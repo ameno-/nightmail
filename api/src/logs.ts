@@ -1,10 +1,12 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, statementTimedOut, unrestrictedRequired, region, response, security, type Actor, type App, type DbExecutor, type MailboxAccess } from './core.js';
-import { PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
+import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, statementTimedOut, unrestrictedRequired, region, response, security, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
+import { createFairPool, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_MAX_WAITING_PER_WORKSPACE, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
+import { enroll24hPoll, enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readRecent24hFacet, readTicketCut, releaseLogFacetTicket, type FacetTicket } from './log-facet-fold.js';
+import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows, type LogFacetCut } from './log-facet-source.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
 import { accessibleMessages, sentThreadId, threadSize } from './thread-view.js';
@@ -94,16 +96,203 @@ function readCursor(value: string | undefined, binding: string) {
 
 type Row = { direction: 'sent' | 'received'; untrusted: boolean; id: string; at: string; status: string; from_address: string; from_name: string | null; to: unknown[]; to_count: number; subject: string; stream: 'transactional' | 'marketing' | null; campaign_id: string | null; scheduled_at: string | null; simulated: boolean; attachment_count: number | null; thread_id: string | null; thread_count: number | null; addresses: { id: string; address: string }[] | null; region: string | null; envelope_to: string[] | null; envelope_to_count: number | null; candidate_count: number };
 
+type Filters = z.output<typeof LogQuery>;
+type SentFacet = { kind: 'transactional' | 'marketing'; status: string; n: number };
+type ReceivedFacet = { spam: number; total: number };
+type Facets = z.infer<typeof LogCounts>;
+const FACET_REPROBE_MS = 150;
+// Parked viewers don't occupy the DB pool or a list/read slot. They still have a finite per-workspace and per-isolate budget.
+const parkedFacets = createFairPool({ name: 'log-facet-wait', maxActive: READ_MAX_WAITERS,
+  maxPerWorkspace: READ_MAX_WAITING_PER_WORKSPACE, maxWaitingPerWorkspace: 0, maxWaitingTotal: 0 });
+
+function waitForFacetProbe(ms: number, signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  return new Promise(resolve => {
+    const done = (elapsed: boolean) => { clearTimeout(timer); signal.removeEventListener('abort', canceled); resolve(elapsed); };
+    const canceled = () => done(false);
+    const timer = setTimeout(() => done(true), ms);
+    signal.addEventListener('abort', canceled, { once: true });
+  });
+}
+
+// Both reads use the same live actor and filter guard. A presentation read never chooses a visibility band from the client.
+function logAccess(c: Ctx, q: Filters, mailAccess: (a: Actor) => MailboxAccess | null) {
+  const a = actor(c);
+  if (q.region) region(c.env, q.region);
+  const access = mailAccess(a), onlyReceived = receivedStatus(q.status);
+  if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? unrestrictedRequired('Received mail requires a credential without domain restrictions.', { permission: 'receivedMail', level: 'read' }) : denied('ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.', { permission: 'receivedMail', level: 'read' });
+  return { a, access, onlyReceived, delivery: !!access && readsDelivery(a, access) };
+}
+
+function facetCounts(q: Filters, sentRows: SentFacet[], receivedRow: ReceivedFacet | undefined, delivery: boolean): Facets {
+  const onlyReceived = receivedStatus(q.status);
+  const status: Record<string, number> = {}, kind = { transactional: 0, marketing: 0 };
+  for (const row of sentRows) {
+    if (!q.kind || row.kind === q.kind) status[row.status] = (status[row.status] ?? 0) + row.n;
+    if (!onlyReceived && (!q.status || row.status === q.status)) kind[row.kind] += row.n;
+  }
+  // Only administrators see the spam verdict (as in the list): for anyone else every message they read is received.
+  const spam = receivedRow && delivery ? receivedRow.spam : 0, clean = (receivedRow?.total ?? 0) - spam;
+  if (clean) status.received = clean;
+  if (spam) status.spam = spam;
+  return { status, kind, capped: { sent: false, received: false } };
+}
+
+type LogScope = ReturnType<typeof logAccess>;
+const facetVisibility = (scope:LogScope) => scope.access?.admin && scope.delivery ? 'admin' as const : 'member' as const;
+function projectCut(q:Filters,scope:LogScope,cut:LogFacetCut) {
+  const received=q.direction==='sent' || q.kind || q.campaignId || !scope.access ? undefined
+    : scope.access.admin ? cut.admin : {total:cut.member.total,spam:0};
+  return facetCounts(q,q.direction==='received'?[]:cut.sent,received,scope.delivery);
+}
+async function currentFacetScope(c:Ctx, db:DbExecutor, q:Filters, original:LogScope, mailAccess:(a:Actor)=>MailboxAccess|null) {
+  const {accountSessionActorOnFacetRetry}=await import('./account-login.js');
+  const fresh=await accountSessionActorOnFacetRetry(c.env,c.req.raw.headers,db);
+  if(!fresh || fresh.keyId!==original.a.keyId)throw new ApiError(401,'AUTH_REQUIRED','Sign in or supply a bearer API key.');
+  if(fresh.workspaceId!==original.a.workspaceId)throw new ApiError(403,'WORKSPACE_ACCESS_DENIED','This workspace is not available to your session.');
+  c.set('actor',fresh);
+  const scope=logAccess(c,q,mailAccess);
+  if(scope.a.credential!=='dashboard'||scope.a.domains.length||scope.access?.mailboxIds!==null)
+    throw denied('DASHBOARD_AUTH_REQUIRED','Use an unrestricted signed-in dashboard session.',{credential:'dashboard'});
+  return scope;
+}
+
+// The unchanged public exact count and the private fallback for uncommon filters and narrowed credentials.
+async function countLiveFacets(db: DbExecutor, q: Filters, scope: ReturnType<typeof logAccess>): Promise<Facets> {
+  const { a, access, delivery } = scope;
+  const sentSide = q.direction !== 'received', receivedSide = q.direction !== 'sent' && !!access && !q.kind && !q.campaignId;
+  const dated = (column: AnyPgColumn) => and(q.from ? sql`${column} >= ${q.from}::timestamptz` : undefined, q.to ? sql`${column} < ${q.to}::timestamptz` : undefined);
+  const byKind = (kind: 'transactional' | 'marketing') => sql`SELECT ${kind}::text AS kind, ${emails.status} AS status, count(*)::int AS n FROM ${emails}
+    WHERE ${and(mailWhere(a), sql`${emails.snapshot}->>'kind' = ${kind}`, q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.region ? sql`${emails.region} = ${q.region}` : undefined, dated(emails.createdAt),
+      q.search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${literalSearch(q.search)}` : undefined)}
+    GROUP BY ${emails.status}`;
+  // One after another on the read's one connection.
+  const sentRows = sentSide ? (await db.execute<{ kind: 'transactional' | 'marketing'; status: string; n: number }>(sql`${byKind('transactional')} UNION ALL ${byKind('marketing')}`)).rows : [];
+  const receivedRow = receivedSide && access ? (await db.execute<{ spam: number; total: number }>(sql`SELECT count(*) FILTER (WHERE ${messages.spam})::int AS spam, count(*)::int AS total
+      FROM ${messages} WHERE ${and(accessibleMessages(access, {}), sql`${messages.direction} = 'inbound'`, q.region ? sql`${messages.region} = ${q.region}` : undefined, dated(messages.receivedAt), q.search ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.search})` : undefined)}`)).rows[0] : undefined;
+  return facetCounts(q, sentRows, receivedRow, delivery);
+}
+
 export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
+  // A dashboard presentation read: no second list page, and no pending representation on the public Logs operation.
+  app.get('/v1/logs/facets', async c => {
+    const parsed = LogQuery.safeParse(c.req.query());
+    if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Invalid Logs filters.');
+    const q = parsed.data, scope = logAccess(c, q, mailAccess);
+    if (scope.a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    c.header('Cache-Control', 'private, no-store');
+    const opts = { route: 'logs.facets', workspaceId: scope.a.workspaceId }, signal = c.req.raw.signal;
+    const mode=c.req.query('mode'), askedPeriod=c.req.query('range'), period=logFacetPeriod(askedPeriod);
+    if ((mode !== undefined && mode !== 'last' && mode !== 'refresh') || (askedPeriod !== undefined && !period))
+      throw new ApiError(422,'VALIDATION_FAILED','Choose a supported Logs facet view and time range.');
+    const prefer=c.req.query('prefer'), poll24h=mode==='refresh' && period==='24h' && prefer==='recent';
+    if (prefer!==undefined && !poll24h) throw new ApiError(422,'VALIDATION_FAILED','Only a 24h refresh can prefer a recent cut.');
+    if (mode==='last') {
+      // This is a relative range *as of the saved source statement*, not an older answer
+      // mislabeled with a new absolute from. Private custom searches/dates never use this matrix.
+      if(!period||q.from||q.to||q.search||q.campaignId||q.cursor)
+        throw new ApiError(422,'VALIDATION_FAILED','A last-folded read requires a rolling range without custom dates, search or campaign.');
+      const last=await withBoundedRead(c,()=>budgetedRead(c.env.db,async db=>{
+        const fresh=await currentFacetScope(c,db,q,scope,mailAccess);
+        const p=await readPublishedLogFacet(db,fresh.a.workspaceId,q.region??null,period);
+        const visibility=facetVisibility(fresh);
+        return p ? {counts:projectCut(q,fresh,p.cut),asOf:p.cut.asOf,from:p.from,visibility}
+          : {counts:null,asOf:null,from:null,visibility};
+      },readLimit(COUNTS_READ),'repeatable read'),opts);
+      if(last instanceof Response)return last;
+      return c.json(last,200);
+    }
+    if(mode==='refresh'&&(!q.from||!period))throw new ApiError(422,'VALIDATION_FAILED','A refresh requires the visible date range and its start.');
+    const fromMs = q.from ? Date.parse(q.from) : NaN, age = Date.now() - fromMs;
+    const foldable = !scope.a.domains.length && scope.access?.mailboxIds === null && !q.search && !q.campaignId && !q.to &&
+      // Date.parse discards sub-millisecond digits: an absolute 00.000001Z start is not a whole minute.
+      !!q.from && /:00(?:\.0+)?(?:Z|[+-]\d\d:\d\d)$/.test(q.from) && fromMs % 60_000 === 0 && age >= 0 && age <= 31 * 86_400_000;
+    if (!foldable) {
+      const counts = await withBoundedRead(c, () => budgetedRead(c.env.db, db => countLiveFacets(db, q, scope), readLimit(COUNTS_READ)), opts);
+      if (counts instanceof Response) return counts;
+      return c.json({ counts, ...(mode==='refresh' && { visibility:facetVisibility(scope),from:q.from }) }, 200);
+    }
+    // A fold reads every email in its window (no index-only path). Refuse a window too large to fold, as the live count
+    // refuses one, before anything is parked or enrolled: it would read gigabytes for 12 seconds, fail and be retried.
+    const fromIso = new Date(fromMs).toISOString();
+    // The dashboard's automatic 24h poll accepts an already completed absolute cut for one minute.
+    // Authorize and project it in the same read snapshot, before sizing mail or occupying a worker.
+    const recent = () => withBoundedRead(c,()=>budgetedRead(c.env.db,async db=>{
+      const current=await currentFacetScope(c,db,q,scope,mailAccess);
+      const cut=await readRecent24hFacet(db,current.a.workspaceId,q.region??null,fromIso);
+      return cut ? {counts:projectCut(q,current,cut),asOf:cut.asOf,from:fromIso,visibility:facetVisibility(current)} : null;
+    },readLimit(COUNTS_READ),'repeatable read'),opts);
+    if (poll24h) {
+      const found=await recent();
+      if (found instanceof Response) return found;
+      if (found) return c.json(found,200);
+    }
+    const rolling = period ? Math.floor(Date.now() / 60_000) * 60_000 - { '24h': 1, '7d': 7, '30d': 30 }[period] * 86_400_000 : fromMs;
+    const sized = await withBoundedRead(c, () => budgetedRead(c.env.db,
+      db => logFacetSourceRows(db, scope.a.workspaceId, new Date(Math.min(fromMs, rolling)).toISOString(), q.region ?? null), readLimit(COUNTS_READ)), opts);
+    if (sized instanceof Response) return sized;
+    if (sized > LOG_FACET_MAX_SOURCE_ROWS) throw readLimit(COUNTS_READ).refusal();
+    const end = performance.now() + LOG_FACET_WAIT_MS;
+    if (signal.aborted) return new Response(null, { status: 499 });
+    let hold;
+    try {
+      hold = await parkedFacets.acquire(opts.workspaceId, signal, { route: 'logs.facets.catchup',
+        idleMs: LOG_FACET_WAIT_MS, maxMs: LOG_FACET_WAIT_MS, wsBusyCode: 'READ_CONCURRENCY_LIMIT', busyCode: 'READ_CONCURRENCY_LIMIT',
+        wsBusyMessage: 'Too many reads are waiting for this workspace.', busyMessage: 'Too many reads are waiting.' });
+    } catch (error) {
+      if (signal.aborted) return new Response(null, { status: 499 });
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    const unavailable = () => {
+      c.header('Retry-After', '1');
+      return new ApiError(503, 'FACET_CATCHUP_UNAVAILABLE', 'Exact Logs counts are temporarily unavailable.', undefined, true);
+    };
+    let ticket:FacetTicket|null=null;
+    try {
+      if (poll24h) {
+        ticket=await enroll24hPoll(c.env,scope.a.workspaceId,fromIso,q.region??null);
+        if (!ticket) {
+          const found=await recent();
+          if (found instanceof Response) return found;
+          if (found) return c.json(found,200);
+        }
+      }
+      ticket??=await enrollLogFacet(c.env,scope.a.workspaceId,fromIso,q.region??null,period);
+      const admitted=ticket;
+      if (ticket.wake) c.env.startLogFacetFold?.(ticket.slot);
+      let probes = 0;
+      while (performance.now() < end) {
+        // A small healthy cut can already be published at the first probe. Park only between probes.
+        if (probes && !await waitForFacetProbe(Math.min(probes === 1 ? 25 : FACET_REPROBE_MS, end - performance.now()), signal)) return new Response(null, { status: 499 });
+        probes++;
+        if (performance.now() >= end) break;
+        const next = await withBoundedRead(c, () => budgetedRead(c.env.db, async db => {
+          if (performance.now() >= end) throw unavailable();
+          // Every probe resolves the real session and role against the same snapshot that reads the published cut.
+          const current=await currentFacetScope(c,db,q,scope,mailAccess);
+          const cut=await readTicketCut(db,admitted);
+          if(!cut)return null;
+          return {counts:projectCut(q,current,cut),asOf:cut.asOf,
+            ...(mode==='refresh' && {from:new Date(fromMs).toISOString(),visibility:facetVisibility(current)})};
+        }, { seconds:COUNTS_READ, refusal:unavailable }, 'repeatable read'), { ...opts, maxWaitMs: Math.max(1, Math.ceil(end - performance.now())) });
+        if (next instanceof Response) return next;
+        if (signal.aborted) return new Response(null, { status: 499 });
+        if (next) return c.json(next, 200);
+      }
+      // A platform/worker failure is not a successful numerical bound; never substitute the previous generation.
+      throw unavailable();
+    } finally {
+      hold.release();
+      if (ticket) await releaseLogFacetTicket(c.env.db,ticket);
+    }
+  });
+
   app.openapi(createRoute({ method: 'get', path: '/v1/logs', operationId: 'listLogs', tags: ['Emails'], security, summary: 'List sent and received mail together',
     description: 'Sent and received mail in one list, newest first, with an opaque cursor bound to the filters. Sent mail is what listEmails returns (keys restricted to domains see their own domains); received mail is what listInboundMessages returns for the same credential: administrators see every received message, including unrouted mail, with delivery details; dashboard members see mail on receiving addresses; other credentials get sent mail only. kind, campaignId and a sent-mail status filter sent mail and leave received mail out; status=received or status=spam filter received mail and leave sent mail out. ' + readLimitNote(LOGS_READ),
     request: { query: LogQuery }, responses: { 200: response(LogPage), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query');
-    if (q.region) region(c.env, q.region);
-    const access = mailAccess(a), onlyReceived = receivedStatus(q.status);
-    // direction=received and the Received/Spam filters ask for received mail alone: refuse them to a credential that can't
-    // read it, rather than answer with sent mail it didn't ask for or with nothing to query.
-    if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? unrestrictedRequired('Received mail requires a credential without domain restrictions.', { permission: 'receivedMail', level: 'read' }) : denied('ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.', { permission: 'receivedMail', level: 'read' });
+    const q = c.req.valid('query'), scope = logAccess(c, q, mailAccess);
+    const { a, access, onlyReceived, delivery } = scope;
     // counts changes what the page carries, not which rows it lists: a cursor works with or without it.
     const { counts: withCounts, ...filters } = q;
     const binding = await pageBinding(a, 'logs', filters), after = readCursor(q.cursor, binding), n = q.limit + 1;
@@ -123,13 +312,12 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       ORDER BY ${emails.createdAt} DESC, ${emails.id} DESC LIMIT ${n})` : null;
 
     // Which messages: every retained one for administrators. Delivery details: only where getInboundMessage gives them.
-    const delivery = !!access && readsDelivery(a, access);
     const receivedPage = received && access ? sql`(SELECT 'received'::text AS direction, true AS untrusted, ${messages.id} AS id, ${messages.receivedAt} AS sort_at, ${precise(messages.receivedAt)} AS at,
         ${delivery ? sql`CASE WHEN ${messages.spam} THEN 'spam' ELSE ${messages.status} END` : messages.status} AS status,
         ${messages.fromAddress} AS from_address, ${messages.fromName} AS from_name, ${sliceAddressStrings(messages.to, addrCap)} AS "to", ${messageFieldCount(messages.to, messages.verdicts, 'toCount')} AS to_count,
         ${messages.subject} AS subject, NULL::text AS stream, NULL::text AS campaign_id, NULL::text AS scheduled_at, false AS simulated, ${messages.attachmentCount} AS attachment_count, ${messages.threadId} AS thread_id,
         ${visibleAddresses(access)} AS addresses, ${delivery ? messages.region : sql`NULL::text`} AS region, ${delivery ? sliceJsonbArray(messages.envelopeTo, addrCap) : sql`NULL::jsonb`} AS envelope_to, ${delivery ? sql`jsonb_array_length(${messages.envelopeTo})::int` : sql`NULL::int`} AS envelope_to_count
-      FROM ${messages} WHERE ${and(accessibleMessages(access, {}), sql`${messages.direction} = 'inbound'`,
+      FROM ${messages} WHERE ${and(accessibleMessages(access, {}, 'perMessage'), sql`${messages.direction} = 'inbound'`,
         after ? after.direction === 'received' ? sql`(${messages.receivedAt}, ${messages.id}) < (${after.at}::timestamptz, ${after.id})` : sql`${messages.receivedAt} <= ${after.at}::timestamptz` : undefined,
         q.region ? sql`${messages.region} = ${q.region}` : undefined, dated(messages.receivedAt), q.search ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.search})` : undefined,
         // Only administrators see the spam flag, so for anyone else nothing is spam and everything is received.
@@ -139,38 +327,13 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const pages = [sentPage, receivedPage].filter((part): part is SQL => part !== null);
     const merged = pages.length === 1 ? pages[0]! : sql`SELECT * FROM (${pages[0]} UNION ALL ${pages[1]}) log ORDER BY sort_at DESC, direction DESC, id DESC LIMIT ${n}`;
 
-    // Facet counts: each facet's values under every other filter, so a count says what choosing that value would list.
-    // Status counts take both sides (received mail only without kind or campaignId); kind counts take sent mail under the status.
-    // Sent mail is read once, a kind at a time: each kind's dates in sending_emails_kind_created, with one heap fetch per
-    // email for its status. The same rows give the status counts (under the chosen kind) and the kind counts (under the
-    // chosen status). Every email has a kind. The kind is only compared, which the index answers, never selected, so the
-    // counts don't load each email's body.
-    const countLogs = async (db: DbExecutor) => {
-      const sentSide = q.direction !== 'received', receivedSide = q.direction !== 'sent' && !!access && !q.kind && !q.campaignId;
-      const byKind = (kind: 'transactional' | 'marketing') => sql`SELECT ${kind}::text AS kind, ${emails.status} AS status, count(*)::int AS n FROM ${emails}
-        WHERE ${and(mailWhere(a), sql`${emails.snapshot}->>'kind' = ${kind}`, q.campaignId ? sql`${emails.campaignId} = ${q.campaignId}` : undefined, q.region ? sql`${emails.region} = ${q.region}` : undefined, dated(emails.createdAt),
-          q.search ? sql`sending_log_text(${emails.id},${emails.campaignId},${emails.providerId},${emails.from},${emails.subject},${emails.to} || ${emails.cc} || ${emails.bcc}) ILIKE ${literalSearch(q.search)}` : undefined)}
-        GROUP BY ${emails.status}`;
-      // One after another on the read's one connection.
-      const sentRows = sentSide ? (await db.execute<{ kind: 'transactional' | 'marketing'; status: string; n: number }>(sql`${byKind('transactional')} UNION ALL ${byKind('marketing')}`)).rows : [];
-      const receivedRow = receivedSide && access ? (await db.execute<{ spam: number; total: number }>(sql`SELECT count(*) FILTER (WHERE ${messages.spam})::int AS spam, count(*)::int AS total
-          FROM ${messages} WHERE ${and(accessibleMessages(access, {}), sql`${messages.direction} = 'inbound'`, q.region ? sql`${messages.region} = ${q.region}` : undefined, dated(messages.receivedAt), q.search ? sql`mail_messages.search @@ websearch_to_tsquery('simple', ${q.search})` : undefined)}`)).rows[0] : undefined;
-      const status: Record<string, number> = {}, kind = { transactional: 0, marketing: 0 };
-      for (const row of sentRows) {
-        if (!q.kind || row.kind === q.kind) status[row.status] = (status[row.status] ?? 0) + row.n;
-        if (!onlyReceived && (!q.status || row.status === q.status)) kind[row.kind] += row.n;
-      }
-      // Only administrators see the spam verdict (as in the list): for anyone else every message they read is received.
-      const spam = receivedRow && delivery ? receivedRow.spam : 0, clean = (receivedRow?.total ?? 0) - spam;
-      if (clean) status.received = clean;
-      if (spam) status.spam = spam;
-      return { status, kind, capped: { sent: false, received: false } };
-    };
     // After the page, on its connection, the counts get a shorter limit of their own: past it they are refused, and the
     // dashboard, which reads them apart from its list, shows its filters without numbers.
     const countWithin = async (db: DbExecutor) => {
       await db.execute(sql.raw(`SET LOCAL statement_timeout = '${COUNTS_READ}s'`));
-      try { return await countLogs(db); } catch (error) { throw statementTimedOut(error) ? readLimit(COUNTS_READ).refusal() : error; }
+      try {
+        return await countLiveFacets(db, q, scope);
+      } catch (error) { throw statementTimedOut(error) ? readLimit(COUNTS_READ).refusal() : error; }
     };
     // The page (byte-bounded in SQL), then its counts, on one connection, each statement within its limit.
     const boundedSql = sql`WITH candidate AS MATERIALIZED (${merged}),

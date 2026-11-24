@@ -52,6 +52,33 @@ export function postgresConnection(connectionString: string | undefined) {
   if (url.searchParams.get('sslrootcert') === 'system') { url.searchParams.delete('sslrootcert'); connectionString = url.toString(); }
   return { connectionString, connectionTimeoutMillis: 10000 };
 }
+/** Dedicated, lazy Node connections for a Logs nudge or runner tick. Neither a browser request
+ * nor mail orchestration holds its own connection while the background source is read. */
+export function nodeLogFacetLane(runtime:Runtime, connectionString:string|undefined) {
+  let pool:Pool|undefined, worker:Runtime|undefined, stopping=false, closed:Promise<void>|undefined;
+  const inflight=new Map<string,Promise<void>>(), again=new Set<string>();
+  const get=()=>{
+    if(!worker) {
+      pool=new Pool({...postgresConnection(connectionString),max:5,idleTimeoutMillis:30000,application_name:'logs-facet-background'});
+      pool.on('error',()=>log('warn',{code:'LOG_FACET_POOL_ERROR'}));
+      worker={...runtime,db:drizzle(pool),startLogFacetFold:undefined};
+    }
+    return worker;
+  };
+  const nudge=(slot:string)=>{
+    if(stopping)return;
+    if(inflight.has(slot)){again.add(slot);return;}
+    const independent=get();
+    const work=import('../log-facet-fold.js').then(m=>m.foldLogFacetSlot(independent,slot))
+      .catch(()=>log('warn',{code:'LOG_FACET_SLOT_FAILED',jobId:slot})).finally(()=>{
+        inflight.delete(slot);
+        // A newly admitted run can reuse this PK while the previous promise is settling.
+        if(again.delete(slot))nudge(slot);
+      });
+    inflight.set(slot,work);
+  };
+  return {get,nudge,close:()=>{stopping=true;return closed??=(async()=>{await Promise.all(inflight.values());await pool?.end();})();}};
+}
 export function nodeRuntime(env: Record<string, string | undefined>): { runtime: Runtime; close: () => Promise<void> } {
   const pool = new Pool({ ...postgresConnection(env.DATABASE_URL), max: 10, idleTimeoutMillis: 30000 });
   // pg evicts failed idle clients, but an unhandled pool error also terminates Node.

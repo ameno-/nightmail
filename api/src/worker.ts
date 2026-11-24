@@ -182,6 +182,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         connect: (name, person) => { quietRooms.delete(name); return rooms.getByName(name).fetch('https://room/connect', { headers: { upgrade: 'websocket', [ROOM_PEER_HEADER]: encodeURIComponent(JSON.stringify(person)) } }); },
         visit: (name, credential, lookup, saved) => { const visit = roomVisit(env, rooms, name, credential, lookup, saved); if (ctx) ctx.waitUntil(visit); },
       },
+      startLogFacetFold: ctx ? slot => afterwards(env,ctx,async independent => { await (await import('./log-facet-fold.js')).foldLogFacetSlot(independent,slot); }) : undefined,
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
@@ -218,15 +219,11 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
-// Health bookkeeping (src/health.ts, src/health-counters.ts) is never awaited by a request, a queue batch, the minute
-// cron's own steps or a dispatcher: it runs after them in waitUntil, on a connection of its own, with a one-second
-// lock_timeout and a three-second statement_timeout on everything it writes. A health table that is locked or slow
-// costs a dropped sample, never a late batch.
-// Without a context to outlive the handler in (a handler called directly, as the cold-isolate check does) it does not
-// run at all: it is never awaited instead, and it can never throw into its caller.
+// Optional background work gets a separate connection and never delays its caller. Health samples
+// may be lost; durable Logs tickets have their own recovery cadence. Each task sets its own limits.
 function afterwards(env: Env, ctx: ExecutionContext | undefined, work: (runtime: Runtime) => Promise<unknown>) {
-  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ })); }
-  catch { /* Health never fails what it reports on. */ }
+  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Background failures do not fail the served request or queue event. */ })); }
+  catch { /* Background failures do not fail the served request or queue event. */ }
 }
 // What this isolate counted (its jobs' database errors, its error lines), at most every 20 seconds.
 async function flushDueCounters(env: Env, ctx: ExecutionContext | undefined) {
@@ -448,6 +445,20 @@ export default {
       // Minute ping: recovers dispatchers that missed a nudge and expired-lease or interrupted rows.
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
+      // Backup for a missed or interrupted facet nudge: check only the four reserved job PKs.
+      afterwards(env,ctx,async background => {
+        const {dueLogFacetSlots,foldLogFacetSlot}=await import('./log-facet-fold.js');
+        for (const slot of await dueLogFacetSlots(background.db)) afterwards(env,ctx,separate => foldLogFacetSlot(separate,slot));
+      });
+      if (runtime.config.multiTenant) afterwards(env, ctx, async background => {
+        try {
+          const [{ bootstrapLogFacet }, { foldLogFacetSlot }] = await Promise.all([
+            import('./log-facet-bootstrap.js'), import('./log-facet-fold.js'),
+          ]);
+          const ticket = await bootstrapLogFacet(background);
+          if (ticket) await foldLogFacetSlot(background, ticket.slot);
+        } catch { core.log('warn', { code: 'LOG_FACET_BOOTSTRAP_FAILED' }); }
+      });
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
       // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).
       const queues: import('./health.js').QueueSample[] = [];

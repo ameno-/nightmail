@@ -46,6 +46,13 @@ const SessionContext = createContext<Session | null>(null)
 export const useSession = () => useContext(SessionContext)
 /** The account/workspace scope of the mounted provider generation; passing it to request() fails closed after a switch. */
 export const useRequestScope = () => useContext(RequestScopeContext) ?? currentScope()
+/** Logs row prefetch and rendering share this key, but never a cache entry across visibility bands. */
+export function useLogsVisibility() {
+  const identity = useSession()?.identity
+  const scope = useRequestScope()
+  return identity ? JSON.stringify([scope.account, scope.workspace, scope.epoch, identity.id, identity.workspaceId,
+    identity.multiTenant ? identity.role : 'self-hosted']) : null
+}
 // Self-hosted installations have no workspace roles; every signed-in operator administers.
 export function useWorkspaceAccess() {
   const identity = useContext(SessionContext)?.identity
@@ -310,6 +317,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     forgetInboxDrafts()
     if (id) announce({ type: 'signed-out', accounts: [id] })
     if (id && id !== selectedAccount()) { void cache.invalidateQueries({ queryKey: accountsKey }); return }
+    window.dispatchEvent(new Event('nightmail:active-session-ended'))
     rememberDashboardReady(selectedWorkspace(), false)
     accountChanged(true)
     if (result.active) { await enter(result.active, { path: '/overview' }); toast('Signed out of that account', 'success'); return }
@@ -317,6 +325,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function signOutAll() {
     await accountApi.signOut({ all: true })
+    window.dispatchEvent(new Event('nightmail:active-session-ended'))
     clearInterruptedWrites()
     forgetInboxDrafts()
     announce({ type: 'signed-out', accounts: 'all' })
@@ -358,7 +367,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     }
     // Another tab signed this tab's account out: leave it now rather than at its next request.
     const mine = selectedAccount()
-    if (event.accounts === 'all' || (mine && event.accounts.includes(mine))) void enter(null, { path: sectionPath() }).catch(() => {})
+    if (event.accounts === 'all' || (mine && event.accounts.includes(mine))) {
+      window.dispatchEvent(new Event('nightmail:active-session-ended'))
+      void enter(null, { path: sectionPath() }).catch(() => {})
+    }
     else void cache.invalidateQueries({ queryKey: accountsKey })
   }))
   // A request answered that this tab's account is signed out in this browser (expired or revoked): move to another.
@@ -504,7 +516,7 @@ export function useApi() {
 // keepPrevious keeps the last result on screen while a changed key (page, search, filter) loads, so a list never blanks.
 // Pass a function to keep it only for some key changes (a region change must not show the old region's rows).
 type KeepPrevious = boolean | ((previousKey: readonly unknown[]) => boolean)
-type Poll<T> = { interval?: number | ((data: T | undefined, failed: boolean) => number | false); enabled?: boolean; keepPrevious?: KeepPrevious }
+type Poll<T> = { interval?: number | ((data: T | undefined, failed: boolean) => number | false); retryInterval?: (error: unknown, failures: number) => number | false; enabled?: boolean; keepPrevious?: KeepPrevious }
 /** Stops polling on 422 READ_TOO_LARGE / non-429 4xx; backs off exponentially on 429/5xx/network and stops after 3 retries. */
 export function politePollInterval(base: number | false, error: unknown, consecutiveFailures: number): number | false {
   if (base === false) return false
@@ -535,6 +547,7 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal:
       throw error
     }
   }, enabled: poll?.enabled, refetchInterval: query => {
+    if (query.state.error && poll?.retryInterval) return poll.retryInterval(query.state.error, failures.current.count)
     const base = typeof interval === 'function' ? interval(query.state.data, query.state.status === 'error') : interval ?? false
     return politePollInterval(base, query.state.error, failures.current.count)
   }, refetchIntervalInBackground: false,

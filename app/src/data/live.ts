@@ -5,6 +5,7 @@ import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDire
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
 import { webhookPatchBody } from '../features/settings/webhook-patch'
+import { decodeLogFacets, foldableFacetView } from './log-facets'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
@@ -122,7 +123,7 @@ function rememberFailedRequest(id: string) {
   failedRequests.length = Math.min(failedRequests.length, 5)
 }
 export const recentFailedRequestIds = () => [...failedRequests]
-export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number; file?: { bytes: Blob; headers: Record<string, string> }; scope?: RequestScope; account?: string | null; workspace?: string | null } = {}): Promise<T> {
+export async function request<T = Json>(path: string, options: { method?: string; body?: unknown; signal?: AbortSignal; idempotencyKey?: string; ifMatch?: number; file?: { bytes: Blob; headers: Record<string, string> }; scope?: RequestScope; account?: string | null; workspace?: string | null; expectedStatus?: number } = {}): Promise<T> {
   const started = performance.now()
   const sessionAgnostic = path.startsWith('/api/auth/') || path === '/health'
   // Fail closed before calling fetch() when a caller pinned to an earlier account/workspace fires after a switch.
@@ -180,6 +181,9 @@ export async function request<T = Json>(path: string, options: { method?: string
     if (failure.requestId) rememberFailedRequest(failure.requestId)
     if (Array.isArray(error?.details)) failure.details = error.details
     throw failure
+  }
+  if (options.expectedStatus !== undefined && response.status !== options.expectedStatus) {
+    throw new ApiError('The response was not complete.', 'INVALID_RESPONSE', {}, response.headers.get('x-request-id') ?? undefined, response.status)
   }
   if (data === null && response.status !== 204 && path !== '/api/auth/get-session') {
     const failure = new ApiError('The response ended before finishing. Try again.', 'INVALID_RESPONSE', {}, response.headers.get('x-request-id') ?? undefined, response.status)
@@ -301,12 +305,14 @@ export function createLiveApi(scope?: RequestScope): Api {
     setup: async signal => { const r = await call<Omit<OverviewSetup, 'domains'> & { domains: { data: Json[] } | null }>('/overview/setup', 'GET', undefined, signal); return { ...r, domains: r.domains ? r.domains.data.map(mapDomain) : null } } },
     logs: {
       list: (input, signal) => page('/logs', input, mapLog, logFilters(input), signal),
-      // The facets' counts: one row's page with counts for the same filters (the page itself is ignored).
-      counts: async (input, signal) => {
-        const params = new URLSearchParams({ limit: '1', counts: 'true' })
-        for (const [key, value] of Object.entries(logFilters(input))) if (value !== undefined && value !== '') params.set(key, String(value))
-        const { counts } = await call<{ counts: { status: Record<string, number>; kind: { transactional: number; marketing: number } } }>(`/logs?${params}`, 'GET', undefined, signal)
-        return { status: counts.status, stream: counts.kind }
+      facets: async (input, signal) => {
+        const params = new URLSearchParams({ mode: input.mode, range: input.range })
+        if (input.mode === 'refresh' && input.range === '24h' && foldableFacetView(input)) params.set('prefer', 'recent')
+        const { from, to, search, campaignId, ...rolling } = logFilters(input)
+        const filters = input.mode === 'last' ? rolling : { ...rolling, from, to, search, campaignId }
+        for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))
+        const data = await request<unknown>(`/v1/logs/facets?${params}`, { method: 'GET', expectedStatus: 200, scope, signal })
+        return decodeLogFacets(data, input)
       },
     },
     emails: {

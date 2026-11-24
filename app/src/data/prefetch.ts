@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { rememberedPageSize } from '../lib/pagination'
-import { useApi, useRegion, useWorkspaceAccess } from './context'
+import { useApi, useLogsVisibility, useRegion, useWorkspaceAccess } from './context'
 import { queries, type QueryDef } from './queries'
 import { firstOverview, overviewQuery } from '../features/inbound/overview'
 import type { Api } from './types'
@@ -17,19 +17,19 @@ export const sidebarPaths = ['/overview', '/logs', '/receiving', '/campaigns', '
 export const routeChunks: Record<string, () => Promise<unknown>> = {}
 
 // newsletters: whether the workspace has any (Campaigns then leaves their issues out).
-type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean; newsletters: boolean }
+type Scope = { regionId: string; multiTenant: boolean; canAdminister: boolean; newsletters: boolean; logsVisibility: string | null }
 /** Preloads only the JS chunk for a route (no API requests): used by the idle sweep so opening one page never scans every other page's data. */
 export const preloadRouteChunk = (path: string) => routeChunks[path.startsWith('/newsletters/') ? '/newsletters' : path]?.().catch(() => {}) ?? Promise.resolve()
 
 // The first screen of the page currently opening (cold load). Never runs multi-page loops.
-function firstScreen(path: string, { regionId, multiTenant, canAdminister, newsletters }: Scope): QueryDef<unknown>[] {
+function firstScreen(path: string, { regionId, multiTenant, canAdminister, newsletters, logsVisibility }: Scope): QueryDef<unknown>[] {
   const scoped = multiTenant || Boolean(regionId)
   // One newsletter's page: the newsletter with its readers, and its newest issues.
   const newsletter = /^\/newsletters\/(?!new$)([^/]+)$/.exec(path)?.[1]
   if (newsletter) { const id = decodeURIComponent(newsletter); return [queries.newsletter(id), queries.campaigns(issuesRequest(id))] }
   switch (path) {
     case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.recentCampaigns(regionId), queries.senderScore(), queries.logs(latestRequest(regionId)), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
-    case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: rangeStart('30d'), page: 1, pageSize })] : [] }
+    case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize && logsVisibility ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: rangeStart('30d'), page: 1, pageSize }, logsVisibility)] : [] }
     // Receiving is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
     case '/campaigns': return [queries.campaigns(campaignsRequest(newsletters))]
@@ -79,15 +79,16 @@ export function usePrefetchRoute(mode: 'active' | 'hover' = 'active') {
   const api = useApi()
   const { regionId } = useRegion()
   const { multiTenant, canAdminister } = useWorkspaceAccess()
+  const logsVisibility = useLogsVisibility()
   const newsletters = useNewsletters().length > 0
   return useCallback(async (path: string) => {
     const chunk = preloadRouteChunk(path)
-    const defs = (mode === 'hover' ? hoverQueries : firstScreen)(path, { regionId, multiTenant, canAdminister, newsletters })
+    const defs = (mode === 'hover' ? hoverQueries : firstScreen)(path, { regionId, multiTenant, canAdminister, newsletters, logsVisibility })
     const data = defs.length ? prefetchQueries(cache, api, defs) : undefined
     // The docs read the public API definition, not the workspace's API.
     const docs = path === '/docs' ? cache.prefetchQuery(openApiQuery) : undefined
     await Promise.all([chunk, data, docs])
-  }, [cache, api, mode, regionId, multiTenant, canAdminister, newsletters])
+  }, [cache, api, mode, regionId, multiTenant, canAdminister, newsletters, logsVisibility])
 }
 
 // Hover intent: a pointer that rests on a link for a moment (not one crossing it) or focuses/presses it warms the chunk

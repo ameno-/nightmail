@@ -173,17 +173,22 @@ export function ConfirmDialog({ open, onOpenChange, title, description, confirmL
   return <Dialog open={open} onOpenChange={next => { if (!working) onOpenChange(next); }} returnFocus={returnFocus} title={title} status={danger ? <span className="ui-dialog__dot ui-tone--danger" aria-hidden="true" /> : undefined} description={description} footer={<><Button disabled={working} onClick={() => onOpenChange(false)}>{confirmLabel.startsWith('Cancel') ? 'Go back' : 'Cancel'}</Button><Button variant={danger ? 'danger' : 'primary'} loading={working} onClick={confirm}>{confirmLabel}</Button></>}>{error ? <Alert tone="danger"><ErrorText error={error} fallback={actionFailed} /></Alert> : null}</Dialog>;
 }
 export type MenuItem = { label: string; onSelect: () => void; icon?: ReactNode; destructive?: boolean; disabled?: boolean; hint?: ReactNode };
-export function DropdownMenu({ items, label = 'More actions', trigger, title, align = 'end' }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode; align?: 'start' | 'end' }) {
+export function DropdownMenu({ items, label = 'More actions', trigger, title, align = 'end', onOpenChange }: { items: MenuItem[]; label?: string; trigger?: ReactNode; title?: ReactNode; align?: 'start' | 'end'; onOpenChange?: (open: boolean) => void }) {
   const phone = usePhone();
   const [open, setOpen] = useState(false);
   const opener = useRef<HTMLElement | null>(null);
+  const changeOpen = (next: boolean) => {
+    if (next && onOpenChange && !items.length) return;
+    setOpen(next);
+    onOpenChange?.(next);
+  };
   // A phone gets an action sheet: full-width rows at the bottom of the screen, and Cancel.
   if (phone) {
-    const show = (event: { currentTarget: HTMLElement }) => { opener.current = event.currentTarget; setOpen(true); };
+    const show = (event: { currentTarget: HTMLElement }) => { opener.current = event.currentTarget; changeOpen(true); };
     const button = trigger && isValidElement(trigger) ? cloneElement(trigger as ReactElement<{ onClick?: (event: { currentTarget: HTMLElement }) => void }>, { onClick: show }) : <IconButton label={label} onClick={show}><MoreHorizontal size={16} /></IconButton>;
-    return <>{button}<ActionSheet open={open} onOpenChange={setOpen} title={title ?? label} items={items} returnFocus={opener} /></>;
+    return <>{button}<ActionSheet open={open} onOpenChange={changeOpen} title={title ?? label} items={items} returnFocus={opener} /></>;
   }
-  return <DropdownPrimitive.Root><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align={align} sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.hint ? <span className="ui-action-sheet__label">{item.label}<span className="ui-action-sheet__hint">{item.hint}</span></span> : item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
+  return <DropdownPrimitive.Root open={onOpenChange ? open : undefined} onOpenChange={onOpenChange ? changeOpen : undefined}><DropdownPrimitive.Trigger asChild>{trigger ?? <IconButton label={label}><MoreHorizontal size={16} /></IconButton>}</DropdownPrimitive.Trigger><DropdownPrimitive.Portal><DropdownPrimitive.Content align={align} sideOffset={4} className="ui-popover ui-menu">{items.map((item, index) => <DropdownPrimitive.Item key={`${item.label}-${index}`} onSelect={item.onSelect} disabled={item.disabled} className={cx('ui-menu-item', item.destructive && 'ui-menu-item--danger')}><span className="ui-menu-icon">{item.icon}</span>{item.hint ? <span className="ui-action-sheet__label">{item.label}<span className="ui-action-sheet__hint">{item.hint}</span></span> : item.label}</DropdownPrimitive.Item>)}</DropdownPrimitive.Content></DropdownPrimitive.Portal></DropdownPrimitive.Root>;
 }
 // The actions run once the sheet has started closing, so a confirmation they open takes focus cleanly.
 export function ActionSheet({ open, onOpenChange, title, items, returnFocus }: { open: boolean; onOpenChange: (open: boolean) => void; title: ReactNode; items: MenuItem[]; returnFocus?: RefObject<HTMLElement | null> }) {
