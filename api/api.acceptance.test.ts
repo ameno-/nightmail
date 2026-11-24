@@ -32509,13 +32509,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Campaigns by state (api/tear/campaign-lifecycle): the tick reads the ones that are preparing, sending or paused,
       // and no draft, scheduled, done, failed or canceled one; a campaign Nightmail paused is an alert, one with
       // everything released is not behind.
-      const draft = ok(await local('POST', '/v1/campaigns', { name: 'Health states' }), 201), states = ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'];
-      for (const state of states) await db.query(`INSERT INTO sending_campaigns SELECT (jsonb_populate_record(NULL::sending_campaigns,to_jsonb(c)||jsonb_build_object('id',$2::text,'state',$3::text,'total',1000,
-        'expanded',CASE WHEN $3 IN ('done','canceled','sending') THEN 1000 ELSE 400 END,'paused_at',CASE WHEN $3='paused' THEN now() END,'pause_reason',CASE WHEN $3='paused' THEN '{"code":"LIST_QUALITY"}'::jsonb END))).* FROM sending_campaigns c WHERE id=$1`, [draft.id, `${draft.id}_${state}`, state]);
+      const draft = ok(await local('POST', '/v1/campaigns', { name: 'Health states' }), 201), states = ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled'], review = `${draft.id}_review`;
+      await db.query(`INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash) SELECT $2,workspace_id,id,revision,draft,'fixture' FROM sending_campaigns WHERE id=$1`, [draft.id, review]);
+      // The table's own rules: expanded <= prepared <= total, preparing means not all prepared, done means all released.
+      for (const state of states) await db.query(`INSERT INTO sending_campaigns SELECT (jsonb_populate_record(NULL::sending_campaigns,to_jsonb(c)||jsonb_build_object('id',$2::text,'state',$3::text,'review_id',$4::text,'total',1000,
+        'prepared',CASE WHEN $3='preparing' THEN 400 ELSE 1000 END,'expanded',CASE WHEN $3 IN ('done','sending') THEN 1000 WHEN $3 IN ('preparing','scheduled') THEN 0 ELSE 400 END,
+        'paused_at',CASE WHEN $3='paused' THEN now() END,'pause_reason',CASE WHEN $3='paused' THEN '{"code":"LIST_QUALITY"}'::jsonb END))).* FROM sending_campaigns c WHERE id=$1`, [draft.id, `${draft.id}_${state}`, state, review]);
       await tick();
       const measured = ok(await local('GET', path));
       assert.deepEqual([measured.campaigns.filter((row: Json) => row.id.startsWith(draft.id)).map((row: Json) => [row.id.slice(draft.id.length + 1), row.released, row.waiting, row.behind]).sort(), measured.alerts.filter((a: Json) => a.key.includes(draft.id)).map((a: Json) => [a.key, a.severity, a.value, a.unit])],
-        [[['paused', 400, 'LIST_QUALITY', true], ['preparing', 400, null, false], ['sending', 1000, null, false]], [[`campaign-paused:${draft.id}_paused`, 'warning', 600, 'recipients_left']]]);
+        [[['paused', 400, 'LIST_QUALITY', true], ['preparing', 0, null, false], ['sending', 1000, null, false]], [[`campaign-paused:${draft.id}_paused`, 'warning', 600, 'recipients_left']]]);
 
       // Hosted: an operator's staff session only (an operator's agent key too: the UI notes test reads it with one).
       runtime.config.multiTenant = true;
