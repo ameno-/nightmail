@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { ApiError, budgetedRead, digest, log, rowId, type DbExecutor, type JobHandler, type Runtime } from './core.js';
+import { ApiError, budgetedRead, databaseCodeOf, digest, log, rowId, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { parseLogFacetCut, readLogFacetGeneration, type LogFacetCut, type LogFacetPeriod } from './log-facet-source.js';
 
 // Historical reads use a durable, stamped certificate. An unconditional refresh waits for a cut
@@ -117,6 +117,12 @@ async function enroll(runtime:Runtime, workspaceId:string, from:string, region:s
       RETURNING id`);
     if (!write.rowCount) throw capacity();
     return {slot,run,workspaceId,generation:1,wake:true,waiting};
+  }).catch((error:unknown)=>{
+    // Only this short admission transaction: its lock/statement deadlines mean the fold
+    // couldn't be enrolled. The independent source-size budget still refuses with 422.
+    const code=databaseCodeOf(error);
+    if(code==='55P03'||code==='57014')throw capacity();
+    throw error;
   });
 }
 

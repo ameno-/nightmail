@@ -6,7 +6,7 @@ import { createFairPool, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_MAX_WAITING_PER_
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
 import { enroll24hPoll, enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readRecent24hFacet, readTicketCut, releaseLogFacetTicket, type FacetTicket } from './log-facet-fold.js';
-import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows, type LogFacetCut } from './log-facet-source.js';
+import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows, type LogFacetCut, type LogFacetPeriod } from './log-facet-source.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
 import { accessibleMessages, sentThreadId, threadSize } from './thread-view.js';
@@ -173,14 +173,29 @@ async function countLiveFacets(db: DbExecutor, q: Filters, scope: ReturnType<typ
   return facetCounts(q, sentRows, receivedRow, delivery);
 }
 
-export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
-  // A dashboard presentation read: no second list page, and no pending representation on the public Logs operation.
-  app.get('/v1/logs/facets', async c => {
-    const parsed = LogQuery.safeParse(c.req.query());
-    if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Invalid Logs filters.');
-    const q = parsed.data, scope = logAccess(c, q, mailAccess);
-    if (scope.a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
-    c.header('Cache-Control', 'private, no-store');
+function foldableFacet(q: Filters, scope: LogScope) {
+  const fromMs = q.from ? Date.parse(q.from) : NaN, age = Date.now() - fromMs;
+  // Date.parse discards sub-millisecond digits: a 00.000001Z start is not a whole minute.
+  return !scope.a.domains.length && scope.access?.mailboxIds === null && !q.search && !q.campaignId && !q.to &&
+    !!q.from && /:00(?:\.0+)?(?:Z|[+-]\d\d:\d\d)$/.test(q.from) && fromMs % 60_000 === 0 && age >= 0 && age <= 31 * 86_400_000;
+}
+const facetBusy = (error: unknown): error is ApiError => error instanceof ApiError && (error.status === 429 || error.status === 503) &&
+  ['READ_CONCURRENCY_LIMIT', 'FACET_FOLD_CAPACITY', 'FACET_CATCHUP_UNAVAILABLE'].includes(error.code);
+
+// Reauthorize and project in the same snapshot. While overloaded, try the indexed publication
+// once without joining a wait queue; never scan mail or substitute the viewer's absolute from.
+function readLastFacet(c: Ctx, q: Filters, scope: LogScope, mailAccess: (a: Actor) => MailboxAccess | null, period: LogFacetPeriod, busy = false) {
+  return withBoundedRead(c, () => budgetedRead(c.env.db, async db => {
+    const fresh = await currentFacetScope(c, db, q, scope, mailAccess);
+    const p = await readPublishedLogFacet(db, fresh.a.workspaceId, q.region ?? null, period);
+    const visibility = facetVisibility(fresh);
+    return p ? { counts: projectCut(q, fresh, p.cut), asOf: p.cut.asOf, from: p.from, visibility }
+      : { counts: null, asOf: null, from: null, visibility };
+  }, busy ? { seconds: 1, refusal: () => new ApiError(503, 'FACET_CATCHUP_UNAVAILABLE', 'Logs facets are busy.') } : readLimit(COUNTS_READ),
+  'repeatable read'), { workspaceId: scope.a.workspaceId, route: busy ? 'logs.facets.pending' : 'logs.facets', ...(busy && { maxWaitMs: 0 }) });
+}
+
+async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:Actor)=>MailboxAccess|null) {
     const opts = { route: 'logs.facets', workspaceId: scope.a.workspaceId }, signal = c.req.raw.signal;
     const mode=c.req.query('mode'), askedPeriod=c.req.query('range'), period=logFacetPeriod(askedPeriod);
     if ((mode !== undefined && mode !== 'last' && mode !== 'refresh') || (askedPeriod !== undefined && !period))
@@ -192,22 +207,13 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       // mislabeled with a new absolute from. Private custom searches/dates never use this matrix.
       if(!period||q.from||q.to||q.search||q.campaignId||q.cursor)
         throw new ApiError(422,'VALIDATION_FAILED','A last-folded read requires a rolling range without custom dates, search or campaign.');
-      const last=await withBoundedRead(c,()=>budgetedRead(c.env.db,async db=>{
-        const fresh=await currentFacetScope(c,db,q,scope,mailAccess);
-        const p=await readPublishedLogFacet(db,fresh.a.workspaceId,q.region??null,period);
-        const visibility=facetVisibility(fresh);
-        return p ? {counts:projectCut(q,fresh,p.cut),asOf:p.cut.asOf,from:p.from,visibility}
-          : {counts:null,asOf:null,from:null,visibility};
-      },readLimit(COUNTS_READ),'repeatable read'),opts);
+      const last = await readLastFacet(c, q, scope, mailAccess, period);
       if(last instanceof Response)return last;
       return c.json(last,200);
     }
     if(mode==='refresh'&&(!q.from||!period))throw new ApiError(422,'VALIDATION_FAILED','A refresh requires the visible date range and its start.');
-    const fromMs = q.from ? Date.parse(q.from) : NaN, age = Date.now() - fromMs;
-    const foldable = !scope.a.domains.length && scope.access?.mailboxIds === null && !q.search && !q.campaignId && !q.to &&
-      // Date.parse discards sub-millisecond digits: an absolute 00.000001Z start is not a whole minute.
-      !!q.from && /:00(?:\.0+)?(?:Z|[+-]\d\d:\d\d)$/.test(q.from) && fromMs % 60_000 === 0 && age >= 0 && age <= 31 * 86_400_000;
-    if (!foldable) {
+    const fromMs = q.from ? Date.parse(q.from) : NaN;
+    if (!foldableFacet(q,scope)) {
       const counts = await withBoundedRead(c, () => budgetedRead(c.env.db, db => countLiveFacets(db, q, scope), readLimit(COUNTS_READ)), opts);
       if (counts instanceof Response) return counts;
       return c.json({ counts, ...(mode==='refresh' && { visibility:facetVisibility(scope),from:q.from }) }, 200);
@@ -285,6 +291,33 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     } finally {
       hold.release();
       if (ticket) await releaseLogFacetTicket(c.env.db,ticket);
+    }
+}
+
+export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess | null) {
+  app.get('/v1/logs/facets', async c => {
+    const parsed = LogQuery.safeParse(c.req.query());
+    if (!parsed.success) throw new ApiError(422, 'VALIDATION_FAILED', parsed.error.issues[0]?.message ?? 'Invalid Logs filters.');
+    const q = parsed.data, scope = logAccess(c, q, mailAccess);
+    if (scope.a.credential !== 'dashboard') throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
+    c.header('Cache-Control', 'private, no-store');
+    try { return await readDashboardFacets(c, q, scope, mailAccess); }
+    catch (error) {
+      if (!facetBusy(error)) throw error;
+      if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });
+      const mode = c.req.query('mode'), period = logFacetPeriod(c.req.query('range'));
+      const retryAfterSeconds = error.code === 'FACET_CATCHUP_UNAVAILABLE' ? 30 : 5;
+      let last = null;
+      if (error.code !== 'READ_CONCURRENCY_LIMIT' && period && (mode === 'last' || mode === 'refresh' && foldableFacet(q, scope))) {
+        try {
+          const stored = await readLastFacet(c, q, scope, mailAccess, period, true);
+          if (stored instanceof Response) return stored;
+          if (stored.counts !== null) last = stored;
+        } catch (fallbackError) { if (!facetBusy(fallbackError)) throw fallbackError; }
+      }
+      if (c.req.raw.signal.aborted) return new Response(null, { status: 499 });
+      c.header('Retry-After', String(retryAfterSeconds));
+      return c.json({ state: 'pending', last, retryAfterSeconds }, 200);
     }
   });
 
