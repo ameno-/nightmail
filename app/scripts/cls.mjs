@@ -54,6 +54,9 @@ const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls');
 const only = process.env.CLS_ONLY ? new RegExp(process.env.CLS_ONLY, 'i') : null;
 const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParallelism() * 5);
+const shard = Number(process.env.CLS_SHARD_INDEX ?? 0), shards = Number(process.env.CLS_SHARD_COUNT ?? 1);
+if (!Number.isSafeInteger(shards) || shards < 1 || !Number.isSafeInteger(shard) || shard < 0 || shard >= shards)
+  throw new Error('CLS_SHARD_INDEX must be a zero-based integer below CLS_SHARD_COUNT.');
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
@@ -846,14 +849,16 @@ try {
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
   jobs.forEach((job, index) => { job.index = index; });
   const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
-  console.log(`${elapsed()} measuring ${queue.length} page loads, ${workers} at a time`);
+  // Round-robin each lane after the weight sort. Keep job.index global: it selects the origin and throttle bucket.
+  const lane = alone => queue.filter(job => Boolean(job.alone) === alone).filter((_, i) => i % shards === shard);
+  const shared = lane(false), alone = lane(true);
+  console.log(`${elapsed()} shard ${shard + 1}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
   const run = async job => {
     const r = await measure(browser, job, fx);
     results[job.index] = r;
     const flag = r.error || r.cls > LIMIT ? '✗' : '✓';
     console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
   };
-  const shared = queue.filter(job => !job.alone), alone = queue.filter(job => job.alone);
   // The live rule jobs each have an agent save the same rule, and every one of their pages hears every save: one at a
   // time, so a page sees only its own save (two at once stacked a second toast that moved the first, Nov 23).
   let live = Promise.resolve();

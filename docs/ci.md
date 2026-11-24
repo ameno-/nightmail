@@ -37,7 +37,7 @@ The routing table lives in `.github/scripts/ci-scope.sh`. Update it when a suite
 | PR, merge group, `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
 | PR, merge group, `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
 | PR, merge group, `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
-| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page in one job, and the support Worker tests |
+| PR, merge group, `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across four independent runners, and the support Worker tests |
 | `dev` push, alongside CI | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
@@ -157,6 +157,10 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 - **The nightly finds new ones.** `.github/workflows/nightly.yml` runs the acceptance suite (`ACCEPTANCE_QUARANTINE=all`, JUnit output) and the CLS gate on the dev tip, once each by default, then keeps one issue labeled `nightly-flakes` current: each failing test or CLS measurement with its failure count and first error, run-level failures (a deadlock, a crashed shard), and quarantined tests that passed every run. A clean night closes the issue. Run it by hand from the Actions tab (5, 10 or 20 runs).
 
 `acceptance.sh` modes: `ACCEPTANCE_QUARANTINE` unset skips quarantined tests, `only` runs just them, `all` runs everything; `ACCEPTANCE_JUNIT=<dir>` also writes `integration.xml` and `simulated.xml` there.
+
+### CLS shards
+
+PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. Exclusive mutations still run after shared pages on their own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
 
 ### CLS: web fonts load before any text, every run
 

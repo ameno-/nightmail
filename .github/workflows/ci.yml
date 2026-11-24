@@ -284,9 +284,13 @@ jobs:
   # Layout shift on every main dashboard page (light and dark, cold load and in-app navigation, throttled network,
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
-  cls-work:
+  cls-shard:
     needs: changes
     if: needs.changes.outputs.dashboard == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     services:
@@ -316,13 +320,15 @@ jobs:
       - name: Measure layout shift on every page
         working-directory: app
         env:
+          CLS_SHARD_INDEX: ${{ matrix.shard }}
+          CLS_SHARD_COUNT: ${{ strategy.job-total }}
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
         run: node scripts/cls.mjs
       - name: Upload the shift sources
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: cls-shift-sources
+          name: cls-shift-sources-${{ matrix.shard }}
           path: app/.cls/
           include-hidden-files: true
           retention-days: 14
@@ -359,7 +365,7 @@ jobs:
   # decision, or a selected suite that didn't succeed must never report green.
   required:
     name: ${{ matrix.check }}
-    needs: [changes, build-work, acceptance-shard, cls-work, preview-work, gateway-work, support-work]
+    needs: [changes, build-work, acceptance-shard, cls-shard, preview-work, gateway-work, support-work]
     if: always()
     runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
@@ -368,7 +374,7 @@ jobs:
         include:
           - { check: build, job: build-work, flag: build }
           - { check: acceptance, job: acceptance-shard, flag: acceptance }
-          - { check: cls, job: cls-work, flag: dashboard }
+          - { check: cls, job: cls-shard, flag: dashboard }
           - { check: preview, job: preview-work, flag: preview }
           - { check: gateway, job: gateway-work, flag: gateway }
           - { check: support, job: support-work, flag: support }
