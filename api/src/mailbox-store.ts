@@ -1,6 +1,6 @@
 import { addressGlob } from './routing-match.js';
 import { and, eq, inArray, sql } from 'drizzle-orm';
-import { ApiError, id, type DbExecutor } from './core.js';
+import { ApiError, id, type DbExecutor, type Runtime } from './core.js';
 import { mailboxAddresses, mailboxes, mailboxWriteLanes, mailMessages, type MailAddress, type SendLimits } from './db/mailbox.js';
 import { mailText } from './mailbox-text.js';
 
@@ -135,4 +135,178 @@ export async function attachToMailboxes(tx: DbExecutor, scope: Scope, message: t
     await tx.execute(sql`SELECT inbox_file_delivery(box,${message.id},NULL) FROM unnest(${sql.param(filed)}::text[]) box ORDER BY box`);
   }
   return result.rows.map(row=>row.mailbox_id);
+}
+
+export const CLAIM_UNROUTED_INLINE = 100;
+export const CLAIM_UNROUTED_BATCH = 200;
+export const CLAIM_UNROUTED_MAX_BATCHES = 5;
+export const CLAIM_UNROUTED_BUDGET_MS = 2_000;
+
+/**
+ * Claims up to `limit` matching rows from `mail_unrouted` into `mailboxId` in a single set-based
+ * SQL batch plus one batched `inbox_file_delivery` call. Acquires `inbox_state FOR UPDATE` in its
+ * own statement BEFORE reading `mail_unrouted` so the claim always runs on a fresh READ COMMITTED
+ * snapshot after waiting on any concurrent writer. Uses `FOR UPDATE OF u SKIP LOCKED` on
+ * `mail_unrouted` and deletes claimed rows in the same atomic transaction, so concurrent claimers
+ * never attach the same unrouted row twice and an interrupted run loses nothing.
+ */
+export async function claimUnroutedBatch(
+  tx: DbExecutor,
+  scope: Scope,
+  mailboxId: string,
+  addresses: string[],
+  rules: string[],
+  limit: number,
+): Promise<{ picked: number; attached: number }> {
+  if (!addresses.length && !rules.length) return { picked: 0, attached: 0 };
+  const locked = await tx.execute(sql`SELECT inbox_id FROM inbox_state WHERE workspace_id=${scope.workspaceId} AND inbox_id=${mailboxId} FOR UPDATE`);
+  if (!locked.rowCount) return { picked: 0, attached: 0 };
+  const unreserved = sql`NOT EXISTS (
+    SELECT 1 FROM mailbox_addresses a JOIN mailboxes bm ON bm.id = a.mailbox_id
+    WHERE a.workspace_id = u.workspace_id AND (bm.expires_at IS NOT NULL OR a.kind = 'public')
+      AND a.address IN (u.address, regexp_replace(u.address, '[+][^@]*@', '@'))
+  )`;
+  const addrParam = addresses.length ? sql.param(addresses) : null;
+  const exactCte = addrParam
+    ? sql`SELECT u.address, u.message_id FROM mail_unrouted u
+      WHERE u.workspace_id = ${scope.workspaceId} AND u.address = ANY(${addrParam}::text[])
+        AND ${unreserved}
+      ORDER BY u.address, u.message_id
+      LIMIT ${limit}
+      FOR UPDATE OF u SKIP LOCKED`
+    : sql`SELECT NULL::text AS address, NULL::text AS message_id WHERE false`;
+  const plusCte = addrParam
+    ? sql`SELECT u.address, u.message_id FROM mail_unrouted u
+      WHERE u.workspace_id = ${scope.workspaceId} AND strpos(u.address, '+') > 0
+        AND regexp_replace(u.address, '[+][^@]*@', '@') = ANY(${addrParam}::text[])
+        AND NOT (u.address = ANY(${addrParam}::text[]))
+        AND ${unreserved}
+      LIMIT greatest(0, ${limit} - (SELECT count(*)::int FROM exact))
+      FOR UPDATE OF u SKIP LOCKED`
+    : sql`SELECT NULL::text AS address, NULL::text AS message_id WHERE false`;
+  const ruleCte = rules.length
+    ? sql`SELECT u.address, u.message_id FROM mail_unrouted u
+      WHERE u.workspace_id = ${scope.workspaceId}
+        AND EXISTS (SELECT 1 FROM unnest(${sql.param(rules)}::text[]) pat WHERE u.address LIKE replace(replace(replace(replace(pat, '!', '!!'), '%', '!%'), '_', '!_'), '*', '%') ESCAPE '!')
+        ${addrParam ? sql`AND NOT (u.address = ANY(${addrParam}::text[]) OR (strpos(u.address, '+') > 0 AND regexp_replace(u.address, '[+][^@]*@', '@') = ANY(${addrParam}::text[])))` : sql``}
+        AND ${unreserved}
+      LIMIT greatest(0, ${limit} - (SELECT count(*)::int FROM exact) - (SELECT count(*)::int FROM plus))
+      FOR UPDATE OF u SKIP LOCKED`
+    : sql`SELECT NULL::text AS address, NULL::text AS message_id WHERE false`;
+  const { rows: [batch] } = await tx.execute<{ picked: number; attached: string[] }>(sql`
+    WITH exact AS MATERIALIZED (${exactCte}),
+    plus AS MATERIALIZED (${plusCte}),
+    by_rule AS MATERIALIZED (${ruleCte}),
+    picked AS MATERIALIZED (
+      SELECT p.address, p.message_id, m.thread_id, m.received_at, coalesce(m.size_bytes, 0) AS size_bytes, m.spam
+      FROM (
+        SELECT address, message_id FROM exact
+        UNION ALL SELECT address, message_id FROM plus
+        UNION ALL SELECT address, message_id FROM by_rule
+      ) p
+      JOIN mail_messages m ON m.id = p.message_id AND m.workspace_id = ${scope.workspaceId}
+    ),
+    distinct_msgs AS MATERIALIZED (
+      SELECT DISTINCT ON (message_id) message_id, thread_id, received_at, size_bytes, spam
+      FROM picked ORDER BY message_id, received_at
+    ),
+    added AS (
+      INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, read, received_at)
+      SELECT ${mailboxId}, d.message_id, ${scope.workspaceId}, d.thread_id, 'inbound', false, d.received_at
+      FROM distinct_msgs d ORDER BY d.received_at, d.message_id
+      ON CONFLICT DO NOTHING
+      RETURNING message_id, thread_id, received_at
+    ),
+    threads AS (
+      INSERT INTO mailbox_threads AS t(mailbox_id, thread_id, workspace_id, message_count, unread_count, last_message_at, last_inbound_at, spam, labels)
+      SELECT ${mailboxId}, a.thread_id, ${scope.workspaceId}, count(*)::int, count(*)::int, max(a.received_at), max(a.received_at),
+             (array_agg(d.spam ORDER BY a.received_at, a.message_id))[1], CASE WHEN (array_agg(d.spam ORDER BY a.received_at, a.message_id))[1] THEN ARRAY['spam'] ELSE ARRAY[]::text[] END
+      FROM added a JOIN distinct_msgs d ON d.message_id = a.message_id
+      GROUP BY a.thread_id
+      ON CONFLICT (mailbox_id, thread_id) DO UPDATE SET
+        message_count = t.message_count + excluded.message_count,
+        unread_count = t.unread_count + excluded.unread_count,
+        last_message_at = greatest(t.last_message_at, excluded.last_message_at),
+        last_inbound_at = greatest(t.last_inbound_at, excluded.last_inbound_at),
+        archived = false
+    ),
+    state AS (
+      UPDATE inbox_state
+      SET messages = messages + (SELECT count(*)::int FROM added),
+          bytes = bytes + coalesce((SELECT sum(d.size_bytes)::bigint FROM added a JOIN distinct_msgs d ON d.message_id = a.message_id), 0)
+      WHERE inbox_id = ${mailboxId} AND EXISTS (SELECT 1 FROM added)
+    ),
+    gone AS (
+      DELETE FROM mail_unrouted u USING picked p
+      WHERE u.workspace_id = ${scope.workspaceId} AND u.address = p.address AND u.message_id = p.message_id
+      RETURNING 1
+    )
+    SELECT (SELECT count(*)::int FROM picked) AS picked,
+           coalesce(ARRAY(SELECT a.message_id FROM added a ORDER BY a.received_at, a.message_id), ARRAY[]::text[]) AS attached
+  `);
+  const attached = batch?.attached ?? [];
+  if (attached.length) {
+    await tx.execute(sql`SELECT inbox_file_delivery(${mailboxId}, mid, NULL) FROM unnest(${sql.param(attached)}::text[]) WITH ORDINALITY t(mid, n) ORDER BY n`);
+  }
+  return { picked: batch?.picked ?? 0, attached: attached.length };
+}
+
+/** Enqueues or refreshes the durable background job that drains remaining unrouted mail for a mailbox. */
+export async function queueClaimUnrouted(tx: DbExecutor, workspaceId: string, mailboxId: string) {
+  const jobId = `claim-unrouted:${mailboxId}`;
+  const queued = await tx.execute<{ status: string }>(sql`
+    INSERT INTO jobs(id, type, workspace_id, payload)
+    VALUES (${jobId}, 'mailbox.claimUnrouted', ${workspaceId}, jsonb_build_object('mailboxId', ${mailboxId}::text))
+    ON CONFLICT (id) DO UPDATE SET
+      status = CASE WHEN jobs.status = 'running' THEN 'running' ELSE 'pending' END,
+      payload = CASE WHEN jobs.status = 'running' THEN jobs.payload || '{"rescan":true}'::jsonb ELSE excluded.payload END,
+      attempts = CASE WHEN jobs.status = 'running' THEN jobs.attempts ELSE 0 END,
+      available_at = now(),
+      lease_until = CASE WHEN jobs.status = 'running' THEN jobs.lease_until ELSE NULL END,
+      last_error = NULL
+    RETURNING status
+  `);
+  if (queued.rows[0]?.status === 'running') {
+    await tx.execute(sql`INSERT INTO jobs(id, type, workspace_id, payload) VALUES (public.row_id('job'), 'mailbox.claimUnrouted', ${workspaceId}, jsonb_build_object('mailboxId', ${mailboxId}::text))`);
+  }
+}
+
+/**
+ * Drains remaining unrouted mail for a mailbox in short independent transactions WITHOUT holding
+ * the workspace's address write lane. Each batch locks the mailbox FOR SHARE and inbox_state
+ * FOR UPDATE, then reads the mailbox's live addresses/rules on a fresh snapshot so deletions,
+ * expiry changes, and alias/rule edits are respected immediately.
+ */
+export async function drainClaimUnrouted(
+  runtime: Runtime,
+  workspaceId: string,
+  mailboxId: string,
+  options?: { batchSize?: number; maxBatches?: number; budgetMs?: number },
+): Promise<{ done: boolean; claimed: number; batches: number }> {
+  const batchSize = options?.batchSize ?? CLAIM_UNROUTED_BATCH;
+  const maxBatches = options?.maxBatches ?? CLAIM_UNROUTED_MAX_BATCHES;
+  const deadline = Date.now() + (options?.budgetMs ?? CLAIM_UNROUTED_BUDGET_MS);
+  let claimed = 0, batches = 0;
+  while (batches < maxBatches && Date.now() < deadline) {
+    const step = await runtime.db.transaction(async tx => {
+      await tx.execute(sql`SET LOCAL lock_timeout = '2s'; SET LOCAL statement_timeout = '10s'`);
+      const { rows: [box] } = await tx.execute<{ id: string; rules: string[]; expires_at: string | null; delete_after: string | null }>(sql`
+        SELECT id, rules, expires_at::text, delete_after::text
+        FROM mailboxes
+        WHERE workspace_id = ${workspaceId} AND id = ${mailboxId}
+        FOR SHARE`);
+      if (!box || box.expires_at !== null || box.delete_after !== null) return { done: true, attached: 0 };
+      const addrRows = await tx.execute<{ address: string }>(sql`
+        SELECT address FROM mailbox_addresses
+        WHERE workspace_id = ${workspaceId} AND mailbox_id = ${mailboxId} AND kind <> 'public'`);
+      const addresses = addrRows.rows.map(r => r.address);
+      const rules = Array.isArray(box.rules) ? box.rules : [];
+      const res = await claimUnroutedBatch(tx, { workspaceId }, mailboxId, addresses, rules, batchSize);
+      return { done: res.picked < batchSize, attached: res.attached };
+    });
+    claimed += step.attached;
+    batches++;
+    if (step.done) return { done: true, claimed, batches };
+  }
+  return { done: false, claimed, batches };
 }

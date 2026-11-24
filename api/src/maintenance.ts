@@ -4,6 +4,7 @@ import { log, logError } from './core.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { foldSendingTallies, recountSendingTallies } from './sending-tallies.js';
 
 // Rows per delete statement: small enough to finish well inside Hyperdrive's 60 s statement limit on 1 vCPU.
 const RETENTION_BATCH = 5000;
@@ -483,6 +484,8 @@ export async function cleanup(runtime: Runtime, budgetMs = RETENTION_BUDGET_MS) 
     const inboxComplete = await sweepInboxes(runtime, Math.min(60_000, Math.floor(budgetMs / 5)));
     // A durable daily election prevents two reconcilers from applying the same
     // snapshot difference. Dispatch continues adding deltas while this runs.
+    try { await foldSendingTallies(runtime, Math.min(10_000, Math.max(1_000, ceiling - Date.now()))); }
+    catch (error) { failed.push('sending_tallies_fold'); logError(error, { code: 'RETENTION_STEP_FAILED', table: 'sending_tallies_fold' }, 'warn'); }
     try {
       await runtime.db.execute(sql`WITH elected AS (INSERT INTO job_schedule(workspace_id,next_wake_at)
         VALUES ('maintenance:sending-depth',now()+interval '1 day') ON CONFLICT(workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at
@@ -591,6 +594,8 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['BYO_HEALTH_QUEUE_FAILED', async () => { await (await import('./byo-regional.js')).queueByoHealth(runtime); }],
     // Abuse monitoring (src/abuse.ts): a bounded, leased slice. Hosted, and only while it is on.
     ['ABUSE_HOURLY_FAILED', async () => { await (await import('./abuse.js')).abuseHourly(runtime); }],
+    // Daily exact recount of sending_campaign_tallies and sending_metrics_hourly.
+    ['SENDING_TALLIES_RECOUNT_FAILED', async () => { await recountSendingTallies(runtime); }],
     // The daily exact recount of every list's counts.
     ['AUDIENCE_LIST_RECOUNT_FAILED', async () => { await recountLists(runtime); }],
     ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],

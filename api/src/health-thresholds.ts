@@ -71,11 +71,15 @@ export const JOBS = {
   /** At most this many due and this many failed jobs are read per tick, newest failures first: the count shows "5,000+". */
   read: 5_000,
   /**
-   * Failed jobs of one type. A pile this large is a bug, not a customer's bad day: on the 23rd, 1,639
-   * mailbox.recoverStaging jobs had sat failed for twelve days. So is this many more within `failedWindowMinutes`,
-   * however small the pile. It reminds once a day while either holds.
+   * Jobs of one type that failed within the last hour (`failedHourMinutes`), by when each failed (a failed job's
+   * available_at: src/jobs.ts), never by what is still kept: this many in the hour is a bug, not a customer's bad day,
+   * and so is `failedNew` within `failedWindowMinutes`. An alert is about what is failing now. Failed jobs are kept
+   * for 30 days, so counting the rows kept held an alert open for a month after its cause was fixed: the 1,648
+   * mailbox.recoverStaging failures of 11 to 23 November (fixed by #625) would have opened one on the first tick and
+   * held it into late December. What is kept is on the Health page, as information. It clears once the last failure
+   * is an hour old, and reminds once a day while they keep coming.
    */
-  failed: 25, failedNew: 5, failedWindowMinutes: 30, failedRemindMinutes: 1_440,
+  failed: 25, failedHourMinutes: 60, failedNew: 5, failedWindowMinutes: 30, failedRemindMinutes: 1_440,
   /** A failed campaign job strands a customer's send: the first one alerts. */
   failedCampaign: 1,
   /** Webhook posts fail when a customer's endpoint is down; the customer sees that on their own page. Never an alert. */

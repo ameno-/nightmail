@@ -1094,4 +1094,15 @@ const mailboxIngestHandler: JobHandler = Object.assign(
   { batch: ingestBatch },
 );
 
-export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs, 'mail.archiveSent': retryDatabaseFailures(async (r, p, j) => (await import('./mailbox-send.js')).archiveSentMessage(r, j.workspaceId, String(p.messageId))), 'mail.deleteObjects': deleteMailObjects, [recoveryPage]: retryDatabaseFailures(async runtime => recoverMailReceipts(runtime, true)), 'mailbox.ingest': mailboxIngestHandler };
+const claimUnroutedJob: JobHandler = retryDatabaseFailures(async (runtime, payload, job) => {
+  const mailboxId = String(payload.mailboxId ?? '');
+  if (!mailboxId) return;
+  const { drainClaimUnrouted } = await import('./mailbox-store.js');
+  const res = await drainClaimUnrouted(runtime, job.workspaceId, mailboxId);
+  if (!res.done) throw new JobDeferred(new Date(Date.now() + 250).toISOString());
+  // If an alias or rule was added while this job was running, queueClaimUnrouted marked rescan:true.
+  const { rows: [again] } = await runtime.db.execute<{ rescan: boolean }>(sql`UPDATE jobs SET payload=payload-'rescan' WHERE id=${job.id} AND payload->>'rescan'='true' RETURNING true AS rescan`);
+  if (again?.rescan) throw new JobDeferred(new Date(Date.now() + 100).toISOString());
+});
+
+export const mailboxIngestJobs: Record<string, JobHandler> = { ...stagingJobs, 'mail.archiveSent': retryDatabaseFailures(async (r, p, j) => (await import('./mailbox-send.js')).archiveSentMessage(r, j.workspaceId, String(p.messageId))), 'mail.deleteObjects': deleteMailObjects, [recoveryPage]: retryDatabaseFailures(async runtime => recoverMailReceipts(runtime, true)), 'mailbox.claimUnrouted': claimUnroutedJob, 'mailbox.ingest': mailboxIngestHandler };

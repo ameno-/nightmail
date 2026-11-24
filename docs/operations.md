@@ -93,12 +93,16 @@ queue. (23 Nov: 1,883 `mailbox.ingest` jobs 13 minutes late.)
 **Then** inbound mail: `docs/receiving-operations.md`. A campaign type behind: see campaign-slow.
 
 ### jobs-failed
-Failed jobs of one type: 25 or more standing, or 5 more within half an hour (a campaign job: the first one).
-Webhook posts are left out: a customer's endpoint being down is on the customer's page. It reminds once a day
-while the pile stays. (23 Nov: 1,639 `mailbox.recoverStaging` failed since the 11th, unnoticed.)
+Jobs of one type that failed in the last hour: 25 or more, or 5 within half an hour (a campaign job, or a job
+whose error is `MAILBOX_STAGING_UNDELIVERED`: the first one). It counts by when each job failed (a failed job's
+`available_at`), never the failed jobs still kept: those stay 30 days and are on the Health page as "failed in
+30 days", for information. So it clears once the last failure is an hour old, and reminds once a day while jobs
+keep failing. Webhook posts are left out: a customer's endpoint being down is on the customer's page.
+(23 Nov: 1,639 `mailbox.recoverStaging` failed since the 11th, unnoticed; fixed by #625. Those rows are history
+and open nothing. A trickle under 25 an hour and 5 a half hour of an ordinary type opens nothing either.)
 
 **An agent checks first**
-1. `SELECT last_error,count(*),min(created_at),max(created_at) FROM jobs WHERE status='failed' AND type='<type>' GROUP BY 1 ORDER BY 2 DESC;`
+1. `SELECT last_error,count(*) FILTER (WHERE available_at>now()-interval '1 hour') AS last_hour,count(*) AS kept,max(available_at) AS last_failed FROM jobs WHERE status='failed' AND type='<type>' GROUP BY 1 ORDER BY 2 DESC,3 DESC;`
 2. One row, without its payload's content: `SELECT id,workspace_id,attempts,last_error,created_at,available_at FROM jobs WHERE status='failed' AND type='<type>' ORDER BY created_at DESC LIMIT 5;`
 3. Workers Logs for one of those `jobId`s: the `logError` line has the error class, SQLSTATE and Nightmail's own stack frames.
 
@@ -317,8 +321,8 @@ Nothing new is required. The cards go to `OPERATOR_SLACK_WEBHOOK_URL`, the secre
 the operator alerts; without it (every self-hosted installation) nothing is posted and nothing is called.
 Optional: `DATABASE_DISK_GB` (the Health page shows the database against it, and `database-disk` opens at 75%).
 For an agent to pull: an operator makes an agent key (Operator, UI notes, Agent keys). Migration 440 creates four
-small tables and one small index and takes milliseconds. Expect `jobs-failed:mailbox.recoverStaging` on the first
-tick in production: the failed jobs of 11 November are still there.
+small tables and one small index and takes milliseconds. The failed `mailbox.recoverStaging` jobs of 11 to 23
+November open nothing: `jobs-failed` counts the last hour's failures only.
 
 ## What is not covered yet
 
