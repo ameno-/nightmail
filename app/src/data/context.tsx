@@ -108,14 +108,14 @@ function invitationError(error: unknown) {
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 // Shown before anything changes: the question, its facts and the two answers. The question is the product's own words;
-// the workspace's name comes as plain words (the API's shownName), the inviter is their address, and the slug tells
-// apart workspaces that share a name. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
+// the workspace's name comes as plain words (the API's shownName) and the inviter is their address, which also tells
+// apart two workspaces that share a name. The slug is not shown: it is made from the name the workspace began with. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
 // instead, and its button says so.
 function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
   return <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
     <h2>Join this workspace?</h2>
     <dl className="invitation-facts">
-      <dt>Workspace</dt><dd>{invitation.workspaceName ? <><bdi>{invitation.workspaceName}</bdi> </> : null}<code>{invitation.workspaceSlug}</code></dd>
+      {invitation.workspaceName ? <><dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi></dd></> : null}
       <dt>Invited by</dt><dd><code><PrivateAddress value={invitation.inviterEmail} /></code></dd>
       {email ? <><dt>Invited as</dt><dd><bdi><PrivateAddress value={email} /></bdi></dd></> : null}
       <dt>Role</dt><dd>{roleLabel[invitation.role]}</dd>
