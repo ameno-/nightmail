@@ -14,7 +14,7 @@ import { SEND_LIMITS } from './send-limits.js';
 // promoted waiters without relying on the dead request's code, logs once per route class, and makes any late release()
 // a safe no-op.
 const budget = SEND_LIMITS.isolateWorkingBytes;
-const MAX_HEAD_SKIPS = 4;
+
 
 /** Tunable isolate memory budget deadlines and fairness bounds (exported for tests). */
 export const MEMORY_LIMITS = {
@@ -102,7 +102,7 @@ type Waiter = {
   signal: AbortSignal | undefined;
   waitDeadlineAt: number;
   busyCode: string;
-  skips: number;
+
   settled: boolean;
   resolve: (hold: ActiveHold) => void;
   reject: (err: unknown) => void;
@@ -262,18 +262,18 @@ function admit(now = Date.now()) {
       head.resolve(hold);
       continue;
     }
-    // A waiter blocked only by its own workspace share must never starve other workspaces.
+    // Preserve arrival order globally; only bypass a head waiter blocked solely by its own workspace share so
+    // one workspace sitting at its share cap cannot block other workspaces.
     const headBlockedByOwnWs = head.workspaceId !== undefined && (usedByWs.get(head.workspaceId) ?? 0) + head.bytes > head.wsCap;
-    if (!headBlockedByOwnWs && head.skips >= MAX_HEAD_SKIPS) return;
+    if (!headBlockedByOwnWs) return;
     const idx = waiting.findIndex((w, i) => i > 0 && !w.settled && canFit(w.bytes, w.workspaceId, w.wsCap));
     if (idx < 0) return;
-    if (!headBlockedByOwnWs) head.skips++;
-    const [small] = waiting.splice(idx, 1);
-    small!.settled = true;
-    adjustMap(waitingByWs, small!.workspaceId, -1);
-    small!.cleanup();
-    const hold = makeHold(small!.bytes, small!.workspaceId, small!.route, small!.idleMs, small!.maxMs, small!.onReclaimFn, false, now);
-    small!.resolve(hold);
+    const [other] = waiting.splice(idx, 1);
+    other!.settled = true;
+    adjustMap(waitingByWs, other!.workspaceId, -1);
+    other!.cleanup();
+    const hold = makeHold(other!.bytes, other!.workspaceId, other!.route, other!.idleMs, other!.maxMs, other!.onReclaimFn, false, now);
+    other!.resolve(hold);
   }
 }
 
@@ -397,7 +397,7 @@ export async function reserveMemory(bytes: number, opts: MemoryLeaseOptions = {}
       signal: opts.signal,
       waitDeadlineAt: now + maxWaitMs,
       busyCode: opts.busyCode ?? 'ISOLATE_MEMORY_BUSY',
-      skips: 0,
+
       settled: false,
       resolve,
       reject,

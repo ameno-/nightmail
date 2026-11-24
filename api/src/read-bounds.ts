@@ -390,6 +390,7 @@ export function createFairPool(config: { name: string; maxActive: number; maxPer
 
 /** Shared bounded-read pool across audience, inbound, and sending list/query endpoints. */
 export const readPool = new FairPool('read', READ_MAX_ACTIVE, READ_MAX_ACTIVE_PER_WORKSPACE, READ_MAX_WAITING_PER_WORKSPACE, READ_MAX_WAITERS);
+export const boundedReadsActive = () => readPool.stats().active;
 
 /**
  * Runs a bounded read inside the isolate's fair per-workspace read pool (isolated from attachment/import memory).
