@@ -1,4 +1,4 @@
-import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
+import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
@@ -8,7 +8,7 @@ import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
-import { Alert, Button, PageHeader, ToastScope, useToast } from '../components/ui'
+import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
@@ -170,18 +170,43 @@ function waitlistAddress() {
   const cookie = document.cookie.split(';').map(part => part.trim()).find(part => /^(?:__Host-)?nightmail\.waitlist=/.test(part))
   try { return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1)) || null : null } catch { return null }
 }
-// ?place=ready: a place is held for the address, or open, but GitHub or a password proves no mailbox, so the API says how
-// to take it instead of waiting.
+// What the refusal says (api/src/account-login.ts). ?place=held: a place is held for the address, but the sign-in doesn't
+// show the address is the person's (GitHub without it verified, a password, a Google account on another provider's
+// address), so one click emails it a sign-in link. ?place=ready: a place is open, and an emailed link or Google takes it.
+// Otherwise the address waits; someone told they're in who signed in with another address asks for a link to that one.
+// ?link=expired: the sign-in link it followed was used or ran out.
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
-  const [email] = useState(waitlistAddress), [ready] = useState(() => new URLSearchParams(window.location.search).get('place') === 'ready')
+  const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
+  const place = search.get('place'), held = place === 'held' && email !== null, expired = search.get('link') === 'expired'
   const who = email ? <bdi data-own-address="">{email}</bdi> : null
   return <SignedOutPage title={`${productName} isn’t open to the public yet`}>
-    {ready ? <p>There’s a place for {who ?? 'you'}: sign in with an emailed link or Google to take it.</p>
-      : <p>We’ll email {who ?? 'you'} when it opens.</p>}
+    {expired ? <Alert tone="info">That sign-in link was already used or has expired. Ask for a new one below.</Alert> : null}
+    {held ? <p>A place is held for {who}, but this sign-in doesn’t show the address is yours. Get a sign-in link sent to it.</p>
+      : place === 'ready' ? <p>There’s a place for {who ?? 'you'}: sign in with an emailed link or Google to take it.</p>
+      : <p>We’ll email {who ?? 'you'} when it opens. Got an email saying you’re in? Sign in with the address you joined the waitlist with, or get a sign-in link sent to it.</p>}
+    {place !== 'ready' || expired ? <SignInLinkForm to={held ? email : null} /> : null}
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
-    <Button variant="primary" loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
+    <Button variant={held ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
   </SignedOutPage>
+}
+// A sign-in link to an address a raise let in (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
+// place is held for it, in one click, else the address typed. The answer never says whether a place is held. Its words
+// replace the hint in one slot sized for the longest, so asking shifts nothing.
+const linkLines = { idle: 'The link works once, for 30 minutes.', sent: 'If a place is held for that address, a link is on its way.', failed: 'Couldn’t ask for a link. Try again in a few minutes.' }
+function SignInLinkForm({ to }: { to: string | null }) {
+  const [typed, setTyped] = useState(''), [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+  async function send(event: FormEvent) {
+    event.preventDefault()
+    setState('sending')
+    try { await accountApi.signInLink(to ?? typed.trim()); setState('sent') } catch { setState('failed') }
+  }
+  const shown = state === 'sending' ? 'idle' : state
+  return <form className="signed-out__link-form" onSubmit={event => void send(event)}>
+    {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input id="waitlist-link-address" type="email" autoComplete="email" required value={typed} onChange={event => { setTyped(event.target.value); setState('idle') }} /></Field>}
+    <Button type="submit" variant={to ? 'primary' : 'secondary'} loading={state === 'sending'} data-analytics="sign-in/waitlist-link">Email me a sign-in link</Button>
+    <p className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === shown || undefined}>{linkLines[key]}</span>)}</p>
+  </form>
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
@@ -454,6 +479,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // /health says which this is.
   // Start alongside /v1/me when no ready dashboard session is remembered so signed-out visitors avoid a second round trip.
   const authResult = new URLSearchParams(window.location.search).get('auth')
+  const signInLink = !publicRoute && /^[\w-]+\.[\w-]+$/.test(new URLSearchParams(window.location.search).get('link') ?? '')
   const checkHome = window.location.pathname === '/' && authResult !== 'waitlist' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
   const home = useQuery({ queryKey: ['public-home'], enabled: checkHome, staleTime: Infinity, retry: false, queryFn: async ({signal}) => {
     const multiTenant = (await request<{multiTenant?: boolean} | null>('/health', {signal}))?.multiTenant === true
@@ -463,7 +489,9 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' || authResult === 'waitlist' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
-    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with an emailed link to the invited address, or its Google account. You join only after you confirm.</Alert>
+    : invitation ? <Alert tone="info" title="You have a workspace invitation">Sign in with an emailed link to the invited address, or its Google account. You join only after you confirm.</Alert>
+    // A sign-in link (api/src/signups.ts): the sign-in from this page takes the place held for the address it went to.
+    : signInLink && <Alert tone="info" title="A place is held for you">Sign in with any account to take it. The link works once.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'

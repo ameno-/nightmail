@@ -3,12 +3,13 @@ import { ApiError, id, isSimulatedSes, log, ModuleLoadError, type DbExecutor, ty
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
 import { customerNotice, plainAddress, type Notice, type NoticeInput } from './notices.js';
+import { LINK_MINUTES, signinLinkUrl } from './signups.js';
 
 // Sending the account emails (src/notices.ts writes them). Three jobs send one each, every one through deliverNotice:
 // standing.notify (standing.ts: paused, marketing on hold, warning, resumed, campaign paused), billing.notify
 // (billing/notify.ts) and account.notify here, for the moments that have no standing event or billing notice of their
-// own: a domain that stopped verifying, the daily limit reached, the evaluation finished, an invitation and the
-// waitlist. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
+// own: a domain that stopped verifying, the daily limit reached, the evaluation finished, an invitation, the waitlist
+// and a sign-in link. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
 //
 // An email goes out once: the row's dedupe key makes one notice of one moment, the job leases the row so one runner
 // sends it, and the send's idempotency key (its origin) makes a retried send the same email. Nothing here runs in the
@@ -62,7 +63,7 @@ export async function noticeFailed(runtime: Runtime, table: NoticeTable, noticeI
 export const noticeRecipients = (workspace: SQL) => sql`ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id
   WHERE m.workspace_id=${workspace} AND m.role IN ('owner','admin') AND u.email_verified ORDER BY u.email LIMIT 20)`;
 
-export type AccountNoticeKind = 'domain_unverified' | 'limit_reached' | 'evaluation_finished' | 'invitation' | 'waitlist_admitted';
+export type AccountNoticeKind = 'domain_unverified' | 'limit_reached' | 'evaluation_finished' | 'invitation' | 'waitlist_admitted' | 'signin_link';
 type Queued = { workspaceId: string; kind: AccountNoticeKind; dedupe: string; data?: Record<string, unknown>;
   /** At most one of this kind per workspace in 24 hours (suppressed ones don't count). */
   daily?: boolean;
@@ -163,12 +164,16 @@ export async function waitlistAdmitted(runtime: Runtime, db: DbExecutor, email: 
 /** The status of a waitlist address's email (null: none queued), for a lowercased address column. */
 export const waitlistNoticeStatus = (email: SQL) => sql`(SELECT n.status FROM account_notices n WHERE n.dedupe_key='waitlist:'||${email})`;
 
+/** A sign-in link's email (signups.ts sendSigninLink), queued in the transaction that made the link. Only the link's ID
+ * is kept: the job makes the link from it, and sends nothing once it is used or expired. */
+export const signinLink = (workspaceId: string, linkId: string) => noticeInsert({ workspaceId, kind: 'signin_link', dedupe: `signin-link:${linkId}`, data: { linkId } });
+
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
-  domain: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null };
+  domain: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string } | null };
 
 /** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
-function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput } | null {
+function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: string[]; input: NoticeInput } | null {
   const workspace = row.name ?? '', held = !!row.paused || (row.standing !== null && ['warn', 'restrict', 'pause'].includes(row.standing.step));
   switch (row.kind) {
     // Still refused: a domain that verified again, or was removed, needs no email.
@@ -186,6 +191,8 @@ function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput 
         acceptUrl: `${origin}/overview?invitation=${encodeURIComponent(String(row.data.invitationId))}` } };
     }
     case 'waitlist_admitted': return typeof row.data.email === 'string' ? { to: [row.data.email], input: { kind: 'waitlist_admitted' } } : null;
+    // Used or expired before it went out: nothing to send.
+    case 'signin_link': return row.link && { to: [row.link.email], input: { kind: 'signin_link', url: signinLinkUrl(config, String(row.data.linkId)), minutes: LINK_MINUTES } };
   }
 }
 
@@ -201,12 +208,13 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
       CASE WHEN l.kind='limit_reached' THEN billing_position(l.workspace_id) END AS position,
       (SELECT dc.sending_state FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id AND dc.name=l.data->>'name') AS domain,
       (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
-        WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation
+        WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation,
+      (SELECT json_build_object('email',sl.email) FROM nightmail_signin_links sl WHERE l.kind='signin_link' AND sl.id=l.data->>'linkId' AND sl.expires_at>now()) AS link
     FROM leased l LEFT JOIN workspaces w ON w.id=l.workspace_id`);
   if (!row) return heldNotice(runtime.db, 'account_notices', noticeId);
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE account_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END WHERE id=${row.id} AND status='sending'`);
   try {
-    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''));
+    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''), runtime.config);
     if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }
     if (!notice.to.length) { await settle('failed'); log('warn', { code: 'ACCOUNT_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: row.kind }); return; }
     if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }) === 'unconfigured') {

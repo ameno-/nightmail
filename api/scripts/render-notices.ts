@@ -59,6 +59,7 @@ billing('credit-expiring', '30 days before credit expires', 'credit_expiring', {
 account('invitation', 'A teammate is invited', { kind: 'invitation', inviter: { email: 'mara@driftwood.example' }, role: 'admin', expiresAt: date('2026-11-29'),
   acceptUrl: origin + '/overview?invitation=inv_6t2m9d' }, 'the invited address');
 account('waitlist', 'A waitlisted address is let in (no trigger yet)', { kind: 'waitlist_admitted' }, 'the waitlisted address');
+account('signin-link', 'A sign-in link to an address that was let in', { kind: 'signin_link', url: origin + '/overview?link=lnk_fixture.mac', minutes: 30 }, 'the address that was let in');
 
 // The paused email's text part, and its HTML part in other clients.
 shot('client-text-part.png', paused, 'gmail-web', 'desktop', 'light', 'text');

@@ -1373,7 +1373,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
 // The sign-up limit (src/signups.ts): an operator opens a number of places. A new account signing in with a mailbox
 // its sign-in proves takes one while there is one, a raise lets the oldest waiting addresses in first, two people racing
 // for the last place can't both have it, and staff and invitees sign in as before, uncounted.
-test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; the sign-ups list keeps every waitlist join and sign-up', async t => {
+test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one each, each held address emailed once, and staff and invitees pass uncounted; a held place also takes the GitHub-verified address or a sign-in link emailed to it; the sign-ups list keeps every waitlist join and sign-up', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
   const {createApp} = await import('./src/app.js');
@@ -1389,7 +1389,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     ACCOUNT_REQUIRED_ACR:`${googleAcr} ${githubAcr} ${emailAcr}`, AUTH_STAFF_GOOGLE_DOMAINS:'example.org'};
   const runtime: import('./src/core.js').Runtime = { config:loadConfig(configInput),
     db:drizzle(pool), snsCertificateState:new SnsCertificateState(), storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){throw Error('unused');}} };
-  type Person = { subject: string; email: string; acr: string; provider: 'google' | 'github' | null; hd: string | null };
+  // upstream: what the provider identity claim says of the address, when not the person's own address, verified.
+  type Person = { subject: string; email: string; acr: string; provider: 'google' | 'github' | null; hd: string | null; upstream?: { email?: string; email_verified?: boolean } };
   // Each sign-in's code names its flow, so concurrent exchanges each get their own person and nonce.
   const flows = new Map<string, { person: Person; nonce: string }>();
   let pushed: URLSearchParams | undefined, peer = 0;
@@ -1401,7 +1402,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
       case '/keys': return Response.json({keys:[{...keys.publicKey.export({format:'jwk'}),kid:'op',alg:'ES256'}]});
       case '/token': {
         const flow = flows.get(new URLSearchParams(String(init?.body)).get('code')!)!, p = flow.person, now = Math.floor(Date.now()/1000);
-        const upstream = p.provider ? {[PROVIDER_IDENTITY_CLAIM]:{provider:p.provider,sub:`${p.provider}-${p.subject}`,email:p.email,email_verified:true,...p.hd ? {hd:p.hd} : {}}} : {};
+        const upstream = p.provider ? {[PROVIDER_IDENTITY_CLAIM]:{provider:p.provider,sub:`${p.provider}-${p.subject}`,...p.upstream ?? {email:p.email,email_verified:true},...p.hd ? {hd:p.hd} : {}}} : {};
         const body=[{alg:'ES256',kid:'op'},{iss:issuer,aud:'dashboard',iat:now,exp:now+300,sub:p.subject,nonce:flow.nonce,acr:p.acr,email:p.email,email_verified:true,...upstream}].map(v=>Buffer.from(JSON.stringify(v)).toString('base64url')).join('.');
         return Response.json({access_token:'fixture',token_type:'Bearer',id_token:body+'.'+Buffer.from(sign('sha256',Buffer.from(body),{key:keys.privateKey,dsaEncoding:'ieee-p1363'})).toString('base64url')});
       }
@@ -1420,7 +1421,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     return async () => {
       const done = await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state,iss:issuer}),{headers:{cookie,'sec-fetch-site':'cross-site','x-nightmail-client-ip':from}}),runtime);
       const location = new URL(done.headers.get('location')!);
-      return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), account: location.searchParams.get('account'), session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '' };
+      return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), link: location.searchParams.get('link'), account: location.searchParams.get('account'),
+        landed: location.pathname + location.search, session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '' };
     };
   }
   const signIn = async (p: Person, callbackURL?: string) => (await begin(p, callbackURL))();
@@ -1462,6 +1464,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
     await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE let_in_at>=$1',[started]);
     await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
+    await db.query('DELETE FROM nightmail_signin_links WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
     await db.query(`DELETE FROM jobs WHERE type='operator.alert' AND workspace_id IN (SELECT m.workspace_id FROM workspace_members m JOIN nightmail_oidc_identities i ON i.user_id=m.user_id WHERE i.issuer=$1)`,[issuer]);
     await db.query('DELETE FROM nightmail_users WHERE id IN (SELECT user_id FROM nightmail_oidc_identities WHERE issuer=$1)',[issuer]);
   });
@@ -1576,16 +1579,22 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.match(posted[0].blocks[0].text.text, new RegExp(`^:wave: \\*New sign-up\\* [^@]+\\. ${signedUp.signedUp} of ${signedUp.limit}\\.$`));
     assert.equal(posted[0].blocks[0].accessory.url, `${origin}/operator/workspaces/${card.workspace_id}`);
   });
-  // Admission rests on what the sign-in proves: GitHub vouches for the second address but proves no mailbox, so its
-  // place stays held; an emailed link proves it.
-  // The refusal tells it how: an emailed link or Google (?place=ready on the waitlist screen).
-  Object.assign(second,{acr:githubAcr,provider:'github'});
-  assert.deepEqual(await signIn(second).then(r=>[r.auth,r.place]),['waitlist','ready']);
-  assert.deepEqual(await waiting(second),{held:true});
-  Object.assign(second,{acr:emailAcr,provider:null});
-  const viaLink = await signIn(second);
-  assert.deepEqual([await outcome(second),await placeOf(viaLink.account)],['signed_in:signup','waitlist']);
-  assert.equal((await cards()).length,2,'Each sign-up has its one card; the refused GitHub sign-in has none.');
+  // Let in, its person signs in with GitHub. A place held for an address takes the GitHub account's own verified
+  // address, never one GitHub didn't verify or the account only asserts: without it (the account service omits an
+  // unverified one), listed unverified, or GitHub's verified address being another, the sign-in is refused, and the
+  // refusal offers a sign-in link to the held address (?place=held on the waitlist screen).
+  for (const upstream of [{}, {email:second.email,email_verified:false}, {email:`elsewhere-${randomUUID().slice(0,8)}@example.net`,email_verified:true}]) {
+    Object.assign(second,{acr:githubAcr,provider:'github',upstream});
+    assert.deepEqual(await signIn(second).then(r=>[r.auth,r.place,r.session]),['waitlist','held',''],JSON.stringify(upstream));
+    assert.deepEqual([await outcome(second),await waiting(second)],['not_approved',{held:true}]);
+  }
+  // GitHub verified it: the place is taken. That shows the address was verified, not that its mailbox is read now, so
+  // nothing that needs a proven mailbox (an invitation, email support) counts it.
+  Object.assign(second,{upstream:undefined});
+  const viaGithub = await signIn(second);
+  assert.deepEqual([await outcome(second),await placeOf(viaGithub.account),await waiting(second)],['signed_in:signup','waitlist',null]);
+  assert.deepEqual((await db.query('SELECT u.mailbox_proved,s.verified_email FROM nightmail_users u JOIN nightmail_sessions s ON s.user_id=u.id WHERE u.id=$1',[viaGithub.account])).rows,[{mailbox_proved:null,verified_email:null}]);
+  assert.equal((await cards()).length,2,'Each sign-up has its one card; the refused GitHub sign-ins have none.');
   // One place per person: another account with an address that is already a verified user's takes none.
   assert.equal((await signIn(someone(oldest.email))).auth,'error');
   // Never written while it waits, is let in and signs up: its contact comes from what the sign-up recorded.
@@ -1668,7 +1677,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   // Lowering it removes no one: every account that took a place keeps it and still signs in, and held places stay.
   const kept = await places(), lowered = await setLimit(0);
   assert.deepEqual([lowered.letIn,lowered.signedUp,lowered.held,lowered.emailed],[0,kept.signedUp,kept.held,0]);
-  for (const session of [first.session,viaLink.session,winner.session]) assert.equal((await request('/v1/me','GET',session)).status,200);
+  for (const session of [first.session,viaGithub.session,winner.session]) assert.equal((await request('/v1/me','GET',session)).status,200);
   // Without the list nothing is queued; a value that isn't a list ID turns it off and nothing else.
   await syncList();
   assert.equal(loadConfig({...configInput, NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE:`ws_${'0'.repeat(32)}`, NIGHTMAIL_SIGNUPS_LIST_ID:'not-a-list'}).signupsListId,undefined);
@@ -1714,6 +1723,47 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   await syncList();
   await reconcileList();
   assert.deepEqual([await contactOf(moved),await stage(oldest)],[null,['signed_up','subscribed',true]]);
+
+  // Let in, its person signs in with another Google account: that address is waitlisted like any other, and nothing is
+  // held for it. The waitlist screen offers a sign-in link to the address that was let in; asked for, it is emailed
+  // there (an account notice from the platform workspace). Following it, then signing in with that other account, takes
+  // the place held for the address: once, and only until it expires. Asking for an address nothing is held for sends
+  // nothing, and the answer is the same.
+  const elsewhere = gmail('elsewhere');
+  assert.deepEqual(await signIn(elsewhere).then(r=>[r.auth,r.place,r.session]),['waitlist',null,'']);
+  const ask = async (email: string) => { const response = await request('/api/auth/sign-in/link','POST','',{email}); return [response.status,await response.json()]; };
+  const links = async (p: Person) => (await db.query(`SELECT n.data->>'linkId' AS id FROM account_notices n JOIN nightmail_signin_links l ON l.id=n.data->>'linkId'
+    WHERE n.kind='signin_link' AND n.workspace_id=$1 AND l.email=lower($2) ORDER BY l.created_at`,[platform,p.email])).rows.map(r=>r.id as string);
+  for (const p of [after, elsewhere]) assert.deepEqual(await ask(p.email),[202,{requested:true}]);
+  assert.deepEqual([await links(after),await links(elsewhere)],[[],[]],'Nothing is held for them: no link');
+  assert.deepEqual(await ask(loser.email.toUpperCase()),[202,{requested:true}]);
+  const { signinLinkUrl } = await import('./src/signups.js'), [sent] = await links(loser), url = signinLinkUrl(runtime.config, sent!);
+  assert.match(url,new RegExp(`^${origin}/overview\\?link=[A-Za-z0-9_-]{24}\\.[A-Za-z0-9_-]{43}$`));
+  // A link this installation didn't make, or one altered, is no link: refused, and the screen says so.
+  for (const forged of [url.replace(/.$/, c => c === 'A' ? 'B' : 'A'), url.replace(/link=[^.]+/, 'link=AAAAAAAAAAAAAAAAAAAAAAAA')]) {
+    assert.deepEqual(await signIn(elsewhere, forged).then(r=>[r.auth,r.link,r.session]),['waitlist','expired','']);
+  }
+  assert.deepEqual(await waiting(loser),{held:true});
+  const viaEmailedLink = await signIn(elsewhere, url);
+  assert.ok(viaEmailedLink.session);
+  assert.equal(viaEmailedLink.landed,`/overview?account=${viaEmailedLink.account}`,'The page opens without the link');
+  assert.deepEqual([await outcome(elsewhere),await placeOf(viaEmailedLink.account),await waiting(loser),await waiting(elsewhere)],['signed_in:signup','waitlist',null,null]);
+  // The sign-up is the let-in address's, and the account keeps its own: a link proves a mailbox for this place only.
+  assert.deepEqual((await db.query('SELECT s.email AS took,u.email,u.mailbox_proved FROM nightmail_signups s JOIN nightmail_users u ON u.id=s.user_id WHERE s.user_id=$1',[viaEmailedLink.account])).rows,
+    [{took:loser.email.toLowerCase(),email:elsewhere.email,mailbox_proved:elsewhere.email.toLowerCase()}]);
+  // Once: another account following it again is refused, told the link no longer works.
+  assert.deepEqual(await signIn(gmail('again'), url).then(r=>[r.auth,r.link,r.session]),['waitlist','expired','']);
+  // And until it expires: an unused link past its time admits nobody, and the place stays held.
+  assert.deepEqual(await ask(coder.email),[202,{requested:true}]);
+  const [stale] = await links(coder);
+  await db.query("UPDATE nightmail_signin_links SET expires_at=now()-interval '1 second' WHERE id=$1",[stale]);
+  assert.deepEqual(await signIn(gmail('late'), signinLinkUrl(runtime.config, stale!)).then(r=>[r.auth,r.link,r.session]),['waitlist','expired','']);
+  assert.deepEqual(await waiting(coder),{held:true});
+  // At most three a day to one address, whatever the answer says.
+  for (let i = 0; i < 3; i++) assert.deepEqual(await ask(coder.email),[202,{requested:true}]);
+  assert.equal((await links(coder)).length,3);
+  // An address that was never let in still waits.
+  assert.equal((await signIn(after)).auth,'waitlist');
 });
 
 // Several accounts in one browser (account switcher): one session cookie per connected account, each request acts as
@@ -25254,6 +25304,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         access_requests: ["INSERT INTO access_requests(email,last_requested_at) SELECT p.tag||p.day||'x'||i||'@example.invalid',now()-interval '91 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM access_requests,p WHERE starts_with(email,p.tag)"],
         nightmail_signin_attempts: ["INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,last_at) SELECT 'https://issuer.invalid','sub_'||p.tag||p.day||'x'||i,'refused',now()-interval '31 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_attempts,p WHERE starts_with(subject,'sub_'||p.tag)"],
         nightmail_waitlist: ["INSERT INTO nightmail_waitlist(email,last_at) SELECT p.tag||p.day||'x'||i||'@example.invalid',now()-interval '366 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_waitlist,p WHERE starts_with(email,p.tag)"],
+        nightmail_signin_links: ["INSERT INTO nightmail_signin_links(id,email,created_at,expires_at) SELECT 'lnk_'||p.tag||p.day||'x'||i,p.tag||p.day||'x'||i||'@example.invalid',now()-interval '25 hours'-make_interval(days=>p.day),now()-interval '24 hours'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_signin_links,p WHERE starts_with(id,'lnk_'||p.tag)"],
         auth_state_slots: ["INSERT INTO auth_state_slots(peer,slot,expires_at) SELECT 'peer_'||p.tag||p.day,i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM auth_state_slots,p WHERE starts_with(peer,'peer_'||p.tag)"],
         nightmail_dpop_proofs: ["INSERT INTO nightmail_dpop_proofs(id,expires_at) SELECT 'dpop_'||p.tag||p.day||'x'||i,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_dpop_proofs,p WHERE starts_with(id,'dpop_'||p.tag)"],
         nightmail_sessions: ["INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) SELECT 'tok_'||p.tag||p.day||'x'||i,p.uid,p.iss,p.sub,now()-interval '0 days'-make_interval(days=>p.day) FROM p,g","SELECT count(*) FROM nightmail_sessions,p WHERE starts_with(token_hash,'tok_'||p.tag)"],
@@ -28651,7 +28702,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
+  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain, a waitlist admission and a sign-in link are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
       const { accountNotifyJob, domainUnverified, evaluationFinished, limitReached, waitlistAdmitted, INVITATION_EMAILS } = await import('./src/account-notices.js');
@@ -28877,7 +28928,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await deliver(), ['waitlist_admitted:sent']);
       const [waitlist] = await fresh();
       assert.deepEqual([waitlist.to_addresses, waitlist.subject], [['waiting@example.net'], 'You can sign in to Nightmail now']);
-      for (const email of [invitation, limit, evaluation, domain, waitlist]) {
+
+      // A sign-in link to an address a raise let in (signups.ts sendSigninLink): queued with the link, and sent once with
+      // the link in it. One used or expired before its job runs sends nothing.
+      const { sendSigninLink, signinLinkUrl } = await import('./src/signups.js');
+      const [letIn, lapsed] = [`let-in-${randomUUID()}@example.net`, `lapsed-${randomUUID()}@example.net`];
+      cleanup(t, async () => { for (const table of ['nightmail_signin_links', 'nightmail_waitlist']) await db.query(`DELETE FROM ${table} WHERE email=ANY($1)`, [[letIn, lapsed]]); });
+      await db.query('INSERT INTO nightmail_waitlist(email,let_in_at) VALUES ($1,now()),($2,now())', [letIn, lapsed]);
+      for (const address of [letIn.toUpperCase(), lapsed]) await sendSigninLink(runtime, address);
+      await db.query("UPDATE nightmail_signin_links SET expires_at=now()-interval '1 second' WHERE email=$1", [lapsed]);
+      assert.deepEqual((await deliver()).sort(), ['signin_link:sent', 'signin_link:suppressed']);
+      const [link] = await fresh(), { rows: [made] } = await db.query('SELECT id FROM nightmail_signin_links WHERE email=$1', [letIn]);
+      assert.deepEqual([link.to_addresses, link.subject, link.kind], [[letIn], 'Your Nightmail sign-in link', 'transactional']);
+      const signInUrl = signinLinkUrl(runtime.config, made.id);
+      assert.ok(link.text.includes(`Sign in: ${signInUrl}\n`), link.text);
+      assert.deepEqual(link.html.match(/href="[^"]*"/g), [`href="${signInUrl}"`]);
+      // The link's random characters aren't words: the check reads the email without it.
+      for (const email of [invitation, limit, evaluation, domain, waitlist, { ...link, text: link.text.replace(signInUrl, '') }]) {
         for (const body of [email.subject, email.text]) assert.doesNotMatch(body, HOW_IT_WORKS);
         // The HTML part says what the text part says, paragraph for paragraph.
         for (const line of email.text.split('\n\n').slice(0, 2)) assert.ok(email.html.includes(line.replaceAll('&', '&amp;').replaceAll('"', '&quot;')), line);
