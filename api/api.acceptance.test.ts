@@ -19918,8 +19918,21 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
       await db.query("DELETE FROM mailboxes WHERE domain_id IN('r-old','r-big'); DELETE FROM mailbox_domains WHERE id IN('r-old','r-big'); DELETE FROM mailbox_write_lanes WHERE workspace_id='default' AND lane='address'");continue;
     }
     // As the migrator: a marked file is one online index build per line, each outside a transaction.
-    if(source.startsWith('-- bane:no-transaction\n')){for(const statement of source.split('\n').filter(line=>line.trim() && !line.startsWith('--')))await db.query(statement);continue;}
-    // Only the trigram index needs the harness's existing public extension/opclass.
+    if(source.startsWith('-- bane:no-transaction\n')){
+      const statements=source.split('\n').filter(line=>line.trim() && !line.startsWith('--'));
+      const trigram=statements.some(statement=>/\bgin_trgm_ops\b/.test(statement));
+      // pg_trgm belongs to the harness's public schema. As with 065 below, keep the re-home tables
+      // first; CONCURRENTLY cannot use a transaction-local search path, so restore it after this file.
+      if(trigram)await db.query(`SET search_path TO ${schema},public`);
+      try {for(const statement of statements)await db.query(statement);}
+      finally {if(trigram)await db.query(`SET search_path TO ${schema}`);}
+      if(file==='462_audience_contacts_search_trgm.sql'){
+        const {rows:[index]}=await db.query('SELECT indisvalid AND indisready AS ready,indrelid=to_regclass($2) AS here FROM pg_index WHERE indexrelid=to_regclass($1)',[`${schema}.audience_contacts_search_trgm`,`${schema}.audience_contacts`]);
+        assert.deepEqual(index,{ready:true,here:true});
+      }
+      continue;
+    }
+    // Transactional trigram DDL can make the harness's existing extension/opclass visible locally.
     await db.query('BEGIN');if(file==='065_log_search.sql')await db.query(`SET LOCAL search_path TO ${schema},public`);
     await db.query(source);
     if(file==='120_webhooks_validate.sql')await t.test('routing M3: constraint scans hold no exclusive lock on receiving tables',async()=>{
