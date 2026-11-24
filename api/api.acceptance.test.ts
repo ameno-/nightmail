@@ -34422,15 +34422,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await queueMail(wsM1, 'm1.example.net', 'marketing', 6);
       await queueMail(wsM2, 'm2.example.net', 'marketing', 6);
       await queueMail(wsTx, 'tx.example.net', 'transactional', 4);
+      // Pass 1: with ownerCursor past ws_a_tx ('ws_m_one'), all 4 transactional rows STILL lease first ahead of ws_m_two's marketing.
       const gate = { ...initialGate(), ownerCursor: 'ws_m_one' };
-      // Lease 6 rows: all 4 transactional rows MUST go first (even though ownerCursor > ws_a_tx), plus 1 marketing from each marketing workspace.
       await dispatchDue(runtime, REGION, { accountId: pool, gate, batchSize: 6, lanes: 1, until: Date.now() });
-      const accepted = (await db.query(`SELECT workspace_id, snapshot->>'kind' AS kind, count(*)::int AS n FROM sending_emails WHERE workspace_id = ANY($1) AND status = 'accepted' GROUP BY 1, 2 ORDER BY 1, 2`, [[wsTx, wsM1, wsM2]])).rows;
-      assert.deepEqual(accepted, [
+      const pass1 = (await db.query(`SELECT workspace_id, snapshot->>'kind' AS kind, count(*)::int AS n FROM sending_emails WHERE workspace_id = ANY($1) AND status = 'accepted' GROUP BY 1, 2 ORDER BY 1, 2`, [[wsTx, wsM1, wsM2]])).rows;
+      assert.deepEqual(pass1, [
         { workspace_id: wsTx, kind: 'transactional', n: 4 },
-        { workspace_id: wsM1, kind: 'marketing', n: 1 },
-        { workspace_id: wsM2, kind: 'marketing', n: 1 },
-      ], 'All 4 transactional rows beat marketing even behind ownerCursor, and remaining marketing slots split 1:1.');
+        { workspace_id: wsM2, kind: 'marketing', n: 2 },
+      ], 'All 4 transactional rows beat marketing even when ownerCursor is past ws_a_tx.');
+      // Pass 2: with cursor wrapped, remaining marketing slots split 1:1 round-robin between ws_m_one and ws_m_two.
+      await dispatchDue(runtime, REGION, { accountId: pool, gate: initialGate(), batchSize: 4, lanes: 1, until: Date.now() });
+      const pass2 = (await db.query(`SELECT workspace_id, snapshot->>'kind' AS kind, count(*)::int AS n FROM sending_emails WHERE workspace_id = ANY($1) AND status = 'accepted' GROUP BY 1, 2 ORDER BY 1, 2`, [[wsTx, wsM1, wsM2]])).rows;
+      assert.deepEqual(pass2, [
+        { workspace_id: wsTx, kind: 'transactional', n: 4 },
+        { workspace_id: wsM1, kind: 'marketing', n: 2 },
+        { workspace_id: wsM2, kind: 'marketing', n: 4 },
+      ], 'Marketing shares remaining slots 1:1 round-robin across active workspaces.');
     });
   });
 

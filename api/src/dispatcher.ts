@@ -263,7 +263,7 @@ export function brake(gate: GateState, kind?: EmailSnapshot['kind']) {
   if (kind === 'transactional') {
     gate.nextAllowedAt = Math.max(gate.nextAllowedAt, now + 250);
     gate.txAllowedAt = Math.max(gate.txAllowedAt ?? 0, now + 250);
-    gate.marketingAllowedAt = Math.max(gate.marketingAllowedAt ?? 0, now + 2000);
+    gate.marketingAllowedAt = Math.max(gate.marketingAllowedAt ?? 0, now + 1000);
     return;
   }
   gate.nextAllowedAt = Math.max(gate.nextAllowedAt, now + 1000);
@@ -1023,7 +1023,7 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
       sendOne(item.owner.runtime, item.owner.a, item.owner.ses, item).then(outcome => {
         item.trace.sesMs = Date.now() - sendAt;
         outcome.screened = item.screened; outcome.trace = item.trace;
-        if (outcome.type === 'provider_throttled') brake(gate, s.kind);
+        if (outcome.type === 'provider_throttled' && outcome.errorCode !== 'SES_DAILY_QUOTA_EXHAUSTED') brake(gate, s.kind);
         if (outcome.type === 'accepted') delete gate.outageStreak;
         // Every ambiguous answer (no response, 5xx, or success without a MessageId) opens it; the specific code stays in the
         // event data. Calls already in flight when SES went quiet share one window; only a failed probe doubles the next.
