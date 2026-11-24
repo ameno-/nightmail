@@ -1124,9 +1124,9 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     const webhooks = await endRelease(runtime, wid, emailId, payload.run).catch(() => { throw new JobDeferred(new Date(Date.now() + 60_000).toISOString()); });
     return wakeWebhooks(runtime, webhooks);
   }
-  if (outcome?.route) {
-    const { route, priority } = outcome;
-    try { await runtime.dispatch?.(route.region, route.connection?.aws_account_id, 1, route.connection?.kind, priority); }
+  if (outcome?.route && !outcome.heldForScreen) {
+    const { route, priority, maxSendRate } = outcome;
+    try { await runtime.dispatch?.(route.region, route.connection?.aws_account_id, 1, route.connection?.kind, priority, maxSendRate); }
     catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', jobId: job.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
   } else if (outcome?.webhooks) await wakeWebhooks(runtime, outcome.webhooks);
   async function release() { return runtime.db.transaction(async tx => {
@@ -1145,10 +1145,15 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     shadowBilling(d.billing, wid);
     if (d.allowed) {
       const route = d.mails[0]!;
-      await tx.execute(sql`UPDATE sending_emails SET status='queued',region=${route.region},created_at=clock_timestamp(),updated_at=clock_timestamp(),
+      const needsVerdict = !isSimulatedSes(runtime) && !s.screenVerdict && ((route.connection?.kind === 'shared' && runtime.config.hostedScreen) || (s.screen && s.kind === 'transactional'));
+      const { rows: [lim] } = await tx.execute<{ rate: number | null }>(route.connection?.aws_account_id
+        ? sql`SELECT max_send_rate AS rate FROM provider_account_limits WHERE aws_account_id=${route.connection.aws_account_id} AND region=${route.region} AND max_send_rate>0`
+        : sql`SELECT max_send_rate AS rate FROM sending_region_limits WHERE workspace_id=${wid} AND region=${route.region} AND max_send_rate>0`);
+      await tx.execute(sql`UPDATE sending_emails SET status='queued',region=${route.region},screened=${!needsVerdict},created_at=clock_timestamp(),updated_at=clock_timestamp(),
         snapshot=(snapshot-'binding')||jsonb_build_object('region',${route.region}::text)${route.binding ? sql`||jsonb_build_object('binding',${JSON.stringify(route.binding)}::jsonb)` : sql``}
         WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled'`);
-      return { route, priority: !marketing };
+      const maxSendRate = typeof lim?.rate === 'number' && lim.rate > 0 ? lim.rate : undefined;
+      return { route, priority: !marketing, maxSendRate, heldForScreen: needsVerdict };
     }
     if (RELEASE_WAITS.has(d.code) && row.waits) throw new JobDeferred(new Date(Date.now() + RELEASE_RETRY_MS).toISOString());
     const { rows: [rejected] } = await tx.execute<{ n: number }>(sql`WITH rejected AS (UPDATE sending_emails SET status='rejected',error_code=${d.code},updated_at=clock_timestamp()
@@ -1700,7 +1705,10 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
   const route = decided.mails[0]!;
   snapshot.region = route.region;
   if (route.binding) snapshot.binding = route.binding;
-  if (route.connection) a.dispatchAccount = { aws_account_id: route.connection.aws_account_id, kind: route.connection.kind };
+  if (route.connection) {
+    const { rows: [lim] } = await db.execute<{ rate: number | null }>(sql`SELECT max_send_rate AS rate FROM provider_account_limits WHERE aws_account_id=${route.connection.aws_account_id} AND region=${route.region} AND max_send_rate>0`);
+    a.dispatchAccount = { aws_account_id: route.connection.aws_account_id, kind: route.connection.kind, ...(typeof lim?.rate === 'number' && lim.rate > 0 ? { maxSendRate: lim.rate } : {}) };
+  }
   if (isBulk) snapshot.bulk = true;
   if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;}
   snapshot.headers = [...snapshot.headers, ...request.headers];
@@ -3862,6 +3870,200 @@ export const jobHandlers: Record<string, JobHandler> = { 'sending.cancelPage':ca
  * notice:<account notice id>. It dispatches only from the configured platform workspace and only while that row exists
  * (the dispatcher's claim); it is not a general system bypass.
  */
+
+/** Background screen sweep outside the mail room (minute cron & Node runner): leases queued/scheduled rows held with
+ *  `screened = false` (pre-deploy rows, rollout-window rows, or pre-deploy scheduled releases), screens them with the
+ *  same Jev + JevF failover screen used at accept time, and either marks them `screened = true` (waking the mail room)
+ *  or rejects them with the same status, error code and `email.rejected` webhook/event. Outages release the lease and retry. */
+export async function screenHeldMail(runtime: Runtime, limit = 50): Promise<{ leased: number; passed: number; rejected: number; deferred: number }> {
+  const mx = runtime.config.multiTenant;
+  type HeldRow = {
+    id: string; workspace_id: string; region: string; actor_key_id: string; review_id: string | null; review_ordinal: number | null;
+    campaign_id: string | null; from_address: string; to_addresses: string[]; cc_addresses: string[]; bcc_addresses: string[];
+    subject: string; status: EmailStatus; provider_id: string | null; snapshot: EmailSnapshot; simulated: boolean; screened: boolean;
+    attempt_started_at: string | null; error_code: string | null; suppression_reason: string | null; scheduled_at: string | null;
+    dispatch_version: number; lease_until: string | null; account_pause_started_at: string | null; event_outcomes: number;
+    created_at: string; updated_at: string;
+    connection: (ReadyConnection & { pool_tier?: string; legacy_names?: boolean }) | null;
+    on_probation: boolean; max_send_rate: number | null;
+    review_version: number | null; review_draft: CampaignDraft | null; review_rendered: { html?: string; text?: string } | null;
+    review_screen: CampaignScreen | null; review_hash: string | null; review_content_hash: string | null; review_recipient: ReviewedRecipient | null;
+  };
+  const { rows } = await runtime.db.execute<HeldRow>(sql`
+    WITH due AS (
+      SELECT workspace_id, id FROM sending_emails
+      WHERE status IN ('queued', 'scheduled') AND NOT screened
+        AND (lease_until IS NULL OR lease_until < clock_timestamp())
+      ORDER BY created_at, id
+      LIMIT ${limit}
+      FOR UPDATE SKIP LOCKED
+    ), leased AS (
+      UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes'
+      FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id
+      RETURNING e.*
+    )
+    SELECT leased.id, leased.workspace_id, leased.region, leased.actor_key_id, leased.review_id, leased.review_ordinal,
+      leased.campaign_id, leased.from_address, leased.to_addresses, leased.cc_addresses, leased.bcc_addresses,
+      leased.subject, leased.status, leased.provider_id, leased.snapshot, leased.simulated, leased.screened,
+      leased.attempt_started_at::text, leased.error_code, leased.suppression_reason, leased.scheduled_at::text,
+      leased.dispatch_version, leased.lease_until::text, leased.account_pause_started_at::text, leased.event_outcomes,
+      leased.created_at::text, leased.updated_at::text,
+      ${mx ? sql`to_jsonb(pc)` : sql`NULL`} AS connection,
+      ${mx ? sql`${probationReason(sql`leased.workspace_id`)} IS NOT NULL` : sql`false`} AS on_probation,
+      ${mx ? sql`(SELECT l.max_send_rate FROM provider_account_limits l WHERE l.aws_account_id = pc.aws_account_id AND l.region = leased.region AND l.max_send_rate > 0)` : sql`(SELECT l.max_send_rate FROM sending_region_limits l WHERE l.workspace_id = leased.workspace_id AND l.region = leased.region AND l.max_send_rate > 0)`} AS max_send_rate,
+      r.renderer_version AS review_version, r.draft AS review_draft, r.rendered AS review_rendered, r.screen AS review_screen, r.content_hash AS review_hash,
+      CASE WHEN leased.review_id IS NOT NULL THEN (SELECT x.content_hash FROM sending_review_recipients x WHERE x.review_id = leased.review_id AND x.ordinal = leased.review_ordinal) END AS review_content_hash,
+      CASE WHEN leased.review_id IS NOT NULL THEN (SELECT x.recipient FROM sending_review_recipients x WHERE x.review_id = leased.review_id AND x.ordinal = leased.review_ordinal) END AS review_recipient
+    FROM leased
+    ${mx ? sql`LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id = leased.workspace_id AND pc.region = leased.region` : sql``}
+    LEFT JOIN sending_campaign_reviews r ON r.workspace_id = leased.workspace_id AND r.campaign_id = leased.campaign_id AND r.id = leased.review_id
+    ORDER BY leased.created_at, leased.id`);
+  if (!rows.length) return { leased: 0, passed: 0, rejected: 0, deferred: 0 };
+
+  let passed = 0, rejected = 0, deferred = 0;
+  const toWake = new Map<string, { region: string; accountId?: string; kind?: ReadyConnection['kind']; count: number; priority: boolean; maxSendRate?: number }>();
+  const screen = await loadScreen();
+  const settings = runtime.config.screen;
+
+  const processRow = async (r: HeldRow) => {
+    const wid = r.workspace_id, id = r.id, ver = r.dispatch_version;
+    const snapshot = r.snapshot;
+    const conn = r.connection;
+    const shared = conn?.kind === 'shared';
+    const hosted = Boolean(mx && shared && runtime.config.hostedScreen);
+    const trusted = Boolean(runtime.config.trustedPool && conn?.pool_tier === 'trusted' && conn?.legacy_names === false);
+    const required = hosted && (!trusted || snapshot.kind === 'marketing');
+    const rules: 'probation' | 'standard' | null = isSimulatedSes(runtime) || !hosted || trusted ? null : r.on_probation ? 'probation' : 'standard';
+    const needsScreen = !r.simulated && !isSimulatedSes(runtime) && (hosted || Boolean(snapshot.screen && snapshot.kind === 'transactional'));
+
+    const releaseHeld = async () => {
+      deferred++;
+      await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = NULL
+        WHERE workspace_id = ${wid} AND id = ${id} AND dispatch_version = ${ver} AND status IN ('queued', 'scheduled') AND NOT screened`);
+    };
+    const passHeld = async (nextSnapshot: EmailSnapshot, countHosted: boolean) => {
+      const { rows: [updated] } = await runtime.db.execute<{ status: EmailStatus }>(sql`
+        WITH moved AS (
+          UPDATE sending_emails SET screened = true, lease_until = NULL, snapshot = ${JSON.stringify(nextSnapshot)}::jsonb, updated_at = clock_timestamp()
+          WHERE workspace_id = ${wid} AND id = ${id} AND dispatch_version = ${ver} AND status IN ('queued', 'scheduled') AND NOT screened
+          RETURNING status, workspace_id, to_addresses || cc_addresses || bcc_addresses AS recipients
+        )
+        ${countHosted ? sql`, screen_counted AS (${countScreened(sql`SELECT workspace_id, 0 AS rejected FROM moved WHERE hosted_real_cost(recipients) > 0`)})` : sql``}
+        SELECT status FROM moved`);
+      if (!updated) return;
+      passed++;
+      if (updated.status === 'queued') {
+        const key = `${conn?.aws_account_id ?? ''}:${r.region}`;
+        const entry = toWake.get(key) ?? { region: r.region, accountId: conn?.aws_account_id, kind: conn?.kind, count: 0, priority: false, maxSendRate: typeof r.max_send_rate === 'number' && r.max_send_rate > 0 ? r.max_send_rate : undefined };
+        entry.count++;
+        entry.priority ||= nextSnapshot.kind === 'transactional';
+        toWake.set(key, entry);
+      }
+    };
+    const rejectHeld = async (code: string, screenData?: { spam: number; model: string; threshold: number }, countHosted = false) => {
+      const { rows: [res] } = await runtime.db.execute<{ n: number; moved: number }>(sql`
+        WITH rejected AS (
+          UPDATE sending_emails SET status = 'rejected', error_code = ${code}, lease_until = NULL, updated_at = clock_timestamp()
+          WHERE workspace_id = ${wid} AND id = ${id} AND dispatch_version = ${ver} AND status IN ('queued', 'scheduled') AND NOT screened
+          RETURNING ${terminalColumns}, to_addresses || cc_addresses || bcc_addresses AS recipients
+        ), ${countHosted ? sql`screen_counted AS (${countScreened(sql`SELECT workspace_id, 1 AS rejected FROM rejected WHERE hosted_real_cost(recipients) > 0`)}), ` : sql``}
+        ${terminalEvents(sql`SELECT * FROM rejected`, sql`${JSON.stringify({ providerCalled: false, ...(screenData ? { screen: screenData } : {}) })}::jsonb`)}
+        SELECT (SELECT count(*)::int FROM webhook_jobs) AS n, (SELECT count(*)::int FROM rejected) AS moved`);
+      if (!res?.moved) return;
+      rejected++;
+      if (res.n) await wakeWebhooks(runtime, res.n);
+      if (screenData) log('warn', { code, emailId: id, workspaceId: wid, spam: screenData.spam, model: screenData.model });
+      else log('warn', { code, emailId: id, workspaceId: wid });
+      if (r.campaign_id) {
+        await runtime.db.execute(finishCampaigns(sql`SELECT ${wid}::text AS workspace_id, ${r.campaign_id}::text AS campaign_id`));
+      }
+    };
+
+    try {
+      if (!needsScreen) { await passHeld(snapshot, false); return; }
+      if (shared && snapshot.raw) { await rejectHeld('SHARED_RAW_UNSUPPORTED'); return; }
+      if (shared && snapshot.mime && !trusted) { await rejectHeld('SEALED_MAIL_UNAVAILABLE'); return; }
+      const scopedRt: Runtime = { ...runtime, config: { ...runtime.config, workspaceId: wid } };
+      const a: Actor = { workspaceId: wid, keyId: r.actor_key_id, permissions: ['manage'], domains: [] };
+
+      if (snapshot.deferredCampaign && r.review_id && r.campaign_id) {
+        if (!r.review_draft || !r.review_rendered || !r.review_recipient || !r.review_content_hash) { await rejectHeld('CAMPAIGN_SNAPSHOT_INVALID'); return; }
+        if (!settings) { await releaseHeld(); return; }
+        const mailRow: typeof emails.$inferSelect = {
+          id, workspaceId: wid, region: r.region, actorKeyId: r.actor_key_id, reviewId: r.review_id, reviewOrdinal: r.review_ordinal,
+          campaignId: r.campaign_id, from: r.from_address, to: r.to_addresses, cc: r.cc_addresses, bcc: r.bcc_addresses,
+          subject: r.subject, status: r.status, providerId: r.provider_id, snapshot, simulated: r.simulated, screened: r.screened,
+          attemptStartedAt: r.attempt_started_at, errorCode: r.error_code, suppressionReason: r.suppression_reason,
+          scheduledAt: r.scheduled_at, dispatchVersion: r.dispatch_version, leaseUntil: r.lease_until,
+          accountPauseStartedAt: r.account_pause_started_at, eventOutcomes: r.event_outcomes, createdAt: r.created_at, updatedAt: r.updated_at,
+        };
+        const materialized = await materializeCampaignEmail(scopedRt, a, mailRow, {
+          version: r.review_version ?? 1, draft: r.review_draft, rendered: r.review_rendered, contentHash: r.review_content_hash, recipient: r.review_recipient,
+        });
+        const delivery = rules ? await import('./screened-html.js') : undefined;
+        let copy = { ...materialized.keyed, to: [] as string[] };
+        if (delivery) copy = delivery.hostedCopy(copy, rules === 'probation');
+        const [verdict] = await campaignVerdicts(scopedRt, { workspaceId: wid, campaignId: r.campaign_id, reviewId: r.review_id }, [copy], Date.now() + 8000);
+        if (!verdict) { await releaseHeld(); return; }
+        if ('refused' in verdict) { await rejectHeld(verdict.refused.code); return; }
+        const alreadyCounted = Boolean(r.review_screen?.template && r.review_screen.contentHash === r.review_hash);
+        if (verdict.spam >= settings.threshold) {
+          await rejectHeld('CONTENT_REJECTED_SPAM', { spam: verdict.spam, model: verdict.model, threshold: settings.threshold }, !alreadyCounted && hosted);
+          return;
+        }
+        await passHeld({ ...snapshot, screenVerdict: { status: 'passed', spam: verdict.spam, model: verdict.model, digest: verdict.key, rules } }, !alreadyCounted && hosted);
+        return;
+      }
+
+      let copy = snapshot;
+      if (rules) {
+        const delivery = await import('./screened-html.js');
+        copy = delivery.hostedCopy(snapshot, rules === 'probation');
+        if (snapshot.attachments.length) {
+          const attRows = await attachmentRows(runtime.db, a, snapshot.attachments);
+          for (const attRow of attRows) {
+            const body = await verifiedAttachment(runtime, attRow);
+            if (rules === 'standard') delivery.shownAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
+            else delivery.screenedAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
+          }
+        }
+      }
+      if (!settings) {
+        if (required) { await releaseHeld(); return; }
+        await passHeld({ ...snapshot, screenVerdict: { status: 'skipped', rules } }, false);
+        return;
+      }
+      const result = await screen.screenSnapshot(scopedRt, copy, required, { emailId: id, workspaceId: wid, region: r.region, kind: copy.kind, required });
+      if (!result) { await releaseHeld(); return; }
+      if (result.spam >= settings.threshold && (required || settings.mode === 'reject')) {
+        await rejectHeld('CONTENT_REJECTED_SPAM', { spam: result.spam, model: result.model, threshold: settings.threshold }, hosted);
+        return;
+      }
+      if (result.spam >= settings.threshold) log('warn', { code: 'CONTENT_SPAM_SUSPECTED', workspaceId: wid, emailId: id, spam: result.spam, model: result.model });
+      const nextSnap: EmailSnapshot = { ...(rules === 'probation' ? copy : snapshot), screenVerdict: { status: 'passed', spam: result.spam, model: result.model, digest: result.digest, rules } };
+      await passHeld(nextSnap, hosted);
+    } catch (error) {
+      if (error instanceof ModuleLoadError) { await releaseHeld(); throw error; }
+      if (error instanceof ApiError && !error.retryable && error.code !== 'CONTENT_SCREEN_UNAVAILABLE') {
+        await rejectHeld(error.code);
+        return;
+      }
+      await releaseHeld();
+    }
+  };
+
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(rows.length, BATCH_SCREEN_CONCURRENCY) }, async () => {
+    while (next < rows.length) await processRow(rows[next++]!);
+  }));
+  await flushScreenObservability(runtime).catch(() => {});
+  for (const target of toWake.values()) {
+    try { await runtime.dispatch?.(target.region, target.accountId, target.count, target.kind, target.priority, target.maxSendRate); }
+    catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', region: target.region, message: 'Screened mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+  }
+  return { leased: rows.length, passed, rejected, deferred };
+}
+
 export async function sendSystemEmail(runtime: Runtime, workspaceId: string, mail: { from: string; to: string[]; subject: string; text: string; html?: string; idempotencyKey: string } & ({ standingEvent: string } | { billingNotice: string } | { notice: string })) {
   const origin = 'standingEvent' in mail ? `standing:${mail.standingEvent}` : 'billingNotice' in mail ? `billing:${mail.billingNotice}` : `notice:${mail.notice}`;
   const a: Actor = { workspaceId, keyId: origin, permissions: ['send'], domains: [], credential: 'apiKey' };

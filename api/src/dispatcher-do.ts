@@ -161,7 +161,7 @@ export class DispatcherShard extends DurableObject<Env> {
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
       // If AWS changed MaxSendRate (e.g. 200/s -> 1,000/s) on an auto-scaled shard, hand off to the new shard count
       // immediately and retire this old count's alarm so stale shards never compete with the resized pool.
-      const desired = identity.autoScale && this.gate.quota?.maxSendRate ? shardsForRate(this.gate.quota.maxSendRate, identity.shard.count) : identity.shard.count;
+      const desired = (identity.autoScale || Boolean(this.env?.DISPATCHER)) && this.gate.quota?.maxSendRate ? shardsForRate(this.gate.quota.maxSendRate, identity.shard.count) : identity.shard.count;
       if (desired !== identity.shard.count) {
         if (!report.idle && identity.shard.index === 0 && this.env?.DISPATCHER) {
           this.ctx.waitUntil(Promise.allSettled(Array.from({ length: desired }, (_, i) => {

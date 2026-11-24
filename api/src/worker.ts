@@ -49,7 +49,7 @@ let nextShard: number | undefined;
 let lastPriorityLagWrite = 0, lastPriorityLagHigh = false;
 const rateCache = new Map<string, { rate: number; until: number }>();
 const RATE_CACHE_MS = 60_000;
-async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false, maxSendRate?: number) {
+async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false, maxSendRate?: number, lookupRate?: (region: string, accountId?: string) => Promise<number | undefined>) {
   const cacheKey = `${accountId ?? ''}:${region}`, now = Date.now();
   let rate = typeof maxSendRate === 'number' && Number.isFinite(maxSendRate) && maxSendRate > 0 ? maxSendRate : undefined;
   if (rate !== undefined) {
@@ -58,16 +58,23 @@ async function wakeDispatchers(env: Env, region: string, accountId?: string, ema
   } else {
     const cached = rateCache.get(cacheKey);
     if (cached && cached.until > now) rate = cached.rate;
+    else if (lookupRate) {
+      const fetched = await lookupRate(region, accountId).catch(() => undefined);
+      if (typeof fetched === 'number' && Number.isFinite(fetched) && fetched > 0) {
+        rate = fetched;
+        if (rateCache.size > 256) rateCache.clear();
+        rateCache.set(cacheKey, { rate, until: now + RATE_CACHE_MS });
+      }
+    }
   }
   const fallback = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
   const count = shardsForRate(rate, fallback);
-  const auto = rate !== undefined;
   nextShard ??= Math.floor(Math.random() * 0x100000000);
   const indexes = emails !== undefined && emails <= 6 ? [nextShard++ % count] : Array.from({ length: count }, (_, i) => i);
   await Promise.all(indexes.map(index => {
-    const identity = { accountId, region, shard: { index, count }, ...(auto ? { autoScale: true } : {}) };
+    const identity = { accountId, region, shard: { index, count }, autoScale: true };
     const stub = env.DISPATCHER.get(env.DISPATCHER.idFromName(dispatcherName(identity)), { locationHint: 'enam' });
-    return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}${auto ? '&auto=1' : ''}`);
+    return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}&auto=1`);
   }));
 }
 
@@ -194,7 +201,12 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (region, accountId, emails, kind, priority, maxSendRate) => wakeDispatchers(env, region, accountId, emails, kind, priority, maxSendRate), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (region, accountId, emails, kind, priority, maxSendRate) => wakeDispatchers(env, region, accountId, emails, kind, priority, maxSendRate, async (r, a) => {
+      const { rows: [lim] } = await db.execute<{ rate: number | null }>(a
+        ? sql`SELECT max_send_rate AS rate FROM provider_account_limits WHERE aws_account_id=${a} AND region=${r} AND max_send_rate>0`
+        : sql`SELECT max(max_send_rate) AS rate FROM sending_region_limits WHERE region=${r} AND max_send_rate>0`);
+      return typeof lim?.rate === 'number' && lim.rate > 0 ? lim.rate : undefined;
+    }), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -466,6 +478,8 @@ export default {
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
+      // Screen any pre-deploy or rollout-window rows held with screened=false outside the mail room before waking shards.
+      try { await (await core.wrapModuleLoad(() => import('./sending.js'))).screenHeldMail(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }
       // Received mail queued for the refilling budget comes due within minutes; the drain below runs its release.
       try { await (await core.wrapModuleLoad(() => import('./mailbox-staging.js'))).scheduleHoldRelease(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind, maxSendRate }) => wakeDispatchers(env, region, accountId, undefined, kind, false, maxSendRate)));

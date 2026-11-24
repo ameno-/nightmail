@@ -20622,6 +20622,93 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await db.query("SELECT status FROM sending_emails WHERE id='em_unscreened'")).rows[0].status, 'queued');
     }));
   });
+  test('mail room holds pre-deploy verdictless rows for screenHeldMail; sweep retries on outage, sends clean rows and rejects spam with email.rejected webhook; refused suppression frees idempotency key', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db, run }) => t.test('synthetic transports', async t => {
+      const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
+      const { screenHeldMail } = await import('./src/sending.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      const wid = runtime.config.workspaceId, acct = '112223330006', origin = 'https://screen.synthetic.invalid', topic = `arn:aws:sns:${REGION}:${acct}:fixture`;
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'held-sweep', permissions: ['send', 'read'] }), 201);
+      const hook = ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/hooks/held-reject', eventTypes: ['email.rejected'] }), 201);
+      Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`, [REGION, acct, topic]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('held-sweep.invalid',$1,$1,'verified')`, [wid]);
+      const sent: string[] = [];
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 200, Max24HourSend: 100000, SentLast24Hours: 0 } };
+        sent.push(cmd.input.EmailTags.find((x: Json) => x.Name === 'bane_email_id').Value);
+        return { MessageId: randomUUID() };
+      });
+      let outage = false, jevCalls = 0;
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
+        assert.equal(String(url), origin);
+        jevCalls++;
+        if (outage) return new Response(null, { status: 503 });
+        const spam = /buy cheap crypto/i.test(String(init?.body ?? '')) ? 0.99 : 0.01;
+        return Response.json({ model: 'fixture', answers: { spam: { noul: spam } } });
+      });
+
+      // Insert two pre-deploy rows (screened=true from column default, NO screenVerdict in snapshot): one clean, one spam.
+      const cleanId = 'em_predeploy_clean', spamId = 'em_predeploy_spam';
+      for (const [id, text] of [[cleanId, 'Your invoice is attached.'], [spamId, 'Buy cheap crypto now!']] as const) {
+        const snap = JSON.stringify({ kind: 'transactional', from: 'a@held-sweep.invalid', to: ['r@example.invalid'], cc: [], bcc: [], replyTo: [], region: REGION, subject: id, text, attachments: [], tracking: false, headers: [] });
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,status)
+          VALUES($1,$2,$3,$4,'a@held-sweep.invalid','["r@example.invalid"]','[]','[]',$1,$5::jsonb,false,true,'queued')`, [id, wid, key.id, REGION, snap]);
+      }
+
+      // 1. Mail room leases them, sees no screenVerdict, makes ZERO classifier/SES calls, and flips screened=false.
+      const disp1 = await runDispatcher(runtime, { region: REGION, accountId: acct, gate: initialGate(), lanes: 1 });
+      assert.deepEqual([disp1.sent, sent.length, jevCalls], [0, 0, 0], 'Verdictless pre-deploy rows never go out unscreened.');
+      const heldRows = (await db.query('SELECT id,status,screened,lease_until FROM sending_emails WHERE id=ANY($1) ORDER BY id', [[cleanId, spamId]])).rows;
+      assert.deepEqual(heldRows, [
+        { id: cleanId, status: 'queued', screened: false, lease_until: null },
+        { id: spamId, status: 'queued', screened: false, lease_until: null },
+      ]);
+
+      // 2. Classifier outage during screenHeldMail: rows stay held (screened=false, lease_until=null) and retry later.
+      outage = true;
+      const sweepOutage = await screenHeldMail(runtime);
+      assert.deepEqual(sweepOutage, { leased: 2, passed: 0, rejected: 0, deferred: 2 });
+      const stillHeld = (await db.query('SELECT id,status,screened,lease_until FROM sending_emails WHERE id=ANY($1) ORDER BY id', [[cleanId, spamId]])).rows;
+      assert.deepEqual(stillHeld, [
+        { id: cleanId, status: 'queued', screened: false, lease_until: null },
+        { id: spamId, status: 'queued', screened: false, lease_until: null },
+      ]);
+
+      // 3. Classifier healthy: screenHeldMail passes clean row (wakes dispatcher), rejects spam row with reject event + email.rejected webhook + hosted_screen_hourly.
+      outage = false;
+      const wakes: { region: string; count?: number; priority?: boolean }[] = [];
+      runtime.dispatch = async (region, _acct, count, _kind, priority) => { wakes.push({ region, count, priority }); };
+      const sweepOk = await screenHeldMail(runtime);
+      assert.deepEqual(sweepOk, { leased: 2, passed: 1, rejected: 1, deferred: 0 });
+      assert.deepEqual(wakes, [{ region: REGION, count: 1, priority: true }]);
+      const spamRow = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=$1', [spamId])).rows[0];
+      assert.deepEqual(spamRow, { status: 'rejected', error_code: 'CONTENT_REJECTED_SPAM' });
+      const spamEvents = (await db.query("SELECT type, data->>'code' AS code FROM sending_email_events WHERE email_id=$1", [spamId])).rows;
+      assert.deepEqual(spamEvents, [{ type: 'reject', code: 'CONTENT_REJECTED_SPAM' }]);
+      const deliveries = (await db.query("SELECT payload->>'type' AS type, payload->'data'->>'emailId' AS eid, payload->'data'->>'code' AS code, payload->'data' ? 'screen' AS has_screen FROM operation_deliveries WHERE webhook_id=$1", [hook.id])).rows;
+      assert.deepEqual(deliveries, [{ type: 'email.rejected', eid: spamId, code: 'CONTENT_REJECTED_SPAM', has_screen: false }]);
+      const screenStats = (await db.query('SELECT coalesce(sum(screened),0)::int AS screened, coalesce(sum(rejected),0)::int AS rejected FROM hosted_screen_hourly WHERE workspace_id=$1', [wid])).rows[0];
+      assert.deepEqual(screenStats, { screened: 2, rejected: 1 });
+
+      // 4. Mail room now sends the newly-screened clean row with ZERO additional classifier calls.
+      const jevBefore = jevCalls;
+      const disp2 = await runDispatcher(runtime, { region: REGION, accountId: acct, gate: initialGate(), lanes: 1 });
+      assert.deepEqual([disp2.sent, sent, jevCalls], [1, [cleanId], jevBefore]);
+
+      // 5. S1 check: an Idempotency-Key refused for RECIPIENT_INELIGIBLE on the atomic/unscreened path is freed for retry.
+      runtime.config.liveEnabled = false;
+      await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,'retry-supp@example.invalid',true,'hard_bounce')", [unique('c'), wid]);
+      const retryHeaders = { authorization: `Bearer ${key.secret}`, 'Idempotency-Key': unique('supp-retry') };
+      const body = { from: 'a@held-sweep.invalid', to: 'retry-supp@example.invalid', subject: 'Retry', text: 'Hi' };
+      error(await local('POST', '/v1/emails/send', body, 'live', retryHeaders), 422, 'RECIPIENT_INELIGIBLE');
+      await db.query("UPDATE audience_contacts SET suppressed=false,suppression_reason=NULL WHERE workspace_id=$1 AND email='retry-supp@example.invalid'", [wid]);
+      const retried = ok(await local('POST', '/v1/emails/send', body, 'live', retryHeaders), 202);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE id=$1', [retried.id])).rows[0].n, 1, 'Retried send after lifting suppression queues a real row.');
+      void run;
+    }));
+  });
   test('mid-batch stop interleaves owners across sendConcurrency chunks while keeping transactional first', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { runDispatcher, initialGate, interleaveByOwner } = await import('./src/dispatcher.js');
