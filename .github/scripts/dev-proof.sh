@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Usage: dev-proof.sh <sha>. Require live dev E2E and queue CI (or a full direct dev push CI) for this exact SHA.
+# Usage: dev-proof.sh <sha> [--queue-only]. Require live dev E2E and queue CI (or a full direct dev push CI) for this exact SHA.
 set -euo pipefail
 sha=$1 repo="repos/$GITHUB_REPOSITORY" wait=${CI_WAIT_SECONDS:-1500} poll=${CI_POLL_SECONDS:-30}
-[[ $sha =~ ^[0-9a-f]{40}$ ]] || { echo "usage: $0 <sha>" >&2; exit 2; }
+mode=${2:-}
+[[ $sha =~ ^[0-9a-f]{40}$ && ( -z $mode || $mode == --queue-only ) && $# -le 2 ]] || { echo "usage: $0 <sha> [--queue-only]" >&2; exit 2; }
 
 # The dev deploy job's name comes from the same pinned output as its checkout, so its E2E step proves this commit.
 # Only that job and its E2E count, not the run's conclusion: a later job in the run (the support Worker's deploy) can
@@ -28,16 +29,16 @@ while :; do
   # A queue push produces an all-skipped green CI run. Only the queue's own CI on the
   # dev queue ref (or the full CI of a direct dev push) can prove this SHA.
   proof=$(gh api "$repo/actions/workflows/ci.yml/runs?head_sha=$sha&per_page=100" |
-    jq -c --arg sha "$sha" --arg repo "$GITHUB_REPOSITORY" '[.workflow_runs[] |
+    jq -c --arg sha "$sha" --arg repo "$GITHUB_REPOSITORY" --arg mode "$mode" '[.workflow_runs[] |
       select(.head_sha == $sha and .head_repository.full_name == $repo) |
       select((.event == "merge_group" and (.head_branch | startswith("gh-readonly-queue/dev/"))) or
-             (.event == "push" and .head_branch == "dev" and .actor.login != null and .actor.login != "github-merge-queue[bot]"))] |
+             ($mode != "--queue-only" and .event == "push" and .head_branch == "dev" and .actor.login != null and .actor.login != "github-merge-queue[bot]"))] |
       max_by(.id) | {id, event, status, conclusion}')
   if [[ $(jq -r '.conclusion' <<< "$proof") == success ]]; then
     echo "CI passed for $sha: $(jq -r '.event + " run " + (.id|tostring)' <<< "$proof")."; exit 0
   fi
   if [[ $(jq -r '.status' <<< "$proof") == completed || $(jq -r '.id' <<< "$proof") == null ]]; then
-    echo "::error::No passing dev merge-group or direct dev push CI for $sha."
+    echo "::error::No passing eligible dev CI for $sha (${mode:-queue or direct push})."
     exit 1
   fi
   if (( SECONDS >= deadline )); then echo "::error::CI for $sha was still running after $((wait / 60)) minutes."; exit 1; fi
