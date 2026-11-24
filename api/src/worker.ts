@@ -62,12 +62,13 @@ async function wakeDispatchers(env: Env, region: string, accountId?: string, ema
 // room that says nobody is in it isn't asked again from this isolate for half a minute, so an agent polling a draft
 // nobody has open wakes it at most twice a minute here and costs no query or storage. Names are kept for ten minutes,
 // so a room with people in it takes one call; the first needs one lookup on a connection of its own. An agent the room
-// heard from lately isn't reported again from here for a quarter of a minute (it stays on screen for two).
+// heard from lately isn't reported again from here for a quarter of a minute (it stays on screen for two), unless it saved:
+// a save (saved, its revision) always reaches a room with people in it, who read it at once.
 const quietRooms = new Map<string, number>(), agentNames = new Map<string, { name: string; until: number }>(), reported = new Map<string, number>();
 const QUIET_MS = 30_000, NAME_MS = 600_000, REPORTED_MS = 15_000;
-async function roomVisit(env: Env, rooms: NonNullable<Env['CAMPAIGN_ROOMS']>, room: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>) {
+async function roomVisit(env: Env, rooms: NonNullable<Env['CAMPAIGN_ROOMS']>, room: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) {
   const now = Date.now(), visit = `${room}|${credential}`;
-  if ((quietRooms.get(room) ?? 0) > now || (reported.get(visit) ?? 0) > now) return;
+  if ((quietRooms.get(room) ?? 0) > now || (saved === undefined && (reported.get(visit) ?? 0) > now)) return;
   try {
     const stub = rooms.getByName(room);
     const id = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`${room}:${credential}`))), n => n.toString(16).padStart(2, '0')).join('').slice(0, 16);
@@ -78,7 +79,7 @@ async function roomVisit(env: Env, rooms: NonNullable<Env['CAMPAIGN_ROOMS']>, ro
       if (agentNames.size > 1000) agentNames.clear();
       agentNames.set(credential, known);
     }
-    if (!await stub.visit({ id, name: known.name })) { quiet(room, now); return; }
+    if (!await stub.visit({ id, name: known.name }, saved)) { quiet(room, now); return; }
     if (reported.size > 1000) reported.clear();
     reported.set(visit, now + REPORTED_MS);
   } catch { /* Presence is best-effort: the request it follows has already answered. */ }
@@ -150,10 +151,12 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       // fails lets the batch through; the per-process cap still applies.
       analyticsStorage: env.ANALYTICS ? r2Storage(env.ANALYTICS) : undefined,
       allowAnalytics: env.ANALYTICS_INGEST ? peer => env.ANALYTICS_INGEST!.limit({ key: `analytics:${peer}` }).then(r => r.success, () => true) : undefined,
+      // The database disk alert (src/disk-alert.ts): one card a minute per threshold. A limiter that fails lets the card through.
+      allowDiskAlert: env.DISK_ALERT ? key => env.DISK_ALERT!.limit({ key: `disk-alert:${key}` }).then(r => r.success, () => true) : undefined,
       // Campaign rooms (src/campaign-room.ts). A room answers the upgrade itself; the person rides in a header only this builds.
       campaignRooms: rooms && {
         connect: (name, person) => { quietRooms.delete(name); return rooms.getByName(name).fetch('https://room/connect', { headers: { upgrade: 'websocket', [ROOM_PEER_HEADER]: encodeURIComponent(JSON.stringify(person)) } }); },
-        visit: (name, credential, lookup) => { const visit = roomVisit(env, rooms, name, credential, lookup); if (ctx) ctx.waitUntil(visit); },
+        visit: (name, credential, lookup, saved) => { const visit = roomVisit(env, rooms, name, credential, lookup, saved); if (ctx) ctx.waitUntil(visit); },
       },
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
