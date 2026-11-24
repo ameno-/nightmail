@@ -148,11 +148,14 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
 // cron's own steps or a dispatcher: it runs after them in waitUntil, on a connection of its own, with a one-second
 // lock_timeout and a three-second statement_timeout on everything it writes. A health table that is locked or slow
 // costs a dropped sample, never a late batch.
-function afterwards(env: Env, ctx: ExecutionContext, work: (runtime: Runtime) => Promise<unknown>) {
-  ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ }));
+// Without a context to outlive the handler in (a handler called directly, as the cold-isolate check does) it does not
+// run at all: it is never awaited instead, and it can never throw into its caller.
+function afterwards(env: Env, ctx: ExecutionContext | undefined, work: (runtime: Runtime) => Promise<unknown>) {
+  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ })); }
+  catch { /* Health never fails what it reports on. */ }
 }
 // What this isolate counted (its jobs' database errors, its error lines), at most every 20 seconds.
-async function flushDueCounters(env: Env, ctx: ExecutionContext) {
+async function flushDueCounters(env: Env, ctx: ExecutionContext | undefined) {
   try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) afterwards(env, ctx, runtime => flushCounters(runtime.db)); } catch { /* Counted again with the next batch. */ }
 }
 /**
