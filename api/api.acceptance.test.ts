@@ -26821,8 +26821,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       try {
         const ran = await processJobs(runtime, mailboxIngestJobs, 30, 6);
         assert.equal(ran, 12, `expected 12 jobs processed, got ${ran}`);
-        // Re-enqueue two already-processed receipts in a second batch to prove retry/overlap idempotency.
-        await db.query("INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.ingest',$1,jsonb_build_object('sesMessageId',m) FROM unnest($2::text[]) m", [wid, [sesIds[0]!, sesIds[1]!]]);
+        // Simulate lease-expiry retry of two already-stored receipts to prove zero duplicates on retry/overlap.
+        await db.query("UPDATE jobs SET status='pending', available_at=now(), lease_until=NULL WHERE workspace_id=$1 AND type='mailbox.ingest' AND payload->>'sesMessageId' = ANY($2::text[])", [wid, [sesIds[0]!, sesIds[1]!]]);
         assert.equal(await processJobs(runtime, mailboxIngestJobs, 10, 6), 2, 'replayed receipts settle as clean no-ops');
       } finally { mockS3.mock.restore(); }
 
