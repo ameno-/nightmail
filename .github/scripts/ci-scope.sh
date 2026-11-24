@@ -23,7 +23,8 @@ paths=$(mktemp)
 trap 'rm -f "$paths"' EXIT
 # Don't lose the old path on renames, split on whitespace, or turn a diff error into 'nothing changed'.
 git diff --name-only --no-renames -z "$base" HEAD > "$paths"
-api=false sdk=false dashboard=false acceptance=false gateway=false support=false audit=false
+# Advisories are published against unchanged lockfiles, so the audit runs on every PR, queue entry and direct push.
+api=false sdk=false dashboard=false acceptance=false gateway=false support=false audit=true
 while IFS= read -r -d '' path; do
   case "$path" in
     .github/workflows/*|.github/actions/*|.github/scripts/*|*/bun.lock|*/bun.lockb|*/Cargo.lock|*/package-lock.json|*/pnpm-lock.yaml|*/yarn.lock) all=true ;;
@@ -50,12 +51,13 @@ while IFS= read -r -d '' path; do
     # Dashboard modules and assets exercised directly by api.acceptance.test.ts.
     app/asset-headers.ts|app/public/_headers|app/public/theme.js|app/public/signed-in/*|app/src/lib/*|app/src/data/types.ts|app/src/features/settings/*) acceptance=true ;;
   esac
-  case "$path" in api/package.json|sdk/package.json|app/package.json) audit=true ;; esac
 done < "$paths"
 if $all; then api=true; sdk=true; dashboard=true; acceptance=true; gateway=true; support=true; audit=true; fi
-build=false preview=false
+build=false preview=false cls=false
 if $api || $dashboard || $sdk; then build=true; fi
 if $api || $dashboard; then preview=true; fi
-for key in base api sdk dashboard build acceptance preview gateway support audit; do
+# The CLS fixture runs this API (migrations, server, read limits) and seeds its tables with raw SQL.
+if $api || $dashboard; then cls=true; fi
+for key in base api sdk dashboard build acceptance preview cls gateway support audit; do
   printf '%s=%s\n' "$key" "${!key}"
 done | tee -a "$GITHUB_OUTPUT"

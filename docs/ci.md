@@ -18,17 +18,16 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | Changed input | Suites selected on a PR or queue entry |
 | --- | --- |
 | Workflow, shared action, CI/deploy script, or dependency lockfile | Everything. Non-queue pushes to dev also run everything. |
-| API code (including the hosted MCP), configuration, migrations or tests | Build (API types, both Worker bundles, pre-merge checks and generated contract/SDK), acceptance and preview. Bundling needs Vite's static assets, not a separate dashboard type-check. |
+| API code (including the hosted MCP), configuration, migrations or tests | Build (API types, both Worker bundles, pre-merge checks and generated contract/SDK), acceptance, preview and CLS (its fixture runs this API's migrations, server and read limits and seeds its tables with raw SQL). Bundling needs Vite's static assets, not a separate dashboard type-check. |
 | Dashboard including bundled legal Markdown | Dashboard build and pre-merge checks, Worker bundle/preview and CLS. Acceptance also exercises asset-headers, the theme and signed-in scripts, shared lib, data types and Settings helpers. |
-| API code used by the dashboard | Also dashboard build and CLS: `api/openapi.json` (rendered in Docs), and `api/src/{analytics-events,billing/rates,block-style,brand,mcp-clients,ritual-schema,standing-model,webhook-signature-guide}.ts`. The dashboard does not import the generated SDK. |
+| API code used by the dashboard | Also the dashboard build: `api/openapi.json` (rendered in Docs), and `api/src/{analytics-events,billing/rates,block-style,brand,mcp-clients,ritual-schema,standing-model,webhook-signature-guide}.ts`. The dashboard does not import the generated SDK. |
 | SDK or standalone MCP client code | Build (type-check the SDK consumer and regenerate the contract/SDK) and acceptance. |
 | Support Worker | Support, including its bundled system prompt and voice guide. Also selected by its API dependencies: brand, log, billing rates, mail-servers and the production Wrangler config. |
 | Gateway | Rust format, lint and tests. |
 | Other fixture/test inputs | Acceptance for Domain Connect templates, shared AWS policies, the Pulumi receiving alarm, the S3 fixture, `api/README.md`'s executable example or the asserted `docs/mcp-coverage.md`. |
-| API, app or SDK package manifest | Also audit (the three packages checked by Bun). |
 | Other Markdown/docs | No heavy suites. Nightly still runs the full acceptance and CLS suites on dev. |
 
-The routing table lives in `.github/scripts/ci-scope.sh`. Update it when a suite starts reading files outside its package. Renames select both the old and the new path.
+`audit` runs on every PR, queue entry and direct dev push: advisories are published against unchanged lockfiles, and production's proof is that run's conclusion. The routing table lives in `.github/scripts/ci-scope.sh`. Update it when a suite starts reading files outside its package. Renames select both the old and the new path.
 
 ## What runs where
 
@@ -160,7 +159,7 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 ### CLS shards
 
-PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately within each fixture API's traffic. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. Exclusive mutations still run after shared pages on their own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
+PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately within each fixture API's traffic. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. The `alone` pages (the running homepage machine) still run one at a time after the shared pages on each shard's own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
 
 ### CLS: web fonts load before any text, every run
 

@@ -30,6 +30,7 @@ jobs:
       build: ${{ steps.scope.outputs.build }}
       acceptance: ${{ steps.scope.outputs.acceptance }}
       preview: ${{ steps.scope.outputs.preview }}
+      cls: ${{ steps.scope.outputs.cls }}
       gateway: ${{ steps.scope.outputs.gateway }}
       support: ${{ steps.scope.outputs.support }}
       audit: ${{ steps.scope.outputs.audit }}
@@ -288,7 +289,7 @@ jobs:
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
   cls-shard:
     needs: changes
-    if: needs.changes.outputs.dashboard == 'true'
+    if: needs.changes.outputs.cls == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -376,7 +377,7 @@ jobs:
         include:
           - { check: build, job: build-work, flag: build }
           - { check: acceptance, job: acceptance-shard, flag: acceptance }
-          - { check: cls, job: cls-shard, flag: dashboard }
+          - { check: cls, job: cls-shard, flag: cls }
           - { check: preview, job: preview-work, flag: preview }
           - { check: gateway, job: gateway-work, flag: gateway }
           - { check: support, job: support-work, flag: support }
