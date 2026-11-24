@@ -72,7 +72,7 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
@@ -255,6 +255,7 @@ export default {
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
+      : (queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '') && batch.queue === queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '')) ? 'priority'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy'
       : batch.queue === queueName(env, 'FEEDBACK_DLQ_NAME', '') ? 'tagged-dlq'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_DLQ_NAME', '') ? 'legacy-dlq' : undefined;
