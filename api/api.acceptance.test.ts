@@ -27298,6 +27298,132 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }finally{await writer.query('ROLLBACK');}
     assert.deepEqual(await state(),before);
   });
+  test('inbox long-poll and from filter: modseq wake skips idle rescans, catches out-of-order inbox_seq and mutable flags, matches all email forms, and surfaces 422 READ_TOO_LARGE',async t=>{
+    const a=await fixtureDatabase(t),w=unique('pollw'),host=w+'.invalid',dom=unique('mdom'),bid=unique('mbx'),addr='poll@'+host;
+    const {digest,randomSecret}=await import('./src/core.js');
+    const tok=randomSecret('bane_mbx_');
+    cleanup(t,async()=>{for(const tbl of ['mailbox_events','mail_gc_candidates','mail_receipts','mailbox_keys','mailbox_addresses','mailbox_threads','mailbox_messages','mail_messages','mail_threads','mailboxes','mailbox_domains','api_request_budgets','mailbox_write_lanes'])await a.query(`DELETE FROM ${tbl} WHERE workspace_id=$1`,[w]);});
+    await a.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,w,host,REGION]);
+    await a.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,$4,'inbox','forever')",[bid,w,dom,addr]);
+    await a.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[w,addr,bid]);
+    await a.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await a.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions) VALUES($1,$2,'poll',$3,'fixture',jsonb_build_array($4::text),'["read","modify"]')`,[unique('mbk'),w,await digest(tok),bid]);
+    const deliver=async(mid:string,opts:{from?:string;fromName?:string|null;subject?:string;text?:string;read?:boolean;flagged?:boolean}={})=>{
+      const at=new Date().toISOString();
+      await a.query("INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification) VALUES($1,$2,$3,'fixture','k',$4,'{}') ON CONFLICT DO NOTHING",[w,mid,REGION,JSON.stringify([addr])]);
+      await a.query("SELECT * FROM mail_store_incoming($1::jsonb,'[]','[]',$2::jsonb,false,false,NULL,NULL)",[JSON.stringify({
+        id:mid,workspace_id:w,ses_message_id:mid,lifecycle:'kept',envelope_to:[addr],direction:'inbound',subject:opts.subject??('Sub '+mid),
+        from_address:(opts.from??'sender@example.invalid').toLowerCase(),from_name:opts.fromName??null,to:[{name:null,address:addr}],cc:[],bcc:[],reply_to:[],references:[],received_at:at,
+        body_truncated:false,snippet:opts.text??mid,text:opts.text??mid,headers:[],size_bytes:128,attachment_count:0,verdicts:{dmarc:'PASS'},spam:false,automated:false,status:'received',
+      }),JSON.stringify([{addr,n:0,valid:true}])]);
+      if(opts.read)await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":true}'::jsonb)`,[w,bid,mid]);
+      if(opts.flagged)await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}'::jsonb)`,[w,bid,mid]);
+    };
+    // 1. Condition (2): Tricky from addresses (display name, plus sign, mixed case, punycode IDN, body/subject-only mention).
+    const mDisp=unique('msg'),mPlus=unique('msg'),mMix=unique('msg'),mIdn=unique('msg'),mBodyOnly=unique('msg'),mOld=unique('msg');
+    await deliver(mDisp,{from:'alice@example.org',fromName:'Alice "The Boss" Smith',subject:'Hello display'});
+    await deliver(mPlus,{from:'user+tag-1@example.org',subject:'Hello plus'});
+    await deliver(mMix,{from:'Mixed.Case@Example.ORG',subject:'Hello case'});
+    await deliver(mIdn,{from:'user@xn--mnchen-3ya.de',subject:'Hello idn'});
+    await deliver(mBodyOnly,{from:'other@example.org',subject:'Mentioning alice@example.org',text:'Body mentions alice@example.org and user+tag-1@example.org'});
+    await deliver(mOld,{from:'old@example.org',subject:'Old already read',read:true});
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=alice@example.org`,tok)).data.map((m:Json)=>m.id),[mDisp],'from excludes body/subject-only mentions');
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=${encodeURIComponent('user+tag-1@example.org')}`,tok)).data.map((m:Json)=>m.id),[mPlus]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=MIXED.CASE@EXAMPLE.ORG`,tok)).data.map((m:Json)=>m.id),[mMix]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?from=user@xn--mnchen-3ya.de`,tok)).data.map((m:Json)=>m.id),[mIdn]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?subjectContains=plus`,tok)).data.map((m:Json)=>m.id),[mPlus]);
+    assert.deepEqual(ok(await http('GET',`/v1/inboxes/${bid}/messages?unread=false`,tok)).data.map((m:Json)=>m.id),[mOld]);
+    // SQL-level verification for quoted local parts, unicode IDN, and group-like display names (never drops true matches).
+    for(const raw of ['"john..doe"@example.org','"user@name"@example.org','user@münchen.de','user@例え.jp']){
+      const hit=(await a.query("SELECT to_tsvector('simple','Subj Display: '||$1||' body') @@ plainto_tsquery('simple',$1) AS ok",[raw.toLowerCase()])).rows[0].ok;
+      assert.equal(hit,true,`plainto_tsquery must match ${raw}`);
+    }
+    // 2. Condition (1): Mutable filter (flagged=true) wakes on the first tick when an OLD message is flagged mid-wait.
+    const waitFlag=http('GET',`/v1/inboxes/${bid}/messages?wait=5&flagged=true`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"flagged":true}'::jsonb)`,[w,bid,mOld]);
+    const flagRes=ok(await waitFlag);
+    assert.deepEqual(flagRes.data.map((m:Json)=>m.id),[mOld],'mutable flagged filter catches old message changed during wait');
+    // Mutable filter (unread=true) wakes when an OLD read message is marked unread mid-wait.
+    const cur=(await a.query('SELECT max(inbox_seq)::text s FROM mailbox_messages WHERE mailbox_id=$1',[bid])).rows[0].s;
+    const waitUnread=http('GET',`/v1/inboxes/${bid}/messages?wait=5&unread=true&from=old@example.org`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    await a.query(`SELECT inbox_mutate($1,$2,$3,'flags','{"read":false}'::jsonb)`,[w,bid,mOld]);
+    assert.deepEqual(ok(await waitUnread).data.map((m:Json)=>m.id),[mOld],'mutable unread filter catches old message marked unread during wait');
+    // 3. Condition (1): Out-of-order inbox_seq (lower seq commits AFTER higher seq with higher modseq) is never skipped.
+    const mOob=unique('msg'),tOob=unique('thr');
+    const waitOob=http('GET',`/v1/inboxes/${bid}/messages?wait=5&subjectContains=OutOfOrderNeedle`,tok);
+    await new Promise(r=>setTimeout(r,400));
+    const lowerSeq=Math.max(1,Number(cur)-1);
+    await a.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,now())',[tOob,w,'OutOfOrderNeedle']);
+    await a.query("INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,snippet,received_at,lifecycle) VALUES($1,$2,$3,'inbound','OutOfOrderNeedle','oob@example.org','oob',now(),'kept')",[mOob,w,tOob]);
+    await a.query('UPDATE inbox_state SET modseq=modseq+1 WHERE inbox_id=$1 RETURNING modseq',[bid]).then(async r=>{
+      await a.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq,modseq) VALUES($1,$2,$3,$4,'inbound',false,now(),$5,$6)",[bid,mOob,w,tOob,lowerSeq,r.rows[0].modseq]);
+    });
+    assert.deepEqual(ok(await waitOob).data.map((m:Json)=>m.id),[mOob],'lower inbox_seq committing with higher modseq is returned on the next tick');
+    // 4. Condition (1) + (3): Idle wait ticks skip message scans (only check inbox_state.modseq),
+    //    5-second timeout returns 422 READ_TOO_LARGE (never empty 200), and MCP descriptions tell agents how to recover.
+    await simulatedSesFixture(t,async({runtime,local})=>{
+      const sb=ok(await local('POST','/v1/inboxes',{type:'sandbox'}),201);
+      let msgScans=0,gateReads=0;
+      const origQuery=pg.Client.prototype.query;
+      const qSpy=t.mock.method(pg.Client.prototype,'query',function(this:pg.Client,...args:unknown[]){
+        const text=typeof args[0]==='string'?args[0]:(args[0] as {text?:string})?.text??'';
+        if(text.includes('strpos(lower(m.subject)'))msgScans++;
+        else if(text.includes('SELECT s.modseq::text AS state_modseq FROM mailboxes'))gateReads++;
+        return (origQuery as (...a:unknown[])=>unknown).apply(this,args);
+      });
+      try{
+        const idle=ok(await local('GET',`/v1/inboxes/${sb.id}/messages?wait=2&subjectContains=never`));
+        assert.deepEqual(idle,{data:[],cursor:'0',hasMore:false});
+        assert.equal(msgScans,1,'idle wait=2 scans mailbox_messages only on tick 0, not on ticks 1..2');
+        assert.ok(gateReads>=1,'subsequent idle ticks use the O(1) inbox_state.modseq gate');
+      }finally{qSpy.mock.restore();}
+      const origTx=runtime.db.transaction.bind(runtime.db);
+      const txSpy=t.mock.method(runtime.db,'transaction',async()=>{throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'});});
+      try{error(await local('GET',`/v1/inboxes/${sb.id}/messages?subjectContains=slow`),422,'READ_TOO_LARGE');}finally{txSpy.mock.restore();}
+      void origTx;
+      const [{buildMcpCatalog},{createOpenApiApp}]=await Promise.all([import('./src/mcp-catalog.js'),import('./src/app.js')]);
+      const catalog=buildMcpCatalog(await createOpenApiApp());
+      for(const name of ['listInboxMessages','waitForMessage']){
+        const desc=catalog.get(name)!.tool.description??'';
+        assert.match(desc,/READ_TOO_LARGE/,name+' description must explain READ_TOO_LARGE');
+        assert.match(desc,/narrow|cursor/i,name+' description must tell agents to narrow or use cursor');
+      }
+    });
+  });
+  test('mail gateway: IMAP SEARCH bounds to mailbox, uses unkept-append index, and returns 413 SEARCH_LIMIT on timeout',async t=>{
+    const db=await fixtureDatabase(t),rt=fixtureWorker!.runtime,w=unique('gwsrch'),bid=unique('mbx'),kid=unique('app'),dom=unique('mdom');
+    cleanup(t,async()=>{for(const tbl of ['inbox_entries','mailbox_messages','mail_messages','mail_threads','inbox_app_passwords','mailboxes','mailbox_domains'])await db.query(`DELETE FROM ${tbl} WHERE ${tbl==='inbox_entries'||tbl==='inbox_app_passwords'?'inbox_id':'workspace_id'}=$1`,[tbl==='inbox_entries'||tbl==='inbox_app_passwords'?bid:w]);});
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,'gwsrch.invalid',$3,'active','store')",[dom,w,REGION]);
+    await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$3,'box@gwsrch.invalid','inbox','forever')",[bid,w,dom]);
+    await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2)',[bid,w]);
+    await db.query("INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES($1,$2,'fixture',$1,ARRAY['imap'])",[kid,bid]);
+    const tid=unique('thr'),m1=unique('msg');
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[tid,w]);
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,thread_id,direction,subject,from_address,from_name,"to",received_at,lifecycle) VALUES($1,$2,$3,'inbound','Invoice Alpha','billing@vendor.test','Vendor Billing','[{"name":"Ops","address":"ops@gwsrch.invalid"}]'::jsonb,now(),'kept')`,[m1,w,tid]);
+    await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,read,received_at,inbox_seq,modseq) VALUES($1,$2,$3,$4,'inbound',false,now(),1,2)",[bid,m1,w,tid]);
+    await db.query("INSERT INTO inbox_entries(inbox_id,role,uid,message_id,modseq,internal_date) VALUES($1,'inbox',7,$2,2,now())",[bid,m1]);
+    const key=randomUUID(),path='/internal/v1/mail';
+    const app=(await import('./src/app.js')).createApp();
+    const call=async(body:Json,dbOverride=rt.db)=>{
+      const raw=JSON.stringify(body),hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+      const ts=String(Math.floor(Date.now()/1000)),scope=hash(kid),dig=hash(raw);
+      const headers={'x-bane-content':dig,'x-bane-timestamp':ts,'x-bane-scope':scope,'x-bane-signature':createHmac('sha256',key).update(['POST',path,ts,dig,scope].join('\n')).digest('hex')};
+      return app.fetch(new Request('http://127.0.0.1'+path,{method:'POST',headers,body:raw}),{...rt,db:dbOverride,config:{...rt.config,mailGatewayToken:key}});
+    };
+    assert.deepEqual(await (await call({op:'subject',kid,folder:'inbox',term:'invoice'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'search',kid,folder:'inbox',field:'from',term:'vendor.test'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'search',kid,folder:'inbox',field:'to',term:'ops@gwsrch'})).json(),[7]);
+    assert.deepEqual(await (await call({op:'subject',kid,folder:'inbox',term:'nomatch'})).json(),[]);
+    // Statement timeout (57014) MUST return 413 SEARCH_LIMIT (not 422, not empty 200 []).
+    const timeoutDb={...rt.db,transaction:async()=>{throw Object.assign(new Error('canceling statement due to statement timeout'),{code:'57014'});}} as unknown as typeof rt.db;
+    for(const body of [{op:'subject',kid,folder:'inbox',term:'slow'},{op:'search',kid,folder:'inbox',field:'from',term:'slow'}]){
+      const res=await call(body,timeoutDb);
+      assert.equal(res.status,413);
+      assert.equal(((await res.json()) as Json).error.code,'SEARCH_LIMIT');
+    }
+  });
   test('inbox unread counter: every mutation path, concurrent races, NULL fallback, backfill and reconcile stay exact',async t=>{
     const a=await fixtureDatabase(t),b=await fixtureDatabase(t),w=unique('unreadw'),host=w+'.invalid',dom=unique('mdom');
     const {readFile}=await import('node:fs/promises');
