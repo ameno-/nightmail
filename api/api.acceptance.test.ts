@@ -40752,6 +40752,30 @@ describe('dashboard analytics', () => {
     assert.equal((await post(batch, {}, '203.0.113.50')).status, 204);
   });
 
+  test('dashboard analytics: no-referrer beacons require positive same-origin evidence on an approved host', async t => {
+    const { app, runtime, post, rows } = await setup();
+    const page = { p: '/pricing', s: 'public-session', w: 390 };
+    const dashboard = envelope([{ id: 'evt_nullorigin', seq: 1, t: Date.now(), type: 'page_view', route: '/overview' }]);
+    const same = { origin: 'null', 'sec-fetch-site': 'same-origin' };
+    for (const body of [page, dashboard]) assert.equal((await post(body, same)).status, 204);
+    const warnings: string[] = [];
+    t.mock.method(console, 'warn', (line: string) => { warnings.push(line); });
+    for (const site of [undefined, 'same-site', 'cross-site', 'none']) {
+      const headers: Record<string, string> = { origin: 'null' };
+      if (site) headers['sec-fetch-site'] = site;
+      assert.equal((await post(page, headers)).status, 403);
+    }
+    const foreign = 'https://refused.example';
+    assert.equal((await post(page, { origin: foreign, 'sec-fetch-site': 'same-origin' })).status, 403);
+    const direct = (url: string, headers: Record<string, string>) => app.fetch(new Request(url + path, { method: 'POST', headers, body: JSON.stringify(page) }), runtime);
+    assert.equal((await direct(foreign, same)).status, 403);
+    assert.equal((await direct(origin, { 'sec-fetch-site': 'same-origin' })).status, 403);
+    assert.deepEqual(rows().map(row => row.route).sort(), ['/overview', '/pricing']);
+    assert.deepEqual(warnings.map(line => JSON.parse(line)).filter(row => row.code === 'ORIGIN_NOT_ALLOWED').map(row => row.originClass),
+      ['null', 'null', 'null', 'null', 'cross-site', 'null', 'missing']);
+    assert.ok(!warnings.join('\n').includes('refused.example'));
+  });
+
   test('dashboard analytics: the dashboard tracker stores nothing on the device, never reads what was typed and sends no address, name or ID', async () => {
     const { createTracker } = await import('../app/src/lib/analytics.js');
     type El = { tagName: string; parentElement: El | null; textContent: string | null; getAttribute(name: string): string | null; validity?: Record<string, boolean> };

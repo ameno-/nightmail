@@ -117,11 +117,14 @@ export function registerAnalytics(app: App) {
     const runtime = c.env, { config } = runtime;
     // Off (DASHBOARD_ANALYTICS): the dashboard sends nothing, and anything that arrives anyway is discarded unread.
     if (!config.dashboardAnalytics) return c.body(null, 204);
-    const origin = c.req.header('origin');
-    // Node may see HTTP behind a TLS-terminating proxy. Match the approved browser origin and actual host;
-    // Fetch Metadata distinguishes a cross-origin browser request even between two approved aliases.
-    if (!origin || ![config.publicUrl, ...config.previousOrigins ?? []].includes(origin) || new URL(origin).host !== new URL(c.req.url).host
-      || (c.req.header('sec-fetch-site') ?? 'same-origin') !== 'same-origin') throw new ApiError(403, 'ORIGIN_NOT_ALLOWED', 'Analytics are accepted only from this installation’s dashboard.');
+    const origin = c.req.header('origin'), site = c.req.header('sec-fetch-site'), host = new URL(c.req.url).host;
+    const approved = [config.publicUrl, ...config.previousOrigins ?? []];
+    // WebKit redacts Origin under no-referrer, even on same-origin POSTs. Require explicit browser Fetch Metadata
+    // for that case and an approved destination host. Node may see HTTP behind a TLS-terminating proxy.
+    const allowed = origin === 'null'
+      ? site === 'same-origin' && approved.some(url => new URL(url).host === host)
+      : !!origin && approved.includes(origin) && new URL(origin).host === host && (site === undefined || site === 'same-origin');
+    if (!allowed) throw new ApiError(403, 'ORIGIN_NOT_ALLOWED', 'Analytics are accepted only from this installation’s dashboard.');
     // Do Not Track and Global Privacy Control: the dashboard sends nothing then, and a batch that says so is dropped.
     if (c.req.header('dnt') === '1' || c.req.header('sec-gpc') === '1') return c.body(null, 204);
     if (!(await allowBatch(runtime, await digest(c.req.header(clientIpHeader) ?? 'unknown')))) throw new ApiError(429, 'ANALYTICS_RATE_LIMITED', 'Too many analytics batches from this connection. Retry after one minute.', undefined, true);
