@@ -1033,15 +1033,12 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
         if (outcome.type === 'acceptance_unknown' && (gate.outageUntil ?? 0) <= Date.now()) {
           gate.outageUntil = Date.now() + Math.min(OUTAGE_MAX_MS, OUTAGE_MS * 2 ** (gate.outageStreak ?? 0));
           gate.outageStreak = (gate.outageStreak ?? 0) + 1;
-          const until = Math.max(gate.nextAllowedAt, gate.outageUntil);
-          gate.brakeUntil = gate.marketingBrakeUntil = gate.nextAllowedAt = gate.txAllowedAt = gate.marketingAllowedAt = until;
-          counters.paceRetryAt = until;
+          gate.brakeUntil = gate.nextAllowedAt = Math.max(gate.nextAllowedAt, gate.outageUntil);
+          counters.paceRetryAt = gate.nextAllowedAt;
         }
         if (outcome.errorCode==='SES_ACCOUNT_SENDING_PAUSED' || (outcome.errorCode==='SES_ACCOUNT_PAUSE_EXPIRED' && outcome.data.providerCalled)) {
-          gate.accountPauseAt=Date.now();
-          const until = Math.max(gate.nextAllowedAt, gate.accountPauseAt + 300000);
-          gate.brakeUntil=gate.marketingBrakeUntil=gate.nextAllowedAt=gate.txAllowedAt=gate.marketingAllowedAt=until;
-          counters.paceRetryAt=until;
+          gate.accountPauseAt=Date.now();gate.brakeUntil=gate.nextAllowedAt=Math.max(gate.nextAllowedAt,gate.accountPauseAt+300000);
+          counters.paceRetryAt=gate.nextAllowedAt;
         } else if (outcome.data.providerCalled!==false) delete gate.accountPauseAt;
         if (outcome.errorCode === 'SES_DAILY_QUOTA_EXHAUSTED') {
           const period = Math.max(options.accountId ? 1000 : 0, options.quotaRefreshMs ?? QUOTA_REFRESH_MS);
