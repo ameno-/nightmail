@@ -22846,8 +22846,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         case 'DeleteConfigurationSetCommand':{const s=JSON.parse((await this.config.credentials()).sessionToken!).Statement;assert.ok(s[0].Action.includes('ses:DeleteConfigurationSet'));assert.ok(s[0].Resource.includes(`arn:aws:ses:${region}:${account}:configuration-set/${i.ConfigurationSetName}`));assert.ok(sets.delete(key));if(loseSetDelete){loseSetDelete=false;throw Object.assign(Error('lost delete acknowledgement'),{name:'TimeoutError'});}return {};}
         case 'ListEmailIdentitiesCommand':if(region===west)return {EmailIdentities:[]};if(region===ie&&i.NextToken)throw denied();return i.NextToken?{EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:region+'.example'},{IdentityType:'DOMAIN',IdentityName:'reselect.example'}]}:{NextToken:'domains2',EmailIdentities:[{IdentityType:'DOMAIN',IdentityName:'both.example'},{IdentityType:'EMAIL_ADDRESS',IdentityName:'x@both.example'}]};
         case 'GetEmailIdentityCommand':{assert.ok(!i.EmailIdentity.includes('@'));if(i.EmailIdentity==='new.example'){if(!createdIdentity)throw missing();return createdIdentity;}const invalid=revoked===true || revoked===i.EmailIdentity;return {VerificationStatus:invalid?'FAILED':'SUCCESS',VerifiedForSendingStatus:!invalid,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true},ConfigurationSetName:'existing'};}
-        case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(i,{EmailIdentity:'new.example',EmailForwardingEnabled:false});createdIdentity!.FeedbackForwardingStatus=false;return {};
-        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
+        case 'PutEmailIdentityFeedbackAttributesCommand':assert.deepEqual(i,{EmailIdentity:'new.example',EmailForwardingEnabled:false});throw denied(); // The shipped 6.0 role does not grant the optional write.
+        case 'CreateEmailIdentityCommand':assert.equal(i.EmailIdentity,'new.example');assert.match(i.Tags.find((t:Json)=>t.Key==='bane:domain-claim').Value,/^[a-f0-9-]{36}$/);assert.deepEqual(i.Tags.slice(1),[{Key:'bane:owner',Value:'bane'},{Key:'bane:installation-id',Value:v5.id},{Key:'bane:purpose',Value:'domain-identity'}]);createdIdentity={Tags:i.Tags,FeedbackForwardingStatus:true,DkimAttributes:{Status:'PENDING',Tokens:['a','b','c']}};return createdIdentity;
         case 'PutEmailIdentityMailFromAttributesCommand':{assert.equal(i.EmailIdentity,'new.example');assert.ok(createdIdentity);const [s]=JSON.parse((await this.config.credentials()).sessionToken!).Statement;
           assert.deepEqual(s.Action,['ses:GetEmailIdentity','ses:PutEmailIdentityMailFromAttributes']);assert.equal(s.Resource,`arn:aws:ses:${region}:${account}:identity/new.example`);mailFromWrites.push(i);
           if(i.MailFromDomain)createdIdentity.MailFromAttributes={MailFromDomain:i.MailFromDomain,MailFromDomainStatus:'PENDING',BehaviorOnMxFailure:i.BehaviorOnMxFailure};else delete createdIdentity.MailFromAttributes;return {};}
@@ -22999,7 +22999,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     assert.equal((await db.query('SELECT region FROM domain_sending_bindings WHERE workspace_id=$1 AND name=$2',[wid,'new.example'])).rows[0].region,oh);
     const verify=(await db.query("SELECT j.* FROM jobs j JOIN operation_domains d ON d.id=j.payload->>'domainId' WHERE d.workspace_id=$1 AND d.name='new.example' AND j.type='domain.verify'",[wid])).rows[0];
     await assert.rejects((await import('./src/operations.js')).operationJobs['domain.verify']!(runtime,verify.payload,{workspaceId:wid,id:verify.id,attempts:1}),JobDeferred);
-    assert.equal(trace.filter(t=>t.op==='PutEmailIdentityFeedbackAttributesCommand').length,1);assert.equal(createdIdentity?.FeedbackForwardingStatus,false);
+    assert.equal(trace.filter(t=>t.op==='PutEmailIdentityFeedbackAttributesCommand').length,1);assert.equal(createdIdentity?.FeedbackForwardingStatus,true,'An unchanged BYO role refuses the optional write without blocking the domain');
     assert.equal(trace.filter(t=>t.op==='CreateEmailIdentityCommand').length,1);assert.ok(policies.at(-1)!.includes(`arn:aws:ses:${oh}:${account}:identity/new.example`));
     await t.test('terminal bind failures release both domain caps and allow regional reselection',async()=>{
       ok(await select(oh+':reselect.example'),202);revoked=true;
@@ -23208,10 +23208,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // Update: a change set of the stack itself, from the newest template with every parameter kept; nothing runs until the customer does.
     await db.query('UPDATE provider_connections SET stack_template_version=NULL WHERE id=$1',[cid]);
     assert.equal(ok(await api(wid,'GET','/v1/connection')).connection.stack.updateAvailable,true);
-    const update=ok(await api(wid,'POST','/v1/connection/stack/update'));assert.equal(update.version,'6.1');assert.match(update.consoleUrl,/^https:\/\/us-east-2\.console\.aws\.amazon\.com\/cloudformation\/home\?region=us-east-2#\/stacks\/changesets\/changes\?stackId=/);
-    assert.equal(changeSets.length,1);assert.equal(changeSets[0].TemplateURL,`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.1.yaml`);assert.match(changeSets[0].ChangeSetName,/^nightmail-update-6-1-/);
+    const update=ok(await api(wid,'POST','/v1/connection/stack/update'));assert.equal(update.version,'6.0');assert.match(update.consoleUrl,/^https:\/\/us-east-2\.console\.aws\.amazon\.com\/cloudformation\/home\?region=us-east-2#\/stacks\/changesets\/changes\?stackId=/);
+    assert.equal(changeSets.length,1);assert.equal(changeSets[0].TemplateURL,`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`);assert.match(changeSets[0].ChangeSetName,/^nightmail-update-6-0-/);
     assert.deepEqual(changeSets[0].Parameters,['ExternalId','ConnectionId','WorkspaceId','ResourcePrefix'].map(ParameterKey=>({ParameterKey,UsePreviousValue:true})));assert.deepEqual(changeSets[0].Capabilities,['CAPABILITY_NAMED_IAM']);
-    await db.query("UPDATE provider_connections SET stack_template_version='6.1' WHERE id=$1",[cid]);error(await api(wid,'POST','/v1/connection/stack/update'),409,'STACK_UP_TO_DATE');
+    await db.query("UPDATE provider_connections SET stack_template_version='6.0' WHERE id=$1",[cid]);error(await api(wid,'POST','/v1/connection/stack/update'),409,'STACK_UP_TO_DATE');
     // Health: hourly, per connection; a paused or sandboxed region and an unusable role are each reported, and nothing in AWS changes.
     assert.ok(await queueByoHealth(runtime)>=1);assert.equal(await queueByoHealth(runtime),0,'One check per connection per hour');
     const health=async()=>{const j=(await db.query("SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='byo.health' ORDER BY created_at DESC LIMIT 1",[wid])).rows[0];await regionalByoJobs['byo.health']!(runtime,j.payload,{workspaceId:wid,id:j.id,attempts:1});return ok(await api(wid,'GET','/v1/connection')).connection.health;};
@@ -35015,7 +35015,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const role=byoRoleStatements(await byoTemplate(file,params,[region]));
       for(const purpose of purposes)for(const s of byoSessionStatements(purpose,{region,account,connectionId:connection,domain:'example.com',template:'bane-pilot',stack:params['AWS::StackName'],templateUrl,changeSet:'nightmail-update-6-0-x'}))
         for(const action of s.Action)for(const resource of [s.Resource].flat().map(sample)){
-          // Old stacks refuse this one best-effort identity setting until their customer upgrades.
+          // The current customer role does not grant this optional setting. Domain creation fails soft on its refusal.
           const expected=!(file==='byo-templates/6.0.yaml' && purpose==='verify' && action==='ses:PutEmailIdentityFeedbackAttributes');
           checked++;assert.equal(iamAllows(role,action,resource,context(action,resource)),expected,`${file}: ${purpose} session's ${action} on ${resource}`);
         }
