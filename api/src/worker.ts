@@ -290,8 +290,9 @@ export default {
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
-      // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds.
-      ctx.waitUntil(flushDueCounters(env, ctx));
+      // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
+      // context (a handler called directly) nothing is written, and nothing here can throw into the request.
+      if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(flushDueCounters(env, ctx));
       // The campaign room's accepted upgrade goes back as it is: a copy would drop its socket.
       if (response.webSocket) return response;
       const responseHeaders = new Headers(response.headers);
