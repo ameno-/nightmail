@@ -83,7 +83,8 @@ const code = (text: string) => '`' + text + '`';
 const id = (value: unknown) => code(safe(value));
 
 type Late = { class: string; type: string; pending: number; oldestSeconds: number };
-type Failed = { type: string; error: string; failed: number };
+/** Failed jobs of one type with one error: how many are kept (of the newest JOBS.read), and how many failed in the last hour and half hour. */
+type Failed = { type: string; error: string; failed: number; hour: number; half: number };
 type CampaignRow = { id: string; workspaceId: string; state: string; total: number; prepared: number; expanded: number; canceled: number; paced: boolean; rateShare: number | null; waitingReason: string | null; waitingSeconds: number | null;
   pauseCode: string | null; pausedSeconds: number | null; quarantines: number; launchedSeconds: number | null; /** What its share of the account's rate is: CAMPAIGNS.share. */ share: keyof typeof CAMPAIGNS.share;
   /** The provider account's send rate. */ account: number | null; /** The rate the release planner reads, shown beside the others and never compared with. */ planned: number | null;
@@ -93,14 +94,15 @@ type Database = { connections: number; maxConnections: number; longTransactions:
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
 /**
- * What the next tick compares with: how many ticks each condition has held, each sending campaign's minute samples
- * (when, released, accepted) and the failed jobs by type over the last half hour.
+ * What the next tick compares with: how many ticks each condition has held, and each sending campaign's minute samples
+ * (when, released, accepted).
  */
-export type Memory = { streaks: Record<string, number>; campaigns: Record<string, [at: number, released: number, accepted: number | null][]>; failed: [at: number, byType: Record<string, number>][] };
-export const emptyMemory = (): Memory => ({ streaks: {}, campaigns: {}, failed: [] });
+export type Memory = { streaks: Record<string, number>; campaigns: Record<string, [at: number, released: number, accepted: number | null][]> };
+export const emptyMemory = (): Memory => ({ streaks: {}, campaigns: {} });
 
 const Queue = z.object({ name: z.string(), depth: z.number().int(), oldestSeconds: z.number().int(), behind: z.boolean() });
-const Jobs = z.object({ type: z.string(), pending: z.number().int().describe('Due now: jobs scheduled for later are not counted. At most 5,000 are read per class.'), oldestSeconds: z.number().int(), failed: z.number().int(), error: z.string().nullable().describe('The most common error among the failed.'), behind: z.boolean() });
+const Jobs = z.object({ type: z.string(), pending: z.number().int().describe('Due now: jobs scheduled for later are not counted. At most 5,000 are read per class.'), oldestSeconds: z.number().int(), failed: z.number().int().describe('Failed jobs still kept (30 days), of the newest 5,000: information, never an alert.'),
+  failedLastHour: z.number().int().describe('Of those, the ones that failed in the last hour: what the jobs-failed alert counts.'), error: z.string().nullable().describe('The most common error among those of the last hour, else among the kept.'), behind: z.boolean() });
 const Campaign = z.object({ id: z.string(), workspaceId: z.string(), state: z.string(), total: z.number().int(), released: z.number().int(),
   rate: z.number().nullable().describe('Recipients released per second, measured from the campaign’s own cursor over the last ten minutes; null until two samples exist.'),
   acceptedRate: z.number().nullable().describe('Recipients the provider accepted per second over the same minutes, from the campaign’s stored counts; null while those have not moved.'),
@@ -157,10 +159,10 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     return { name, depth: q.depth, oldestSeconds, behind: behind.has(key) };
   });
 
-  let jobs: Rollup['jobs'] = null, failedRing = memory.failed ?? [];
+  let jobs: Rollup['jobs'] = null;
   if (sample.late && sample.failed) {
-    const types = new Map<string, { type: string; pending: number; oldestSeconds: number; failed: number; error: string | null; top: number; behind: boolean }>();
-    const of = (type: string) => { const name = safe(type); let row = types.get(name); if (!row) types.set(name, row = { type: name, pending: 0, oldestSeconds: 0, failed: 0, error: null, top: 0, behind: false }); return row; };
+    const types = new Map<string, { type: string; pending: number; oldestSeconds: number; failed: number; failedLastHour: number; half: number; first: boolean; error: string | null; top: number; behind: boolean }>();
+    const of = (type: string) => { const name = safe(type); let row = types.get(name); if (!row) types.set(name, row = { type: name, pending: 0, oldestSeconds: 0, failed: 0, failedLastHour: 0, half: 0, first: false, error: null, top: 0, behind: false }); return row; };
     for (const late of sample.late) {
       const row = of(late.type), rule = JOBS_LATE[late.class] ?? JOBS_LATE.other!;
       row.pending += late.pending; row.oldestSeconds = Math.max(row.oldestSeconds, late.oldestSeconds);
@@ -171,23 +173,22 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     }
     for (const failed of sample.failed) {
       const row = of(failed.type);
-      row.failed += failed.failed;
-      if (failed.failed > row.top) { row.top = failed.failed; row.error = failed.error ? safe(failed.error) : null; }
+      row.failed += failed.failed; row.failedLastHour += failed.hour; row.half += failed.half;
+      // The error named is the commonest among the last hour's failures; without any, among what is kept.
+      const weight = failed.hour ? JOBS.read + failed.hour : failed.failed;
+      if (weight > row.top) { row.top = weight; row.error = failed.error ? safe(failed.error) : null; }
+      if (failed.hour && (REQUESTS.errorLinesFirst as readonly string[]).includes(failed.error)) row.first = true;
     }
-    const firstTypes = new Set(sample.failed.filter(failed => (REQUESTS.errorLinesFirst as readonly string[]).includes(failed.error)).map(failed => safe(failed.type)));
-    // The pile as it stands, and how much it grew in the last half hour (the first tick has nothing to compare with).
-    const before = failedRing.find(([at]) => now - at <= JOBS.failedWindowMinutes * 60)?.[1];
+    // What failed in the last hour, never what is still kept from before: an alert is about now.
     for (const row of types.values()) {
-      if (!row.failed || (JOBS.failedIgnored as readonly string[]).includes(row.type)) continue;
-      const grew = before ? row.failed - (before[row.type] ?? 0) : 0;
-      const first = firstTypes.has(row.type);
-      if (first || row.failed >= (row.type.startsWith('campaign.') ? JOBS.failedCampaign : JOBS.failed) || grew >= JOBS.failedNew) {
-        find('jobs-failed', row.type, row.failed, `${id(row.type)}: ${count(row.failed)}${row.failed >= JOBS.read ? '+' : ''}${grew > 0 ? `, ${count(grew)} in the last ${JOBS.failedWindowMinutes} min` : ''}, mostly ${id(row.error ?? 'unknown')}.`, JOBS.failedRemindMinutes, first || row.type.startsWith('campaign.') ? 'critical' : 'warning');
+      if (!row.failedLastHour || (JOBS.failedIgnored as readonly string[]).includes(row.type)) continue;
+      const urgent = row.first || row.type.startsWith('campaign.');
+      if (row.failedLastHour >= (urgent ? JOBS.failedCampaign : JOBS.failed) || row.half >= JOBS.failedNew) {
+        find('jobs-failed', row.type, row.failedLastHour, `${id(row.type)}: ${count(row.failedLastHour)}${row.failedLastHour >= JOBS.read ? '+' : ''} failed in the last hour, mostly ${id(row.error ?? 'unknown')}.`, JOBS.failedRemindMinutes, urgent ? 'critical' : 'warning');
         row.behind = true;
       }
     }
-    failedRing = [...failedRing.filter(([at]) => now - at <= JOBS.failedWindowMinutes * 60 + 90), [now, Object.fromEntries([...types.values()].filter(row => row.failed).slice(0, 100).map(row => [row.type, row.failed]))] as Memory['failed'][number]];
-    jobs = [...types.values()].map(({ top: _, ...row }) => row).sort((a, b) => Number(b.behind) - Number(a.behind) || b.oldestSeconds - a.oldestSeconds || b.failed - a.failed);
+    jobs = [...types.values()].map(({ top: _, half: __, first: ___, ...row }) => row).sort((a, b) => Number(b.behind) - Number(a.behind) || b.oldestSeconds - a.oldestSeconds || b.failedLastHour - a.failedLastHour || b.failed - a.failed);
   } else blind.add('jobs');
 
   const feedbackQueue = sample.queues.filter(q => q.name === 'feedback' || q.name === 'priority').map(q => Math.round(q.oldestMs / 1000));
@@ -295,7 +296,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
   for (const [key, n] of Object.entries(memory.streaks)) if (!(key in streaks) && blind.has(sectionOf(key))) streaks[key] = n;
   // Critical before warning, each in the order it was measured: what a tick posts first, and what a reader sees first.
   findings.sort((a, b) => Number(b.severity === 'critical') - Number(a.severity === 'critical'));
-  return { rollup: { queues, jobs, campaigns, feedbackLagSeconds, routes, errors: errorCodes, requests, database, memory: { streaks, campaigns: samples, failed: failedRing } }, findings, blind };
+  return { rollup: { queues, jobs, campaigns, feedbackLagSeconds, routes, errors: errorCodes, requests, database, memory: { streaks, campaigns: samples } }, findings, blind };
 }
 
 /** Everything the tick asks the database runs in a short transaction of its own under WRITE_LIMITS: a second for a lock, three to run. */
@@ -318,9 +319,11 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
   const late = await probe(db, 'jobs_late', async tx => (await tx.execute<Late>(sql`SELECT k.class,d.type,count(*)::int AS pending,greatest(0,extract(epoch FROM now()-min(d.due)))::int AS "oldestSeconds"
     FROM unnest(${sql.param(Object.keys(JOBS_LATE))}::text[]) k(class) CROSS JOIN LATERAL (SELECT j.type,${due} AS due FROM jobs j
       WHERE public.job_class(j.type)=k.class AND j.status IN ('pending','running') AND ${due}<=now() ORDER BY ${due},j.id LIMIT ${JOBS.read}) d GROUP BY k.class,d.type`)).rows);
-  // The newest failed jobs through jobs_due_idx (status, available_at).
-  const failed = await probe(db, 'jobs_failed', async tx => (await tx.execute<Failed>(sql`SELECT type,coalesce(last_error,'') AS error,count(*)::int AS failed
-    FROM (SELECT type,last_error FROM jobs WHERE status='failed' ORDER BY available_at DESC LIMIT ${JOBS.read}) f GROUP BY 1,2`)).rows);
+  // The newest failed jobs through jobs_due_idx (status, available_at), and how many of them failed in the last hour
+  // and half hour: a failed job's available_at is when it failed (src/jobs.ts sets it, in both places a job fails).
+  const failed = await probe(db, 'jobs_failed', async tx => (await tx.execute<Failed>(sql`SELECT type,coalesce(last_error,'') AS error,count(*)::int AS failed,
+      count(*) FILTER (WHERE available_at>now()-make_interval(mins=>${JOBS.failedHourMinutes}))::int AS hour,count(*) FILTER (WHERE available_at>now()-make_interval(mins=>${JOBS.failedWindowMinutes}))::int AS half
+    FROM (SELECT type,last_error,available_at FROM jobs WHERE status='failed' ORDER BY available_at DESC LIMIT ${JOBS.read}) f GROUP BY 1,2`)).rows);
   // Campaigns that are preparing or sending, and those paused in the last day, through sending_campaigns_running. The
   // account's rate comes from the account (provider_account_limits; a self-hosted installation's own limits), and the
   // workspace's kind from its connection: never from the view the release planner reads, which is selected only to be

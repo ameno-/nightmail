@@ -178,7 +178,9 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
       const retry = failure instanceof ApiError && failure.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || failure.code === 'JOB_FINALIZATION_FAILED');
       const delay=error instanceof ActionRetry?actionDelay(job.attempts,error.afterMs):Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
-      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
+      // A job that fails for good is never due again: its available_at is when it failed, which the health tick counts
+      // within the hour (src/health.ts jobs-failed), where a retry's is when it is next due.
+      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + (retry ? delay : 0)).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
       logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } finally {
       activeJobs--;
@@ -237,7 +239,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         -- campaign: one busy in a cancel, reschedule or release under way is left for the next claim.
         SELECT e.workspace_id,e.id FROM sending_emails e WHERE (e.workspace_id,e.id) IN (SELECT workspace_id,email_id FROM exhausted)
         ORDER BY e.id FOR NO KEY UPDATE SKIP LOCKED
-      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL FROM exhausted x WHERE j.id=x.id AND
+      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL,available_at=now() /* when it failed, as above */ FROM exhausted x WHERE j.id=x.id AND
         (x.campaign_id IS NULL OR EXISTS(SELECT FROM parents p WHERE (p.workspace_id,p.id)=(x.workspace_id,x.campaign_id)) OR NOT EXISTS(SELECT FROM sending_campaigns c WHERE (c.workspace_id,c.id)=(x.workspace_id,x.campaign_id)))
         AND (x.email_id IS NULL OR EXISTS(SELECT FROM releases r WHERE (r.workspace_id,r.id)=(x.workspace_id,x.email_id)) OR NOT EXISTS(SELECT FROM sending_emails e WHERE (e.workspace_id,e.id)=(x.workspace_id,x.email_id)))
         RETURNING j.workspace_id,j.type,j.payload,x.campaign_id,x.email_id), ${failScheduledRelease(sql`SELECT workspace_id,email_id AS id FROM failed WHERE email_id IS NOT NULL`)}, campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),
