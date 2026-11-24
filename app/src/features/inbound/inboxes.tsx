@@ -204,11 +204,12 @@ function InboxDetail({ id }: { id: string }) {
   const [folder,setFolder]=useState('')
   const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000})
   const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000 })
-  // The inbox's keys from the one API key list, which has no inbox filter: up to ten pages of 100 active keys.
+  // The inbox's keys from the API key list (no server inboxId filter yet): check up to 3 pages (300 active keys),
+  // and link to API keys when more exist.
   const keys = useApiQuery(['keys', 'inbox', id], async (api, signal) => {
     const data: ApiKey[] = []
     let cursor: string | undefined, pages = 0
-    do { const page = await api.keys.list(signal, cursor, false); data.push(...page.filter(key => keyFor(key, id))); cursor = page.nextCursor ?? undefined } while (cursor && ++pages < 10)
+    do { const page = await api.keys.list(signal, cursor, false); data.push(...page.filter(key => keyFor(key, id))); cursor = page.nextCursor ?? undefined } while (cursor && ++pages < 3)
     return { data, complete: !cursor }
   }, { enabled: canAdminister })
   const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, invalidate.agentInboxes, id)

@@ -4,8 +4,7 @@
 import { useEffect, useId, useState } from 'react'
 import { Link } from 'react-router'
 import { Button } from '../../components/ui'
-import { useApiDef } from '../../data/context'
-import { queries } from '../../data/queries'
+import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { defaultSample, EntryFlow, OutcomeFlow, TestBar, testAddress, useFlowTest, type Sample } from './flow'
 import type { Overview, RouteEntry } from './overview'
 
@@ -14,8 +13,8 @@ export const mailOf = (entry: RouteEntry) => !entry.address || entry.kind === 'p
 
 export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink = true }: { entry?: RouteEntry; lookup?: string; overview: Overview; onEdit: (entry: RouteEntry) => void; onCreate?: (address: string) => void; mailLink?: boolean }) {
   const test = useFlowTest()
-  // Every address by its ID, for the names a lookup's path reaches (the list may be filtered to one).
-  const addresses = useApiDef(queries.inboundAddressOptions())
+  // First page of addresses + by-ID resolution for any off-page destination in this route or dry-run outcome.
+  const addresses = useAddressOptions()
   const formId = useId()
   const [sample, setSample] = useState<Sample>(defaultSample)
   const address = entry ? testAddress(entry.match) : lookup ?? ''
@@ -26,6 +25,14 @@ export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink 
     return () => clearTimeout(timer)
   }, [lookup]) // eslint-disable-line react-hooks/exhaustive-deps
   const outcome = test.address === address ? test.outcome : null
+  const referencedIds = [
+    entry?.address?.id,
+    ...(Array.isArray(entry?.route?.to) ? entry.route.to : []),
+    ...(entry?.to ?? []).map(t => t.id),
+    ...(outcome?.recipient?.inboxes ?? []),
+  ].filter((id): id is string => Boolean(id && id.startsWith('mbx_')))
+  const resolved = useResolvedAddresses(referencedIds, addresses.items)
+  const knownAddresses = mergeAddresses(resolved.items, addresses.items)
   // The questions its rules ask the AI: a test can assume their answer, keyed by question as the rules read it.
   const decisions = [...new Set((entry?.rules ?? []).flatMap(key => overview.rules.find(r => r.key === key)?.questions ?? []))]
   const mail = entry && mailLink ? mailOf(entry) : null
@@ -39,6 +46,6 @@ export function FlowPanel({ entry, lookup, overview, onEdit, onCreate, mailLink 
     </div>
     <TestBar id={formId} address={address} test={test} sample={sample} onSample={setSample} decisions={decisions} />
     {/* A test shows what the server reports: the rules that acted and where the mail went, not ticks on the drawn branches. */}
-    {entry && !outcome ? <EntryFlow entry={entry} overview={overview} boxes={addresses.data ?? []} /> : entry ? <OutcomeFlow address={address} overview={overview} outcome={outcome} error={null} addresses={addresses.data ?? []} unasked /> : <OutcomeFlow address={address} overview={overview} outcome={addresses.data || addresses.error || !lookup ? outcome : null} error={test.address === address ? test.error : null} addresses={addresses.data ?? []} unasked />}
+    {entry && !outcome ? <EntryFlow entry={entry} overview={overview} boxes={knownAddresses} /> : entry ? <OutcomeFlow address={address} overview={overview} outcome={outcome} error={null} addresses={knownAddresses} unasked /> : <OutcomeFlow address={address} overview={overview} outcome={!addresses.isPending || addresses.isError || !lookup ? outcome : null} error={test.address === address ? test.error : null} addresses={knownAddresses} unasked />}
   </section>
 }
