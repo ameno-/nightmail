@@ -3,6 +3,7 @@ import { X } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
@@ -104,7 +105,7 @@ function AddressPath({ address, overview }: { address: InboundAddress; overview:
 /** Wildcard patterns that also deliver here, such as reply+*@acme.com. */
 function PatternsField({ address, inputRef }: { address: InboundAddress; inputRef: React.RefObject<HTMLInputElement | null> }) {
   const [draft, setDraft] = useState('')
-  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Wildcards saved', false, true, address.id)
+  const save = useApiMutation((api, rules: string[]) => api.inbound.updateAddress(address.id, { rules } as InboundAddressPatch), 'Wildcards saved', false, invalidate.inboundAddresses, address.id)
   const rules = save.data?.rules ?? address.rules
   const domain = address.address.split('@')[1]
   async function add() {
@@ -129,8 +130,8 @@ export function InboundAddressDetailPage() {
   const [params, setParams] = useSearchParams()
   const { canAdminister } = useWorkspaceAccess()
   const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
-  const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved', false, true, id)
-  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted', false, true, id)
+  const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved', false, invalidate.inboundAddresses, id)
+  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted', false, invalidate.inboundAddresses, id)
   const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const patternInput = useRef<HTMLInputElement>(null)

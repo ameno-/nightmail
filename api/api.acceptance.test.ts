@@ -31327,6 +31327,93 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited again', addressIds: [nobodys] })).addressIds, [nobodys]);
     });
   });
+  // tear/workspace-isolation class BUG-ISO-04: the rules' AI opt-ins (evaluateRoutes, evaluateDomains) stored another
+  // workspace's route ID and a domain the workspace doesn't receive on.
+  // Another workspace's receiving host and route, ones nobody has, and this workspace's own (a sandbox inbox's host and a route on it).
+  async function optInIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace');
+    const theirs = { route: unique('rt'), domain: `${other}.invalid` }, nobodys = { route: unique('rt'), domain: `${unique('nobody')}.invalid` };
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [unique('mbd'), other, theirs.domain, REGION]);
+    const route = "INSERT INTO mail_routes(id,workspace_id,domain_id,match,destinations) SELECT $1,$2,id,'support@'||name,'[]' FROM mailbox_domains WHERE workspace_id=$2 AND name=$3";
+    await db.query(route, [theirs.route, other, theirs.domain]);
+    const box = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201), ours = { route: unique('rt'), domain: (box.address as string).split('@')[1]! };
+    await db.query(route, [ours.route, wid, ours.domain]);
+    return { wid, other, box, ours, theirs, nobodys };
+  }
+  test('rule AI opt-ins may name only routes and receiving domains of their own workspace: one of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { local } = fixture, { ours, theirs, nobodys } = await optInIsolation(fixture);
+      // The refusal names what was sent; apart from that, another workspace's and nobody's get the same answer.
+      const refused = (reply: Reply, code: string, sent: string) => { const e = error(reply, 422, code); return [e.code, (e.message as string).replace(sent, '…'), e.field]; };
+      for (const path of ['/v1/rules/decisions', '/v1/rules']) {
+        assert.deepEqual(refused(await local('PUT', path, { evaluateRoutes: [ours.route, theirs.route] }), 'UNKNOWN_ROUTE', theirs.route), refused(await local('PUT', path, { evaluateRoutes: [ours.route, nobodys.route] }), 'UNKNOWN_ROUTE', nobodys.route), path);
+        assert.deepEqual(refused(await local('PUT', path, { evaluateDomains: [ours.domain, theirs.domain] }), 'UNKNOWN_DOMAIN', theirs.domain), refused(await local('PUT', path, { evaluateDomains: [ours.domain, nobodys.domain] }), 'UNKNOWN_DOMAIN', nobodys.domain), path);
+      }
+      // Its own route and receiving host, and a host under it, are taken.
+      const saved = ok(await local('PUT', '/v1/rules/decisions', { evaluateRoutes: [ours.route], evaluateDomains: [ours.domain, `sub.${ours.domain}`] }));
+      assert.deepEqual([saved.config.evaluateRoutes, saved.config.evaluateDomains], [[ours.route], [ours.domain, `sub.${ours.domain}`]]);
+    });
+  });
+  test('rule AI opt-ins stored with a route or domain of another workspace open nothing of it and stay editable', async t => {
+    // Opt-ins stored before the check above (written here past the API) keep the route ID and the domain. They are read
+    // only against this workspace's own mail (its recipient's host, the route it matched), so they match nothing: the AI's
+    // answer is used for this workspace's mail only once its own host is opted in, and the other workspace has no rule config.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, other, box, ours, theirs } = await optInIsolation(fixture);
+      const rules = { rules: [{ key: 'asks', source: 'export default function route(email){const r=decisions(email,{refund:"Requests a refund?"});if(r.refund>0.8)label("refund")}' }], attachments: [{ rule: 'asks', target: box.address }] };
+      ok(await local('PUT', '/v1/rules', rules));
+      const store = `UPDATE mail_ritual_configs SET config=config||$2::jsonb, programs=CASE WHEN programs IS NULL THEN NULL ELSE programs||$2::jsonb END WHERE workspace_id=$1`;
+      await db.query(store, [wid, JSON.stringify({ evaluateRoutes: [theirs.route], evaluateDomains: [theirs.domain] })]);
+      const stored = ok(await local('GET', '/v1/rules'));
+      assert.deepEqual([stored.config.evaluateRoutes, stored.config.evaluateDomains], [[theirs.route], [theirs.domain]]);
+      const mime = `From: a@example.net\r\nTo: ${box.address}\r\nSubject: Refund\r\n\r\nRefund please`, scores = { 'Requests a refund?': 0.9 };
+      // What a dry run of this workspace's own mail does with the AI's answer: the score the rule saw, and its labels.
+      const dry = async () => { const run = ok(await local('POST', '/v1/rules/test', { mime, scores })); return [run.trace[0].scores, run.recipients[0].labels]; };
+      assert.deepEqual(await dry(), [{ refund: 0 }, []], 'Not opted in: the answer is not used.');
+      // Still editable with what it has, and its own host can be opted in beside them.
+      const edited = ok(await local('PUT', '/v1/rules/decisions', { evaluateRoutes: [theirs.route], evaluateDomains: [theirs.domain, ours.domain] }));
+      assert.deepEqual([edited.config.evaluateRoutes, edited.config.evaluateDomains], [[theirs.route], [theirs.domain, ours.domain]]);
+      assert.deepEqual(await dry(), [{ refund: 0.9 }, ['refund']], 'Its own host opted in: the answer is used.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_ritual_configs WHERE workspace_id=$1', [other])).rows[0].n, 0);
+    });
+  });
+  test('an API key for every address refuses addAddressIds that name no address of its workspace; removing one it does not have changes nothing', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { theirs, nobodys, ours } = await addressIsolation(fixture);
+      const keyIds = async (id: string) => (await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id=$1', [id])).rows[0].mailbox_ids;
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.message, e.field]; };
+      // A key for every address: adding one of its own changes nothing; another workspace's ID is refused like one nobody has.
+      const every = ok(await local('POST', '/v1/api-keys', { name: 'Every address', access: { type: 'addresses', mail: ['read'] } }), 201);
+      assert.deepEqual(refused(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [theirs] } })), refused(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [ours, nobodys] } })));
+      ok(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [ours] } }));
+      assert.equal(await keyIds(every.id), null);
+      // Removing is idempotent: an ID the key does not have, whoever's it is, leaves the key as it was.
+      const some = ok(await local('POST', '/v1/api-keys', { name: 'One address', access: { type: 'addresses', addressIds: [ours], mail: ['read'] } }), 201);
+      for (const id of [theirs, nobodys]) ok(await local('PATCH', `/v1/api-keys/${some.id}`, { access: { removeAddressIds: [id] } }));
+      assert.deepEqual(await keyIds(some.id), [ours]);
+    });
+  });
+  test('an agent inbox that was just deleted is no longer an address a webhook or an API key can be given', async t => {
+    // DELETE /v1/inboxes/{id} ends the inbox at once (delete_after) and its row goes with the hourly sweep. Until then it
+    // answered as a live address here, while reading it already answered 404.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { ours, url, hook, path } = await addressIsolation(fixture);
+      const ended = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201).id as string;
+      const some = ok(await local('POST', '/v1/api-keys', { name: 'One address', access: { type: 'addresses', addressIds: [ours], mail: ['read'] } }), 201);
+      // Chosen while it was live, it stays on the webhook after it ends.
+      ok(await local('PATCH', path, { addressIds: [ours, ended] }));
+      const gone = await local('DELETE', `/v1/inboxes/${ended}`);
+      assert.ok(gone.status < 300, `delete answered ${gone.status}`);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailboxes WHERE id=$1 AND delete_after<=now()', [ended])).rows[0].n, 1, 'The row waits for the sweep.');
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.field]; };
+      assert.deepEqual(refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: [ended] })), ['MAILBOX_NOT_FOUND', 'addressIds']);
+      assert.deepEqual(refused(await local('POST', '/v1/api-keys', { name: 'Ended', access: { type: 'addresses', addressIds: [ended], mail: ['read'] } })), ['MAILBOX_NOT_FOUND', 'access.addressIds']);
+      assert.deepEqual(refused(await local('PATCH', `/v1/api-keys/${some.id}`, { access: { addAddressIds: [ended] } })), ['MAILBOX_NOT_FOUND', 'access.addAddressIds']);
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited', addressIds: [ours, ended] })).addressIds, [ours, ended]);
+      assert.equal(hook.id, ok(await local('GET', path)).id);
+    });
+  });
   test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{
     // tear/delivery witnesses: ingest m1 b, claim K m1:U, pause U, go K; ingest m1 b, claim K m1:U, expire m1:U,
     // run L m1:U, reply L 410, go K; three timeouts, then run K m1:U (the breaker defers, attempts kept).
@@ -33609,6 +33696,97 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([nonzero(done.counts), nonzero(again.counts)], [exact, exact], 'A finished campaign reports exact counts immediately.');
       assert.equal(counted(), before + 2, 'A finished campaign is never served from the cache.');
       t.diagnostic(`${polls} detail polls, ${counted()} count statements`);
+    });
+  });
+
+  test('campaign content hash reader: verifies legacy and s1: hashes, rejects tampering, and pauses without burning recipients on unknown formats', async t => {
+    const { staticContentHash, verifyCampaignContentHash, isSupportedContentHash, sentCampaignContent } = await import('./src/sending.js');
+    const { digest } = await import('./src/core.js');
+    const { canonical } = await import('./src/idempotency.js');
+    assert.deepEqual([
+      isSupportedContentHash('a'.repeat(64)),
+      isSupportedContentHash('s1:' + 'a'.repeat(64)),
+      isSupportedContentHash('s2:' + 'a'.repeat(64)),
+      isSupportedContentHash('s1:short'),
+      isSupportedContentHash(null),
+    ], [true, true, false, false, false]);
+
+    await simulatedSesFixture(t, async ({ runtime, local, run, db }) => {
+      const ws = runtime.config.workspaceId;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('s1-reader') }), 201);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent)
+        SELECT 'con_s1_' || n, $1, 's1-reader-' || n || '@example.com', 'subscribed' FROM generate_series(1, 6) n`, [ws]);
+      await db.query('INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1', [ws, list.id]);
+
+      const camp = ok(await local('POST', '/v1/campaigns', { name: unique('s1-ok'), from: 'sender@example.com', subject: 'Static S1', html: '<p>Hello static world</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${camp.id}/send`, { revision: camp.revision }), 202);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const revId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [camp.id])).rows[0].review_id as string;
+      const { rows: [revRow] } = await db.query('SELECT draft, rendered, renderer_version FROM sending_campaign_reviews WHERE id=$1', [revId]);
+      const baseCustomer = {
+        testCampaignId: null, untrustedContent: false, from: 'sender@example.com', to: ['s1-reader-1@example.com'], cc: [], bcc: [], replyTo: [],
+        region: REGION, kind: 'marketing' as const, subject: 'Static S1',
+        html: revRow.rendered.html, text: revRow.rendered.text, attachments: [], tracking: Boolean(revRow.draft.tracking), headers: [],
+      };
+      const baseHash = await digest(canonical({ ...baseCustomer, to: [] }));
+      assert.equal(await verifyCampaignContentHash(baseCustomer, await staticContentHash(baseHash, 's1-reader-1@example.com')), true);
+      assert.equal(await verifyCampaignContentHash({ ...baseCustomer, html: '<p>Tampered</p>' }, await staticContentHash(baseHash, 's1-reader-1@example.com')), false);
+      assert.equal(await verifyCampaignContentHash({ ...baseCustomer, to: ['other@example.com'] }, await staticContentHash(baseHash, 's1-reader-1@example.com')), false);
+      await assert.rejects(verifyCampaignContentHash(baseCustomer, 's2:' + 'a'.repeat(64)), { code: 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED' });
+
+      // 1. Stamp a campaign with s1: hashes directly and verify full release, dispatch, and sentCampaignContent rebuild!
+      const campS1 = ok(await local('POST', '/v1/campaigns', { name: unique('s1-mixed'), from: 'sender@example.com', subject: 'Static S1', html: '<p>Hello static world</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campS1.id}/send`, { revision: campS1.revision }), 202);
+      const s1RevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campS1.id])).rows[0].review_id as string;
+      const s1Recs = (await db.query("SELECT ordinal, recipient->>'email' AS email FROM sending_review_recipients WHERE review_id=$1 ORDER BY ordinal", [s1RevId])).rows as { ordinal: number; email: string }[];
+      for (const r of s1Recs) {
+        const h = await staticContentHash(baseHash, r.email);
+        await db.query('UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2 AND ordinal=$3', [h, s1RevId, r.ordinal]);
+      }
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total WHERE id=$1", [campS1.id]);
+      await run('campaign.run');
+      await run('email.dispatch');
+      const s1View = ok(await local('GET', `/v1/campaigns/${campS1.id}`));
+      assert.equal(s1View.state, 'done');
+      assert.equal((s1View.counts.byStatus.simulated ?? 0) + (s1View.counts.byStatus.accepted ?? 0) + (s1View.counts.byStatus.delivered ?? 0), 6, 'All 6 s1:-hashed recipients dispatched cleanly');
+      assert.equal(s1View.counts.byStatus.rejected ?? 0, 0);
+      const s1Mail = (await db.query('SELECT * FROM sending_emails WHERE workspace_id=$1 AND campaign_id=$2 ORDER BY review_ordinal LIMIT 1', [ws, campS1.id])).rows[0];
+      const rebuiltS1 = await sentCampaignContent(runtime, { workspaceId: ws, keyId: 'test', permissions: ['manage'], domains: [] }, {
+        ...s1Mail, workspaceId: s1Mail.workspace_id, actorKeyId: s1Mail.actor_key_id, campaignId: s1Mail.campaign_id, reviewId: s1Mail.review_id, reviewOrdinal: s1Mail.review_ordinal,
+        fromAddress: s1Mail.from_address, toAddresses: s1Mail.to_addresses, ccAddresses: s1Mail.cc_addresses, bccAddresses: s1Mail.bcc_addresses,
+        providerId: s1Mail.provider_id, errorCode: s1Mail.error_code, suppressionReason: s1Mail.suppression_reason,
+        scheduledAt: s1Mail.scheduled_at, attemptStartedAt: s1Mail.attempt_started_at, leaseUntil: s1Mail.lease_until,
+        createdAt: s1Mail.created_at, updatedAt: s1Mail.updated_at, feedbackTopicArn: s1Mail.feedback_topic_arn,
+        dispatchVersion: s1Mail.dispatch_version, attachmentFailures: s1Mail.attachment_failures, eventOutcomes: s1Mail.event_outcomes,
+      });
+      assert.ok(rebuiltS1.html?.includes('Hello static world'), 'sentCampaignContent rebuilds s1: email cleanly');
+
+      // 2. Unknown future hash format (s2:...) pauses at releaseStep without releasing or burning any recipient!
+      const campFuture = ok(await local('POST', '/v1/campaigns', { name: unique('s2-future'), from: 'sender@example.com', subject: 'Future', html: '<p>Future</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campFuture.id}/send`, { revision: campFuture.revision }), 202);
+      const futRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campFuture.id])).rows[0].review_id as string;
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2", ['s2:' + 'b'.repeat(64), futRevId]);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total WHERE id=$1", [campFuture.id]);
+      await run('campaign.run');
+      const futView = ok(await local('GET', `/v1/campaigns/${campFuture.id}`));
+      assert.deepEqual([futView.state, futView.delivery.expanded, futView.delivery.pauseReason?.code], ['paused', 0, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED']);
+
+      // 3. Even if email rows were already queued by a newer release referencing an s2: hash, dispatch defers them (never rejects/burns) and pauses the campaign loudly!
+      const campQueued = ok(await local('POST', '/v1/campaigns', { name: unique('s2-queued'), from: 'sender@example.com', subject: 'FutureQ', html: '<p>FutureQ</p>', audience: { listId: list.id } }), 201);
+      ok(await local('POST', `/v1/campaigns/${campQueued.id}/send`, { revision: campQueued.revision }), 202);
+      const qRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campQueued.id])).rows[0].review_id as string;
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2", ['s2:' + 'c'.repeat(64), qRevId]);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total, expanded=total WHERE id=$1", [campQueued.id]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'em_s2_'||r.ordinal, $1, c.actor_key_id, $2, c.id, c.review_id, r.ordinal, 'sender@example.com', jsonb_build_array(r.recipient->>'email'), '[]', '[]', 'FutureQ', '{"kind":"marketing","deferredCampaign":true}'::jsonb, true
+        FROM sending_campaigns c JOIN sending_review_recipients r ON r.review_id=c.review_id WHERE c.id=$3`, [ws, REGION, campQueued.id]);
+      await run('email.dispatch');
+      const qView = ok(await local('GET', `/v1/campaigns/${campQueued.id}`));
+      assert.equal(qView.state, 'paused', 'Campaign pauses instead of ending done');
+      assert.equal(qView.delivery.pauseReason?.code, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED');
+      assert.equal(qView.counts.byStatus.rejected ?? 0, 0, 'Zero recipients rejected/burned');
+      assert.equal(qView.counts.byStatus.queued, 6, 'All 6 recipients remain queued for the matching release');
     });
   });
 
