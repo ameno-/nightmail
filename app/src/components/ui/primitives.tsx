@@ -398,10 +398,18 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     try { const kept = sessionStorage.getItem(KEPT_TOASTS); sessionStorage.removeItem(KEPT_TOASTS); if (kept) for (const { message, tone } of JSON.parse(kept) as { message: string; tone: ToastTone }[]) toast(message, tone); } catch { /* Nothing to restore. */ }
     // A toast's action belongs to this page: one with an action (Undo) isn't kept.
     const keep = () => { try { sessionStorage.setItem(KEPT_TOASTS, JSON.stringify(shown.current.filter(item => !item.action).map(({ message, tone }) => ({ message, tone })))); } catch { /* The toasts go with the page. */ } };
+    const clear = () => setToasts([]);
     window.addEventListener('nightmail:reloading', keep);
-    return () => window.removeEventListener('nightmail:reloading', keep);
+    window.addEventListener('nightmail:scope-changed', clear);
+    return () => { window.removeEventListener('nightmail:reloading', keep); window.removeEventListener('nightmail:scope-changed', clear); };
   }, [toast]);
   return <ToastContext.Provider value={toast}>{children}<div className="ui-toasts" aria-label="Notifications">{toasts.map(item => <Toast key={item.id} id={item.id} tone={item.tone} message={item.message} action={item.action} duration={item.duration} dismiss={dismiss} />)}</div></ToastContext.Provider>;
+}
+/** Drops toasts emitted by an unmounted account/workspace scope (late catch blocks or unmount blur handlers). */
+export function ToastScope({ allow, children }: { allow: () => boolean; children: ReactNode }) {
+  const parent = useToast();
+  const scoped = useCallback<ToastFn>((message, tone, options) => { if (allow()) parent(message, tone, options); }, [allow, parent]);
+  return <ToastContext.Provider value={scoped}>{children}</ToastContext.Provider>;
 }
 export function useToast(): ToastFn {
   const toast = useContext(ToastContext);

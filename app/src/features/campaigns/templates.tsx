@@ -1,14 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { MoreHorizontal } from 'lucide-react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useInfiniteQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useApi, useApiDef, useApiMutation, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { errorText, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
 import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
 import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import type { EmailComposerRef } from './EmailComposer'
+import { draftAttachments } from './composer-content'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
@@ -22,7 +24,7 @@ import { useLeaveGuard } from '../../lib/leave-guard'
 import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 
-// Only the draft schema's fields: the composer also returns inline attachment ids, which the API rejects as unknown keys.
+// Only the draft schema's fields: the API rejects unknown keys.
 const templateDraft = (draft: CampaignTemplateDraft): CampaignTemplateDraft => ({ name: draft.name.trim(), description: draft.description ?? '', subject: draft.subject.trim(), previewText: draft.previewText ?? '', fromName: draft.fromName ?? '', replyTo: draft.replyTo ?? [], html: draft.html ?? '', attachments: draft.attachments ?? [], ...(draft.unsubscribePageUrl ? { unsubscribePageUrl: draft.unsubscribePageUrl } : {}) })
 
 /** Creates a campaign draft from a published template and opens it in the editor. */
@@ -32,7 +34,7 @@ export function useStartFromTemplate() {
   const { regionId } = useRegion()
   // Hosted campaigns follow their From domain's region, so they need no selected region.
   const { multiTenant } = useWorkspaceAccess()
-  const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }), undefined, false, true, regionId)
+  const mutation = useApiMutation((client, template: {id: string; name: string}) => client.campaigns.save({ templateId: template.id, idempotencyKey: crypto.randomUUID(), regionId, name: template.name, subject: '', previewText: '', fromName: '', fromEmail: '', listId: '', segmentId: null, html: '' }), undefined, false, invalidate.campaignCreate, regionId)
   async function start(template: {id: string; name: string}) {
     try { const campaign = await mutation.mutateAsync(template); navigate(`/campaigns/${encodeURIComponent(campaign.id)}/edit`) }
     catch (error) { toast(errorText(error), 'error') }
@@ -42,13 +44,23 @@ export function useStartFromTemplate() {
 
 /** Published templates to start a campaign from; with none, a link to Templates. */
 export function TemplatePickerDialog({ onOpenChange }: { onOpenChange: (open: boolean) => void }) {
-  const query = useApiQuery(['templates', { publishedOnly: true, page: 1 }], (client, signal) => client.templates.list({ publishedOnly: true, page: 1, pageSize: 50 }, signal))
+  const api = useApi()
+  const query = useInfiniteQuery({
+    queryKey: ['nightmail', 'templates', { publishedOnly: true }],
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => api.templates.list({ publishedOnly: true, cursor: pageParam, pageSize: 50 }, signal),
+    getNextPageParam: last => last.nextCursor ?? undefined,
+    retry: false,
+  })
   const { start, pending, unavailable } = useStartFromTemplate()
-  const rows: CampaignTemplateSummary[] = query.data?.items ?? []
+  const rows: CampaignTemplateSummary[] = query.data?.pages.flatMap(page => page.items) ?? []
   return <Dialog open onOpenChange={value => { if (pending === null) onOpenChange(value) }} title="Start from a template" className="template-picker-dialog">
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <div className="template-picker" aria-busy={query.isPending || undefined}>
+    {query.isError && !rows.length ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <div className="template-picker" aria-busy={query.isPending || undefined}>
       {query.isPending ? [0, 1, 2].map(index => <div key={index} className="template-picker__row" aria-hidden="true"><SkeletonText width="45%" lineHeight={18} /><SkeletonText width="70%" lineHeight={18} /></div>)
-        : rows.length ? rows.map(row => <button key={row.id} type="button" className="template-picker__row" disabled={pending !== null || unavailable} onClick={() => void start(row)}><span className="template-picker__name">{row.name}</span><span className="muted">{row.description || row.subject || 'No subject yet'}</span>{pending === row.id && <span className="muted template-picker__status" role="status">Creating draft…</span>}</button>)
+        : rows.length ? <>
+          {rows.map(row => <button key={row.id} type="button" className="template-picker__row" disabled={pending !== null || unavailable} onClick={() => void start(row)}><span className="template-picker__name">{row.name}</span><span className="muted">{row.description || row.subject || 'No subject yet'}</span>{pending === row.id && <span className="muted template-picker__status" role="status">Creating draft…</span>}</button>)}
+          {query.hasNextPage && <Button variant="ghost" loading={query.isFetchingNextPage} onClick={() => void query.fetchNextPage()}>Load more templates</Button>}
+        </>
         : <EmptyState title="No published templates" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/campaigns/templates">Go to templates</Link>} />}
     </div>}
   </Dialog>
@@ -65,7 +77,7 @@ export function TemplatesPage() {
   const requestedPage = Number(params.get('page'))
   const currentPage = Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1
   const query = useApiQuery(['templates', { search, archived, page: currentPage }], (client, signal) => client.templates.list({ search: search || undefined, archived, page: currentPage, pageSize: 10 }, signal))
-  const create = useApiMutation((client, name: string) => client.templates.create({ name }))
+  const create = useApiMutation((client, name: string) => client.templates.create({ name }), undefined, false, invalidate.templates)
   const [createOpen, setCreateOpen] = useState(false)
   const [name, setName] = useState('')
   async function createTemplate() {
@@ -154,7 +166,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
     try {
       const content = await composer.current?.prepare()
       if (!content) throw new Error('The editor is still loading. Try again in a moment.')
-      const submitted = templateDraft({...draftRef.current, html: content.html, attachments: [...new Set([...(draftRef.current.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])]})
+      const submitted = templateDraft({...draftRef.current, html: content.html, attachments: draftAttachments(draftRef.current.attachments, content)})
       const updated = await api.templates.update(templateRef.current.id, templateRef.current.revision, submitted)
       remember(updated)
       await refreshLists()
@@ -208,7 +220,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         {replyToValidation && <div id="template-reply-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
       </div>
       <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
-      <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
+      <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} body={template.draft.html ?? ''} shown={ready} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {leaveGuard}
     {previewOpen && <TemplatePreviewDialog template={template} onOpenChange={setPreviewOpen} />}

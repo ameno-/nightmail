@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { useApiMutation } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import type { ImportPreview } from '../../data/types'
 import { Alert, Button, Checkbox, DataTable, Dialog, Field, Input, Select, fieldError, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -109,7 +110,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       if (index + 1 < input.ids.length) setProgress(`Imported part ${index + 1} of ${input.ids.length}`)
     }
     return { imported, subscribed }
-  })
+  }, undefined, false, invalidate.audienceBulk)
   function resetPreview() { setPreview(null); setProgress(''); setStarted(false); committed.current.clear(); review.reset(); commit.reset() }
   async function readFile(file?: File) {
     if (!file) return

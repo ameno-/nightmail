@@ -25,6 +25,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
+| On demand (`api/ bun run tear:ci`) | Model-based tear suite | Runs on demand against a disposable local Postgres (`anomalyco/tear` is private); public CI's `acceptance` shard verifies the disposable-DB guard on all 11 real `api/tear/**/*.host.ts` processes |
 
 CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every matrix job to succeed. [Measured PR CI: 93 seconds](https://github.com/anomalyco/nightmail/actions/runs/43788887814), including queue time.
 
@@ -109,6 +110,16 @@ Connected AWS accounts run a published role template (`api/byo-templates/<major>
 
 **Fix:** revert the published file and add the change as a new version. A minor version only adds permissions. The acceptance test `BYO contract` checks every session the code asks for (`api/src/byo-permissions.ts`) against the current draft and every published version; a call outside its session policy fails the BYO v5 enrollment test.
 
+### Price pages
+
+The public price pages (`/pricing` and `/compare/*`, `app/src/features/pricing`) compare Nightmail with named competitors, so a wrong figure is a false claim. The check renders them with React as a browser gets them, at their own sizes and at inputs a visitor might type (empty, negative, decimals, commas, past a billion). **Fails when:**
+
+- a Nightmail figure isn't what `api/src/billing/rates.ts` charges for the usage it is marked with (`data-nightmail-sent` and `data-nightmail-received`), or the pages don't quote the rate, the free allowances, storage, or the top-up minimum and expiry (`CREDIT`) as the billing code has them;
+- a competitor price in `prices.ts` has no source, or a source lacks an https link to the vendor's page, the day it was read (not in the future) or the text it was read from;
+- a competitor row has no date and link, or a comparison shows a size without a verified price.
+
+**Fix:** take prices from `rates.ts` and `prices.ts`, never as literals in the page; give a new figure its `source`. A price that changed is re-read on the vendor's page and updated in `prices.ts` with the new day; one that can't be re-read is removed, not left stale. The pages stay out of the site's links and search engines until `PRICE_PAGES_LIVE` in `app/src/features/pricing/live.ts` is true.
+
 ## Deadlock guard (`acceptance`)
 
 Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two endpoints locking the same rows (the workspace's settings row, a domain claim, a receipt or its window) in opposite orders. Each request then failed with a 500 after `deadlock_timeout`. The acceptance job now:
@@ -167,12 +178,6 @@ A Workers preview version per PR (`wrangler versions upload --preview-alias pr-<
 
 The local workerd stack catches the classes that hit dev (routing, module loading, migrations) for free and without credentials. Recommendation: keep it. If live-provider coverage before merge is ever worth paying for, use one shared staging fixture, not one per PR.
 
-## tear (local nightly)
-
-tear, the model checker behind `api/tear/*` (access, admission, delivery, dispatch, inbox, ses), is a private repository, so CI cannot fetch it. `api/tear/nightly.sh` runs every checker's `ci` (with a seed that rotates by date) against a disposable Postgres in Docker, on a machine that can fetch it, in about 20 minutes. Logs and a summary go to `~/.cache/bane-tear/<date>`. With `TEAR_REPORT_REPO=anomalyco/nightmail`, a failing night opens or comments on the `tear-nightly` issue with each failing checker's minimal witnesses.
-
-Ryan's Mac runs it nightly with cronctl (`bane-tear-nightly`, 02:30) from a detached checkout of `dev` at `~/dev/bane-tear-nightly`. A witness after an API change is often model drift: for example, the first run found `rescheduleCampaign` and `unscheduleCampaign` missing from `api/tear/src/rest.rs`. Add new routes there when you add them to the API.
-
 ## Request logs
 
 Every process logs one JSON object per line (`log` and `logError` in `api/src/core.ts`): the Worker to Workers Logs (`observability` in both wrangler configs, 100% head sampling), the Node API and runner to stdout (CloudWatch on Fargate), and the mail gateway to CloudWatch `/ecs/nightmail-mail-gateway`. Each line carries `service` (`worker`, `api`, `runner`, `gateway`) and `deploy`, the first 12 characters of the commit (`DEPLOY_SHA`, which `deploy-worker.sh` sets on the Worker; set it in the environment for Node).
@@ -200,7 +205,7 @@ Each window's aggregate is cached under `reports/state/<stage>/`, and the seven-
 
 **Issues.** With `NIGHTLY_FILE_ISSUES=1` it opens one issue labeled `nightly` per new problem, at most five a night: a route and error code that answered 5xx, a new error code at error level (a new client error only from 50 a day), a p95 regression, or a jump in gateway auth failures. The body starts with a `nightly-fingerprint` comment; a problem with an open issue is only linked from the report, and one whose issue was closed gets a new issue that names the old one. The repository is public, so an issue is built only from values that pass `publicText` in the script: route templates, error codes, SQLSTATEs, stage names and counts. Request IDs stay in the private report; stack frames and log messages are never read, because a multiline database error can put caller text where a frame is expected.
 
-**Self-improve.** Ryan's Mac runs `~/.config/opensend-mx/nightly-report.sh` with cronctl (`bane-nightly-report`, 03:00 America/New_York, after tear's 02:30). It moves the detached checkout `~/dev/bane-nightly-report` to `bane/dev`, refreshes the `cf` work profile's token, runs the report, then starts one OpenCode child session (`anthropic/claude-opus-5-5`, high) under the Bane session that set it up. That session takes the top one to three issues filed that night, reproduces each on the isolated local harness (the acceptance suite or the preview stack against a disposable Postgres in Docker, never dev or production), opens a small fix PR to `dev` for each one it reproduces (never merged), comments on the ones it cannot, and appends what it did to the report's `## Self-improve` section.
+**Self-improve.** Ryan's Mac runs `~/.config/opensend-mx/nightly-report.sh` with cronctl (`bane-nightly-report`, 03:00 America/New_York). It moves the detached checkout `~/dev/bane-nightly-report` to `bane/dev`, refreshes the `cf` work profile's token, runs the report, then starts one OpenCode child session (`anthropic/claude-opus-5-5`, high) under the Bane session that set it up. That session takes the top one to three issues filed that night, reproduces each on the isolated local harness (the acceptance suite or the preview stack against a disposable Postgres in Docker, never dev or production), opens a small fix PR to `dev` for each one it reproduces (never merged), comments on the ones it cannot, and appends what it did to the report's `## Self-improve` section.
 
 Run the report by hand from `api/` (read-only unless `NIGHTLY_FILE_ISSUES=1`):
 

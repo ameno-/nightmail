@@ -5,7 +5,7 @@ import { Link, Navigate, useLocation, useNavigate, useParams, useSearchParams } 
 import { useApiDef, useApiMutation, useApiQuery, useRegion, useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { priceUc, total, usd } from '../../data/billing'
-import { useRefreshListsOnChange } from '../../data/invalidation'
+import { invalidate, useRefreshListsOnChange } from '../../data/invalidation'
 import { useRegionCatalog } from '../../data/regions'
 import { ApiError, campaignEditable, errorText, campaignResumable, type Campaign, type CampaignInput, type Newsletter, type SendCampaignInput } from '../../data/types'
 import { PostalAddressDialog } from '../../components/PostalAddress'
@@ -28,10 +28,11 @@ export { TemplatesPage, TemplateEditorPage } from './templates'
 import { TemplatePickerDialog } from './templates'
 import './campaigns.css'
 import type { EmailComposerRef } from './EmailComposer'
+import { draftAttachments } from './composer-content'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignSenderInput, SenderLines } from './CampaignSenderInput'
-import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
+import { AttachmentList, CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import { campaignVersion, useCampaignSync } from './useCampaignSync'
 import { ComposerSkeleton } from './skeletons'
 import { composerLoading, invalidSender } from './copy'
@@ -41,6 +42,9 @@ import { useSingleFlight } from '../../lib/single-flight'
 import { usePhone } from '../../lib/media'
 import { useLeaveGuard } from '../../lib/leave-guard'
 import { emailIsValid, replyToAddresses, replyToError } from './reply-to'
+import { mergeCampaign, mergeFieldsText, type MergeField } from './merge'
+import { CampaignPresence, useCampaignPresence } from './presence'
+import { PresenceOverlay } from './presence-overlay'
 
 // {{placeholders}} the campaign uses; email always resolves, everything else needs a contact value or a fallback.
 const placeholderPattern = /\{\{\s*([a-zA-Z_][a-zA-Z0-9_]*)\s*\}\}/g
@@ -139,6 +143,8 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const composer = useRef<EmailComposerRef>(null)
   const attachments = useRef<CampaignAttachmentsRef>(null)
   const [generation, setGeneration] = useState(0)
+  // A merge that took someone else's message or sender remounts just that part (rebase below).
+  const [rebased, setRebased] = useState({ body: 0, sender: 0 })
   const [composerReady, setComposerReady] = useState(false)
   const readyRef = useRef(false)
   const [dirty, setDirty] = useState(false)
@@ -147,6 +153,10 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const [remote, setRemote] = useState<Campaign | null>(null)
   const remoteRef = useRef<Campaign | null>(null)
   const [reviewUpdate, setReviewUpdate] = useState(false)
+  // Every attachment this page has seen on a version of the draft: where the composer finds an image the message shows
+  // but the form no longer lists (after a merge), so no saved message refers to an image it doesn't attach.
+  const seenAttachments = useRef(new Set(initial?.attachments ?? []))
+  const rememberAttachments = (version: Campaign) => { for (const id of version.attachments ?? []) seenAttachments.current.add(id) }
   const [loadingLatest, setLoadingLatest] = useState(false)
   const refreshController = useRef<AbortController | null>(null)
   const [preparing, setPreparing] = useState(false)
@@ -185,7 +195,9 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const pending = preparing || autosaving || attachmentsBusy || composerBusy || saveMutation.isPending || loadingLatest
   busyRef.current = pending
   const markDirty = useCallback(() => { editVersion.current += 1; setEdits(editVersion.current); dirtyRef.current = true; setDirty(true); setError('') }, [])
-  const handleComposerDirty = useCallback(() => { if (readyRef.current) markDirty() }, [markDirty])
+  // Message edits made since the saved version (accepted): whether this person changed the message, for a merge.
+  const bodyEdits = useRef(0), bodySaved = useRef(0), staleRetries = useRef(0)
+  const handleComposerDirty = useCallback(() => { if (readyRef.current) { bodyEdits.current += 1; markDirty() } }, [markDirty])
   function change<K extends keyof CampaignInput>(key: K, value: CampaignInput[K]) {
     updateForm({ ...formRef.current, [key]: value })
     markDirty()
@@ -197,6 +209,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     if (remoteRef.current && olderCampaign(next, remoteRef.current)) next = remoteRef.current
     if (acceptedRef.current && olderCampaign(next, acceptedRef.current)) next = acceptedRef.current
     acceptedRef.current = next
+    rememberAttachments(next)
     setAccepted(next)
     updateForm(campaignInput(next))
     setReplyToText(next.replyTo.join(', '))
@@ -207,6 +220,8 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     readyRef.current = false
     setComposerReady(readyRef.current)
     setGeneration(value => value + 1)
+    bodySaved.current = bodyEdits.current
+    staleRetries.current = 0
     setPreviewOpen(Boolean(next.previewText))
     queueRemote(null)
     setReviewUpdate(false)
@@ -218,10 +233,34 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     if (!baseline || next.id !== baseline.id || campaignVersion(next) === campaignVersion(baseline)) return
     if (olderCampaign(next, baseline) || (remoteRef.current && olderCampaign(next, remoteRef.current))) return
     setTestOpen(false)
-    if (dirtyRef.current || busyRef.current) queueRemote(next)
-    else applyRemote(next)
+    if (busyRef.current) queueRemote(next)
+    else if (!dirtyRef.current) applyRemote(next)
+    else if (!rebase(next)) queueRemote(next)
+  }
+  // Someone else saved while this person has unsaved edits. Where only they changed a field, theirs lands; where only
+  // this person did, the edit stays; where both did, `prefer` decides. Without one, nothing lands and the fields both
+  // changed stay unmerged, and so does a version that can't take edits: null. Once it landed, what it took of theirs comes
+  // back (maybe nothing), and autosave saves on their revision.
+  function rebase(theirs: Campaign, prefer?: 'mine' | 'theirs'): Set<MergeField> | null {
+    const base = acceptedRef.current
+    if (!base || theirs.id !== base.id || olderCampaign(theirs, base) || theirs.archivedAt || !campaignEditable(theirs)) return null
+    const { input, conflicts, taken } = mergeCampaign(campaignInput(base), formRef.current, campaignInput(theirs), bodyEdits.current !== bodySaved.current, prefer ?? 'mine')
+    if (conflicts.length && !prefer) return null
+    rememberAttachments(theirs)
+    acceptedRef.current = theirs
+    setAccepted(theirs)
+    updateForm(input)
+    if (taken.has('replyTo')) setReplyToText(theirs.replyTo.join(', '))
+    if (taken.has('html')) { bodySaved.current = bodyEdits.current; readyRef.current = false; setComposerReady(false); setBodyKeys(placeholders(theirs.html)) }
+    if (taken.has('html') || taken.has('sender')) setRebased(value => ({ body: value.body + Number(taken.has('html')), sender: value.sender + Number(taken.has('sender')) }))
+    queueRemote(null)
+    setReviewUpdate(false)
+    setAutosavePaused(false)
+    markDirty()
+    return taken
   }
   const sync = useCampaignSync(accepted, receiveRemote)
+  const { present, room } = useCampaignPresence(accepted?.id, 'write')
   const current = remote ?? accepted
   const unavailable = Boolean(sync.error && 'status' in sync.error && [401, 403, 404].includes(Number(sync.error.status)))
   const readOnly = unavailable || Boolean(current && (current.archivedAt || !campaignEditable(current)))
@@ -236,8 +275,12 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     const timer = setTimeout(() => { void save('auto') }, 800)
     return () => clearTimeout(timer)
   }, [edits, dirty, pending, saveDisabled, autosavePaused, form.name])
-  useEffect(() => { if (remote && !dirtyRef.current && !busyRef.current) applyRemote(remote) }, [remote, pending, dirty])
-  async function loadLatest() {
+  useEffect(() => { if (!remote || busyRef.current) return; if (!dirtyRef.current) applyRemote(remote); else rebase(remote) }, [remote, pending, dirty])
+  // Both changed the same field: keep these edits there, or load theirs there. Everything else merges either way.
+  // A version that can't take edits any more (sent, archived) has nothing to merge into: loading it drops yours.
+  const remoteLocked = Boolean(remote && (remote.archivedAt || !campaignEditable(remote)))
+  const conflicts = remote && accepted && !remoteLocked ? mergeCampaign(campaignInput(accepted), form, campaignInput(remote), bodyEdits.current !== bodySaved.current, 'mine').conflicts : []
+  async function loadLatest(prefer: 'mine' | 'theirs') {
     if (!acceptedRef.current || pending) return
     const controller = new AbortController()
     refreshController.current?.abort()
@@ -246,14 +289,19 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     busyRef.current = true
     try {
       const latest = await api.campaigns.get(acceptedRef.current.id, controller.signal)
-      if (!controller.signal.aborted) applyRemote(latest)
+      if (controller.signal.aborted) return
+      // The choice was about the version the dialog showed: a newer one is shown and asked about again.
+      const shown = remoteRef.current
+      if (dirtyRef.current && shown && campaignVersion(latest) !== campaignVersion(shown) && !olderCampaign(latest, shown)) { queueRemote(latest); return }
+      // Theirs can't take edits any more (sent, archived): nothing to keep, so it simply loads.
+      if (!dirtyRef.current || !rebase(latest, prefer)) applyRemote(latest)
     } catch (cause) { if (!controller.signal.aborted) toast(errorText(cause), 'error') }
     finally { if (!controller.signal.aborted) { setLoadingLatest(false); busyRef.current = false } }
   }
   const syncLabel = autosaving || preparing || saveMutation.isPending ? 'Saving…' : remote ? 'Update available' : autosavePaused ? 'Save failed' : error ? 'Check draft' : unavailable ? 'Unavailable' : readOnly ? 'Read only' : sync.connection === 'offline' ? 'Sync interrupted' : dirty ? form.name.trim() ? 'Unsaved changes' : 'Name required' : accepted ? 'Saved' : 'New draft'
   const syncActionable = Boolean(remote || error || autosavePaused || sync.connection === 'offline')
   const syncState = error || autosavePaused || sync.connection === 'offline' ? 'offline' : remote || dirty || autosaving ? 'changed' : sync.connection
-  const syncTitle = error || sync.error?.message || (remote ? 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? `This ${thing} is no longer editable.` : 'Changes save automatically and sync with MCP and the API.')
+  const syncTitle = error || sync.error?.message || (remote ? conflicts.length ? `You both changed ${mergeFieldsText(conflicts)}.` : 'A newer version is available.' : autosavePaused ? 'Autosave paused. Retry saving your changes.' : readOnly ? `This ${thing} is no longer editable.` : 'Changes save automatically and sync with MCP and the API.')
   function syncAction() { if (remote) setReviewUpdate(true); else if (autosavePaused) void save('edit'); else if (error) toast(error, 'error'); else sync.checkNow() }
   function reportError(value: string) { setError(value); toast(value, 'error') }
   async function save(next: 'auto' | 'edit' | 'review' | 'test') {
@@ -281,13 +329,15 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
     setAutosavePaused(false)
     if (automatic) setAutosaving(true)
     else setPreparing(true)
+    const bodyVersion = bodyEdits.current
+    let retry = false
     try {
       let submitted = creation.current?.input
       if (!submitted) {
         const content = await composer.current?.prepare()
         if (!content) throw new Error(composerLoading)
         if (continuing && !content.html.trim()) throw new Error('Add some email content before continuing.')
-        submitted = { ...input, ...content, attachments: [...new Set([...(input.attachments ?? []), ...(content.inlineAttachmentIds ?? [])])], defaults: Object.fromEntries(Object.entries(input.defaults ?? {}).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value)), name: input.name.trim(), subject: input.subject.trim(), fromName: input.fromName.trim(), fromEmail: input.fromEmail.trim(), regionId: input.regionId.trim() }
+        submitted = { ...input, html: content.html, attachments: draftAttachments(input.attachments, content), defaults: Object.fromEntries(Object.entries(input.defaults ?? {}).map(([key, value]) => [key, value.trim()]).filter(([, value]) => value)), name: input.name.trim(), subject: input.subject.trim(), fromName: input.fromName.trim(), fromEmail: input.fromEmail.trim(), regionId: input.regionId.trim() }
         if (!submitted.id) {
           submitted.idempotencyKey = crypto.randomUUID()
           creation.current = { input: structuredClone(submitted), version }
@@ -300,11 +350,17 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       creation.current = null
       const changedWhileSaving = editVersion.current !== version
       acceptedRef.current = saved
+      bodySaved.current = bodyVersion
+      staleRetries.current = 0
       setAccepted(saved)
       dirtyRef.current = changedWhileSaving
       setDirty(changedWhileSaving)
       queueRemote(remoteRef.current && olderCampaign(saved, remoteRef.current) ? remoteRef.current : null)
-      updateForm({...formRef.current, id: saved.id, revision: saved.revision, draft: saved.draft, attachments: changedWhileSaving ? formRef.current.attachments : saved.attachments})
+      rememberAttachments(saved)
+      // Edited while saving: the form keeps its newer edits, and learns which attachments this save added or dropped
+      // (an image the composer uploaded, one #583's pruning removed), so a later merge reads them as saved, not as removed.
+      const sent = new Set(input.attachments ?? []), stored = new Set(saved.attachments ?? []), kept = (formRef.current.attachments ?? []).filter(id => !sent.has(id) || stored.has(id))
+      updateForm({...formRef.current, id: saved.id, revision: saved.revision, draft: saved.draft, attachments: changedWhileSaving ? [...kept, ...(saved.attachments ?? []).filter(id => !sent.has(id) && !kept.includes(id))] : saved.attachments})
       const reviewing = next === 'review' && !changedWhileSaving
       if (!submitted.id && !reviewing) {
         preserveEditor(saved)
@@ -315,6 +371,18 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       setBodyKeys(placeholders(submitted.html))
     } catch (cause) {
       if (!mounted.current) return
+      // Someone else saved first: lay these edits over their version and save again, a few times at most. Where you both
+      // changed the same field, their version waits behind "Update available".
+      if (cause instanceof ApiError && cause.code === 'STALE_CAMPAIGN_REVISION' && acceptedRef.current && staleRetries.current < 3) {
+        staleRetries.current += 1
+        const latest = await api.campaigns.get(acceptedRef.current.id).catch(() => null)
+        if (!mounted.current) return
+        const taken = latest && rebase(latest)
+        // Continue and Send test act on what this person saw: when the merge brought in someone else's change, it
+        // stops and shows it instead of going on with it.
+        if (taken) { retry = !automatic && !(continuing && taken.size); if (continuing && taken.size) toast(`Someone else changed this ${thing}. Check it, then try again.`, 'info'); return }
+        if (latest) { queueRemote(latest); if (!automatic) setReviewUpdate(true); return }
+      }
       const status = cause && typeof cause === 'object' && 'status' in cause ? Number(cause.status) : 0
       if (creation.current) {
         if (!creation.current.ambiguous && status >= 400 && status < 500 && status !== 408) creation.current = null
@@ -328,6 +396,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       guard.current = false
       if (mounted.current) { setPreparing(false); setAutosaving(false) }
     }
+    if (retry) void save(next)
   }
   // In-app links ask before dropping edits autosave hasn't stored: a draft without a name, a failed save, or typing
   // inside autosave's 800 ms wait. Closing or reloading the tab gets the browser's prompt.
@@ -341,6 +410,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       <h1 className="sr-only">{issueOf ? accepted ? 'Edit issue' : 'New issue' : accepted ? 'Edit campaign' : 'Create campaign'}</h1>
       <Input id="campaign-name" className="studio-name" aria-label={issueOf ? 'Issue name' : 'Campaign name'} placeholder={issueOf ? 'Untitled issue' : 'Untitled campaign'} value={form.name} onChange={event => change('name', event.target.value)} required disabled={controlsDisabled} />
     </>} steps={<CampaignSteps step="write" onReview={saveDisabled || pending || autosavePaused ? undefined : review} />} actions={<>
+      <CampaignPresence present={present} room />
       {!phone && <div className="campaign-sync-status" role="status" data-state={syncState} data-actionable={syncActionable || undefined} title={syncTitle}>
         <span className="campaign-sync-dot" aria-hidden="true" />
         {syncActionable ? <Button variant="ghost" size="sm" disabled={pending} onClick={syncAction}>{syncLabel}</Button> : <span>{syncLabel}</span>}
@@ -348,7 +418,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       {phone ? <>
         <Button variant="primary" disabled={saveDisabled || pending || autosavePaused} loading={preparing} onClick={review}>Continue</Button>
         <DropdownMenu label="More actions" trigger={<IconButton label={syncActionable ? `More actions. ${syncLabel}` : 'More actions'} className="campaign-menu-trigger" data-state={syncActionable ? syncState : undefined}><MoreHorizontal size={16} /></IconButton>} items={[
-          ...(syncActionable ? [{ label: `${syncLabel} · ${remote ? 'Load latest' : error && !autosavePaused ? 'Details' : 'Retry'}`, hint: syncTitle, disabled: pending, onSelect: syncAction }] : []),
+          ...(syncActionable ? [{ label: `${syncLabel} · ${remote ? 'Choose' : error && !autosavePaused ? 'Details' : 'Retry'}`, hint: syncTitle, disabled: pending, onSelect: syncAction }] : []),
           // A new draft offers a template; once it has saved (named), a test send.
           ...(accepted ? [{ label: 'Send test', disabled: saveDisabled || pending || autosavePaused, onSelect: () => void save('test') }] : [{ label: 'Use a template', disabled: pending, onSelect: () => setTemplatesOpen(true) }]),
         ]} />
@@ -359,11 +429,12 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       </>}
     </>} />
     {options.isError && <ErrorState error={options.error} onRetry={() => options.refetch()} />}
+    <PresenceOverlay room={room} />
     <section className="campaign-compose-workspace" aria-label={issueOf ? 'Issue composer' : 'Campaign composer'}>
       <div className="campaign-compose-scroll">
         <div className="campaign-compose-sheet">
           <div className="campaign-compose-metadata">
-            <div className="campaign-compose-row campaign-compose-sender"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={generation} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /><Button variant="ghost" size="sm" className="campaign-sender-toggle" aria-expanded={senderDetailsOpen} aria-controls="campaign-sender-details" onClick={toggleSender}>Reply to<ChevronRight size={14} aria-hidden="true" /></Button></div>
+            <div className="campaign-compose-row campaign-compose-sender"><label htmlFor="campaign-from-email">From</label><CampaignSenderInput key={`${generation}.${rebased.sender}`} name={form.fromName} email={form.fromEmail} domains={choices.domains.map(domain => domain.name)} disabled={controlsDisabled || options.isPending} onChange={({name, email}) => {const domain = email.split('@')[1]?.toLowerCase(); const supports = (parent: string) => domain === parent || domain?.endsWith(`.${parent}`); const match = choices.domains.find(item => supports(item.name) && item.regionId === formRef.current.regionId) ?? choices.domains.find(item => supports(item.name)); if (name !== formRef.current.fromName || email !== formRef.current.fromEmail || (match && match.regionId !== formRef.current.regionId)) updateForm({...formRef.current, fromName: name, fromEmail: email, ...(match ? {regionId: match.regionId} : {})}); markDirty()}} /><Button variant="ghost" size="sm" className="campaign-sender-toggle" aria-expanded={senderDetailsOpen} aria-controls="campaign-sender-details" onClick={toggleSender}>Reply to<ChevronRight size={14} aria-hidden="true" /></Button></div>
             <div id="campaign-sender-details" className="campaign-compose-preview" data-open={senderDetailsOpen || undefined} aria-hidden={!senderDetailsOpen} inert={!senderDetailsOpen}>
               <div>
                 <div className="campaign-compose-row"><label htmlFor="campaign-reply-to">Reply to</label><Input id="campaign-reply-to" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'campaign-reply-to-error' : undefined} onChange={event => { const value = event.target.value; setReplyToText(value); setReplyToLeft(false); updateForm({...formRef.current, replyTo: replyToAddresses(value)}); markDirty() }} onBlur={() => setReplyToLeft(true)} disabled={controlsDisabled} /></div>
@@ -377,8 +448,8 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
               <div><div className="campaign-compose-row"><label htmlFor="campaign-preview">Inbox preview</label><Input ref={previewInput} id="campaign-preview" maxLength={200} placeholder="Shown after the subject" value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={controlsDisabled} /></div></div>
             </div>
           </div>
-          <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={generation} ref={composer} personalize attachmentIds={form.attachments ?? []} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
-          <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
+          <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={`${generation}.${rebased.body}`} ref={composer} personalize attachmentIds={form.attachments ?? []} knownAttachmentIds={[...seenAttachments.current]} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
+          <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} body={form.draft?.html ?? form.html} shown={composerReady} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
           {/* Every contact has an email, so {{email}} needs no fallback and no row. */}
           {fallbackKeys.length > 0 && <section className="campaign-personalize" aria-labelledby="campaign-personalize-title">
             <h2 className="campaign-personalize__lead" id="campaign-personalize-title">Fallbacks</h2>
@@ -387,7 +458,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
         </div>
       </div>
     </section>
-    <ConfirmDialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title={`Load the latest ${thing}?`} description={`This ${thing} changed elsewhere. Loading the latest version discards your unsaved changes.`} confirmLabel="Load latest" onConfirm={loadLatest} pending={loadingLatest} />
+    <Dialog open={reviewUpdate} onOpenChange={value => {if (!loadingLatest) setReviewUpdate(value)}} title={conflicts.length ? `You both changed ${mergeFieldsText(conflicts)}` : `This ${thing} changed elsewhere`} description={remoteLocked ? 'It can’t be edited any more. Loading it discards your unsaved changes.' : 'Your other edits stay either way.'} footer={remoteLocked ? <Button variant="primary" loading={loadingLatest} onClick={() => void loadLatest('theirs')}>Load latest</Button> : <><Button disabled={loadingLatest} onClick={() => void loadLatest('theirs')}>Load theirs</Button><Button variant="primary" loading={loadingLatest} onClick={() => void loadLatest('mine')}>Keep mine</Button></>}>{null}</Dialog>
     {accepted && testOpen && <TestEmailDialog campaign={accepted} open={testOpen} onOpenChange={setTestOpen} />}
     {templatesOpen && <TemplatePickerDialog onOpenChange={setTemplatesOpen} />}
     {leaveGuard}
@@ -403,7 +474,7 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
   const samples = placeholders(campaign.subject, campaign.previewText, campaign.html).filter(key => key !== 'email' && (fallbacks[key] === undefined || fallbacks[key] === ''))
   const [data, setData] = useState<Record<string, string>>(() => Object.fromEntries(samples.map(key => [key, key === 'name' ? 'Sam Example' : key === 'firstName' ? 'Sam' : ''])))
   const [sent, setSent] = useState<{ to: string; id?: string } | null>(null)
-  const mutation = useApiMutation((api, input: { id: string; to: string; data: Record<string, string> }) => api.campaigns.test(input))
+  const mutation = useApiMutation((api, input: { id: string; to: string; data: Record<string, string> }) => api.campaigns.test(input), undefined, false, invalidate.campaignTest)
   async function submit(event: FormEvent) {
     event.preventDefault()
     if (guard.current || mutation.isPending) return
@@ -432,18 +503,83 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
   </Dialog>
 }
 
+// Lightweight controls when GET /v1/campaigns/{id} fails (e.g. 422 READ_TOO_LARGE on a 1.8M send):
+// reads GET /v1/campaigns/{id}/state (single row, no counts) so Pause, Resume, Unschedule and Cancel stay usable.
+function CampaignControlFallback({ id, state, error, refreshing, onRetry }: { id: string; state: import('../../data/types').CampaignState; error: unknown; refreshing: boolean; onRetry: () => void }) {
+  const api = useApi()
+  const cache = useQueryClient()
+  const toast = useToast()
+  const { canAdminister } = useWorkspaceAccess()
+  const [confirm, setConfirm] = useState<'cancel' | 'unschedule' | null>(null)
+  const [busy, setBusy] = useState<'pause' | 'resume' | 'unschedule' | 'cancel' | null>(null)
+  const [actionError, setActionError] = useState('')
+  const active = ['preparing', 'sending'].includes(state.status)
+  const paused = state.status === 'paused' || state.status === 'failed'
+  const scheduled = state.status === 'scheduled'
+  const cancellable = !state.archivedAt && (active || paused)
+  async function run(kind: 'pause' | 'resume' | 'unschedule', call: () => Promise<Campaign>, message: string) {
+    setBusy(kind); setActionError('')
+    try {
+      const next = await call()
+      toast(message, 'success')
+      cache.setQueryData(['nightmail', 'campaign', id], next)
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign-state', id] })
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' })
+    } catch (cause) { setActionError(errorText(cause)) }
+    finally { setBusy(null) }
+  }
+  async function cancel() {
+    setBusy('cancel'); setActionError('')
+    try {
+      const result = await api.campaigns.cancel(id)
+      toast(`Campaign canceled · ${number(result.canceled)} not sent`, 'success')
+      setConfirm(null)
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign-state', id] })
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaign', id] })
+      void cache.invalidateQueries({ queryKey: ['nightmail', 'campaigns'], refetchType: 'none' })
+    } catch (cause) { setActionError(errorText(cause)) }
+    finally { setBusy(null) }
+  }
+  return <div className="campaign-review">
+    <CampaignBar back={state.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">Campaign</h1>}
+      actions={<><Link className="ui-button ui-button--secondary ui-button--md" to={campaignLogs(id)}>View logs</Link><StatusBadge status={campaignDisplayStatus(state)} /></>} />
+    <div className="campaign-review__body stack">
+      <div className="campaign-scheduled" data-tone="warning" role="status">
+        <div className="campaign-scheduled__text">
+          <strong>Live counts unavailable</strong>
+          <span className="muted">{errorText(error, 'Couldn’t load campaign counts.')}</span>
+        </div>
+        <div className="cluster">
+          {active && canAdminister && <Button variant="secondary" size="sm" loading={busy === 'pause'} disabled={busy !== null} onClick={() => void run('pause', () => api.campaigns.pause(id), 'Sending paused')}>Pause</Button>}
+          {paused && canAdminister && <Button variant="primary" size="sm" loading={busy === 'resume'} disabled={busy !== null} onClick={() => void run('resume', () => api.campaigns.resume(id), 'Sending resumed')}>Resume</Button>}
+          {scheduled && canAdminister && <Button variant="secondary" size="sm" loading={busy === 'unschedule'} disabled={busy !== null} onClick={() => setConfirm('unschedule')}>Unschedule</Button>}
+          {cancellable && canAdminister && <Button variant="ghost" size="sm" disabled={busy !== null} onClick={() => setConfirm('cancel')}>Cancel campaign</Button>}
+          <Button variant="secondary" size="sm" loading={refreshing} disabled={busy !== null} onClick={onRetry}>Retry</Button>
+        </div>
+      </div>
+      {actionError && <p className="campaign-note" data-tone="danger" role="alert">{actionError}</p>}
+    </div>
+    <ConfirmDialog open={confirm === 'cancel'} onOpenChange={open => { if (!open) setConfirm(null) }} danger title="Cancel this campaign?" description="Queued emails are canceled and remaining recipients won’t get it. Sent emails stay sent. You can’t undo this." confirmLabel="Cancel campaign" pending={busy === 'cancel'} onConfirm={cancel} />
+    <ConfirmDialog open={confirm === 'unschedule'} onOpenChange={open => { if (!open) setConfirm(null) }} title="Unschedule this campaign?" description="It becomes a draft again and won’t send." confirmLabel="Unschedule" pending={busy === 'unschedule'} onConfirm={async () => { await run('unschedule', () => api.campaigns.unschedule(id), 'Unscheduled. The campaign is a draft again.'); setConfirm(null) }} />
+  </div>
+}
+
 export function CampaignReviewPage() {
   const { id = '' } = useParams()
   const query = useApiQuery(['campaign', id], (api, signal) => api.campaigns.get(id, signal), { interval: campaignPollInterval })
+  // If detail fails (e.g. 422 READ_TOO_LARGE on a large send), fall back to compact /state so Pause & Cancel stay usable.
+  const missingOrDenied = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status ?? 0)
+  const fallbackState = useApiQuery(['campaign-state', id], (api, signal) => api.campaigns.state(id, signal), { enabled: query.isError && !query.data && !missingOrDenied })
   // The polled review learns of a finished or paused send before the cached Campaigns list does.
-  useRefreshListsOnChange('campaigns', query.data?.status)
+  useRefreshListsOnChange('campaigns', query.data?.status ?? fallbackState.data?.status)
   const stats = useCampaignStats(query.data)
   // Whether a draft may be a required notice is read beside it, so the Recipients choice is there from the first frame.
   const settings = useApiDef(queries.workspaceSettings())
   const editableDraft = Boolean(query.data && !query.data.archivedAt && campaignEditable(query.data))
-  if (query.isPending || (query.data && campaignFinished(query.data) && stats.isPending) || (editableDraft && settings.isPending)) return <CampaignRouteSkeleton kind="review" />
-  if (!query.data) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
-  return <CampaignReview key={id} campaign={query.data} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
+  const waitingStats = Boolean(query.data && campaignFinished(query.data) && stats.isPending && stats.errorUpdateCount === 0)
+  if (query.isPending || (query.isError && !query.data && !missingOrDenied && fallbackState.isPending) || waitingStats || (editableDraft && settings.isPending)) return <CampaignRouteSkeleton kind="review" />
+  if (!query.data) return fallbackState.data ? <CampaignControlFallback id={id} state={fallbackState.data} error={query.error} refreshing={query.isFetching} onRetry={() => void query.refetch()} /> : <ErrorState error={query.error} onRetry={() => query.refetch()} />
+  return <CampaignReview key={id} campaign={query.data} stats={stats} stale={query.isError} refreshing={query.isFetching} refresh={() => void query.refetch()} />
 }
 
 // The server renders block HTML into the styled email; the review shows that rendering, not the blocks.
@@ -457,6 +593,24 @@ function CampaignRenderedPreview({ campaign, transform = html => html }: { campa
 const unreleasedSchedule = (campaign: Campaign) => Boolean(campaign.scheduledAt) && ['preparing', 'scheduled', 'paused'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) === 0
 const sampleValue = (key: string) => key === 'email' ? 'sam@example.com' : key === 'name' ? 'Sam Example' : key === 'firstName' ? 'Sam' : `[${key}]`
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, char => `&#${char.charCodeAt(0)};`)
+
+// A Review change saved on the version it was read at; if someone saved since, it goes again on theirs, unless they
+// changed the same thing (then the stale-revision error stands and the page reloads the campaign).
+async function saveChange(api: ReturnType<typeof useApi>, campaign: Campaign, change: Partial<CampaignInput>) {
+  const mine = { ...campaignInput(campaign), ...change }
+  try { return await api.campaigns.save(mine) }
+  catch (cause) {
+    if (!(cause instanceof ApiError && cause.code === 'STALE_CAMPAIGN_REVISION')) throw cause
+    // Review is where the message is approved: a save here never brings in a change this page didn't show. When anything
+    // of theirs would be taken, or their message differs by a single byte (the merge compares messages as the composer
+    // reads them, which evens some changes out, such as a link it can't import), the stale-revision error stands, as
+    // does Send's until the page is read again.
+    const base = campaignInput(campaign), latest = campaignInput(await api.campaigns.get(campaign.id))
+    const { input, conflicts, taken } = mergeCampaign(base, mine, latest, false, 'mine')
+    if (conflicts.length || taken.size || latest.html !== base.html || String(latest.attachments ?? []) !== String(base.attachments ?? [])) throw cause
+    return api.campaigns.save(input)
+  }
+}
 
 function useCampaignCache() {
   const cache = useQueryClient()
@@ -560,7 +714,7 @@ function UnsubscribePageField({ campaign, disabled }: { campaign: Campaign; disa
     const next = value.trim()
     if (problem || next === (campaign.unsubscribePageUrl ?? '')) return
     setSaving(true)
-    try { accept(await api.campaigns.save({ ...campaignInput(campaign), unsubscribePageUrl: next })) }
+    try { accept(await saveChange(api, campaign, { unsubscribePageUrl: next })) }
     catch (cause) { toast(errorText(cause), 'error') }
     finally { setSaving(false) }
   }
@@ -574,10 +728,11 @@ function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; n
   const toast = useToast()
   const accept = useCampaignCache()
   const [cursor, setCursor] = useState<string | undefined>()
+  const [segmentCursor, setSegmentCursor] = useState<string | undefined>()
   const [saving, setSaving] = useState(false)
-  const options = useApiQuery(['campaign-audience-options', cursor ?? ''], async (api, signal) => {
-    const [listPage, segmentPage] = await Promise.all([api.lists.list({ pageSize: 100, cursor, counts: false }, signal), api.segments.list({ pageSize: 100 }, signal)])
-    return { lists: [...listPage.items].sort((a, b) => a.name.localeCompare(b.name)), segments: [...segmentPage.items].sort((a, b) => a.name.localeCompare(b.name)), next: listPage.nextCursor }
+  const options = useApiQuery(['campaign-audience-options', cursor ?? '', segmentCursor ?? ''], async (api, signal) => {
+    const [listPage, segmentPage] = await Promise.all([api.lists.list({ pageSize: 100, cursor, counts: false }, signal), api.segments.list({ pageSize: 100, cursor: segmentCursor }, signal)])
+    return { lists: [...listPage.items].sort((a, b) => a.name.localeCompare(b.name)), segments: [...segmentPage.items].sort((a, b) => a.name.localeCompare(b.name)), next: listPage.nextCursor, nextSegment: segmentPage.nextCursor }
   })
   const lists = options.data?.lists ?? [], segments = options.data?.segments ?? []
   // The chosen list or segment may not be on the loaded page: read its name, so it never shows as an ID.
@@ -587,7 +742,7 @@ function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; n
   const chosenSegment = useApiQuery(['segments', campaign.segmentId ?? ''], (api, signal) => api.segments.get(campaign.segmentId!, signal), { enabled: segmentMissing })
   async function save(change: Partial<CampaignInput>) {
     setSaving(true)
-    try { accept(await api.campaigns.save({ ...campaignInput(campaign), ...change })) }
+    try { accept(await saveChange(api, campaign, change)) }
     catch (cause) { toast(errorText(cause), 'error') }
     finally { setSaving(false) }
   }
@@ -600,6 +755,7 @@ function AudiencePicker({ campaign, notices, disabled }: { campaign: Campaign; n
     <Field label="List" htmlFor="campaign-list"><Select id="campaign-list" aria-label="Recipient list" disabled={off} value={campaign.listId} onValueChange={value => void choose(value, campaign.segmentId ?? null)} options={options.isPending ? [{ value: campaign.listId, label: 'Loading lists…', disabled: true }] : lists.length ? [{ value: '', label: 'Choose a list' }, ...(listMissing ? [{ value: campaign.listId, label: chosenList.data?.name ?? (chosenList.isError ? 'List not found' : 'Loading list…') }] : []), ...lists.map(list => ({ value: list.id, label: list.name }))] : [{ value: '', label: 'No lists yet. Create one in Audience.', disabled: true }]} /></Field>
     {(cursor || options.data?.next) && <div className="cluster"><Button onClick={() => setCursor(undefined)}>First lists</Button><Button disabled={!options.data?.next} onClick={() => setCursor(options.data?.next ?? undefined)}>More lists</Button></div>}
     <Field label="Segment" htmlFor="campaign-segment"><Select id="campaign-segment" aria-label="Segment" disabled={off || !campaign.listId} value={campaign.segmentId ?? ''} onValueChange={value => void choose(campaign.listId, value || null)} options={[{ value: '', label: 'Everyone on the list' }, ...(campaign.segmentId && segmentMissing ? [{ value: campaign.segmentId, label: chosenSegment.data?.name ? `Only ${chosenSegment.data.name}` : chosenSegment.isError ? 'Segment not found' : 'Loading segment…' }] : []), ...segments.map(segment => ({ value: segment.id, label: `Only ${segment.name}` })), ...(!options.isPending && !segments.length ? [{ value: '__none', label: 'No segments yet. Create one in Audience.', disabled: true }] : [])]} /></Field>
+    {(segmentCursor || options.data?.nextSegment) && <div className="cluster"><Button disabled={!segmentCursor} onClick={() => setSegmentCursor(undefined)}>First segments</Button><Button disabled={!options.data?.nextSegment} onClick={() => setSegmentCursor(options.data?.nextSegment ?? undefined)}>More segments</Button></div>}
     {/* A campaign that is already a notice keeps the choice, so it can go back to marketing if notices were turned off. */}
     {(notices || campaign.requiredNotice) && <Field label="Kind" htmlFor="campaign-kind" hint={campaign.requiredNotice ? 'Reaches people who unsubscribed too, with no unsubscribe link.' : undefined}><Select id="campaign-kind" aria-label="Kind" disabled={disabled || saving} value={campaign.requiredNotice ? 'notice' : 'marketing'} onValueChange={value => { if (!saving && (value === 'notice') !== campaign.requiredNotice) void save({ requiredNotice: value === 'notice' }) }} options={[{ value: 'marketing', label: 'Marketing' }, { value: 'notice', label: 'Required notice', disabled: !notices }]} /></Field>}
   </div>
@@ -622,12 +778,12 @@ const day = (value: string) => date(value, { month: 'short', day: 'numeric', ...
 
 // Only the outcomes that happened, each opening its emails in Logs; opens and clicks as the newsletter's issues show them.
 // A count links only when Logs lists exactly that many: Canceled, and Recipients with some never queued, stay plain.
-function CampaignResults({ campaign }: { campaign: Campaign }) {
+function CampaignResults({ campaign, stats: statsQuery }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats> }) {
   const byStatus = campaign.counts?.byStatus ?? {}
   const total = Math.max(campaign.counts?.total ?? 0, campaign.delivery?.total ?? 0)
   // Past the email history, the per-email counts are gone: the stored totals keep the outcomes (not suppressed or canceled).
   const expired = (campaign.counts?.total ?? 0) === 0 && (campaign.delivery?.expanded ?? 0) > 0
-  const stats = useCampaignStats(campaign).data
+  const stats = statsQuery.data
   const totals = expired ? stats?.totals : undefined
   const figure = (perEmail: number, stored?: number) => expired ? stored ?? null : perEmail
   const logs = (status?: string) => expired ? undefined : campaignLogs(campaign.id, status)
@@ -649,10 +805,11 @@ function CampaignResults({ campaign }: { campaign: Campaign }) {
     <SummaryLine label={<strong>Recipients</strong>} figure={number(total)} to={campaign.counts?.total && campaign.counts.total === total ? logs() : undefined} />
     {rows.filter(row => row.always || (typeof row.count === 'number' ? row.count > 0 : Boolean(row.count))).map(row => <SummaryLine key={row.label} label={row.label}
       figure={row.count === null ? '—' : typeof row.count === 'number' ? number(row.count) : row.count} to={row.status && typeof row.count === 'number' && row.count > 0 ? logs(row.status) : undefined} />)}
+    {statsQuery.isError && <div className="campaign-summary-line muted"><span>Engagement stats unavailable</span><Button variant="ghost" size="sm" loading={statsQuery.isFetching} onClick={() => void statsQuery.refetch()}>Retry</Button></div>}
   </div>
 }
 
-function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Campaign; stale: boolean; refreshing: boolean; refresh: () => void }) {
+function CampaignReview({ campaign, stats, stale, refreshing, refresh }: { campaign: Campaign; stats: ReturnType<typeof useCampaignStats>; stale: boolean; refreshing: boolean; refresh: () => void }) {
   const navigate = useNavigate()
   // An issue goes back to its newsletter, and the sidebar marks it.
   const issueOf = useNewsletterOf(campaign.listId), thing = issueOf ? 'issue' : 'campaign'
@@ -676,6 +833,8 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const origin = multiTenant ? '' : ` from ${campaign.regionId}`
 
   const draft = !campaign.archivedAt && campaignEditable(campaign)
+  // Review joins the draft's room too: someone still writing sees you here, and you see them.
+  const { present } = useCampaignPresence(draft ? campaign.id : null, 'review')
   const readinessError = campaignReadinessError(campaign)
   const fallbacks = campaign.draft?.defaults ?? {}
   const keys = placeholders(campaign.subject, campaign.previewText, campaign.html)
@@ -694,7 +853,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
   const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
   const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const toast = useToast()
-  const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input))
+  const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input), undefined, false, invalidate.campaignSend)
   // Every campaign footer carries the workspace's postal address, so Send and Schedule ask for it first when it is
   // missing, then go on: to the confirmation, or straight to sending when the API asked after it was confirmed.
   const settings = useApiDef(queries.workspaceSettings(), { enabled: draft })
@@ -759,7 +918,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
     ...(!canAdminister ? [['neutral', `Only owners and admins can send or schedule ${thing}s.`] as ['neutral', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
-  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<>{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<><CampaignPresence present={present} room={draft} />{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
   const dialogs = <>
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? `Schedule this ${thing}?` : `Send this ${thing} now?`} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${noticeNote}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost}${noticeNote || ' Consent is checked again as each email sends.'}${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}
@@ -794,6 +953,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
                 {campaign.replyTo.length > 0 && <><dt>Reply to</dt><dd><AddressList values={campaign.replyTo} /></dd></>}
                 <dt>Subject</dt><dd>{campaign.subject || <span className="muted">Not set</span>}</dd>
                 {campaign.previewText && <><dt>Inbox preview</dt><dd>{campaign.previewText}</dd></>}
+                {(campaign.attachments?.length ?? 0) > 0 && <><dt>Attached</dt><dd><AttachmentList ids={campaign.attachments!} body={campaign.html} /></dd></>}
               </dl>
               {missingFallbacks.length > 0 && <p className="review-detail review-warn">{missingFallbacks.map(key => `{{${key}}}`).join(', ')} {missingFallbacks.length === 1 ? 'needs' : 'need'} a fallback, or contacts without a value stop the send.</p>}
               {!campaign.requiredNotice && <UnsubscribePageField campaign={campaign} disabled={sendMutation.isPending} />}
@@ -840,7 +1000,7 @@ function CampaignReview({ campaign, stale, refreshing, refresh }: { campaign: Ca
           {scheduledView ? <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix="To " /> : <>
             <AudienceSource listId={campaign.listId} segmentId={campaign.segmentId} prefix={campaign.status === 'done' ? `Sent ${day(campaign.scheduledAt || campaign.updatedAt)} to ` : undefined} />
             <CampaignPacing key={`${campaign.id}:${campaign.delivery?.pacing?.perDay ?? ''}:${campaign.delivery?.pacing?.autoPause ?? ''}:${campaign.delivery?.pacing?.rateShare ?? ''}`} campaign={campaign} />
-            {finished ? <CampaignResults campaign={campaign} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
+            {finished ? <CampaignResults campaign={campaign} stats={stats} /> : campaign.counts ? <CampaignProgress campaign={campaign} /> : <div className="campaign-audience-summary"><div className="campaign-summary-line"><span>Recipients</span><span>{number(campaign.recipients)}</span></div></div>}
           </>}
           {scheduledView && <CampaignPacing key={`${campaign.id}:paused`} campaign={campaign} />}
         </>}

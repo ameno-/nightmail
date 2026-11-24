@@ -498,7 +498,7 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
       count(c.id)::int AS matched, count(*) FILTER (WHERE c.suppression_reason = 'hard_bounce' AND c.suppressed_at >= i.created_at)::int AS hard_bounced,
       count(*) FILTER (WHERE c.suppression_reason = 'complaint' AND c.suppressed_at >= i.created_at)::int AS complained,
       count(*) FILTER (WHERE c.marketing_consent = 'unsubscribed')::int AS unsubscribed
-    FROM audience_imports i LEFT JOIN LATERAL (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 50000) x ON true
+    FROM i LEFT JOIN LATERAL (SELECT r->>'email' AS email FROM jsonb_array_elements(i.rows) r LIMIT 50000) x ON true
       LEFT JOIN audience_contacts c ON c.workspace_id = i.workspace_id AND c.email = lower(x.email)
     GROUP BY i.id, i.workspace_id, i.list_id, i.created_at, i.imported, i.errors ORDER BY i.created_at DESC`);
   const importViews = imports.map(i => ({ id: i.id, listId: i.list_id, listName: i.list_name, at: new Date(i.created_at).toISOString(), imported: i.imported, errors: i.errors, contacts: i.matched,

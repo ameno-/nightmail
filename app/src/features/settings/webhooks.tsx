@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, EmptyState, KeyValues, ErrorState, Field, Input, SecretInput, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, StatusBadge, DropdownMenu, fieldError, MutationError, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useApi, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import type { RegionCatalogEntry, Webhook, WebhookDelivery, WebhookEvent, WebhookInput } from '../../data/types'
 import { useRegionCatalog } from '../../data/regions'
@@ -86,7 +87,7 @@ function NewWebhook() {
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
   const regions = useRegionCatalog({ enabled: !multiTenant })
-  const save = useApiMutation((api, input: WebhookInput) => api.webhooks.create(input), 'Webhook created')
+  const save = useApiMutation((api, input: WebhookInput) => api.webhooks.create(input), 'Webhook created', false, invalidate.webhooks)
   // Hosted endpoints are created without a region scope, so they cover every region.
   const [input, setInput] = useState<WebhookInput>(() => multiTenant ? { name: '', url: '', events: [...defaultEvents] } : blankEndpoint)
   // The signing secret comes back once with the new webhook: show it before moving on to the webhook's page.
@@ -131,7 +132,7 @@ function ExistingWebhook({ id }: { id: string }) {
 function WebhookEditor({ webhook: read, regions, refreshError, onRefresh }: { webhook: Webhook; regions: RegionCatalogEntry[]; refreshError: unknown; onRefresh: () => void }) {
   const navigate = useNavigate()
   const { multiTenant } = useWorkspaceAccess()
-  const save = useApiMutation((api, value: { edits: Partial<WebhookFields>; headers?: WebhookInput['headers'] }) => api.webhooks.update(read.id, value.edits, value.headers), 'Webhook saved')
+  const save = useApiMutation((api, value: { edits: Partial<WebhookFields>; headers?: WebhookInput['headers'] }) => api.webhooks.update(read.id, value.edits, value.headers), 'Webhook saved', false, invalidate.webhooks)
   // The webhook as last read: the saved response until a newer read replaces it.
   const webhook = save.data && (save.data.updatedAt ?? '') > (read.updatedAt ?? '') ? { ...read, ...save.data, deliveries: read.deliveries, nextCursor: read.nextCursor } : read
   // The form holds only what the person changed; every other field shows the webhook as last read, so a change saved
@@ -157,13 +158,13 @@ function WebhookEditor({ webhook: read, regions, refreshError, onRefresh }: { we
   const [opened, setInspected] = useState<WebhookDelivery | null>(null)
   const rows = history?.items ?? webhook.deliveries
   const inspected = opened && (rows.find(delivery => delivery.id === opened.id) ?? opened)
-  const status = useApiMutation((api, value: { id: string; status: 'active' | 'paused' }) => api.webhooks.setStatus(value.id, value.status), 'Webhook status updated')
-  const rotate = useApiMutation((api, id: string) => api.webhooks.rotate(id), 'Signing secret rotated')
+  const status = useApiMutation((api, value: { id: string; status: 'active' | 'paused' }) => api.webhooks.setStatus(value.id, value.status), 'Webhook status updated', false, invalidate.webhooks)
+  const rotate = useApiMutation((api, id: string) => api.webhooks.rotate(id), 'Signing secret rotated', false, invalidate.webhooks)
   // Reading the secret changes nothing, so it refreshes nothing.
   const reveal = useApiMutation((api, id: string) => api.webhooks.reveal(id), undefined, false, false)
-  const remove = useApiMutation((api, id: string) => api.webhooks.remove(id), 'Webhook deleted')
-  const test = useApiMutation((api, id: string) => api.webhooks.test(id), 'Test delivery created')
-  const retry = useApiMutation((api, value: { id: string; deliveryId: string }) => api.webhooks.retry(value.id, value.deliveryId), 'Delivery retry queued')
+  const remove = useApiMutation((api, id: string) => api.webhooks.remove(id), 'Webhook deleted', false, invalidate.webhooks)
+  const test = useApiMutation((api, id: string) => api.webhooks.test(id), 'Test delivery created', false, invalidate.webhookDelivery)
+  const retry = useApiMutation((api, value: { id: string; deliveryId: string }) => api.webhooks.retry(value.id, value.deliveryId), 'Delivery retry queued', false, invalidate.webhookDelivery)
   const pending = save.isPending || status.isPending || rotate.isPending || remove.isPending || test.isPending || retry.isPending
 
   const currentHistoryCursor = history ? history.nextCursor : webhook.nextCursor

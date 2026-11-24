@@ -85,7 +85,9 @@ jobs:
           if [[ $GITHUB_EVENT_NAME == pull_request ]]; then
             # HEAD in the build checkout is GitHub's synthetic merge. Compare
             # the actual PR head against its merge-base, not the updated dev.
-            head=$PR_HEAD; BASE=$(git merge-base "$head" "$BASE")
+            # The base is the merge's first parent, today's dev: the event's base.sha stays where dev was when the pull
+            # request opened, so a branch that has since merged dev would answer for dev's own changes.
+            head=$PR_HEAD; BASE=$(git merge-base "$head" "$(git rev-parse HEAD^1)")
           elif [[ $GITHUB_EVENT_NAME == merge_group ]]; then
             # The queue's commit merges one pull request onto dev and the entries ahead of it (its first parent), so
             # compare just that step. Its ref names the pull request: refs/heads/gh-readonly-queue/dev/pr-<n>-<sha>.
