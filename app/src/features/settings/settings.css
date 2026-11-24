@@ -209,6 +209,21 @@
 .admin-only__icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 32px; height: 32px; border-radius: 50%; background: none; box-shadow: inset 0 0 0 1px var(--color-border); color: var(--color-muted); }
 .admin-only h2 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); text-wrap: pretty; }
 
+/* The invite dialog: the form and the answer in one cell, the one not shown (inert) laid out but hidden, so the cell is
+   as tall as the taller one before the answer arrives and nothing below it moves. In the answer every opening line
+   shares a cell too, and the address and the link are one line each, cut where the line ends. */
+.settings-invite, .settings-invite__lead { display: grid; }
+.settings-invite > *, .settings-invite__lead > span { grid-area: 1 / 1; min-width: 0; }
+.settings-invite > [inert], .settings-invite__lead > [aria-hidden] { visibility: hidden; }
+.settings-invite__answer { display: flex; flex-direction: column; gap: var(--space-12); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.settings-invite__answer p { margin: 0; }
+.settings-invite__lead { color: var(--color-muted); text-wrap: pretty; }
+.settings-invite__address { height: var(--leading-sm); overflow: hidden; white-space: nowrap; }
+.settings-invite__address .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.ui-secret .settings-invite__link { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-invite .settings-share { align-self: flex-start; }
+/* The spinner has its room from the start, so the button and its neighbour stay put while the invitation is made. */
+.settings-invite__submit { min-width: 84px; }
 /* The roles in one line each, under the members table and in the invite dialog. */
 .settings-role-guide { display: grid; gap: var(--space-4); margin: 0; font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-role-guide > div { display: grid; grid-template-columns: 56px minmax(0, 1fr); gap: var(--space-8); }

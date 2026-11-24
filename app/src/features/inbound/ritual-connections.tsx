@@ -1,12 +1,12 @@
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, SecretInput, Select, type Tone } from '../../components/ui'
+import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, SearchField, SecretInput, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
-import { useApiDef } from '../../data/context'
-import { queries } from '../../data/queries'
+import { useAddressOptions } from '../../data/addresses'
+import { useDebounced } from '../../lib/pagination'
 import { idempotencyFor, SecretField } from './shared'
 import '../settings/settings.css'
 import './inbound.css'
@@ -51,7 +51,8 @@ const chat = (type: EndpointType) => type === 'slack' || type === 'discord'
  * URL: the field starts empty as "Replace URL", and left empty the endpoint keeps its URL.
  */
 export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing, types = Object.keys(typeLabel) as EndpointType[], taken = [] }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated?: (e: Endpoint & { secret?: string }) => void; onSaved?: (e: Endpoint) => void; editing?: EditableEndpoint | null; types?: EndpointType[]; taken?: string[] }) {
-  const boxes = useApiDef(queries.inboundAddressOptions(), { enabled: open && !editing })
+  const [boxSearch, setBoxSearch] = useState('')
+  const boxes = useAddressOptions({ enabled: open && !editing, search: useDebounced(boxSearch) })
   const [type, setType] = useState<EndpointType>(types[0]!)
   const [name, setName] = useState('')
   const [target, setTarget] = useState('')
@@ -133,7 +134,11 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
       {dropsHeaders && <Alert tone="warning">A new URL drops the custom headers set on this webhook over the API.</Alert>}
       {!editing && type === 'forward' && <>
         <Field label="Forward from">
-          <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...(boxes.data ?? []).map(a => ({ value: a.id, label: a.address }))]} />
+          <div className="stack">
+            {(boxes.hasMore || Boolean(boxSearch)) && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={boxSearch} onChange={event => setBoxSearch(event.target.value)} />}
+            <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...boxes.items.map(a => ({ value: a.id, label: a.address }))]} />
+            {boxes.hasMore && <Button variant="ghost" size="sm" loading={boxes.loadingMore} onClick={boxes.loadMore}>Load more addresses</Button>}
+          </div>
         </Field>
         <Checkbox checked={preverify} onCheckedChange={setPreverify} label="Skip the email: it’s on a domain you verified" />
       </>}

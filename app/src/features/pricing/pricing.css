@@ -1,0 +1,50 @@
+/* The price pages' frame outside the scene (a comparison that doesn't exist: the legal pages' header and type, one
+   centred column) and the small print's pieces the scene uses too (notes, the day a figure was read, citations, facts,
+   Nightmail's terms). The pages themselves are board.css's scene. */
+html:has(.price-page) { scrollbar-gutter: stable; }
+.price-page { --price-header: 58px; display: flex; flex-direction: column; min-height: 100dvh; background: var(--color-surface); color: var(--color-text); }
+.price-header { position: sticky; z-index: 5; top: 0; display: flex; align-items: center; gap: var(--space-24); height: var(--price-header); padding-inline: var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
+.price-header .wordmark, .price-header .theme-toggle { position: relative; inset: auto; }
+.price-header .theme-toggle { margin-inline-start: auto; }
+.price-switcher { display: flex; gap: var(--space-4); min-width: 0; font-size: var(--text-sm); }
+.price-switcher a { display: flex; align-items: center; height: var(--control-height); padding-inline: var(--space-8); border-radius: var(--radius-sm); color: var(--color-muted); text-decoration: none; white-space: nowrap; transition: color var(--motion-duration), background-color var(--motion-duration); }
+.price-switcher a:hover { color: var(--color-text); }
+.price-switcher a[aria-current='page'] { background: var(--color-active-bg); color: var(--color-text); }
+
+.price-main { flex: 1; width: min(100%, 1040px); margin-inline: auto; padding: var(--space-40) var(--space-24) 72px; }
+.price-note { margin-top: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: normal; }
+.price-checked { color: var(--color-muted); font-size: var(--text-sm); white-space: nowrap; }
+.price-checked a { color: var(--color-text); text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); transition: text-decoration-color var(--motion-duration); }
+.price-checked a:hover { text-decoration-color: currentColor; }
+.price-checked svg { margin-inline-start: 1px; vertical-align: -1px; }
+.price-cite { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; margin: -2px 0 -2px 1px; border-radius: var(--radius-sm); color: var(--color-muted); vertical-align: middle; transition: color var(--motion-duration), background-color var(--motion-duration); }
+.price-cite:hover { background: var(--color-hover); color: var(--color-text); }
+
+.price-ours__head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--space-8) var(--space-16); }
+.price-ours__head h2 { font-family: var(--font-mono); font-size: var(--text-lg); font-weight: 700; }
+.price-terms { display: flex; flex-direction: column; gap: var(--space-6); margin: var(--space-16) 0 0; padding: 0; list-style: none; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: normal; }
+
+.price-row__name { font-weight: var(--font-weight-bold); }
+.price-row__plan { margin-inline-start: var(--space-8); color: var(--color-muted); font-weight: var(--font-weight-regular); }
+.price-row__price { font-family: var(--font-mono); font-weight: 700; text-align: end; }
+.price-row__price--none { color: var(--color-muted); font-family: var(--font-body); font-weight: var(--font-weight-regular); }
+.price-row__meta { grid-column: 1 / -1; color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: normal; text-wrap: pretty; }
+.price-facts { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding-inline-start: 1.1em; font-size: var(--text-md); line-height: 1.55; font-variant-numeric: normal; }
+.price-facts li { padding-inline-start: .2em; text-wrap: pretty; }
+.price-facts li::marker { color: var(--color-faint); }
+
+
+
+.price-footer { padding: var(--space-20) var(--space-24); border-top: 1px solid var(--color-border); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+
+/* Tablets and phones: the header as on the legal pages, and one column. */
+@media (max-width: 900px) {
+  .price-page { --price-header: 0px; }
+  .price-header { position: static; flex-wrap: wrap; row-gap: 0; height: auto; padding: var(--space-8) var(--space-16) 0; }
+  .price-header .wordmark { height: 44px; }
+  .price-switcher { order: 3; flex-basis: 100%; margin: calc(-1 * var(--focus-reach)) calc(-1 * var(--space-16)) 0; padding: var(--focus-reach) var(--space-16) var(--space-8); overflow-x: auto; }
+  .price-switcher a { height: 36px; }
+  .price-header .theme-toggle { width: 44px; height: 44px; }
+  .price-main { padding: var(--space-28) var(--space-16) var(--space-40); }
+  .price-footer { padding: var(--space-16); }
+}

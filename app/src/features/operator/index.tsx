@@ -8,7 +8,7 @@ import { useSession } from '../../data/context'
 import { ApiError, type SenderScoreFactor, type StandingReason, type StandingStep } from '../../data/types'
 import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type SignupPlaces, type TimelineKind, type WaitlistEntry, type WorkspaceSummary } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
-import { downloadCsv } from '../../lib/download'
+import { downloadCsvChunks, formatCsvRow } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
 import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
@@ -132,8 +132,11 @@ function Queue() {
   return <>
     <QueueToolbar search={search} step={step} onSearch={setSearch} onStep={setStep} />
     {queue.isError && !queue.data ? <ErrorState error={queue.error} onRetry={() => void queue.refetch()} />
-      : <DataTable className="op-table" loading={queue.isPending} skeletonRows={6} rows={queue.data ?? []} rowKey={row => row.workspaceId} rowHref={row => `/operator/workspaces/${encodeURIComponent(row.workspaceId)}`}
-        empty={<EmptyState title={q ? 'No workspace matches' : 'Nothing to review'} action={q ? <Button onClick={() => setSearch('')}>Clear search</Button> : undefined} />} columns={queueColumns} />}
+      : <>
+        <DataTable className="op-table" loading={queue.isPending} skeletonRows={6} rows={queue.data ?? []} rowKey={row => row.workspaceId} rowHref={row => `/operator/workspaces/${encodeURIComponent(row.workspaceId)}`}
+          empty={<EmptyState title={q ? 'No workspace matches' : 'Nothing to review'} action={q ? <Button onClick={() => setSearch('')}>Clear search</Button> : undefined} />} columns={queueColumns} />
+        {(queue.data?.length ?? 0) >= 200 && <p className="op-total muted">Showing first 200 workspaces — filter by standing or search to narrow.</p>}
+      </>}
   </>
 }
 
@@ -200,16 +203,21 @@ function Waitlist() {
   })
   const rows = (list.data?.pages ?? []).flatMap(page => page.items), total = list.data?.pages[0]?.total
   const [exporting, setExporting] = useState(false)
-  // Everyone the search lists, every page, not only the rows loaded so far.
+  // Bound browser CSV export to 25,000 rows (25 pages of 1,000) and format per page so large waitlists cannot OOM the tab.
   async function exportCsv() {
     setExporting(true)
     try {
-      const all: WaitlistEntry[] = []
-      for (let cursor: string | undefined, first = true; first || cursor; first = false) {
+      const MAX_PAGES = 25
+      const chunks: string[] = [formatCsvRow(['Email', 'Name', 'First attempt (UTC)', 'Last attempt (UTC)', 'Attempts', 'Let in (UTC)', 'Emailed'])]
+      let cursor: string | undefined, pages = 0, truncated = false
+      do {
         const page = await operatorApi.waitlist({ q: q || undefined, cursor, limit: 1000 })
-        all.push(...page.items); cursor = page.nextCursor ?? undefined
-      }
-      downloadCsv('nightmail-waitlist.csv', [['Email', 'Name', 'First attempt (UTC)', 'Last attempt (UTC)', 'Attempts', 'Let in (UTC)', 'Emailed'], ...all.map(row => [row.email, row.name ?? '', isoTime(row.firstAt), isoTime(row.lastAt), row.attempts, row.letInAt ? isoTime(row.letInAt) : '', row.emailed ?? ''])])
+        if (page.items.length) chunks.push('\r\n' + page.items.map(row => formatCsvRow([row.email, row.name ?? '', isoTime(row.firstAt), isoTime(row.lastAt), row.attempts, row.letInAt ? isoTime(row.letInAt) : '', row.emailed ?? ''])).join('\r\n'))
+        cursor = page.nextCursor ?? undefined
+        if (cursor && ++pages >= MAX_PAGES) { truncated = true; break }
+      } while (cursor)
+      downloadCsvChunks('nightmail-waitlist.csv', chunks)
+      if (truncated) toast('Exported first 25,000 entries. Filter by search to export the rest.', 'info')
     } catch (error) { toast(errorText(error, 'Couldn’t export the waitlist.'), 'error') }
     finally { setExporting(false) }
   }

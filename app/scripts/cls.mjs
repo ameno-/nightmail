@@ -237,6 +237,15 @@ const pages = ids => [
   ['Legal · acceptable use', '/legal/acceptable-use', { user: null, from: '/legal/terms' }],
   ['Legal · privacy', '/legal/privacy', { user: null, from: '/legal' }],
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
+  // The price pages (features/pricing), public and linked from the homepage: signed out, cold and from one another
+  // (their header's links), the calculator also at its large size and signed in.
+  ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
+  ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
+  ['Pricing · signed in', '/pricing', {}],
+  ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
+  // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
+  ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
+  ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
   ['Support chat', '/logs', { from: '/overview', support: true }],
   ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
@@ -280,7 +289,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · range', 'Overview · stream', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Legal', 'Legal · terms', 'Legal · privacy', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
+const phonePages = new Set(['Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · range', 'Overview · stream', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -366,6 +375,12 @@ async function settle(page, net) {
   }
 }
 const sharp = n => Math.round(n * 10000) / 10000;
+// A step that should ask first: whichever comes first, the question (asked) or the page going on without it (left). Both
+// can take seconds on a loaded runner, where a fixed 3 or 5 s wait read a slow question as none (Nov 23).
+const askedOrLeft = (question, left) => Promise.race([
+  question.waitFor({ timeout: 30_000 }).then(() => 'asked', () => 'neither'),
+  left.then(() => 'left', () => 'neither'),
+]);
 // The live view's long poll (features/inbound/live.ts) stays open while its page does; it never counts as loading.
 const LONG_POLL = '/v1/rules/version';
 let liveSaves = 0;
@@ -562,14 +577,22 @@ async function measure(browser, job, fx) {
       // Templates → Edit, after the measurement: Reply to keeps two typed addresses apart, and Back with an edit autosave
       // hasn't sent asks first, then Save and leave saves it (templates.tsx's leave guard).
       const replyTo = ['billing@example.invalid', 'ops@example.invalid'], subject = `Leave check ${Date.now()}`;
+      // Once the editor has loaded: before, Save and leave has nothing to save with and stays.
+      await page.locator('.composer-canvas:not(:has(.composer-starting))').waitFor({ timeout: 30_000 }).catch(() => problems.push('the template editor never finished loading'));
       await page.fill('#template-reply', '');
       await page.locator('#template-reply').pressSequentially(replyTo.join(', '));
       const typed = await page.inputValue('#template-reply');
       if (typed !== replyTo.join(', ')) problems.push(`Reply to turned "${replyTo.join(', ')}" into "${typed}"`);
-      await page.fill('#template-subject', subject);
-      await page.click('.ui-page-header a[href="/campaigns/templates"]');
-      const asked = await page.getByRole('dialog', { name: 'Leave without saving?' }).waitFor({ timeout: 5_000 }).then(() => true, () => false);
-      if (!asked) problems.push('Back with an unsaved template edit left without asking');
+      // The subject, then Back in the next frame. Autosave sends 800 ms after Reply to becomes valid, so separate
+      // Playwright steps on a loaded runner let it save everything first, and Back rightly left without asking.
+      await page.evaluate(value => new Promise(done => {
+        const input = document.querySelector('#template-subject');
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value);
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        requestAnimationFrame(() => { document.querySelector('.ui-page-header a[href="/campaigns/templates"]').click(); done(); });
+      }), subject);
+      const outcome = await askedOrLeft(page.getByRole('dialog', { name: 'Leave without saving?' }), page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 30_000 }));
+      if (outcome !== 'asked') problems.push(outcome === 'left' ? 'Back with an unsaved template edit left without asking' : 'Back with an unsaved template edit neither asked nor left');
       else {
         await page.getByRole('button', { name: 'Save and leave' }).click();
         await page.waitForURL(url => url.pathname === '/campaigns/templates', { timeout: 20_000 }).catch(async () => problems.push(`Save and leave stayed on the template${await page.locator('[role=alert], [role=status]').allInnerTexts().then(texts => texts.filter(Boolean).length ? `: ${texts.filter(Boolean).join(' / ').slice(0, 160)}` : '', () => '')}`));
@@ -623,8 +646,10 @@ async function measure(browser, job, fx) {
         if (typed.startsWith('*') && !await dialog.getByRole('button', { name: 'Edit the catch-all' }).count()) problems.push('New address with * offers no way to the catch-all');
         await dialog.getByRole('button', { name: 'Cancel' }).click();
         // What was typed is a change: closing asks first.
-        await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel with an address typed closed New address without asking'));
-        await page.waitForTimeout(300);
+        const outcome = await askedOrLeft(page.getByRole('button', { name: 'Discard', exact: true }), page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }));
+        if (outcome !== 'asked') problems.push(outcome === 'left' ? 'Cancel with an address typed closed New address without asking' : 'Cancel with an address typed neither asked nor closed');
+        else await page.getByRole('button', { name: 'Discard', exact: true }).click();
+        await page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => problems.push('Discard left New address open'));
       }
       const edit = async () => { const clicked = await page.evaluate(() => { const button = [...document.querySelectorAll('.flow-panel button')].find(el => el.textContent.trim() === 'Edit'); button?.click(); return Boolean(button); }); if (clicked) await page.waitForSelector('.builder #builder-flow', { timeout: 10_000 }).catch(() => problems.push('Edit on the flow panel opened no builder for an address it can draw')); return clicked; };
       if (!await edit()) problems.push('no Edit on the flow panel');
@@ -637,9 +662,12 @@ async function measure(browser, job, fx) {
         if (await edit()) {
           await page.locator('.builder').getByRole('button', { name: 'Split with a rule' }).click();
           await page.locator('.builder').getByRole('button', { name: 'Cancel' }).click();
-          await page.getByRole('button', { name: 'Discard', exact: true }).click({ timeout: 3_000 }).catch(() => problems.push('Cancel after a change closed the builder without asking'));
-          await page.waitForTimeout(300);
-          if (await page.$('.builder')) problems.push('Discard left the builder open');
+          const outcome = await askedOrLeft(page.getByRole('button', { name: 'Discard', exact: true }), page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }));
+          if (outcome !== 'asked') problems.push(outcome === 'left' ? 'Cancel after a change closed the builder without asking' : 'Cancel after a change neither asked nor closed the builder');
+          else {
+            await page.getByRole('button', { name: 'Discard', exact: true }).click();
+            await page.locator('.builder').waitFor({ state: 'detached', timeout: 30_000 }).catch(() => problems.push('Discard left the builder open'));
+          }
         }
       }
       page.off('request', onRequest);
@@ -824,8 +852,12 @@ try {
     console.log(`${elapsed().padStart(6)} ${flag} ${(r.device === 'phone' ? 'phone' : r.scheme).padEnd(5)} ${r.mode.padEnd(6)} ${r.page.padEnd(26)} ${String(r.cls).padEnd(7)}${r.longTask !== null ? ` ${r.longTask} ms` : ''}${r.error ? `  ${r.error}` : ''}`);
   };
   const shared = queue.filter(job => !job.alone), alone = queue.filter(job => job.alone);
+  // The live rule jobs each have an agent save the same rule, and every one of their pages hears every save: one at a
+  // time, so a page sees only its own save (two at once stacked a second toast that moved the first, Nov 23).
+  let live = Promise.resolve();
+  const turn = job => { if (!job.live) return run(job); const mine = live.then(() => run(job)); live = mine.catch(() => {}); return mine; };
   let next = 0;
-  await Promise.all(Array.from({ length: Math.min(workers, shared.length) }, async () => { while (next < shared.length) await run(shared[next++]); }));
+  await Promise.all(Array.from({ length: Math.min(workers, shared.length) }, async () => { while (next < shared.length) await turn(shared[next++]); }));
   for (const job of alone) await run(job);
 } finally {
   await browserPromise.then(b => b.close(), () => {});

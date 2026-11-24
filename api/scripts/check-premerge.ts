@@ -1,10 +1,8 @@
-// Pre-merge invariants that broke dev only after merge. Fast and offline except the open-PR scan.
+// Pre-merge invariants that broke dev only after merge. Fast and offline except the quarantine issue check.
 //   node --import tsx scripts/check-premerge.ts [--base <sha>]
 // --base is the commit this change lands on (the PR's base tip, the merge group's base, or the previous dev tip).
-// Locally it defaults to the merge-base with dev. Set GH_TOKEN, GITHUB_REPOSITORY and PR_NUMBER to also compare
-// migration numbers with other open pull requests. docs/ci.md explains each failure and how to fix it.
+// Locally it defaults to the merge-base with dev. docs/ci.md explains each failure and how to fix it.
 import { execFileSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { readFileSync, readdirSync } from 'node:fs';
 import { register } from 'node:module';
 import { isDeepStrictEqual } from 'node:util';
@@ -87,9 +85,11 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Worker routes: ${paths.length} API paths reach the Worker in both wrangler configs and src/worker.ts.`);
 }
 
-// 3. Migrations. src/migrate.ts applies every /^\d+_[a-z_]+\.sql$/ file once, in name order, and refuses a changed one.
-// A migration that sorts before one dev already applied runs in a different order on a fresh database than on dev,
-// and two open PRs picking the same next number collide when the second one merges.
+// 3. Migrations. src/migrate.ts tracks applied filenames in nightmail_migrations and runs every unapplied
+// /^\d+_[a-z_]+\.sql$/ file in name order (refusing a changed file). Any unused three-digit number is accepted so
+// independent PRs can merge in any order; duplicate numbers (two files with the same number, or a number already on
+// the base branch) are refused. Open-PR collisions are caught when the second PR merges. Because a fresh install
+// applies migrations in number order, a later-merged lower-numbered migration must not depend on a higher-numbered one.
 {
   const dir = 'api/migrations', applied = /^\d+_[a-z_]+\.sql$/, numbered = /^(\d{3})_[a-z_]+\.sql$/;
   // Pairs that shipped before this check, ordered by name everywhere since. Never add to this list.
@@ -103,53 +103,28 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   const byNumber = new Map<string, string[]>();
   for (const name of head) { const n = number(name); if (n) byNumber.set(n, [...byNumber.get(n) ?? [], name]); }
   const baseList = base ? (tryGit('ls-tree', '--name-only', `${base}:${dir}`) ?? '').split('\n').filter(Boolean) : [];
+  const baseNumbers = new Map<string, string>();
+  for (const name of baseList) { const n = number(name); if (n && !baseNumbers.has(n)) baseNumbers.set(n, name); }
   const baseMax = baseList.map(number).filter(Boolean).sort().at(-1) ?? '000';
   const added = head.filter(n => !baseList.includes(n));
-  // A new file that reuses a dev number is reported below with the number to use instead.
-  for (const [n, names] of byNumber) if (names.length > 1 && !grandfathered.has(n) && (n > baseMax || !names.some(name => added.includes(name)))) fail('Migrations', `Migration number ${n} is used by ${names.join(' and ')}. Renumber the newer one to the next free number.`, `${dir}/${names.find(name => added.includes(name)) ?? names.at(-1)}`);
+  let next = Math.max(Number(baseMax), ...[...byNumber.keys()].map(Number)) + 1;
+  const free = () => String(next++).padStart(3, '0');
   for (const name of baseList) {
     if (!head.includes(name)) fail('Migrations', `${name} is on the base branch and was deleted or renamed. Applied migrations are permanent: restore it and add a new migration.`, `${dir}/${name}`);
     else if (atBase(`${dir}/${name}`) !== readFileSync(new URL(`migrations/${name}`, api), 'utf8').trim()) fail('Migrations', `${name} is already on the base branch, and dev has applied it. Editing it fails every upgraded database with MIGRATION_CHANGED: revert the edit and add a new migration.`, `${dir}/${name}`);
   }
-  let next = Number(baseMax) + 1;
-  const claimed = new Map<string, number>();
-  const token = process.env.GH_TOKEN, repo = process.env.GITHUB_REPOSITORY, pr = Number(process.env.PR_NUMBER);
-  if (added.length && token && repo && pr) {
-    // Other open PRs into dev that add a migration. An older PR keeps its number; this one renumbers.
-    const get = async (path: string) => {
-      const response = await fetch(`https://api.github.com/${path}`, { headers: { authorization: `Bearer ${token}`, accept: 'application/vnd.github+json' } });
-      if (!response.ok) throw new Error(`GitHub ${path}: HTTP ${response.status}`);
-      return response.json() as Promise<{ number: number; filename: string; status: string; sha: string }[]>;
-    };
-    // A stacked PR (one built on this one) carries this PR's migration files unchanged: the same blob is the same
-    // migration, not a second PR claiming its number.
-    const blob = (name: string) => { const bytes = readFileSync(new URL(`migrations/${name}`, api)); return createHash('sha1').update(`blob ${bytes.length}\0`).update(bytes).digest('hex'); };
-    const ours = new Map(added.map(name => [name, blob(name)]));
-    const pulls: { number: number }[] = [];
-    for (let page = 1; ; page++) { const rows = await get(`repos/${repo}/pulls?state=open&base=dev&per_page=100&page=${page}`); pulls.push(...rows); if (rows.length < 100) break; }
-    await Promise.all(pulls.filter(p => p.number !== pr).map(async p => {
-      for (let page = 1; page <= 30; page++) {
-        const files = await get(`repos/${repo}/pulls/${p.number}/files?per_page=100&page=${page}`);
-        for (const f of files) {
-          const name = f.filename.slice(dir.length + 1), n = f.status === 'added' && f.filename.startsWith(`${dir}/`) ? number(name) : undefined;
-          if (n && ours.get(name) !== f.sha && (!claimed.has(n) || claimed.get(n)! > p.number)) claimed.set(n, p.number);
-        }
-        if (files.length < 100) break;
-      }
-    }));
-    next = Math.max(next, ...[...claimed.keys()].map(n => Number(n) + 1));
-  }
-  const free = () => String(next++).padStart(3, '0');
   for (const name of added) {
     const n = number(name);
     if (!n) continue;
-    const other = claimed.get(n);
-    const taken = baseList.find(b => number(b) === n);
-    if (n <= baseMax) fail('Migrations', `${name} ${taken ? `reuses number ${n} (${taken} on dev)` : `sorts before ${baseMax}, the newest migration on dev`}, so a fresh database applies it in a different order than dev did. Renumber it to ${free()}.`, `${dir}/${name}`);
-    else if (other !== undefined && other < pr) fail('Migrations', `Open PR #${other} already adds migration ${n}. The older PR keeps the number: renumber ${name} to ${free()}.`, `${dir}/${name}`);
-    else if (other !== undefined) warn('Migrations', `Newer open PR #${other} also adds migration ${n}; it will be asked to renumber.`, `${dir}/${name}`);
+    const taken = baseNumbers.get(n);
+    if (taken) fail('Migrations', `${name} reuses migration number ${n} (${taken} is already on the base branch). Renumber it to ${free()}.`, `${dir}/${name}`);
   }
-  console.log(`Migrations: ${head.length} files, ${added.length} new on top of ${baseMax}${base ? ` (base ${base.slice(0, 12)})` : ' (no base: order not checked)'}.`);
+  for (const [n, names] of byNumber) {
+    if (names.length > 1 && !grandfathered.has(n) && !(baseNumbers.has(n) && names.some(name => added.includes(name)))) {
+      fail('Migrations', `Migration number ${n} is used by ${names.join(' and ')}. Renumber the newer one to ${free()}.`, `${dir}/${names.find(name => added.includes(name)) ?? names.at(-1)}`);
+    }
+  }
+  console.log(`Migrations: ${head.length} files, ${added.length} new${base ? ` (base ${base.slice(0, 12)}, highest ${baseMax})` : ' (no base: base collisions not checked)'}.`);
 }
 
 // 4. Phone layout: below 640 px every DataTable renders cards from each column's `card` slot (AGENTS.md). A column
@@ -269,6 +244,118 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   const newest = Math.max(-1, ...baseList.map(version));
   for (const name of head.filter(n => !baseList.includes(n))) if (version(name) <= newest) fail('BYO templates', `${name} isn't newer than the newest published version. Use a higher version.`, `${dir}/${name}`);
   if (failed === before) console.log(`BYO templates: ${head.length} published, ${head.filter(n => !baseList.includes(n)).length} new.`);
+}
+
+// 9. Price pages (app/src/features/pricing). Every Nightmail figure the pages show must be what the billing rates
+// (src/billing/rates.ts) charge for the usage beside it, and every competitor figure in the pages' data must name the
+// vendor's page it was read on, the day and the text. The pages are rendered as React renders them for a browser (in a
+// child process with the app's JSX settings), at their own sizes and at inputs a visitor might type.
+{
+  const before = failed, file = 'app/src/features/pricing/prices.ts'
+  const { RATES, CREDIT, STORAGE_AFTER_DAYS, perThousandUsd } = await import('../src/billing/rates.js')
+  const n = (value: number) => value.toLocaleString('en-US')
+  // Written again here, apart from the pages' own code: micro-cents to dollars, half up, four places under a cent, and
+  // no cents on a whole-dollar amount (the pages print "$19", "$26.50", "$0").
+  const dollarsOf = (uc: bigint) => { const places = uc > 0n && uc < 1_000_000n ? 4 : 2, unit = 10n ** BigInt(8 - places), v = ((uc + unit / 2n) / unit).toString().padStart(places + 1, '0'); return '$' + n(Number(v.slice(0, -places))) + (v.slice(-places) === '00' ? '' : '.' + v.slice(-places)) }
+  const charged = (sent: number, received: number) => BigInt(Math.max(0, sent - RATES.freeSentEmails) + Math.max(0, received - RATES.freeReceivedEmails)) * RATES.emailUc
+  // What a typed value means: its digits, at most a billion.
+  const typed = (value: string) => { const digits = value.replace(/\D/g, ''); return digits ? Math.min(Number(digits.slice(0, 10)), 1e9) : 0 }
+  const inputs: Record<string, string>[] = [
+    {}, { sent: '20000', received: '0', contacts: '5000', teammates: '3' }, { sent: '400000', received: '0', contacts: '100000', teammates: '3' },
+    { sent: '4999', received: '5000', contacts: '0', teammates: '1' }, { sent: '5001', received: '5001', contacts: '250', teammates: '1' },
+    { sent: '6000', received: '0', contacts: '12000', teammates: '4' }, { sent: '55000', received: '100', contacts: '5000', teammates: '3' },
+    { sent: '101000', received: '9000', contacts: '1000', teammates: '6' }, { sent: '3000001', received: '0', contacts: '150000', teammates: '2' },
+    { sent: 'abc', received: '-5', contacts: '1e9', teammates: '' }, { sent: '99999999999999', received: '1,234,567', contacts: '0.5', teammates: '99999999999' },
+  ]
+  const script = [
+    "import { createElement as h, Fragment } from 'react'", "import { renderToStaticMarkup } from 'react-dom/server'", "import { MemoryRouter } from 'react-router'",
+    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts')",
+    'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
+    `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(scene.Scene, {})) } })`,
+    // Each comparison's page (scene.tsx: the board in its hall, and the page's end, whose Sources has its small print), and every
+    // size its fader can reach, with the competitor's price there.
+        "const boards = Object.entries(prices.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
+    "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
+    'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
+    "process.stdout.write(JSON.stringify({ calculator, boards, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
+  ].join('\n')
+  type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; boards: { id: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
+  let out: Rendered | null = null
+  try {
+    out = JSON.parse(execFileSync('node', ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e', script], { cwd: new URL('app/', root), encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] })) as Rendered
+  } catch (error) {
+    if (/Cannot find (module|package) '(react|react-dom|react-router|lucide-react)/.test(String((error as { stderr?: string }).stderr))) warn('Price pages', 'Skipped: run bun install in app/ to render the price pages.')
+    else fail('Price pages', `Rendering the price pages failed: ${String((error as { stderr?: string }).stderr ?? error).slice(0, 600)}`, file)
+  }
+  if (out) {
+    const text = (html: string) => html.replace(/<[^>]+>/g, ' ').replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, '&').replace(/\s+/g, ' ')
+    const figures = (html: string) => [...html.matchAll(/data-nightmail-sent="(\d+)" data-nightmail-received="(\d+)">([^<]*)</g)].map(m => ({ sent: Number(m[1]), received: Number(m[2]), shown: m[3]! }))
+    const checkFigures = (where: string, html: string, least: number) => {
+      const found = figures(html)
+      if (found.length < least) fail('Price pages', `${where} shows ${found.length} Nightmail figures marked with the usage they price, not at least ${least}: mark each with data-nightmail-sent and data-nightmail-received (content.tsx, Ours).`, file)
+      for (const f of found) if (f.shown !== dollarsOf(charged(f.sent, f.received))) fail('Price pages', `${where} shows ${f.shown} for ${n(f.sent)} sent and ${n(f.received)} received; src/billing/rates.ts charges ${dollarsOf(charged(f.sent, f.received))}.`, file)
+    }
+    // The rates and terms the pages quote, as the billing code has them.
+    const minTopUp = '$' + n(CREDIT.minTopUpCents / 100)
+    const terms = ['$' + perThousandUsd(RATES.emailUc) + ' per 1,000', n(RATES.freeSentEmails) + ' of each free', dollarsOf(RATES.storageUcPerGbMonth) + ' per GB a month after ' + Number(RATES.freeStorageBytes / 1_000_000_000n) + ' GB free',
+      'past ' + STORAGE_AFTER_DAYS + ' days', 'Top-ups start at ' + minTopUp + ' and expire ' + CREDIT.expiresAfterMonths + ' months after purchase']
+    for (const { input, path, html } of out.calculator) {
+      const page = text(html), want = { sent: typed(input.sent ?? '100000'), received: typed(input.received ?? '0') }
+      checkFigures(`The calculator at ${path}`, html, 4)
+      const total = figures(html)[0]
+      if (total && (total.sent !== want.sent || total.received !== want.received)) fail('Price pages', `The calculator at ${path} priced ${n(total.sent)} sent and ${n(total.received)} received, not the ${n(want.sent)} and ${n(want.received)} typed.`, file)
+      for (const term of terms) if (!page.includes(term)) fail('Price pages', `The calculator at ${path} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
+      const monthly = charged(want.sent, want.received), floor = monthly > 0n && monthly * 12n < BigInt(CREDIT.minTopUpCents) * 1_000_000n
+      if (floor !== page.includes(`at least ${minTopUp} a year`)) fail('Price pages', `The calculator at ${path} ${floor ? 'doesn’t say' : 'says'} that a year costs at least the smallest top-up, at ${dollarsOf(monthly)} a month.`, file)
+      if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `The calculator at ${path} shows NaN, undefined or Infinity.`, file)
+      if (/Not (published|checked)/.test(page)) fail('Price pages', `The calculator at ${path} lists a vendor without a price that was read: list only vendors priced at the size.`, file)
+    }
+    // Every competitor figure (a tier, a per-email rate, a fact that names a price) and its source: the vendor's page
+    // (https), the day it was read (not in the future) and the text it was read from. Facts without a source are
+    // Nightmail's own (a comparison's \`ours\`).
+    const sources: [string, Record<string, unknown>][] = []
+    const walk = (value: unknown, at: string) => {
+      if (!value || typeof value !== 'object') return
+      if (Array.isArray(value)) return value.forEach((item, i) => walk(item, `${at}[${i}]`))
+      const record = value as Record<string, unknown>, cited = Object.keys(record).some(key => key === 'source' || key.endsWith('Source'))
+      const price = 'cents' in record || 'ucPerEmail' in record || ('text' in record && /\$\d/.test(String(record.text)) && !/\.ours\[\d+\]$/.test(at))
+      if (price && !cited) fail('Price pages', `${at} is a competitor price with no source.`, file)
+      for (const [key, item] of Object.entries(record)) {
+        if (key === 'source' || key.endsWith('Source') || key === 'resendOverage' || key === 'resendReceived') sources.push([`${at}.${key}`, (item ?? {}) as Record<string, unknown>])
+        walk(item, `${at}.${key}`)
+      }
+    }
+    walk(out.data, 'prices')
+    const today = new Date().toISOString().slice(0, 10)
+    for (const [at, source] of sources) {
+      let url: URL | null = null
+      try { url = new URL(String(source.url)) } catch { url = null }
+      if (url?.protocol !== 'https:') fail('Price pages', `${at} has no https link to the vendor's page.`, file)
+      if (typeof source.checked !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(source.checked) || Number.isNaN(Date.parse(source.checked)) || source.checked > today) fail('Price pages', `${at} has no valid day it was checked (YYYY-MM-DD, not in the future).`, file)
+      if (typeof source.quote !== 'string' || source.quote.trim().length < 8) fail('Price pages', `${at} doesn't quote the text it was read from.`, file)
+    }
+    // On the calculator, each competitor row with a price names the day it was checked and links the vendor's page (a
+    // row with none links it).
+    const dated = /Checked \d{1,2} \w{3} \d{4} on <a href="https:\/\//
+    for (const { path, html } of out.calculator) for (const row of html.split(/(?=<li [^>]*data-offer=)/).slice(1).map(part => part.split('</li>')[0]!))
+      if (!(/Not checked/.test(row) ? /See <a href="https:\/\//.test(row) : dated.test(row))) fail('Price pages', `A competitor row on the calculator at ${path} has no date and link to the vendor's page: ${text(row).slice(0, 80)}`, file)
+    // A comparison's page: every size its fader can reach is one the competitor's page prices, and Nightmail costs less
+    // there (a size where it doesn't must not be offered); its Nightmail figure is the billed price for the emails a
+    // month written beside it, the competitor's price is dated and linked, and the terms are in its small print.
+    for (const { id, sizes } of out.reach) for (const s of sizes) {
+      if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (prices.ts).`, file)
+      else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (prices.ts, steps).`, file)
+    }
+    for (const { id, html } of out.boards) {
+      const page = text(html), where = `Nightmail vs ${id}`
+      checkFigures(where, html, 1)
+      for (const f of figures(html)) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
+      for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
+      if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
+      if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)
+    }
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.boards.length} comparison pages match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+  }
 }
 
 if (failed) {
