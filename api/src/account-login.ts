@@ -4,20 +4,22 @@ import { z } from 'zod';
 import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
-import { acceptedMethods, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
+import { acceptedMethods, githubVerifiedAddress, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
 import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
 import { requestNetwork, signInSignals, type RequestNetwork } from './abuse.js';
-import { placeReady, readPlaces, recordSignup, takePlace } from './signups.js';
+import { placeReady, readPlaces, recordSignup, sendSigninLink, spendSigninLink, takePlace } from './signups.js';
 
 const verifiedEmail = z.email().max(320);
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
 class AuthenticationMethodRequired extends Error {}
-/** placeReady: a place it could take by signing in with an emailed link or Google (signups.ts placeReady). */
-class NotAdmitted extends Error { constructor(readonly reason: string, readonly placeReady = false) { super(reason); } }
+/** place: one held for its address or open, which a sign-in proving the mailbox could take (signups.ts placeReady).
+ * staleLink: the sign-in link it followed was used, expired or not one of ours. */
+type Refusal = { place?: 'held' | 'open' | null; staleLink?: boolean };
+class NotAdmitted extends Error { constructor(readonly reason: string, readonly refusal: Refusal = {}) { super(reason); } }
 /** A refused hosted sign-in whose verified address is now on the waitlist: the refusal screen names it. */
-class Waitlisted extends Error { constructor(readonly email: string, readonly placeReady = false) { super('waitlist'); } }
+class Waitlisted extends Error { constructor(readonly email: string, readonly refusal: Refusal) { super('waitlist'); } }
 
 function loginIssue(error: unknown, requiredAcr?: string[]) {
   const issuerError = error instanceof oidc.AuthorizationResponseError || error instanceof oidc.ResponseBodyError ? error.error : undefined;
@@ -191,6 +193,8 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   // and the dashboard signs in with the page it is on as the return URL. It names an ID only; pendingInvitation checks
   // that it is for the address this sign-in proves.
   const invitation = returnUrl.searchParams.get('invitation');
+  // A sign-in link (signups.ts sendSigninLink) rides in the return URL the same way: /overview?link=….
+  const link = returnUrl.searchParams.get('link');
   // Identity is (issuer, subject). An email address is display and contact data only: it never links a subject to an
   // existing user. The account service gives an account one subject whichever of its linked methods (GitHub, Google)
   // signs in, so a person who uses both stays one user here; an account it keeps apart is another user.
@@ -217,12 +221,16 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         const selfHosted = !runtime.config.multiTenant && runtime.config.allowedSubjects.includes(claims.sub);
         const invited = runtime.config.multiTenant && !staff && !!invitation && !!mailbox && await pendingInvitation(db, mailbox, invitation);
         // Signing up on its own (signups.ts): hosted, without an invitation link, while a place is held for the mailbox or
-        // open. At the limit it is refused as before, and joins the waitlist.
-        const signup = runtime.config.multiTenant && !staff && !invitation && mailbox ? await takePlace(db, mailbox) : null;
-        // GitHub or a password proves no mailbox: when a place is held for its address or open, the refusal says to sign
-        // in with an emailed link or Google instead.
-        if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved',
-          runtime.config.multiTenant && !staff && !invitation && !mailbox && !!emailAtLogin && await placeReady(db, emailAtLogin));
+        // open. A place held for an address this sign-in shows another way is taken too: the GitHub account's own
+        // verified address, or the address the sign-in link it followed was emailed to. At the limit it is refused as
+        // before, and joins the waitlist.
+        const own = runtime.config.multiTenant && !staff && !invitation;
+        const linked = own && link ? await spendSigninLink(db, runtime.config, link) : null, github = own ? githubVerifiedAddress(claims.acr, upstream) : null;
+        const signup = own && (mailbox || linked || github) ? await takePlace(db, mailbox, [linked, github]) : null;
+        // GitHub without the address verified, or a password, proves no mailbox: when a place is held for its address the
+        // refusal offers a sign-in link to it, and when one is open it says to sign in with an emailed link or Google.
+        if (!staff && !invited && !selfHosted && !signup) throw new NotAdmitted(invitation ? 'invitation' : 'not_approved', {
+          place: own && !mailbox && !!emailAtLogin ? await placeReady(db, emailAtLogin) : null, staleLink: own && !!link && !linked });
         userId = crypto.randomUUID();
         const name = typeof claims.name === 'string' && claims.name.trim() ? claims.name.slice(0,200) : address ?? `${productName} user`;
         if (emailAtLogin) await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(lower(${emailAtLogin}),80324))`);
@@ -269,7 +277,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     // Without a verified address, or when the write fails, nothing is promised.
     if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
       const name = [claims.name, profile.name].find((value): value is string => typeof value === 'string' && value.trim() !== '')?.trim().slice(0, 200) ?? null;
-      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) throw new Waitlisted(emailAtLogin.toLowerCase(), error.placeReady);
+      if (await joinWaitlist(runtime, emailAtLogin, name).catch(() => false)) throw new Waitlisted(emailAtLogin.toLowerCase(), error.refusal);
     }
     throw loginFailed();
   }
@@ -452,6 +460,8 @@ export async function accountBrowserRoute(c: Ctx) {
       if (cookieValue(c.req.raw.headers,cookieName(runtime,'waitlist')) !== null) clearCookie(c,'waitlist');
       const target = new URL(returnUrl);
       target.searchParams.set('account', userId);
+      // A sign-in link is spent or no longer needed: the page opens without it.
+      target.searchParams.delete('link');
       // A signed-out page's analytics session (docs/analytics.md): linked to the account here, and never shown to the browser.
       const analyticsSession = target.searchParams.get(ANALYTICS_SESSION_PARAM);
       if (analyticsSession !== null) {
@@ -472,9 +482,23 @@ export async function accountBrowserRoute(c: Ctx) {
       // where a visitor's sign-in starts, with what went wrong.
       const back = started && new URL(started).pathname === POPUP_PATH ? new URL(started) : new URL(`${origin}/`);
       back.searchParams.set('auth', issue?.reason ?? 'error');
-      if (error instanceof Waitlisted && error.placeReady) back.searchParams.set('place', 'ready');
+      // The waitlist screen says how to take a place held for the address (place=held: a sign-in link to it) or open
+      // (place=ready), and that a sign-in link it followed no longer works (link=expired).
+      if (error instanceof Waitlisted && error.refusal.place) back.searchParams.set('place', error.refusal.place === 'held' ? 'held' : 'ready');
+      if (error instanceof Waitlisted && error.refusal.staleLink) back.searchParams.set('link', 'expired');
       return c.redirect(back.href,303);
     }
+  }
+  if (path === '/api/auth/sign-in/link' && c.req.method === 'POST') {
+    // The waitlist screen asks for a sign-in link to an address a raise let in (signups.ts sendSigninLink). The answer is
+    // the same whether one is sent or not, so it says nothing of an address; each request takes one of the browser's
+    // pending sign-ins, as starting a sign-in does.
+    if (!runtime.config.multiTenant) throw new ApiError(404,'NOT_FOUND','Authentication endpoint was not found.');
+    const { email } = await body(z.object({ email: verifiedEmail }).strict());
+    const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(c.req.header(clientIpHeader) ?? 'unknown')}) AS ok`);
+    if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
+    await sendSigninLink(runtime, email);
+    return c.json({ requested: true }, 202);
   }
   if (path === '/api/auth/accounts' && c.req.method === 'GET') {
     const connection = c.req.query('connection');
