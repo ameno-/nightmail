@@ -3311,8 +3311,14 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   const quotaUntil = new Date(Math.max(dbNow + 1000, Number.isFinite(refreshAt) ? refreshAt : dbNow + QUOTA_REFRESH_MS)).toISOString();
   if (sesCapacity <= buffered!.total) return hold('ses_daily_quota', quotaUntil);
   if (shareCapacity <= buffered!.total) return hold('hosted_daily_quota', quotaUntil);
-  if (buffered!.campaign >= limits.campaign || buffered!.total >= limits.total) {
-    const backlog = Math.max(buffered!.campaign - limits.campaign / 2, buffered!.total - limits.total / 2);
+  // Release hysteresis: once this campaign already has rows buffered, wait until at least a quarter of its buffer has drained
+  // (or the remaining recipients fit) instead of topping up tiny batches that contend on locks and wake shards nonstop.
+  const room = Math.min(limits.campaign - buffered!.campaign, limits.total - buffered!.total);
+  const minRelease = Math.min(row.total - row.expanded, Math.floor(limits.campaign / 4), CAMPAIGN_EXPAND_ROWS);
+  if (room <= 0 || (buffered!.campaign > 0 && room < minRelease)) {
+    const backlog = room <= 0
+      ? Math.max(buffered!.campaign - limits.campaign / 2, buffered!.total - limits.total / 2)
+      : Math.max(buffered!.campaign - Math.max(0, limits.campaign - minRelease), buffered!.total - Math.max(0, limits.total - minRelease));
     throw new JobDeferred(new Date(nowMs + drainDelayMs(backlog, row.rate)).toISOString(), payload);
   }
   const rolling = row.pacePerDay !== null && !!row.windowStartedAt && nowMs - Date.parse(row.windowStartedAt) >= DAY_MS;
@@ -3422,10 +3428,16 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (paceLeft <= 0) throw new JobDeferred(new Date(Date.parse(windowStart!) + DAY_MS).toISOString(), payload);
     const sesAllowance = Math.min(sesCapacity, shareCapacity) - buffer!.total;
     if (sesAllowance <= 0) return sesCapacity <= shareCapacity ? 'ses_daily_quota' as const : 'hosted_daily_quota' as const;
-    const capacity = Math.min(CAMPAIGN_EXPAND_ROWS, campaignBuffer(buffer!.rate) - buffer!.campaign, workspaceBuffer(buffer!.rate) - buffer!.total, paceLeft, sesAllowance, rateAllowance, probeLeft, screened);
-    if (capacity <= 0) {
-      // Lost a race with another release after the bounded precheck: wait for the buffer to drain (the rollback releases only locks).
-      const backlog = Math.max(buffer!.campaign - campaignBuffer(buffer!.rate) / 2, buffer!.total - workspaceBuffer(buffer!.rate) / 2);
+    const cBuf = campaignBuffer(buffer!.rate), wBuf = workspaceBuffer(buffer!.rate);
+    const bufRoom = Math.min(cBuf - buffer!.campaign, wBuf - buffer!.total);
+    const demand = Math.min(CAMPAIGN_EXPAND_ROWS, campaign.total - campaign.expanded, paceLeft, sesAllowance, rateAllowance, probeLeft, screened);
+    const txMinRelease = Math.min(demand, Math.floor(cBuf / 4));
+    const capacity = Math.min(demand, bufRoom);
+    if (capacity <= 0 || (buffer!.campaign > 0 && bufRoom < txMinRelease)) {
+      // Lost a race with another release or buffer is still more than three-quarters full: wait for it to drain.
+      const backlog = capacity <= 0
+        ? Math.max(buffer!.campaign - cBuf / 2, buffer!.total - wBuf / 2)
+        : Math.max(buffer!.campaign - Math.max(0, cBuf - txMinRelease), buffer!.total - Math.max(0, wBuf - txMinRelease));
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);

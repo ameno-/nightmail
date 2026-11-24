@@ -72,7 +72,7 @@
     "SIMULATED_SES_LATENCY_MS": "170",
     "SIMULATED_SES_RATE": "5000",
     "DISPATCH_SHARDS": "8",
-    "DISPATCH_RATE_FACTOR": "1.1",
+    "DISPATCH_RATE_FACTOR": "1.05",
     // The customer share: outside workspaces together may use this percent of each shared account's SES daily limit.
     "HOSTED_CUSTOMER_SHARE_PERCENT": "50",
     "API_RATE_LIMIT_PER_MINUTE": "10000",

@@ -47,14 +47,14 @@ function loadHttpDeps() {
 // A provider group fits on one shard. Spread small sends across the pool without waking idle siblings.
 let nextShard: number | undefined;
 let lastPriorityLagWrite = 0, lastPriorityLagHigh = false;
-async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false) {
+async function wakeDispatchers(env: Env, region: string, accountId?: string, emails?: number, kind?: 'shared' | 'byo', priority = false, internal = false) {
   const count = kind === 'byo' ? 1 : shardCount('DISPATCH_SHARDS' in env ? env.DISPATCH_SHARDS : undefined);
   nextShard ??= Math.floor(Math.random() * 0x100000000);
   const indexes = emails !== undefined && emails <= 6 ? [nextShard++ % count] : Array.from({ length: count }, (_, i) => i);
   await Promise.all(indexes.map(index => {
     const identity = { accountId, region, shard: { index, count } };
     const stub = env.DISPATCHER.get(env.DISPATCHER.idFromName(dispatcherName(identity)), { locationHint: 'enam' });
-    return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}`);
+    return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(region)}&shard=${index}&count=${count}${accountId ? `&account=${encodeURIComponent(accountId)}` : ''}${priority ? '&priority=1' : ''}${internal ? '&internal=1' : ''}`);
   }));
 }
 
@@ -109,7 +109,7 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUE
 };
 /** `shadowWaitUntil`: the invocation's waitUntil, for the sends to the second classifier's queue alone, from a handler that
  *  gives no `ctx` here (queue, scheduled: their database connection is closed before they return, as before). */
-async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext, shadowWaitUntil?: (sent: Promise<unknown>) => void): Promise<T> {
+async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext, shadowWaitUntil?: (sent: Promise<unknown>) => void, internal = false): Promise<T> {
   const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake, enqueueShadow } = await loadRuntimeDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
@@ -181,7 +181,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         throw error;
       }
       core.log('info', { code: 'QUEUE_WAKE', readyJobs, messages: 1 });
-    }, dispatch: (...args) => wakeDispatchers(env, ...args), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
+    }, dispatch: (region, accountId, emails, kind, priority) => wakeDispatchers(env, region, accountId, emails, kind, priority, internal), feedback: feedbackSink(env.FEEDBACK_QUEUE, config.authSecret, env.FEEDBACK_PRIORITY_QUEUE), renderHtmlImage: browserImageRenderer(env.BROWSER), importPublicImage: publicImageImporter() });
   } finally {
     if (client) {
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
@@ -403,7 +403,7 @@ export default {
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
       // A campaign's copies are screened in these drains: their repeats go to the second classifier's queue under
       // waitUntil, so the acknowledgement below never waits for that queue.
-    }, concurrency + 2, undefined, waitUntilOf(ctx));
+    }, concurrency + 2, undefined, waitUntilOf(ctx), true);
     batch.ackAll();
     await flushDueCounters(env, ctx);
   },
@@ -455,7 +455,7 @@ export default {
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       // Received mail queued for the refilling budget comes due within minutes; the drain below runs its release.
       try { await (await core.wrapModuleLoad(() => import('./mailbox-staging.js'))).scheduleHoldRelease(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
-      await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
+      await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind, false, true)));
       } finally {
         // Health (src/health.ts), once dispatch recovery has run or failed: what is falling behind, on the Health page and as
         // Slack cards, including a database that refuses the tick's own write. Started here and awaited by nothing: it runs
@@ -478,6 +478,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, concurrency + 2, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
+    }, concurrency + 2, undefined, waitUntilOf(ctx), true); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.
   },
 } satisfies ExportedHandler<Env>;
