@@ -48,7 +48,7 @@ export interface Actor {
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
-  dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind'] };
+  dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind']; maxSendRate?: number };
   // Orchestration jobs this request committed that must not wait for a coalesced wake (campaign launches).
   wakeJobs?: number;
   wakeJobPool?: 'webhook';
@@ -176,15 +176,12 @@ export interface Runtime {
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
-  dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
+  dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean, maxSendRate?: number) => Promise<void>;
   /** Campaign rooms (src/campaign-room.ts): who has a campaign open in the dashboard. Cloudflare only: the Node server has
    *  none, and its dashboard shows no presence. connect answers the WebSocket upgrade. visit reports an agent's read or
    *  save (saved: the revision it made) in the background, never delaying or failing the request: nothing when nobody
    *  is in the room, and its name (lookup, given a runtime of its own) is looked up only when someone is. */
   campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) => void };
-  /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
-   *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
-  screenHandover?: () => boolean;
   /** Where the screen's requests go to be repeated to the second classifier (src/screen-shadow.ts flushShadow), on a
    *  platform that must not make those calls in the invocation that sends mail: Cloudflare puts them on a queue whose
    *  consumer makes them. Returns at once and never throws. Without it they run in this process, in the background. */
@@ -267,6 +264,8 @@ export class ApiError extends Error {
   required?: Required;
   /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
+  /** Seconds for the HTTP Retry-After header when a retryable 503/429 has a fixed backoff instead of resetAt. */
+  retryAfterSeconds?: number;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 /** The permissions a refusal names in error.required, each covering one area of the API (requiredFor). */

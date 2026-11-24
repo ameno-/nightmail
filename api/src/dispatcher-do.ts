@@ -26,25 +26,29 @@ function loadDeps() {
 // per-invocation setup the queue consumer did, and an evicted object resumes from storage
 // without bursting past its quota share. PostgreSQL rows remain the only queue.
 //
-// A run always starts in the alarm, never inside a wake request. Cloudflare labels a request's outbound calls with the
-// visitor who started the chain (a browser, the caller's Worker, our API Worker, this shard), and the content classifier's
-// edge refuses requests labelled with some countries (HTTP 451). The alarm invocation has no visitor. So a wake only arms
-// the alarm for now and returns; the platform runs one alarm() at a time, so runs never overlap.
-//
-// Which request labels a call is the "current" one: the newest request delivered to the object that hasn't completed, and
-// on a Durable Object a request whose handler has returned stays current while the object has any pending timer, as a run
-// always does (workerd io-context.c++). So a request that lands during an alarm is current until the next alarm() begins,
-// however fast it returns. From then the run makes no classifier call: `landed` (set first thing in fetch) stops it before
-// each one (Runtime.screenHandover), the run gives that mail back to the queue and ends, and the follow-up alarm, a newer
-// request with no visitor, screens it. A wake on an idle shard is safe: the alarm it arms is delivered after it.
+// Content screening runs at API accept time (src/sending.ts) before anything enters the sending queue, so the mail room
+// never calls a classifier and visitor wakes never interrupt running alarms. A wake arms the alarm when idle and nudges
+// priorityWake when running; the platform runs one alarm() at a time, so runs never overlap.
 
-type Identity = { region: string; accountId?: string; shard: { index: number; count: number } };
+type Identity = { region: string; accountId?: string; shard: { index: number; count: number }; autoScale?: boolean };
 const RUN_MS = 45000;      // Re-arm well inside the alarm wall-clock and default CPU budgets.
 const RETRY_MS = 15000;    // Dependency failure (database, quota) backoff.
 const OVERDUE_MS = 3000;   // An alarm this far past due with no run in progress is waiting out a platform retry: arm it again.
+/** Target per-shard SES send rate (emails/sec). A Durable Object holds 6 simultaneous outbound connections (~35/s ceiling
+ *  at 170 ms SES RTT), so 25/s per shard gives 8 shards at 200/s and scales smoothly to 40 shards at 1,000/s. */
+export const TARGET_SHARD_RATE = 25;
 
 export function dispatcherName(identity: Identity) { return `dispatcher:${identity.accountId ? `${identity.accountId}:` : ''}${identity.region}:${identity.shard.index}/${identity.shard.count}`; }
 export function shardCount(value: unknown) { const n = Number(value); return Number.isInteger(n) && n >= 1 ? Math.min(n, 256) : 1; }
+/** Derives the number of mail-room shards from the SES account's MaxSendRate, falling back to `fallback` before the first quota sample. */
+export function shardsForRate(rate: number | null | undefined, fallback = 1, max = 256, targetRate = TARGET_SHARD_RATE): number {
+  const cap = Math.min(256, Math.max(1, Math.floor(max) || 256));
+  if (typeof rate === 'number' && Number.isFinite(rate) && rate > 0) {
+    const target = Number.isFinite(targetRate) && targetRate > 0 ? targetRate : TARGET_SHARD_RATE;
+    return Math.min(cap, Math.max(1, Math.ceil(rate / target)));
+  }
+  return Math.min(cap, Math.max(1, Math.floor(fallback) || 1));
+}
 
 export class DispatcherShard extends DurableObject<Env> {
   private pool?: Pool;
@@ -55,9 +59,7 @@ export class DispatcherShard extends DurableObject<Env> {
   private placementLogged = false;
   // The first wake that found no run in progress since the last run started: DISPATCH_RUN's wakeMs, the cost of the hop.
   private wokenAt?: number;
-  // An alarm() is in progress, and a request (any request) has been delivered since it began.
-  private alarmActive = false;
-  private landed = false;
+
 
   // Once per persisted shard, after its first dispatch: where it runs and the cost of one DB round trip.
   // The location hint is only honored at creation, so this is the record of where the object actually landed.
@@ -80,15 +82,13 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    // First, before anything can await: only visitor-originated HTTP requests carry a Cloudflare visitor country
-    // label (queue and cron wakes pass internal=1 and have no visitor, so they must not abort running alarms).
     const url = new URL(request.url);
-    if (this.alarmActive && url.searchParams.get('internal') !== '1') this.landed = true;
     if (url.pathname !== '/wake' || url.searchParams.has('environment')) return new Response('Not found', { status: 404 });
     const identity: Identity = {
       region: url.searchParams.get('region') ?? '',
       accountId: url.searchParams.get('account') ?? undefined,
       shard: { index: Number(url.searchParams.get('shard') ?? 0), count: Math.max(1, Number(url.searchParams.get('count') ?? 1)) },
+      ...(url.searchParams.get('auto') === '1' ? { autoScale: true } : {}),
     };
     if (!identity.region) return new Response('region required', { status: 400 });
     if (!this.identity || dispatcherName(this.identity) !== dispatcherName(identity)) {
@@ -129,11 +129,7 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
-    // This invocation is now the current request: nothing delivered before it labels what it sends. Only the outermost call
-    // resets the flags (the platform never overlaps alarm(); a direct call could).
-    const outer = !this.alarmActive;
-    if (outer) { this.alarmActive = true; this.landed = false; }
-    try { await this.dispatch(); } finally { if (outer) this.alarmActive = false; }
+    await this.dispatch();
   }
 
   private async dispatch(): Promise<void> {
@@ -154,19 +150,7 @@ export class DispatcherShard extends DurableObject<Env> {
       deps.setLogContext({ service: 'worker', deploy: (this.env as unknown as Record<string, unknown>).DEPLOY_SHA });
       const { initialGate, runDispatcher } = deps;
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
-      // Once a visitor request lands, no classifier call in this run (screenHandover). Only stop early for a clean
-      // follow-up alarm when a message genuinely hits screenHandover (needs an external classifier call); otherwise keep
-      // serving priorityWake and normal batches without interrupting pre-screened or cached sends.
-      const baseRuntime = await this.runtime();
-      let handedOver = false;
-      const runtime: Runtime = {
-        ...baseRuntime,
-        screenHandover: () => {
-          if (!this.landed) return false;
-          handedOver = true;
-          return true;
-        },
-      };
+      const runtime = await this.runtime();
       // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
       if (runtime.config.multiTenant && !identity.accountId) return;
       // Throttle and guard gate persistence: a transient DO storage error must never crash a healthy run into a 15 s retry.
@@ -181,17 +165,31 @@ export class DispatcherShard extends DurableObject<Env> {
         catch (error) { deps?.log('warn', { code: 'DISPATCHER_GATE_PERSIST_FAILED', shard: dispatcherName(identity), cause: deps.platformMessage(error) }); }
       };
       const report = await runDispatcher(runtime, {
-        ...identity, gate: this.gate, priorityWake: this.priorityWake, stop: () => handedOver,
+        ...identity, gate: this.gate, priorityWake: this.priorityWake,
         until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6, wakeMs,
         onGate: state => persistGate(state),
       });
       await persistGate(this.gate, true);
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
-      // Work remained when the run budget ended: continue immediately. Otherwise sleep until the next wake (an API nudge or
-      // the scheduler's minute ping) or the run's own retry. A wake only arms this alarm, so every run, and all queued mail,
-      // now depends on the alarm firing; armNow re-arms one left overdue by a platform retry wait.
-      const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
-      next = !report.idle ? Date.now() : retry === Infinity ? undefined : retry;
+      // If AWS changed MaxSendRate (e.g. 200/s -> 1,000/s) on an auto-scaled shard, hand off to the new shard count
+      // immediately and retire this old count's alarm so stale shards never compete with the resized pool.
+      const desired = identity.autoScale && this.gate.quota?.maxSendRate ? shardsForRate(this.gate.quota.maxSendRate, identity.shard.count) : identity.shard.count;
+      if (desired !== identity.shard.count) {
+        if (!report.idle && identity.shard.index === 0 && this.env?.DISPATCHER) {
+          this.ctx.waitUntil(Promise.allSettled(Array.from({ length: desired }, (_, i) => {
+            const target: Identity = { accountId: identity.accountId, region: identity.region, shard: { index: i, count: desired }, autoScale: true };
+            const stub = this.env.DISPATCHER.get(this.env.DISPATCHER.idFromName(dispatcherName(target)), { locationHint: 'enam' });
+            return stub.fetch(`https://dispatcher/wake?region=${encodeURIComponent(identity.region)}&shard=${i}&count=${desired}${identity.accountId ? `&account=${encodeURIComponent(identity.accountId)}` : ''}&auto=1`);
+          })));
+        }
+        next = undefined;
+      } else {
+        // Work remained when the run budget ended: continue immediately. Otherwise sleep until the next wake (an API nudge or
+        // the scheduler's minute ping) or the run's own retry. A wake only arms this alarm, so every run, and all queued mail,
+        // now depends on the alarm firing; armNow re-arms one left overdue by a platform retry wait.
+        const retry = Math.min(report.quotaRetryAt ?? Infinity, report.paceRetryAt ?? Infinity);
+        next = !report.idle ? Date.now() : retry === Infinity ? undefined : retry;
+      }
     } catch (error) {
       // Module loading itself can fail; still log, close and retry so the shard never wedges.
       if (!deps) console.error(JSON.stringify({ level: 'error', timestamp: new Date().toISOString(), service: 'worker', code: 'DISPATCHER_DEPS_FAILED' }));
@@ -208,8 +206,7 @@ export class DispatcherShard extends DurableObject<Env> {
     } finally {
       this.running = false;
     }
-    // A visitor request landed during the run: the follow-up alarm (a newer request, with no visitor) screens what this run gave back.
-    await this.rearm(this.landed ? Date.now() : next);
+    await this.rearm(next);
   }
 
   private async runtime(): Promise<Runtime> {

@@ -24370,9 +24370,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(name==='outage'){assert.equal(report.sent,0);assert.ok(screens<=6 && rewritten<=24 && q.mock.callCount()<=9);}
         await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[ids]);
       }
-      gate.screenRetryAt=Date.now()-1;outage=false;score=.99;runtime.config.screen!.mode='flag';
-      const flagged=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'r@example.invalid',subject:'recovered',text:'fixture'},'live',{authorization:`Bearer ${key.secret}`}),202);
-      assert.equal((await run()).sent,0);assert.equal((await db.query('SELECT error_code FROM sending_emails WHERE id=$1',[flagged.id])).rows[0].error_code,'CONTENT_REJECTED_SPAM');
+      outage=false;score=.99;runtime.config.screen!.mode='flag';
+      error(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'r@example.invalid',subject:'recovered',text:'fixture'},'live',{authorization:`Bearer ${key.secret}`}),422,'CONTENT_REJECTED_SPAM');
     }));
   });
 
@@ -24397,9 +24396,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const logs:Json[]=[];for(const level of ['error','warn','info'] as const)t.mock.method(console,level,(line:string)=>{try{logs.push(JSON.parse(line));}catch{}});
       const gate=initialGate(),ids:Record<string,string>={};
       for(const [name,code] of [['ok','111111'],['503','222222'],['stall','333333'],['stall-body','444444']] as const){
-        answer=name;gate.screenRetryAt=undefined;
-        ids[name]=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`}),202).id;
-        await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
+        answer=name;
+        const reply=await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`});
+        if(name==='ok'){ids[name]=ok(reply,202).id;await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});}
+        else{error(reply,503,'CONTENT_SCREEN_UNAVAILABLE');assert.equal(reply.headers.get('retry-after'),'30');}
       }
       const call=(name:string)=>logs.find(l=>l.code==='CONTENT_SCREEN_CALL' && l.emailId===ids[name])!,email=(name:string)=>logs.find(l=>l.code==='DISPATCH_EMAIL' && l.emailId===ids[name])!;
       assert.deepEqual([call('ok').outcome,call('503').outcome,call('stall').outcome,call('stall-body').outcome],['ok','http_503','timeout','timeout']);
@@ -24444,9 +24444,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const logs:Json[]=[];for(const level of ['error','warn','info'] as const)t.mock.method(console,level,(line:string)=>{try{logs.push(JSON.parse(line));}catch{}});
       const gate=initialGate(),ids:Record<string,string>={};
       const send=async(name:string,code:number)=>{
-        answer=(['refused','locked'].includes(name)?'ok':name) as Answer;gate.screenRetryAt=undefined;
-        ids[name]=ok(await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`}),202).id;
-        await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
+        answer=(['refused','locked'].includes(name)?'ok':name) as Answer;
+        const reply=await local('POST','/v1/emails/send',{from:'a@bench.invalid',to:'private.person@example.invalid',subject:`Your sign-in code is ${code}`,text:`Private body ${code}`},'live',{authorization:`Bearer ${key.secret}`});
+        if(['ok','refused','locked'].includes(name)){ids[name]=ok(reply,202).id;await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});}
+        else{error(reply,503,'CONTENT_SCREEN_UNAVAILABLE');}
       };
       let code=111111;
       // Another session holds a lock on the table: the database cancels the write once it has waited 1.5 s for the lock, the
@@ -25296,8 +25297,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await ask()).model, 'jev-fixture'); assert.equal(sent.jev.length, 5);
         status = 402; let charged = 0;
         assert.equal((await ask(async () => { charged++; })).model, 'jevf'); assert.equal(charged, 2);
-        const before = sent.jevf.length; runtime.screenHandover = () => sent.jev.length > 6;
-        await assert.rejects(ask(), { name: 'ScreenHandover' }); assert.equal(sent.jevf.length, before);
       } finally { clock.mock.restore(); }
     }));
   });

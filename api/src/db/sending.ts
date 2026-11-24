@@ -28,8 +28,10 @@ export type EmailSnapshot = {
   replyAuthors?: string[];
   /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */
   untrustedContent?: boolean;
-  /** Live transactional only: ask the content classifier (Jev) before dispatch. */
+  /** Live transactional only: ask the content classifier (Jev) before accepting into the queue. */
   screen?: boolean;
+  /** Content-screen verdict recorded at accept time so the dispatcher never re-screens queued mail. */
+  screenVerdict?: { status: 'passed' | 'skipped'; spam?: number; model?: string; digest?: string; rules?: 'probation' | 'standard' | null };
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
   unsubscribeUrl?: string;
   /** A sent required notice's email, which has no unsubscribe URL to keep: its body is re-rendered the same way. */
@@ -63,7 +65,7 @@ export const emails = pgTable('sending_emails', {
   reviewId: text('review_id'), reviewOrdinal: integer('review_ordinal'),
   campaignId: text('campaign_id'), from: text('from_address').notNull(), to: jsonb('to_addresses').$type<string[]>().notNull(), cc: jsonb('cc_addresses').$type<string[]>().notNull(), bcc: jsonb('bcc_addresses').$type<string[]>().notNull(),
   subject: text('subject').notNull(), status: text('status').$type<EmailStatus>().notNull().default('queued'), providerId: text('provider_id'),
-  snapshot: jsonb('snapshot').$type<EmailSnapshot>().notNull(), simulated: boolean('simulated').notNull(),
+  snapshot: jsonb('snapshot').$type<EmailSnapshot>().notNull(), simulated: boolean('simulated').notNull(), screened: boolean('screened').notNull().default(true),
   attemptStartedAt: time('attempt_started_at'), errorCode: text('error_code'), suppressionReason: text('suppression_reason'), scheduledAt: time('scheduled_at'), dispatchVersion: integer('dispatch_version').notNull().default(0),
   leaseUntil: time('lease_until'), accountPauseStartedAt: time('account_pause_started_at'),
   // Union of public event outcomes as bit flags (migration 031 trigger); see OUTCOME in operations.ts.
@@ -146,7 +148,7 @@ export const reviewRecipients = pgTable('sending_review_recipients', {
   // No foreign key (migration 026): a statement-level trigger on reviews cascades deletes without a per-row insert check.
   reviewId: text('review_id').notNull(),
   ordinal: integer('ordinal').notNull(), recipient: jsonb('recipient').$type<ReviewedRecipient>().notNull(),
-  recipientBytes: integer('recipient_bytes').notNull(), contentHash: text('content_hash'), subject: text('subject'), snapshotBytes: integer('snapshot_bytes'),
+  recipientBytes: integer('recipient_bytes').notNull(), contentHash: text('content_hash'), subject: text('subject'), snapshotBytes: integer('snapshot_bytes'), screenRejected: boolean('screen_rejected').notNull().default(false),
 }, t => [primaryKey({ columns: [t.reviewId, t.ordinal] })]);
 export const regionalLimits = pgTable('sending_region_limits', {
   ...scope(), region: text('region').notNull(), maxSendRate: doublePrecision('max_send_rate').notNull().default(0), max24HourSend: doublePrecision('max_24_hour_send').notNull().default(0), sentLast24Hours: doublePrecision('sent_last_24_hours').notNull().default(0), reserved: integer('reserved').notNull().default(0),

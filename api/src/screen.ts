@@ -23,10 +23,14 @@ const TTL_MS = 60 * 60 * 1000;
 const MAX_ENTRIES = 5000;
 const DEADLINE_MS = 500;
 const PRIMARY_FAILURES = 3, PRIMARY_COOLDOWN_MS = 60_000;
+const WINDOW_CONCURRENCY = 4;
 const primaryBreakers = new Map<string, { failures: number; retryAt: number }>();
-const authOrBilling = (status?: number) => status === 401 || status === 402 || status === 403;
-// All preparation lanes of a dispatcher invocation share its db object. Allow at most two slow requests, leaving
-// four of the Worker's six outbound connections for its pool and SES. Waiting here holds neither a socket nor a DB client.
+const failoverEligible = (timing: CallTiming) =>
+  timing.outcome === 'timeout' || timing.outcome === 'network' || timing.outcome === 'invalid' ||
+  (timing.httpStatus !== undefined && (timing.httpStatus === 401 || timing.httpStatus === 402 || timing.httpStatus === 403 || timing.httpStatus === 429 || timing.httpStatus === 451 || timing.httpStatus >= 500));
+// 451 is visitor-country-specific at the primary edge: fail over to JevF for that request without tripping the global breaker.
+const tripsPrimaryBreaker = (timing: CallTiming) => failoverEligible(timing) && timing.httpStatus !== 451;
+// Bound concurrent failover requests per runtime so slow JevF calls don't exhaust the Worker's 6 outbound connections.
 const failoverSlots = new WeakMap<object, { active: number; waiting: (() => void)[] }>();
 const QUESTIONS = {
   spam: {
@@ -39,10 +43,7 @@ const QUESTIONS = {
   },
 };
 
-export type ScreenResult = { spam: number; model: string };
-/** A classifier request the caller may not make now (Runtime.screenHandover): nothing was sent, so it is not a classifier
- *  failure. The dispatcher gives the mail back to the queue for its next run. */
-export class ScreenHandover extends Error { constructor() { super('The classifier request was left to the next run.'); this.name = 'ScreenHandover'; } }
+export type ScreenResult = { spam: number; model: string; digest?: string };
 // Bulk invitations repeat identical content, so one verdict serves every copy for an hour.
 // Insertion order is age order: the first key is always the oldest entry.
 const cache = new Map<string, { expires: number; result: ScreenResult }>();
@@ -460,11 +461,9 @@ export async function jevQuestions(endpoint:string,apiKey:string,model:string,st
 }
 /** One window, one verdict. Each actual request has its own deadline, campaign charge and record. */
 async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | undefined, window: number, windows: number, sample: number, shadow?: ShadowRef, charge?: () => Promise<void>): Promise<ScreenResult> {
-  if (runtime.screenHandover?.()) throw new ScreenHandover();
   const primary = runtime.config.screen!, backup = primary.failover;
   const ask = async (settings: Pick<typeof primary, 'endpoint' | 'apiKey' | 'model'>, deadline: number, timing: CallTiming) => {
-    if (charge) { if (runtime.screenHandover?.()) throw new ScreenHandover(); await charge(); }
-    if (runtime.screenHandover?.()) throw new ScreenHandover(); // Also after waiting for a failover slot or a charge.
+    if (charge) await charge();
     const at = Date.now(), { endpoint, apiKey, model } = settings;
     let parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined;
     try {
@@ -479,7 +478,7 @@ async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | und
       throw error;
     } finally {
       logCall(timing,call,window,windows,sample,at,runtime.db);
-      if (shadow && timing.classifier === 'jev' && !(backup && authOrBilling(timing.httpStatus))) shadowed(shadow,runtime.db,at,state,window,windows,timing,parsed,model);
+      if (shadow && timing.classifier === 'jev' && !(backup && failoverEligible(timing))) shadowed(shadow,runtime.db,at,state,window,windows,timing,parsed,model);
     }
   };
   const timing: CallTiming = { classifier: 'jev' };
@@ -497,11 +496,12 @@ async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | und
       if (breaker.retryAt === claim) { breaker.failures = 0; breaker.retryAt = 0; }
       return result;
     } catch (error) {
-      const eligible = authOrBilling(timing.httpStatus);
+      const eligible = failoverEligible(timing);
+      const trips = tripsPrimaryBreaker(timing);
       if (breaker.retryAt === claim) {
-        if (eligible && ++breaker.failures >= PRIMARY_FAILURES) breaker.retryAt = Date.now() + PRIMARY_COOLDOWN_MS;
+        if (trips && ++breaker.failures >= PRIMARY_FAILURES) breaker.retryAt = Date.now() + PRIMARY_COOLDOWN_MS;
         else if (!eligible && timing.outcome) { breaker.failures = 0; breaker.retryAt = 0; }
-        else if (!eligible && claim) breaker.retryAt = now; // No request made: leave the probe available.
+        else if (!trips && claim) breaker.retryAt = now; // No global primary outage: leave the probe available.
       }
       if (!eligible) throw error;
     }
@@ -556,12 +556,18 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
   const limits=runtime.config.screenLimits, test=!!snapshot.testCampaignId;
   const lookup=body(snapshot,test ? limits.campaignBytes : limits.messageBytes,test ? 'campaign' : 'message').then(async ({bodies,textHtmlOverlap})=>{
     const state=classifierState(snapshot,required,textHtmlOverlap);
-    let highest: ScreenResult | undefined;
-    for (const [window, body] of bodies.entries()) {
-      const result=await evaluate(runtime,state(body),call,window,bodies.length,1,shadow);
-      if (!highest || result.spam>highest.spam) highest=result;
-    }
-    return highest!;
+    // Screen all windows of a long email in parallel (bounded to WINDOW_CONCURRENCY so Worker sockets stay bounded).
+    const results: ScreenResult[] = new Array(bodies.length);
+    let next = 0;
+    await Promise.all(Array.from({ length: Math.min(bodies.length, WINDOW_CONCURRENCY) }, async () => {
+      while (next < bodies.length) {
+        const w = next++;
+        results[w] = await evaluate(runtime, state(bodies[w]!), call, w, bodies.length, 1, shadow);
+      }
+    }));
+    let highest = results[0]!;
+    for (let i = 1; i < results.length; i++) if (results[i]!.spam > highest.spam) highest = results[i]!;
+    return { ...highest, digest: key };
   });pending.set(key,lookup);
   try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
     while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;

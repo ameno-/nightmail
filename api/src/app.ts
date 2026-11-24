@@ -199,7 +199,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const nudge = async (runtime: Runtime) => {
       if (wake) try { await runtime.wake?.(wakeJobs, actor?.wakeJobPool ?? (/^\/v1\/(?:inbound\/)?webhooks\//.test(c.req.path) ? 'webhook' : undefined)); } catch { log('warn', { requestId, code: 'QUEUE_WAKE_FAILED', message: 'The job is durable in Postgres; scheduler will recover it.' }); }
       if (dispatch && targets) for (const [region, { count, priority }] of targets) {
-        try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
+        try { await runtime.dispatch?.(region, actor.dispatchAccount?.aws_account_id, count, actor.dispatchAccount?.kind, priority, actor.dispatchAccount?.maxSendRate); } catch { log('warn', { requestId, code: 'DISPATCH_WAKE_FAILED', message: 'Queued mail is durable; the dispatcher polls and the scheduler pings it.' }); }
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
@@ -358,6 +358,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (!known && responseError.status >= 500) logError(error, { requestId, route: routeOf(c), code: responseError.code, status: responseError.status });
     if (responseError.required) c.header(requiredHeader, requiredHeaderValue(responseError.required));
     if (responseError.resetAt) c.header('Retry-After', new Date(responseError.resetAt).toUTCString());
+    else if (responseError.retryAfterSeconds !== undefined) c.header('Retry-After', String(Math.max(1, Math.ceil(responseError.retryAfterSeconds))));
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: { code: responseError.code, message: responseError.message, requestId, retryable: responseError.retryable, ...(responseError.field ? { field: responseError.field } : {}), ...(responseError.resetAt ? { resetAt: responseError.resetAt } : {}), ...(responseError.details ? { details: responseError.details } : {}), ...(responseError.required ? { required: responseError.required } : {}) } }, responseError.status as ContentfulStatusCode);
   });
