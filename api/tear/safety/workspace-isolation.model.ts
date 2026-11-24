@@ -1,10 +1,11 @@
 /**
  * Workspace data-isolation safety model: nothing crosses between workspaces, on any route.
  *
- * Invariants verified across 3 workspaces (A, B, C), all principal kinds (owner, admin, member,
+ * Invariants verified across 3 workspaces (A, B, C), all 14 principal kinds (owner, admin, member,
  * dual-workspace user, unrestricted API key, domain-limited API key, MCP OAuth sessions,
- * support conversations, unauthenticated), every route enumerated from api/openapi.json,
- * every hidden /v1/support/* route, and every MCP catalog tool:
+ * support conversations, unauthenticated), all 276 OpenAPI routes (enumerated dynamically from
+ * api/openapi.json), all 31 support routes (28 hidden /v1/support/* + 3 /v1/support-actions/*),
+ * all 242 MCP catalog tools, and every ID-carrying body, query, and path field:
  *   1. No response ever contains another workspace's recognisable data, IDs, names, or counts.
  *   2. No write ever changes another workspace's state (full DB + storage snapshot before/after).
  *   3. "Not yours" and "doesn't exist" are indistinguishable (same status, code, message, shape).
@@ -15,6 +16,7 @@
 import { choice, model, prop, satisfies, sel, type Choice, type IdleRule, type Step } from "@tear/mbt";
 import type {
   AggregatePrincipal,
+  FieldProbeFocus,
   McpChunk,
   McpPrincipal,
   OpenApiPrincipal,
@@ -43,7 +45,6 @@ const ROUTE_GROUPS: readonly RouteGroup[] = [
   "routing-rules",
   "inboxes",
   "inbound-mail",
-  "inbound-webhooks-write",
   "inbound-config",
   "workspaces",
   "billing",
@@ -82,6 +83,13 @@ const AGGREGATE_PRINCIPALS: readonly AggregatePrincipal[] = [
   "dualB",
   "keyA",
   "supportA",
+] as const;
+
+const FIELD_FOCUSES: readonly FieldProbeFocus[] = [
+  "body-writes",
+  "query-reads",
+  "pr614-bug-iso-04",
+  "nearby-ended-inboxes",
 ] as const;
 
 const TARGETS: readonly WorkspaceSlot[] = ["A", "B", "C"] as const;
@@ -146,31 +154,12 @@ function summarizeViolations(obs: WorkspaceIsolationObs): string | true {
 }
 
 function maskFor(a: WorkspaceIsolationAction): string | undefined {
-  // Known product bugs documented in /Users/vogel/.config/opensend-mx/plans/tear/bugs-isolation.md:
-  // - BUG-ISO-01 (PR #591, unmerged on api/tear-update base 24333f2c): GET /v1/support/audience/health
-  //   reads base table audience_imports instead of scoped CTE i, leaking every workspace's imports.
-  if (a.op === "ProbeSupport" && a.scope === "audience-health" && (a.principal === "supportA" || a.principal === "supportDualA")) {
-    return "BUG-ISO-01";
-  }
-  // - BUG-ISO-02 (PR #597 class, unfixed): POST /v1/campaigns and PATCH /v1/campaigns/{id} accept and
-  //   persist foreign workspace listId/segmentId/excludeListIds/excludeSegmentIds without workspace check.
-  if (a.op === "DualMismatch" && a.focus === "campaign-audience" && a.header !== "C" && a.header !== a.target) {
-    return "BUG-ISO-02";
-  }
-  // - BUG-ISO-03 (PR #597 class, unfixed): POST /v1/inbound/webhooks and PATCH /v1/inbound/webhooks/{id}
-  //   accept and persist foreign workspace addressIds into mailbox_webhooks.mailbox_ids without workspace check.
-  if (a.op === "DualMismatch" && a.focus === "inbound-webhook-addresses" && a.header !== "C" && a.header !== a.target) {
-    return "BUG-ISO-03";
-  }
-  if (
-    a.op === "ProbeGroup" &&
-    a.group === "inbound-webhooks-write" &&
-    a.principal !== "anon" &&
-    a.principal !== "dualC" &&
-    a.principal !== "memberA" &&
-    a.principal !== "dkeyA"
-  ) {
-    return "BUG-ISO-03";
+  // BUG-ISO-01 (#591), BUG-ISO-02 (#611), and BUG-ISO-03 (#612) are fixed on dev — NO masks!
+  // BUG-ISO-04 (PR #614, approved & waiting to merge onto dev): PUT /v1/rules & /v1/rules/decisions
+  // accept foreign evaluateRoutes / unowned evaluateDomains; PATCH /v1/api-keys/{id} on all-addresses
+  // keys accepts foreign addAddressIds; ended inboxes not excluded on key/webhook addressIds.
+  if (a.op === "ProbeFields" && a.focus === "pr614-bug-iso-04") {
+    return "BUG-ISO-04";
   }
   return undefined;
 }
@@ -191,6 +180,7 @@ export const workspaceIsolation = model<
     ProbeGroup: "call",
     ProbeSupport: "call",
     ProbeMcp: "call",
+    ProbeFields: "call",
     CheckAggregates: "read",
     DualMismatch: "call",
     ConcurrentDualSwitch: "sequential",
@@ -201,7 +191,7 @@ export const workspaceIsolation = model<
   choices(s): Choice<WorkspaceIsolationAction>[] {
     const out: Choice<WorkspaceIsolationAction>[] = [];
     for (const group of ROUTE_GROUPS) {
-      const weight = group === "other" || group === "inbound-webhooks-write" ? 1 : s.seenGroups.includes(group) ? 1 : 3;
+      const weight = group === "other" ? 1 : s.seenGroups.includes(group) ? 1 : 3;
       for (const principal of OPENAPI_PRINCIPALS) {
         const target: WorkspaceSlot = principal === "dualB" ? "A" : "B";
         out.push(choice({ op: "ProbeGroup", group, principal, target }, weight));
@@ -213,27 +203,33 @@ export const workspaceIsolation = model<
     for (const principal of SUPPORT_PRINCIPALS) {
       for (const target of TARGETS) {
         if (principal === "supportA" && target === "A") continue;
-        out.push(choice({ op: "ProbeSupport", principal, scope: "core", target }, 2));
+        out.push(choice({ op: "ProbeSupport", principal, target }, 2));
       }
     }
-    out.push(choice({ op: "ProbeSupport", principal: "supportA", scope: "audience-health", target: "B" }, 1));
-    out.push(choice({ op: "ProbeSupport", principal: "supportDualA", scope: "audience-health", target: "B" }, 1));
     for (const principal of MCP_PRINCIPALS) {
       for (const chunk of MCP_CHUNKS) {
         out.push(choice({ op: "ProbeMcp", principal, chunk, target: "B" }, 2));
         if (principal === "mcpDual") out.push(choice({ op: "ProbeMcp", principal, chunk, target: "C" }, 1));
       }
     }
+    for (const focus of FIELD_FOCUSES) {
+      const w = focus === "pr614-bug-iso-04" || focus === "nearby-ended-inboxes" ? 1 : 3;
+      out.push(choice({ op: "ProbeFields", principal: "ownerA", target: "B", focus }, w));
+      out.push(choice({ op: "ProbeFields", principal: "dualA", target: "B", focus }, w));
+      if (focus === "body-writes" || focus === "query-reads") {
+        out.push(choice({ op: "ProbeFields", principal: "dualB", target: "A", focus }, 2));
+        out.push(choice({ op: "ProbeFields", principal: "keyA", target: "B", focus }, 2));
+        out.push(choice({ op: "ProbeFields", principal: "ownerA", target: "C", focus }, 1));
+      }
+    }
     for (const principal of AGGREGATE_PRINCIPALS) {
       out.push(choice({ op: "CheckAggregates", principal }, 2));
     }
     out.push(
-      choice({ op: "DualMismatch", header: "A", target: "B", focus: "core" }, 3),
-      choice({ op: "DualMismatch", header: "B", target: "A", focus: "core" }, 3),
-      choice({ op: "DualMismatch", header: "A", target: "C", focus: "core" }, 2),
-      choice({ op: "DualMismatch", header: "C", target: "A", focus: "core" }, 2),
-      choice({ op: "DualMismatch", header: "A", target: "B", focus: "campaign-audience" }, 1),
-      choice({ op: "DualMismatch", header: "A", target: "B", focus: "inbound-webhook-addresses" }, 1),
+      choice({ op: "DualMismatch", header: "A", target: "B" }, 3),
+      choice({ op: "DualMismatch", header: "B", target: "A" }, 3),
+      choice({ op: "DualMismatch", header: "A", target: "C" }, 2),
+      choice({ op: "DualMismatch", header: "C", target: "A" }, 2),
       choice({ op: "ConcurrentDualSwitch" }, 3),
     );
     return out;

@@ -35,9 +35,11 @@ export type SupportPrincipal =
   | "keyA"
   | "anon";
 
-export type SupportScopeMode = "core" | "audience-health";
-
-export type DualMismatchFocus = "core" | "campaign-audience" | "inbound-webhook-addresses";
+export type FieldProbeFocus =
+  | "body-writes"
+  | "query-reads"
+  | "pr614-bug-iso-04"
+  | "nearby-ended-inboxes";
 
 export type McpPrincipal = "mcpA" | "mcpDual" | "keyA" | "dkeyA" | "anon";
 
@@ -64,7 +66,6 @@ export type RouteGroup =
   | "routing-rules"
   | "inboxes"
   | "inbound-mail"
-  | "inbound-webhooks-write"
   | "inbound-config"
   | "workspaces"
   | "billing"
@@ -72,10 +73,11 @@ export type RouteGroup =
 
 export type WorkspaceIsolationAction =
   | { op: "ProbeGroup"; group: RouteGroup; principal: OpenApiPrincipal; target: WorkspaceSlot }
-  | { op: "ProbeSupport"; principal: SupportPrincipal; scope: SupportScopeMode; target: WorkspaceSlot }
+  | { op: "ProbeSupport"; principal: SupportPrincipal; target: WorkspaceSlot }
   | { op: "ProbeMcp"; principal: McpPrincipal; chunk: McpChunk; target: WorkspaceSlot }
+  | { op: "ProbeFields"; principal: "ownerA" | "dualA" | "dualB" | "keyA"; target: WorkspaceSlot; focus: FieldProbeFocus }
   | { op: "CheckAggregates"; principal: AggregatePrincipal }
-  | { op: "DualMismatch"; header: WorkspaceSlot; target: WorkspaceSlot; focus: DualMismatchFocus }
+  | { op: "DualMismatch"; header: WorkspaceSlot; target: WorkspaceSlot }
   | { op: "ConcurrentDualSwitch" };
 
 export interface WorkspaceIsolationObs {

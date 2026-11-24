@@ -6,18 +6,25 @@ import { host, type HostEvent, type Observed } from "@tear/mbt";
 import { workspaceIsolation } from "./workspace-isolation.model.ts";
 import type {
   AggregatePrincipal,
-  DualMismatchFocus,
+  FieldProbeFocus,
   McpChunk,
   McpPrincipal,
   OpenApiPrincipal,
   RouteGroup,
   SupportPrincipal,
-  SupportScopeMode,
   WorkspaceIsolationAction,
   WorkspaceIsolationObs,
   WorkspaceIsolationSnapshot,
   WorkspaceSlot,
 } from "./workspace-isolation.types.ts";
+
+// Validate disposable database URL & marker FIRST before registering handlers or importing api/src/.
+const { disposableUrl, assertDisposable } = await import("../disposable.ts");
+const url = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
+
+const pool = new pg.Pool({ connectionString: url, max: 16 });
+pool.on("error", () => {});
+await assertDisposable((text) => pool.query(text));
 
 // Silence routine app logs unless TEAR_HOST_LOG=1; keep console.error visible.
 for (const level of ["log", "info", "warn", "debug"] as const) {
@@ -32,9 +39,6 @@ process.on("unhandledRejection", (error) => {
   const msg = error instanceof Error ? error.message : String(error);
   leaked.push(`unhandled-rejection:${msg.slice(0, 140)}`);
 });
-
-const { disposableUrl, assertDisposable } = await import("../disposable.ts");
-const url = disposableUrl(process.env.TEAR_DATABASE_URL ?? process.env.DATABASE_URL, "TEAR_DATABASE_URL");
 
 const PUBLIC = "http://127.0.0.1:8796";
 const fixtureIssuer = "https://tear-issuer.invalid";
@@ -87,10 +91,6 @@ const env: Record<string, string> = {
   SIMULATED_SES_LATENCY_MS: "0",
   SIMULATED_SES_DELIVERY_DELAY_MS: "0",
 };
-
-const pool = new pg.Pool({ connectionString: url, max: 16 });
-pool.on("error", () => {});
-await assertDisposable((text) => pool.query(text));
 
 const [
   { createApp, createOpenApiApp },
@@ -244,9 +244,7 @@ function classifyGroup(p: string, method?: string): RouteGroup {
     return "ops";
   if (p.startsWith("/v1/routing") || p.startsWith("/v1/rules") || p.startsWith("/v1/endpoints")) return "routing-rules";
   if (p.startsWith("/v1/inboxes") || p.startsWith("/v1/inbox-connections") || p === "/v1/app-passwords") return "inboxes";
-  if ((p === "/v1/inbound/webhooks" && method === "POST") || (p === "/v1/inbound/webhooks/{id}" && method === "PATCH")) {
-    return "inbound-webhooks-write";
-  }
+
   if (
     p.startsWith("/v1/inbound/threads") ||
     p.startsWith("/v1/inbound/messages") ||
@@ -373,6 +371,8 @@ interface SeededWorkspace {
   domainId: string;
   mailboxDomainId: string;
   mailboxSubdomainId: string;
+  hostedChildName: string;
+  hostedChildReceivingHost: string;
   connectionId: string;
   ownerUserId: string;
   ownerMemberId: string;
@@ -384,6 +384,7 @@ interface SeededWorkspace {
   domainKeyId: string;
   domainKeySecret: string;
   mailboxKeyId: string;
+  allAddrKeyId: string;
   agentTokenId: string;
   mcpGrantId: string;
   contactIds: string[];
@@ -408,9 +409,11 @@ interface SeededWorkspace {
   inboundWebhookDeliveryId: string;
   endpointId: string;
   endpointKey: string;
+  forwardEndpointKey: string;
   routeId: string;
   ruleKey: string;
   inboxId: string;
+  endedInboxId: string;
   addressId: string;
   addressEmail: string;
   inboxEmail: string;
@@ -615,10 +618,12 @@ async function seedWorkspace(
      VALUES ($1,$2,$3,$4,$4,$5,'active','store')`,
     [mailboxDomainId, wsId, domainId, domainName, region],
   );
+  const hostedChildName = `child-${mLow}.${domainName}`;
+  const hostedChildReceivingHost = `rx-${mLow}.${domainName}`;
   await pool.query(
     `INSERT INTO mailbox_domains(id,workspace_id,domain_id,parent_id,name,receiving_host,region,status,catch_all)
-     VALUES ($1,$2,$3,$4,$5,$5,$6,'active','store')`,
-    [mailboxSubdomainId, wsId, domainId, mailboxDomainId, `sub.${domainName}`, region],
+     VALUES ($1,$2,$3,$4,$5,$6,$7,'active','store')`,
+    [mailboxSubdomainId, wsId, domainId, mailboxDomainId, hostedChildName, hostedChildReceivingHost, region],
   );
 
   // 4. API keys, MCP grant, agent token
@@ -935,12 +940,30 @@ async function seedWorkspace(
     `INSERT INTO inbox_app_passwords(id,inbox_id,name,hash,protocols) VALUES ($1,$2,$3,$4,ARRAY['imap','smtp'])`,
     [appPasswordId, inboxId, `AppPw ${marker}`, sha256(`pw-${marker}`)],
   );
+  const endedInboxId = `mbx_${hex(12)}`;
+  const endedInboxEmail = `ended-${mLow}@${domainName}`;
+  await pool.query(
+    `INSERT INTO mailboxes(id,workspace_id,domain_id,address,display_name,kind,retention_mode,expires_at,delete_after,key)
+     VALUES ($1,$2,$3,$4,$5,'inbox','ephemeral',now() - interval '2 hours',now() - interval '1 hour',$6)`,
+    [endedInboxId, wsId, mailboxDomainId, endedInboxEmail, `EndedInbox ${marker}`, `end-${mLow}`],
+  );
+  await pool.query(
+    `INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES ($1,$2,$3,'primary')`,
+    [wsId, endedInboxEmail, endedInboxId],
+  );
   const mailboxKeyId = `mbk_${hex(12)}`;
   const mbxKeySecret = `nm_mbx_${hex(32)}`;
   await pool.query(
     `INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,inbox_id,permissions)
      VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,'["read","send"]'::jsonb)`,
     [mailboxKeyId, wsId, `MbxKey ${marker}`, sha256(mbxKeySecret), mbxKeySecret.slice(0, 14), JSON.stringify([inboxId]), inboxId],
+  );
+  const allAddrKeyId = `mbk_${hex(12)}`;
+  const allAddrKeySecret = `nm_mbx_${hex(32)}`;
+  await pool.query(
+    `INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,inbox_id,permissions)
+     VALUES ($1,$2,$3,$4,$5,NULL,NULL,'["read","send"]'::jsonb)`,
+    [allAddrKeyId, wsId, `AllAddrKey ${marker}`, sha256(allAddrKeySecret), allAddrKeySecret.slice(0, 14)],
   );
 
   const threadId = `thr_${hex(12)}`;
@@ -1023,6 +1046,14 @@ async function seedWorkspace(
     `INSERT INTO mailbox_webhooks(id,workspace_id,type,key,name,event_types,encrypted_target)
      VALUES ($1,$2,'slack',$3,$4,'[]'::jsonb,$5)`,
     [endpointId, wsId, endpointKey, `SlackEp ${marker}`, encEpTarget],
+  );
+  const forwardEndpointId = `con_${hex(12)}`;
+  const forwardEndpointKey = `fwd-${mLow}`;
+  const encFwdTarget = await encrypt(runtime, `fwd-${mLow}@example.org`, `${wsId}:endpoint:${forwardEndpointId}`);
+  await pool.query(
+    `INSERT INTO mailbox_webhooks(id,workspace_id,type,key,name,event_types,encrypted_target,verified,expires_at)
+     VALUES ($1,$2,'forward',$3,$4,'[]'::jsonb,$5,false,now() + interval '1 day')`,
+    [forwardEndpointId, wsId, forwardEndpointKey, `FwdEp ${marker}`, encFwdTarget],
   );
 
   const routeId = `rte_${hex(12)}`;
@@ -1135,12 +1166,15 @@ async function seedWorkspace(
     domainId,
     mailboxDomainId,
     mailboxSubdomainId,
+    hostedChildName,
+    hostedChildReceivingHost,
     connectionId,
     owner.email,
     invitationId,
     apiKeyId,
     domainKeyId,
     mailboxKeyId,
+    allAddrKeyId,
     agentTokenId,
     mcpGrantId,
     ...contactIds,
@@ -1162,9 +1196,11 @@ async function seedWorkspace(
     inboundWebhookDeliveryId,
     endpointId,
     endpointKey,
+    forwardEndpointKey,
     routeId,
     ruleKey,
     inboxId,
+    endedInboxId,
     addressId,
     addressEmail,
     inboxEmail,
@@ -1190,6 +1226,8 @@ async function seedWorkspace(
     domainId,
     mailboxDomainId,
     mailboxSubdomainId,
+    hostedChildName,
+    hostedChildReceivingHost,
     connectionId,
     ownerUserId: owner.id,
     ownerMemberId,
@@ -1201,6 +1239,7 @@ async function seedWorkspace(
     domainKeyId,
     domainKeySecret,
     mailboxKeyId,
+    allAddrKeyId,
     agentTokenId,
     mcpGrantId,
     contactIds,
@@ -1225,9 +1264,11 @@ async function seedWorkspace(
     inboundWebhookDeliveryId,
     endpointId,
     endpointKey,
+    forwardEndpointKey,
     routeId,
     ruleKey,
     inboxId,
+    endedInboxId,
     addressId,
     addressEmail,
     inboxEmail,
@@ -2036,13 +2077,10 @@ async function runProbeGroup(
       echoedInputs: req.echoed,
       context: `${principal} ${route.method} ${route.path} (target=${targetSlot})`,
     });
-    const isKnownBugGroup = group === "inbound-webhooks-write";
     for (const l of foundLeaks) {
       obs.leaks.push(l);
-      if (!isKnownBugGroup) {
-        t.leaks.push(l);
-        t.pendingEvents.push({ name: "isolation.leak", data: { principal, route: `${route.method} ${route.path}`, target: targetSlot } });
-      }
+      t.leaks.push(l);
+      t.pendingEvents.push({ name: "isolation.leak", data: { principal, route: `${route.method} ${route.path}`, target: targetSlot } });
     }
 
     // Invariant 3: Indistinguishability ("not yours" vs "doesn't exist") for foreign resource IDs
@@ -2114,7 +2152,6 @@ async function runProbeGroup(
 async function runProbeSupport(
   t: Trial,
   principal: SupportPrincipal,
-  scopeMode: SupportScopeMode,
   targetSlot: WorkspaceSlot,
 ): Promise<WorkspaceIsolationObs> {
   const allowedSlots = activeSlotsFor(principal);
@@ -2158,11 +2195,8 @@ async function runProbeSupport(
   if (isSupportCaller) {
     await pool.query(`UPDATE support_conversations SET used = 0 WHERE id = ANY($1::text[])`, [t.convIds]);
   }
-  const supportEntries = SUPPORT_CEILINGS.filter((e) =>
-    scopeMode === "audience-health" ? e.path === "/v1/support/audience/health" : e.path !== "/v1/support/audience/health",
-  );
-  // Drive ALL 28 hidden /v1/support/* routes from SUPPORT_CEILINGS!
-  for (const entry of supportEntries) {
+  // Drive ALL 28 hidden /v1/support/* routes from SUPPORT_CEILINGS (including /v1/support/audience/health, fixed by #591)!
+  for (const entry of SUPPORT_CEILINGS) {
     if (isSupportCaller) {
       await pool.query(`UPDATE support_conversations SET used = 0 WHERE id = ANY($1::text[])`, [t.convIds]);
     }
@@ -2234,10 +2268,8 @@ async function runProbeSupport(
       });
       for (const l of uLeaks) {
         obs.leaks.push(l);
-        if (scopeMode !== "audience-health") {
-          t.leaks.push(l);
-          t.pendingEvents.push({ name: "isolation.leak", data: { principal, route: entry.path, target: "unscoped" } });
-        }
+        t.leaks.push(l);
+        t.pendingEvents.push({ name: "isolation.leak", data: { principal, route: entry.path, target: "unscoped" } });
       }
       // Also check aggregate recount on /v1/support/audience/health (Invariant 4)
       if (entry.path === "/v1/support/audience/health" && unscopedReply.status === 200 && allowedSlots.length === 1) {
@@ -2273,7 +2305,7 @@ async function runProbeSupport(
   }
 
   // Also probe customer-facing /v1/support-actions/{id} (+ confirm/decline) against foreign action IDs!
-  if (!isSupportCaller && scopeMode === "core") {
+  if (!isSupportCaller) {
     for (const [m, p] of [
       ["GET", `/v1/support-actions/${target.supportActionId}`],
       ["POST", `/v1/support-actions/${target.supportActionId}/confirm`],
@@ -2582,8 +2614,8 @@ async function runCheckAggregates(t: Trial, principal: AggregatePrincipal): Prom
       (SELECT count(*)::int FROM operation_domains WHERE workspace_id=$1) AS domains,
       (SELECT count(*)::int FROM operation_webhooks WHERE workspace_id=$1) AS webhooks,
       (SELECT count(*)::int FROM api_keys WHERE workspace_id=$1) + (SELECT count(*)::int FROM mailbox_keys WHERE workspace_id=$1) AS api_keys,
-      (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1 AND kind='inbox') AS inboxes,
-      (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1 AND kind='address') AS addresses,
+      (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1 AND kind='inbox' AND (delete_after IS NULL OR delete_after > now())) AS inboxes,
+      (SELECT count(*)::int FROM mailboxes WHERE workspace_id=$1 AND kind='address' AND (delete_after IS NULL OR delete_after > now())) AS addresses,
       (SELECT count(*)::int FROM mail_threads WHERE workspace_id=$1) AS threads,
       (SELECT count(*)::int FROM mail_messages WHERE workspace_id=$1 AND direction='inbound') AS messages,
       (SELECT count(*)::int FROM workspace_members WHERE workspace_id=$1) AS members,
@@ -2620,6 +2652,23 @@ async function runCheckAggregates(t: Trial, principal: AggregatePrincipal): Prom
       for (const l of scanForLeaks(t, ctx, foreignSlots, { context: "supportA GET /v1/support/context" })) {
         obs.leaks.push(l);
         t.leaks.push(l);
+      }
+    }
+    // BUG-ISO-01 (#591) is fixed on dev: /v1/support/audience/health must return ONLY workspace A's committed imports!
+    const aud = await rawFetch("GET", "/v1/support/audience/health", baseOpts);
+    obs.routesDriven += 1;
+    if (aud.status === 200) {
+      expectEq("support/audience/health all.contacts", aud.body?.all?.contacts, sqlCounts!.contacts);
+      expectEq("support/audience/health lists.length", aud.body?.lists?.length, sqlCounts!.lists);
+      const committedImports = await pool.query<{ n: number }>(
+        `SELECT count(*)::int AS n FROM audience_imports WHERE workspace_id=$1 AND status='committed'`,
+        [w.id],
+      );
+      expectEq("support/audience/health imports.length", aud.body?.imports?.length, committedImports.rows[0]!.n);
+      for (const l of scanForLeaks(t, aud, foreignSlots, { context: "supportA GET /v1/support/audience/health" })) {
+        obs.leaks.push(l);
+        t.leaks.push(l);
+        t.pendingEvents.push({ name: "isolation.leak", data: { principal, route: "/v1/support/audience/health" } });
       }
     }
     return obs;
@@ -2716,7 +2765,6 @@ async function runDualMismatch(
   t: Trial,
   headerSlot: WorkspaceSlot,
   targetSlot: WorkspaceSlot,
-  focus: DualMismatchFocus,
 ): Promise<WorkspaceIsolationObs> {
   const obs: WorkspaceIsolationObs = {
     routesDriven: 0,
@@ -2816,13 +2864,8 @@ async function runDualMismatch(
       { name: "attach-rules-to-other-addr", method: "PUT", path: "/v1/rules/attachments", body: { attachments: [{ rule: headerWs.ruleKey, target: targetWs.addressId }] }, mustReject: true, echoed: [targetWs.addressId] },
     ];
 
-    const crossCases =
-      focus === "campaign-audience"
-        ? campaignAudienceCases
-        : focus === "inbound-webhook-addresses"
-          ? inboundWebhookCases
-          : coreCases;
-    const isKnownBugKind = focus !== "core";
+    // All three groups (campaign audience #611, inbound webhook addressIds #612, and core path/body) now run unmasked!
+    const crossCases = [...campaignAudienceCases, ...inboundWebhookCases, ...coreCases];
 
     for (const tc of crossCases) {
       const r = await rawFetch(tc.method, tc.path, { ...auth, body: tc.body });
@@ -2831,14 +2874,12 @@ async function runDualMismatch(
       if (tc.mustReject && r.status >= 200 && r.status < 300) {
         const msg = `dual(header=${headerSlot},target=${targetSlot}) ${tc.name} (${tc.method} ${tc.path}): ACCEPTED with ${r.status}! body=${r.text.slice(0, 160)}`;
         obs.dualViolations.push(msg);
-        if (!isKnownBugKind) t.dualViolations.push(msg);
+        t.dualViolations.push(msg);
       }
       for (const l of scanForLeaks(t, r, foreignSlots, { echoedInputs: tc.echoed, context: `dual(${headerSlot}->${targetSlot}) ${tc.name}` })) {
         obs.leaks.push(l);
-        if (!isKnownBugKind) {
-          t.leaks.push(l);
-          t.pendingEvents.push({ name: "isolation.leak", data: { principal: `dual${headerSlot}`, case: tc.name } });
-        }
+        t.leaks.push(l);
+        t.pendingEvents.push({ name: "isolation.leak", data: { principal: `dual${headerSlot}`, case: tc.name } });
       }
     }
   }
@@ -2853,6 +2894,405 @@ async function runDualMismatch(
   }
 
   return obs;
+  } finally {
+    tracker.end();
+  }
+}
+
+
+// ---------- Exhaustive ID-carrying field probes (bodies + queries + #614 + nearby edge cases) ----------
+async function runProbeFields(
+  t: Trial,
+  principal: "ownerA" | "dualA" | "dualB" | "keyA",
+  targetSlot: WorkspaceSlot,
+  focus: FieldProbeFocus,
+): Promise<WorkspaceIsolationObs> {
+  const allowedSlots = activeSlotsFor(principal);
+  const callerSlot = allowedSlots[0]!;
+  const foreignSlots = foreignSlotsFor(allowedSlots);
+  const callerWs = t.ws[callerSlot];
+  const targetWs = t.ws[targetSlot];
+  const auth = authOptsFor(t, principal);
+  const tracker = beginSlotTracking(t, allowedSlots);
+
+  const obs: WorkspaceIsolationObs = {
+    routesDriven: 0,
+    leaks: [],
+    foreignMutations: [],
+    probeOracles: [],
+    aggregateMismatches: [],
+    dualViolations: [],
+    unexpectedErrors: [],
+  };
+
+  const snapBefore = await snapshotWorkspaces(t.wsIds);
+  const isMaskedFocus = focus === "pr614-bug-iso-04";
+  const miss = (prefix: string, hexLen = 24) => `${prefix}${"0".repeat(hexLen)}`;
+
+  interface FieldPair {
+    name: string;
+    method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+    pathReal: string;
+    pathMiss: string;
+    bodyReal?: unknown;
+    bodyMiss?: unknown;
+    headers?: Record<string, string>;
+    realTokens: string[];
+    missTokens: string[];
+    mustRejectWrite?: boolean;
+    skipOracle?: boolean;
+  }
+
+  try {
+    const pairs: FieldPair[] = [];
+
+    if (focus === "body-writes") {
+      // Every ID-carrying body field across all write routes, comparing foreign real ID vs nonexistent ID!
+      const p: FieldPair[] = [
+        // Campaigns (BUG-ISO-02 #611 — fixed on dev: must reject with 404 identical to missing!)
+        { name: "createCampaign.audience.listId", method: "POST", pathReal: "/v1/campaigns", pathMiss: "/v1/campaigns",
+          bodyReal: { name: "F1", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { listId: targetWs.listIds[0]! } },
+          bodyMiss: { name: "F1", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { listId: miss("lst_") } },
+          realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")], mustRejectWrite: true },
+        { name: "createCampaign.audience.segmentId", method: "POST", pathReal: "/v1/campaigns", pathMiss: "/v1/campaigns",
+          bodyReal: { name: "F2", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { segmentId: targetWs.segmentIds[0]! } },
+          bodyMiss: { name: "F2", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { segmentId: miss("seg_") } },
+          realTokens: [targetWs.segmentIds[0]!], missTokens: [miss("seg_")], mustRejectWrite: true },
+        { name: "createCampaign.audience.excludeListIds", method: "POST", pathReal: "/v1/campaigns", pathMiss: "/v1/campaigns",
+          bodyReal: { name: "F3", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { listId: callerWs.listIds[0]!, excludeListIds: [targetWs.listIds[0]!] } },
+          bodyMiss: { name: "F3", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { listId: callerWs.listIds[0]!, excludeListIds: [miss("lst_")] } },
+          realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")], mustRejectWrite: true },
+        { name: "createCampaign.audience.excludeSegmentIds", method: "POST", pathReal: "/v1/campaigns", pathMiss: "/v1/campaigns",
+          bodyReal: { name: "F4", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { listId: callerWs.listIds[0]!, excludeSegmentIds: [targetWs.segmentIds[0]!] } },
+          bodyMiss: { name: "F4", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", audience: { listId: callerWs.listIds[0]!, excludeSegmentIds: [miss("seg_")] } },
+          realTokens: [targetWs.segmentIds[0]!], missTokens: [miss("seg_")], mustRejectWrite: true },
+        { name: "createCampaign.attachments", method: "POST", pathReal: "/v1/campaigns", pathMiss: "/v1/campaigns",
+          bodyReal: { name: "F5", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", attachments: [targetWs.attachmentId] },
+          bodyMiss: { name: "F5", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", attachments: [miss("att_")] },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        { name: "createCampaign.templateId", method: "POST", pathReal: "/v1/campaigns", pathMiss: "/v1/campaigns",
+          bodyReal: { name: "F6", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", templateId: targetWs.templateId },
+          bodyMiss: { name: "F6", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", templateId: miss("tpl_", 32) },
+          realTokens: [targetWs.templateId], missTokens: [miss("tpl_", 32)], mustRejectWrite: true },
+        { name: "updateCampaign.draft.audience.listId", method: "PATCH", pathReal: `/v1/campaigns/${callerWs.campaignDraftId}`, pathMiss: `/v1/campaigns/${callerWs.campaignDraftId}`,
+          bodyReal: { revision: 1, draft: { name: "U1", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", attachments: [], tracking: true, audience: { listId: targetWs.listIds[0]! }, defaults: {} } },
+          bodyMiss: { revision: 1, draft: { name: "U1", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", attachments: [], tracking: true, audience: { listId: miss("lst_") }, defaults: {} } },
+          realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")], mustRejectWrite: true },
+        { name: "updateCampaign.draft.attachments", method: "PATCH", pathReal: `/v1/campaigns/${callerWs.campaignDraftId}`, pathMiss: `/v1/campaigns/${callerWs.campaignDraftId}`,
+          bodyReal: { revision: 1, draft: { name: "U2", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", attachments: [targetWs.attachmentId], tracking: true, audience: {}, defaults: {} } },
+          bodyMiss: { revision: 1, draft: { name: "U2", from: `news@${callerWs.domainName}`, region: "us-east-1", subject: "s", html: "<p>x</p>", attachments: [miss("att_")], tracking: true, audience: {}, defaults: {} } },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        // Inbound webhooks (BUG-ISO-03 #612 — fixed on dev: must reject with 422 identical to missing!)
+        { name: "createInboundWebhook.addressIds", method: "POST", pathReal: "/v1/inbound/webhooks", pathMiss: "/v1/inbound/webhooks",
+          bodyReal: { url: "https://probe-inb.example.com/wh", eventTypes: ["message.received"], addressIds: [targetWs.addressId] },
+          bodyMiss: { url: "https://probe-inb.example.com/wh", eventTypes: ["message.received"], addressIds: [miss("mbx_")] },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "updateInboundWebhook.addressIds", method: "PATCH", pathReal: `/v1/inbound/webhooks/${callerWs.inboundWebhookId}`, pathMiss: `/v1/inbound/webhooks/${callerWs.inboundWebhookId}`,
+          bodyReal: { addressIds: [targetWs.addressId] },
+          bodyMiss: { addressIds: [miss("mbx_")] },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        // Templates
+        { name: "updateTemplate.draft.attachments", method: "PATCH", pathReal: `/v1/templates/${callerWs.templateId}`, pathMiss: `/v1/templates/${callerWs.templateId}`,
+          bodyReal: { revision: 1, draft: { name: "T1", description: "", subject: "s", replyTo: [], html: "<p>x</p>", attachments: [targetWs.templateAssetId] } },
+          bodyMiss: { revision: 1, draft: { name: "T1", description: "", subject: "s", replyTo: [], html: "<p>x</p>", attachments: [miss("tas_")] } },
+          realTokens: [targetWs.templateAssetId], missTokens: [miss("tas_")], mustRejectWrite: true },
+        // Emails (attachments, replyAddressId, replyMailboxId, checkEmail, previewEmail)
+        { name: "sendEmail.attachments", method: "POST", pathReal: "/v1/emails/send", pathMiss: "/v1/emails/send",
+          bodyReal: { from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", attachments: [targetWs.attachmentId] },
+          bodyMiss: { from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", attachments: [miss("att_")] },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        { name: "sendEmail.replyAddressId", method: "POST", pathReal: "/v1/emails/send", pathMiss: "/v1/emails/send",
+          bodyReal: { from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", replyAddressId: targetWs.addressId },
+          bodyMiss: { from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", replyAddressId: miss("mbx_") },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "sendEmail.replyMailboxId", method: "POST", pathReal: "/v1/emails/send", pathMiss: "/v1/emails/send",
+          bodyReal: { from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", replyMailboxId: targetWs.inboxId },
+          bodyMiss: { from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", replyMailboxId: miss("mbx_") },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "sendEmailBatch.attachments", method: "POST", pathReal: "/v1/emails/batch", pathMiss: "/v1/emails/batch",
+          bodyReal: { emails: [{ from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", attachments: [targetWs.attachmentId] }] },
+          bodyMiss: { emails: [{ from: `a@${callerWs.domainName}`, to: "x@example.com", region: "us-east-1", subject: "s", text: "t", attachments: [miss("att_")] }] },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        { name: "checkEmail.emailId", method: "POST", pathReal: "/v1/emails/check", pathMiss: "/v1/emails/check",
+          bodyReal: { emailId: targetWs.emailIds[0]! }, bodyMiss: { emailId: miss("eml_") },
+          realTokens: [targetWs.emailIds[0]!], missTokens: [miss("eml_")], mustRejectWrite: true },
+        { name: "checkEmail.campaignId", method: "POST", pathReal: "/v1/emails/check", pathMiss: "/v1/emails/check",
+          bodyReal: { campaignId: targetWs.campaignDraftId }, bodyMiss: { campaignId: miss("cmp_") },
+          realTokens: [targetWs.campaignDraftId], missTokens: [miss("cmp_")], mustRejectWrite: true },
+        { name: "checkEmail.attachments", method: "POST", pathReal: "/v1/emails/check", pathMiss: "/v1/emails/check",
+          bodyReal: { from: `a@${callerWs.domainName}`, subject: "s", text: "hello", stream: "transactional", attachments: [targetWs.attachmentId] },
+          bodyMiss: { from: `a@${callerWs.domainName}`, subject: "s", text: "hello", stream: "transactional", attachments: [miss("att_")] },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        { name: "previewEmail.emailId", method: "POST", pathReal: "/v1/emails/preview", pathMiss: "/v1/emails/preview",
+          bodyReal: { emailId: targetWs.emailIds[0]!, clients: ["gmail-web"], theme: "light" },
+          bodyMiss: { emailId: miss("eml_"), clients: ["gmail-web"], theme: "light" },
+          realTokens: [targetWs.emailIds[0]!], missTokens: [miss("eml_")], mustRejectWrite: true },
+        // Audience
+        { name: "addListMembers.contactIds", method: "POST", pathReal: `/v1/lists/${callerWs.listIds[0]}/members`, pathMiss: `/v1/lists/${callerWs.listIds[0]}/members`,
+          bodyReal: { contactIds: [targetWs.contactIds[0]!] }, bodyMiss: { contactIds: [miss("con_")] },
+          realTokens: [targetWs.contactIds[0]!], missTokens: [miss("con_")], mustRejectWrite: true },
+        { name: "previewSegment.listId", method: "POST", pathReal: `/v1/segments/${callerWs.segmentIds[0]}/preview`, pathMiss: `/v1/segments/${callerWs.segmentIds[0]}/preview`,
+          bodyReal: { listId: targetWs.listIds[0]! }, bodyMiss: { listId: miss("lst_") },
+          realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")], mustRejectWrite: true },
+        { name: "previewContactImport.listId", method: "POST", pathReal: "/v1/contact-imports", pathMiss: "/v1/contact-imports",
+          bodyReal: { csv: "email,name\np@example.com,P", listId: targetWs.listIds[0]!, mapping: { email: "email", name: "name" } },
+          bodyMiss: { csv: "email,name\np@example.com,P", listId: miss("lst_"), mapping: { email: "email", name: "name" } },
+          realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")], mustRejectWrite: true },
+        { name: "applyAudiencePlan.planId", method: "POST", pathReal: "/v1/audience-query/apply", pathMiss: "/v1/audience-query/apply",
+          bodyReal: { planId: targetWs.planId }, bodyMiss: { planId: miss("aqp_", 32) },
+          realTokens: [targetWs.planId], missTokens: [miss("aqp_", 32)], mustRejectWrite: true },
+        { name: "createNewsletter.listId", method: "POST", pathReal: "/v1/newsletters", pathMiss: "/v1/newsletters",
+          bodyReal: { listId: targetWs.listIds[0]!, from: `nl@${callerWs.domainName}` },
+          bodyMiss: { listId: miss("lst_"), from: `nl@${callerWs.domainName}` },
+          realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")], mustRejectWrite: true },
+        // API keys (scoped key)
+        { name: "createApiKey.access.inboxId", method: "POST", pathReal: "/v1/api-keys", pathMiss: "/v1/api-keys",
+          bodyReal: { name: "K1", access: { type: "inbox", inboxId: targetWs.inboxId, mail: ["read"] } },
+          bodyMiss: { name: "K1", access: { type: "inbox", inboxId: miss("mbx_"), mail: ["read"] } },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createApiKey.access.addressIds", method: "POST", pathReal: "/v1/api-keys", pathMiss: "/v1/api-keys",
+          bodyReal: { name: "K2", access: { type: "addresses", addressIds: [targetWs.addressId], mail: ["read"] } },
+          bodyMiss: { name: "K2", access: { type: "addresses", addressIds: [miss("mbx_")], mail: ["read"] } },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "updateApiKey.scoped.inboxId", method: "PATCH", pathReal: `/v1/api-keys/${callerWs.mailboxKeyId}`, pathMiss: `/v1/api-keys/${callerWs.mailboxKeyId}`,
+          bodyReal: { access: { type: "inbox", inboxId: targetWs.inboxId } },
+          bodyMiss: { access: { type: "inbox", inboxId: miss("mbx_") } },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "updateApiKey.scoped.addressIds", method: "PATCH", pathReal: `/v1/api-keys/${callerWs.mailboxKeyId}`, pathMiss: `/v1/api-keys/${callerWs.mailboxKeyId}`,
+          bodyReal: { access: { type: "addresses", addressIds: [targetWs.addressId] } },
+          bodyMiss: { access: { type: "addresses", addressIds: [miss("mbx_")] } },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        // Inbound threads, replies, redeliver
+        { name: "createInboundThread.addressId", method: "POST", pathReal: "/v1/inbound/threads", pathMiss: "/v1/inbound/threads",
+          bodyReal: { addressId: targetWs.addressId, to: ["x@example.org"], subject: "s", text: "t" },
+          bodyMiss: { addressId: miss("mbx_"), to: ["x@example.org"], subject: "s", text: "t" },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createInboundThread.attachments", method: "POST", pathReal: "/v1/inbound/threads", pathMiss: "/v1/inbound/threads",
+          bodyReal: { addressId: callerWs.addressId, to: ["x@example.org"], subject: "s", text: "t", attachments: [targetWs.attachmentId] },
+          bodyMiss: { addressId: callerWs.addressId, to: ["x@example.org"], subject: "s", text: "t", attachments: [miss("att_")] },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        { name: "updateInboundThread.addressId", method: "PATCH", pathReal: `/v1/inbound/threads/${callerWs.threadId}`, pathMiss: `/v1/inbound/threads/${callerWs.threadId}`,
+          bodyReal: { addressId: targetWs.addressId, read: true },
+          bodyMiss: { addressId: miss("mbx_"), read: true },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "replyToInboundThread.addressId", method: "POST", pathReal: `/v1/inbound/threads/${callerWs.threadId}/reply`, pathMiss: `/v1/inbound/threads/${callerWs.threadId}/reply`,
+          bodyReal: { addressId: targetWs.addressId, text: "r" },
+          bodyMiss: { addressId: miss("mbx_"), text: "r" },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "replyToInboundThread.replyToMessageId", method: "POST", pathReal: `/v1/inbound/threads/${callerWs.threadId}/reply`, pathMiss: `/v1/inbound/threads/${callerWs.threadId}/reply`,
+          bodyReal: { addressId: callerWs.addressId, replyToMessageId: targetWs.inboundMessageId, text: "r" },
+          bodyMiss: { addressId: callerWs.addressId, replyToMessageId: miss("msg_", 32), text: "r" },
+          realTokens: [targetWs.inboundMessageId], missTokens: [miss("msg_", 32)], mustRejectWrite: true },
+        { name: "replyToInboundThread.attachments", method: "POST", pathReal: `/v1/inbound/threads/${callerWs.threadId}/reply`, pathMiss: `/v1/inbound/threads/${callerWs.threadId}/reply`,
+          bodyReal: { addressId: callerWs.addressId, text: "r", attachments: [targetWs.attachmentId] },
+          bodyMiss: { addressId: callerWs.addressId, text: "r", attachments: [miss("att_")] },
+          realTokens: [targetWs.attachmentId], missTokens: [miss("att_")], mustRejectWrite: true },
+        { name: "redeliverInboundMessage.destination", method: "POST", pathReal: `/v1/inbound/messages/${callerWs.inboundMessageId}/redeliver`, pathMiss: `/v1/inbound/messages/${callerWs.inboundMessageId}/redeliver`,
+          bodyReal: { destination: targetWs.inboundWebhookId },
+          bodyMiss: { destination: miss("mwh_") },
+          realTokens: [targetWs.inboundWebhookId], missTokens: [miss("mwh_")], mustRejectWrite: true },
+        // Routing, rules, endpoints, inbox-connections, inbound addresses
+        { name: "createRoute.to.inbox", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
+          bodyReal: { match: `r1@${callerWs.domainName}`, to: [targetWs.inboxId] },
+          bodyMiss: { match: `r1@${callerWs.domainName}`, to: [miss("mbx_")] },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createRoute.to.webhook", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
+          bodyReal: { match: `r2@${callerWs.domainName}`, to: [targetWs.inboundWebhookId] },
+          bodyMiss: { match: `r2@${callerWs.domainName}`, to: [miss("mwh_")] },
+          realTokens: [targetWs.inboundWebhookId], missTokens: [miss("mwh_")], mustRejectWrite: true },
+        { name: "updateRoute.to.inbox", method: "PATCH", pathReal: `/v1/routing/routes/${callerWs.routeId}`, pathMiss: `/v1/routing/routes/${callerWs.routeId}`,
+          bodyReal: { to: [targetWs.inboxId] }, bodyMiss: { to: [miss("mbx_")] },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "applyRouting.to.inbox", method: "PUT", pathReal: "/v1/routing", pathMiss: "/v1/routing", headers: { "if-match": "1" },
+          bodyReal: { version: 1, routes: [{ match: `r3@${callerWs.domainName}`, to: [targetWs.inboxId] }] },
+          bodyMiss: { version: 1, routes: [{ match: `r3@${callerWs.domainName}`, to: [miss("mbx_")] }] },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "testRouting.messageId", method: "POST", pathReal: "/v1/routing/test", pathMiss: "/v1/routing/test",
+          bodyReal: { messageId: targetWs.inboundMessageId }, bodyMiss: { messageId: miss("msg_", 32) },
+          realTokens: [targetWs.inboundMessageId], missTokens: [miss("msg_", 32)], mustRejectWrite: true },
+        { name: "testRules.messageId", method: "POST", pathReal: "/v1/rules/test", pathMiss: "/v1/rules/test",
+          bodyReal: { messageId: targetWs.inboundMessageId }, bodyMiss: { messageId: miss("msg_", 32) },
+          realTokens: [targetWs.inboundMessageId], missTokens: [miss("msg_", 32)], mustRejectWrite: true },
+        { name: "attachRules.target", method: "PUT", pathReal: "/v1/rules/attachments", pathMiss: "/v1/rules/attachments", headers: { "if-match": "1" },
+          bodyReal: { attachments: [{ rule: callerWs.ruleKey, target: targetWs.addressId }] },
+          bodyMiss: { attachments: [{ rule: callerWs.ruleKey, target: miss("mbx_") }] },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createRuleFromRecipe.addresses", method: "POST", pathReal: "/v1/rules/recipes", pathMiss: "/v1/rules/recipes",
+          bodyReal: { recipe: "auto-reply", addresses: [targetWs.addressId] },
+          bodyMiss: { recipe: "auto-reply", addresses: [miss("mbx_")] },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createEndpoint.forward.from", method: "POST", pathReal: "/v1/endpoints", pathMiss: "/v1/endpoints",
+          bodyReal: { type: "forward", name: "fwd-probe-1", address: "dest@example.org", from: targetWs.addressId },
+          bodyMiss: { type: "forward", name: "fwd-probe-1", address: "dest@example.org", from: miss("mbx_") },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "sendEndpointVerification.from", method: "POST", pathReal: `/v1/endpoints/${callerWs.forwardEndpointKey}/verification`, pathMiss: `/v1/endpoints/${callerWs.forwardEndpointKey}/verification`,
+          bodyReal: { from: targetWs.addressId }, bodyMiss: { from: miss("mbx_") },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createInboxConnection.inboxes", method: "POST", pathReal: "/v1/inbox-connections", pathMiss: "/v1/inbox-connections",
+          bodyReal: { inboxes: [targetWs.inboxId], client: "opencode", auth: "key" },
+          bodyMiss: { inboxes: [miss("mbx_")], client: "opencode", auth: "key" },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createInbox.domain", method: "POST", pathReal: "/v1/inboxes", pathMiss: "/v1/inboxes",
+          bodyReal: { domain: targetWs.domainName, localPart: "p1" },
+          bodyMiss: { domain: "missing-0000.example.com", localPart: "p1" },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "createInboundAddress.domain", method: "POST", pathReal: "/v1/inbound/addresses", pathMiss: "/v1/inbound/addresses",
+          bodyReal: { address: `a1@${targetWs.domainName}` },
+          bodyMiss: { address: "a1@missing-0000.example.com" },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "setInboundAddressFlow.deliver", method: "PATCH", pathReal: `/v1/inbound/addresses/${callerWs.addressId}/flow`, pathMiss: `/v1/inbound/addresses/${callerWs.addressId}/flow`,
+          bodyReal: { deliver: [targetWs.inboxId] }, bodyMiss: { deliver: [miss("mbx_")] },
+          realTokens: [targetWs.inboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "bindMcpConnection.workspaceId", method: "POST", pathReal: `/v1/mcp-connections/${callerWs.mcpGrantId}/workspace`, pathMiss: `/v1/mcp-connections/${callerWs.mcpGrantId}/workspace`,
+          bodyReal: { workspaceId: targetWs.id }, bodyMiss: { workspaceId: "ws_00000000000000000000000000000000" },
+          realTokens: [targetWs.id], missTokens: ["ws_00000000000000000000000000000000"], mustRejectWrite: principal === "ownerA" || principal === "keyA" || targetSlot === "C" },
+      ];
+      pairs.push(...p);
+    } else if (focus === "query-reads") {
+      // Every ID-carrying query parameter across all read/delete routes, comparing foreign real ID vs nonexistent ID!
+      pairs.push(
+        { name: "listContacts?listId", method: "GET", pathReal: `/v1/contacts?listId=${targetWs.listIds[0]}`, pathMiss: `/v1/contacts?listId=${miss("lst_")}`, realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")] },
+        { name: "listEmails?campaignId", method: "GET", pathReal: `/v1/emails?campaignId=${targetWs.campaignDraftId}`, pathMiss: `/v1/emails?campaignId=${miss("cmp_")}`, realTokens: [targetWs.campaignDraftId], missTokens: [miss("cmp_")] },
+        { name: "listCampaigns?listId", method: "GET", pathReal: `/v1/campaigns?listId=${targetWs.listIds[0]}`, pathMiss: `/v1/campaigns?listId=${miss("lst_")}`, realTokens: [targetWs.listIds[0]!], missTokens: [miss("lst_")] },
+        { name: "listLogs?campaignId", method: "GET", pathReal: `/v1/logs?counts=true&campaignId=${targetWs.campaignDraftId}`, pathMiss: `/v1/logs?counts=true&campaignId=${miss("cmp_")}`, realTokens: [targetWs.campaignDraftId], missTokens: [miss("cmp_")] },
+        { name: "getRoutingAudit?resource", method: "GET", pathReal: `/v1/routing/audit?resource=${targetWs.routeId}`, pathMiss: `/v1/routing/audit?resource=${miss("rte_")}`, realTokens: [targetWs.routeId], missTokens: [miss("rte_")] },
+        { name: "getRoutingAudit?actor", method: "GET", pathReal: `/v1/routing/audit?actor=${targetWs.ownerUserId}`, pathMiss: `/v1/routing/audit?actor=tear-user-00000000-0000-0000-0000-000000000000`, realTokens: [targetWs.ownerUserId], missTokens: ["tear-user-00000000-0000-0000-0000-000000000000"] },
+        { name: "listInboundAddresses?domain", method: "GET", pathReal: `/v1/inbound/addresses?domain=${targetWs.domainName}`, pathMiss: `/v1/inbound/addresses?domain=missing-0000.example.com`, realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"] },
+        { name: "getInboundOverview?domain", method: "GET", pathReal: `/v1/inbound/overview?domain=${targetWs.domainName}`, pathMiss: `/v1/inbound/overview?domain=missing-0000.example.com`, realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"] },
+        { name: "listInboundThreads?addressId", method: "GET", pathReal: `/v1/inbound/threads?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/threads?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "getInboundThread(own)?addressId", method: "GET", pathReal: `/v1/inbound/threads/${callerWs.threadId}?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/threads/${callerWs.threadId}?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "listInboundMessages?addressId", method: "GET", pathReal: `/v1/inbound/messages?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/messages?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "listInboundMessages?threadId", method: "GET", pathReal: `/v1/inbound/messages?threadId=${targetWs.threadId}`, pathMiss: `/v1/inbound/messages?threadId=${miss("thr_")}`, realTokens: [targetWs.threadId], missTokens: [miss("thr_")] },
+        { name: "getInboundMessage(own)?addressId", method: "GET", pathReal: `/v1/inbound/messages/${callerWs.inboundMessageId}?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/messages/${callerWs.inboundMessageId}?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "getInboundAttachment(own)?addressId", method: "GET", pathReal: `/v1/inbound/messages/${callerWs.inboundMessageId}/attachments/${callerWs.mailAttachmentId}?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/messages/${callerWs.inboundMessageId}/attachments/${callerWs.mailAttachmentId}?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "downloadInboundAttachment(own)?addressId", method: "GET", pathReal: `/v1/inbound/messages/${callerWs.inboundMessageId}/parts/${callerWs.mailAttachmentId}?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/messages/${callerWs.inboundMessageId}/parts/${callerWs.mailAttachmentId}?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "listInboundEndpoints?addressId", method: "GET", pathReal: `/v1/inbound/endpoints?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/endpoints?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "listInboundEvents?addressId", method: "GET", pathReal: `/v1/inbound/events?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/events?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "listInboundEvents?addressIds", method: "GET", pathReal: `/v1/inbound/events?addressIds=${targetWs.addressId}`, pathMiss: `/v1/inbound/events?addressIds=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "listInboundWebhooks?addressId", method: "GET", pathReal: `/v1/inbound/webhooks?addressId=${targetWs.addressId}`, pathMiss: `/v1/inbound/webhooks?addressId=${miss("mbx_")}`, realTokens: [targetWs.addressId], missTokens: [miss("mbx_")] },
+        { name: "revokeWorkspaceInvitation?id", method: "DELETE", pathReal: `/v1/workspaces/current/invitations?id=${targetWs.invitationId}`, pathMiss: `/v1/workspaces/current/invitations?id=${miss("inv_")}`, realTokens: [targetWs.invitationId], missTokens: [miss("inv_")] },
+        { name: "listActivity?actorId", method: "GET", pathReal: `/v1/activity?actorId=${targetWs.ownerUserId}`, pathMiss: `/v1/activity?actorId=tear-user-00000000-0000-0000-0000-000000000000`, realTokens: [targetWs.ownerUserId], missTokens: ["tear-user-00000000-0000-0000-0000-000000000000"] },
+      );
+    } else if (focus === "pr614-bug-iso-04") {
+      // BUG-ISO-04 (PR #614, approved & waiting to merge onto dev):
+      // 1. PUT /v1/rules/decisions & PUT /v1/rules must refuse foreign evaluateRoutes and unowned evaluateDomains with 422.
+      // 2. PATCH /v1/api-keys/{allAddrKey} (mailbox_ids IS NULL) must refuse foreign addAddressIds with 422.
+      // 3. Ended/deleted own inboxes must be refused by POST/PATCH /v1/api-keys and POST /v1/inbound/webhooks.
+      pairs.push(
+        { name: "setDecisionOptIns.evaluateRoutes", method: "PUT", pathReal: "/v1/rules/decisions", pathMiss: "/v1/rules/decisions",
+          bodyReal: { evaluateRoutes: [targetWs.routeId] }, bodyMiss: { evaluateRoutes: [miss("rte_")] },
+          realTokens: [targetWs.routeId], missTokens: [miss("rte_")], mustRejectWrite: true },
+        { name: "setDecisionOptIns.evaluateDomains", method: "PUT", pathReal: "/v1/rules/decisions", pathMiss: "/v1/rules/decisions",
+          bodyReal: { evaluateDomains: [targetWs.domainName] }, bodyMiss: { evaluateDomains: ["missing-0000.example.com"] },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "applyRules.evaluateRoutes", method: "PUT", pathReal: "/v1/rules", pathMiss: "/v1/rules",
+          bodyReal: { rules: [], attachments: [], evaluateRoutes: [targetWs.routeId] },
+          bodyMiss: { rules: [], attachments: [], evaluateRoutes: [miss("rte_")] },
+          realTokens: [targetWs.routeId], missTokens: [miss("rte_")], mustRejectWrite: true },
+        { name: "applyRules.evaluateDomains", method: "PUT", pathReal: "/v1/rules", pathMiss: "/v1/rules",
+          bodyReal: { rules: [], attachments: [], evaluateDomains: [targetWs.domainName] },
+          bodyMiss: { rules: [], attachments: [], evaluateDomains: ["missing-0000.example.com"] },
+          realTokens: [targetWs.domainName], missTokens: ["missing-0000.example.com"], mustRejectWrite: true },
+        { name: "updateApiKey.allAddr.addAddressIds", method: "PATCH", pathReal: `/v1/api-keys/${callerWs.allAddrKeyId}`, pathMiss: `/v1/api-keys/${callerWs.allAddrKeyId}`,
+          bodyReal: { access: { addAddressIds: [targetWs.addressId] } },
+          bodyMiss: { access: { addAddressIds: [miss("mbx_")] } },
+          realTokens: [targetWs.addressId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createApiKey.endedOwnInbox", method: "POST", pathReal: "/v1/api-keys", pathMiss: "/v1/api-keys",
+          bodyReal: { name: "EndKey", access: { type: "addresses", addressIds: [callerWs.endedInboxId], mail: ["read"] } },
+          bodyMiss: { name: "EndKey", access: { type: "addresses", addressIds: [miss("mbx_")], mail: ["read"] } },
+          realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createInboundWebhook.endedOwnInbox", method: "POST", pathReal: "/v1/inbound/webhooks", pathMiss: "/v1/inbound/webhooks",
+          bodyReal: { url: "https://ended.example.com/wh", eventTypes: ["message.received"], addressIds: [callerWs.endedInboxId] },
+          bodyMiss: { url: "https://ended.example.com/wh", eventTypes: ["message.received"], addressIds: [miss("mbx_")] },
+          realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+      );
+    } else if (focus === "nearby-ended-inboxes") {
+      // Reviewer-noted nearby cases from #611/#612/#614:
+      // 1. Foreign ended inbox must NEVER be accepted by rules/attachments or routing!
+      // 2. Own just-deleted ephemeral inbox (delete_after <= now()) on rules/attachments and routing (flagged if accepted!)
+      // 3. Hosted child row mailbox_domains.name vs receiving_host on PUT /v1/rules/decisions (foreign child name must be refused!)
+      pairs.push(
+        { name: "attachRules.foreignEndedInbox", method: "PUT", pathReal: "/v1/rules/attachments", pathMiss: "/v1/rules/attachments",
+          bodyReal: { attachments: [{ rule: callerWs.ruleKey, target: targetWs.endedInboxId }] },
+          bodyMiss: { attachments: [{ rule: callerWs.ruleKey, target: miss("mbx_") }] },
+          realTokens: [targetWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "attachRules.ownEndedInbox", method: "PUT", pathReal: "/v1/rules/attachments", pathMiss: "/v1/rules/attachments",
+          bodyReal: { attachments: [{ rule: callerWs.ruleKey, target: callerWs.endedInboxId }] },
+          bodyMiss: { attachments: [{ rule: callerWs.ruleKey, target: miss("mbx_") }] },
+          realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createRoute.foreignEndedInbox", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
+          bodyReal: { match: `re1@${callerWs.domainName}`, to: [targetWs.endedInboxId] },
+          bodyMiss: { match: `re1@${callerWs.domainName}`, to: [miss("mbx_")] },
+          realTokens: [targetWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "createRoute.ownEndedInbox", method: "POST", pathReal: "/v1/routing/routes", pathMiss: "/v1/routing/routes",
+          bodyReal: { match: `re2@${callerWs.domainName}`, to: [callerWs.endedInboxId] },
+          bodyMiss: { match: `re2@${callerWs.domainName}`, to: [miss("mbx_")] },
+          realTokens: [callerWs.endedInboxId], missTokens: [miss("mbx_")], mustRejectWrite: true },
+        { name: "setDecisionOptIns.foreignChildName", method: "PUT", pathReal: "/v1/rules/decisions", pathMiss: "/v1/rules/decisions",
+          bodyReal: { evaluateDomains: [targetWs.hostedChildName] },
+          bodyMiss: { evaluateDomains: ["child-0000.missing-0000.example.com"] },
+          realTokens: [targetWs.hostedChildName], missTokens: ["child-0000.missing-0000.example.com"], mustRejectWrite: true },
+      );
+    }
+
+    for (const pair of pairs) {
+      const realReply = await rawFetch(pair.method, pair.pathReal, { ...auth, body: pair.bodyReal, headers: pair.headers });
+      const missReply = await rawFetch(pair.method, pair.pathMiss, { ...auth, body: pair.bodyMiss, headers: pair.headers });
+      obs.routesDriven += 2;
+      t.totalRoutesDriven += 2;
+
+      // Invariant 1: No leakage of foreign tokens
+      const foundLeaks = scanForLeaks(t, realReply, foreignSlots, {
+        echoedInputs: pair.realTokens,
+        context: `${principal} field:${pair.name} (target=${targetSlot})`,
+      });
+      for (const l of foundLeaks) {
+        obs.leaks.push(l);
+        if (!isMaskedFocus) {
+          t.leaks.push(l);
+          t.pendingEvents.push({ name: "isolation.leak", data: { principal, field: pair.name } });
+        }
+      }
+
+      // Invariant 5: Write referencing foreign/ended ID must be refused!
+      if (pair.mustRejectWrite && realReply.status >= 200 && realReply.status < 300) {
+        const msg = `${principal} field:${pair.name} (${pair.method} ${pair.pathReal}): ACCEPTED with ${realReply.status}! body=${realReply.text.slice(0, 140)}`;
+        obs.dualViolations.push(msg);
+        if (!isMaskedFocus) t.dualViolations.push(msg);
+      }
+
+      // Invariant 3: Identical answer for foreign real ID vs nonexistent ID (no probing!)
+      if (!pair.skipOracle) {
+        const oracle = checkIndistinguishable(
+          `${principal} field:${pair.name} (target=${targetSlot})`,
+          realReply,
+          missReply,
+          pair.realTokens,
+          pair.missTokens,
+        );
+        if (oracle) {
+          obs.probeOracles.push(oracle);
+          if (!isMaskedFocus) {
+            t.probeOracles.push(oracle);
+            t.pendingEvents.push({ name: "isolation.id_oracle", data: { principal, field: pair.name } });
+          }
+        }
+      }
+    }
+
+    // Invariant 2: Full DB + storage snapshot check on ALL non-overlapping foreign workspaces
+    const snapAfter = await snapshotWorkspaces(t.wsIds);
+    const diffs = diffWorkspaces(snapBefore, snapAfter, tracker.watchIds(foreignSlots));
+    for (const d of diffs) {
+      const msg = `${principal} fields:${focus} target=${targetSlot}: ${d}`;
+      obs.foreignMutations.push(msg);
+      if (!isMaskedFocus) {
+        t.foreignMutations.push(msg);
+        t.pendingEvents.push({ name: "isolation.foreign_mutation", data: { principal, focus, diff: d } });
+      }
+    }
+
+    return obs;
   } finally {
     tracker.end();
   }
@@ -3019,13 +3459,15 @@ export const workspaceIsolationHost = host(workspaceIsolation, {
       case "ProbeGroup":
         return runProbeGroup(t, a.group, a.principal, a.target);
       case "ProbeSupport":
-        return runProbeSupport(t, a.principal, a.scope, a.target);
+        return runProbeSupport(t, a.principal, a.target);
       case "ProbeMcp":
         return runProbeMcp(t, a.principal, a.chunk, a.target);
+      case "ProbeFields":
+        return runProbeFields(t, a.principal, a.target, a.focus);
       case "CheckAggregates":
         return runCheckAggregates(t, a.principal);
       case "DualMismatch":
-        return runDualMismatch(t, a.header, a.target, a.focus);
+        return runDualMismatch(t, a.header, a.target);
       case "ConcurrentDualSwitch":
         return runConcurrentDualSwitch(t);
     }
