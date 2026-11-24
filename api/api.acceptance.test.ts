@@ -20043,7 +20043,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([violations, calls], [[], ['alarm', 'alarm', 'alarm']]);
       assert.equal(sent.at(-1), first);
       // 2. A request that lands as the alarm begins, before the run is marked running: the run makes no classifier call and
-      // leases nothing; the follow-up alarm sends the email.
+      // hands the email back; the follow-up alarm screens and sends it.
       const second = await send('222222');
       await deliver();
       during = async at => { if (at === 'get:displacedAlarm') { during = undefined; await deliver(); } };
@@ -20051,7 +20051,62 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([violations, calls.length], [[], 3]); assert.equal((await row(second)).status, 'queued');
       await fire();
       assert.deepEqual([violations, calls.length], [[], 5]); assert.equal(sent.at(-1), second);
+      // 3. A visitor wake landing while the alarm runs does NOT stop the batch when the queued transactional row needs no
+      // external classifier call (cached verdict): it is leased and sent in the same alarm run with zero handover.
+      const third = await send('222222'); // identical copy -> screenSnapshot cache hit, no classifier call
+      await deliver();
+      during = async at => { if (at === 'get:displacedAlarm') { during = undefined; await deliver(); } };
+      await fire();
+      assert.deepEqual([violations, calls.length], [[], 5], 'Cached copy needs no classifier call and makes no violation.');
+      assert.equal(sent.at(-1), third, 'Visitor wake without a classifier call sends in the same alarm run without stopping.');
     }));
+  });
+  test('mid-batch stop interleaves owners across sendConcurrency chunks while keeping transactional first', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { runDispatcher, initialGate, interleaveByOwner } = await import('./src/dispatcher.js');
+      const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
+      // Pure helper check: transactional stays first; marketing alternates owners; offset rotates start owner.
+      const sample = [
+        { k: 'marketing' as const, w: 'A', id: 1 }, { k: 'marketing' as const, w: 'A', id: 2 },
+        { k: 'marketing' as const, w: 'B', id: 3 }, { k: 'marketing' as const, w: 'B', id: 4 },
+        { k: 'transactional' as const, w: 'C', id: 5 },
+      ];
+      assert.deepEqual(interleaveByOwner(sample, x => x.k, x => x.w, 0).map(x => x.id), [5, 1, 3, 2, 4]);
+      assert.deepEqual(interleaveByOwner(sample, x => x.k, x => x.w, 1).map(x => x.id), [5, 3, 1, 4, 2]);
+      // End-to-end check: stop flips after the first 6-email chunk of a 24-row 2-workspace marketing batch.
+      const pool = '111122229999', wsOld = 'ws_a_old_mkt', wsNew = 'ws_z_new_mkt';
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, hostedScreen: false, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      let sentInRun = 0, shouldStop = false;
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 200, Max24HourSend: 5_000_000, SentLast24Hours: 0 } };
+        if (++sentInRun >= 6) shouldStop = true;
+        return { MessageId: unique('interleave') };
+      });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready') ON CONFLICT DO NOTHING`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:feedback`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),200,5000000,0) ON CONFLICT (aws_account_id,region) DO UPDATE SET max_send_rate=200, checked_at=now()`, [pool, REGION]);
+      for (const [wid, dom] of [[wsOld, 'old.example.net'], [wsNew, 'new.example.net']] as const) {
+        await db.query('INSERT INTO workspaces(id,slug,name,exempt_hosted_quotas) VALUES($1,$1,$1,true) ON CONFLICT DO NOTHING', [wid]);
+        await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,pool_tenant_name) VALUES ($1,$1,$2,'ready','shared',$3,'ready','t-'||$1) ON CONFLICT DO NOTHING`, [wid, REGION, pool]);
+        await db.query(`INSERT INTO provider_connection_regions(connection_id,region,tenant_state,sending_state) VALUES ($1,$2,'ready','ready') ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified') ON CONFLICT DO NOTHING`, [dom, wid]);
+        await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) VALUES ($1,'inst_'||$1,$2,jsonb_build_array($2::text)) ON CONFLICT DO NOTHING`, [wid, REGION]);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ('key_'||$1,$1,'k',md5($1),'nm_000000','["send"]','[]') ON CONFLICT DO NOTHING`, [wid]);
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'c_'||$1||'_'||n,$1,'u'||n||'@example.net','subscribed' FROM generate_series(1,20) n`, [wid]);
+      }
+      for (const [wid, dom, age] of [[wsOld, 'old.example.net', '2 minutes'], [wsNew, 'new.example.net', '0 seconds']] as const) {
+        const snap = JSON.stringify({ kind: 'marketing', from: `n@${dom}`, to: ['u1@example.net'], cc: [], bcc: [], replyTo: [], region: REGION, subject: 'News', text: 'hi', attachments: [], tracking: false, headers: [] });
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,created_at)
+          SELECT 'em_'||$1||'_'||n,$1,'key_'||$1,$2,$3,jsonb_build_array('u'||n||'@example.net'),'[]','[]','News',jsonb_set($4::jsonb,'{to}',jsonb_build_array('u'||n||'@example.net')),false,'queued',clock_timestamp()-$5::interval
+          FROM generate_series(1,12) n`, [wid, REGION, `n@${dom}`, snap, age]);
+      }
+      const rep = await runDispatcher(runtime, { accountId: pool, region: REGION, gate: initialGate(), batchSize: 24, sendConcurrency: 6, lanes: 1, stop: () => shouldStop, until: Date.now() + 5000 });
+      assert.equal(rep.sent, 6, 'Stops after the first 6-email chunk.');
+      const split = (await db.query(`SELECT workspace_id, count(*) FILTER (WHERE status='accepted')::int AS sent, count(*) FILTER (WHERE status='queued')::int AS returned FROM sending_emails WHERE workspace_id = ANY($1) GROUP BY 1 ORDER BY 1`, [[wsOld, wsNew]])).rows;
+      assert.deepEqual(split, [
+        { workspace_id: wsOld, sent: 3, returned: 9 },
+        { workspace_id: wsNew, sent: 3, returned: 9 },
+      ], 'Both sent and returned chunks split 1:1 across concurrent campaigns instead of dropping the newer one.');
+    });
   });
   // tear witness (api/tear/dispatch): send ok, send ok, then a one-row dispatcher stepped through
   // lease, claim, send, record and the next lease, which found nothing and ended the run.
