@@ -4,12 +4,12 @@ import { ApiError, type App } from './core.js';
 
 // Campaign mail links its inline pictures instead of carrying them. Each is served at PUBLIC_URL/i/<name>, the same
 // bytes for every recipient, so a message is its HTML (a few KB) rather than its HTML plus every picture: November's
-// newsletter carried one 272 KB PNG to 1.8M people, 632 GB of SES attachment data. The name is the attachment's ID and
-// the first half of its SHA-256 with the type's extension: it can't be guessed without both, a secret rotation doesn't
-// change it, and it names no recipient. A link works while the attachment exists, which its draft, review and sent mail
-// keep it (sending_attachment_links): as long as the campaign does, and for the sending-log retention after it is deleted.
-// Only PNG, JPEG, GIF and WebP whose bytes open as their type are linked, here and when served: nothing else (no SVG,
-// no document) can be published through the route.
+// 1.8M-recipient newsletter carried a 272 KB PNG in every copy, and SES billed 632 GB of attachment data that month.
+// The name is the attachment's ID and the first half of its SHA-256, with the type's extension: it can't be guessed
+// without both, a secret rotation doesn't change it, and it names no recipient. A link works while the attachment
+// exists, and its draft, review and sent mail keep it (sending_attachment_links): as long as the campaign does, and for
+// the sending-log retention after it is deleted. Only PNG, JPEG, GIF and WebP whose bytes open as their type are linked,
+// here and when served: nothing else (no SVG, no document) can be published through the route.
 
 const TYPES = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/gif', 'gif'], ['image/webp', 'webp']]);
 const EXTENSION_TYPES = new Map([...TYPES].map(([type, extension]) => [extension, type]));

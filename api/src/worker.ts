@@ -343,7 +343,11 @@ export default {
       if(innerTiming) responseHeaders.set('server-timing', [innerTiming, `admission;dur=${admissionMs.toFixed(1)}`, `runtime;dur=${runtimeMs.toFixed(1)}`].join(', '));
       if (!(feedbackIngress && [400,429].includes(response.status))) core.log('info', { requestId: responseHeaders.get('x-request-id'), operation: 'worker-runtime', status: response.status, admissionMs: Number(admissionMs.toFixed(1)), runtimeMs: Number(runtimeMs.toFixed(1)) });
       const answer = core.secureResponse(new Response(response.body, { status: response.status, statusText: response.statusText, headers: responseHeaders }));
-      if (images && answer.status === 200) ctx.waitUntil(images.put(imageKey, answer.clone()).catch(() => {}));
+      if (images && answer.status === 200) {
+        const kept = new Response(answer.clone().body, answer);
+        kept.headers.delete('x-request-id'); kept.headers.delete('server-timing');
+        ctx.waitUntil(images.put(imageKey, kept).catch(() => {}));
+      }
       return answer;
     }
     catch (error) {
