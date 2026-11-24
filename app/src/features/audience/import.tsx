@@ -1,8 +1,8 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { useApiMutation } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
-import type { ImportPreview } from '../../data/types'
+import { ApiError, type ImportPreview } from '../../data/types'
 import { Alert, Button, Checkbox, DataTable, Dialog, Field, Input, Select, fieldError, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { evidenceRequired, ListPicker, nameTitle, number } from './shared'
@@ -72,10 +72,60 @@ const firstIssues = (issues: Issue[]) => issues.sort((a, b) => a.row - b.row).sl
 // The API can name one row twice (a blank email is invalid and not ASCII): the first message is enough, and the count counts rows.
 const onePerRow = (issues: Issue[]) => { const seen = new Set<number>(); return issues.filter(issue => !seen.has(issue.row) && Boolean(seen.add(issue.row))) }
 
+// Wait up to a bounded number of retries when another upload in the workspace hits the 40/min preview budget (429) or
+// holds the per-workspace commit lock (503 IMPORT_COMMIT_BUSY), so concurrent multi-part uploads finish instead of failing.
+const BUSY_BACKOFF_MS = [1500, 3000, 5000, 8000, 12000, 15000]
+function sleepAbortable(ms: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException('Aborted', 'AbortError')); return }
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException('Aborted', 'AbortError')) }
+    const timer = setTimeout(() => { signal.removeEventListener('abort', onAbort); resolve() }, ms)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+async function withImportRetry<T>(work: () => Promise<T>, signal: AbortSignal, onWait: (message: string) => void): Promise<T> {
+  let rateTries = 0, busyTries = 0, truncatedTries = 0
+  for (;;) {
+    try { return await work() } catch (err) {
+      if (!(err instanceof ApiError) || signal.aborted) throw err
+      if ((err.status === 429 || err.code === 'IMPORT_PREVIEW_RATE_LIMITED') && rateTries < 5) {
+        rateTries++
+        const waitSec = Math.min(65, Math.max(5, err.retryAfter ?? 60))
+        onWait(`Preview limit reached — retrying in ${waitSec}s…`)
+        await sleepAbortable(waitSec * 1000 + Math.round(Math.random() * 1500), signal)
+        onWait('Retrying…')
+        continue
+      }
+      if ((err.code === 'IMPORT_COMMIT_BUSY' || (err.status === 503 && err.retryable)) && busyTries < 16) {
+        const base = BUSY_BACKOFF_MS[Math.min(busyTries, BUSY_BACKOFF_MS.length - 1)]!
+        busyTries++
+        onWait('Another import is finishing — waiting to continue…')
+        await sleepAbortable(base + Math.round(Math.random() * 1000), signal)
+        onWait('Retrying…')
+        continue
+      }
+      if (err.code === 'INVALID_RESPONSE' && err.retryable && truncatedTries < 2) {
+        truncatedTries++
+        onWait('Response cut short — retrying…')
+        await sleepAbortable(1000 * truncatedTries, signal)
+        onWait('Retrying…')
+        continue
+      }
+      throw err
+    }
+  }
+}
+
 export function ImportContactsDialog({ listId: initialListId = '', onClose }: { listId?: string; onClose: () => void }) {
   const [listId, setListId] = useState(initialListId)
   // The file's text stays out of the mutations' inputs: each write's input is serialized to guard against a double submit.
-  const source = useRef(''), committed = useRef(new Map<string, ImportPreview>())
+  const source = useRef(''), committed = useRef(new Map<number, ImportPreview>())
+  const abortRef = useRef<AbortController | null>(null)
+  useEffect(() => {
+    const controller = new AbortController()
+    abortRef.current = controller
+    return () => controller.abort()
+  }, [])
   const [csv, setCsv] = useState(false), [rowCount, setRowCount] = useState(0), [headers, setHeaders] = useState<string[]>([])
   const [mapping, setMapping] = useState<Record<string, string>>({}), [fileError, setFileError] = useState<unknown>(null), [reading, setReading] = useState(false)
   const [consent, setConsent] = useState(false), [evidence, setEvidence] = useState(''), [checked, setChecked] = useState(false)
@@ -83,6 +133,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   // Consent belongs to the whole import: once a part is in, the rest commit with the same choice.
   const [started, setStarted] = useState(false)
   const review = useApiMutation(async (api, input: { mapping: Record<string, string>; listId?: string }) => {
+    const signal = abortRef.current?.signal ?? new AbortController().signal
     const { mapping: selected, parts } = importParts(source.current, input.mapping)
     const found: Review = { ids: [], total: 0, rows: [], errors: [], errorCount: 0 }
     const note = (issues: Issue[]) => { found.errorCount += issues.length; found.errors = firstIssues([...found.errors, ...issues]) }
@@ -91,7 +142,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       note(part.skipped)
       done += part.rows.length + part.skipped.length
       if (!part.csv) continue
-      const answer = await api.imports.preview({ csv: part.csv, mapping: selected, ...(input.listId ? { listId: input.listId } : {}) })
+      const answer = await withImportRetry(() => api.imports.preview({ csv: part.csv, mapping: selected, ...(input.listId ? { listId: input.listId } : {}) }, signal), signal, setProgress)
       const fileRow = (row: number) => part.rows[row - 2] ?? row
       found.ids.push(answer.id); found.total += answer.rows.length
       found.rows.push(...answer.rows.slice(0, 10 - found.rows.length).map(item => ({ ...item, row: fileRow(item.row) })))
@@ -101,11 +152,39 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
     return found
   }, undefined, false, false)
   // Parts commit in order. One that failed is retried from where it stopped: a committed part isn't sent again.
-  const commit = useApiMutation(async (api, input: { ids: string[]; evidence?: string }) => {
+  // If another concurrent upload evicted an uncommitted preview past the 50-preview cap (404), re-preview that part on the fly.
+  const commit = useApiMutation(async (api, input: { ids: string[]; mapping: Record<string, string>; listId?: string; evidence?: string }) => {
+    const signal = abortRef.current?.signal ?? new AbortController().signal
     let imported = 0, subscribed = 0
-    for (const [index, id] of input.ids.entries()) {
-      let answer = committed.current.get(id)
-      if (!answer) { answer = await api.imports.commit(id, input.evidence ? { consent: { status: 'subscribed', evidence: input.evidence } } : undefined); committed.current.set(id, answer); setStarted(true) }
+    let fallbackParts: { mapping: Record<string, string>; csvs: string[] } | null = null
+    const getPartCsv = (index: number) => {
+      if (!fallbackParts) {
+        const built = importParts(source.current, input.mapping)
+        fallbackParts = { mapping: built.mapping, csvs: [...built.parts].filter(p => p.csv).map(p => p.csv) }
+      }
+      return { mapping: fallbackParts.mapping, csv: fallbackParts.csvs[index] }
+    }
+    for (const [index, initialId] of input.ids.entries()) {
+      let answer = committed.current.get(index)
+      if (!answer) {
+        const payload = input.evidence ? { consent: { status: 'subscribed' as const, evidence: input.evidence } } : undefined
+        let partId = initialId
+        for (let refreshes = 0; ; refreshes++) {
+          try {
+            answer = await withImportRetry(() => api.imports.commit(partId, payload, signal), signal, setProgress)
+            break
+          } catch (err) {
+            if (!(err instanceof ApiError && err.status === 404) || refreshes >= 3) throw err
+            const part = getPartCsv(index)
+            if (!part.csv) throw err
+            setProgress(`Refreshing part ${index + 1} of ${input.ids.length}…`)
+            const refreshed = await withImportRetry(() => api.imports.preview({ csv: part.csv!, mapping: part.mapping, ...(input.listId ? { listId: input.listId } : {}) }, signal), signal, setProgress)
+            partId = refreshed.id
+          }
+        }
+        committed.current.set(index, answer)
+        setStarted(true)
+      }
       imported += answer.imported; subscribed += answer.subscribed ?? 0
       if (index + 1 < input.ids.length) setProgress(`Imported part ${index + 1} of ${input.ids.length}`)
     }
@@ -138,7 +217,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
     setChecked(true)
     if (!preview || (consent && !evidence.trim())) return
     try {
-      const done = await commit.mutateAsync({ ids: preview.ids, evidence: consent ? evidence.trim() : undefined })
+      const done = await commit.mutateAsync({ ids: preview.ids, mapping, ...(listId ? { listId } : {}), evidence: consent ? evidence.trim() : undefined })
       setResult({ ...done, errors: preview.errors, errorCount: preview.errorCount })
     } catch { /* Shown inline. */ }
     finally { setProgress('') }
@@ -146,7 +225,14 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   const busy = reading || review.isPending || commit.isPending
   const locked = busy || Boolean(preview)
   const combinedAvailable = Boolean(mapping.firstName || mapping.lastName || mapping.name === COMBINED)
-  const error = fileError || review.error || commit.error
+  function handleCancel() {
+    abortRef.current?.abort()
+    abortRef.current = new AbortController()
+    setProgress('')
+    onClose()
+  }
+  const visibleError = (cause: unknown) => cause instanceof DOMException && cause.name === 'AbortError' ? null : cause
+  const error = fileError || visibleError(review.error) || visibleError(commit.error)
   const unknownHref = listId ? `/audience/lists/${listId}?status=unknown` : '/audience?status=unknown'
   if (result) {
     const imported = result.imported, subscribed = result.subscribed ?? 0
@@ -156,7 +242,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       {result.errorCount > 0 && <RejectedRows errors={result.errors} count={result.errorCount} skipped />}
     </div></Dialog>
   }
-  return <Dialog open onOpenChange={open => { if (!open && !busy) onClose() }} title="Import contacts" footer={<><Button disabled={busy} onClick={onClose}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.total} onClick={() => void submitImport()}>{preview.total ? `Import ${plural(preview.total, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
+  return <Dialog className="audience-import-dialog" open onOpenChange={open => { if (!open && !reading) handleCancel() }} title="Import contacts" footer={<>{progress && <p className="muted audience-import-status" role="status">{progress}</p>}<Button disabled={reading} onClick={handleCancel}>Cancel</Button>{preview ? <Button variant="primary" loading={commit.isPending} disabled={busy || !preview.total} onClick={() => void submitImport()}>{preview.total ? `Import ${plural(preview.total, 'contact')}` : 'Nothing to import'}</Button> : <Button variant="primary" loading={busy} disabled={!csv || !mapping.email} onClick={() => void submitPreview()}>Preview import</Button>}</>}>
     <div className="stack">
       <div className="stack audience-import-fields" hidden={Boolean(preview)}>
         {/* The columns are the mapping below once a file is read; the row and size limits are the file's errors. */}
@@ -177,7 +263,6 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
         <Checkbox checked={consent} disabled={busy || started} onCheckedChange={value => { setConsent(value); setChecked(false) }} label="They agreed to receive marketing email" />
         {consent && <Field label="How did they agree?" htmlFor="import-evidence" error={checked && !evidence.trim() ? evidenceRequired : fieldError(commit.error, 'consent.evidence')}><Input id="import-evidence" autoFocus maxLength={2000} placeholder="Signed up on our website" disabled={busy || started} value={evidence} onChange={event => setEvidence(event.target.value)} /></Field>}
       </div>
-      {progress && <p className="muted" role="status">{progress}</p>}
       <MutationError error={error} />
     </div>
   </Dialog>

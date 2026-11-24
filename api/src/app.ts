@@ -3,9 +3,11 @@ import type { MiddlewareHandler } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
+import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
+import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { actor, budgetExhausted, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -247,6 +249,37 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       // isolate memory for it (sending.ts), so it is not buffered here first.
       if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
         await boundRequestBody(c,snsIngress(c.req.path)||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
+    }
+    // Reserve isolate memory for contact-import previews before Hono parses the 5 MiB JSON body (after boundRequestBody
+    // finished reading the wire bytes, so stalled slow uploads never hold a lease). Check domain scope, editContent
+    // permission, and the per-minute preview limit first so rejected callers never queue other workspaces behind them.
+    if (c.req.method === 'POST' && c.req.path === '/v1/contact-imports' && c.get('actor')) {
+      if (c.get('actor')?.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
+      const identity = actor(c, 'editContent');
+      if (await budgetExhausted(c.env, identity.workspaceId, 'imports:preview', IMPORT_PREVIEW_RATE_PER_MINUTE)) {
+        c.header('Retry-After', '60');
+        throw new ApiError(429, 'IMPORT_PREVIEW_RATE_LIMITED', `This workspace allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} contact import previews per minute. Retry after the window resets.`, undefined, true);
+      }
+      const len = Number(c.req.raw.headers.get('content-length'));
+      const bytes = importPreviewReservationBytes(Number.isFinite(len) && len > 0 ? len : 5 * 1024 * 1024);
+      let lease: MemoryLease;
+      try {
+        lease = await reserveMemory(bytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: 15_000, maxMs: 45_000 });
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') { c.res = new Response(null, { status: 499 }); return; }
+        if (err instanceof ApiError && (err.status === 429 || err.status === 503)) c.header('Retry-After', '1');
+        throw err;
+      }
+      c.set('importLease', lease);
+      try {
+        await runInMemoryScope(bytes, async () => {
+          if (c.req.raw.signal?.aborted) { c.res = new Response(null, { status: 499 }); return; }
+          await next();
+        }, () => lease.touch());
+      } finally {
+        if (!c.get('importLeaseTransferred')) lease.release();
+      }
+      return;
     }
     await next();
   });

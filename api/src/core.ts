@@ -226,7 +226,7 @@ export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: strin
 export type SupportScope = { userId: string; contentWorkspaceId: string | null;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
   conversation: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
-export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; importLease?: import('./isolate-memory.js').MemoryLease; importLeaseTransferred?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
@@ -808,6 +808,11 @@ export async function guardPublicRequest(path: string, headers: Headers, peer: s
  * One atomic per-minute counter in api_request_budgets, named by `key` within a workspace: true while this minute's
  * charges, this one included, stay within `limit`. A window stored in the future (an operator's or a test's hold) stays.
  */
+/** Read-only check for whether a workspace's per-minute budget is already spent (does not increment usage). */
+export async function budgetExhausted(runtime: Pick<Runtime, 'db'>, workspaceId: string, key: string, limit: number) {
+  const { rows: [row] } = await runtime.db.execute<{ exhausted: boolean }>(sql`SELECT (window_start >= date_trunc('minute', now()) AND used >= ${limit}) AS exhausted FROM api_request_budgets WHERE workspace_id = ${workspaceId} AND key_id = ${key}`);
+  return row?.exhausted === true;
+}
 export async function chargeBudget(runtime: Pick<Runtime, 'db'>, workspaceId: string, key: string, limit: number) {
   const { rows: [row] } = await runtime.db.execute<{ used: number }>(sql`INSERT INTO api_request_budgets(workspace_id, key_id, window_start, used)
     VALUES (${workspaceId}, ${key}, date_trunc('minute', now()), 1)

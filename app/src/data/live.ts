@@ -174,11 +174,18 @@ export async function request<T = Json>(path: string, options: { method?: string
     if (response.status === 401 && path.startsWith('/v1/') && path !== '/v1/me') window.dispatchEvent(new Event(code === 'ACCOUNT_SIGNED_OUT' ? 'nightmail:account-signed-out' : 'nightmail:unauthorized'))
     analytics().apiError(options.method ?? 'GET', path, response.status, code, typeof error?.field === 'string' ? error.field : undefined)
     const failure = new ApiError(message, code, error?.field ? { [error.field]: message } : {}, error?.requestId ?? response.headers.get('x-request-id') ?? undefined, response.status)
+    const retryAfterHeader = Number(response.headers.get('retry-after'))
+    if (Number.isFinite(retryAfterHeader) && retryAfterHeader > 0) failure.retryAfter = retryAfterHeader
+    if (error?.retryable === true) failure.retryable = true
     if (failure.requestId) rememberFailedRequest(failure.requestId)
     if (Array.isArray(error?.details)) failure.details = error.details
     throw failure
   }
-  if (data === null && response.status !== 204 && path !== '/api/auth/get-session') throw new ApiError('The API returned an invalid response.', 'INVALID_RESPONSE')
+  if (data === null && response.status !== 204 && path !== '/api/auth/get-session') {
+    const failure = new ApiError('The response ended before finishing. Try again.', 'INVALID_RESPONSE', {}, response.headers.get('x-request-id') ?? undefined, response.status)
+    failure.retryable = true
+    throw failure
+  }
   analytics().apiResult(options.method ?? 'GET', path, data)
   return data as T
 }
@@ -376,7 +383,7 @@ export function createLiveApi(scope?: RequestScope): Api {
       },
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
-    imports: { preview: input => call<any>('/contact-imports', 'POST', input), commit: (id, input) => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST', input?.consent ? input : undefined) },
+    imports: { preview: (input, signal) => call<any>('/contact-imports', 'POST', input, signal), commit: (id, input, signal) => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST', input?.consent ? input : undefined, signal) },
     audienceQuery: { plan: statement => call<any>('/audience-query/plan', 'POST', {statement}), apply: input => call<any>('/audience-query/apply', 'POST', input) },
     lists: { list: (input = {}, signal) => page('/lists', input, mapList, {search: input.search, counts: input.counts === false ? 'false' : undefined}, signal), get: async (id, signal) => mapList(await call(`/lists/${idPath(id)}`, 'GET', undefined, signal)), create: async (input, signal) => mapList(await call('/lists', 'POST', input, signal)), remove: async (id, signal) => { await call(`/lists/${idPath(id)}`, 'DELETE', undefined, signal) } },
     segments: {
