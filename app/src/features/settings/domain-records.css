@@ -57,6 +57,17 @@
 .ui-section-header:has(> .domain-group-title) { align-items: flex-start; }
 .domain-records-section > .dns-issue { margin-top: 0; }
 .domain-records-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-8); }
+/* Check now's answer: one line beside the record actions (two on a phone, on its own row), the same height before and
+   after a check, so the records never move. The full text is its title; each row's status says the rest. */
+.domain-check-summary { display: -webkit-box; flex: 1 1 0; align-self: center; min-width: 0; height: var(--leading-sm); overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 1; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.domain-check-summary[data-tone='danger'] { color: var(--color-danger); }
+.domain-check-summary[data-tone='warning'] { color: var(--color-warning); }
+.domain-check-summary[data-tone='info'] { color: var(--color-text); }
+@media (max-width: 640px) { .domain-check-summary { flex-basis: 100%; height: calc(2 * var(--leading-sm)); -webkit-line-clamp: 2; } }
+/* Check now and Checking… share one width, so the header's other actions never move. */
+.ui-button.domain-check { display: inline-grid; place-items: center; }
+.domain-check > span { grid-area: 1 / 1; }
+.domain-check > span:not([data-active]) { visibility: hidden; }
 .ui-page-header .domain-status-skeleton { border-radius: var(--radius-sm); }
 
 /* Pending records: quiet guidance under the records, no box. */

@@ -88,6 +88,36 @@ export async function setLimit(db: DbExecutor, limit: number, raise: Raise = 'ho
 }
 
 /**
+ * Where a waiting address stands in the order a hold raise lets the waitlist in (setLimit: first attempt first, then the
+ * address, leaving out addresses that are already a verified user's): 1 is next. Null when it isn't waiting.
+ */
+export async function waitlistPosition(db: DbExecutor, address: string): Promise<number | null> {
+  const email = address.toLowerCase();
+  const { rows: [row] } = await db.execute<{ position: number }>(sql`SELECT 1+(SELECT count(*)::int FROM nightmail_waitlist q WHERE q.let_in_at IS NULL AND (q.first_at,q.email)<(me.first_at,me.email)
+      AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=q.email)) AS position
+    FROM nightmail_waitlist me WHERE me.email=${email} AND me.let_in_at IS NULL`);
+  return row?.position ?? null;
+}
+
+/** Open places at or under which the operators hear that sign-ups are nearly full (placesAlert). */
+export const LOW_PLACES = 10;
+/**
+ * Whether the operators should hear that sign-ups are nearly full (LOW_PLACES or fewer open) or full (none), once per
+ * level: the level told is kept with the limit (migration 467), so the next check at the same level or above it says
+ * nothing. Places reopening past a level clear it without a word (an operator's raise did that), so reaching it again is
+ * told again. Called after a sign-up or a change of the limit commits, in its own transaction under the limit's lock;
+ * returns the level newly reached, with the places it saw, or null.
+ */
+export async function placesAlert(db: DbExecutor): Promise<{ level: 'low' | 'full'; places: Places } | null> {
+  await lockLimit(db);
+  const places = await readPlaces(db), level = places.open === 0 ? 0 : places.open <= LOW_PLACES ? LOW_PLACES : null;
+  const { rows: [told] } = await db.execute<{ alerted: number | null }>(sql`SELECT alerted_open AS alerted FROM nightmail_signup_limit WHERE singleton`);
+  if (told!.alerted === level) return null;
+  await db.execute(sql`UPDATE nightmail_signup_limit SET alerted_open=${level} WHERE singleton`);
+  return level !== null && (told!.alerted === null || level < told!.alerted) ? { level: level === 0 ? 'full' : 'low', places } : null;
+}
+
+/**
  * Whether a sign-in that showed nothing of its address (GitHub without a verified primary address, a password) could take
  * a place by proving the mailbox: 'held' for its address, or 'open'. Either way the refusal offers a sign-in link to it.
  * Read without the lock: it only decides what the refusal says.

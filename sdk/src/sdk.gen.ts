@@ -2501,7 +2501,7 @@ export const getDomain = <ThrowOnError extends boolean = false>(options: Options
 });
 
 /**
- * On MX, request a background verification and return the current stored status. Read the domain again for updates.
+ * On MX, request a background verification and return the current stored status, with what public DNS shows now for each pending sending and MAIL FROM record (dns[].publicDns), so a missing or mistyped record can be named. Read the domain again for updates.
  */
 export const verifyDomain = <ThrowOnError extends boolean = false>(options: Options<VerifyDomainData, ThrowOnError>): RequestResult<VerifyDomainResponses, VerifyDomainErrors, ThrowOnError> => (options.client ?? client).post<VerifyDomainResponses, VerifyDomainErrors, ThrowOnError>({
     security: [
@@ -5512,7 +5512,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Nightmail-Workspace.
+ * Create another workspace you own. Hosted: staff only for now (decided at sign-in; everyone else gets 403 WORKSPACE_LIMIT, and GET /v1/me says so in canCreateWorkspace), up to 10 per account. Select it with X-Nightmail-Workspace.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{

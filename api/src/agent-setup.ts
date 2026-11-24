@@ -8,7 +8,7 @@ import { apiKeyEnv, secretPrefixes, shownPrefix } from './brand.js';
 import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
 
 /**
- * Agent setup: how a coding agent gets its own lasting API key without a person making one by hand (migration 467).
+ * Agent setup: how a coding agent gets its own lasting API key without a person making one by hand (migration 469).
  *
  * - prompt: when a signed-in owner or admin copies the agent prompt, the dashboard mints a setup token (nm_setup_…) bound
  *   to them and their workspace, and puts it in the copied text. It works once, for 15 minutes; copying again replaces

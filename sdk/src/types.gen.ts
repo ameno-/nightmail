@@ -2323,6 +2323,20 @@ export type DomainReadiness = {
         purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc';
         status: 'pending' | 'verified';
         note?: string;
+        /**
+         * verifyDomain only, for pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1, answers cached up to 30 seconds) shows for this record now. Null when DNS did not answer in time; absent on other reads and records.
+         */
+        publicDns?: {
+            /**
+             * found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.
+             */
+            state: 'found' | 'missing' | 'wrong_value';
+            /**
+             * wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise.
+             */
+            values: Array<string>;
+            checkedAt: string;
+        } | null;
     }>;
     /**
      * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
@@ -6388,6 +6402,10 @@ export type GetCurrentIdentityResponses = {
          * Nightmail staff only: this session may use staff UI notes. False for everyone else.
          */
         uiNotes?: boolean;
+        /**
+         * Dashboard sessions: whether createWorkspace lets this session create another workspace. Hosted, only staff can for now; everyone else has one workspace and gets 403 WORKSPACE_LIMIT. False for keys, MCP and agent tokens.
+         */
+        canCreateWorkspace?: boolean;
         /**
          * Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false.
          */
