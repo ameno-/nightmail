@@ -25,7 +25,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/internal/v1/analytics' || pathname === '/internal/v1/analytics/export') return 'analytics';
   if (pathname === '/internal/v1/database-disk') return 'disk-alert';
-  if (pathname === '/v1/public/stats') return 'public-stats';
+  if (pathname === '/v1/public/stats' || pathname === '/v1/public/signups') return 'public-stats';
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (operatorPath(pathname) || pathname.startsWith('/v1/ui-notes/')) return 'operator';
@@ -94,8 +94,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerSupportInbox }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js')]);
-        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js')]);
-        return (target: App) => { registerOperator(target); registerHealth(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
+        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }, { registerGlass }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js'), import('./glass.js')]);
+        return (target: App) => { registerOperator(target); registerHealth(target); registerGlass(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -185,8 +185,9 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
-    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set; everything else is no-store.
-    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set, and whether sign-ups are open
+    // (public-stats.ts) its minute; everything else is no-store.
+    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/|v1\/public\/signups$)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
     c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
@@ -221,8 +222,9 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // A UI note's screenshot link is its own short-lived credential (src/ui-notes.ts), as is a stored preview's (src/preview-images.ts).
     if (['GET', 'HEAD'].includes(c.req.method) && /^\/v1\/preview-images\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.method === 'GET' && /^\/v1\/ui-notes\/screenshots\/[^/]+$/.test(c.req.path)) return next();
-    // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
-    if (c.req.path === '/v1/public/stats') return next();
+    // The homepage's installation-wide aggregates, and whether sign-ups are open, are public; neither returns anything
+    // workspace-scoped.
+    if (c.req.path === '/v1/public/stats' || c.req.path === '/v1/public/signups') return next();
     // Forward recipients answer with the emailed link alone; the routes check the token themselves.
     if (['GET','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
@@ -384,8 +386,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerGlass }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./glass.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerGlass(full);
   return full;
 }
 

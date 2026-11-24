@@ -1,5 +1,5 @@
 /*
-  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'sha256-WUcvRkSV9DBbeUsaYT4eC8yYCJZ80miszu/bx16BNAY='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; media-src 'self' https://media.nightmail.dev https://media.dev.nightmail.dev; connect-src 'self' https://support.nightmail.dev wss://support.nightmail.dev https://support.dev.nightmail.dev wss://support.dev.nightmail.dev https://support.bane.mx wss://support.bane.mx https://support.dev.bane.mx wss://support.dev.bane.mx https://media.nightmail.dev https://media.dev.nightmail.dev; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'
+  Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'sha256-sH76ouQYBaMQ5FLNfCiRS6RDM5thQuRzt8vLQXjlfHg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; media-src 'self' https://media.nightmail.dev https://media.dev.nightmail.dev; connect-src 'self' https://support.nightmail.dev wss://support.nightmail.dev https://support.dev.nightmail.dev wss://support.dev.nightmail.dev https://support.bane.mx wss://support.bane.mx https://support.dev.bane.mx wss://support.dev.bane.mx https://media.nightmail.dev https://media.dev.nightmail.dev; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'
   X-Frame-Options: DENY
   X-Content-Type-Options: nosniff
   Referrer-Policy: no-referrer
@@ -7,3 +7,15 @@
   Strict-Transport-Security: max-age=31536000; includeSubDomains
 # No rule for /assets/* or /fonts/*: a path there with no file is answered with the dashboard shell, which must not be
 # kept. The build appends a cache rule for each file it has in those directories (asset-headers.ts).
+# The price pages and their Markdown twins: revalidated as every page is, and never transformed on the way, so Cloudflare
+# adds nothing to them (its analytics beacon, which the CSP refuses). The Worker answers them from here (api/src/worker.ts,
+# untransformed: it says the same, and compresses them, which no-transform stops Cloudflare doing). The site's other
+# Markdown and text files say their character set.
+/pricing
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
+/compare/*
+  Cache-Control: public, max-age=0, must-revalidate, no-transform
+/*.md
+  Content-Type: text/markdown; charset=utf-8
+/*.txt
+  Content-Type: text/plain; charset=utf-8

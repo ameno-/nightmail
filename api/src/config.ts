@@ -102,6 +102,10 @@ const values = z.object({
   // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
   // queue, the jobs, a campaign, a route or the database falling behind. Unset, nothing is posted. Treat as a secret.
   OPERATOR_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
+  // The commit this deploy runs and when it was deployed (.github/scripts/deploy-worker.sh sets both; Docker may). Glass
+  // shows them; a value that isn't a commit or a time is ignored, never an error.
+  DEPLOY_SHA: z.unknown().optional(),
+  DEPLOY_AT: z.unknown().optional(),
   // The database's disk in GB, optional: the Health page shows the database's size against it (src/health.ts).
   DATABASE_DISK_GB: optional(z.coerce.number().positive().max(1_000_000)),
   // Hosted only, optional: the signing secret of the PlanetScale webhook that reports the database disk (src/disk-alert.ts).
@@ -290,6 +294,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
+    deploy: { sha: typeof v.DEPLOY_SHA === 'string' && /^[0-9a-f]{7,40}$/.test(v.DEPLOY_SHA) ? v.DEPLOY_SHA : null,
+      at: typeof v.DEPLOY_AT === 'string' && Number.isFinite(Date.parse(v.DEPLOY_AT)) ? new Date(v.DEPLOY_AT).toISOString() : null },
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
       creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,

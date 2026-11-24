@@ -169,15 +169,16 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 
 export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
-    description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Nightmail-Workspace.`,
+    description: `Create another workspace you own. Hosted: staff only for now (decided at sign-in; everyone else gets 403 WORKSPACE_LIMIT, and GET /v1/me says so in canCreateWorkspace), up to ${maxOwnedWorkspaces} per account. Select it with X-Nightmail-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
     const a = dashboardSession(c), { name } = c.req.valid('json'), policy = await accountSessionPolicy(c.env, c.req.raw.headers);
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
       const [user] = await db.select({id:baneUsers.id}).from(baneUsers).where(eq(baneUsers.id,a.userId)).for('update');
       // Decided by the sign-in, never by an address: hosted staff (the provider identity), or a self-hosted allowed subject.
-      const allowed = user && (c.env.config.multiTenant ? policy?.staff === true : !!policy && c.env.config.allowedSubjects.includes(policy.subject));
-      if (!allowed) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
+      // Hosted, everyone else is an approved account limited to the workspace it signed up with, not an unapproved one.
+      if (c.env.config.multiTenant ? !user || policy?.staff !== true : !user || !policy || !c.env.config.allowedSubjects.includes(policy.subject))
+        throw c.env.config.multiTenant ? new ApiError(403, 'WORKSPACE_LIMIT', 'Your account can have one workspace for now.') : new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
       const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c));
       if (row) return row;
       const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));

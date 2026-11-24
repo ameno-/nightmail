@@ -2837,7 +2837,7 @@ export type Usage = {
          */
         perThousand: number;
         /**
-         * Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round.
+         * The sent allowance (same as freeSentEmails), kept for older clients. Sent and received each have their own allowance (freeSentEmails, freeReceivedEmails), counted separately: sends beyond theirs are charged even while received mail is still free, and the other way round.
          */
         freeEmails: number;
         /**
@@ -5919,7 +5919,7 @@ export type BillingSummary = {
          */
         storagePerGbMonth: string;
         /**
-         * Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).
+         * The sent allowance (same as freeSentEmails), kept for older clients. Each direction has its own allowance, counted separately (freeSentEmails, freeReceivedEmails).
          */
         freeEmails: number;
         /**
@@ -6318,6 +6318,10 @@ export type GetCurrentIdentityResponses = {
          * Nightmail staff only: this session may use staff UI notes. False for everyone else.
          */
         uiNotes?: boolean;
+        /**
+         * Dashboard sessions: whether createWorkspace lets this session create another workspace. Hosted, only staff can for now; everyone else has one workspace and gets 403 WORKSPACE_LIMIT. False for keys, MCP and agent tokens.
+         */
+        canCreateWorkspace?: boolean;
         /**
          * Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false.
          */

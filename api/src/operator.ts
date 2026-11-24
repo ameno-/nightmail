@@ -366,8 +366,11 @@ export function registerOperator(app: App) {
         audit: { action: 'operator-set-signup-limit', before: { limit: change.before.limit }, after: { limit: body.limit, raise: body.raise, letIn: change.letIn.length }, reason: body.reason, ticketRef: body.ticketRef } };
     });
     // After the commit: an email that fails or is slow can't undo the change. Each address is emailed once, ever; an
-    // open raise emails nobody.
-    return c.json({ ...result, ...await placesOpened(c.env, body.raise === 'hold') }, 200);
+    // open raise emails nobody. A lowered limit can leave sign-ups nearly full or full, and a raise reopens them, so the
+    // operators' places alert is checked too (operator-alerts.ts signupPlacesAlert).
+    const opened = await placesOpened(c.env, body.raise === 'hold');
+    await (await import('./operator-alerts.js')).signupPlacesAlert(c.env);
+    return c.json({ ...result, ...opened }, 200);
   });
   // The content screen beside the second classifier that repeats its requests (src/screen-shadow.ts): how often they
   // agree at the threshold, how far their scores are apart, how each one's requests ended and how long they took. Read

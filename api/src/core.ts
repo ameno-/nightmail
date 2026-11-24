@@ -133,6 +133,8 @@ export interface Config {
   operatorSlackWebhookUrl?: string;
   /** DATABASE_DISK_GB in bytes: the Health page shows the database's size against it. Undefined: the size alone. */
   databaseDiskBytes?: number;
+  /** DEPLOY_SHA and DEPLOY_AT: the commit this deploy runs and when it went out (Glass). Null when not set. */
+  deploy?: { sha: string | null; at: string | null };
   /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: its token alone. */
   planetscaleWebhookSecret?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */

@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { aborted, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, takeInterruptedWrite, type RequestScope } from './live'
+import { aborted, asksOnlyIfLikely, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, rememberSession, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, sessionLikely, takeInterruptedWrite, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
@@ -71,7 +71,7 @@ const authMessages: Record<string, string> = {
   method_required: 'Sign in again using the authentication method required by this installation.',
   interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
   account_limit: 'This browser has the most accounts it can hold. Sign out of one to add another.',
-  waitlist: `${productName} isn’t open to the public yet. We’ll email you when it opens.`,
+  waitlist: `${productName} is full for now. You’re on the waitlist, and we’ll email you as soon as a place opens.`,
   error: 'Sign-in didn’t finish. Check that you used your invited or approved account.',
 }
 // The section of the current page, without a record from the previous account or workspace in it.
@@ -109,9 +109,12 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
   const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
+  // A visitor on a marketing page with no trace of a session here is signed out, without asking (live.ts, sessionLikely).
+  if (!override && asksOnlyIfLikely(window.location) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
   let result: Identity
   try { result = await read() }
   catch (error) {
+    if (!override && error instanceof ApiError && error.status === 401 && error.code === 'AUTH_REQUIRED') rememberSession(false)
     if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
     else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
@@ -126,6 +129,7 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   if (!override) {
     selectAccount(result.id)
     selectWorkspace(result.multiTenant ? result.workspaceId : null)
+    rememberSession(true)
   }
   return result
 }
@@ -173,16 +177,19 @@ function waitlistAddress() {
 // What the refusal says (api/src/account-login.ts). ?place=held (a place is held for the address) or ?place=ready (one is
 // open), but the sign-in didn't show the address is the person's (GitHub without it as its verified primary email, a
 // password, a Google account on another provider's address): one click emails it a sign-in link. Otherwise the address
-// waits; someone told they're in who signed in with another address asks for a link to that one. ?link=expired: the
-// sign-in link it followed was used or ran out.
+// waits, every place taken, and ?position=N says where in the order a raise lets the waitlist in (1 is next); someone
+// told they're in who signed in with another address asks for a link to that one. ?link=expired: the sign-in link it
+// followed was used or ran out.
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
   const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
+  const position = /^[1-9]\d{0,6}$/.test(search.get('position') ?? '') ? Number(search.get('position')) : null
   const who = email ? <bdi data-own-address="">{email}</bdi> : null
-  return <SignedOutPage title={ready ? `There’s a place for you in ${productName}` : `${productName} isn’t open to the public yet`}>
+  return <SignedOutPage title={ready ? `There’s a place for you in ${productName}` : `${productName} is full for now`}>
     {expired ? <Alert tone="info">That sign-in link was already used or has expired. Ask for a new one below.</Alert> : null}
     {ready ? <p>This sign-in didn’t confirm {who} is yours. GitHub counts only a verified primary email. Get a sign-in link sent to it to take your place.</p>
-      : <p>We’ll email {who ?? 'you'} when it opens. Got an email saying you’re in? Sign in with the address you joined the waitlist with, or get a sign-in link sent to it.</p>}
+      : <><p><strong>{position ? `You’re number ${position.toLocaleString('en-US')} on the waitlist.` : 'You’re on the waitlist.'}</strong> We’ll email {who ? <>you at {who}</> : 'you'} as soon as a place opens.</p>
+        <p className="muted">Got an email saying you’re in? Sign in with that address, or get a sign-in link sent to it.</p></>}
     <SignInLinkForm to={ready ? email : null} />
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
     <Button variant={ready ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
@@ -373,7 +380,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function redirectAdd() {
     const callback = new URL(window.location.pathname, window.location.origin)
-    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place')
+    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
     try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
     catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : errorText(error, 'Couldn’t add an account.'), 'error') }
   }
@@ -447,7 +454,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     callback.pathname = path === '/' || path === '/pricing' || path.startsWith('/compare/') || !isKnownPath(path) ? '/overview' : path
     callback.search = window.location.search
     callback.hash = window.location.hash
-    callback.searchParams.delete('auth'); callback.searchParams.delete('place')
+    callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
     // Analytics: this signed-out page's session rides in the return URL to the sign-in callback, which links it to the
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()

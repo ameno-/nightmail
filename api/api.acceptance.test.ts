@@ -1042,6 +1042,8 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   cleanup(t,async()=>{await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[waitlist.map(address=>address.toLowerCase())]);});
   const waitlisted = async (address:string) => (await db.query('SELECT email,name,attempts FROM nightmail_waitlist WHERE email=lower($1)',[address])).rows;
   const waitlistCookie = (response:Response) => response.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='));
+  // A waitlisted refusal says where the address waits (position=N, 1 next): present, and otherwise the location as before.
+  const waitingAt = (location:string|null) => { assert.match(location??'',/[?&]position=[1-9]\d*$/); return location!.replace(/&position=\d+$/,''); };
   // Staff sign-up needs the provider identity of a staff domain. Nothing else admits a new subject: no claim, a provider
   // the acr doesn't name, another domain, an address the provider didn't verify. Each refusal is recorded by subject.
   // Exactly the account service's staff rule: Google, a verified Google address, and hd in AUTH_STAFF_GOOGLE_DOMAINS.
@@ -1050,7 +1052,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   for (const [name,hd,googleVerified] of [[null,null,true],['github','example.org',true],['google','other.example',true],['google','Example.org',true],['google','example.org',false]] as const) {
     providerName=name;providerHd=hd;providerVerified=googleVerified;
     const refused=await login();
-    assert.equal(refused.headers.get('location'),origin+'/?auth=waitlist',`${name}/${hd}/${googleVerified}`);
+    assert.equal(waitingAt(refused.headers.get('location')),origin+'/?auth=waitlist',`${name}/${hd}/${googleVerified}`);
     assert.deepEqual(await attempt(),{acr:googleAcr,provider:name,provider_hd:hd,outcome:'not_approved'});
     const notice=waitlistCookie(refused)!;
     assert.ok(notice.startsWith(`__Host-nightmail.waitlist=${encodeURIComponent(approved)};`) && /Max-Age=600/.test(notice) && /Secure/.test(notice) && !/HttpOnly/i.test(notice),notice);
@@ -1069,7 +1071,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // One row per address, every attempt counted, whatever the address's case or the subject; the name when one is given.
   assert.deepEqual(await waitlisted(approved),[{email:approved,name:null,attempts:5}]);
   const firstSubject=subject;subject=randomUUID();subjects.push(subject);email=approved.toUpperCase();givenName='Avery Example';
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   assert.deepEqual(await waitlisted(approved),[{email:approved,name:'Avery Example',attempts:6}]);
   subject=firstSubject;email=approved;givenName=undefined;
   // Hosted, a new subject needs a verified address whatever the method: a staff sign-in without one is refused before
@@ -1158,7 +1160,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // user lands in that user's workspace with its role. Addresses never decide: the same address under another
   // subject gets nothing.
   subject=randomUUID();subjects.push(subject);email=`seat-${randomUUID()}@example.org`;providerName=null;providerHd=null;waitlist.push(email);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:null,provider_hd:null,outcome:'not_approved'});
   const seatId=randomUUID();
   await db.query("INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,'Seat',NULL,false)",[seatId]);
@@ -1184,9 +1186,12 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   // Its address is a verified user's now, so nothing promises to write to it: the refusal is the plain one.
   assert.equal((await login()).headers.get('location'),origin+'/?auth=error','The same verified address under another subject is refused');
   assert.deepEqual(await waitlisted(email),[]);
-  // Workspace creation follows the sign-in's staff status, not the address.
+  // Workspace creation follows the sign-in's staff status, not the address. Everyone else is approved, with one workspace
+  // for now: /v1/me says so before they try, and the refusal says why in those words.
+  assert.equal(((await (await request('/v1/me','GET',seatSession)).json()) as {canCreateWorkspace:boolean}).canCreateWorkspace,false);
   const created=await request('/v1/workspaces','POST',seatSession,{name:'Not staff'});
-  assert.equal(created.status,403);assert.equal(((await created.json()) as {error:{code:string}}).error.code,'SIGNUP_NOT_APPROVED');
+  const refused=((await created.json()) as {error:{code:string;message:string}}).error;
+  assert.deepEqual([created.status,refused.code,refused.message],[403,'WORKSPACE_LIMIT','Your account can have one workspace for now.']);
 
   // GitHub and Google, as hosted: sign-in asks for no method, so the account service offers both, and the acr names
   // the one used. Staff is a Google Workspace sign-in only. Hosted, nothing is admitted without a verified address.
@@ -1200,23 +1205,24 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const staffIn=await login(), staffSubject=subject, staffEmail=email, staffUser=accountOf(staffIn)!, staffSession=sessionOf(staffIn);
   assert.equal(landed(staffIn),origin+'/');
   assert.deepEqual(await attempt(),{acr:googleAcr,provider:'google',provider_hd:'example.org',outcome:'signed_in:staff'});
+  assert.equal(((await (await request('/v1/me','GET',staffSession)).json()) as {canCreateWorkspace:boolean}).canCreateWorkspace,true,'Staff can create more workspaces');
   for (const method of ['github','google'] as const) {
     use(method);if (method==='google') providerHd='example.org';fresh(`${method}-${randomUUID()}@example.org`);verified=false;
     assert.equal((await login()).headers.get('location'),origin+'/?auth=error',`${method}: an unverified address is refused`);
     assert.equal((await attempt()).outcome,'email_unverified');
     assert.deepEqual(await waitlisted(email),[]);
     use(method);if (method==='google') providerHd='other.example';fresh(`${method}-${randomUUID()}@example.net`);
-    assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',`${method}: another domain is waitlisted`);
+    assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist',`${method}: another domain is waitlisted`);
     assert.equal((await attempt()).outcome,'not_approved');
   }
   // Review 1: GitHub proves no Workspace membership. Its verified address at the staff domain (a former colleague's,
   // say) is not staff: no account, no workspace, the waitlist. Nor is a Google account outside a Workspace.
   use('github');fresh(`former-${randomUUID()}@example.org`);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   assert.deepEqual(await attempt(),{acr:githubAcr,provider:'github',provider_hd:null,outcome:'not_approved'});
   assert.equal((await db.query('SELECT FROM nightmail_oidc_identities WHERE issuer=$1 AND subject=$2',[issuer,subject])).rowCount,0);
   use('google');fresh(`consumer-${randomUUID()}@example.org`);
-  assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist');
   // A method the installation doesn't list is refused before anything else.
   use('github');tokenAcr='urn:anomaly:acr:passkey';fresh(`other-${randomUUID()}@example.org`);
   assert.equal((await login()).headers.get('location'),origin+'/?auth=method_required');
@@ -1240,7 +1246,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   }
   // Without an invitation, the page the dashboard signs in from admits nobody: a new Gmail address is waitlisted.
   use('google');fresh(`uninvited-${randomUUID()}@gmail.com`);
-  assert.equal((await login(undefined,origin+'/overview')).headers.get('location'),origin+'/?auth=waitlist');
+  assert.equal(waitingAt((await login(undefined,origin+'/overview')).headers.get('location')),origin+'/?auth=waitlist');
   assert.equal((await attempt()).outcome,'not_approved');
   // A new Gmail invitee following the link joins, and lands back on it, where the dashboard shows the review.
   use('google');const gmail=`invited-${randomUUID()}@gmail.com`, gmailInvite=await invite(gmail);fresh(gmail);const gmailSubject=subject;
@@ -1270,7 +1276,7 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   assert.deepEqual([githubMe.id,githubMe.operator,githubMe.staffSignIn],[staffUser,null,true]);
   assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
   assert.deepEqual(await errorOf(await request('/v1/operator/support-inbox','GET',githubSession)),[403,'OPERATOR_REQUIRED']);
-  assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'SIGNUP_NOT_APPROVED']);
+  assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',githubSession,{name:'Through GitHub'})),[403,'WORKSPACE_LIMIT']);
   // Sign in with Google: the account service is asked for Google, and that session is staff again.
   use('google');providerHd='example.org';
   const stepUp=await login(undefined,origin+'/operator','google');
@@ -1299,10 +1305,10 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     const emailSession=sessionOf(signedIn), emailMe=await (await request('/v1/me','GET',emailSession)).json() as {operator:string|null;staffSignIn:boolean};
     assert.deepEqual([emailMe.operator,emailMe.staffSignIn],[null,true],acr);
     assert.deepEqual(await errorOf(await request('/v1/operator/waitlist','GET',emailSession)),[403,'OPERATOR_REQUIRED']);
-    assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',emailSession,{name:'Through email'})),[403,'SIGNUP_NOT_APPROVED']);
+    assert.deepEqual(await errorOf(await request('/v1/workspaces','POST',emailSession,{name:'Through email'})),[403,'WORKSPACE_LIMIT']);
     // A new, verified address at the staff domain is not staff: it is waitlisted, as any other address is.
     viaEmail(acr);fresh(`email-${randomUUID()}@example.org`);
-    assert.equal((await login()).headers.get('location'),origin+'/?auth=waitlist',acr);
+    assert.equal(waitingAt((await login()).headers.get('location')),origin+'/?auth=waitlist',acr);
     assert.deepEqual(await attempt(),{acr,provider:null,provider_hd:null,outcome:'not_approved'});
     // An unverified address is refused, and isn't waitlisted.
     viaEmail(acr);fresh(`email-${randomUUID()}@example.net`);verified=false;
@@ -1418,11 +1424,15 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     assert.equal(start.status,200);
     const code = randomUUID(), state = pushed!.get('state')!, cookie = start.headers.getSetCookie()[0]!.split(';')[0]!, from = ip();
     flows.set(code,{person:p,nonce:pushed!.get('nonce')!});
+    // replay: the browser asks for the same callback again, with the cookies it holds then.
+    const callback = (cookie: string) => app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state,iss:issuer}),{headers:{cookie,'sec-fetch-site':'cross-site','x-nightmail-client-ip':from}}),runtime);
     return async () => {
-      const done = await app.fetch(new Request(origin+'/api/auth/callback/account?'+new URLSearchParams({code,state,iss:issuer}),{headers:{cookie,'sec-fetch-site':'cross-site','x-nightmail-client-ip':from}}),runtime);
+      const done = await callback(cookie);
       const location = new URL(done.headers.get('location')!);
-      return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), link: location.searchParams.get('link'), account: location.searchParams.get('account'),
-        landed: location.pathname + location.search, session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '' };
+      return { auth: location.searchParams.get('auth'), place: location.searchParams.get('place'), link: location.searchParams.get('link'), account: location.searchParams.get('account'), position: location.searchParams.get('position'),
+        landed: location.pathname + location.search, session: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.session_token='))?.split(';')[0] ?? '',
+        waitlist: done.headers.getSetCookie().find(v=>v.startsWith('__Host-nightmail.waitlist='))?.split(';')[0] ?? '',
+        replay: async (held: string) => new URL((await callback(held)).headers.get('location')!).search };
     };
   }
   const signIn = async (p: Person, callbackURL?: string) => (await begin(p, callbackURL))();
@@ -1432,7 +1442,7 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   const outcome = async (p: Person) => (await db.query('SELECT outcome FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,p.subject])).rows[0]?.outcome;
   const waiting = async (p: Person) => (await db.query('SELECT let_in_at IS NOT NULL AS held FROM nightmail_waitlist WHERE email=lower($1)',[p.email])).rows[0] ?? null;
   const placeOf = async (account: string | null) => (await db.query('SELECT via FROM nightmail_signups WHERE user_id=$1',[account])).rows[0]?.via ?? null;
-  const started = (await db.query('SELECT now() AS at')).rows[0].at, initial = (await db.query('SELECT places FROM nightmail_signup_limit')).rows[0].places;
+  const started = (await db.query('SELECT now() AS at')).rows[0].at, { places: initial, alerted_open: initialAlert } = (await db.query('SELECT places,alerted_open FROM nightmail_signup_limit')).rows[0];
   // Account emails go out as the platform workspace's (account-notices.ts); how many "you can sign in" emails an address got.
   const platform = `signup-platform-${randomUUID()}`;
   runtime.config.platformDomainWorkspace = platform;
@@ -1461,7 +1471,8 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
     for (const table of ['audience_list_members','audience_consent_audit','audience_contacts','audience_list_counts','audience_lists']) await db.query(`DELETE FROM ${table} WHERE workspace_id=$1`,[platform]);
     await db.query('DELETE FROM jobs WHERE workspace_id=$1',[platform]);
     await db.query('DELETE FROM account_notices WHERE workspace_id=$1',[platform]);
-    await db.query('UPDATE nightmail_signup_limit SET places=$1',[initial]);
+    await db.query('UPDATE nightmail_signup_limit SET places=$1,alerted_open=$2',[initial,initialAlert]);
+    await db.query("DELETE FROM jobs WHERE type='operator.alert' AND workspace_id='platform' AND id LIKE 'operator-alert:signups\\_%' AND created_at>=$1",[started]);
     await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE let_in_at>=$1',[started]);
     await db.query('DELETE FROM nightmail_waitlist WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
     await db.query('DELETE FROM nightmail_signin_links WHERE email=ANY($1)',[people.map(p=>p.email.toLowerCase())]);
@@ -1709,6 +1720,62 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.equal(await placeOf((await signIn(eldest)).account),'waitlist');
   const refilled = await places();
   assert.deepEqual([refilled.signedUp,refilled.held,refilled.open],[kept.signedUp+4,kept.held,0]);
+
+  // Full, a refused sign-in says where it waits: ?position=N, 1 next, in the order a hold raise lets the waitlist in
+  // (first attempt first, leaving out addresses that are already a verified user's).
+  const expectedPosition = async (p: Person) => (await db.query(`SELECT 1+count(*)::int AS n FROM nightmail_waitlist q, nightmail_waitlist me WHERE me.email=lower($1)
+    AND q.let_in_at IS NULL AND (q.first_at,q.email)<(me.first_at,me.email) AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=q.email)`,[p.email])).rows[0].n;
+  const [queuer, nextInLine] = [gmail('queuer'), gmail('next-in-line')];
+  const lined = await signIn(queuer), behind = await signIn(nextInLine);
+  assert.deepEqual([lined.auth,lined.place,behind.auth],['waitlist',null,'waitlist']);
+  assert.deepEqual([Number(lined.position),Number(behind.position)],[await expectedPosition(queuer),await expectedPosition(queuer)+1]);
+  await db.query("UPDATE nightmail_waitlist SET first_at=timestamptz '1999-01-01' WHERE email=lower($1)",[nextInLine.email]);
+  assert.equal((await signIn(nextInLine)).position,'1','The oldest waiting address is next');
+  // A refusal that offers a held place (?place=held) gives no position: there's a place for it.
+  Object.assign(tooLate,{acr:githubAcr,provider:'github',upstream:{}});
+  await db.query('UPDATE nightmail_waitlist SET let_in_at=now() WHERE email=lower($1)',[tooLate.email]);
+  assert.deepEqual(await signIn(tooLate).then(r=>[r.auth,r.place,r.position]),['waitlist','held',null]);
+  await db.query('UPDATE nightmail_waitlist SET let_in_at=NULL WHERE email=lower($1)',[tooLate.email]);
+  // Whether sign-ups are open is public, for the homepage's and the price pages' button: yes or no, never the counts,
+  // cached for a minute. (Each check reads as its own installation, so one's cached answer isn't the next one's.)
+  const signupsOpen = async (installation: string) => {
+    const response = await app.fetch(new Request(origin+'/v1/public/signups',{headers:{'x-nightmail-client-ip':ip()}}),{...runtime,config:{...runtime.config,publicUrl:`https://${installation}.example.org`}});
+    assert.deepEqual([response.status,response.headers.get('cache-control')],[200,'public, max-age=60']);
+    return await response.json();
+  };
+  assert.deepEqual(await signupsOpen(`full-${randomUUID().slice(0,8)}`),{open:false});
+
+  // The operators hear once when ten or fewer places are left and once when none are (operator-alerts.ts
+  // signupPlacesAlert), and neither again until places reopen past it.
+  const placeCards = async () => (await db.query("SELECT payload FROM jobs WHERE type='operator.alert' AND workspace_id='platform' AND id LIKE 'operator-alert:signups\\_%' AND created_at>=$1 ORDER BY created_at,id",[started])).rows.map(r=>r.payload);
+  const filled = await places(), taken12 = filled.signedUp+filled.held;
+  // Twelve open (an open raise holds none for the waitlist): over both levels, nothing to tell.
+  const twelve = await setLimit(taken12+12,'open');
+  assert.equal(twelve.open,12);
+  assert.deepEqual(await signupsOpen(`open-${randomUUID().slice(0,8)}`),{open:true});
+  const cardsBefore = (await placeCards()).length;
+  const newcomers = Array.from({length:6},(_,i)=>gmail(`newcomer-${i}`)), heard: number[] = [];
+  for (const p of newcomers.slice(0,3)) { assert.equal(await placeOf((await signIn(p)).account),'open'); heard.push((await placeCards()).length-cardsBefore); }
+  assert.deepEqual(heard,[0,1,1],'Told once, at ten left: not at eleven, not again at nine');
+  // Lowered to what is taken: full, told once; saving it again and a sign-in refused at the limit tell nothing more.
+  const nine = await places();
+  for (let i = 0; i < 2; i++) assert.equal((await setLimit(nine.signedUp+nine.held)).open,0);
+  assert.equal((await signIn(gmail('refused-at-full'))).auth,'waitlist');
+  // Three reopen (under ten, so nothing is told), and taking them fills it again: told again, once.
+  await setLimit(nine.signedUp+nine.held+3,'open');
+  for (const p of newcomers.slice(3)) assert.equal(await placeOf((await signIn(p)).account),'open');
+  assert.equal((await places()).open,0);
+  const limitNow = (await places()).limit;
+  assert.deepEqual((await placeCards()).slice(cardsBefore),[{kind:'signups_low',open:10,limit:taken12+12},{kind:'signups_full',open:0,limit:nine.signedUp+nine.held},{kind:'signups_full',open:0,limit:limitNow}]);
+  await t.test('the sign-ups full cards are posted to Slack', async t => {
+    const posted: Json[] = [], { operatorAlertJobs } = await import('./src/operator-alerts.js');
+    t.mock.method(globalThis,'fetch',async (url: RequestInfo|URL, init?: RequestInit) => { assert.equal(String(url),runtime.config.operatorSlackWebhookUrl); posted.push(JSON.parse(String(init!.body))); return new Response(null); });
+    for (const payload of (await placeCards()).slice(cardsBefore,cardsBefore+2)) await operatorAlertJobs['operator.alert']!(runtime, payload, { id: 'operator-alert:signups', workspaceId: 'platform', attempts: 1 });
+    assert.deepEqual(posted.map(p=>[p.text,p.blocks[0].accessory.url]),[
+      [`Sign-ups nearly full: 10 of ${(taken12+12).toLocaleString('en-US')} places left. Raise the limit in Operator → Sign-ups.`,`${origin}/operator?view=signups`],
+      [`Sign-ups are full: All ${(nine.signedUp+nine.held).toLocaleString('en-US')} places are taken. Raise the limit in Operator → Sign-ups.`,`${origin}/operator?view=signups`]]);
+  });
+
   // Without the list nothing is queued; a value that isn't a list ID turns it off and nothing else.
   await syncList();
   assert.equal(loadConfig({...configInput, NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE:`ws_${'0'.repeat(32)}`, NIGHTMAIL_SIGNUPS_LIST_ID:'not-a-list'}).signupsListId,undefined);
@@ -1815,11 +1882,29 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.deepEqual(await signIn(sibling).then(r=>[r.auth,r.place,r.session]),['waitlist','ready','']);
   assert.deepEqual([(await places()).open,await placeOf(devIn.account)],[1,'open']);
   // No verified primary address on GitHub, or one listed unverified: refused, offered a link (?place=ready), place kept.
+  // Each refusal's log line says which place it could have had and what GitHub said of the address, never the address.
   const unverified = someone(`unverified-${randomUUID().slice(0,8)}@example.net`,githubAcr,'github');
+  const refusals: Record<string, unknown>[] = [], warn = console.warn;
+  const capture = t.mock.method(console,'warn',(line: string) => { try { const o = JSON.parse(line); if (o.code === 'SIGN_IN_NOT_APPROVED') refusals.push(o); } catch { warn(line); } });
   for (const upstream of [{}, {email:unverified.email,email_verified:false}]) {
     unverified.upstream = upstream;
     assert.deepEqual(await signIn(unverified).then(r=>[r.auth,r.place,r.session]),['waitlist','ready',''],JSON.stringify(upstream));
   }
+  sibling.upstream = {email:dev.email,email_verified:true};
+  await signIn(sibling);
+  capture.mock.restore();
+  assert.deepEqual(refusals.map(o=>[o.place,o.github]),[['open','none'],['open','unverified'],['open','other']]);
+  assert.ok(!JSON.stringify(refusals).includes('@'),'No address in the log');
+  // The browser asks for the same callback again right after a refusal (production saw it 120 ms later): the sign-in is
+  // spent, and the waitlist cookie the refusal set brings it back to the waitlist screen and its link offer. Without
+  // that cookie it is the plain failure, as before.
+  const twice = await (await begin(unverified))();
+  assert.deepEqual([twice.auth,twice.place,!!twice.waitlist],['waitlist','ready',true]);
+  assert.deepEqual([await twice.replay(twice.waitlist),await twice.replay('')],['?auth=waitlist','?auth=error']);
+  // Asking for a link has its own allowance per browser: one that used up its pending sign-ins (production saw a retrier
+  // refused with AUTH_STATE_LIMIT) still gets one.
+  for (let i = 0; i < 8; i++) await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
+  assert.equal((await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'})).status,429);
   assert.equal((await places()).open,1);
   assert.deepEqual(await ask(unverified.email),[202,{requested:true}]);
   const [openLink] = await links(unverified);
@@ -3374,7 +3459,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
       error(await local('GET','/v1/me',undefined,guest),401);
       assert.equal(ok(await local('POST',`/v1/workspaces/invitations/${invitation.id}/accept`,undefined,guest)).workspaceId,a.org.id);
       const me=ok(await local('GET','/v1/me',undefined,guest));assert.equal(me.role,'member');
-      error(await local('POST','/v1/workspaces',{name:'Guest workspace'},guest),403,'SIGNUP_NOT_APPROVED');
+      assert.equal(me.canCreateWorkspace,false);
+      error(await local('POST','/v1/workspaces',{name:'Guest workspace'},guest),403,'WORKSPACE_LIMIT');
       await mx.test('MX connections: shared provisioning is regional; BYO verifies and uniquely claims an account with an external ID', async providerTest => {
         const [{ STSClient }, { SESv2Client }, { SNSClient }, { getSes }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2'), import('@aws-sdk/client-sns'), import('./src/core.js')]);
         const path = '/v1/connection', region = 'us-east-2', platform = '111111111111', customer = '222222222222';
@@ -12101,6 +12187,9 @@ describe('Import property boundaries', () => {
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id)
         SELECT $1, $2, id FROM audience_contacts WHERE workspace_id = $1 AND email IN ('info1@gmial.com', 'info2@gmial.com', 'user501@example.com')`, [wid, smallList.id]);
 
+      // Autoanalyze cannot see the uncommitted bulk seed; give the AudienceQL membership join current statistics.
+      await db.query('ANALYZE audience_contacts, audience_list_members');
+
       // 1. A1-4: >50k skinny capture with priority + referenced personalization + hashed send order.
       const { snapshotCampaignAudience } = await import('./src/audience.js');
       const actor = { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never;
@@ -13133,7 +13222,7 @@ describe('Billing: metering, gate and settlement', () => {
     });
   });
 
-  test('the free tier is 5,000 sent and 5,000 received a month, counted separately: nothing is charged up to 5,000 in each direction, the 5,001st is, both roll over, and months before November 2026 keep 3,000', async t => {
+  test('the free tier is 5,000 sent and 20,000 received a month, counted separately: nothing is charged up to each allowance, the next email is, both roll over, and months before November 2026 keep 3,000', async t => {
     await simulatedSesFixture(t, async ({ db }) => {
       // February 10, 2027, a second later for each settlement (a usage row's key carries the time it was posted).
       const at = await clock(db, '2027-02-10T09:00:00Z');
@@ -13149,28 +13238,28 @@ describe('Billing: metering, gate and settlement', () => {
         return [s.costUc, sum('send'), sum('receive')];
       };
       const both = unique('free-both'), sends = unique('free-sends'), receives = unique('free-receives');
-      // 5,000 sent (recipients) and 5,000 received in one month are free.
-      await meter(both, '2026-12-01 01:00Z', 'send', 5000); await meter(both, '2026-12-01 01:00Z', 'receive', 5000);
+      // 5,000 sent (recipients) and 20,000 received in one month are free.
+      await meter(both, '2026-12-01 01:00Z', 'send', 5000); await meter(both, '2026-12-01 01:00Z', 'receive', 20000);
       assert.deepEqual(await priced(both, '2026-12-01 02:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await month(db, both, '2026-12-01'), { sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 });
-      // The 5,001st send is charged while received mail is still free: the 5,000th received costs nothing, the 5,001st does.
-      await meter(sends, '2026-12-01 01:00Z', 'send', 5001); await meter(sends, '2026-12-01 01:00Z', 'receive', 4999);
+      assert.deepEqual(await month(db, both, '2026-12-01'), { sent: 5000, received: 20000, unchargedSent: 0, unchargedReceived: 0 });
+      // The 5,001st send is charged while received mail is still free: the 20,000th received costs nothing, the 20,001st does.
+      await meter(sends, '2026-12-01 01:00Z', 'send', 5001); await meter(sends, '2026-12-01 01:00Z', 'receive', 19999);
       assert.deepEqual(await priced(sends, '2026-12-01 02:00Z'), ['20000', 1, 0]);
       await meter(sends, '2026-12-01 02:00Z', 'receive', 1);
       assert.deepEqual(await priced(sends, '2026-12-01 03:00Z'), ['0', 0, 0]);
       await meter(sends, '2026-12-01 03:00Z', 'receive', 1);
       assert.deepEqual(await priced(sends, '2026-12-01 04:00Z'), ['20000', 0, 1]);
-      // And the other way round: the 5,001st received is charged while sends are still free, up to their own 5,000.
-      await meter(receives, '2026-12-01 01:00Z', 'receive', 5001); await meter(receives, '2026-12-01 01:00Z', 'send', 4000);
+      // And the other way round: the 20,001st received is charged while sends are still free, up to their own 5,000.
+      await meter(receives, '2026-12-01 01:00Z', 'receive', 20001); await meter(receives, '2026-12-01 01:00Z', 'send', 4000);
       assert.deepEqual(await priced(receives, '2026-12-01 02:00Z'), ['20000', 0, 1]);
       await meter(receives, '2026-12-01 02:00Z', 'send', 1000);
       assert.deepEqual(await priced(receives, '2026-12-01 03:00Z'), ['0', 0, 0]);
       await meter(receives, '2026-12-01 03:00Z', 'send', 1);
       assert.deepEqual(await priced(receives, '2026-12-01 04:00Z'), ['20000', 1, 0]);
       // Month rollover: both allowances start again in January.
-      await meter(sends, '2027-01-01 00:00Z', 'send', 5000); await meter(sends, '2027-01-01 00:00Z', 'receive', 5000);
+      await meter(sends, '2027-01-01 00:00Z', 'send', 5000); await meter(sends, '2027-01-01 00:00Z', 'receive', 20000);
       assert.deepEqual(await priced(sends, '2027-01-01 01:00Z'), ['0', 0, 0]);
-      assert.deepEqual(await month(db, sends, '2027-01-01'), { sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 });
+      assert.deepEqual(await month(db, sends, '2027-01-01'), { sent: 5000, received: 20000, unchargedSent: 0, unchargedReceived: 0 });
       await meter(receives, '2027-01-01 00:00Z', 'send', 1);
       assert.deepEqual(await priced(receives, '2027-01-01 01:00Z'), ['0', 0, 0]);
       // A refund settled in February goes back into December, its mail's own hour, and gives back what December's cost
@@ -13183,34 +13272,34 @@ describe('Billing: metering, gate and settlement', () => {
       await refundInto(db, receives, '2026-12-01 01:00Z', 'send', -1);
       assert.deepEqual(await priced(receives, 'later'), ['0', 0, 0]);
       assert.deepEqual([await month(db, sends, '2027-01-01'), await month(db, receives, '2027-01-01')],
-        [{ sent: 5000, received: 5000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
+        [{ sent: 5000, received: 20000, unchargedSent: 0, unchargedReceived: 0 }, { sent: 1, received: 0, unchargedSent: 0, unchargedReceived: 0 }]);
 
-      // Rate version 3 (5,000 and 5,000, as version 2 was) prices November 2026 on; October and earlier keep version 1, 3,000 and 3,000. October's 3,001st send
+      // Rate version 4 (5,000 sent and 20,000 received) prices November 2026 on, in place of versions 2 and 3; October and earlier keep version 1, 3,000 and 3,000. October's 3,001st send
       // was charged, and a refund of it settled now gives back one email's price, as October was charged.
       const october = unique('free-october'), november = unique('free-november');
       await meter(october, '2026-10-31 23:00Z', 'send', 3001); await meter(october, '2026-10-31 23:00Z', 'receive', 3000);
       assert.deepEqual(await priced(october, '2026-11-01 00:00Z'), ['20000', 1, 0]);
-      await meter(november, '2026-11-01 00:00Z', 'send', 5000); await meter(november, '2026-11-01 00:00Z', 'receive', 5001);
+      await meter(november, '2026-11-01 00:00Z', 'send', 5000); await meter(november, '2026-11-01 00:00Z', 'receive', 20001);
       assert.deepEqual(await priced(november, '2026-11-01 01:00Z'), ['20000', 0, 1]);
       await refundInto(db, october, '2026-10-31 23:00Z', 'send', -1);
       assert.deepEqual(await priced(october, 'later'), ['-20000', -1, 0]);
       assert.deepEqual((await db.query(`SELECT detail->>'usageMonth' AS m, detail->'rateVersion' AS v FROM billing_ledger WHERE workspace_id = ANY($1) ORDER BY id`, [[october, november]])).rows,
-        [{ m: '2026-10', v: 1 }, { m: '2026-11', v: 3 }, { m: '2026-10', v: 1 }]);
+        [{ m: '2026-10', v: 1 }, { m: '2026-11', v: 4 }, { m: '2026-10', v: 1 }]);
 
       // The gate prices sends against the sent allowance only. This month: free sends used, every received email left.
       const live = unique('free-live'), gate = async () => (await db.query('SELECT billing_gate($1, 1) AS g', [live])).rows[0].g;
       await settledThisMonth(db, live, 5000);
       let g = await gate();
-      assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [false, '20000', 0, 5000], 'The 5,001st send needs credit while received mail is still free.');
+      assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [false, '20000', 0, 20000], 'The 5,001st send needs credit while received mail is still free.');
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
-      assert.deepEqual([(await gate()).openUc, (await gate()).freeReceivedLeft], ['0', 4999], 'An unsettled received message is free.');
+      assert.deepEqual([(await gate()).openUc, (await gate()).freeReceivedLeft], ['0', 19999], 'An unsettled received message is free.');
       // And the other way round: received allowance used, sends free.
-      await settledThisMonth(db, live, 0, 5000);
+      await settledThisMonth(db, live, 0, 20000);
       await db.query(`DELETE FROM billing_usage_hourly WHERE workspace_id=$1`, [live]);
       g = await gate();
       assert.deepEqual([g.ok, g.requiredUc, g.freeSentLeft, g.freeReceivedLeft], [true, '0', 5000, 0]);
       await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC'),'receive',1)`, [live]);
-      assert.deepEqual([(await gate()).openUc, (await gate()).freeSentLeft], ['20000', 5000], 'The 5,001st received is charged; the sends stay free.');
+      assert.deepEqual([(await gate()).openUc, (await gate()).freeSentLeft], ['20000', 5000], 'The 20,001st received is charged; the sends stay free.');
       // What the API publishes (RATES) is this month's version, the price of an AI decision included.
       const { RATES } = await import('./src/billing/money.js');
       assert.deepEqual((await db.query(`SELECT (billing_rates_in((date_trunc('month', now() AT TIME ZONE 'UTC'))::date)).*, billing_rate_uc('omen', 1::smallint, now())::text AS omen_uc`)).rows[0],
@@ -13406,9 +13495,9 @@ describe('Billing: metering, gate and settlement', () => {
         SELECT $1||'-'||i,$2,$3,'fixture',$4,(SELECT jsonb_agg('r'||i||'-'||n||'@example.net') FROM generate_series(1,1000) n),'[]','[]','Queued','{}',false,now()-interval '2 hours'
         FROM generate_series(1,4) i RETURNING id`, [unique('queued'), f.wid, REGION, f.from])).rows.map(r => r.id as string);
       assert.equal((await settle(db, f.wid, later)).charged, false);
-      // Prepaid from an hour ago with no funds: 6,000 received messages owe $0.20, eight days ago, so received mail is held.
+      // Prepaid from an hour ago with no funds: 21,000 received messages owe $0.20, eight days ago, so received mail is held.
       await free(false); await charging(db, f.wid, true, 1);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',6000)`, [f.wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',21000)`, [f.wid]);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
       const mid = unique('held');
@@ -14406,8 +14495,8 @@ describe('Billing: metering, gate and settlement', () => {
       await db.query(`SELECT billing_post($1,$2,'fixture:'||$1,$3,$4,'{}','operator:fixture')`, funding === 'top-up' ? [f.wid, 'topup', 20_000_000, 0] : [f.wid, 'grant', 0, 20_000_000]);
       const funded = await queue(20, 1);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
-      // 6,000 received messages owe $0.20; eight days later received mail is held.
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',6000)`, [f.wid]);
+      // 21,000 received messages owe $0.20; eight days later received mail is held.
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC') - interval '1 hour','receive',21000)`, [f.wid]);
       assert.equal((await settle(db, f.wid, later)).costUc, '20000000');
       await db.query(`UPDATE billing_accounts SET unpaid_since=now()-interval '8 days' WHERE workspace_id=$1`, [f.wid]);
       const mid = unique('held');
@@ -14685,10 +14774,10 @@ describe('Billing: metering, gate and settlement', () => {
       await w.mail(5000, '2027-01-20T10:00:00Z'); const january = await w.mail(1000, '2027-01-20T10:00:00Z');
       await at('2027-01-20T11:07:00Z'); await settleClosedHours(runtime);
       assert.deepEqual(await w.totals(), { balance: '0', promo: '0', unpaid_since: null });
-      // February 2, 11:10: 6,000 received messages owe $0.20. 12:02: 1,000 of January's recipients are canceled, which
+      // February 2, 11:10: 21,000 received messages owe $0.20. 12:02: 1,000 of January's recipients are canceled, which
       // gives $0.20 back. Both settle at 12:07, as before 334, so nothing is ever owed.
       await at('2027-02-02T11:10:00Z');
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2027-02-02T11:00:00Z','receive',6000)`, [w.wid]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,'2027-02-02T11:00:00Z','receive',21000)`, [w.wid]);
       await at('2027-02-02T12:02:00Z');
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=$1`, [january]);
       for (const run of ['2027-02-02T12:07:00Z', '2027-02-02T13:07:00Z']) { await at(run); await settleClosedHours(runtime); }
@@ -14854,7 +14943,7 @@ describe('Billing: metering, gate and settlement', () => {
   test('the hourly run settles every workspace with work due: hundreds of fresh cancellations don\'t hide a closed hour (review of #393, finding 7)', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { settleClosedHours } = await import('./src/billing/cron.js');
-      // 520 workspaces sent one recipient two hours ago, settled, and cancel it now. Another has 6,000 received messages
+      // 520 workspaces sent one recipient two hours ago, settled, and cancel it now. Another has 21,000 received messages
       // in the last closed hour, $0.20.
       const busy = unique('aa-billing-r1-busy'), due = unique('zz-billing-r1-due');
       await db.query(`INSERT INTO workspaces(id,name,slug) SELECT $1||i,$1||i,$1||i FROM generate_series(1,520) i`, [busy]);
@@ -14863,13 +14952,13 @@ describe('Billing: metering, gate and settlement', () => {
         SELECT $1||i||'-mail',$1||i,$2,'fixture','hello@billing.example','["r@example.net"]','[]','[]','Busy','{}',false,date_trunc('hour',now(),'UTC')-interval '2 hours' FROM generate_series(1,520) i`, [busy, REGION]);
       await db.query(`SELECT billing_settle($1||i, date_trunc('hour',now(),'UTC')) FROM generate_series(1,520) i`, [busy]);
       await db.query(`UPDATE sending_emails SET status='canceled' WHERE id LIKE $1||'%'`, [busy]);
-      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC')-interval '1 hour','receive',6000)`, [due]);
+      await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ($1,date_trunc('hour',now(),'UTC')-interval '1 hour','receive',21000)`, [due]);
       const cutoff = (await db.query(`SELECT date_trunc('hour', now(), 'UTC')::text AS c`)).rows[0].c;
       // Every workspace the run takes up has something to settle; none is passed over.
       const run = await settleClosedHours(runtime, cutoff);
       assert.ok(run.workspaces >= 1 && run.entries >= run.workspaces, `Workspaces without work due were taken up: ${JSON.stringify(run)}`);
       assert.deepEqual((await db.query(`SELECT a.balance_uc::text AS b, (SELECT settled_quantity::int FROM billing_usage_hourly WHERE workspace_id=$1 AND meter='receive') AS settled
-        FROM billing_accounts a WHERE a.workspace_id=$1`, [due])).rows[0], { b: '-20000000', settled: 6000 });
+        FROM billing_accounts a WHERE a.workspace_id=$1`, [due])).rows[0], { b: '-20000000', settled: 21000 });
     });
   });
 
@@ -15576,7 +15665,9 @@ describe('Dashboard API capabilities', () => {
     cleanup(t, async () => { await db.query('DELETE FROM sending_campaign_reviews WHERE id = $1', [reviewId]); });
     // Scoped terminal/active states exercise guards without scheduling or sending email.
     for (const state of ['preparing', 'scheduled', 'sending', 'paused', 'done', 'failed', 'canceled']) {
-      const seeded = await db.query("UPDATE sending_campaigns SET state = $1, review_id = $4, total = 1, prepared = CASE WHEN $1 = 'preparing' THEN 0 ELSE 1 END, expanded = CASE WHEN $1 IN ('sending','done') THEN 1 ELSE 0 END, paused_at = CASE WHEN $1 = 'paused' THEN now() END WHERE id = $2 AND workspace_id = $3 RETURNING id", [state, campaign.id, list.workspaceId, reviewId]);
+      // Keep one recipient unreleased while sending; otherwise the recovery sweep correctly marks it done.
+      const total = state === 'sending' ? 2 : 1;
+      const seeded = await db.query("UPDATE sending_campaigns SET state = $1, review_id = $4, total = $5, prepared = CASE WHEN $1 = 'preparing' THEN 0 ELSE $5 END, expanded = CASE WHEN $1 IN ('sending','done') THEN 1 ELSE 0 END, paused_at = CASE WHEN $1 = 'paused' THEN now() END WHERE id = $2 AND workspace_id = $3 RETURNING id", [state, campaign.id, list.workspaceId, reviewId, total]);
       assert.equal(seeded.rowCount, 1);
       const before = ok(await http('GET', path, key.secret));
       assert.equal(before.state, state);
@@ -16347,6 +16438,9 @@ describe('Dashboard API capabilities', () => {
         await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
           SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array($6::text||n%$7||'@example.net'),'[]','[]','Grown','{}',false,'delivered','p-'||$1||n,3,now() FROM generate_series(1,$5::int) n`, [tag, wid, REGION, from, n, to(0), to(1)]);
         await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,created_at) SELECT 'ev-'||$1||n,$2,$1||n,'accepted',false,now() FROM generate_series(1,$3::int) n`, [tag, wid, n]); };
+      // Autoanalyze cannot see the 12,000 envelopes seeded in this uncommitted fixture. Give the accepted-event
+      // triggers accurate statistics before they join their 800 event IDs back to sending_emails.
+      await db.query('ANALYZE sending_emails');
       await accepted(800, i => i ? '800' : 'grown');
       await accepted(500, i => i ? '1' : 'same');
       // Graded half an hour after the hour those were accepted in ends.
@@ -19051,7 +19145,7 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual([owner.prices.decisionPerThousand, owner.prices.omenPerThousand], ['0.00', '0.00'], 'AI decisions are free; the deprecated prices stay.');
       // One allowance per direction; emails repeats sent for older clients.
       assert.deepEqual([owner.free.sent, owner.free.received, owner.free.emails, owner.prices.freeSentEmails, owner.prices.freeReceivedEmails],
-        [{ limit: 5000, used: 0, left: 5000 }, { limit: 5000, used: 0, left: 5000 }, owner.free.sent, 5000, 5000]);
+        [{ limit: 5000, used: 0, left: 5000 }, { limit: 20000, used: 0, left: 20000 }, owner.free.sent, 5000, 20000]);
       const ledger = page(await local('GET', '/v1/billing/ledger?limit=3'));
       assert.deepEqual(ledger.map(e => [e.kind, e.amount, e.description]), [['adjustment', '100000000', 'Adjustment by Nightmail'], ['usage', '-24800000', 'Usage Nov 12, 13:00–15:00 UTC: 1,240 emails'], ['grant', '500000000', 'Promotional credit from Nightmail']]);
       assert.deepEqual(ledger[0].detail, {}, 'Operator reasons and tickets never reach the customer.');
@@ -19072,7 +19166,7 @@ describe('Billing: API, MCP and notices', () => {
       const read = ok(await request('GET', '/v1/billing', reader));
       assert.deepEqual([read.balance, read.monthToDate, read.autoRecharge, read.paymentMethod, read.state.sending], [null, null, null, null, 'ok']);
       // The received allowance, like GET /v1/usage's received count, is for credentials that may read every received message.
-      assert.deepEqual([read.free.sent.limit, read.free.received, ok(await request('GET', '/v1/billing', manage)).free.received.limit], [5000, null, 5000]);
+      assert.deepEqual([read.free.sent.limit, read.free.received, ok(await request('GET', '/v1/billing', manage)).free.received.limit], [5000, null, 20000]);
       error(await request('GET', '/v1/billing/ledger', reader), 403, 'PERMISSION_DENIED');
       error(await request('GET', '/v1/billing/payments', reader), 403, 'PERMISSION_DENIED');
       error(await request('POST', '/v1/billing/top-up-links', reader, { amountCents: 5000 }), 403, 'PERMISSION_DENIED');
@@ -19206,7 +19300,7 @@ describe('Billing: API, MCP and notices', () => {
       error(await local('GET', '/v1/billing/usage?granularity=hour&from=2026-01-01&to=2026-03-01'), 422, 'VALIDATION_FAILED');
       // Plan & usage carries the free allowances, one per direction, and whether billing charges yet.
       const plan = ok(await local('GET', '/v1/usage'));
-      assert.deepEqual([plan.billing, plan.pricing], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 5000, freeSentEmails: 5000, freeReceivedEmails: 5000, freeStorageBytes: 1_000_000_000 }]);
+      assert.deepEqual([plan.billing, plan.pricing], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 5000, freeSentEmails: 5000, freeReceivedEmails: 20000, freeStorageBytes: 1_000_000_000 }]);
       // Its billed counts are the units billing prices (each recipient of a send, each billable received message), so an
       // estimate from them matches the charge; a reader sees sends only, as with the received count.
       assert.deepEqual([plan.month.billedSent, plan.month.billedReceived], [42, 7]);
@@ -24095,7 +24189,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Plan & usage shows the same limit, the step it is on (the evaluation), the price and the free allowance per direction.
       const usage = ok(await request('GET','/v1/usage',key));
       // Billing launches enforced (migration 249); the workspace-wide switch is billing_config.
-      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 5000, freeSentEmails: 5000, freeReceivedEmails: 5000, freeStorageBytes: 1000000000 }, false]);
+      assert.deepEqual([usage.billing, usage.pricing, usage.simulated], [{ enabled: true, enforcement: 'enforce' }, { currency: 'USD', perThousand: 0.2, freeEmails: 5000, freeSentEmails: 5000, freeReceivedEmails: 20000, freeStorageBytes: 1000000000 }, false]);
       assert.deepEqual([usage.daily.cap, usage.daily.used, usage.daily.step, usage.steps.map((step: Json) => step.cap)], [500, limit.used, 0, [500]], 'The evaluation is the only step: after it, good standing has no daily limit.');
       assert.ok(usage.month.sent >= physical && usage.month.received === 0 && usage.month.from.endsWith('-01T00:00:00.000Z'));
       // PR92 P2: received volume counts unrouted and spam mail, so only credentials that may read every received message
@@ -28077,14 +28171,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await rescore(), (await clusterOf(a))!.score], [15, 100], 'Together past one allowance.');
       await used(wid, 'send', 4200); await used(wsB, 'send', 4100);
       assert.equal(await rescore(), 20, 'Two workspaces each near their own cap.');
-      await used(wsC, 'receive', 5000); await used(wsB, 'receive', 5000);
+      await used(wsC, 'receive', 20000); await used(wsB, 'receive', 20000);
       assert.equal(await rescore(), 35, 'Twice the allowance.');
       // A workspace that bought credit, or one an operator made free, is not multiplying anything.
       await db.query(`SELECT billing_post($1,'topup',$2,$3,$4,'{}','operator:fixture')`, [wsB, unique('topup'), '2000000000', '0']);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wsC]);
       assert.equal(await rescore(), undefined);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wsC]);
-      assert.equal(await rescore(), 20, 'A and C: 4,200 sent and 5,000 received.');
+      assert.equal(await rescore(), 20, 'A and C: 4,200 sent and 20,000 received.');
       // Standing and payments are read live: a paused member and a dispute raise the score without any link changing.
       await db.query(`INSERT INTO sender_standing(workspace_id,step) VALUES ($1,'pause') ON CONFLICT (workspace_id) DO UPDATE SET step='pause'`, [wsB]);
       await db.query(`SELECT billing_post($1,'dispute',$2,$3,$4,'{}','stripe')`, [wsC, unique('dispute'), '-1000000', '0']);
@@ -28113,7 +28207,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(detail.accounts.map((account: Json) => [account.kind, account.userId]).sort(), [['refused', null], ['user', a], ['user', b], ['user', c], ['user', e]].sort());
       const row = (id: string) => detail.workspaces.find((workspace: Json) => workspace.id === id);
       assert.deepEqual([row(wid).plan, row(wid).sent, row(wsB).plan, row(wsB).step, row(wsC).received, row(wsE).account === detail.accounts.find((account: Json) => account.userId === e).key],
-        ['free', { used: 4200, limit: 5000 }, 'paid', 'pause', { used: 5000, limit: 5000 }, true]);
+        ['free', { used: 4200, limit: 5000 }, 'paid', 'pause', { used: 20000, limit: 20000 }, true]);
       const edge = (x: string, y: string) => detail.links.find((link: Json) => (link.a === x && link.b === y) || (link.a === y && link.b === x));
       const keyOf = (userId: string) => detail.accounts.find((account: Json) => account.userId === userId).key as string;
       assert.deepEqual([edge(keyOf(a), wid).strength, edge(keyOf(a), keyOf(b)).kinds.map((kind: Json) => kind.kind).sort(), edge(keyOf(a), keyOf(b)).strength, edge(wid, wsC).strength, edge(wid, wsE).strength],
@@ -28261,6 +28355,87 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await outbox(), []);
     });
   });
+  test('Glass: everything going on in one read for operators, from rollups and bounded counts; anyone else gets exactly what an operator path that does not exist answers', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, path = '/v1/operator/glass', pool = '444455556666', region = 'eu-glass-1';
+      Object.assign(runtime.config, { multiTenant: true, deploy: { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' } });
+      const { readGlass, GLASS_CAP } = await import('./src/glass.js');
+      // Not an operator, by session or by API key: the operator area's one refusal, the same as for a path that doesn't
+      // exist but for its request ID, so nothing says Glass is there.
+      const refused = (reply: Reply) => { const { requestId: _, ...rest } = error(reply, 403, 'OPERATOR_REQUIRED'); return { status: reply.status, ...rest }; };
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      for (const read of [(p: string) => local('GET', p), (p: string) => request('GET', p, key.secret)])
+        assert.deepEqual(refused(await read(path)), refused(await read('/v1/operator/no-such-page')));
+      assert.equal(ok(await local('GET', '/openapi.json')).paths[path], undefined, 'Hidden from the public OpenAPI document.');
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic Glass reader']);
+
+      // Everything is read in this transaction, so what the test adds shows as a difference from what the database held.
+      const before = await readGlass(runtime);
+      const user = unique('user');
+      await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)', [user, 'Glass sign-up', `${user}@example.org`]);
+      await db.query("INSERT INTO nightmail_signups(user_id,via) VALUES($1,'waitlist')", [user]);
+      // Queued mail held for screening, and an hour of sending outcomes.
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,screened)
+        VALUES ($1,$2,$3,'fixture','news@example.com','["someone@example.net"]','[]','[]','Held',$4,'queued',false,false)`, [unique('email'), wid, REGION, { kind: 'marketing', subject: 'Held', text: 'Held', attachments: [] }]);
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails,accepted,delivered,bounced,complained) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),100,100,90,6,1)`, [wid, REGION]);
+      await db.query(`INSERT INTO public_stats_minutes(minute,accepted,delivered,bounced,regions,workspaces,computed_at) VALUES (date_trunc('minute',now(),'UTC')-interval '1 minute',42,40,1,'{}','{}',now())
+        ON CONFLICT (minute) DO UPDATE SET accepted=public_stats_minutes.accepted+42`);
+      await db.query(`INSERT INTO health_minutes(minute,kind,key,n,errors,ms,slowest,hist) VALUES (date_trunc('minute',now()),'route','POST /v1/emails/send',4,0,200,90,$1)
+        ON CONFLICT (minute,kind,key) DO UPDATE SET n=health_minutes.n+4`, [[0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0]]);
+      // A graded sender, paused, on a pool region with SES limits; a critical alert.
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [region, pool, `arn:aws:sns:${region}:${pool}:glass`]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),14,50000,1200)`, [pool, region]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,paused_at,pause_reason) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now(),'Glass fixture hold')`, [wid, region, pool]);
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,score) VALUES ($1,'graded',92)`, [wid]);
+      await db.query(`INSERT INTO health_alerts(key,kind,severity,value,unit,words,since) VALUES ('jobs-behind:glass.fixture','jobs-behind','critical',600,'seconds','\`glass.fixture\`: 3 due, oldest 10 min.',now()-interval '10 years')`);
+      // Received mail, one of it spam.
+      const thread = unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, wid]);
+      for (const spam of [false, true]) await db.query("INSERT INTO mail_messages(id,workspace_id,direction,thread_id,status,lifecycle,spam) VALUES($1,$2,'inbound',$3,'received','default',$4)", [unique('msg'), wid, thread, spam]);
+      // Money: $25 of credit today, and $12.40 owed.
+      await db.query(`INSERT INTO billing_ledger(workspace_id,kind,source_id,paid_uc,balance_after_uc,promo_after_uc,actor) VALUES ($1,'topup',$2,2500000000,2500000000,0,'stripe')`, [wid, `attempt:${unique('glass')}`]);
+      await db.query(`INSERT INTO billing_accounts(workspace_id,balance_uc,unpaid_since) VALUES ($1,-1240000000,now()) ON CONFLICT (workspace_id) DO UPDATE SET balance_uc=-1240000000,unpaid_since=now()`, [wid]);
+      // Visitors: an hour rolled up today, from a referrer.
+      await db.query(`INSERT INTO analytics_hours(hour,snapshot) VALUES (date_trunc('day',now(),'UTC'),'glass') ON CONFLICT (hour) DO NOTHING`);
+      await db.query(`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids) VALUES (date_trunc('day',now(),'UTC'),'page_view',$1,1000000,'{glass-a,glass-b}'),(date_trunc('day',now(),'UTC'),'visit','{}',3,'{glass-a,glass-b}')
+        ON CONFLICT (hour,metric,dimensions) DO UPDATE SET events=analytics_hourly.events+excluded.events,visitor_ids=analytics_hourly.visitor_ids||excluded.visitor_ids`, [{ path: '/', referrer: 'news.glass.example' }]);
+
+      const after = await readGlass(runtime), hour = (g: typeof after) => g.sending.hourly.at(-1)!;
+      const usd = (uc: string) => BigInt(uc);
+      assert.deepEqual([after.signups.today.waitlist - before.signups.today.waitlist, after.signups.week.waitlist - before.signups.week.waitlist, after.signups.daily.at(-1)! - before.signups.daily.at(-1)!, after.signups.places.signedUp - before.signups.places.signedUp], [1, 1, 1, 1]);
+      assert.deepEqual([after.sending.queued.n - before.sending.queued.n, after.sending.held.n - before.sending.held.n, after.sending.today.marketing - before.sending.today.marketing, after.sending.perMinute - before.sending.perMinute], [1, 1, 100, 42]);
+      assert.deepEqual([hour(after).marketing - hour(before).marketing, hour(after).delivered - hour(before).delivered, hour(after).bounced - hour(before).bounced, hour(after).complained - hour(before).complained], [100, 90, 6, 1]);
+      assert.ok(after.sending.sendApi && after.sending.sendApi.requests >= 4 && after.sending.sendApi.p50Ms <= after.sending.sendApi.p95Ms);
+      assert.deepEqual([after.delivery.grades.A - before.delivery.grades.A, after.delivery.paused - before.delivery.paused], [1, 1]);
+      assert.deepEqual([after.receiving.today - before.receiving.today, after.receiving.spam - before.receiving.spam], [2, 1]);
+      assert.deepEqual([usd(after.money.creditToday) - usd(before.money.creditToday), usd(after.money.creditMonth) - usd(before.money.creditMonth), usd(after.money.owed) - usd(before.money.owed), after.money.owing - before.money.owing],
+        [2500000000n, 2500000000n, 1240000000n, 1]);
+      assert.equal(after.system.alerts.critical - before.system.alerts.critical, 1);
+      assert.deepEqual(after.system.alerts.top.find(a => a.key === 'jobs-behind:glass.fixture'), { key: 'jobs-behind:glass.fixture', label: 'Jobs behind', severity: 'critical', words: 'glass.fixture: 3 due, oldest 10 min.', since: after.system.alerts.top.find(a => a.key === 'jobs-behind:glass.fixture')!.since });
+      assert.ok(after.system.status === 'critical' || after.system.status === 'stale');
+      assert.deepEqual([after.system.ses!.maxSendRate - (before.system.ses?.maxSendRate ?? 0), after.system.ses!.max24HourSend - (before.system.ses?.max24HourSend ?? 0), after.system.ses!.sentLast24Hours - (before.system.ses?.sentLast24Hours ?? 0)], [14, 50000, 1200]);
+      assert.deepEqual(after.system.deploy, { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' });
+      assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors.n - before.visitors.visitors.n, after.visitors.visitors.atLeast, after.visitors.referrers[0]], [1000000, 2, false, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
+      assert.ok(after.visitors.referrers[0]!.views >= 1000000);
+
+      // The route: an operator reads the same figures, every series its full length, cached for the next read.
+      const first = await local('GET', path), page = ok(first);
+      assert.deepEqual([first.headers.get('x-nightmail-glass-cache'), first.headers.get('cache-control')], ['miss', 'private, no-store']);
+      assert.deepEqual(Object.keys(page), ['generatedAt', 'signups', 'sending', 'delivery', 'receiving', 'money', 'system', 'visitors']);
+      assert.deepEqual({ ...page, generatedAt: null }, { ...after, generatedAt: null });
+      const day = new Date().getUTCDate();
+      assert.deepEqual([page.signups.daily.length, page.sending.minutes.length, page.sending.hourly.length, page.receiving.hourly.length, page.visitors.hourly.length, page.money.creditDaily.length], [14, 60, 24, 24, 24, day]);
+      assert.deepEqual(Object.keys(page.delivery.grades), ['A+', 'A', 'B', 'C', 'D', 'F']);
+      assert.ok([page.sending.queued, page.sending.held].every(c => c.n <= GLASS_CAP && typeof c.atLeast === 'boolean'));
+      const second = await local('GET', path);
+      assert.deepEqual([second.headers.get('x-nightmail-glass-cache'), ok(second).generatedAt], ['hit', page.generatedAt]);
+      // A role taken away is refused again, cache or no cache.
+      await db.query('DELETE FROM platform_operators WHERE user_id=$1', [manager!.userId]);
+      assert.deepEqual(refused(await local('GET', path)), refused(await local('GET', '/v1/operator/no-such-page')));
+    });
+  });
+
   test('operator API: only platform operators read and act; every action needs a reason and is audited in its transaction', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', base = `/v1/operator/workspaces/${wid}`;

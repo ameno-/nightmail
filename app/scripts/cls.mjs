@@ -198,6 +198,10 @@ const pages = ids => [
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
+  // Glass: every group's rows are fixed, so the figures (and their 30-second refresh) land in place. Anyone but an
+  // operator gets the app's "Page not found".
+  ['Glass', '/glass', { from: '/operator' }],
+  ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The support inbox (staff): Needs you and its counts, Agent handling, a conversation beside its customer panel, and
   // on a phone the panel's sheet.
   ['Support', '/support', { from: '/overview' }],
@@ -241,7 +245,7 @@ const pages = ids => [
   ['Signed out · deep link', '/overview', { user: null }],
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
   // A hosted sign-in nothing admitted lands here, with its address in a short-lived cookie (api/src/account-login.ts).
-  ['Signed out · waitlist', '/?auth=waitlist', { user: null, waitlist: 'mara.quinn@example.net' }],
+  ['Signed out · waitlist', '/?auth=waitlist&position=4', { user: null, waitlist: 'mara.quinn@example.net' }],
   // The same refusal for a GitHub or password sign-in that showed nothing of its address, with a place open for it: a
   // sign-in link to it in one click.
   ['Signed out · waitlist, place ready', '/?auth=waitlist&place=ready', { user: null, waitlist: 'kwame.mensah@example.net' }],
@@ -267,6 +271,14 @@ const pages = ids => [
   // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
   ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
   ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
+  // The other comparisons, from the calculator's Compare line.
+  ['Compare · AgentMail', '/compare/agentmail', { user: null, from: '/pricing', click: 'AgentMail' }],
+  ['Compare · Bird', '/compare/bird', { user: null, from: '/pricing', click: 'Bird' }],
+  ['Compare · Mailgun', '/compare/mailgun', { user: null, from: '/pricing', click: 'Mailgun' }],
+  ['Compare · Mailjet', '/compare/mailjet', { user: null, from: '/pricing', click: 'Mailjet' }],
+  ['Compare · Mandrill', '/compare/mandrill', { user: null, from: '/pricing', click: 'Mandrill' }],
+  ['Compare · Postmark', '/compare/postmark', { user: null, from: '/pricing', click: 'Postmark' }],
+  ['Compare · SendGrid', '/compare/sendgrid', { user: null, from: '/pricing', click: 'SendGrid' }],
   ['Support chat', '/logs', { from: '/overview', support: true }],
   ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
@@ -310,7 +322,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
+const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -480,6 +492,8 @@ async function measure(browser, job, fx) {
   const work = (async () => {
     if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
+    // A signed-in browser has been to the dashboard, which remembers it: the marketing pages ask for its session (data/live.ts, sessionLikely).
+    if (job.user) await context.addInitScript(() => { try { localStorage.setItem('nightmail.session', 'in'); } catch {} });
     await context.addInitScript(probe);
     // Privacy mode on (lib/privacy.ts; off by default), so the masking checks and the review screenshots see addresses masked.
     // (Init scripts run in every frame too, and an email preview's sandboxed frame has no storage.)
@@ -522,6 +536,14 @@ async function measure(browser, job, fx) {
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
+    // A price page paints from its HTML first and its app takes over at the reader's first key or touch (app/price-pages.ts,
+    // features/pricing/index.tsx): wake it, as a reader would, so the painted page and the takeover are both measured and
+    // an in-app click lands in the app.
+    if (await page.evaluate(() => !!document.getElementById('price-shell'))) {
+      await page.keyboard.press('Shift');
+      await page.waitForFunction(() => !document.getElementById('price-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
+      await settle(page, net);
+    }
     if (job.support) {
       // Open the chat and let the greeting finish: the panel is idle and no caret is left in it.
       const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });

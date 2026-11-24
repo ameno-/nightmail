@@ -12,12 +12,15 @@ import type { ListContactResult } from './audience.js';
 // number an operator sees is the number the gate keeps. Staff, invitations and subjects an operator bound take none.
 
 export type Places = { limit: number; signedUp: number; held: number; waiting: number; open: number };
+/** The limit and what fills it, as one row (Glass reads it inside its own statement). Open is worked out from it. */
+export const placesRow = sql`SELECT l.places AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
+    (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting
+    FROM nightmail_signup_limit l WHERE l.singleton`;
+export const withOpen = (row: Omit<Places, 'open'>): Places => ({ ...row, open: Math.max(0, row.limit - row.signedUp - row.held) });
 /** The limit and what fills it, in one statement. Open: places left for anyone, after those held for the waitlist. */
 export async function readPlaces(db: DbExecutor): Promise<Places> {
-  const { rows: [row] } = await db.execute<Omit<Places, 'open'>>(sql`SELECT l.places AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
-    (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting
-    FROM nightmail_signup_limit l WHERE l.singleton`);
-  return { ...row!, open: Math.max(0, row!.limit - row!.signedUp - row!.held) };
+  const { rows: [row] } = await db.execute<Omit<Places, 'open'>>(placesRow);
+  return withOpen(row!);
 }
 // One sign-up or one change of the limit at a time. Read the places in a later statement: under READ COMMITTED each
 // statement sees what the previous holder committed.
@@ -82,6 +85,36 @@ export async function setLimit(db: DbExecutor, limit: number, raise: Raise = 'ho
       SELECT q.email FROM nightmail_waitlist q WHERE q.let_in_at IS NULL AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=q.email)
       ORDER BY q.first_at,q.email LIMIT ${free} FOR UPDATE OF q) oldest WHERE w.email=oldest.email RETURNING w.email`) : { rows: [] };
   return { before, after: await readPlaces(db), letIn: rows.map(row => row.email) };
+}
+
+/**
+ * Where a waiting address stands in the order a hold raise lets the waitlist in (setLimit: first attempt first, then the
+ * address, leaving out addresses that are already a verified user's): 1 is next. Null when it isn't waiting.
+ */
+export async function waitlistPosition(db: DbExecutor, address: string): Promise<number | null> {
+  const email = address.toLowerCase();
+  const { rows: [row] } = await db.execute<{ position: number }>(sql`SELECT 1+(SELECT count(*)::int FROM nightmail_waitlist q WHERE q.let_in_at IS NULL AND (q.first_at,q.email)<(me.first_at,me.email)
+      AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=q.email)) AS position
+    FROM nightmail_waitlist me WHERE me.email=${email} AND me.let_in_at IS NULL`);
+  return row?.position ?? null;
+}
+
+/** Open places at or under which the operators hear that sign-ups are nearly full (placesAlert). */
+export const LOW_PLACES = 10;
+/**
+ * Whether the operators should hear that sign-ups are nearly full (LOW_PLACES or fewer open) or full (none), once per
+ * level: the level told is kept with the limit (migration 467), so the next check at the same level or above it says
+ * nothing. Places reopening past a level clear it without a word (an operator's raise did that), so reaching it again is
+ * told again. Called after a sign-up or a change of the limit commits, in its own transaction under the limit's lock;
+ * returns the level newly reached, with the places it saw, or null.
+ */
+export async function placesAlert(db: DbExecutor): Promise<{ level: 'low' | 'full'; places: Places } | null> {
+  await lockLimit(db);
+  const places = await readPlaces(db), level = places.open === 0 ? 0 : places.open <= LOW_PLACES ? LOW_PLACES : null;
+  const { rows: [told] } = await db.execute<{ alerted: number | null }>(sql`SELECT alerted_open AS alerted FROM nightmail_signup_limit WHERE singleton`);
+  if (told!.alerted === level) return null;
+  await db.execute(sql`UPDATE nightmail_signup_limit SET alerted_open=${level} WHERE singleton`);
+  return level !== null && (told!.alerted === null || level < told!.alerted) ? { level: level === 0 ? 'full' : 'low', places } : null;
 }
 
 /**

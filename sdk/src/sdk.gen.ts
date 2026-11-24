@@ -2678,7 +2678,7 @@ export const releaseSenderStanding = <ThrowOnError extends boolean = false>(opti
 /**
  * Plan, pricing and sending limits
  *
- * Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 5,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.
+ * Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances (5,000 sent and 20,000 received), counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.
  */
 export const getUsage = <ThrowOnError extends boolean = false>(options?: Options<GetUsageData, ThrowOnError>): RequestResult<GetUsageResponses, GetUsageErrors, ThrowOnError> => (options?.client ?? client).get<GetUsageResponses, GetUsageErrors, ThrowOnError>({
     security: [
@@ -5363,7 +5363,7 @@ export const listInboundWebhookDeliveries = <ThrowOnError extends boolean = fals
 });
 
 /**
- * Create another workspace you own. Hosted: staff only (decided at sign-in), up to 10 per account. Select it with X-Nightmail-Workspace.
+ * Create another workspace you own. Hosted: staff only for now (decided at sign-in; everyone else gets 403 WORKSPACE_LIMIT, and GET /v1/me says so in canCreateWorkspace), up to 10 per account. Select it with X-Nightmail-Workspace.
  */
 export const createWorkspace = <ThrowOnError extends boolean = false>(options: Options<CreateWorkspaceData, ThrowOnError>): RequestResult<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError> => (options.client ?? client).post<CreateWorkspaceResponses, CreateWorkspaceErrors, ThrowOnError>({
     security: [{

@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
-import { ChevronDown, MessageCircleQuestionMark } from 'lucide-react'
+import { ChevronDown, MessageCircleQuestionMark, X } from 'lucide-react'
 import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
-import { IconButton } from './ui'
+import { Button, IconButton } from './ui'
+import { NightmailMark } from './NightmailLogo'
+import { productName } from '../../../api/src/brand'
 
 // The support chat's Help button and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
 // page is idle (hover, focus or press warms it sooner); the conversation and its transport start when Help opens.
@@ -82,5 +84,37 @@ export function SupportHost({ chat }: { chat: SupportChat }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [chat.open])
   if (!chat.mode || !chat.used) return null
-  return <Panel mode={chat.mode} resume={chat.resume} open={chat.open} onClose={() => chat.setOpen(false)} onUnread={chat.setUnread} />
+  return <SupportErrorBoundary open={chat.open} phone={phone} onClose={() => chat.setOpen(false)}>
+    {attempt => <Panel key={attempt} mode={chat.mode!} resume={chat.resume} open={chat.open} onClose={() => chat.setOpen(false)} onUnread={chat.setUnread} />}
+  </SupportErrorBoundary>
+}
+
+// Isolates any render or chunk failure inside the support panel so it never takes down the dashboard.
+class SupportErrorBoundary extends Component<{ open: boolean; phone: boolean; onClose: () => void; children: (attempt: number) => ReactNode }, { failed: boolean; attempt: number }> {
+  state = { failed: false, attempt: 0 }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(_error: Error, _info: ErrorInfo) { /* Contained in the panel; never bubble to AppErrorBoundary. */ }
+  private retry = () => {
+    window.dispatchEvent(new CustomEvent('nightmail:support-reset'))
+    this.setState(s => ({ failed: false, attempt: s.attempt + 1 }))
+  }
+  render() {
+    if (!this.state.failed) return this.props.children(this.state.attempt)
+    const { open, phone, onClose } = this.props
+    if (!open) return null
+    return <>
+      {phone && <div className="support-overlay" data-open="" aria-hidden="true" onClick={onClose} />}
+      <section id="support-panel" className={phone ? 'support-panel support-panel--sheet support-panel--error' : 'support-panel support-panel--error'} role="dialog" aria-modal="false" aria-labelledby="support-title" data-open="">
+        <header className="support-panel__header">
+          <NightmailMark className="support-panel__mark" size={18} />
+          <div className="support-panel__heading"><h2 id="support-title">{productName} Support</h2></div>
+          <div className="support-panel__actions"><IconButton label="Close" onClick={onClose}><X size={16} /></IconButton></div>
+        </header>
+        <div className="support-error" role="alert">
+          <p>Support couldn’t load.</p>
+          <Button size="sm" onClick={this.retry}>Retry</Button>
+        </div>
+      </section>
+    </>
+  }
 }
