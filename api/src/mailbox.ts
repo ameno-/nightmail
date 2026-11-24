@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { fitPageByBytes, INBOUND_PAGE_MAX_BYTES, INBOUND_READ_RESERVATION_BYTES, withReadMemory } from './bounded-read.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { INBOUND_READ_RESERVATION_BYTES } from './inbound-bounds.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
@@ -441,7 +442,7 @@ function registerAddresses(app: App) {
       rules: string[]; metadata: Record<string, unknown>; origin: 'api' | 'auto'; send_limits: Partial<typeof mailboxes.$inferSelect.sendLimits>;
       require_dmarc: boolean; expires_at: string | null; kind: 'inbox' | 'address'; delete_after: string | null; created_at: string; updated_at: string; candidate_count: number;
     };
-    return await withReadMemory(c, INBOUND_READ_RESERVATION_BYTES, async () => {
+    return await withBoundedReadMemory(c, async () => {
       const where = and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
         q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
         q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
@@ -462,7 +463,7 @@ function registerAddresses(app: App) {
           )
           SELECT id, workspace_id, key, domain_id, address, display_name, rules, metadata, origin, send_limits, require_dmarc,
             expires_at, kind, delete_after, created_at, updated_at, (SELECT count(*)::int FROM candidate) AS candidate_count
-          FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+          FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
           ORDER BY rn`);
         const mapped: MailboxRow[] = rows.slice(0, q.limit).map(r => ({
           id: r.id, workspaceId: r.workspace_id, key: r.key, domainId: r.domain_id, address: r.address, displayName: r.display_name,
@@ -471,10 +472,9 @@ function registerAddresses(app: App) {
         }));
         return { views: await mailboxViews({ ...c.env, db }, mapped), candidateCount: rows[0]?.candidate_count ?? 0 };
       }, readLimit(5));
-      const fitted = fitPageByBytes(views, candidateCount > views.length, INBOUND_PAGE_MAX_BYTES, 256);
-      const last = fitted.items[fitted.items.length - 1];
-      return c.json({ data: fitted.items, nextCursor: fitted.hasMore && last ? last.id : null }, 200);
-    }) as never;
+      const { json: body } = buildBoundedPageJson(views, candidateCount > views.length);
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+    }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
   });
   app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(InboundAddressSchema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);

@@ -14,7 +14,7 @@ import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { mailAttachments, mailReceipts, type MailAddress, type MailHeader, type Verdicts } from './db/mailbox.js';
 import { mailboxS3, STAGING_PREFIX, refreshMailboxDns } from './mailbox-setup.js';
 import { ADDRESS, messageIdListCounted, normalizeMessageId, snippetOf, type Scope } from './mailbox-store.js';
-import { INBOUND_ADDRESS_ADDR_LIMIT, INBOUND_ADDRESS_NAME_LIMIT, INBOUND_ADDRESS_STORE_LIMIT } from './bounded-read.js';
+import { INBOUND_ADDRESS_ADDR_LIMIT, INBOUND_ADDRESS_NAME_LIMIT, INBOUND_ADDRESS_STORE_LIMIT } from './inbound-bounds.js';
 import type { ReceivedNotification } from './mailbox-receipts.js';
 import { scheduleMailRecovery, stagingJobs } from './mailbox-staging.js';
 import { billed } from './billing/gate.js';

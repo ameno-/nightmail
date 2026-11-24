@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, budgetedRead, denied, digest, id, randomSecret, readLimit, readLimitNote, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
-import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, INBOUND_DETAIL_RESERVATION_BYTES, INBOUND_PAGE_MAX_BYTES, INBOUND_READ_RESERVATION_BYTES, messageFieldCount, sliceJsonbArray, withReadLease, withReadMemory } from './bounded-read.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_RESERVATION_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, INBOUND_READ_RESERVATION_BYTES, messageFieldCount, sliceJsonbArray, withReadLease } from './inbound-bounds.js';
 import { longPoll, reservePolls } from './auth.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
 import type { MailboxPermission, MailAddress, Verdicts } from './db/mailbox.js';
@@ -221,7 +222,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     responses: { 200: response(z.object({ data: z.array(Inbox), nextCursor: z.string().nullable() }).openapi('InboxPage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query');
-    return await withReadMemory(c, INBOUND_READ_RESERVATION_BYTES, async () => {
+    return await withBoundedReadMemory(c, async () => {
       const { rows } = await budgetedRead(c.env.db, db => db.execute<{ box: Box; candidate_count: number }>(sql`
         WITH candidate AS (
           SELECT b.id, inbox_view(b) AS box
@@ -234,14 +235,13 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
           FROM candidate
         )
         SELECT box, (SELECT count(*)::int FROM candidate) AS candidate_count
-        FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+        FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
         ORDER BY rn`), readLimit(5));
       const candidateCount = rows[0]?.candidate_count ?? 0;
       const pageItems = rows.slice(0, q.limit).map(r => r.box);
-      const fitted = fitPageByBytes(pageItems, candidateCount > pageItems.length, INBOUND_PAGE_MAX_BYTES, 256);
-      const last = fitted.items[fitted.items.length - 1];
-      return c.json({ data: fitted.items, nextCursor: fitted.hasMore && last ? last.id : null }, 200);
-    }) as never;
+      const { json: body } = buildBoundedPageJson(pageItems, candidateCount > pageItems.length);
+      return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+    }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
   });
   app.openapi(createRoute({
     ...meta, method: 'get', path: item, operationId: 'getInbox', summary: 'Read an agent inbox', description: 'Address, status, expiry, limits and usage of one inbox.',
@@ -334,7 +334,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
         )
         SELECT id, thread_id, from_name, from_address, "to", to_count, subject, received_at, spam, attachment_count, verdicts, text, html, inbox_seq, read, held_reason, modseq, flags, labels, folders, uid, uid_validity,
           (SELECT count(*)::int FROM candidate) AS candidate_count
-        FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+        FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
         ORDER BY rn
       ) page ON true WHERE ${visible(v)} AND b.id=${id} ORDER BY page.inbox_seq::bigint`,
     )).rows), rows => !rows.length || rows.some(r => r.id));
@@ -342,7 +342,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     const present = rows.filter(r => r.id);
     const candidateCount = present[0]?.candidate_count ?? present.length;
     const projected = present.slice(0, q.limit).map(r => project(r, q.extract).message);
-    const fitted = fitPageByBytes(projected, candidateCount > projected.length, INBOUND_PAGE_MAX_BYTES, 256);
+    const fitted = fitPageByBytes(projected, candidateCount > projected.length, PAGE_MAX_BYTES, 256);
     return c.json({ data: fitted.items, cursor: fitted.items.at(-1)?.cursor ?? q.after, hasMore: fitted.hasMore }, 200);
   });
   app.openapi(createRoute({
@@ -352,7 +352,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query'), { id, messageId } = c.req.valid('param');
     const storeCap = INBOUND_ADDRESS_STORE_LIMIT;
-    return await withReadMemory(c, INBOUND_DETAIL_RESERVATION_BYTES, async () => {
+    return await withBoundedReadMemory(c, async () => {
       const r = (await budgetedRead(c.env.db, db => db.execute<Row>(sql`
         SELECT m.id, m.thread_id, m.direction, m.from_name, m.from_address,
           ${sliceJsonbArray(sql`m."to"`, storeCap)} AS "to", ${messageFieldCount(sql`m."to"`, sql`m.verdicts`, 'toCount')} AS to_count,
@@ -376,7 +376,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
         })));
         return c.json({ ...message, text, replyText: replyText(text), html: q.includeHtml === 'true' && r.html ? safeForwardHtml(r.html) : null, attachments }, 200);
       } finally { s3?.destroy(); }
-    }) as never;
+    }, { bytes: READ_RESERVATION_BYTES }) as never;
   });
   app.openapi(createRoute({
     ...meta, method: 'get', path: `${detail}/attachments/{attachmentId}`, operationId: 'getInboxAttachment', summary: 'Read an inbox attachment',

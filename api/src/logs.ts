@@ -2,7 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, statementTimedOut, unrestrictedRequired, region, response, security, type Actor, type App, type DbExecutor, type MailboxAccess } from './core.js';
-import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_PAGE_MAX_BYTES, INBOUND_READ_RESERVATION_BYTES, messageFieldCount, sliceAddressStrings, sliceJsonbArray, withReadMemory } from './bounded-read.js';
+import { PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_READ_RESERVATION_BYTES, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
@@ -182,12 +183,12 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       ),
       page AS MATERIALIZED (
         SELECT *, (SELECT count(*)::int FROM candidate) AS candidate_count
-        FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+        FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
       )${access ? sql`,
       sizes AS (SELECT t.thread_id, ${threadSize(access, true, sql`t.thread_id`)} AS thread_count FROM (SELECT DISTINCT thread_id FROM page WHERE thread_id IS NOT NULL) t)
       SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.rn` : sql`
       SELECT page.*, NULL::int AS thread_count FROM page ORDER BY page.rn`}`;
-    return await withReadMemory(c, INBOUND_READ_RESERVATION_BYTES, async () => {
+    return await withBoundedReadMemory(c, async () => {
       const { rows, counts } = await budgetedRead(c.env.db, async db => ({
         rows: (await db.execute<Row>(boundedSql)).rows,
         counts: withCounts === 'true' ? await countWithin(db) : undefined,
@@ -201,7 +202,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
           threadId: row.thread_count == null ? null : row.thread_id, threadCount: row.thread_count ?? null, addresses: row.addresses, region: row.region, envelopeTo: row.envelope_to, envelopeToCount: row.envelope_to === null ? null : Math.max(row.envelope_to.length, row.envelope_to_count ?? 0),
         },
       }));
-      const fitted = fitPageByBytes(mapped, candidateCount > mapped.length, INBOUND_PAGE_MAX_BYTES, 512);
+      const fitted = fitPageByBytes(mapped, candidateCount > mapped.length, PAGE_MAX_BYTES, 512);
       const last = fitted.hasMore ? fitted.items[fitted.items.length - 1]?.raw : undefined;
       return c.json({
         data: fitted.items.map(x => x.entry),
@@ -209,6 +210,6 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
         received,
         ...counts && { counts },
       }, 200);
-    }) as never;
+    }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
   });
 }

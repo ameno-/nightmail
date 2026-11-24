@@ -2,7 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
 import { actor, ApiError, budgetedRead, denied, errors, id, json, readLimit, readLimitNote, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { fitPageByBytes, INBOUND_PAGE_MAX_BYTES, INBOUND_READ_RESERVATION_BYTES, ROUTING_READ_RESERVATION_BYTES, withReadMemory } from './bounded-read.js';
+import { PAGE_MAX_BYTES, READ_RESERVATION_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { fitPageByBytes, INBOUND_READ_RESERVATION_BYTES } from './inbound-bounds.js';
 import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
@@ -156,11 +157,11 @@ async function boundedRoutePage(tx: DbExecutor, w: string, limit: number, cursor
       FROM candidate
     )
     SELECT id, key, match, "to", subaddresses, enabled, note, "createdAt", (SELECT count(*)::int FROM candidate) AS candidate_count
-    FROM sized WHERE rn = 1 OR cum_bytes <= ${INBOUND_PAGE_MAX_BYTES}
+    FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
     ORDER BY rn`);
   const candidateCount = rows[0]?.candidate_count ?? 0;
   const pageRows: Route[] = rows.slice(0, limit).map(({ candidate_count: _c, ...route }) => route);
-  const fitted = fitPageByBytes(pageRows, candidateCount > pageRows.length, INBOUND_PAGE_MAX_BYTES, 512);
+  const fitted = fitPageByBytes(pageRows, candidateCount > pageRows.length, PAGE_MAX_BYTES, 512);
   const last = fitted.items[fitted.items.length - 1];
   return { routes: fitted.items, nextCursor: fitted.hasMore && last ? last.match : null };
 }
@@ -341,7 +342,7 @@ export async function save(
         'match',
       );
   const boundedDiff = () => {
-    const fitted = fitPageByBytes(diff, false, INBOUND_PAGE_MAX_BYTES, 512);
+    const fitted = fitPageByBytes(diff, false, PAGE_MAX_BYTES, 512);
     const truncated = fitted.items.length < diff.length;
     return { diff: fitted.items, ...(truncated ? { diffCount: diff.length, diffTruncated: true as const } : {}) };
   };
@@ -486,7 +487,7 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       const w = workspace(c), q = c.req.valid('query');
-      return await withReadMemory(c, ROUTING_READ_RESERVATION_BYTES, async () => {
+      return await withBoundedReadMemory(c, async () => {
         const { version, routes, nextCursor, keys } = await budgetedRead(c.env.db, async (db) => {
           const version = await currentVersion(db, w);
           const page = await boundedRoutePage(db, w, q.limit, q.cursor);
@@ -506,7 +507,7 @@ export function registerRouting(app: App) {
         if (q.format !== 'config') return c.json({ version, routes, ...cursorField }, 200);
         const mapped = routes.map(({ id: _id, createdAt: _at, ...r }) => ({ ...r, to: Array.isArray(r.to) ? r.to.map((d) => keys!.get(d) ?? d) : r.to }));
         return c.json({ version, routes: mapped, ...cursorField }, 200);
-      }) as never;
+      }, { bytes: READ_RESERVATION_BYTES }) as never;
     },
   );
   app.openapi(
@@ -527,12 +528,12 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       checkReferenceBudget(c.req.valid('json').routes);
-      return await withReadMemory(c, ROUTING_READ_RESERVATION_BYTES, async () => c.json(
+      return await withBoundedReadMemory(c, async () => c.json(
         await edit(c, (routes) => applyEntries(routes, c.req.valid('json').routes), {
           dryRun: c.req.valid('query').dryRun === 'true', audit: { action: 'routing.apply' },
         }),
         200,
-      )) as never;
+      ), { bytes: READ_RESERVATION_BYTES }) as never;
     },
   );
   app.openapi(
@@ -548,10 +549,10 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       const w = workspace(c), q = c.req.valid('query');
-      return await withReadMemory(c, INBOUND_READ_RESERVATION_BYTES, async () => {
+      return await withBoundedReadMemory(c, async () => {
         const page = await budgetedRead(c.env.db, db => boundedRoutePage(db, w, q.limit, q.cursor), readLimit(5));
         return c.json({ data: page.routes, nextCursor: page.nextCursor }, 200);
-      }) as never;
+      }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
     },
   );
   app.openapi(
