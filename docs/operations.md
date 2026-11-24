@@ -58,7 +58,7 @@ the numbers. Do not pause, resume, cancel, requeue, delete or deploy: those are 
 ### queue-behind
 The oldest message of a Cloudflare queue has waited too long (feedback 2 min, priority 1 min, work 3 min,
 webhooks 5 min) for two ticks: the consumers are not keeping up. A deep queue that drains in time is only busy
-and never alerts. `feedback` and `priority` are critical: bounces and complaints are late, so bounce rates read
+and never alerts. `feedback` and `feedback-priority` are critical: bounces and complaints are late, so bounce rates read
 low and the list probe and auto-pause decide on old numbers. (23 Nov: 158,000 waiting, 20 minutes behind.)
 
 **An agent checks first**

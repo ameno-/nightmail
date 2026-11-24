@@ -155,7 +155,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     const name = safe(q.name), dlq = name.endsWith('-dlq'), rule = QUEUES[name], oldestSeconds = Math.round(q.oldestMs / 1000), key = `${dlq ? 'dead-letters' : 'queue-behind'}:${name}`;
     if (dlq) { if (held(key, q.depth >= DLQ.depth, DLQ.sustain)) find('dead-letters', name, q.depth, `${id(name)}: ${count(q.depth)}.`, DLQ.remindMinutes); }
     // Feedback is what bounce rates, the list probe and auto-pause decide on; the other queues only delay.
-    else if (rule && held(key, oldestSeconds >= rule.oldestSeconds, rule.sustain)) find('queue-behind', name, oldestSeconds, `${id(name)}: oldest ${span(oldestSeconds)}, ${count(q.depth)} waiting.`, rule.remindMinutes, name === 'feedback' || name === 'priority' ? 'critical' : 'warning');
+    else if (rule && held(key, oldestSeconds >= rule.oldestSeconds, rule.sustain)) find('queue-behind', name, oldestSeconds, `${id(name)}: oldest ${span(oldestSeconds)}, ${count(q.depth)} waiting.`, rule.remindMinutes, name === 'feedback' || name === 'feedback-priority' ? 'critical' : 'warning');
     return { name, depth: q.depth, oldestSeconds, behind: behind.has(key) };
   });
 
@@ -191,7 +191,7 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
     jobs = [...types.values()].map(({ top: _, half: __, first: ___, ...row }) => row).sort((a, b) => Number(b.behind) - Number(a.behind) || b.oldestSeconds - a.oldestSeconds || b.failedLastHour - a.failedLastHour || b.failed - a.failed);
   } else blind.add('jobs');
 
-  const feedbackQueue = sample.queues.filter(q => q.name === 'feedback' || q.name === 'priority').map(q => Math.round(q.oldestMs / 1000));
+  const feedbackQueue = sample.queues.filter(q => q.name === 'feedback' || q.name === 'feedback-priority').map(q => Math.round(q.oldestMs / 1000));
   const feedbackJobs = sample.late?.filter(late => late.class === 'feedback').map(late => late.oldestSeconds) ?? [];
   const feedbackLagSeconds = feedbackQueue.length || sample.late ? Math.max(0, ...feedbackQueue, ...feedbackJobs) : null;
 

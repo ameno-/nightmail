@@ -44,8 +44,9 @@ export const QUEUES: Record<string, { oldestSeconds: number; sustain: number; re
   // Bounces and complaints ride here: a campaign's bounce rate reads low while they are late, and the list probe and
   // auto-pause decide on them.
   feedback: { oldestSeconds: 120, sustain: 2, remindMinutes: 30 },
-  // The safety lane (#619) for bounces and complaints of mail already under watch: it should never wait.
-  priority: { oldestSeconds: 60, sustain: 2, remindMinutes: 30 },
+  // The safety lane (#619) for bounces and complaints of mail already under watch: it should never wait. Under the
+  // name the cron reads it by: as `priority` this line matched no queue and the lane could not alert.
+  'feedback-priority': { oldestSeconds: 60, sustain: 2, remindMinutes: 30 },
   // Wake messages for the jobs table: each is consumed within seconds, and the cron sends one a minute regardless.
   work: { oldestSeconds: 180, sustain: 2, remindMinutes: 30 },
   // Customers' endpoints can be slow, and one slow endpoint must not page anyone: five minutes.

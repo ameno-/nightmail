@@ -33918,6 +33918,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // A dead letter alerts at once; a probe that failed leaves its alerts and their streaks alone.
     const blind = tick({ ...behind, late: null, queues: [...behind.queues.slice(0, 2), { name: 'feedback-dlq', depth: 3, oldestMs: 0 }] });
     assert.deepEqual([blind.findings.map(finding => finding.key), [...blind.blind], blind.rollup.jobs, blind.rollup.memory.streaks['jobs-behind:mailbox.ingest']], [['queue-behind:feedback', 'dead-letters:feedback-dlq'], ['jobs'], null, 2]);
+    // The safety lane (#619), under the name the cron reads it by: a minute and a half behind for two ticks is critical, and
+    // it is what feedbackLagSeconds reads.
+    memory = emptyMemory();
+    const lane = { ...quiet(), queues: [{ name: 'feedback-priority', depth: 40, oldestMs: 90_000 }] };
+    const laneFirst = lines(lane), laneSecond = tick(lane);
+    assert.deepEqual([laneFirst, laneSecond.findings.map(finding => finding.key + ' ' + finding.severity + ' ' + finding.value), laneSecond.rollup.feedbackLagSeconds], [[], ['queue-behind:feedback-priority critical 90'], 90]);
 
     // 8. 1,639 jobs of one type failed between the 11th and the 23rd and are still kept. Kept is history: it is on the
     // Health page and is never an alert. Failing now is one: 25 of a type within the hour, five within half an hour, one
