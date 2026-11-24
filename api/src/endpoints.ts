@@ -195,7 +195,7 @@ function checkScope(ids: string[] | null, types: string[], format: StoredFormat)
 // names pass unchecked: an address can be deleted after it was chosen, and the webhook must stay editable.
 async function ownAddresses(tx: DbExecutor, w: string, ids: string[] | null, stored: string[] | null = null) {
   const added = [...new Set(ids ?? [])].filter(id => !stored?.includes(id));
-  if (added.length && (await tx.execute(sql`SELECT id FROM mailboxes WHERE workspace_id=${w} AND id=ANY(${sql.param(added)}::text[])`)).rows.length !== added.length)
+  if (added.length && (await tx.execute(sql`SELECT id FROM mailboxes WHERE workspace_id=${w} AND id=ANY(${sql.param(added)}::text[]) AND (delete_after IS NULL OR delete_after>now())`)).rows.length !== added.length)
     throw new ApiError(422, 'MAILBOX_NOT_FOUND', 'Every ID must identify an existing receiving address.', 'addressIds');
 }
 const defaultJunk = (format: StoredFormat) => format === 'inbound' ? 'include' as const : 'skip' as const;

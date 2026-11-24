@@ -31327,6 +31327,93 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited again', addressIds: [nobodys] })).addressIds, [nobodys]);
     });
   });
+  // tear/workspace-isolation class BUG-ISO-04: the rules' AI opt-ins (evaluateRoutes, evaluateDomains) stored another
+  // workspace's route ID and a domain the workspace doesn't receive on.
+  // Another workspace's receiving host and route, ones nobody has, and this workspace's own (a sandbox inbox's host and a route on it).
+  async function optInIsolation({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0]) {
+    const wid = runtime.config.workspaceId, other = unique('other-workspace');
+    const theirs = { route: unique('rt'), domain: `${other}.invalid` }, nobodys = { route: unique('rt'), domain: `${unique('nobody')}.invalid` };
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)', [other]);
+    await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [unique('mbd'), other, theirs.domain, REGION]);
+    const route = "INSERT INTO mail_routes(id,workspace_id,domain_id,match,destinations) SELECT $1,$2,id,'support@'||name,'[]' FROM mailbox_domains WHERE workspace_id=$2 AND name=$3";
+    await db.query(route, [theirs.route, other, theirs.domain]);
+    const box = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201), ours = { route: unique('rt'), domain: (box.address as string).split('@')[1]! };
+    await db.query(route, [ours.route, wid, ours.domain]);
+    return { wid, other, box, ours, theirs, nobodys };
+  }
+  test('rule AI opt-ins may name only routes and receiving domains of their own workspace: one of another workspace is refused like one nobody has', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { local } = fixture, { ours, theirs, nobodys } = await optInIsolation(fixture);
+      // The refusal names what was sent; apart from that, another workspace's and nobody's get the same answer.
+      const refused = (reply: Reply, code: string, sent: string) => { const e = error(reply, 422, code); return [e.code, (e.message as string).replace(sent, '…'), e.field]; };
+      for (const path of ['/v1/rules/decisions', '/v1/rules']) {
+        assert.deepEqual(refused(await local('PUT', path, { evaluateRoutes: [ours.route, theirs.route] }), 'UNKNOWN_ROUTE', theirs.route), refused(await local('PUT', path, { evaluateRoutes: [ours.route, nobodys.route] }), 'UNKNOWN_ROUTE', nobodys.route), path);
+        assert.deepEqual(refused(await local('PUT', path, { evaluateDomains: [ours.domain, theirs.domain] }), 'UNKNOWN_DOMAIN', theirs.domain), refused(await local('PUT', path, { evaluateDomains: [ours.domain, nobodys.domain] }), 'UNKNOWN_DOMAIN', nobodys.domain), path);
+      }
+      // Its own route and receiving host, and a host under it, are taken.
+      const saved = ok(await local('PUT', '/v1/rules/decisions', { evaluateRoutes: [ours.route], evaluateDomains: [ours.domain, `sub.${ours.domain}`] }));
+      assert.deepEqual([saved.config.evaluateRoutes, saved.config.evaluateDomains], [[ours.route], [ours.domain, `sub.${ours.domain}`]]);
+    });
+  });
+  test('rule AI opt-ins stored with a route or domain of another workspace open nothing of it and stay editable', async t => {
+    // Opt-ins stored before the check above (written here past the API) keep the route ID and the domain. They are read
+    // only against this workspace's own mail (its recipient's host, the route it matched), so they match nothing: the AI's
+    // answer is used for this workspace's mail only once its own host is opted in, and the other workspace has no rule config.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { wid, other, box, ours, theirs } = await optInIsolation(fixture);
+      const rules = { rules: [{ key: 'asks', source: 'export default function route(email){const r=decisions(email,{refund:"Requests a refund?"});if(r.refund>0.8)label("refund")}' }], attachments: [{ rule: 'asks', target: box.address }] };
+      ok(await local('PUT', '/v1/rules', rules));
+      const store = `UPDATE mail_ritual_configs SET config=config||$2::jsonb, programs=CASE WHEN programs IS NULL THEN NULL ELSE programs||$2::jsonb END WHERE workspace_id=$1`;
+      await db.query(store, [wid, JSON.stringify({ evaluateRoutes: [theirs.route], evaluateDomains: [theirs.domain] })]);
+      const stored = ok(await local('GET', '/v1/rules'));
+      assert.deepEqual([stored.config.evaluateRoutes, stored.config.evaluateDomains], [[theirs.route], [theirs.domain]]);
+      const mime = `From: a@example.net\r\nTo: ${box.address}\r\nSubject: Refund\r\n\r\nRefund please`, scores = { 'Requests a refund?': 0.9 };
+      // What a dry run of this workspace's own mail does with the AI's answer: the score the rule saw, and its labels.
+      const dry = async () => { const run = ok(await local('POST', '/v1/rules/test', { mime, scores })); return [run.trace[0].scores, run.recipients[0].labels]; };
+      assert.deepEqual(await dry(), [{ refund: 0 }, []], 'Not opted in: the answer is not used.');
+      // Still editable with what it has, and its own host can be opted in beside them.
+      const edited = ok(await local('PUT', '/v1/rules/decisions', { evaluateRoutes: [theirs.route], evaluateDomains: [theirs.domain, ours.domain] }));
+      assert.deepEqual([edited.config.evaluateRoutes, edited.config.evaluateDomains], [[theirs.route], [theirs.domain, ours.domain]]);
+      assert.deepEqual(await dry(), [{ refund: 0.9 }, ['refund']], 'Its own host opted in: the answer is used.');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_ritual_configs WHERE workspace_id=$1', [other])).rows[0].n, 0);
+    });
+  });
+  test('an API key for every address refuses addAddressIds that name no address of its workspace; removing one it does not have changes nothing', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { theirs, nobodys, ours } = await addressIsolation(fixture);
+      const keyIds = async (id: string) => (await db.query('SELECT mailbox_ids FROM mailbox_keys WHERE id=$1', [id])).rows[0].mailbox_ids;
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.message, e.field]; };
+      // A key for every address: adding one of its own changes nothing; another workspace's ID is refused like one nobody has.
+      const every = ok(await local('POST', '/v1/api-keys', { name: 'Every address', access: { type: 'addresses', mail: ['read'] } }), 201);
+      assert.deepEqual(refused(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [theirs] } })), refused(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [ours, nobodys] } })));
+      ok(await local('PATCH', `/v1/api-keys/${every.id}`, { access: { addAddressIds: [ours] } }));
+      assert.equal(await keyIds(every.id), null);
+      // Removing is idempotent: an ID the key does not have, whoever's it is, leaves the key as it was.
+      const some = ok(await local('POST', '/v1/api-keys', { name: 'One address', access: { type: 'addresses', addressIds: [ours], mail: ['read'] } }), 201);
+      for (const id of [theirs, nobodys]) ok(await local('PATCH', `/v1/api-keys/${some.id}`, { access: { removeAddressIds: [id] } }));
+      assert.deepEqual(await keyIds(some.id), [ours]);
+    });
+  });
+  test('an agent inbox that was just deleted is no longer an address a webhook or an API key can be given', async t => {
+    // DELETE /v1/inboxes/{id} ends the inbox at once (delete_after) and its row goes with the hourly sweep. Until then it
+    // answered as a live address here, while reading it already answered 404.
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local } = fixture, { ours, url, hook, path } = await addressIsolation(fixture);
+      const ended = ok(await local('POST', '/v1/inboxes', { type: 'sandbox' }), 201).id as string;
+      const some = ok(await local('POST', '/v1/api-keys', { name: 'One address', access: { type: 'addresses', addressIds: [ours], mail: ['read'] } }), 201);
+      // Chosen while it was live, it stays on the webhook after it ends.
+      ok(await local('PATCH', path, { addressIds: [ours, ended] }));
+      const gone = await local('DELETE', `/v1/inboxes/${ended}`);
+      assert.ok(gone.status < 300, `delete answered ${gone.status}`);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailboxes WHERE id=$1 AND delete_after<=now()', [ended])).rows[0].n, 1, 'The row waits for the sweep.');
+      const refused = (reply: Reply) => { const e = error(reply, 422, 'MAILBOX_NOT_FOUND'); return [e.code, e.field]; };
+      assert.deepEqual(refused(await local('POST', '/v1/inbound/webhooks', { url, addressIds: [ended] })), ['MAILBOX_NOT_FOUND', 'addressIds']);
+      assert.deepEqual(refused(await local('POST', '/v1/api-keys', { name: 'Ended', access: { type: 'addresses', addressIds: [ended], mail: ['read'] } })), ['MAILBOX_NOT_FOUND', 'access.addressIds']);
+      assert.deepEqual(refused(await local('PATCH', `/v1/api-keys/${some.id}`, { access: { addAddressIds: [ended] } })), ['MAILBOX_NOT_FOUND', 'access.addAddressIds']);
+      assert.deepEqual(ok(await local('PATCH', path, { description: 'Edited', addressIds: [ours, ended] })).addressIds, [ours, ended]);
+      assert.equal(hook.id, ok(await local('GET', path)).id);
+    });
+  });
   test('a plain event subscription takes the delivery fence: paused after its claim, claimed stale or behind the breaker',async t=>{
     // tear/delivery witnesses: ingest m1 b, claim K m1:U, pause U, go K; ingest m1 b, claim K m1:U, expire m1:U,
     // run L m1:U, reply L 410, go K; three timeouts, then run K m1:U (the breaker defers, attempts kept).
