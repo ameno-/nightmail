@@ -259,7 +259,7 @@ type LogFacetNumbers = { counts: LogCounts; asOf: ISODate | null; from: ISODate;
 export type LogFacetRead =
   | { counts: null; asOf: null; from: null; visibility: LogVisibility }
   | LogFacetNumbers
-  | { state: 'pending'; last: (LogFacetNumbers & { asOf: ISODate }) | null; retryAfterSeconds: number }
+  | { state: 'pending'; last: (LogFacetNumbers & { asOf: ISODate }) | null; retryAfterSeconds: number; attempt?: number }
 export interface LogEntry {
   id: string; direction: 'sent' | 'received'; at: ISODate; status: string; from: MailAddress; to: string[]; toCount?: number; subject: string
   stream: Stream | null; campaignId: string | null; simulated: boolean; attachmentCount: number | null; threadId: string | null; threadCount: number | null

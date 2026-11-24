@@ -59,8 +59,22 @@ export function decodeLogFacets(data: unknown, input: LogFacetInput): LogFacetRe
     asOf: typeof asOf === 'string' ? asOf : null, from, visibility }
 }
 
-export const facetPollMs = (data: LogFacetRead | undefined, view: string) =>
-  data && 'state' in data ? data.retryAfterSeconds * 1000 + parseInt(view.slice(0, 4), 16) % 2500 : 30_000
+// Consecutive pending replies for one request, counted on the reply itself. The stamped attempt also makes each reply
+// differ from the last (the query cache would keep an equal earlier object), so the quiet retry grows from the server's
+// delay to five minutes while the service stays busy, instead of returning every few seconds from every open tab.
+const pendingStreaks = new Map<string, number>()
+export function countPending(result: LogFacetRead, request: string): LogFacetRead {
+  if (!('state' in result)) { pendingStreaks.delete(request); return result }
+  const attempt = (pendingStreaks.get(request) ?? 0) + 1
+  pendingStreaks.delete(request)
+  pendingStreaks.set(request, attempt)
+  if (pendingStreaks.size > 32) pendingStreaks.delete(pendingStreaks.keys().next().value!)
+  return { ...result, attempt }
+}
+
+export const facetPollMs = (data: LogFacetRead | undefined, view: string) => data && 'state' in data
+  ? Math.min(300_000, data.retryAfterSeconds * 1000 * 2 ** Math.min(6, Math.max(0, (data.attempt ?? 1) - 1))) + parseInt(view.slice(0, 4), 16) % 2500
+  : 30_000
 
 export function logFacetAccessLost(error: unknown) {
   return error instanceof ApiError && (error.status === 401 || error.status === 403 || error.code === 'LOG_FACET_VISIBILITY_CHANGED')
