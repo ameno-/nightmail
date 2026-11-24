@@ -53,6 +53,28 @@ export interface OperatorHealth {
   errors: { kind: 'code' | 'sqlstate' | 'error'; code: string; count: number }[] | null; requests: { count: number; errors: number } | null
   database: { connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number; diskBytes: number | null } | null
 }
+/**
+ * Glass (GET /v1/operator/glass, api/src/glass.ts): everything going on in the installation in one read, cached 30 s.
+ * Money is integer micro-cents as strings; a Count stopped at its cap when atLeast.
+ */
+export type GlassCount = { n: number; atLeast: boolean }
+export type GlassHour = { accepted: number; marketing: number; delivered: number; bounced: number; complained: number }
+export type GlassGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
+export interface Glass {
+  generatedAt: string
+  signups: { places: SignupPlaces; today: { open: number; waitlist: number }; week: { open: number; waitlist: number }; daily: number[]
+    funnel: { signedUp: number; domainAdded: number; domainVerified: number; keyCreated: number; firstSend: number } }
+  sending: { perMinute: number; minutes: number[]; today: { transactional: number; marketing: number }; hourly: GlassHour[]; queued: GlassCount; held: GlassCount
+    campaigns: { id: string; name: string; workspace: string; total: number; released: number; rate: number | null }[]; sendApi: { requests: number; p50Ms: number; p95Ms: number } | null }
+  delivery: { grades: Record<GlassGrade, number>; calibrating: number; paused: number; held: number }
+  receiving: { today: number; spam: number; atLeast: boolean; hourly: number[] }
+  money: { creditToday: string; creditMonth: string; creditDaily: number[]; owed: string; owing: number; usageMonth: string }
+  system: { status: 'ok' | 'warning' | 'critical' | 'stale'; measuredAt: string | null
+    alerts: { critical: number; warning: number; top: { key: string; label: string; severity: 'critical' | 'warning'; words: string; since: string }[] }
+    ses: { regions: number; maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: string | null } | null
+    deploy: { sha: string | null; at: string | null } }
+  visitors: { views: number; visitors: GlassCount; hourly: number[]; referrers: { host: string; views: number }[]; through: string | null }
+}
 /** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
 export type AbuseBand = 'low' | 'watch' | 'review' | 'high'
 export interface AbuseReason { code: string; points: number; count?: number }
@@ -106,6 +128,7 @@ export const operatorApi = {
   },
   signups: (signal?: AbortSignal) => request<SignupPlaces>(`${base}/signups`, { signal }),
   health: (signal?: AbortSignal) => request<OperatorHealth>(`${base}/health`, { signal }),
+  glass: (signal?: AbortSignal) => request<Glass>(`${base}/glass`, { signal }),
   setSignupLimit: (limit: number, raise: SignupRaise, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit, raise }, idempotencyKey: guard.idempotencyKey }),
   allWorkspaces: async (input: { cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: WorkspaceSummary[]; nextCursor: string | null }>(`${base}/signups/workspaces${query({ cursor: input.cursor, limit: 100 })}`, { signal })

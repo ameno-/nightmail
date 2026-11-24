@@ -15,6 +15,14 @@ export function Meter({ value, max = 1, mark, tone = 'neutral', label, title, cl
     style={{ '--share': `${share * 100}%`, ...at !== undefined && { '--mark': `${at * 100}%` } } as CSSProperties}><i />{at !== undefined && <b />}</span>;
 }
 
+/** A series as one line, oldest first, from zero to its largest value: a metric row's trend. No axes and no labels; it
+ *  fills the box it is given, so an empty or flat series holds the same space. */
+export function Sparkline({ values, tone, className }: { values: readonly number[]; tone?: Tone; className?: string }) {
+  const max = Math.max(0, ...values), y = (value: number) => max > 0 ? 19 - Math.max(0, value) / max * 18 : 19;
+  const points = values.length === 1 ? `0,${y(values[0]!)} 100,${y(values[0]!)}` : values.map((value, i) => `${i / (values.length - 1) * 100},${y(value)}`).join(' ');
+  return <svg className={cx('ui-spark', tone && `ui-tone--${tone}`, className)} viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">{values.length > 0 && <polyline points={points} />}</svg>;
+}
+
 /** One metric as a row: label (and a muted hint), its series, the mono value with a muted unit; a meter is the row's rule. */
 export function MetricRow({ label, hint, spark, value, unit, tone, meter, className }: { label: ReactNode; hint?: ReactNode; spark?: ReactNode; value: ReactNode; unit?: ReactNode; tone?: Tone; meter?: ReactNode; className?: string }) {
   return <div className={cx('ui-metric', meter ? 'ui-metric--meter' : null, className)} data-tone={tone}>
