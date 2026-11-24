@@ -109,7 +109,7 @@
     ],
     "consumers": [
       // Wake messages are hints, not jobs: drain Postgres once for hints already waiting together.
-      { "queue": "nightmail-dev-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 4 },
+      { "queue": "nightmail-dev-work", "max_batch_size": 1, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 8 },
       // Start an idle callback immediately; arrivals during its DB round trip form the next batch.
       { "queue": "nightmail-dev-webhooks", "max_batch_size": 8, "max_batch_timeout": 0, "max_retries": 3, "max_concurrency": 2 },
       { "queue": "nightmail-dev-feedback-v2", "max_batch_size": 100, "max_batch_timeout": 0, "max_retries": 5, "max_concurrency": 6, "dead_letter_queue": "nightmail-dev-feedback-v2-dlq" },

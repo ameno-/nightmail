@@ -304,17 +304,13 @@ export default {
       return;
     }
     const { drainJobs } = await core.wrapModuleLoad(() => import('./dispatch.js'));
-    // Size DB pools so worst-case concurrent Worker invocations + DO shards fit under Postgres max_connections = 100
-    // with headroom: webhook invocations spend most time in outbound HTTP (2 DB conns feed 6 deliveries), while work
-    // runs up to 6 concurrent jobs (at least 2 conns so progress writes never deadlock against a single-concurrency pool).
-    const poolMax = hooks ? Math.min(2, concurrency) : Math.min(6, Math.max(2, concurrency));
     await withRuntime(env, async runtime => {
       // Orchestration only (mail is dispatched by Durable Objects): a longer budget lets a campaign's
       // prepare → expand → finish chain run inside one invocation instead of one queue hop per step.
       // Wait in place up to 45 s for a job due soon (paced campaign releases), and schedule at most one follow-up.
       const outcome = await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,pool), delaySeconds => (hooks?env.WEBHOOK_QUEUE:env.WAKE_QUEUE).send({ kind: 'wake' }, { delaySeconds }), 45000,pool);
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
-    }, poolMax);
+    }, concurrency);
     batch.ackAll();
   },
   async scheduled(controller, env) {
@@ -375,6 +371,6 @@ export default {
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
-    }, Math.min(6, Math.max(2, concurrency)));
+    }, concurrency);
   },
 } satisfies ExportedHandler<Env>;
