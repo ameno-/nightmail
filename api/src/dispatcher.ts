@@ -20,6 +20,7 @@ import { outbound } from './screen-calls.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { SesBodyError } from './ses-body.js';
 import { sendReservation, withMemory } from './isolate-memory.js';
+import { linkInlineImages } from './linked-images.js';
 
 const loadSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
 const loadSimulatedSes = lazyModule(() => import('./adapters/simulated-ses.js'));
@@ -522,15 +523,27 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
   const rules=isSimulatedSes(runtime) || !hosted || leased.owner.trusted ? null : leased.owner.probation ? 'probation' : 'standard';
   const delivery=rules ? await import('./screened-html.js') : undefined;
   if (delivery && (mail.snapshot.deferredCampaign || s.screenVerdict?.rules !== rules)) s = delivery.hostedCopy(s, rules==='probation');
-  const parts: Attachment[] = [];
+  let parts: Attachment[] = [];
   rows ??= checkedDispatchAttachments(s.attachments, await loadAttachments(mail));
+  const files: { row: AttachmentRow; bytes: Uint8Array }[] = [];
   for (const row of rows) {
     const body = await verifiedAttachment(runtime, row);
+    files.push({ row, bytes: body });
     // A probation attachment goes out under a name a client shows as is, as a type its extension and bytes agree with;
     // any other sender's is checked only for pictures (no SVG, inline parts as raster images).
     if (rules==='standard') delivery!.shownAttachment(row.filename, row.contentType, body, row.disposition === 'inline');
     const { filename, contentType } = rules==='probation' ? delivery!.screenedAttachment(row.filename, row.contentType, body, row.disposition === 'inline') : row;
     parts.push({ FileName: filename, RawContent: body, ContentType: contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) });
+  }
+  // A campaign's mail, and its test, links its inline pictures from PUBLIC_URL/i/… rather than carrying them, after the
+  // checks above (src/linked-images.ts). An email sent through the API keeps the parts its caller attached.
+  if (runtime.config.linkedImages && s.html && !s.mime && !s.raw && (mail.campaignId || s.testCampaignId) && rows.some(row => row.disposition === 'inline')) {
+    const { html, linked } = linkInlineImages(runtime.config.publicUrl, s.html, files);
+    if (linked.size) {
+      s = { ...s, html };
+      parts = parts.filter((_, i) => !linked.has(files[i]!.row.id));
+      rows = rows.filter(row => !linked.has(row.id));
+    }
   }
   sizeCheck(s, rows);
   const content: SendEmailCommandInput['Content'] = s.mime || s.raw

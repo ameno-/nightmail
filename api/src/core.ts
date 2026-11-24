@@ -147,6 +147,8 @@ export interface Config {
   sharedRegions?: string[];
   hostedSendCaps: { firstWeek: number };
   publicUrl: string;
+  /** CAMPAIGN_IMAGES: campaign mail links its inline pictures from publicUrl/i/… instead of carrying them (src/linked-images.ts). */
+  linkedImages: boolean;
   sesFeedbackUrl?: string;
   regions: string[];
   liveEnabled: boolean;
