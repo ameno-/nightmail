@@ -32109,7 +32109,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await db.query("SELECT FROM mailbox_events WHERE workspace_id=$1 AND message_id=$2 AND type='message.stored'",[wid,m.id])).rowCount,1);
         assert.deepEqual((await db.query('SELECT address FROM mail_unrouted WHERE workspace_id=$1 AND message_id=$2 ORDER BY address',[wid,m.id])).rows,[{address:first},{address:late}]);
       });
-      await t.test('inbound catch-all enforces the hourly and workspace caps with unrouted fallback',async()=>{
+      await t.test('inbound catch-all enforces the hourly and workspace caps with unrouted fallback',async it=>{
+        // Roll back the 50,000-address fixture, even on failure. Deleting the stand-ins fires per-row FK and routing
+        // triggers and can time out, leaving the parent scenario's transaction aborted for subsequent subtests.
+        await db.query('SAVEPOINT catch_all_caps');
+        it.after(async()=>{await db.query('ROLLBACK TO SAVEPOINT catch_all_caps; RELEASE SAVEPOINT catch_all_caps');});
         await db.query("UPDATE mailbox_domains SET catch_all='create_mailbox' WHERE id=$1",[domain]);
         const seed=(count:number,d:string)=>db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,origin,created_at) SELECT gen_random_uuid()::text,$1,$2,gen_random_uuid()||'@receive.example','auto',now()-interval '2 days' FROM generate_series(1,$3)",[wid,d,count]);
         const burst=async(mid:string,n:number)=>{raw.set(mid,Buffer.from('Subject: '+mid+'\r\n\r\nhello'));await submit(mid,Array.from({length:n},(_,i)=>`${mid}${i}@receive.example`));await run('mailbox.ingest',{sesMessageId:mid});return (await db.query('SELECT count(*)::int AS n FROM mail_unrouted u JOIN mail_messages m ON m.id=u.message_id AND m.workspace_id=u.workspace_id WHERE m.workspace_id=$1 AND m.ses_message_id=$2',[wid,mid])).rows[0].n;};
@@ -32124,7 +32128,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,origin,kind,created_at) SELECT 'auto-cap'||i,$1,$2,'auto-cap'||i||'@other.example','auto','inbox',now()-interval '2 days' FROM generate_series(1,$3::int) i",[wid,other,49999-used]);
         // One address short of 50,000 in the workspace: one more is created and the other recipient stays unrouted.
         assert.equal(await burst('workspace',2),1);
-        await db.query("DELETE FROM mailboxes WHERE workspace_id=$1 AND id LIKE 'auto-cap%'",[wid]);
       });
       await t.test('inbound ingest keeps accepted mail pending after an unclassified database disconnect',async it=>{
         const mid='disconnect';raw.set(mid,Buffer.from('Subject: retry\r\n\r\nbody'));await submit(mid,['a@receive.example']);
