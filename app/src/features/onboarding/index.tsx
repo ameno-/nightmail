@@ -506,7 +506,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>
       <div className="onb-rise" style={rise(2)}><FirstSend domain={current} apiKey={secret} title="Send with cURL or the SDK" compact /></div>
-      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} compact setup={setup} copy={setup?.copy(promptFor)} /></div>
+      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} compact setup={setup} copy={setup?.copy(promptFor)} download={origin ? promptFor(undefined) : undefined} /></div>
       <div className="onb-rise" style={rise(4)}><McpSetup compact /></div>
     </div>
     <div className="onboarding-actions">

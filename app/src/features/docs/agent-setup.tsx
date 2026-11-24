@@ -138,13 +138,14 @@ export function AgentSetupStatus({ setup }: { setup: AgentSetup }) {
 }
 
 // A null prompt is still loading: the section keeps its place and its actions stay hidden. `compact` (onboarding) is the
-// prompt and its actions without the docs' paragraph on how to use it. With `setup` (an owner or admin), copying and
-// downloading put a fresh setup token in the prompt (`copy` makes it), and the line below says when the agent used it.
-export function AgentPrompt({ prompt, compact = false, setup, copy }: { prompt: string | null; compact?: boolean; setup?: AgentSetup | null; copy?: () => Promise<string> }) {
+// prompt and its actions without the docs' paragraph on how to use it. With `setup` (an owner or admin), copying puts a
+// fresh setup token in the prompt (`copy` makes it), and the line above it says when the agent used it. A download never
+// has one, so no live credential lands in a file: it is `download`, the prompt with the device flow instead.
+export function AgentPrompt({ prompt, compact = false, setup, copy, download }: { prompt: string | null; compact?: boolean; setup?: AgentSetup | null; copy?: () => Promise<string>; download?: string }) {
   const value = setup && copy ? copy : prompt ?? ''
   return <section id="agent-prompt" className="section stack developer-section" aria-label="Agent prompt" aria-busy={prompt === null || undefined}>
     <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions" data-pending={prompt === null || undefined} inert={prompt === null}>
-      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => void (typeof value === 'string' ? Promise.resolve(value) : value()).then(text => downloadText(`${productSlug}-agent-prompt.txt`, text))}><Download size={14} aria-hidden="true" /></button>
+      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(`${productSlug}-agent-prompt.txt`, download ?? prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
       <CopyAction value={value} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
     {!compact && <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>}

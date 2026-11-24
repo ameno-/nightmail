@@ -34,5 +34,5 @@ CREATE TABLE agent_setups (
 CREATE INDEX agent_setups_pending_prompt ON agent_setups(workspace_id, user_id) WHERE kind = 'prompt' AND status = 'pending';
 CREATE INDEX agent_setups_expiry ON agent_setups(expires_at);
 -- The key an agent received this way. It manages the workspace like any manage key, except API keys, agent tokens and
--- billing: keyAdminRefusal and agentSetupRefusal (core.ts) refuse those to it, so an agent can't mint another credential.
+-- billing: keyAdminRefusal and agentSetupRefusal (core.ts) refuse those to it, so an agent can't make another API key.
 ALTER TABLE api_keys ADD COLUMN agent_setup_id text;

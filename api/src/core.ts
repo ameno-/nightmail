@@ -524,7 +524,7 @@ export function receivingAdminRefusal(a: Actor | undefined, change?: string): Ap
 }
 /** Key administration (auth.ts manageKeys, and the deprecated inbound key routes): why it refuses this actor, or null.
  *  It takes unrestricted manage and a lasting credential that is not an agent's own setup key: an agent that received
- *  its key through agent setup can't mint itself, or anyone, another credential. */
+ *  its key through agent setup can't make itself, or anyone, another API key or agent token. */
 export function keyAdminRefusal(a: Actor): ApiError | null {
   const need: Required = { permission: 'configuration', level: 'write' };
   if (!a.permissions.includes('manage')) return denied('PERMISSION_DENIED', 'This operation requires manage permission.', need);

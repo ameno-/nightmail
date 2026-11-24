@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties, type FormEvent, type ReactNode
 import { Link, useSearchParams } from 'react-router'
 import { useQuery } from '@tanstack/react-query'
 import { Check, LogOut, X } from 'lucide-react'
-import { Alert, Button, Field, Input, Select } from '../../components/ui'
+import { Alert, Button, Checkbox, Field, Input, Select } from '../../components/ui'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { NightmailWordmark } from '../../components/NightmailLogo'
@@ -47,15 +47,17 @@ function ConnectSteps() {
   const [params, setParams] = useSearchParams()
   const code = readCode(params.get('code'))
   const [decided, setDecided] = useState<{ code: string; decision: Decision; workspace: string | null } | null>(null)
+  // A code typed here is the person's confirmation; one that came in a link (anyone can send one) is confirmed below.
+  const [typed, setTyped] = useState<string | null>(null)
   const looked = useQuery({ queryKey: ['agent-device', code], enabled: !!code, retry: false, staleTime: Infinity, gcTime: 0,
     queryFn: ({ signal }) => request<AgentRequest>('/v1/agent/device/lookup', { method: 'POST', body: { userCode: code }, signal }) })
-  const choose = (next: string | null) => { setDecided(null); setParams(next ? { code: next } : {}, { replace: true }) }
+  const choose = (next: string | null) => { setDecided(null); setTyped(next); setParams(next ? { code: next } : {}, { replace: true }) }
   let view: string, content: ReactNode
   if (decided && decided.code === code) { view = 'done'; content = <Decided decision={decided.decision} workspace={decided.workspace} onAnother={() => choose(null)} /> }
   else if (!code || looked.error) { view = 'enter'; content = <EnterCode initial={params.get('code') ?? ''} error={code ? looked.error : null} onCode={choose} /> }
   else if (looked.isPending) { view = 'loading'; content = <BootLoader inline /> }
   else if (looked.data.status !== 'pending') { view = 'closed'; content = <Closed request={looked.data} onAnother={() => choose(null)} /> }
-  else { view = 'review'; content = <Review request={looked.data} onDecided={(decision, workspace) => setDecided({ code, decision, workspace })} onAnother={() => choose(null)} /> }
+  else { view = 'review'; content = <Review request={looked.data} typed={typed === code} onDecided={(decision, workspace) => setDecided({ code, decision, workspace })} onAnother={() => choose(null)} /> }
   return <div key={view} className="onboarding-step" data-motion={view === 'loading' ? undefined : 'fade'}>{content}</div>
 }
 
@@ -92,7 +94,7 @@ function lookupError(error: unknown) {
 // What the agent's key may do (api/src/agent-setup.ts AGENT_PERMISSIONS), and what it never may.
 const grants: [boolean, string][] = [
   [true, 'Send email from your domains'],
-  [true, 'Add and verify domains, create inboxes and set up receiving'],
+  [true, 'Add and verify domains; create inboxes, their mail logins and receiving'],
   [true, 'Read logs and received mail; manage webhooks, audience and campaigns'],
   [false, 'Never API keys, members or billing'],
 ]
@@ -101,7 +103,7 @@ function expiresIn(at: string) {
   return minutes < 90 ? `In ${minutes} min` : `In ${Math.round(minutes / 60)} h`
 }
 
-function Review({ request: agent, onDecided, onAnother }: { request: AgentRequest; onDecided: (decision: Decision, workspace: string | null) => void; onAnother: () => void }) {
+function Review({ request: agent, typed, onDecided, onAnother }: { request: AgentRequest; typed: boolean; onDecided: (decision: Decision, workspace: string | null) => void; onAnother: () => void }) {
   const identity = useSession()?.identity
   // Hosted: the workspaces this person owns or administers, the current one first. Self-hosted has the one it is in.
   const hosted = identity?.workspaces ?? null
@@ -109,6 +111,9 @@ function Review({ request: agent, onDecided, onAnother }: { request: AgentReques
   const [workspace, setWorkspace] = useState(() => choices?.find(item => item.id === identity?.workspaceId)?.id ?? choices?.[0]?.id ?? '')
   const [busy, setBusy] = useState<Decision | null>(null)
   const [error, setError] = useState<unknown>(null)
+  // From a link, Approve waits for the person to say the code is their own agent's (RFC 8628 §5.4): someone else can
+  // start the flow and send the link, hoping for one click.
+  const [confirmed, setConfirmed] = useState(typed)
   const canApprove = !choices || choices.length > 0
   async function decide(decision: Decision) {
     setBusy(decision); setError(null)
@@ -119,8 +124,8 @@ function Review({ request: agent, onDecided, onAnother }: { request: AgentReques
   }
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title">Connect {agent.clientName ? <bdi>{agent.clientName}</bdi> : 'an agent'}?</h1>
-      <p className="muted connect-lead">Check that your agent shows this code. Approve only an agent you started.</p>
+      <h1 className="onboarding-title">Connect an agent?</h1>
+      <p className="muted connect-lead">Approve only an agent you started just now, showing this code. Anyone can send you a link like this one.</p>
     </div>
     <dl className="connect-facts onb-rise" style={rise(1)}>
       <dt>Code</dt><dd><code>{agent.userCode}</code></dd>
@@ -137,10 +142,11 @@ function Review({ request: agent, onDecided, onAnother }: { request: AgentReques
       <ul>{grants.map(([can, text]) => <li key={text} data-can={can || undefined}>{can ? <Check size={14} strokeWidth={2.5} aria-hidden /> : <X size={14} strokeWidth={2.5} aria-hidden />}<span>{text}</span></li>)}</ul>
       <p className="muted">It’s listed under API keys as “Agent (set up {new Date().toISOString().slice(0, 10)})”. Revoke it there any time.</p>
     </section>
+    {!typed && canApprove && <div className="onb-rise" style={rise(4)}><Checkbox checked={confirmed} onCheckedChange={setConfirmed} disabled={!!busy} label={`I started this agent, and it shows ${agent.userCode}`} /></div>}
     {!canApprove && <Alert tone="info">Only an owner or admin of a workspace can approve an agent. Ask one to open this link, or deny it.</Alert>}
     {error ? <Alert tone="danger">{errorText(error)}{error instanceof ApiError && <span className="ui-error-reference">{error.reference}</span>}</Alert> : null}
-    <div className="onboarding-connect-actions connect-decide onb-rise" style={rise(4)}>
-      <Button variant="primary" loading={busy === 'approved'} disabled={!canApprove || !!busy} onClick={() => void decide('approved')} data-analytics="connect/approve">Approve</Button>
+    <div className="onboarding-connect-actions connect-decide onb-rise" style={rise(5)}>
+      <Button variant="primary" loading={busy === 'approved'} disabled={!canApprove || !confirmed || !!busy} onClick={() => void decide('approved')} data-analytics="connect/approve">Approve</Button>
       <Button variant="ghost" loading={busy === 'denied'} disabled={!!busy} onClick={() => void decide('denied')} data-analytics="connect/deny">Deny</Button>
       <button type="button" className="onboarding-skip connect-another" disabled={!!busy} onClick={onAnother}>Use another code</button>
     </div>
@@ -165,7 +171,8 @@ function Decided({ decision, workspace, onAnother }: { decision: Decision; works
 function Closed({ request: agent, onAnother }: { request: AgentRequest; onAnother: () => void }) {
   const text = agent.status === 'expired' ? 'This code expired. Start again in your agent for a new one.'
     : agent.status === 'denied' ? 'This code was denied: the agent got nothing.'
-    : 'This code was already approved, and its agent has its key.'
+    : agent.status === 'approved' ? 'This code was already approved. Its agent gets its key on its next check.'
+    : 'This code was already used: its agent has its key.'
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro"><h1 className="onboarding-title">Connect an agent</h1></div>
     <Alert tone={agent.status === 'expired' ? 'warning' : 'info'} title={agent.userCode}>{text}</Alert>

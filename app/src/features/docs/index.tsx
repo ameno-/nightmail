@@ -192,11 +192,11 @@ function useAgentPrompt() {
   const items = domains.data?.items ?? []
   const domain = withDomain ? items.find(row => row.status === 'verified') ?? items[0] ?? null : undefined
   const promptFor = (setupToken: string | null | undefined) => agentPrompt({ origin, domain, email: identity?.email ?? null, multiTenant, setupToken })
-  return { prompt: promptFor(setup ? null : undefined), setup, copy: setup?.copy(promptFor) }
+  return { prompt: promptFor(setup ? null : undefined), setup, copy: setup?.copy(promptFor), download: promptFor(undefined) }
 }
 
 function DocsOverview({ document, all }: {document: Document; all: Operation[]}) {
-  const { prompt, setup, copy } = useAgentPrompt()
+  const { prompt, setup, copy, download } = useAgentPrompt()
   const groups = [...new Set(all.map(operation => operation.tag))]
   const install = `npm install ${sdkPackage}`
   return <article className="docs-operation docs-overview">
@@ -205,7 +205,7 @@ function DocsOverview({ document, all }: {document: Document; all: Operation[]})
     <section id="guides" className="docs-section" aria-labelledby="docs-guides"><h2 id="docs-guides">Guides</h2><div className="docs-resource-list">
       {guides.map(guide => <Link key={guide.id} to={`/docs/${guide.id}`}><strong>{guide.title}</strong><span>{guide.summary}</span></Link>)}
     </div></section>
-    <AgentPrompt prompt={prompt} setup={setup} copy={copy} />
+    <AgentPrompt prompt={prompt} setup={setup} copy={copy} download={download} />
     <section id="sdk" className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href={`https://www.npmjs.com/package/${sdkPackage}`}>published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
     <section id="formats" className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>API index for agents and text tools, with a complete reference per tag.</span></a>

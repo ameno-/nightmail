@@ -19,8 +19,9 @@ import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
  *
  * Either way the agent gets one API key, "Agent (set up <date>)", listed and revocable under API keys like any other,
  * with AGENT_PERMISSIONS on every sender domain: what onboarding needs (sending, domains, inboxes and receiving, webhooks)
- * and the rest of the workspace's own resources. It never administers the workspace: keyAdminRefusal refuses it API keys
- * and agent tokens, and agentSetupRefusal billing (api_keys.agent_setup_id marks it). Members, invitations, the sending
+ * and the rest of the workspace's own resources, inbox-scoped credentials included (inbox connections, mail client
+ * passwords). It never administers the workspace: keyAdminRefusal refuses it API keys and agent tokens, and
+ * agentSetupRefusal billing (api_keys.agent_setup_id marks it). Members, invitations, the sending
  * connection and the workspace itself are a person's already: no API key reaches them.
  *
  * A secret is the row's ID (its selector) and a 256-bit verifier; only the verifier's SHA-256 is stored, and the
@@ -31,6 +32,8 @@ export const AGENT_PERMISSIONS = ['read', 'send', 'manage'] as const;
 const SETUP_MINUTES = 15, DEVICE_MINUTES = 15, POLL_SECONDS = 5;
 // Rate limits, per minute: a client network's exchanges, device codes and polls, and a person's user code attempts.
 const LIMITS = { exchange: 30, device: 30, poll: 120, userCode: 10 } as const;
+// Device codes from every network together: a bound on the rows they keep (each a day past its 15 minutes).
+const DEVICES_PER_MINUTE = 600;
 // api_request_budgets rows for callers that have no workspace yet (core.ts chargeBudget), purged after a day like any.
 const BUDGET = 'agent-setup';
 // RFC 8628 §6.1: twenty consonants, no vowels (no words) and none easily confused.
@@ -42,7 +45,7 @@ const gone = { 410: { description: 'Expired, or replaced by a newer one; use err
 
 type Row = { id: string; kind: 'prompt' | 'device'; secret_hash: string; status: 'pending' | 'approved' | 'denied' | 'replaced' | 'used'; workspace_id: string | null; user_id: string | null;
   client_name: string | null; poll_interval: number; expired: boolean; too_soon: boolean };
-type Issued = { key: string; keyId: string; name: string; workspaceId: string };
+type Issued = { key: string; keyId: string; name: string; workspaceId: string; workspaceName: string };
 
 const hex = (bytes: number) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), n => n.toString(16).padStart(2, '0')).join('');
 /** A new setup token or device code for a new row: the row's ID, then the verifier whose hash the row keeps. */
@@ -94,7 +97,8 @@ function person(c: Ctx, admin: boolean) {
  * Written with the setup's end and an audit row naming that person, in the caller's transaction.
  */
 async function issueKey(tx: DbExecutor, c: Ctx, row: Row): Promise<Issued | null> {
-  const { rows: [member] } = await tx.execute<{ role: string }>(sql`SELECT role FROM workspace_members WHERE workspace_id = ${row.workspace_id} AND user_id = ${row.user_id} FOR SHARE`);
+  const { rows: [member] } = await tx.execute<{ role: string; name: string }>(sql`SELECT m.role, w.name FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
+    WHERE m.workspace_id = ${row.workspace_id} AND m.user_id = ${row.user_id} FOR SHARE OF m`);
   if (member?.role !== 'owner' && member?.role !== 'admin') return null;
   const key = randomSecret(secretPrefixes.apiKey), keyId = id('key'), prefix = shownPrefix(key), name = `Agent (set up ${new Date().toISOString().slice(0, 10)})`;
   const context: AuditContext = { ...auditContext(c), actor: { type: 'member', id: row.user_id, userId: row.user_id, via: 'api', label: row.kind === 'device' ? 'Agent setup (device code)' : 'Agent setup (prompt)' } };
@@ -103,13 +107,13 @@ async function issueKey(tx: DbExecutor, c: Ctx, row: Row): Promise<Issued | null
     s AS (UPDATE agent_setups SET status = 'used', used_at = now(), key_id = ${keyId} WHERE id = ${row.id})
     ${auditInsert(context, { action: 'api_key.create', workspaceId: row.workspace_id, target: { type: 'api_key', id: keyId },
       after: { name, permissions: AGENT_PERMISSIONS, domains: [], prefix: prefix.slice(0, 9), agentSetup: row.id, flow: row.kind, client: row.client_name ?? undefined } }, { from: sql`k` })}`);
-  return { key, keyId, name, workspaceId: row.workspace_id! };
+  return { key, keyId, name, workspaceId: row.workspace_id!, workspaceName: member.name };
 }
 function issuedView(c: Ctx, issued: Issued) {
   const url = mcpServerUrl(c.env.config.publicUrl);
-  return { key: issued.key, keyId: issued.keyId, name: issued.name, workspaceId: issued.workspaceId, permissions: [...AGENT_PERMISSIONS], baseUrl: new URL(c.env.config.publicUrl).origin,
+  return { key: issued.key, keyId: issued.keyId, name: issued.name, workspaceId: issued.workspaceId, workspaceName: issued.workspaceName, permissions: [...AGENT_PERMISSIONS], baseUrl: new URL(c.env.config.publicUrl).origin,
     mcp: { url, config: mcpClientConfig('generic', url, { key: issued.key, env: apiKeyEnv }) },
-    nextStep: `Save key as ${apiKeyEnv} in the project's environment (a gitignored .env, or the host's secrets), never in code or a commit: it is shown once. Send it as Authorization: Bearer on every request. A person revokes it under API keys.` };
+    nextStep: `Tell the person the key is for the workspace "${issued.workspaceName}", so they can confirm it's theirs. Save key as ${apiKeyEnv} in the project's environment (a gitignored .env, or the host's secrets), never in code or a commit: it is shown once. Send it as Authorization: Bearer on every request. A person revokes it under API keys.` };
 }
 const notAllowed = () => new ApiError(403, 'AGENT_SETUP_FORBIDDEN', 'The person who set this up is no longer an owner or admin of the workspace, so no key was made. Ask an owner or admin to set up the agent again.');
 
@@ -117,7 +121,7 @@ const Permissions = z.array(z.enum(['read', 'send', 'manage']));
 const AgentKey = z.object({
   key: z.string().describe(`The API key (${secretPrefixes.apiKey}…), shown once. Save it as ${apiKeyEnv} in the project's environment, never in code or a commit.`),
   keyId: z.string(), name: z.string().describe('Agent (set up <date>), under API keys, where a person revokes it.'),
-  workspaceId: z.string(),
+  workspaceId: z.string(), workspaceName: z.string().describe('The workspace\'s name: tell the person, so they can confirm the key is in theirs.'),
   permissions: Permissions.describe('read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. Never API keys or agent tokens; members, billing and deleting the workspace are a person\'s.'),
   baseUrl: z.string().describe('The API origin to call.'),
   mcp: z.object({ url: z.string(), config: z.record(z.string(), z.unknown()).describe(`A remote MCP server entry that reads the key from ${apiKeyEnv}.`) }),
@@ -190,8 +194,9 @@ export function registerAgentSetup(app: App) {
       user_code: z.string().describe('Show this to the person: they confirm it matches.'), verification_uri: z.string(), verification_uri_complete: z.string().describe('The page with the user code filled in: the link to give the person.'),
       expires_in: z.number().int(), interval: z.number().int().describe('Seconds to wait between polls.') }).openapi('AgentDeviceAuthorization')), ...errors } }), async c => {
     await fromNetwork(c, 'device');
+    await limited(c, 'device:all', DEVICES_PER_MINUTE, 'Too many agents are starting the device flow right now. Retry in a minute.');
     const body = c.req.valid('json') as { client_name?: string } | undefined, { clientLabel } = await wrapModuleLoad(() => import('./mcp-auth.js'));
-    const clientName = clientLabel(body?.client_name).slice(0, 100) || null, { rowId, secret, hash } = await newSecret(secretPrefixes.deviceCode);
+    const clientName = Array.from(clientLabel(body?.client_name)).slice(0, 100).join('') || null, { rowId, secret, hash } = await newSecret(secretPrefixes.deviceCode);
     const expiresAt = new Date(Date.now() + DEVICE_MINUTES * 60_000).toISOString();
     // A user code is unique among the rows kept (a day past expiry); a collision draws another.
     for (let attempt = 0; ; attempt++) {

@@ -522,6 +522,10 @@ export type AgentKey = {
     name: string;
     workspaceId: string;
     /**
+     * The workspace's name: tell the person, so they can confirm the key is in theirs.
+     */
+    workspaceName: string;
+    /**
      * read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. Never API keys or agent tokens; members, billing and deleting the workspace are a person's.
      */
     permissions: Array<'read' | 'send' | 'manage'>;

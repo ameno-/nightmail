@@ -4728,7 +4728,8 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       const agent = ok(await exchange(request, minted.token), 201);
       secrets.add(agent.key);
       assert.match(agent.key, /^nm_[0-9a-f]{64}$/);
-      assert.equal(agent.workspaceId, w);
+      assert.deepEqual([agent.workspaceId, agent.workspaceName], [w, w]);
+      assert.match(agent.nextStep, new RegExp(`workspace "${w}"`));
       assert.match(agent.name, /^Agent \(set up \d{4}-\d{2}-\d{2}\)$/);
       assert.deepEqual(agent.permissions, ['read', 'send', 'manage']);
       assert.equal(agent.baseUrl, PUBLIC_ORIGIN);
@@ -4856,7 +4857,7 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       await waited();
       const agent = ok(await poll(), 201);
       secrets.add(agent.key);
-      assert.deepEqual([agent.workspaceId, agent.permissions], [theirs, ['read', 'send', 'manage']]);
+      assert.deepEqual([agent.workspaceId, agent.workspaceName, agent.permissions], [theirs, theirs, ['read', 'send', 'manage']]);
       assert.equal(ok(await request('GET', '/v1/me', agent.key)).workspaceId, theirs);
       error(await request('GET', '/v1/api-keys', agent.key), 403, 'PERMISSION_DENIED');
       // Once.
@@ -4914,6 +4915,10 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.equal(limited.headers.get('retry-after'), '60');
       for (let i = 0; i < 30; i++) ok(await request('POST', '/v1/agent/device', undefined, {}));
       error(await request('POST', '/v1/agent/device', undefined, {}), 429, 'AGENT_SETUP_RATE_LIMITED');
+      // Every network together: 600 device codes a minute, however many networks they come from.
+      await db.query("DELETE FROM api_request_budgets WHERE workspace_id='agent-setup'");
+      await db.query("INSERT INTO api_request_budgets(workspace_id,key_id,window_start,used) VALUES('agent-setup','device:all',date_trunc('minute',now()),600)");
+      assert.match(error(await request('POST', '/v1/agent/device', undefined, {}), 429, 'AGENT_SETUP_RATE_LIMITED').message, /Too many agents/);
     });
   });
 });
