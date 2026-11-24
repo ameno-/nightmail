@@ -492,6 +492,9 @@ export type UpdateApiKey = {
 };
 
 export type ContactRead = Contact & {
+    /**
+     * Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.
+     */
     listIds: Array<string>;
 };
 
@@ -6743,6 +6746,9 @@ export type CreateContactData = {
     body: {
         email: string;
         name?: string;
+        /**
+         * Up to 50 key/value pairs, at most 16 KiB of JSON total.
+         */
         properties?: {
             [key: string]: string | number | boolean | null;
         };
@@ -6938,6 +6944,9 @@ export type GetContactResponse = GetContactResponses[keyof GetContactResponses];
 export type UpdateContactData = {
     body: {
         name?: string | null;
+        /**
+         * Up to 50 key/value pairs, at most 16 KiB of JSON total.
+         */
         properties?: {
             [key: string]: string | number | boolean | null;
         };

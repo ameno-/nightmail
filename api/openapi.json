@@ -1332,7 +1332,8 @@
                 "type": "array",
                 "items": {
                   "type": "string"
-                }
+                },
+                "description": "Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID."
               }
             },
             "required": [
@@ -20270,7 +20271,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.",
+        "description": "Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent. Pages are also bounded by response size and may return fewer than limit contacts; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -20552,7 +20553,8 @@
                         }
                       ]
                     },
-                    "default": {}
+                    "default": {},
+                    "description": "Up to 50 key/value pairs, at most 16 KiB of JSON total."
                   }
                 },
                 "required": [
@@ -20915,7 +20917,8 @@
                           "type": "null"
                         }
                       ]
-                    }
+                    },
+                    "description": "Up to 50 key/value pairs, at most 16 KiB of JSON total."
                   }
                 },
                 "additionalProperties": false
@@ -22628,6 +22631,7 @@
             "secureDashboardSession": []
           }
         ],
+        "description": "Active list members with current list IDs. Pages are also bounded by response size and may return fewer than limit contacts; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -24145,7 +24149,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts.",
+        "description": "Bounded to 1000 matches. Unknown observation history is never classified as inactive. Counts separate suppressed and other non-consenting contacts. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -25126,7 +25130,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema.",
+        "description": "Execute a bounded read-only AudienceQL SELECT against the virtual contacts schema. Results are bounded by response size as well as LIMIT (truncated is true when capped). Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "requestBody": {
           "required": true,
           "content": {
@@ -25298,7 +25302,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships.",
+        "description": "Create a 15-minute immutable plan for a bounded AudienceQL bulk mutation. Does not modify contacts or memberships. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "requestBody": {
           "required": true,
           "content": {
