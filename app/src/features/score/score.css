@@ -11,7 +11,7 @@
 .gauge-card > * { position: relative; z-index: 1; }
 /* Every score view is a button that opens the explainer. */
 button.gauge-card { width: 100%; border: 0; font: inherit; text-align: left; cursor: pointer; }
-button.gauge-card:focus-visible { background: var(--color-layer-1); }
+button.gauge-card:focus-visible { background: var(--color-layer-3); }
 .gauge-skeleton { position: absolute; inset: 0; border-radius: inherit; background: var(--color-layer-1); animation: ui-pulse 1.2s ease-in-out infinite alternate; }
 
 .gauge-dial { display: block; overflow: visible; }
@@ -32,9 +32,9 @@ button.gauge-card:focus-visible { background: var(--color-layer-1); }
 /* Compact: the sidebar card, full sidebar width and 56px tall. */
 .gauge-card--compact { display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 14px 0 10px; transition: background var(--motion-duration), transform 160ms var(--ease-out-strong); }
 .gauge-card--compact:active { transform: scale(.98); }
-@media (hover: hover) and (pointer: fine) { .gauge-card--compact:hover { background: var(--color-layer-1); } }
+@media (hover: hover) and (pointer: fine) { .gauge-card--compact:hover { background: var(--color-layer-3); } }
 .gauge-card--compact .gauge-dial { flex: none; width: 60px; height: 34px; }
-.gauge-card--compact:focus-visible { background: var(--color-layer-1); }
+.gauge-card--compact:focus-visible { background: var(--color-layer-3); }
 .gauge-stack { display: flex; flex: 1; flex-direction: column; gap: 2px; min-width: 0; }
 /* One 24px line in every state: the graded number keeps a fixed slot before its grade; ungraded or unread, a dash. */
 .gauge-readout { display: flex; align-items: baseline; gap: 8px; height: 24px; line-height: 24px; }

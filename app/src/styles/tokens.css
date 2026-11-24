@@ -111,8 +111,9 @@
   --color-neutral-marker: var(--color-faint);
   --color-overlay: rgb(0 0 0 / 40%);
   --color-shadow: rgb(0 0 0 / 8%);
-  --color-hover: rgb(0 0 0 / 4%);
-  --color-pressed: rgb(0 0 0 / 8%);
+  /* Hover is also keyboard focus (no rings), so it steps at least 1.1:1 off white; press a step further. */
+  --color-hover: rgb(0 0 0 / 6%);
+  --color-pressed: rgb(0 0 0 / 10%);
   --color-transparent: transparent;
   --font-body: 'Inter', 'Inter Fallback', sans-serif;
   --font-mono: 'OpenTUI Mono', 'OpenTUI Mono Fallback', monospace;
@@ -243,7 +244,7 @@
   --mark-l: .62; --mark-c: .14; --warn-l: .70; --ink-l: .50; --ink-c: .12;
   --hue-ok: 152; --hue-warn: 85; --hue-error: 27; --hue-info: 250;
   --hue-received: 190; --hue-opened: 300; --hue-clicked: 345;
-  --l-deep: .974; --l-surface: 1; --l-layer-1: .978; --l-layer-2: .956; --l-layer-3: .928; --l-text: .195; --l-muted: .475; --l-faint: .56;
+  --l-deep: .974; --l-surface: 1; --l-layer-1: .978; --l-layer-2: .956; --l-layer-3: .928; --l-text: .195; --l-muted: .475; --l-faint: .545;
   /* An unticked checkbox's or radio's edge: 3:1 or more against the control and the surface or dialog around it. */
   --l-control-edge: .62;
   /* Hairlines: the text colour at these strengths. */
@@ -259,7 +260,7 @@
 }
 :root[data-theme='dark'] {
   --mark-l: .74; --mark-c: .13; --warn-l: .80; --ink-l: .82; --ink-c: .11;
-  --l-deep: .175; --l-surface: .205; --l-layer-1: .238; --l-layer-2: .272; --l-layer-3: .312; --l-text: .955; --l-muted: .74; --l-faint: .615;
+  --l-deep: .175; --l-surface: .205; --l-layer-1: .238; --l-layer-2: .272; --l-layer-3: .312; --l-text: .955; --l-muted: .74; --l-faint: .65;
   --l-control-edge: .54;
   --border-muted-a: 7.5%; --border-a: 11%; --border-strong-a: 19%; --active-a: 9%;
   --color-control: var(--color-layer-1);

@@ -116,6 +116,8 @@ a.ss__fix:focus-visible > svg { color: var(--color-text); }
 .ev-toggle > button:is([aria-checked='true'], [aria-pressed='true']) { background: var(--color-surface); box-shadow: var(--shadow-button); color: var(--color-text); }
 @media (hover: hover) and (pointer: fine) { .ev-toggle:not([aria-disabled]) > button:hover:not([aria-checked='true'], [aria-pressed='true']) { color: var(--color-text); transition-duration: 0ms; } }
 .ev-toggle:not([aria-disabled]) > button:focus-visible:not([aria-checked='true'], [aria-pressed='true']) { color: var(--color-text); }
+/* The selected segment's glyph has no label to underline: under keyboard focus its chip takes the pressed step. */
+.ev-toggle > button:is([aria-checked='true'], [aria-pressed='true']):focus-visible { background: var(--color-pressed); }
 .ev-toggle:not([aria-disabled]) > button:active { transform: scale(.94); }
 .ev-toggle[aria-disabled] > button { cursor: default; opacity: .45; }
 .ev-note { font-size: var(--text-xs); line-height: var(--leading-xs); }

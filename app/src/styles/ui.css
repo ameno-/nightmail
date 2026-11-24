@@ -36,6 +36,9 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
 :focus, :focus-visible { outline: none; }
 :where(button, summary, [role='button'], [tabindex]:not([tabindex='-1'], [contenteditable], input, textarea, select)):focus-visible { background-color: var(--color-hover); }
 :where(a:not(.ui-button, .ui-tab, .ui-row-link, .ui-card__link)):focus-visible { color: var(--color-text); text-decoration: underline; text-underline-offset: 3px; }
+/* A selected item (the page you're on, a chosen segment or option, a pressed toggle) already wears the strongest fill and
+   the text colour, so keyboard focus on it underlines its label, as on a link. A tab's own line marks it already. */
+:is(a, button):not(.ui-tab):is([aria-current]:not([aria-current='false']), [aria-selected='true'], [aria-pressed='true'], [aria-checked='true'], .active):focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 /* A scroll area pads its edges by --focus-reach (taking it back with a negative margin), so a focused control scrolls
    clear of the edge and its fade; the page does the same. */
 html, .page-surface { scroll-padding-block: var(--focus-reach); }
