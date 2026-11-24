@@ -12,12 +12,15 @@ import type { ListContactResult } from './audience.js';
 // number an operator sees is the number the gate keeps. Staff, invitations and subjects an operator bound take none.
 
 export type Places = { limit: number; signedUp: number; held: number; waiting: number; open: number };
+/** The limit and what fills it, as one row (Glass reads it inside its own statement). Open is worked out from it. */
+export const placesRow = sql`SELECT l.places AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
+    (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting
+    FROM nightmail_signup_limit l WHERE l.singleton`;
+export const withOpen = (row: Omit<Places, 'open'>): Places => ({ ...row, open: Math.max(0, row.limit - row.signedUp - row.held) });
 /** The limit and what fills it, in one statement. Open: places left for anyone, after those held for the waitlist. */
 export async function readPlaces(db: DbExecutor): Promise<Places> {
-  const { rows: [row] } = await db.execute<Omit<Places, 'open'>>(sql`SELECT l.places AS "limit",(SELECT count(*)::int FROM nightmail_signups) AS "signedUp",
-    (SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NOT NULL) AS held,(SELECT count(*)::int FROM nightmail_waitlist WHERE let_in_at IS NULL) AS waiting
-    FROM nightmail_signup_limit l WHERE l.singleton`);
-  return { ...row!, open: Math.max(0, row!.limit - row!.signedUp - row!.held) };
+  const { rows: [row] } = await db.execute<Omit<Places, 'open'>>(placesRow);
+  return withOpen(row!);
 }
 // One sign-up or one change of the limit at a time. Read the places in a later statement: under READ COMMITTED each
 // statement sees what the previous holder committed.
@@ -27,27 +30,26 @@ type Waited = { name: string | null; attempts: number; first_at: string; let_in_
 export type Place = { via: 'waitlist' | 'open'; mailbox: string; waited: Waited | null };
 /**
  * Whether a new account may sign up on its own, decided in the transaction that creates it (account-login.ts).
- * `mailbox`: the mailbox its sign-in proves (account-policy.ts provenMailbox), never an asserted address; a place held
- * for it is taken, otherwise an open one. `held`: addresses the sign-in shows another way (the GitHub account's own
- * verified address, the address an emailed sign-in link went to), which take only a place held for them. Either way
- * the address leaves the waitlist here, and what its row said comes back for recordSignup; a sign-in refused after all
- * rolls the transaction back with the row. An address that is already a verified user's, or already took a place, takes
- * none: one place per person. The caller records the place once the user row exists.
+ * `addresses`: what the sign-in shows of its person's address, in order of preference, never an asserted address: the
+ * mailbox it proves (account-policy.ts provenMailbox), the address a sign-in link it followed was emailed to, and the
+ * GitHub account's verified primary address (githubVerifiedAddress). A place held for any of them is taken first,
+ * otherwise an open one for the first. Either way the address leaves the waitlist here, and what its row said comes back
+ * for recordSignup; a sign-in refused after all rolls the transaction back with the row. When any of them is already a
+ * verified user's, or already took a place, it takes none: one place per person, and one per address. The caller
+ * records the place once the user row exists.
  */
-export async function takePlace(db: DbExecutor, mailbox: string | null, held: (string | null)[] = []): Promise<Place | null> {
+export async function takePlace(db: DbExecutor, addresses: (string | null)[]): Promise<Place | null> {
   await lockLimit(db);
-  const own = mailbox?.toLowerCase() ?? null;
-  const spent = async (address: string) => !!(await db.execute(sql`SELECT WHERE EXISTS (SELECT FROM nightmail_users WHERE email_verified AND lower(email)=${address})
-    OR EXISTS (SELECT FROM nightmail_signups WHERE email=${address})`)).rowCount;
-  if (own && await spent(own)) return null;
+  const shown = [...new Set(addresses.flatMap(address => address ? [address.toLowerCase()] : []))];
+  if (!shown.length) return null;
+  if ((await db.execute(sql`SELECT FROM unnest(${sql.param(shown)}::text[]) a WHERE EXISTS (SELECT FROM nightmail_users WHERE email_verified AND lower(email)=a)
+    OR EXISTS (SELECT FROM nightmail_signups WHERE email=a)`)).rowCount) return null;
   const evidence = sql`name,attempts,first_at::text,let_in_at::text`;
-  for (const address of new Set([own, ...held.map(other => other?.toLowerCase() ?? null)])) {
-    if (!address || (address !== own && await spent(address))) continue;
+  for (const address of shown) {
     const { rows: [waited] } = await db.execute<Waited>(sql`DELETE FROM nightmail_waitlist WHERE email=${address} AND let_in_at IS NOT NULL RETURNING ${evidence}`);
     if (waited) return { via: 'waitlist', mailbox: address, waited };
   }
-  if (!own) return null;
-  const address = own;
+  const address = shown[0]!;
   // As on dev, a closed gate never takes an unheld waitlist row lock while holding the installation's limit lock.
   // If a place is open, consume any waiting evidence in the statement already checking capacity.
   const { rows: [free] } = await db.execute<{ waited: Waited | null }>(sql`WITH capacity AS MATERIALIZED (
@@ -66,15 +68,19 @@ export const recordSignup = (db: DbExecutor, userId: string, place: Place, name:
   db.execute(sql`INSERT INTO nightmail_signups(user_id,via,email,name,joined_at,attempts,let_in_at) VALUES(${userId},${place.via},${place.mailbox.length <= 320 ? place.mailbox : null},
     ${place.waited?.name ?? (name?.trim().slice(0, 200) || null)},${place.waited?.first_at ?? null}::timestamptz,${place.waited?.attempts ?? null},${place.waited?.let_in_at ?? null}::timestamptz)`);
 
+/** How a raise gives out the places it adds: held for the waitlist (oldest first, each emailed), or open to anyone. */
+export type Raise = 'hold' | 'open';
 /**
- * Sets the limit. A raise holds the places it opens for the oldest waiting addresses (first attempt first); places
- * left over go to whoever signs in next. Lowering it removes nobody and keeps every held place.
+ * Sets the limit. A hold raise holds the places it adds for the oldest waiting addresses (first attempt first); places
+ * left over go to whoever signs in next. An open raise holds none: its places go to whoever signs in next, waiting or
+ * not, and nobody is emailed (placesOpened with send false). Places already open stay open either way. Lowering it
+ * removes nobody and keeps every held place.
  */
-export async function setLimit(db: DbExecutor, limit: number) {
+export async function setLimit(db: DbExecutor, limit: number, raise: Raise = 'hold') {
   await lockLimit(db);
   const before = await readPlaces(db);
   await db.execute(sql`UPDATE nightmail_signup_limit SET places=${limit} WHERE singleton`);
-  const free = Math.max(0, limit - before.signedUp - before.held);
+  const free = raise === 'open' ? 0 : Math.max(0, Math.min(limit - before.limit, limit - before.signedUp - before.held));
   const { rows } = free ? await db.execute<{ email: string }>(sql`UPDATE nightmail_waitlist w SET let_in_at=now() FROM (
       SELECT q.email FROM nightmail_waitlist q WHERE q.let_in_at IS NULL AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=q.email)
       ORDER BY q.first_at,q.email LIMIT ${free} FOR UPDATE OF q) oldest WHERE w.email=oldest.email RETURNING w.email`) : { rows: [] };
@@ -82,19 +88,20 @@ export async function setLimit(db: DbExecutor, limit: number) {
 }
 
 /**
- * Whether a sign-in that proved no mailbox (GitHub without this address verified, a password) could take a place by
- * proving it: 'held' for its address (the refusal offers a sign-in link to it), or 'open'. Read without the lock: it
- * only decides what the refusal says.
+ * Whether a sign-in that showed nothing of its address (GitHub without a verified primary address, a password) could take
+ * a place by proving the mailbox: 'held' for its address, or 'open'. Either way the refusal offers a sign-in link to it.
+ * Read without the lock: it only decides what the refusal says.
  */
 export async function placeReady(db: DbExecutor, address: string): Promise<'held' | 'open' | null> {
   if ((await db.execute(sql`SELECT FROM nightmail_waitlist WHERE email=${address.toLowerCase()} AND let_in_at IS NOT NULL`)).rowCount) return 'held';
   return (await readPlaces(db)).open > 0 ? 'open' : null;
 }
 
-// Sign-in links (migration 466): a person a raise let in whose sign-in shows nothing of that address (a GitHub account
-// without it verified, another Google account) asks for a link to it. The link proves the mailbox: following it and then
-// signing in, with any method, takes the place held for the address (account-login.ts, takePlace's `held`). It goes
-// only to an address with a held place that no account has, at most LINKS_A_DAY a day, and works once, for LINK_MINUTES.
+// Sign-in links (migration 466): a person whose sign-in shows nothing of an address with a place (a GitHub account
+// without it as its verified primary, another Google account) asks for a link to it. The link proves the mailbox:
+// following it and then signing in, with any method, takes the place held for the address, or an open one (account-login.ts,
+// takePlace). It goes only to an address that asked for access (a waitlist row) with a place held for it, or while one is
+// open, that no account has and that took no place; at most LINKS_A_DAY a day, and it works once, for LINK_MINUTES.
 // The row keeps the address and expiry; the link carries the row's ID and an HMAC of it, so the table alone makes none.
 // Rows are kept a day for the daily count (maintenance.ts removes them then).
 export const LINK_MINUTES = 30;
@@ -107,9 +114,9 @@ const linkMac = (config: Pick<Config, 'authSecret'>, id: string) => {
 /** The link a sign-in link email carries: Overview, which signs in from it and keeps it in the sign-in's return URL. */
 export const signinLinkUrl = (config: Pick<Config, 'authSecret' | 'publicUrl'>, id: string) => `${new URL(config.publicUrl).origin}/overview?link=${id}.${linkMac(config, id)}`;
 /**
- * Emails a sign-in link to `address` when a place is held for it (account-notices.ts signinLink, queued with the link in
- * one transaction). Otherwise nothing, and the caller answers the same either way, so the answer says nothing of an
- * address.
+ * Emails a sign-in link to `address` when a place is held for it, or it is waiting while a place is open
+ * (account-notices.ts signinLink, queued with the link in one transaction). Otherwise nothing, and the caller answers
+ * the same either way, so the answer says nothing of an address.
  */
 export async function sendSigninLink(runtime: Runtime, address: string) {
   const workspaceId = runtime.config.platformDomainWorkspace, email = address.toLowerCase();
@@ -119,7 +126,9 @@ export async function sendSigninLink(runtime: Runtime, address: string) {
     // One request per address at a time, so the daily count holds.
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${email},46400))`);
     const { rows: [link] } = await tx.execute<{ id: string }>(sql`INSERT INTO nightmail_signin_links(id,email,expires_at) SELECT ${id},w.email,now()+make_interval(mins=>${LINK_MINUTES}::int) FROM nightmail_waitlist w
-      WHERE w.email=${email} AND w.let_in_at IS NOT NULL AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=w.email)
+      WHERE w.email=${email} AND (w.let_in_at IS NOT NULL OR (SELECT l.places>(SELECT count(*) FROM nightmail_signups)+(SELECT count(*) FROM nightmail_waitlist WHERE let_in_at IS NOT NULL)
+          FROM nightmail_signup_limit l WHERE l.singleton))
+        AND NOT EXISTS (SELECT FROM nightmail_users u WHERE u.email_verified AND lower(u.email)=w.email) AND NOT EXISTS (SELECT FROM nightmail_signups s WHERE s.email=w.email)
         AND (SELECT count(*) FROM nightmail_signin_links l WHERE l.email=w.email AND l.created_at>now()-interval '1 day')<${LINKS_A_DAY}
       RETURNING id`);
     if (link) await tx.execute(signinLink(workspaceId, link.id));
@@ -140,14 +149,15 @@ export async function spendSigninLink(db: DbExecutor, config: Pick<Config, 'auth
  * Emails every held address not yet told that it can sign in (account-notices.ts waitlistAdmitted, one email per
  * address ever). Called after a change of the limit commits, never inside it, so an email can't undo or hold up a
  * raise, and it never throws. A second raise tells only the addresses it newly let in; saving the limit again tells
- * any a failure missed. emailed: queued now. notEmailed: held addresses still without one (null when unknown).
+ * any a failure missed. emailed: queued now. notEmailed: held addresses still without one (null when unknown). send
+ * false (an open raise) emails nobody and only counts them.
  */
-export async function placesOpened(runtime: Runtime): Promise<{ emailed: number; notEmailed: number | null }> {
+export async function placesOpened(runtime: Runtime, send = true): Promise<{ emailed: number; notEmailed: number | null }> {
   let emailed = 0;
   try {
     const { waitlistAdmitted, waitlistNoticeStatus } = await import('./account-notices.js');
     const untold = sql`FROM nightmail_waitlist w WHERE w.let_in_at IS NOT NULL AND ${waitlistNoticeStatus(sql`w.email`)} IS NULL`;
-    const { rows } = await runtime.db.execute<{ email: string }>(sql`SELECT w.email ${untold} ORDER BY w.let_in_at,w.first_at,w.email`);
+    const { rows } = send ? await runtime.db.execute<{ email: string }>(sql`SELECT w.email ${untold} ORDER BY w.let_in_at,w.first_at,w.email`) : { rows: [] };
     for (const { email } of rows) if (await waitlistAdmitted(runtime, runtime.db, email)) emailed++;
     const { rows: [left] } = await runtime.db.execute<{ n: number }>(sql`SELECT count(*)::int AS n ${untold}`);
     if (emailed) log('info', { code: 'SIGNUP_PLACES_EMAILED', count: emailed });

@@ -11,7 +11,7 @@ type Block = { type: 'p'; text: string } | { type: 'ul' | 'ol'; items: string[];
 const ITEM = /^\s{0,3}(?:([-*•])|(\d{1,3})[.)])\s+(.*)$/
 function blocks(source: string): Block[] {
   const out: Block[] = []
-  const lines = source.replace(/\r\n?/g, '\n').split('\n')
+  const lines = (source ?? '').replace(/\r\n?/g, '\n').split('\n')
   let paragraph: string[] = []
   const flush = () => { if (paragraph.length) out.push({ type: 'p', text: paragraph.join('\n') }); paragraph = [] }
   for (let i = 0; i < lines.length; i++) {
@@ -61,7 +61,7 @@ const CLOSED = /`([^`\n]+)`|\*\*([^*\n]+?)\*\*|\[([^\]\n]+)\]\(([^)\s]+)\)|(http
 function inline(text: string, key = 'i'): ReactNode[] {
   const out: ReactNode[] = []
   let at = 0, n = 0
-  const plain = (value: string) => value.split('\n').forEach((line, index) => { if (index) out.push(<br key={`${key}b${n++}`} />); if (line) out.push(line) })
+  const plain = (value: string) => (value ?? '').split('\n').forEach((line, index) => { if (index) out.push(<br key={`${key}b${n++}`} />); if (line) out.push(line) })
   for (const match of text.matchAll(CLOSED)) {
     plain(text.slice(at, match.index))
     at = match.index + match[0].length

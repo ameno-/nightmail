@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { baneApi, BaneError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './bane.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
-import { addTicketNote, expectation, fileTicket, openFollowUp, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
+import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
 import { alertOnce, countToday, holdOverCap, limits, mailAllowed, ticketAllowed } from './limits.js';
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type WorkState } from './work.js';
@@ -44,7 +44,7 @@ const TURNS_PER_CONVERSATION = 60;
 const TOKEN_BUDGET = 500_000;
 /** How long a turn's account summary (<account>) is reused, so quick follow-up turns keep the same, cached prompt. */
 const CONTEXT_MS = 5 * 60_000;
-const CHAT_IDLE_MS = 24 * 3_600_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_CLOSE_MS = 7 * 86_400_000;
+const CHAT_IDLE_MS = 30 * 86_400_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_CLOSE_MS = 7 * 86_400_000;
 const EMAIL_BURST = 5, EMAIL_BURST_MS = 10 * 60_000;
 const MAX_FRAME = 16_384, MAX_TEXT = 8000;
 const MODEL_LABEL = `${MODEL.model}#${MODEL.variant}`;
@@ -117,7 +117,7 @@ type Meta = {
   // The staff inbox: the subject and ticket it lists, the transcript seq mirrored so far and the state last mirrored, the
   // mirror's retry, the last customer email (a staff reply answers it), the sender whose mail passed DMARC, and whether
   // chat already said the agent is paused.
-  subject?: string | null; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3' } | null; mirrored?: number; mirroredState?: string | null;
+  subject?: string | null; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; category?: string; replyTo?: string | null; expect?: string } | null; mirrored?: number; mirroredState?: string | null;
   mirrorDueAt?: number | null; mirrorAttempts?: number; lastInbound?: { messageId: string; threadId: string; addressIds?: string[] } | null; dmarcSender?: string | null; pauseNotice?: boolean;
   /** Registered with Nightmail: a chat's account reads are stamped with this conversation. Absent: opened before the stamp. */
   registered?: boolean;
@@ -575,9 +575,12 @@ export class SupportConversation extends DurableObject<Env> {
     if (opening) this.record({ id: newId('msg'), role: 'user', kind: null, text: opening, at: new Date().toISOString(), tools: [] });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
+    const messages = this.history();
     this.sendTo(pair[1], this.hello(meta));
-    this.sendTo(pair[1], { type: 'history', messages: this.history(), pending: { consent: this.pendingConsent(), ticket: meta.ticketId ? { ticketId: meta.ticketId } : null, actions: cards } });
+    this.sendTo(pair[1], { type: 'history', messages, pending: { consent: this.pendingConsent(), ticket: this.pendingTicket(meta), actions: cards } });
     if (opening) this.enqueueTurn({ text: opening });
+    // Pull any staff replies queued in Nightmail's outbox while the panel was closed (in case a wake was missed).
+    if (messages.length) this.ctx.waitUntil(this.wake().catch(error => logError(error, { event: 'inbox', code: 'SUPPORT_CONNECT_WAKE_FAILED' }, 'warn')));
     this.warm();
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
@@ -601,6 +604,7 @@ export class SupportConversation extends DurableObject<Env> {
         if (this.sql.exec('INSERT INTO _support_client_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING', clientId).rowsWritten === 0) return;
         const messageId = newId('msg');
         for (const id of requested) this.sql.exec('UPDATE _support_attachments SET message_id = ? WHERE id = ?', messageId, id);
+        this.update(m => { m.lastActivity = Date.now(); });
         this.record({ id: messageId, role: 'user', kind: null, text, at: new Date().toISOString(), tools: [], attachments: requested.map(id => unused.get(id)!) });
         this.enqueueTurn({ text: text || '(The customer sent a screenshot without text.)', attachments: requested });
         return;
@@ -646,8 +650,20 @@ export class SupportConversation extends DurableObject<Env> {
   override async webSocketClose(ws: WebSocket, code: number) { try { ws.close(code === 1005 ? 1000 : code, 'bye'); } catch { /* already closed */ } }
 
   private hello(meta: Meta): Outgoing {
-    return { type: 'hello', conversationId: meta.conversationId, channel: meta.channel, status: meta.status, agent: { name: `${productName} support`, ai: true }, customer: { firstName: firstName(meta.name) },
+    return { type: 'hello', conversationId: meta.conversationId, channel: meta.channel, status: meta.status, agent: { name: `${productName} Support`, ai: true }, customer: { firstName: firstName(meta.name) },
       workspace: meta.workspace, contentAccess: meta.contentAccess, busy: this.abort !== null };
+  }
+  private pendingTicket(meta: Meta) {
+    if (!meta.ticketId) return null;
+    const t = meta.ticket;
+    return {
+      ticketId: meta.ticketId,
+      ...(t?.type ? { ticketType: t.type } : {}),
+      category: t?.category ?? t?.type ?? 'other',
+      replyTo: t?.replyTo !== undefined ? t.replyTo : masked(meta.email),
+      // A ticket filed before its card was stored has no topic, so no honest time to promise: the card shows none.
+      ...(t?.expect ? { expect: t.expect } : {}),
+    };
   }
   private history() {
     // Held drafts are the inbox's (never sent); email entries never reach a panel.
@@ -679,7 +695,7 @@ export class SupportConversation extends DurableObject<Env> {
   /** What the inbox lists about this conversation: its subject, ticket, counters, blocked work and an emailed ticket's pause. */
   private inboxSnapshot(meta: Meta): MirroredState {
     const blocked = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _support_work WHERE state = 'blocked'").one().n;
-    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: meta.ticket } : {}, turns: meta.turns, costUsd: Math.round(meta.costUsd * 10_000) / 10_000, blockedWork: blocked,
+    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: { id: meta.ticket.id, type: meta.ticket.type, severity: meta.ticket.severity } } : {}, turns: meta.turns, costUsd: Math.round(meta.costUsd * 10_000) / 10_000, blockedWork: blocked,
       // After an emailed ticket the team owns the thread: the agent answers no later mail (compose), so the inbox shows it paused.
       ...meta.channel === 'email' && meta.status === 'ticketed' ? { pauseForTicket: true as const } : {} };
   }
@@ -814,6 +830,7 @@ export class SupportConversation extends DurableObject<Env> {
       } else {
         const open = this.ctx.getWebSockets().length > 0;
         if (!progress.recorded) {
+          this.update(m => { m.lastActivity = Date.now(); });
           this.record({ id: reply.id, role: 'staff', kind: 'staff', text: reply.text, at, tools: [], author });
           this.broadcast({ type: 'message.start', messageId: reply.id, kind: 'staff', author });
           this.broadcast({ type: 'message.end', messageId: reply.id, text: reply.text, redacted: false });
@@ -1008,6 +1025,9 @@ export class SupportConversation extends DurableObject<Env> {
       if (refused === 'closed') return;
       this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
       await this.harnessTicket(meta, internal('Conversation limit reached', `The conversation reached its ${refused === 'turns' ? `${TURNS_PER_CONVERSATION}-turn` : 'token'} limit before it was resolved.`, input.text ?? '', 'Read the conversation and reply to the customer.'));
+      // The panel resumes this person's open chat on every open, and each message keeps it from going idle: left open, a
+      // spent conversation would answer nothing for up to 30 days. It ends here; the team follows up by email.
+      await this.close('limit');
       return;
     }
     // Staff have paused the agent (api/src/support-inbox.ts): the message is recorded and mirrored, and no turn runs. The
@@ -1315,8 +1335,9 @@ export class SupportConversation extends DurableObject<Env> {
     if (filed.created) {
       // Emailing the team and, for a chat, opening the customer's follow-up thread are work of their own, retried until
       // sent. Each is the request built now (its screenshot links signed once), from the address configured now.
+      const category = input.details.topic ?? input.type, expect = expectation(input);
       this.ctx.storage.transactionSync(() => {
-        this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; m.ticket = { id: filed.id, type: input.type, severity: input.severity }; });
+        this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; m.ticket = { id: filed.id, type: input.type, severity: input.severity, category, replyTo: filed.replyTo, expect }; });
         this.work.insert({ kind: 'notify', id: `notify:${filed.id}`, payload: { ticketId: filed.id, key: `ticket-${filed.id}`,
           input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, filed, input) } } satisfies Notify });
         if (meta.channel === 'chat') this.work.insert({ kind: 'followup', id: `followup:${filed.id}`, payload: { addressId: this.env.SUPPORT_ADDRESS_ID, ctx, ticket: filed } satisfies FollowUp });
@@ -1324,7 +1345,7 @@ export class SupportConversation extends DurableObject<Env> {
       log('info', { event: 'ticket', code: 'TICKET_FILED', ticket: filed.id, type: input.type, channel: meta.channel });
       this.mirrorSoon();
       await this.arm();
-      if (meta.channel === 'chat') this.broadcast({ type: 'ticket.filed', ticketId: filed.id, ticketType: input.type, category: input.details.topic ?? input.type, replyTo: filed.replyTo, expect: expectation(input) });
+      if (meta.channel === 'chat') this.broadcast({ type: 'ticket.filed', ticketId: filed.id, ticketType: input.type, category, replyTo: filed.replyTo, expect });
     }
     return filed;
   }

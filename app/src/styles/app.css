@@ -377,4 +377,11 @@ body:has(.support-launcher[aria-expanded='true']) .ui-toasts { right: calc(var(-
 .support-trigger[data-unread]::before { opacity: 1; transform: none; }
 .mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: -8px; }
 .mobile-bar .support-trigger::before { top: 11px; right: 11px; }
+.support-panel--error { position: fixed; right: var(--launcher-inset); bottom: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); z-index: 40; display: flex; flex-direction: column; width: min(400px, calc(100vw - var(--sidebar-width) - 2 * var(--launcher-inset))); height: auto; background: var(--color-surface); color: var(--color-text); border-radius: var(--radius-lg); box-shadow: var(--shadow-dialog); overflow: hidden; }
+.support-panel--error.support-panel--sheet { inset: auto 0 calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); width: auto; border-radius: 14px 14px 0 0; }
+.support-panel--error .support-panel__header { display: flex; align-items: center; gap: var(--space-12); height: 56px; padding: 0 var(--space-8) 0 var(--space-16); border-bottom: 1px solid var(--color-border-muted); }
+.support-panel--error .support-panel__heading { flex: 1; min-width: 0; }
+.support-panel--error .support-panel__heading h2 { margin: 0; font-size: var(--text-md); line-height: 20px; font-weight: var(--font-weight-bold); }
+.support-error { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); padding: var(--space-16); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.support-error p { margin: 0; }
 @media (prefers-reduced-motion: reduce) { .support-launcher__icons > svg { transform: none !important; transition: opacity 150ms ease-out !important; } }

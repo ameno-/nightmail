@@ -9,6 +9,7 @@ export function r2Storage(bucket: R2Bucket): Storage {
     cacheScope: bucket,
     // The binding takes no signal and a started put cannot be cancelled: see Storage.put.
     async put(key, body, contentType, signal) { signal?.throwIfAborted(); await bucket.put(key, body, { httpMetadata: { contentType } }); },
+    async createIfAbsent(key, body, contentType) { await bucket.put(key, body, { onlyIf: { etagDoesNotMatch: '*' }, httpMetadata: { contentType } }); },
     async get(key) {
       const object = await bucket.get(key);
       if (!object) return null;
@@ -36,6 +37,11 @@ export function s3Storage(env: Record<string, string | undefined>): Storage {
   })).catch(error => { clientPromise = undefined; throw error; });
   return {
     async put(key, body, contentType, signal) { const { client, s3 } = await getClient(); await client.send(new s3.PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType }), { abortSignal: signal }); },
+    async createIfAbsent(key, body, contentType) {
+      const { client, s3 } = await getClient();
+      try { await client.send(new s3.PutObjectCommand({ Bucket: bucket, Key: key, Body: body, ContentType: contentType, IfNoneMatch: '*' })); }
+      catch (error) { if (!(error instanceof s3.S3ServiceException && error.$metadata.httpStatusCode === 412)) throw error; }
+    },
     async get(key) {
       try {
         const { client, s3 } = await getClient();

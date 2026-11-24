@@ -51,6 +51,10 @@ const values = z.object({
   // Dashboard usage analytics (docs/analytics.md): first-party, stored in this installation's own bucket. Off by default;
   // off, the dashboard sends nothing and the ingest discards whatever arrives.
   DASHBOARD_ANALYTICS: z.enum(['on', 'off']).default('off'),
+  ANALYTICS_PUSH_URL: optional(z.url().refine(value => {
+    const u = new URL(value); return !u.username && !u.password && !u.hash && (u.protocol === 'https:' || u.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(u.hostname));
+  })),
+  ANALYTICS_PUSH_SECRET: optional(z.string().min(32).max(256)),
   MULTI_TENANT: z.enum(['true', 'false']).default('false'),
   NIGHTMAIL_PLATFORM_AWS_ACCOUNT: optional(accountId),
   // Hosted only: the one workspace allowed to own PUBLIC_URL's own domain (see scripts/adopt-platform-domain.ts).
@@ -92,6 +96,10 @@ const values = z.object({
   // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
   // queue, the jobs, a campaign, a route or the database falling behind. Unset, nothing is posted. Treat as a secret.
   OPERATOR_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
+  // The commit this deploy runs and when it was deployed (.github/scripts/deploy-worker.sh sets both; Docker may). Glass
+  // shows them; a value that isn't a commit or a time is ignored, never an error.
+  DEPLOY_SHA: z.unknown().optional(),
+  DEPLOY_AT: z.unknown().optional(),
   // The database's disk in GB, optional: the Health page shows the database's size against it (src/health.ts).
   DATABASE_DISK_GB: optional(z.coerce.number().positive().max(1_000_000)),
   // Hosted only, optional: the signing secret of the PlanetScale webhook that reports the database disk (src/disk-alert.ts).
@@ -208,6 +216,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     ...(catalogUnused ? { STRIPE_CREDIT_PRODUCT_ID: undefined, STRIPE_TAX_CODE: undefined } : {})});
   if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
   const v = parsed.data;
+  if (Boolean(v.ANALYTICS_PUSH_URL) !== Boolean(v.ANALYTICS_PUSH_SECRET)) throw new ApiError(503, 'CONFIG_INVALID', 'Set both ANALYTICS_PUSH_URL and ANALYTICS_PUSH_SECRET.');
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
   // Hosted sign-in and MCP accept only the account service's own methods (METHOD_ACR). A missing, empty or misspelled
   // value must stop the installation instead of silently accepting every authentication method.
@@ -279,6 +288,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
+    deploy: { sha: typeof v.DEPLOY_SHA === 'string' && /^[0-9a-f]{7,40}$/.test(v.DEPLOY_SHA) ? v.DEPLOY_SHA : null,
+      at: typeof v.DEPLOY_AT === 'string' && Number.isFinite(Date.parse(v.DEPLOY_AT)) ? new Date(v.DEPLOY_AT).toISOString() : null },
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
       creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
@@ -288,6 +299,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: EVALUATION.limit },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
+    analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),

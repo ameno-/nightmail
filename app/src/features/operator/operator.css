@@ -108,6 +108,20 @@ a.op-cluster-rail__row[aria-current='page'] { background: var(--color-active-bg)
 .op-slack__actions span { padding: 2px var(--space-8); border-radius: 4px; box-shadow: var(--shadow-button); font-size: var(--text-xs); }
 .op-slack__context { color: var(--color-muted); font-size: var(--text-xs); }
 
+/* Glass: groups of 40px metric rows in as many columns as fit, one on a phone. A row is a label with a muted hint, a
+   trend and the figure; a slot with nothing in it keeps its row, its label faint. */
+.glass { --metric-spark: 72px; --metric-value: 112px; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); align-items: start; gap: var(--space-32); }
+.glass-group { display: flex; flex-direction: column; min-width: 0; }
+.glass-empty .ui-metric__label { color: var(--color-faint); }
+/* A long hint (an alert's words, a workspace) gives way before the label does; a label longer than its cell ends in an ellipsis. */
+.glass .ui-metric__label > span:first-child { flex-shrink: 0; max-width: 100%; }
+.glass .ui-metric__hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass-grades { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); align-items: center; height: var(--metric-height, 40px); border-bottom: 1px solid var(--color-border-muted); }
+.glass-grades > span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.glass-grades > span > span { color: var(--color-faint); font-size: var(--text-label); line-height: 12px; }
+.glass-grades b { height: 16px; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: inherit; line-height: 16px; font-variant-numeric: tabular-nums; }
+.glass-asof { display: inline-block; min-width: 104px; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; text-align: right; }
+
 @media (max-width: 1200px) { .op-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .op-grid { grid-template-columns: minmax(0, 1fr); gap: var(--page-gap); } }
 @media (max-width: 640px) {

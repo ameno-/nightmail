@@ -8,6 +8,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
+import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
 export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -16,6 +17,43 @@ function fastSecure(response: Response): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!headers.has(name)) headers.set(name, value);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+// A page from the static assets, as Workers Assets sent it but never transformed on the way: Cloudflare otherwise adds
+// its analytics beacon to HTML, which the CSP refuses (an error in every visitor's console). no-transform also stops
+// Cloudflare compressing it, so the Worker does: a Content-Encoding the client accepts has the runtime encode the body
+// (brotli, else gzip), and a price page's 95 kB of HTML goes out as about 18 kB.
+function untransformed(response: Response, request: Request, status = response.status): Response {
+  const headers = new Headers(response.headers), cache = headers.get('cache-control') ?? 'public, max-age=0, must-revalidate';
+  if (!/\bno-transform\b/.test(cache)) headers.set('cache-control', `${cache}, no-transform`);
+  if ((response.status === 200 || response.status === 304) && !headers.has('content-encoding')) {
+    const encoding = clientEncoding(request), etag = headers.get('etag');
+    headers.append('vary', 'accept-encoding');
+    // The encoded body is another representation of the file: its validator is weak (on the 304 too), as Cloudflare makes
+    // it when it compresses. Workers Assets matches If-None-Match either way.
+    if (encoding && etag?.startsWith('"')) headers.set('etag', `W/${etag}`);
+    if (encoding && response.status === 200) { headers.set('content-encoding', encoding); headers.delete('content-length'); }
+  }
+  return fastSecure(new Response(response.body, { status, statusText: status === response.status ? response.statusText : '', headers }));
+}
+
+// What the client accepts. Cloudflare tells every Worker "br, gzip" and keeps the client's own header in
+// cf.clientAcceptEncoding; with no-transform nothing on the way decodes a body for a client that can't, so the choice
+// is made from the client's header (q=0 refuses a coding).
+function clientEncoding(request: Request): 'br' | 'gzip' | null {
+  const header = request.cf ? (typeof request.cf.clientAcceptEncoding === 'string' ? request.cf.clientAcceptEncoding : '') : request.headers.get('accept-encoding') ?? '';
+  const accepted = new Set(header.toLowerCase().split(',').map(part => part.split(';'))
+    .filter(([, ...params]) => !params.some(param => /^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(param))).map(([coding]) => coding!.trim()));
+  return accepted.has('br') ? 'br' : accepted.has('gzip') ? 'gzip' : null;
+}
+
+// /llms.txt: the API's, with the website's own pages under its title when the dashboard build lists them (site-index.ts).
+async function withSitePages(response: Response, assets: Fetcher, url: URL): Promise<Response> {
+  const site = await assets.fetch(new Request(new URL(SITE_INDEX, url))).catch(() => null);
+  if (!site?.ok || !site.headers.get('content-type')?.startsWith('text/plain')) return response;
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(withSiteIndex(await response.text(), await site.text()), { status: response.status, statusText: response.statusText, headers });
 }
 
 function initRuntimeDeps() {
@@ -290,8 +328,20 @@ export default {
       // (app/home-shell.ts); Workers Assets answers /home with it.
       if (pathname.startsWith('/assets/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok) return fastSecure(page); }
-      return fastSecure(await assets.fetch(new Request(new URL('/', url), request)));
+      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
+      // A price page (app/price-pages.ts writes one per comparison), or its Markdown twin: the file, compressed here
+      // (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash) go back as they are.
+      if (pathname === '/pricing' || pathname.startsWith('/compare/')) {
+        const page = await assets.fetch(request);
+        if (page.ok || page.status === 304) return untransformed(page, request);
+        if (page.status !== 404) return fastSecure(page);
+      }
+      const shell = await assets.fetch(new Request(new URL('/', url), request));
+      // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
+      // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
+      // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
+      if (isMissingComparePage(pathname)) return untransformed(shell, request, 404);
+      return untransformed(shell, request);
     }
     let deps: Awaited<ReturnType<typeof loadHttpDeps>> | undefined;
     try {
@@ -317,13 +367,17 @@ export default {
       if (/^\/v1\/campaigns\/[^/]+\/room$/.test(pathname) && request.headers.get('upgrade')?.toLowerCase() === 'websocket') {
         for (const name of ['account', 'workspace']) { const value = url.searchParams.get(name); if (value && !requestHeaderNames(name).some(header => headers.has(header))) headers.set(requestHeaderNames(name)[0]!, value); }
       }
-      const cf = (request as Request & { cf?: { asn?: unknown; country?: unknown } }).cf;
+      const cf = (request as Request & { cf?: { asn?: unknown; country?: string; botManagement?: { verifiedBot?: boolean; score?: number } } }).cf;
       if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
-      const response = staticDoc
+      let response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
-          app.fetch(new Request(request, { headers }), runtime), 1, ctx));
+          app.fetch(new Request(request, { headers }), pathname === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: {
+            ip: request.headers.get('CF-Connecting-IP') ?? '', country: cf?.country,
+            bot: cf?.botManagement?.verifiedBot === true || (cf?.botManagement?.score ?? 100) === 1,
+          } } : runtime), 1, ctx));
+      if (pathname === '/llms.txt' && request.method === 'GET' && response.ok && assets) response = await withSitePages(response, assets, url);
       const runtimeMs = performance.now() - runtimeStarted;
       // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
       // context (a handler called directly) nothing is written, and nothing here can throw into the request.

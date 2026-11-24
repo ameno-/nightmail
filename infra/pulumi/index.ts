@@ -120,6 +120,7 @@ const analyticsR2 = new cf.R2Bucket("analytics", { accountId: cloudflareAccountI
   provider: cloudflare, protect: true, ignoreChanges: ["location"],
 });
 new cf.R2BucketLifecycle("analytics-lifecycle", { accountId: cloudflareAccountId, bucketName: analyticsR2.name, jurisdiction: "default", rules: [
+  { id: "analytics-salts-1d", enabled: true, conditions: { prefix: "analytics/v1/salts/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: day } } },
   { id: "raw-30d", enabled: true, conditions: { prefix: "analytics/v1/raw/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 30 * day } } },
   { id: "events-400d", enabled: true, conditions: { prefix: "analytics/v1/events/" }, deleteObjectsTransition: { condition: { type: "Age", maxAge: 400 * day } } },
   { id: "abort-multipart-1d", enabled: true, conditions: { prefix: "" }, abortMultipartUploadsTransition: { condition: { type: "Age", maxAge: day } } },

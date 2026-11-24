@@ -29,6 +29,14 @@
   try { if (localStorage.getItem('nightmail.dashboard-ready')) root.dataset.member = '' } catch {}
 })()
 
+// A price page's painted first screen (app/price-pages.ts) shows its plain address: with a query (other than utm_*) or
+// the hash its script tag names (data-plain), the app draws it instead, from the start (home/shell/boot.js).
+;(() => {
+  const plain = document.currentScript?.dataset.plain
+  if (plain === undefined) return
+  if ([...new URLSearchParams(location.search).keys()].some(name => !name.startsWith('utm_')) || (plain && location.hash === plain)) document.documentElement.dataset.shell = 'off'
+})()
+
 ;(() => {
   // The homepage has no theme switch: it is in the system's theme (lib/theme.tsx). Elsewhere a saved choice wins.
   let saved = null
@@ -51,15 +59,18 @@ try { if (localStorage.getItem('nightmail.overview-panel') === 'hidden') documen
 ;(() => {
   const path = location.pathname, query = new URLSearchParams(location.search)
   if (path === '/docs' || path.startsWith('/docs/') || query.get('invitation') || query.get('account')) return
-  let account = null, workspace = null, ready = null
-  try { account = sessionStorage.getItem('nightmail.account'); workspace = account && localStorage.getItem('nightmail.workspace:' + account); ready = localStorage.getItem('nightmail.dashboard-ready') } catch {}
+  let account = null, workspace = null, ready = null, session = null
+  try { account = sessionStorage.getItem('nightmail.account'); workspace = account && localStorage.getItem('nightmail.workspace:' + account); ready = localStorage.getItem('nightmail.dashboard-ready'); session = localStorage.getItem('nightmail.session') } catch {}
+  // A visitor on a marketing page with no trace of a session here isn't asked about one (data/live.ts, sessionLikely).
+  const marketing = path === '/' || path === '/pricing' || path.startsWith('/compare/')
+  const visitor = marketing && session !== 'in' && (session === 'out' || (ready === null && account === null))
   const header = '%HEADER_PREFIX%' // api/src/brand.ts's headerPrefix, filled in by vite.config.ts
   const start = url => {
     const response = fetch(url, { credentials: 'include', headers: { Accept: 'application/json', ...(account ? { [header + 'Account']: account } : {}), ...(workspace ? { [header + 'Workspace']: workspace } : {}) } })
     response.catch(() => {}) // The app awaits the real rejection; this only silences the unhandled one.
     return response
   }
-  const responses = { '/v1/me': start('/v1/me') }
+  const responses = visitor ? {} : { '/v1/me': start('/v1/me') }
   // The public homepage check, for visitors whose workspace is not remembered as ready.
   if (path === '/' && ready !== (workspace ?? '*')) responses['/health'] = start('/health')
   window.__nightmailEarly = { account, workspace: workspace || null, at: Date.now(), responses }

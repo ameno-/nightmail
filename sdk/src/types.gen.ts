@@ -6805,7 +6805,7 @@ export type UpdateApiKeyData = {
     body: UpdateApiKey;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10069,7 +10069,7 @@ export type SendEmailData = {
     body: SendEmailInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10136,7 +10136,7 @@ export type SendEmailBatchData = {
     body: SendEmailBatchInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10728,7 +10728,7 @@ export type UploadAttachmentData = {
     body: AttachmentUpload;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11069,7 +11069,7 @@ export type CreateCampaignData = {
     body: CreateCampaignInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11764,7 +11764,7 @@ export type TestCampaignData = {
     body: CampaignTestInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11833,7 +11833,7 @@ export type SendCampaignData = {
     body: CampaignSendInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11902,7 +11902,7 @@ export type ScheduleCampaignData = {
     body: CampaignScheduleInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11971,7 +11971,7 @@ export type CancelCampaignData = {
     body?: never;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -21287,7 +21287,7 @@ export type CreateInboundThreadData = {
     body: CreateInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -22024,7 +22024,7 @@ export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };

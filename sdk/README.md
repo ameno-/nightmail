@@ -42,7 +42,7 @@ const message = await getEmail({
 });
 ```
 
-**Retries.** Repeating a request with the same `Idempotency-Key` returns the first result without sending again. A send's key is kept at least 30 days (a scheduled send's 60); after that the same key is a new request and sends again, so use it to make retries safe, not as a permanent once-only guard.
+**Retries.** Repeating a request with the same `Idempotency-Key` returns the first result without sending again. A send's key is kept at least 30 days (at least 60 for a scheduled send); after that the same key is a new request and sends again, so use it to make retries safe, not as a permanent once-only guard.
 
 **Schedule it.** Add `scheduledAt`, an instant with `Z` or an offset, up to 30 days ahead. The email waits with `scheduled: true` (status `queued`); move it with `rescheduleEmail` or stop it with `cancelEmail` until it goes. Sending limits and the balance apply when it goes: one they refuse then is rejected with their code and the `email.rejected` webhook.
 

@@ -63,6 +63,8 @@ export interface Storage {
    * reconciles storage against its records instead (maintenance.ts).
    */
   put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
+  /** Atomic creation (used for the shared, disposable daily analytics salt). */
+  createIfAbsent?(key: string, body: Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
   /** The object's body as a stream from the bucket, for responses that should not buffer it (preview links). */
   stream?(key: string): Promise<{ body: ReadableStream<Uint8Array>; contentType: string } | null>;
@@ -98,6 +100,7 @@ export interface Config {
   uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
+  analyticsPush?: { url: string; secret: string };
   /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
@@ -126,6 +129,8 @@ export interface Config {
   operatorSlackWebhookUrl?: string;
   /** DATABASE_DISK_GB in bytes: the Health page shows the database's size against it. Undefined: the size alone. */
   databaseDiskBytes?: number;
+  /** DEPLOY_SHA and DEPLOY_AT: the commit this deploy runs and when it went out (Glass). Null when not set. */
+  deploy?: { sha: string | null; at: string | null };
   /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: its token alone. */
   planetscaleWebhookSecret?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
@@ -203,6 +208,7 @@ export interface Runtime {
   // Dashboard analytics (src/analytics.ts): the Workers ANALYTICS bucket and the ANALYTICS_INGEST limiter. Node uses
   // the installation's bucket and a per-process cap.
   analyticsStorage?: Storage;
+  analyticsPeer?: { ip: string; country?: string; bot?: boolean };
   allowAnalytics?: (peer: string) => Promise<boolean>;
   // The database disk alert (src/disk-alert.ts): the Workers DISK_ALERT limiter, one card a minute per threshold. Node has the per-process count.
   allowDiskAlert?: (key: string) => Promise<boolean>;

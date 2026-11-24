@@ -3,6 +3,8 @@
    Nightmail's terms). The pages themselves are board.css's scene. */
 html:has(.price-page) { scrollbar-gutter: stable; }
 .price-page { --price-header: 58px; display: flex; flex-direction: column; min-height: 100dvh; background: var(--color-surface); color: var(--color-text); }
+/* The scene's <i>s are its bolts, cells and lamp, never words: upright, so no italic face is fetched for them. */
+.price-page i { font-style: normal; }
 .price-header { position: sticky; z-index: 5; top: 0; display: flex; align-items: center; gap: var(--space-24); height: var(--price-header); padding-inline: var(--space-24); border-bottom: 1px solid var(--color-border); background: var(--color-surface); }
 .price-header .wordmark, .price-header .theme-toggle { position: relative; inset: auto; }
 .price-header .theme-toggle { margin-inline-start: auto; }

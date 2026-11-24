@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { aborted, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, takeInterruptedWrite, type RequestScope } from './live'
+import { aborted, asksOnlyIfLikely, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, rememberSession, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, sessionLikely, takeInterruptedWrite, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
@@ -109,9 +109,12 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
   const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
+  // A visitor on a marketing page with no trace of a session here is signed out, without asking (live.ts, sessionLikely).
+  if (!override && asksOnlyIfLikely(window.location) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
   let result: Identity
   try { result = await read() }
   catch (error) {
+    if (!override && error instanceof ApiError && error.status === 401 && error.code === 'AUTH_REQUIRED') rememberSession(false)
     if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
     else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
@@ -126,6 +129,7 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   if (!override) {
     selectAccount(result.id)
     selectWorkspace(result.multiTenant ? result.workspaceId : null)
+    rememberSession(true)
   }
   return result
 }
@@ -170,30 +174,29 @@ function waitlistAddress() {
   const cookie = document.cookie.split(';').map(part => part.trim()).find(part => /^(?:__Host-)?nightmail\.waitlist=/.test(part))
   try { return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1)) || null : null } catch { return null }
 }
-// What the refusal says (api/src/account-login.ts). ?place=held: a place is held for the address, but the sign-in doesn't
-// show the address is the person's (GitHub without it verified, a password, a Google account on another provider's
-// address), so one click emails it a sign-in link. ?place=ready: a place is open, and an emailed link or Google takes it.
-// Otherwise the address waits; someone told they're in who signed in with another address asks for a link to that one.
-// ?link=expired: the sign-in link it followed was used or ran out.
+// What the refusal says (api/src/account-login.ts). ?place=held (a place is held for the address) or ?place=ready (one is
+// open), but the sign-in didn't show the address is the person's (GitHub without it as its verified primary email, a
+// password, a Google account on another provider's address): one click emails it a sign-in link. Otherwise the address
+// waits; someone told they're in who signed in with another address asks for a link to that one. ?link=expired: the
+// sign-in link it followed was used or ran out.
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
-  const place = search.get('place'), held = place === 'held' && email !== null, expired = search.get('link') === 'expired'
+  const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
   const who = email ? <bdi data-own-address="">{email}</bdi> : null
-  return <SignedOutPage title={`${productName} isn’t open to the public yet`}>
+  return <SignedOutPage title={ready ? `There’s a place for you in ${productName}` : `${productName} isn’t open to the public yet`}>
     {expired ? <Alert tone="info">That sign-in link was already used or has expired. Ask for a new one below.</Alert> : null}
-    {held ? <p>A place is held for {who}, but this sign-in doesn’t show the address is yours. Get a sign-in link sent to it.</p>
-      : place === 'ready' ? <p>There’s a place for {who ?? 'you'}: sign in with an emailed link or Google to take it.</p>
+    {ready ? <p>This sign-in didn’t confirm {who} is yours. GitHub counts only a verified primary email. Get a sign-in link sent to it to take your place.</p>
       : <p>We’ll email {who ?? 'you'} when it opens. Got an email saying you’re in? Sign in with the address you joined the waitlist with, or get a sign-in link sent to it.</p>}
-    {place !== 'ready' || expired ? <SignInLinkForm to={held ? email : null} /> : null}
+    <SignInLinkForm to={ready ? email : null} />
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
-    <Button variant={held ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
+    <Button variant={ready ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
   </SignedOutPage>
 }
-// A sign-in link to an address a raise let in (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
-// place is held for it, in one click, else the address typed. The answer never says whether a place is held. Its words
-// replace the hint in one slot sized for the longest, so asking shifts nothing.
-const linkLines = { idle: 'The link works once, for 30 minutes.', sent: 'If a place is held for that address, a link is on its way.', failed: 'Couldn’t ask for a link. Try again in a few minutes.' }
+// A sign-in link to an address with a place (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
+// place is held for it or open, in one click, else the address typed. The answer never says whether there is a place.
+// Its words replace the hint in one slot sized for the longest, so asking shifts nothing.
+const linkLines = { idle: 'The link works once, for 30 minutes.', sent: 'If there’s a place for that address, a link is on its way.', failed: 'Couldn’t ask for a link. Try again in a few minutes.' }
 function SignInLinkForm({ to }: { to: string | null }) {
   const [typed, setTyped] = useState(''), [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
   async function send(event: FormEvent) {
@@ -490,8 +493,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' || authResult === 'waitlist' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
     : invitation ? <Alert tone="info" title="You have a workspace invitation">Sign in with an emailed link to the invited address, or its Google account. You join only after you confirm.</Alert>
-    // A sign-in link (api/src/signups.ts): the sign-in from this page takes the place held for the address it went to.
-    : signInLink && <Alert tone="info" title="A place is held for you">Sign in with any account to take it. The link works once.</Alert>
+    // A sign-in link (api/src/signups.ts): the sign-in from this page takes the place for the address it went to.
+    : signInLink && <Alert tone="info" title="There’s a place for you">Sign in with any account to take it. The link works once.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
