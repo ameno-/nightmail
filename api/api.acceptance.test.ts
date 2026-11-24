@@ -11957,6 +11957,53 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       assert.ok(ok(await check({emailId:await email(wid)},scoped)).score>0);error(await check({emailId:await email(foreign)}),404,'NOT_FOUND');
       const campaign=async(workspace:string)=>{const id=unique('checked-campaign');await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft) VALUES($1,$2,$3)`,[id,workspace,{from:'newsletter@shop.example.com',fromName:'Shop',region:REGION,subject:'Updates',html:'<p>Updates from the shop.</p>',audience:{},attachments:[],defaults:{},tracking:false}]);return id;};
       const c=ok(await check({campaignId:await campaign(wid)}));assert.ok(!c.findings.some((f:Json)=>f.ruleId.startsWith('unsubscribe-')));error(await check({campaignId:await campaign(foreign)}),404,'NOT_FOUND');
+
+      await t.test('campaign review-display keeps the saved audience and public advisory independent', async () => {
+        const list = ok(await local('POST', '/v1/lists', { name: unique('review-display') }), 201);
+        const ids = ['eligible', 'opted-out', 'unknown', 'suppressed'].map(name => unique(name));
+        await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,suppressed)
+          SELECT id,$1,id||'@example.test',consent,suppressed
+          FROM unnest($2::text[],$3::text[],$4::boolean[]) AS fixture(id,consent,suppressed)`,
+        [wid, ids, ['subscribed', 'unsubscribed', 'unknown', 'subscribed'], [false, false, false, true]]);
+        ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: ids }));
+        const audience = { listId: list.id }, counts = { matched: 4, eligible: 1, suppressed: 1, unsubscribed: 2 };
+        const create = async (fields: Json) => ok(await local('POST', '/v1/campaigns', {
+          name: unique('review-display'), from: 'newsletter@shop.example.com', subject: 'Shop review', region: REGION, ...fields,
+        }), 201);
+        const display = (draft: Json, check = true) => `/v1/campaigns/${draft.id}/review-display?revision=${draft.revision}&check=${check}`;
+        const advisory = async (draft: Json) => ok(await local('POST', path, { campaignId: draft.id }));
+        const content = { html: '<p>Updates from the shop.</p>' };
+
+        const draft = await create({ audience, ...content });
+        const base = `/v1/campaigns/${draft.id}`;
+        assert.deepEqual(ok(await local('GET', `${base}/audience`)), counts);
+        assert.deepEqual(ok(await local('GET', display(draft))), { audience: { data: counts }, check: { data: await advisory(draft) } });
+        assert.deepEqual(ok(await local('GET', display(draft, false))), { audience: { data: counts }, check: null });
+        error(await request('GET', display(draft), read), 403, 'DASHBOARD_AUTH_REQUIRED');
+        error(await request('GET', display(draft)), 401, 'AUTH_REQUIRED');
+        const newer = ok(await local('PATCH', base, { revision: draft.revision, draft: { ...draft.draft, subject: 'New saved subject' } }));
+        assert.ok(newer.revision > draft.revision);
+        error(await local('GET', display(draft)), 409, 'STALE_CAMPAIGN_REVISION');
+
+        // Missing selection is an audience error, but a complete message can still receive advice.
+        const unselected = await create(content);
+        const noAudience = ok(await local('GET', display(unselected)));
+        assert.deepEqual([noAudience.audience.status, noAudience.audience.error.code, noAudience.audience.error.field],
+          [422, 'CAMPAIGN_INCOMPLETE', 'audience.listId']);
+        assert.deepEqual(noAudience.check, { data: await advisory(unselected) });
+        // Missing content is a check error, not a failed audience read or a silent successful advisory.
+        const incomplete = await create({ audience });
+        const noCheck = ok(await local('GET', display(incomplete)));
+        assert.deepEqual(noCheck.audience, { data: counts });
+        assert.deepEqual([noCheck.check.status, noCheck.check.error.code, noCheck.check.error.field],
+          [422, 'CAMPAIGN_INCOMPLETE', 'campaignId']);
+        assert.deepEqual(ok(await local('GET', display(incomplete, false))), { audience: { data: counts }, check: null });
+        for (const saved of [newer, unselected, incomplete]) {
+          const actual = ok(await local('GET', `/v1/campaigns/${saved.id}`));
+          assert.deepEqual([actual.revision, actual.state], [saved.revision, 'draft']);
+        }
+      });
+
       // Marketing mail gets its unsubscribe headers, link and postal address from the workspace when it is sent: a campaign
       // and a sent marketing email are told only that the workspace has no address yet, and where to add it.
       const marketing=unique('checked-marketing');await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated) VALUES ($1,$2,$3,'fixture','orders@shop.example.com','[]','[]','[]',$4,$5,'delivered',true)`,[marketing,wid,REGION,good.subject,{...good,kind:'marketing',testCampaignId:null,attachments:[]}]);
