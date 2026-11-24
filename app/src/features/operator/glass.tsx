@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ErrorState, PageHeader, StatusBadge, type Tone } from '../../components/ui'
 import { useSession } from '../../data/context'
+import { ApiError } from '../../data/types'
 import { usd } from '../../data/billing'
 import { operatorApi, type Glass, type GlassCount, type GlassGrade } from '../../data/operator'
 import { ago, number, percent, time } from '../../lib/format'
@@ -91,7 +92,9 @@ export function GlassPage() {
 }
 function GlassView() {
   const query = useQuery({ queryKey: ['operator', 'glass'], queryFn: ({ signal }) => operatorApi.glass(signal), staleTime: 10_000,
-    refetchInterval: current => current.state.status === 'error' ? false : 30_000, refetchIntervalInBackground: false })
+    // A failed refresh (the app retries nothing) keeps the last figures and tries again in 30 s; only a refusal stops it.
+    refetchInterval: current => current.state.error instanceof ApiError && (current.state.error.status === 401 || current.state.error.status === 403) ? false : 30_000,
+    refetchIntervalInBackground: false })
   const glass = query.data
   return <>
     <PageHeader title="Glass" actions={<GlassAsOf at={glass && `${time(glass.generatedAt)} UTC`} />} />
