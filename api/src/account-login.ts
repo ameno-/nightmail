@@ -128,13 +128,17 @@ export async function beginAccountLogin(runtime: Runtime, returnUrl: URL, peer: 
 // Every verified sign-in, refused or admitted: one row per subject for the operator (scripts/list-signin-attempts.ts),
 // who may then bind that subject explicitly. The address and name are shown, never trusted.
 async function recordAttempt(runtime: Runtime, claims: oidc.IDToken, upstream: ProviderIdentity | null, address: string | null, outcome: string,
-  observed?: { email: string | null; network?: RequestNetwork }) {
+  observed?: { email: string | null; network?: RequestNetwork }, refusal?: Refusal) {
   // Hosted, while abuse monitoring is on (src/abuse.ts): what this sign-in shows, hashed here, rides the row this log
   // writes anyway. No other statement, connection or wait; the hourly job reads the log later. Off, the column is null.
   const noted = observed ? signInSignals(runtime.config, { outcome, provider: upstream, ...observed }) : null;
   const acr = typeof claims.acr === 'string' ? claims.acr.slice(0, 200) : null, name = typeof claims.name === 'string' ? claims.name.slice(0, 200) : null;
   if (outcome.startsWith('signed_in')) log('info', { code: 'SIGN_IN', outcome, subject: claims.sub, acr });
-  else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr });
+  // A refusal says which place it could have taken (held, open or none) and, for GitHub, what GitHub said of the address:
+  // none, unverified, or verified and the same as the account's (the waitlist's) address or another. Never the address.
+  else log('warn', { code: 'SIGN_IN_NOT_APPROVED', reason: outcome, subject: claims.sub, acr, place: refusal?.place ?? 'none',
+    github: upstream?.provider !== 'github' ? undefined : !upstream.email ? 'none' : !upstream.emailVerified ? 'unverified'
+      : !observed?.email ? 'verified' : upstream.email.toLowerCase() === observed.email.toLowerCase() ? 'same' : 'other' });
   await runtime.db.execute(sql`INSERT INTO nightmail_signin_attempts(issuer,subject,acr,provider,provider_hd,email,name,outcome,observed)
     VALUES(${claims.iss},${claims.sub},${acr},${upstream?.provider ?? null},${upstream?.hd ?? null},${address},${name},${outcome},${noted ? JSON.stringify(noted) : null}::jsonb)
     ON CONFLICT(issuer,subject) DO UPDATE SET acr=excluded.acr,provider=excluded.provider,provider_hd=excluded.provider_hd,email=excluded.email,
@@ -156,13 +160,16 @@ async function retryDPoPNonce<T>(attempt: () => Promise<T>) {
 }
 
 class AccountLimit extends Error {}
+/** The callback names no sign-in this browser started, or one already finished: a browser that asks for the same callback
+ * twice gets this the second time. */
+class FlowGone extends Error {}
 export async function finishAccountLogin(runtime: Runtime, url: URL, binding: string, jar: Jar = { slots: [], selected: null, preferred: null }, onFlow?: (returnUrl: string) => void, network?: RequestNetwork) {
   const state = url.searchParams.get('state');
-  if (!state || state.length > 256 || !binding || binding.length > 256) throw loginFailed();
+  if (!state || state.length > 256 || !binding || binding.length > 256) throw new FlowGone();
   const {rows:[flow]} = await runtime.db.execute<{nonce:string;verifier:string;return_url:string}>(sql`
     DELETE FROM nightmail_login_flows WHERE state_hash=${await digest(state)} AND cookie_hash=${await digest(binding)}
       AND issuer=${runtime.config.accountIssuer} AND client_id=${runtime.config.accountClient?.id} AND expires_at>now() RETURNING nonce,verifier,return_url`);
-  if (!flow) throw loginFailed();
+  if (!flow) throw new FlowGone();
   onFlow?.(flow.return_url);
   const { metadata, client, authentication, callback, options } = await provider(runtime);
   const params = oidc.validateAuthResponse(metadata, client, url, state);
@@ -273,7 +280,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     });
   } catch (error) {
     if (!(error instanceof NotAdmitted)) throw error;
-    await recordAttempt(runtime, claims, upstream, address, error.reason, { email: emailAtLogin, network });
+    await recordAttempt(runtime, claims, upstream, address, error.reason, { email: emailAtLogin, network }, error.refusal);
     // Hosted, and no invitation: the verified address joins the waitlist, and the refusal says we'll email it at launch.
     // Without a verified address, or when the write fails, nothing is promised.
     if (error.reason === 'not_approved' && runtime.config.multiTenant && emailAtLogin) {
@@ -471,14 +478,18 @@ export async function accountBrowserRoute(c: Ctx) {
       }
       return c.redirect(target.href,303);
     } catch (error) {
-      const issue = error instanceof AccountLimit ? {reason:'account_limit'} : error instanceof Waitlisted ? {reason:'waitlist'} : loginIssue(error, runtime.config.accountRequiredAcr);
+      // The same callback again (production saw one 120 ms after a refusal): the sign-in is spent, but the waitlist cookie
+      // that refusal set says how it ended, so the browser lands on the waitlist screen and its sign-in link offer again,
+      // not on "Sign-in didn't finish".
+      const repeat = error instanceof FlowGone && readCookie(runtime,c.req.raw.headers,'waitlist') !== null;
+      const issue = error instanceof AccountLimit ? {reason:'account_limit'} : error instanceof Waitlisted || repeat ? {reason:'waitlist'} : loginIssue(error, runtime.config.accountRequiredAcr);
       // The waitlist screen names the address it joined: readable by the page, for as long as a sign-in cookie lives.
       if (error instanceof Waitlisted) setCookie(c,cookieName(runtime,'waitlist'),error.email,{...cookieOptions(runtime,600),httpOnly:false});
       // What failed, never a token or a claim: the error class, the issuer's error code and the library's message.
       const failure = error as { name?: string; error?: unknown; status?: unknown; message?: unknown };
-      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof ApiError ? error.code : 'error'), errorType: failure?.name,
+      log('warn', { code: 'SIGN_IN_DENIED', reason: issue?.reason ?? (error instanceof FlowGone ? 'flow_gone' : error instanceof ApiError ? error.code : 'error'), repeat: repeat || undefined, errorType: failure?.name,
         issuerError: typeof failure?.error === 'string' ? failure.error.slice(0, 80) : undefined, issuerStatus: typeof failure?.status === 'number' ? failure.status : undefined,
-        detail: error instanceof ApiError || error instanceof AccountLimit || error instanceof Waitlisted ? undefined : String(failure?.message ?? '').slice(0, 200) });
+        detail: error instanceof ApiError || error instanceof AccountLimit || error instanceof Waitlisted || error instanceof FlowGone ? undefined : String(failure?.message ?? '').slice(0, 200) });
       // An account added in a popup reports back to the page that opened it; every other failure lands on the homepage,
       // where a visitor's sign-in starts, with what went wrong.
       const back = started && new URL(started).pathname === POPUP_PATH ? new URL(started) : new URL(`${origin}/`);
@@ -491,12 +502,13 @@ export async function accountBrowserRoute(c: Ctx) {
     }
   }
   if (path === '/api/auth/sign-in/link' && c.req.method === 'POST') {
-    // The waitlist screen asks for a sign-in link to an address a raise let in (signups.ts sendSigninLink). The answer is
-    // the same whether one is sent or not, so it says nothing of an address; each request takes one of the browser's
-    // pending sign-ins, as starting a sign-in does.
+    // The waitlist screen asks for a sign-in link to an address with a place (signups.ts sendSigninLink). The answer is
+    // the same whether one is sent or not, so it says nothing of an address. Requests have their own allowance per
+    // browser, as many as pending sign-ins: someone who retried signing in until that ran out (production saw it) can
+    // still ask for a link.
     if (!runtime.config.multiTenant) throw new ApiError(404,'NOT_FOUND','Authentication endpoint was not found.');
     const { email } = await body(z.object({ email: verifiedEmail }).strict());
-    const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(c.req.header(clientIpHeader) ?? 'unknown')}) AS ok`);
+    const slots = await runtime.db.execute(sql`SELECT reserve_auth_state(${await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`)}) AS ok`);
     if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
     // Making a link writes more than finding no held place, so the answer waits until a fixed time after the request, and
     // a failure is logged rather than answered: neither its timing nor its status says whether a place is held.
