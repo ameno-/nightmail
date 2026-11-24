@@ -32371,7 +32371,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const failed = (imports: number) => ({ ...quiet(), failed: [{ type: 'mailbox.recoverStaging', error: 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', failed: 1_600 }, { type: 'mailbox.recoverStaging', error: 'JOB_LEASE_EXHAUSTED', failed: 39 },
       { type: 'operation.webhook', error: 'WEBHOOK_HTTP_500', failed: 4_000 }, { type: 'mailbox.reconcile', error: 'JOB_INTERNAL_ERROR', failed: 24 }, { type: 'campaign.run', error: 'JOB_LEASE_EXHAUSTED', failed: 1 }, { type: 'audience.import', error: 'IMPORT_FAILED', failed: imports }] });
     const piles = [`jobs-failed:mailbox.recoverStaging warning 1639: ${c('mailbox.recoverStaging')}: 1,639, mostly ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}.`, `jobs-failed:campaign.run critical 1: ${c('campaign.run')}: 1, mostly ${c('JOB_LEASE_EXHAUSTED')}.`];
-    assert.deepEqual([lines(failed(2)), lines(failed(8))], [piles, [...piles, `jobs-failed:audience.import warning 8: ${c('audience.import')}: 8, 6 in the last 30 min, mostly ${c('IMPORT_FAILED')}.`]]);
+    assert.deepEqual([lines(failed(2)), lines(failed(8))], [piles.toReversed(), [...piles.toReversed(), `jobs-failed:audience.import warning 8: ${c('audience.import')}: 8, 6 in the last 30 min, mostly ${c('IMPORT_FAILED')}.`]]);
 
     // 4. A first-party campaign of 1.8M releasing 32 a second on an account that allows 160, because the planner reads 40.
     // What it releases is measured from its cursor and held against the account's rate and the workspace's share, never
@@ -32384,8 +32384,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       found = lines({ ...quiet(), campaigns: [campaign('cmp_quartered', { workspaceId: 'ws_first_party', share: 'exempt', expanded: 32 * 60 * minute }), campaign('cmp_stalled', { workspaceId: 'ws_stalled', expanded: 1_800 }),
         campaign('cmp_paced', { workspaceId: 'ws_paced', expanded: 60 * minute, paced: true }), campaign('cmp_healthy', { expanded: 38 * 60 * minute, total: 400_000, accepted: 37 * 60 * minute })] });
       if (minute === 4) assert.deepEqual(found, [], 'Four minutes of samples are too few to say how long it takes.');
-      if (minute === 5) assert.deepEqual(found, [`campaign-long:cmp_quartered warning 55950: ${c('cmp_quartered')}: 15.5 h left at 32/s, ${rates}. 1,790,400 of 1,800,000 left.`,
-        `campaign-slow:cmp_stalled critical 0: ${c('cmp_stalled')}: nothing released for 5 min, 0% of the account’s 160/s (entitled to 40/s). 1,798,200 left.`]);
+      if (minute === 5) assert.deepEqual(found, [`campaign-slow:cmp_stalled critical 0: ${c('cmp_stalled')}: nothing released for 5 min, 0% of the account’s 160/s (entitled to 40/s). 1,798,200 left.`,
+        `campaign-long:cmp_quartered warning 55950: ${c('cmp_quartered')}: 15.5 h left at 32/s, ${rates}. 1,790,400 of 1,800,000 left.`], 'Critical first.');
     }
     assert.deepEqual(found.filter(line => line.startsWith('campaign-slow:cmp_quartered')), [`campaign-slow:cmp_quartered warning 32: ${c('cmp_quartered')}: 32/s for 10 min, ${rates}. 1,780,800 left.`]);
     const healthy = tick({ ...quiet(), campaigns: [campaign('cmp_healthy', { expanded: 38 * 60 * 11, total: 400_000, accepted: 37 * 60 * 11 })] }).rollup.campaigns![0]!;
@@ -32424,12 +32424,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         counter('code', 'DATABASE_UNAVAILABLE', { n: 40, n5: 40 }), counter('sqlstate', '25006', { n: 40, n5: 40 }), counter('sqlstate', '57014', { n: 4, n5: 4 }), counter('sqlstate', '23505', { n: 900, n5: 300 }),
         counter('error', 'DISPATCHER_RUN_FAILED', { n: 3, n5: 1 }), counter('error', 'MAILBOX_STAGING_ENVELOPE_UNKNOWN', { n: 9, n5: 6 }), counter('error', 'QUEUE_BACKLOG_ALERT', { n: 15, n5: 5 }), counter('error', 'BILLING_DRIFT', { n: 4, n5: 4 }),
         counter('error', 'MAILBOX_STAGING_UNDELIVERED', { n: 1, n5: 1 })] }), [
+      `campaign-bounces:cmp_bouncing critical 0.06: ${c('cmp_bouncing')}: 6% bounced and 2 complaints on 12,000 settled.`, `database-errors:25006 critical 40: read-only (${c('25006')}): 40 in 5 min.`,
+      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_UNDELIVERED critical 1: ${c('MAILBOX_STAGING_UNDELIVERED')}: 1 in 5 min.`,
       `campaign-preparing:cmp_frozen warning 380: ${c('cmp_frozen')}: 6 min, 1,200,000 of 1,800,000 ready.`, `campaign-paused:cmp_quarantined warning 1799500: ${c('cmp_quarantined')} of ${c('ws_fixture')}: ${c('LIST_QUALITY')}, quarantined. 1,799,500 left.`,
-      `campaign-bounces:cmp_bouncing critical 0.06: ${c('cmp_bouncing')}: 6% bounced and 2 complaints on 12,000 settled.`,
       `slow-requests:POST:/v1/campaigns/:id/send warning 45000: ${c('POST /v1/campaigns/:id/send')}: slowest 45 s, p95 45 s over 3 in 15 min.`, `request-storm:GET:/v1/campaigns/:id/stats warning 3000: ${c('GET /v1/campaigns/:id/stats')}: 3,000 a minute for 3 minutes.`,
-      `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `database-errors:25006 critical 40: read-only (${c('25006')}): 40 in 5 min.`,
-      `dispatcher-failing critical 3: 3 failed runs in 15 min, mostly ${c('DISPATCHER_RUN_FAILED')}.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`,
-      `errors:MAILBOX_STAGING_UNDELIVERED critical 1: ${c('MAILBOX_STAGING_UNDELIVERED')}: 1 in 5 min.`],
+      `request-storm:workspace:ws_fixture warning 3010: workspace ${c('ws_fixture')}: 3,010 reads a minute for 3 minutes.`, `errors:MAILBOX_STAGING_ENVELOPE_UNKNOWN warning 6: ${c('MAILBOX_STAGING_ENVELOPE_UNKNOWN')}: 6 in 5 min.`],
       'Sending mail at 100 a second is not a storm, 40 errors in 45,000 requests are not an alert, unique violations are not database errors, a line every minute already says is not counted, and mail whose arrival notice was lost (#625) alerts at the first line.');
     // The same code as a failed job's error: the first job, critical.
     memory = emptyMemory();
@@ -32441,7 +32440,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // The database: connections near the limit, slow queries and lock waits for two ticks; a transaction open ten minutes; the disk three quarters full.
     const crowded = { ...quiet(), database: { connections: 85, maxConnections: 100, longTransactions: 2, oldestTransactionSeconds: 660, slowQueries: 4, lockWaits: 12, sizeBytes: 120 * GB } };
     const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk critical 0.8: 80% of 150 GB.'];
-    assert.deepEqual([lines(crowded), lines(crowded)], [always, ['database-connections critical 85: 85 of 100.', always[0], 'database-slow-queries warning 4: 4 running over 30 s.', 'database-lock-waits warning 12: 12 sessions waiting on a lock.', always[1]]]);
+    assert.deepEqual([lines(crowded), lines(crowded)], [always.toReversed(), ['database-connections critical 85: 85 of 100.', always[1], always[0], 'database-slow-queries warning 4: 4 running over 30 s.', 'database-lock-waits warning 12: 12 sessions waiting on a lock.']]);
   });
 
   test('MX health: the tick posts one card when an alert opens, tries a refused card again, reminds, posts a cleared card with the same key and forgets; each card ends with a line a program reads; the Health route reads what the tick wrote, for an operator or a self-hosted dashboard only; without a webhook nothing is posted', async t => {

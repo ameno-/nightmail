@@ -293,6 +293,8 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   // A streak whose probe failed this tick is kept as it was, so one failed probe does not start every count over.
   for (const [key, n] of Object.entries(memory.streaks)) if (!(key in streaks) && blind.has(sectionOf(key))) streaks[key] = n;
+  // Critical before warning, each in the order it was measured: what a tick posts first, and what a reader sees first.
+  findings.sort((a, b) => Number(b.severity === 'critical') - Number(a.severity === 'critical'));
   return { rollup: { queues, jobs, campaigns, feedbackLagSeconds, routes, errors: errorCodes, requests, database, memory: { streaks, campaigns: samples, failed: failedRing } }, findings, blind };
 }
 
