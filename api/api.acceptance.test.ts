@@ -33685,12 +33685,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const futView = ok(await local('GET', `/v1/campaigns/${campFuture.id}`));
       assert.deepEqual([futView.state, futView.delivery.expanded, futView.delivery.pauseReason?.code], ['paused', 0, 'CAMPAIGN_HASH_FORMAT_UNSUPPORTED']);
 
-      // 3. Even if email rows were already queued referencing an s2: hash, dispatch defers them (never rejects/burns) and pauses the campaign loudly!
+      // 3. Even if email rows were already queued by a newer release referencing an s2: hash, dispatch defers them (never rejects/burns) and pauses the campaign loudly!
       const campQueued = ok(await local('POST', '/v1/campaigns', { name: unique('s2-queued'), from: 'sender@example.com', subject: 'FutureQ', html: '<p>FutureQ</p>', audience: { listId: list.id } }), 201);
       ok(await local('POST', `/v1/campaigns/${campQueued.id}/send`, { revision: campQueued.revision }), 202);
-      await run('campaign.run');
       const qRevId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id=$1', [campQueued.id])).rows[0].review_id as string;
-      await db.query("UPDATE sending_review_recipients SET content_hash=$1 WHERE review_id=$2", ['s2:' + 'c'.repeat(64), qRevId]);
+      await db.query("UPDATE sending_review_recipients SET content_hash=$1, snapshot_bytes=1024 WHERE review_id=$2", ['s2:' + 'c'.repeat(64), qRevId]);
+      await db.query("UPDATE sending_campaigns SET state='sending', prepared=total, expanded=total WHERE id=$1", [campQueued.id]);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
+        SELECT 'em_s2_'||r.ordinal, $1, c.actor_key_id, $2, c.id, c.review_id, r.ordinal, 'sender@example.com', jsonb_build_array(r.recipient->>'email'), '[]', '[]', 'FutureQ', '{"kind":"marketing","deferredCampaign":true}'::jsonb, true
+        FROM sending_campaigns c JOIN sending_review_recipients r ON r.review_id=c.review_id WHERE c.id=$3`, [ws, REGION, campQueued.id]);
       await run('email.dispatch');
       const qView = ok(await local('GET', `/v1/campaigns/${campQueued.id}`));
       assert.equal(qView.state, 'paused', 'Campaign pauses instead of ending done');
