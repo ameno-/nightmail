@@ -12,7 +12,7 @@ import './presence.css'
 // someone joins or leaves; alone, it is a hibernated connection and a ping every 30 s the runtime answers for it. People
 // are known by a key the room gives them (never a user ID), and an agent's name only to those who see API keys.
 type Person = { kind: 'person'; slot: number; id: string; name: string; view: 'write' | 'review' }
-type Agent = { kind: 'agent'; id: string; name: string; at: number; ago?: number }
+type Agent = { kind: 'agent'; id: string; name: string; at: number; ago?: number; saved?: number }
 export type Present = { id: string; kind: 'person' | 'agent'; name: string; view?: Person['view']; color: number }
 const AGENT_MS = 120_000, PING_MS = 30_000, READMIT = 4000, AGENT = 'An agent'
 // Reconnecting: exponential, with jitter so a deploy doesn't bring every tab back in the same instant, at most 30 s apart,
@@ -23,8 +23,17 @@ const LEAVE_MS = 1500
 /** A person's colour, the same in every browser, for their face, pointer and highlights. Flat, and white text reads on each. */
 export const PRESENCE_COLORS = ['#d13f45', '#1f6fd1', '#23855a', '#8a4fc4', '#c43d8e', '#c25a12', '#0f7d8a', '#5d5fc9']
 export const presenceColor = (id: string) => { let hash = 0; for (const char of id) hash = (hash * 31 + char.charCodeAt(0)) >>> 0; return hash % PRESENCE_COLORS.length }
-/** The room as presence-overlay.tsx uses it: the people by slot, and binary frames each way. */
-export type Room = { people: ReadonlyMap<number, Present & { slot: number }>; send: (frame: Uint8Array<ArrayBuffer>) => void; listen: (receive: (frame: Uint8Array) => void) => () => void; joins: number }
+/** Someone saved the draft (a person through their tab, an agent through the API), at this revision. */
+export type Save = { revision: number; by: { kind: 'person' | 'agent'; id: string; name: string } }
+/** The room: the people by slot (self: this person's key, for their other tabs) and binary frames each way
+ *  (presence-overlay.tsx), and saves. announce tells everyone
+ *  else (your other tabs too) that this page saved, so their pages read it now instead of at their next poll. */
+export type Room = { people: ReadonlyMap<number, Present & { slot: number }>; self: string | null; send: (frame: Uint8Array<ArrayBuffer>) => void; listen: (receive: (frame: Uint8Array) => void) => () => void; joins: number; announce: (revision: number) => void; onSave: (receive: (save: Save) => void) => () => void }
+
+// The open rooms by campaign, so whatever saves a campaign on this page (Write's autosave, Review's list) can say so.
+const open = new Map<string, (revision: number) => void>()
+/** Tell everyone else in the campaign's room that this page just saved it (no-op where no room is open). */
+export const announceSave = (campaignId: string, revision: number | undefined) => { if (revision) open.get(campaignId)?.(revision) }
 
 export function useCampaignPresence(campaignId: string | null | undefined, view: Person['view']): { present: Present[]; room: Room } {
   const identity = useSession()?.identity
@@ -36,6 +45,19 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
   const [agents, setAgents] = useState<ReadonlyMap<string, Agent>>(new Map())
   const [now, setNow] = useState(() => Date.now())
   const socket = useRef<WebSocket | null>(null), listeners = useRef(new Set<(frame: Uint8Array) => void>()), [joins, joined] = useReducer((n: number) => n + 1, 0)
+  const saves = useRef(new Set<(save: Save) => void>())
+  // The same functions for the page's whole life, so effects that use them don't start again on every change.
+  const stable = useRef({
+    listen: (receive: (frame: Uint8Array) => void) => { listeners.current.add(receive); return () => { listeners.current.delete(receive) } },
+    onSave: (receive: (save: Save) => void) => { saves.current.add(receive); return () => { saves.current.delete(receive) } },
+    // [5][revision: two big-endian u16], only when anyone else, or another tab of yours, is here.
+    announce: (revision: number) => {
+      const ws = socket.current
+      if (ws?.readyState !== WebSocket.OPEN || !people.current.size) return
+      ws.send(new Uint8Array([5, (revision >>> 24) & 255, (revision >>> 16) & 255, (revision >>> 8) & 255, revision & 255]))
+    },
+  })
+  const saved = (save: Save) => { for (const receive of saves.current) receive(save) }
   useEffect(() => {
     if (!enabled || !campaignId) return
     let stopped = false, failures = 0, resting = false
@@ -46,7 +68,12 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
       ws.binaryType = 'arraybuffer'
       ws.onopen = () => { failures = 0; resting = false; ping = setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send('ping') }, PING_MS) }
       ws.onmessage = ({ data }) => {
-        if (data instanceof ArrayBuffer) { const frame = new Uint8Array(data); for (const receive of listeners.current) receive(frame); return }
+        if (data instanceof ArrayBuffer) {
+          const frame = new Uint8Array(data), person = people.current.get(frame[0]!)
+          if (frame[1] === 5 && frame.length >= 6 && person) saved({ revision: ((frame[2]! << 24) | (frame[3]! << 16) | (frame[4]! << 8) | frame[5]!) >>> 0, by: { kind: 'person', id: person.id, name: person.name } })
+          else for (const receive of listeners.current) receive(frame)
+          return
+        }
         if (typeof data !== 'string' || data === 'pong') return
         let message: { type?: string; self?: string; peers?: (Person | Agent)[]; peer?: Person | Agent; slot?: number }
         try { message = JSON.parse(data) } catch { return }
@@ -56,7 +83,10 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
           people.current = new Map((message.peers ?? []).filter((item): item is Person => item.kind === 'person').map(item => [item.slot, item])); changed(); joined()
           setAgents(new Map((message.peers ?? []).filter((item): item is Agent => item.kind === 'agent').map(item => [item.id, { ...item, at: Date.now() - Math.max(0, item.ago ?? 0) }])))
         } else if (message.type === 'join' && peer?.kind === 'person') { people.current.set(peer.slot, peer); changed(); joined() }
-        else if (message.type === 'agent' && peer?.kind === 'agent') { setAgents(map => new Map(map).set(peer.id, { ...peer, at: Date.now() })); setNow(Date.now()) }
+        else if (message.type === 'agent' && peer?.kind === 'agent') {
+          setAgents(map => new Map(map).set(peer.id, { ...peer, at: Date.now() })); setNow(Date.now())
+          if (typeof peer.saved === 'number') saved({ revision: peer.saved, by: { kind: 'agent', id: peer.id, name: peer.name } })
+        }
         else if (message.type === 'leave' && typeof message.slot === 'number') {
           const slot = message.slot, gone = people.current.get(slot)
           const timer = setTimeout(() => { leaving.delete(timer); if (gone && people.current.get(slot) === gone) { people.current.delete(slot); changed() } }, LEAVE_MS)
@@ -77,7 +107,9 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
     const wake = () => { if (resting && document.visibilityState === 'visible') { resting = false; failures = 0; connect() } }
     document.addEventListener('visibilitychange', wake); window.addEventListener('online', wake); window.addEventListener('focus', wake)
     connect()
+    open.set(campaignId, stable.current.announce)
     return () => {
+      if (open.get(campaignId) === stable.current.announce) open.delete(campaignId)
       stopped = true; clearTimeout(retry); clearInterval(ping); leaving.forEach(clearTimeout)
       document.removeEventListener('visibilitychange', wake); window.removeEventListener('online', wake); window.removeEventListener('focus', wake)
       socket.current?.close(1000); socket.current = null
@@ -107,7 +139,7 @@ export function useCampaignPresence(campaignId: string | null | undefined, view:
     for (const key of here) if (!arrival.current.has(key)) arrival.current.set(key, next.current++)
     // Other people's tabs by slot (not your own other tabs), for the pointers and highlights.
     const slots = new Map([...people.current.values()].filter(person => person.id !== self).map(person => [person.slot, { id: person.id, kind: 'person' as const, name: person.name, view: person.view, color: presenceColor(person.id), slot: person.slot }]))
-    const room: Room = { people: slots, joins, send: frame => { const ws = socket.current; if (ws?.readyState === WebSocket.OPEN && slots.size) ws.send(frame) }, listen: receive => { listeners.current.add(receive); return () => { listeners.current.delete(receive) } } }
+    const room: Room = { people: slots, self, joins, send: frame => { const ws = socket.current; if (ws?.readyState === WebSocket.OPEN && slots.size) ws.send(frame) }, ...stable.current }
     return { present: all.sort((a, b) => arrival.current.get(a.kind + a.id)! - arrival.current.get(b.kind + b.id)!), room }
   }, [version, agents, now, self, joins])
 }

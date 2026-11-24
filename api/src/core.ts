@@ -174,9 +174,9 @@ export interface Runtime {
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean) => Promise<void>;
   /** Campaign rooms (src/campaign-room.ts): who has a campaign open in the dashboard. Cloudflare only: the Node server has
    *  none, and its dashboard shows no presence. connect answers the WebSocket upgrade. visit reports an agent's read or
-   *  save in the background, never delaying or failing the request: nothing when nobody is in the room, and its name
-   *  (lookup, given a runtime of its own) is looked up only when someone is. */
-  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>) => void };
+   *  save (saved: the revision it made) in the background, never delaying or failing the request: nothing when nobody
+   *  is in the room, and its name (lookup, given a runtime of its own) is looked up only when someone is. */
+  campaignRooms?: { connect: (name: string, person: import('./campaign-room-protocol.js').RoomPerson) => Promise<Response>; visit: (name: string, credential: string, lookup: (runtime: Runtime) => Promise<string | null>, saved?: number) => void };
   /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;

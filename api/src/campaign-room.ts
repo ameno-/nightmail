@@ -17,7 +17,8 @@ import { AGENT_PRESENCE_MS, ROOM_PEER_HEADER, ROOM_READMIT, type RoomAgent, type
 //                                              (an agent's ago: milliseconds since it was seen, so no clocks compare)
 //   { v: 1, type: 'join', peer }          a person opened the campaign (peer: their key, name, view and slot)
 //   { v: 1, type: 'leave', slot }         that tab closed or went away
-//   { v: 1, type: 'agent', peer }         an agent read or saved the campaign
+//   { v: 1, type: 'agent', peer }         an agent read or saved the campaign (saved: the revision it saved, when it
+//                                         saved)
 // What a person sees of others: names, never user IDs (keys are per room), and an agent's name only if they may see
 // API keys and MCP clients in Settings (owners and admins); everyone else sees "An agent".
 // Browser → room: 'ping' about every 30 s, answered 'pong' by the runtime without waking the room, and while anyone else
@@ -26,6 +27,7 @@ import { AGENT_PRESENCE_MS, ROOM_PEER_HEADER, ROOM_READMIT, type RoomAgent, type
 //   1 pointer at x, y: x in 1/16384 of the sheet's width from its left edge, y in px from its top, both + 32768
 //   4 pointer gone
 //   2 selection: block, from, to (0xffff: none)   3 field (0xffff: none)
+//   5 saved: this tab saved the draft at a revision (two u16: high, low), so the others read it now
 // Any other frame closes the socket.
 type Slotted = RoomPerson & { slot: number };
 type Visit = { id: string; name: string };
@@ -73,22 +75,23 @@ export class CampaignRoom extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  /** An agent read or saved the campaign (sending.ts, after its response). With nobody here it does nothing and says
-   *  so (false), so the API can stop asking for a while; name is only looked up once someone is (resolve). */
-  async visit(agent: Visit | { id: string; name?: undefined }): Promise<boolean> {
+  /** An agent read or saved the campaign (sending.ts, after its response); saved is the revision its save made. With
+   *  nobody here it does nothing and says so (false), so the API can stop asking for a while; name is only looked up
+   *  once someone is (resolve). */
+  async visit(agent: Visit | { id: string; name?: undefined }, saved?: number): Promise<boolean> {
     const now = Date.now(), here = this.sockets(now);
     if (!here.length) return false;
     if (agent.name === undefined) return true;
     const seen: RoomAgent = { kind: 'agent', id: agent.id, name: agent.name, at: now };
     this.ctx.storage.kv.put('agents', [...this.agents(now).filter(item => item.id !== agent.id), seen]);
-    for (const item of here) this.send(item.ws, { type: 'agent', peer: this.shown(seen, item.peer) });
+    for (const item of here) { const peer = this.shown(seen, item.peer); this.send(item.ws, { type: 'agent', peer: saved === undefined ? peer : { ...peer, saved } }); }
     return true;
   }
 
   override async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer) {
     const peer = ws.deserializeAttachment() as Slotted | null;
     const bytes = typeof message === 'string' ? null : new Uint8Array(message);
-    if (!peer || !bytes || !bytes.length || bytes.length > MAX_FRAME || bytes[0]! < 1 || bytes[0]! > 4) { ws.close(1003, 'Unsupported message'); return; }
+    if (!peer || !bytes || !bytes.length || bytes.length > MAX_FRAME || bytes[0]! < 1 || bytes[0]! > 5) { ws.close(1003, 'Unsupported message'); return; }
     // A sender past its admission joins again before anyone hears from it.
     const now = Date.now();
     if (peer.until <= now) { ws.close(ROOM_READMIT, 'Join again'); return; }
