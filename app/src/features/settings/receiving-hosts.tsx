@@ -2,6 +2,7 @@ import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
 import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, Field, Input, MutationError, StatusDot, fieldError, type Tone } from '../../components/ui'
 import { useApiMutation, useApiQuery } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { request } from '../../data/live'
 import { ApiError, type ReceivingHost } from '../../data/types'
 import { catchAllSetting } from '../inbound/concepts'
@@ -26,9 +27,9 @@ export function ReceivingHosts({ domainId, domainName, hosts, actions, title = <
   const [name, setName] = useState('')
   const [moveMail, setMoveMail] = useState<{ name: string; message: string } | null>(null)
   const [removing, setRemoving] = useState<ReceivingHost | null>(null)
-  const add = useApiMutation((_api, input: { name: string; confirm: boolean }) => request<ReceivingHost>(path(domainId), { method: 'POST', body: input }), 'Host added', true, true, domainId)
-  const update = useApiMutation((_api, input: { id: string; catchAll: ReceivingHost['catchAll'] }) => request<ReceivingHost>(path(domainId, input.id), { method: 'PATCH', body: { catchAll: input.catchAll } }), 'Catch-all saved', false, true, domainId)
-  const remove = useApiMutation((_api, id: string) => request<ReceivingHost>(path(domainId, id), { method: 'DELETE' }), 'Host removed', true, true, domainId)
+  const add = useApiMutation((_api, input: { name: string; confirm: boolean }) => request<ReceivingHost>(path(domainId), { method: 'POST', body: input }), 'Host added', true, invalidate.mailboxDomains, domainId)
+  const update = useApiMutation((_api, input: { id: string; catchAll: ReceivingHost['catchAll'] }) => request<ReceivingHost>(path(domainId, input.id), { method: 'PATCH', body: { catchAll: input.catchAll } }), 'Catch-all saved', false, invalidate.mailboxDomains, domainId)
+  const remove = useApiMutation((_api, id: string) => request<ReceivingHost>(path(domainId, id), { method: 'DELETE' }), 'Host removed', true, invalidate.mailboxDomains, domainId)
   function open() { add.reset(); setName(''); setAdding(true) }
   async function submit(event: FormEvent) {
     event.preventDefault()

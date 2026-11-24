@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode, type RefObject } from 'rea
 import { useSearchParams } from 'react-router'
 import { Button, Checkbox, ConfirmDialog, CopyButton, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, Pagination, StatusBadge, Tabs, useToast, SecretDialog } from '../../components/ui'
 import { useApiMutation, useApiDef, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import type { Agent, AgentTokenSummary, ApiKey, AppPassword, ApprovalTie } from '../../data/types'
 import { date, shortDateTime } from '../../lib/format'
@@ -64,11 +65,11 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const agents = useApiDef(queries.agents(showRevoked), { keepPrevious: true })
   const passwords = useApiDef(queries.appPasswords())
   const addresses = useApiDef(queries.inboundAddressOptions())
-  const revokeKey = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked')
+  const revokeKey = useApiMutation((api, id: string) => api.keys.revoke(id), 'API key revoked', false, invalidate.apiKeys)
   // Your own agent loses its sign-in and every token; another member's loses the tokens it made here.
-  const revokeAgent = useApiMutation(async (api, id: string) => { const result = await api.credentials.revokeAgent(id); toast(result.scope === 'agent' ? 'Agent revoked' : 'Agent tokens revoked', 'success') })
-  const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked')
-  const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked')
+  const revokeAgent = useApiMutation(async (api, id: string) => { const result = await api.credentials.revokeAgent(id); toast(result.scope === 'agent' ? 'Agent revoked' : 'Agent tokens revoked', 'success') }, undefined, false, invalidate.agents)
+  const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked', false, invalidate.agents)
+  const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked', false, invalidate.appPasswords)
   // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here),
   // and /api-keys?create=smtp on an SMTP login (the Keys guide links there);
   // the parameters then leave the URL, so Back and reload don't open it again.

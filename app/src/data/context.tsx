@@ -14,7 +14,7 @@ import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
-import { resourceOf, staleAfterWrite } from './invalidation'
+import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
 import { productName } from '../../../api/src/brand'
@@ -513,7 +513,7 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal:
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
 /** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
  *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
-export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
+export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate: InvalidationTarget<TInput, TResult> = true, target?: unknown) {
   const api = useApi()
   const scope = useRequestScope()
   const client = useQueryClient()
@@ -529,12 +529,17 @@ export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput)
       if (!isCurrentScope(scope)) throw aborted()
       return result
     },
-    onSuccess: () => {
+    onSuccess: (result, input) => {
       if (!isCurrentScope(scope)) return
       if (successMessage) toast(successMessage, 'success')
       if (!invalidate) return
-      void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
-      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
+      if (invalidate === true) {
+        void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
+        if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
+        return
+      }
+      const resources = typeof invalidate === 'function' ? invalidate(result, input) : invalidate
+      void invalidateResources(client, resources).catch(() => {})
     },
   })
 }

@@ -4,6 +4,7 @@ import { Link, useNavigate, useParams } from 'react-router'
 import { request } from '../../data/live'
 import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
 import { date, fileSize, number } from '../../lib/format'
@@ -49,7 +50,7 @@ export function NewInboxDialog({ open, onOpenChange }: { open: boolean; onOpenCh
   const [connecting, setConnecting] = useState(false)
   const [now, setNow] = useState(() => Date.now())
   // No toast: the dialog itself turns into "Agent inbox created".
-  const create = useApiMutation((api, input: InboxInput) => api.inboxes.create(input))
+  const create = useApiMutation((api, input: InboxInput) => api.inboxes.create(input), undefined, false, invalidate.agentInboxes)
   const created: CreatedInbox | undefined = create.data
   const noHost = !domains.isPending && !hosts.length
   useEffect(() => { if (open) { create.reset(); setHost(''); setName(''); setLifetime('86400'); setWithKey(true); setReplies(false); setOrganize(false); setNow(Date.now()) } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -167,7 +168,7 @@ function EditInboxDialog({ inbox, open, onOpenChange }: { inbox: Inbox; open: bo
   const limit = Date.parse(inbox.createdAt) + 30 * DAY, expires = Date.parse(inbox.expiresAt)
   const untilOf = (value: string) => value === 'max' ? limit : Math.min(limit, Math.max(Date.now(), expires) + Number(value) * 1000)
   const until = extend === '' ? null : new Date(untilOf(extend))
-  const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated', false, true, inbox.id)
+  const save = useApiMutation((_api, body: { name?: string; expiresAt?: string }) => request(`/v1/inboxes/${encodeURIComponent(inbox.id)}`, { method: 'PATCH', body }), 'Inbox updated', false, invalidate.agentInboxes, inbox.id)
   useEffect(() => { if (open) { save.reset(); setName(inbox.name ?? ''); setExtend('') } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   // An expired inbox can still be kept longer during its hold day: updateInbox takes any expiry up to the limit.
   const canExtend = inbox.status !== 'deleting' && limit - 60_000 > Math.max(Date.now(), expires)
@@ -210,10 +211,10 @@ function InboxDetail({ id }: { id: string }) {
     do { const page = await api.keys.list(signal, cursor, false); data.push(...page.filter(key => keyFor(key, id))); cursor = page.nextCursor ?? undefined } while (cursor && ++pages < 10)
     return { data, complete: !cursor }
   }, { enabled: canAdminister })
-  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, true, id)
-  const revoke = useApiMutation((api, keyId: string) => api.keys.revoke(keyId), 'API key revoked')
+  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, invalidate.agentInboxes, id)
+  const revoke = useApiMutation((api, keyId: string) => api.keys.revoke(keyId), 'API key revoked', false, invalidate.apiKeys)
   // A sandbox only gets mail this way (simulateInboxMessage): a sign-up code to read, as an agent or test would.
-  const simulate = useApiMutation((_api, _: void) => request(`/v1/inboxes/${encodeURIComponent(id)}/simulate`, { method: 'POST', body: { from: 'hello@example.com', subject: 'Your sign-up code', text: 'Your code is 482913. It expires in 10 minutes.' } }), 'Test mail sent', false, true, id)
+  const simulate = useApiMutation((_api, _: void) => request(`/v1/inboxes/${encodeURIComponent(id)}/simulate`, { method: 'POST', body: { from: 'hello@example.com', subject: 'Your sign-up code', text: 'Your code is 482913. It expires in 10 minutes.' } }), 'Test mail sent', false, invalidate.agentInboxSimulate, id)
   const b: Inbox | undefined = inbox.data
   if (inbox.error) return <><PageHeader title="Agent inbox" backTo={route} /><ErrorState error={inbox.error} onRetry={() => void inbox.refetch()} /></>
   const next = messages.data?.hasMore ? messages.data.cursor : null
