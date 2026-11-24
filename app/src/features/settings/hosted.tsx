@@ -4,6 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
 import { Button, ConfirmDialog, CopyButton, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
 import { queries } from '../../data/queries'
 import type { Agent, DisconnectSummary, ProviderConnection, WorkspaceMembership } from '../../data/types'
@@ -126,7 +127,7 @@ function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
 function EditableName({ initial }: { initial: string }) {
   const [name, setName] = useState(initial)
   const memberships = useMembershipCache()
-  const save = useApiMutation(async (_api, value: string) => { const renamed = await workspaceApi.rename(value); memberships.renamed(renamed); return renamed }, 'Saved')
+  const save = useApiMutation(async (_api, value: string) => { const renamed = await workspaceApi.rename(value); memberships.renamed(renamed); return renamed }, 'Saved', false, invalidate.workspace)
   async function submit(event: FormEvent) { event.preventDefault(); try { await save.mutateAsync(name.trim()) } catch { /* inline */ } }
   const changed = name.trim() !== initial && name.trim() !== ''
   // Save keeps its place whether or not it is shown, so typing never moves the field.
@@ -161,7 +162,7 @@ function SendingRows() {
 // access, and the last health check's first finding.
 // Three rows whatever loads, so the rows below never move.
 function ConnectedAccountRows({ connection }: { connection: ProviderConnection | null }) {
-  const update = useApiMutation(() => connectionApi.updateStack(), undefined, true)
+  const update = useApiMutation(() => connectionApi.updateStack(), undefined, true, invalidate.connection)
   // The template row keeps its code element while loading: on a phone that decides whether the row stacks.
   if (!connection) return <><Row title="Role template"><span className="cluster settings-inline settings-version"><code><Skeleton width={32} height={20} /></code></span></Row>{['Production access', 'Health'].map(title => <Row key={title} title={title}><Skeleton width={140} height={20} /></Row>)}</>
   const { stack, health } = connection
@@ -188,7 +189,7 @@ function ScoreRow() {
 // A connected AWS account's disconnect runs a cleanup in the account: its summary opens once confirmed.
 function DisconnectRow({ kind, connection }: { kind: 'shared' | 'byo' | undefined; connection: ProviderConnection | null | undefined }) {
   const regional = connection?.templateVersion === 'v5'
-  const disconnect = useApiMutation(() => connectionApi.remove(), regional ? undefined : 'Disconnected', true)
+  const disconnect = useApiMutation(() => connectionApi.remove(), regional ? undefined : 'Disconnected', true, invalidate.connection)
   const [confirming, setConfirming] = useState(false)
   const [summary, setSummary] = useState<DisconnectSummary | null>(null)
   const sync = useConnectionCache()
@@ -213,7 +214,7 @@ function AccountRows() {
   // Your own connected agents (another member's that made tokens here are on API keys, not here).
   const agents = useApiDef(queries.agents(true))
   const apps = agents.data?.filter(agent => agent.own)
-  const revoke = useApiMutation((api, id: string) => api.credentials.revokeAgent(id), 'Agent revoked')
+  const revoke = useApiMutation((api, id: string) => api.credentials.revokeAgent(id), 'Agent revoked', false, invalidate.agents)
   const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
@@ -238,7 +239,7 @@ function AccountRows() {
 // shown, so choosing never moves the row. Its access and client are on its page, which the name links to.
 export function McpApproval({ app, workspaces, onRevoke, linked = true }: { app: Agent; workspaces: WorkspaceMembership[]; onRevoke: () => void; linked?: boolean }) {
   const [workspaceId, setWorkspaceId] = useState(app.workspaceId ?? '')
-  const bind = useApiMutation((api, workspace: string) => api.credentials.bindMcpConnection(app.id, { workspaceId: workspace }), 'Saved')
+  const bind = useApiMutation((api, workspace: string) => api.credentials.bindMcpConnection(app.id, { workspaceId: workspace }), 'Saved', false, invalidate.agents)
   const [revoking, setRevoking] = useState(false)
   const changed = workspaceId !== '' && workspaceId !== app.workspaceId
   const name = connectionTitle(app)

@@ -72,7 +72,7 @@ const evidence = ({ cluster, note, ticketRef }: AbuseEvidence) => ({ evidence: {
 const write = (path: string, method: 'POST' | 'PUT', body: unknown, guard: OperatorGuard) => request<OperatorReceipt>(`${base}${path}`, { method, body, idempotencyKey: guard.idempotencyKey, ifMatch: guard.ifMatch })
 
 export const operatorApi = {
-  queue: async (input: { step?: StandingStep; q?: string }, signal?: AbortSignal) => (await request<{ data: OperatorQueueItem[] }>(`${base}/workspaces${query({ step: input.step, q: input.q?.trim(), limit: 100 })}`, { signal })).data,
+  queue: async (input: { step?: StandingStep; q?: string }, signal?: AbortSignal) => (await request<{ data: OperatorQueueItem[] }>(`${base}/workspaces${query({ step: input.step, q: input.q?.trim(), limit: 200 })}`, { signal })).data,
   workspace: (workspaceId: string, signal?: AbortSignal) => request<OperatorWorkspace>(`${base}/workspaces/${id(workspaceId)}`, { signal }),
   // Paged by the API's opaque cursor, so rows that share a timestamp are never skipped at a page boundary.
   timeline: async (workspaceId: string, cursor: string | undefined, signal?: AbortSignal) => {

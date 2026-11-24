@@ -6,5 +6,20 @@
 // decisions. AI decisions are free (omenUc 0): still metered and counted, never charged.
 export const RATES = { version: 3, emailUc: 20_000n, omenUc: 0n, storageUcPerGbMonth: 25_000_000n, freeSentEmails: 5000, freeReceivedEmails: 5000, freeStorageBytes: 1_000_000_000n } as const;
 
+/** Prepaid credit: a top-up is $20 to $10,000 before tax (routes.ts), and what is left of it expires 12 months after
+ *  purchase (migration 300, billing_credit_lots.expires_at). The public price pages quote these. */
+export const CREDIT = { minTopUpCents: 2000, maxTopUpCents: 1_000_000, expiresAfterMonths: 12 } as const;
+/** Storage bills received mail kept past this many days (migrations 292 and 314); default mail's raw copy expires then. */
+export const STORAGE_AFTER_DAYS = 90;
+
 /** A per-unit rate in micro-cents as US dollars per 1,000 units, as GET /v1/billing and the homepage show it ("0.20"). */
 export const perThousandUsd = (uc: bigint) => (Number(uc) * 1000 / 100_000_000).toFixed(2);
+
+/** Micro-cents (1¢ = 1,000,000 µ¢) as "$12.34" or "−$0.50"; four decimals when 0 < |v| < 1¢ ("$0.0002"), rounded half up. */
+export const usd = (uc: bigint): string => {
+  const neg = uc < 0n, abs = neg ? -uc : uc;
+  const digits = abs > 0n && abs < 1_000_000n ? 4 : 2;
+  const scale = 10n ** BigInt(8 - digits), units = (abs + scale / 2n) / scale;
+  const whole = units / 10n ** BigInt(digits), frac = (units % 10n ** BigInt(digits)).toString().padStart(digits, '0');
+  return `${neg ? '−' : ''}$${whole.toLocaleString('en-US')}.${frac}`;
+};

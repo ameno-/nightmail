@@ -1,0 +1,539 @@
+{
+  "version": 1,
+  "modelId": "workspace-isolation",
+  "cases": [
+    {
+      "name": "smoke-control-workspace-isolation",
+      "steps": [
+        {
+          "op": "CheckAggregates",
+          "principal": "ownerA"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "audience",
+          "principal": "ownerA",
+          "target": "B"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: ownerA aggregates match workspace A recount and audience probes against workspace B leak/mutate nothing"
+    },
+    {
+      "name": "canary-cross-workspace-leak",
+      "steps": [
+        {
+          "op": "ProbeGroup",
+          "group": "audience",
+          "principal": "ownerA",
+          "target": "B"
+        }
+      ],
+      "bug": "canary_cross_workspace_leak",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ProbeGroup:satisfies:no-cross-workspace-violation",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary: planted workspace B marker leak into workspace A response fails no-cross-workspace-violation"
+    },
+    {
+      "name": "canary-cross-workspace-write",
+      "steps": [
+        {
+          "op": "ProbeGroup",
+          "group": "ops",
+          "principal": "ownerA",
+          "target": "B"
+        }
+      ],
+      "bug": "canary_cross_workspace_write",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ProbeGroup:satisfies:no-cross-workspace-violation",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary: planted mutation of workspace B operation_settings fails snapshot comparison"
+    },
+    {
+      "name": "canary-id-probe-oracle",
+      "steps": [
+        {
+          "op": "ProbeGroup",
+          "group": "audience",
+          "principal": "ownerA",
+          "target": "B"
+        }
+      ],
+      "bug": "canary_id_probe_oracle",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ProbeGroup:satisfies:no-cross-workspace-violation",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary: planted 403 vs 404 oracle on foreign ID fails indistinguishability check"
+    },
+    {
+      "name": "fixed-bug-iso-01-support-audience-health-scoped",
+      "steps": [
+        {
+          "op": "ProbeSupport",
+          "principal": "supportA",
+          "target": "B"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "supportA"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Regression for BUG-ISO-01 (PR #591, live on dev): GET /v1/support/audience/health returns only caller workspace's committed imports"
+    },
+    {
+      "name": "fixed-bug-iso-02-and-03-dual-body-writes",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "body-writes"
+        },
+        {
+          "op": "ProbeFields",
+          "principal": "dualA",
+          "target": "B",
+          "focus": "body-writes"
+        },
+        {
+          "op": "ProbeFields",
+          "principal": "dualB",
+          "target": "A",
+          "focus": "body-writes"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Regression for BUG-ISO-02 (#611 campaigns) & BUG-ISO-03 (#612 inbound webhooks) + all ID-carrying body write fields (real foreign ID vs nonexistent ID identical)"
+    },
+    {
+      "name": "all-query-id-fields-indistinguishable",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "query-reads"
+        },
+        {
+          "op": "ProbeFields",
+          "principal": "dualA",
+          "target": "B",
+          "focus": "query-reads"
+        },
+        {
+          "op": "ProbeFields",
+          "principal": "keyA",
+          "target": "B",
+          "focus": "query-reads"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Every ID-carrying query parameter returns identical answers for foreign real IDs and nonexistent IDs with zero leaks"
+    },
+    {
+      "name": "known-bug-iso-04-pr614-rules-optins-and-all-addr-key",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "pr614-bug-iso-04"
+        }
+      ],
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ProbeFields:satisfies:no-cross-workspace-violation",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Known bug BUG-ISO-04 (fixed in approved PR #614, waiting to merge onto dev): PUT /v1/rules & /v1/rules/decisions accept foreign evaluateRoutes/evaluateDomains; PATCH /v1/api-keys/{allAddrKey} accepts foreign addAddressIds; ended inboxes accepted"
+    },
+    {
+      "name": "nearby-foreign-ended-inboxes-refused",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "nearby-foreign-ended"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Foreign ended/deleted ephemeral inbox IDs are refused identically to nonexistent IDs across rules/attachments, routing, API keys, and inbound webhooks"
+    },
+    {
+      "name": "nearby-own-ended-inbox-accepted-in-rules-and-routing",
+      "steps": [
+        {
+          "op": "ProbeFields",
+          "principal": "ownerA",
+          "target": "B",
+          "focus": "nearby-own-ended"
+        }
+      ],
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:ProbeFields:satisfies:no-cross-workspace-violation",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Reviewer-noted nearby cases (own workspace only, nothing crosses): PUT /v1/rules/attachments and POST /v1/routing/routes accept an own just-deleted ephemeral inbox until GC cleanup"
+    },
+    {
+      "name": "all-openapi-routes-ownerA-vs-B",
+      "steps": [
+        {
+          "op": "ProbeGroup",
+          "group": "auth",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "audience",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "templates",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "emails",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "campaigns",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "domains",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "webhooks",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "ops",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "routing-rules",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "inboxes",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "inbound-mail",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "inbound-config",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "workspaces",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "billing",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "other",
+          "principal": "ownerA",
+          "target": "B"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "All 276 OpenAPI routes (enumerated dynamically from api/openapi.json) probed by ownerA against workspace B IDs"
+    },
+    {
+      "name": "all-principals-cross-workspace",
+      "steps": [
+        {
+          "op": "ProbeGroup",
+          "group": "audience",
+          "principal": "adminA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "campaigns",
+          "principal": "memberA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "emails",
+          "principal": "keyA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "emails",
+          "principal": "dkeyA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "auth",
+          "principal": "dualA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "auth",
+          "principal": "dualB",
+          "target": "A"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "billing",
+          "principal": "dualC",
+          "target": "C"
+        },
+        {
+          "op": "ProbeGroup",
+          "group": "workspaces",
+          "principal": "anon",
+          "target": "B"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Every principal kind (admin, member, API key, domain-limited key, dual-workspace user, anon) isolated across workspaces"
+    },
+    {
+      "name": "all-support-routes-isolation",
+      "steps": [
+        {
+          "op": "ProbeSupport",
+          "principal": "supportA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeSupport",
+          "principal": "supportDualA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeSupport",
+          "principal": "supportDualAB",
+          "target": "C"
+        },
+        {
+          "op": "ProbeSupport",
+          "principal": "ownerA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeSupport",
+          "principal": "keyA",
+          "target": "B"
+        },
+        {
+          "op": "ProbeSupport",
+          "principal": "anon",
+          "target": "B"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "All 28 hidden /v1/support/* routes + 3 /v1/support-actions/* routes isolated across single-ws, dual-ws narrowed, dual-ws unscoped, and non-support callers"
+    },
+    {
+      "name": "all-mcp-tools-isolation",
+      "steps": [
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpA",
+          "chunk": "auth-ops",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpA",
+          "chunk": "audience",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpA",
+          "chunk": "sending",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpA",
+          "chunk": "routing-inboxes",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpA",
+          "chunk": "inbound",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpDual",
+          "chunk": "audience",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "mcpDual",
+          "chunk": "sending",
+          "target": "C"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "keyA",
+          "chunk": "audience",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "dkeyA",
+          "chunk": "sending",
+          "target": "B"
+        },
+        {
+          "op": "ProbeMcp",
+          "principal": "anon",
+          "chunk": "auth-ops",
+          "target": "B"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "All 242 MCP tools isolated across OAuth single-ws, OAuth dual-ws, API keys, and unauthenticated callers"
+    },
+    {
+      "name": "dual-workspace-mismatch-and-concurrent-switch",
+      "steps": [
+        {
+          "op": "DualMismatch",
+          "header": "A",
+          "target": "B"
+        },
+        {
+          "op": "DualMismatch",
+          "header": "B",
+          "target": "A"
+        },
+        {
+          "op": "DualMismatch",
+          "header": "A",
+          "target": "C"
+        },
+        {
+          "op": "DualMismatch",
+          "header": "C",
+          "target": "A"
+        },
+        {
+          "op": "ConcurrentDualSwitch"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Dual-workspace user header vs path/body cross-workspace mismatches never leak or cross-land, including concurrent workspace switching"
+    },
+    {
+      "name": "aggregates-exact-all-principals",
+      "steps": [
+        {
+          "op": "CheckAggregates",
+          "principal": "ownerA"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "adminA"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "memberA"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "dualA"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "dualB"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "keyA"
+        },
+        {
+          "op": "CheckAggregates",
+          "principal": "supportA"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "All aggregate and count endpoints equal direct SQL recounts over the caller's workspace only"
+    }
+  ]
+}

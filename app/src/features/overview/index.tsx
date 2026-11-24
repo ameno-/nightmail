@@ -5,7 +5,7 @@ import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
-import { campaignEditable, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
+import { campaignEditable, type Campaign, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
 import { DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
@@ -35,6 +35,8 @@ export function OverviewPage() {
   const stream = requested === 'transactional' || requested === 'marketing' ? requested : 'all'
   // Each refresh runs one created-cohort aggregation; a minute is fresh enough, and a hidden tab stays quiet.
   const query = useApiDef(queries.overview(regionId, range, stream), { interval: 60_000, keepPrevious: previous => previous[1] === regionId })
+  // Read separately from /metrics so a slow or over-budget metrics query never hides Recent campaigns.
+  const recent = useApiDef(queries.recentCampaigns(regionId), { keepPrevious: true })
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const regions = useRegionCatalog({ enabled: !multiTenant })
   const current = regions.data?.data.find(region => region.region === regionId)
@@ -50,10 +52,10 @@ export function OverviewPage() {
   // lands, so until then the main column holds its skeletons and swaps in whole (new nodes, nothing moves).
   const stacked = useMediaQuery('(max-width: 960px)'), compact = useCompactShell()
   const setup = useSetupSteps()
-  const detail = useDetail(setup)
+  const detail = useDetail(setup, Boolean(recent.data || recent.isError))
   const held = stacked && setup.loading
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
-  // the figures are read again. The API keys its dashboard cache on the same mail activity, so that read is current.
+  // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
   const count = useLatestRowCount()
   // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
   const latestParams = latestRequest(regionId, stream)
@@ -61,7 +63,8 @@ export function OverviewPage() {
   const head = latest.data?.items.slice(0, 7).map(row => `${row.id}:${row.status}`).join(',')
   const seen = useRef<string | undefined>(undefined)
   const refetch = query.refetch
-  useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head) void refetch(); seen.current = head }, [head, refetch])
+  const metricsFailed = query.isError
+  useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head && !metricsFailed) void refetch(); seen.current = head }, [head, refetch, metricsFailed])
   const latestEmails = <LatestEmails params={latestParams} count={count} reserve={!stacked} held={held} range={range} figures={data} figuresFailed={query.isError} />
   return <>
     <PageHeader title="Overview" actions={controls} />
@@ -78,7 +81,7 @@ export function OverviewPage() {
           {!stacked && latestEmails}
         </Fragment>
       </div>
-      <Aside setup={setup} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={data?.recentCampaigns} range={range} />
+      <Aside setup={setup} detail={detail} showSetup={!stacked} placeholder={!stacked} campaigns={recent.data?.items} range={range} />
       {/* Under the detail column, once that column has its final height (its own reads and the figures' campaigns). */}
       {stacked && detail.ready && (data || query.isError) ? latestEmails : null}
     </div>
@@ -86,11 +89,11 @@ export function OverviewPage() {
 }
 
 // What the detail column shows, and whether all of it is known (the page also waits on this to place the list under it).
-function useDetail(setup: ReturnType<typeof useSetupSteps>) {
+function useDetail(setup: ReturnType<typeof useSetupSteps>, recentReady: boolean) {
   const score = useSenderScore()
   const next = useNextSteps(score.data)
   const limitPending = useSendingLimitPending()
-  return { score, next, ready: Boolean((score.data || score.isError) && !setup.loading && next.ready && !limitPending) }
+  return { score, next, ready: Boolean((score.data || score.isError) && !setup.loading && next.ready && !limitPending && recentReady) }
 }
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
@@ -203,7 +206,7 @@ function LatestEmails({ params, count, reserve, held, range, figures, figuresFai
   </section>
 }
 // Up to three, in the detail column's list style: the name, then how it went (or its status while not sent).
-function Campaigns({ rows }: { rows: Overview['recentCampaigns'] }) {
+function Campaigns({ rows }: { rows: Campaign[] }) {
   const warm = usePrefetchQueries()
   return <nav className="next-steps ov-campaigns" aria-label="Recent campaigns">
     <div className="ov-campaigns__head"><h2 className="next-steps__title">Campaigns</h2><Link className="ui-button ui-button--ghost ui-button--sm" to="/campaigns">All <ArrowUpRight size={16} /></Link></div>

@@ -2104,7 +2104,11 @@ const processSesReceipt: JobHandler = async (runtime, payload, job) => {
   const suppress = classification === 'complaint' || classification === 'bounce' || validationSuppressed;
   const observeEngagement = (kind === 'Open' || kind === 'Click') && normalized.data.isBotEvent !== true && normalized.data.isBotEvent !== 'Likely';
   if (recipients.length && (suppress || observeEngagement)) await runtime.db.transaction(async tx => {
-    for (const address of recipients) {
+    // Several contacts are locked in email order, as the database sorts it, wherever several are (imports, the feedback
+    // batch, lockContacts in audience.ts): a bounce for two people and someone adding both to a list wait for each
+    // other instead of deadlocking. SES lists the recipients in its own order.
+    const ordered = recipients.length > 1 ? (await tx.execute<{ address: string }>(sql`SELECT address FROM unnest(${sql.param(recipients)}::text[]) address ORDER BY address`)).rows.map(row => row.address) : recipients;
+    for (const address of ordered) {
       const contactWhere = and(scoped(contacts, job), eq(contacts.email, address));
       if (suppress) {
         const suppressionReason = kind === 'Complaint' ? 'complaint' : validationSuppressed ? 'email_validation' : 'hard_bounce';

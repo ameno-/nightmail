@@ -24,7 +24,7 @@ function useSendingLimitRead() {
   const hosted = identity?.multiTenant === true && identity.connection?.kind === 'shared'
   // Seeded with the session's own /v1/me, so opening Overview doesn't ask again; it refreshes each minute.
   // An identity without the limit (the connection cache keeps only a summary) is not a seed: the limit is read.
-  const live = useQuery({ queryKey: ['nightmail', 'sending-limit', identity?.workspaceId], enabled: hosted, refetchInterval: 60_000, refetchIntervalInBackground: false,
+  const live = useQuery({ queryKey: ['nightmail', 'sending-limit', identity?.workspaceId], enabled: hosted, refetchInterval: query => query.state.status === 'error' ? false : 60_000, refetchIntervalInBackground: false,
     initialData: identity?.connection?.sendingLimit !== undefined ? identity ?? undefined : undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
   return { limit: hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null, pending: hosted && live.isPending }
 }

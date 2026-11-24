@@ -1,0 +1,78 @@
+{
+  "version": 1,
+  "modelId": "campaign-lifecycle",
+  "cases": [
+    {
+      "name": "pr619-priority-feedback-lag-holds-routine-lag-does-not",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "InjectFeedbackLag",
+          "lane": "routine",
+          "lagMs": 600000
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "Dispatch"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Expected on PR #619 (opt/feedback-throughput): 10-min routine feedback lag never holds campaign release"
+    },
+    {
+      "name": "pr619-priority-lag-5min-holds-then-recovers",
+      "steps": [
+        {
+          "op": "Configure",
+          "preset": "small"
+        },
+        {
+          "op": "InjectFeedbackLag",
+          "lane": "priority",
+          "lagMs": 360000
+        },
+        {
+          "op": "SendNow"
+        },
+        {
+          "op": "RunJobOnce"
+        },
+        {
+          "op": "GetCampaign"
+        },
+        {
+          "op": "InjectFeedbackLag",
+          "lane": "priority",
+          "lagMs": 0
+        },
+        {
+          "op": "Settle"
+        },
+        {
+          "op": "GetCampaign"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Expected on PR #619 (opt/feedback-throughput): >=5-min priority feedback lag holds release on waiting.reason=feedback_lag, then recovers cleanly once priority lag clears"
+    }
+  ]
+}

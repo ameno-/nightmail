@@ -5,9 +5,10 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { Check, X } from 'lucide-react'
 import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, IconButton, LoadingRegion, PageHeader, Pagination, SearchField, Select, StatusBadge, Tabs, useToast } from '../../components/ui'
-import { useApiDef, useApiQuery, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import { request } from '../../data/live'
+import { useResolvedAddresses } from '../../data/addresses'
+import { isAbortError, request } from '../../data/live'
 import { errorText, type InboundAddress } from '../../data/types'
 import { number } from '../../lib/format'
 import { useMediaQuery } from '../../lib/media'
@@ -185,6 +186,7 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
   const none = !address && !overview.endpoints.length && !overview.endpointsTruncated
   const list = useEndpointPage({ addressId: address, cursor: pagination.cursor, limit: ENDPOINT_PAGE }, !none)
   const addresses = useApiDef(queries.inboundAddressOptions(), { enabled: !!address })
+  const resolvedFilter = useResolvedAddresses(address ? [address] : [], addresses.data ?? [], !!address)
   const reload = () => { refresh(); void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'inbound-endpoints' }) }
   const showAll = () => { setParams(previous => { const next = new URLSearchParams(previous); next.delete('address'); return next }, { replace: true }); pagination.reset() }
   // The first page holds as many rows as the overview counted, so the list keeps its height while it loads.
@@ -196,19 +198,20 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
   // Kept after closing, so the dialog's title and fields don't change while it animates out.
   const [editing, setEditing] = useState<EditableEndpoint | null>(null), [editOpen, setEditOpen] = useState(false)
   const [deleting, setDeleting] = useState<OverviewEndpoint | null>(null), [deleteOpen, setDeleteOpen] = useState(false)
+  const scope = useRequestScope()
   async function act(e: OverviewEndpoint, path: string, method: string, body: unknown, done: string) {
     try {
-      const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }) })
+      const result = await request<{ ok?: boolean; error?: string | null }>(`/v1/endpoints/${encodeURIComponent(e.name)}${path}`, { method, ...(body === undefined ? {} : { body }), scope })
       toast(result.ok === false ? `${e.name} answered ${result.error ?? 'an error'}.` : done, result.ok === false ? 'error' : 'success')
       reload()
-    } catch (error) { toast(errorText(error), 'error') }
+    } catch (error) { if (!isAbortError(error)) toast(errorText(error), 'error') }
   }
   // A webhook opens its own page (events, deliveries, headers, secret), named or not.
   const webhookPage = (e: OverviewEndpoint) => e.type === 'webhook' ? `/receiving/webhooks/${e.id}` : null
   const used = (e: OverviewEndpoint) => [e.routes ? `${number(e.routes)} ${e.routes === 1 ? 'address' : 'addresses'}` : null, e.rules.length ? `${number(e.rules.length)} ${e.rules.length === 1 ? 'rule' : 'rules'}` : null, e.eventTypes.length ? eventWords(e.eventTypes) : null].filter(Boolean).join(' · ')
   return <div className="stack rcv-tab">
     <div className="rcv-kindline">
-      {address && <span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(addresses.data?.find(item => item.id === address)?.address)}<IconButton size="sm" label="Show every destination" onClick={showAll}><X size={14} aria-hidden="true" /></IconButton></span>}
+      {address && <span className="rcv-filter-chip">{(a => a ? <PrivateAddress value={a} /> : 'One address')(resolvedFilter.byId.get(address)?.address ?? addresses.data?.find(item => item.id === address)?.address)}<IconButton size="sm" label="Show every destination" onClick={showAll}><X size={14} aria-hidden="true" /></IconButton></span>}
       {/* With none yet, the empty list's own button is the one. */}
       {!none && <div className="cluster"><Button onClick={() => setCreating(true)}>New destination</Button></div>}
     </div>

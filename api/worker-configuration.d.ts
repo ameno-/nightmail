@@ -13,6 +13,7 @@ interface __BaseEnv_Env {
 	ADMISSION: RateLimit;
 	SNS_CERT_MISSES: RateLimit;
 	ANALYTICS_INGEST?: RateLimit;
+	DISK_ALERT?: RateLimit;
 	BROWSER: BrowserRun;
 	BANE_MAIL_BUCKET: "bane-prod-mail";
 	BANE_MAIL_STORE: "r2";
@@ -41,6 +42,7 @@ interface __BaseEnv_Env {
 	LEGACY_FEEDBACK_QUEUE_NAME: "bane-prod-feedback";
 	LEGACY_FEEDBACK_CUTOVER: "";
 	DISPATCHER: DurableObjectNamespace<import("./src/worker").DispatcherShard>;
+	CAMPAIGN_ROOMS?: DurableObjectNamespace<import("./src/worker").CampaignRoom>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
