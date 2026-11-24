@@ -91,7 +91,7 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
 function Header({ state, store, workspaceName, onClose }: { state: ChatState; store: SupportStore; workspaceName: string | null; onClose: () => void }) {
   const hello = state.hello
   // While it connects the header already reads as it will once connected; only the dot turns green.
-  const workspace = hello?.workspace.name ?? workspaceName
+  const workspace = hello?.workspace?.name ?? workspaceName
   const displayName = `${productName} Support`
   const [tone, subtitle] = state.closed ? ['neutral', 'Conversation ended']
     : state.connection === 'offline' ? ['warning', 'Offline · reconnecting']

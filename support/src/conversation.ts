@@ -661,7 +661,8 @@ export class SupportConversation extends DurableObject<Env> {
       ...(t?.type ? { ticketType: t.type } : {}),
       category: t?.category ?? t?.type ?? 'other',
       replyTo: t?.replyTo !== undefined ? t.replyTo : masked(meta.email),
-      expect: t?.expect ?? expectation({ details: { topic: t?.category }, severity: t?.severity ?? 'P3' }),
+      // A ticket filed before its card was stored has no topic, so no honest time to promise: the card shows none.
+      ...(t?.expect ? { expect: t.expect } : {}),
     };
   }
   private history() {
