@@ -536,8 +536,14 @@ export function keyAdminRefusal(a: Actor): ApiError | null {
 }
 /** Billing (its balance, payments and top-ups): an agent's setup key never reaches it, reads included. REST refuses it in
  *  app.ts and the MCP listing leaves it out (mcp.ts refusal), with the same answer. */
-export const agentSetupRefusal = (a: Actor | undefined, path: string) => a?.agentSetup && /^\/v1\/billing(?:\/|$)/.test(path)
-  ? denied('PERMISSION_DENIED', 'A key an agent received at setup can\'t read or change billing. An owner or admin does that in the dashboard (Settings → Billing).', { person: 'admin' }) : null;
+/** agentSetupRefusal's credential routes: an inbox connection's key and a mail client password, which would outlive the
+ *  agent's key when it is revoked. Inbox routes authenticate after the /v1 guard, so createInbox's own key (inboxes.ts,
+ *  from its body) and app passwords (inbox-passwords.ts) are refused in their handlers too; this keeps the MCP listing. */
+const agentCredentialRoute = (method: string, path: string) => method.toUpperCase() === 'POST' && (path === '/v1/inbox-connections' || /^\/v1\/inboxes\/[^/]+\/app-passwords$/.test(path));
+export const agentCredentialRefusal = () => denied('PERMISSION_DENIED', 'A key an agent received at setup can\'t create inbox keys or mail client passwords: they would outlive it when it is revoked. An owner or admin does that in the dashboard.', { person: 'admin' });
+export const agentSetupRefusal = (a: Actor | undefined, path: string, method = 'GET') => !a?.agentSetup ? null
+  : /^\/v1\/billing(?:\/|$)/.test(path) ? denied('PERMISSION_DENIED', 'A key an agent received at setup can\'t read or change billing. An owner or admin does that in the dashboard (Settings → Billing).', { person: 'admin' })
+  : agentCredentialRoute(method, path) ? agentCredentialRefusal() : null;
 /** createAgentToken: only an MCP approval delegates a temporary token. Why it refuses this actor, or null. */
 export const agentTokenMintRefusal = (a: Actor) => a.credential === 'mcp' && a.keyId.startsWith('mcp_') ? null
   : denied('MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.', { credential: 'signIn' });

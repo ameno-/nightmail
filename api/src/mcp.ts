@@ -186,7 +186,7 @@ function refusal(op: McpOperation, actor: Actor): Required | null {
   if (mail === 'UNRESTRICTED_KEY_REQUIRED' || (op.unrestricted && actor.domains.length)) return { ...need, scope: 'workspace' };
   if (mail === 'ADMIN_REQUIRED') return need;
   if ((op.receivingConsent && actor.grantId && !actor.receivingConsent) || (op.ownerOnly && actor.role === 'member')) return { ...need, person: 'admin' };
-  const guard = agentSetupRefusal(actor, op.path) || (op.keyAdmin && keyAdminRefusal(actor)) || (op.agentTokenMint && agentTokenMintRefusal(actor))
+  const guard = agentSetupRefusal(actor, op.path, op.method) || (op.keyAdmin && keyAdminRefusal(actor)) || (op.agentTokenMint && agentTokenMintRefusal(actor))
     || (op.receivingAdmin && receivingAdminRefusal(actor, op.write ? 'change receiving configuration' : undefined))
     || (op.lasting && lastingRefusal(actor, 'make lasting changes', need)) || (op.memberAdmin && memberAdminRefusal(actor, memberAdminManage(op.method, op.path)));
   if (guard) return guard.required ?? need;

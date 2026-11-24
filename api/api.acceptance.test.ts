@@ -4813,7 +4813,14 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       // What onboarding needs: it reads, sends and manages the workspace (an inbox here).
       const me = ok(await request('GET', '/v1/me', agent.key));
       assert.deepEqual([me.workspaceId, me.permissions], [w, ['read', 'send', 'manage']]);
-      ok(await request('POST', '/v1/inboxes', agent.key, { type: 'sandbox' }), 201);
+      const inbox = ok(await request('POST', '/v1/inboxes', agent.key, { type: 'sandbox' }), 201);
+      // No credential that would outlive it: an inbox connection's key, an inbox key made with the inbox, a mail client password.
+      for (const [path, body] of [['/v1/inbox-connections', { inboxes: [inbox.id], client: 'generic', auth: 'key' }], ['/v1/inboxes', { type: 'sandbox', credential: { name: 'kept', permissions: ['read'] } }],
+        [`/v1/inboxes/${inbox.id}/app-passwords`, { name: 'kept', protocols: ['imap'] }]] as const) {
+        const refused = error(await request('POST', path, agent.key, body), 403, 'PERMISSION_DENIED');
+        assert.equal(refused.required.person, 'admin', path);
+      }
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailbox_keys WHERE workspace_id=$1', [w])).rows[0].n, 0, 'No inbox key was made');
       // No workspace administration: keys and agent tokens, billing, members.
       for (const [method, path, body] of [['GET', '/v1/api-keys'], ['POST', '/v1/api-keys', { name: 'another' }], ['PATCH', `/v1/api-keys/${agent.keyId}`, { name: 'renamed' }],
         ['POST', `/v1/api-keys/${agent.keyId}/revoke`], ['GET', `/v1/api-keys/${agent.keyId}/changes`], ['GET', '/v1/agent-tokens'], ['GET', '/v1/billing'], ['POST', '/v1/billing/top-up-links', { amountCents: 1000 }]] as const) {
@@ -4825,7 +4832,7 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       // Over MCP the same key is listed neither keys nor billing.
       const tools = ok(await request('POST', '/mcp?codemode=false', agent.key, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' })).result.tools.map((tool: Json) => tool.name);
       assert.ok(tools.includes('createInbox') && tools.includes('sendEmail'), tools.join());
-      for (const name of ['createApiKey', 'listApiKeys', 'revokeApiKey', 'getBilling', 'createBillingTopUpLink']) assert.ok(!tools.includes(name), name);
+      for (const name of ['createApiKey', 'listApiKeys', 'revokeApiKey', 'getBilling', 'createBillingTopUpLink', 'createInboxConnection', 'createInboxAppPassword']) assert.ok(!tools.includes(name), name);
 
       // The token works once.
       error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED');
