@@ -44,6 +44,8 @@ type NavItem = readonly [path: string, title: string]
 const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
 // Nightmail staff (a platform operator role in GET /v1/me) also get the support inbox and the operator console, last.
 const staffLinks: readonly NavItem[] = [['/support', 'Support'], ['/operator', 'Operator']]
+// A self-hosted installation has no operator area; the same address is its Health page (features/operator/health.tsx).
+const selfHostedLinks: readonly NavItem[] = [['/operator', 'Health']]
 // Below 900 px the sidebar becomes a top bar (workspace, theme) and a bottom tab bar: the four areas used most, one
 // thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
 // button; the tab bar keeps the main ones visible and says where you are.
@@ -169,7 +171,7 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   // Docs pages name themselves (features/docs).
-  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...newsletters, ...navigation, ...staffLinks].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname, newsletters.map(([, title]) => title).join('\n')])
+  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...newsletters, ...navigation, ...(access.multiTenant ? staffLinks : selfHostedLinks)].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname, newsletters.map(([, title]) => title).join('\n')])
   // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -207,7 +209,7 @@ export function AppShell() {
     }
   }
   // Members see every page: owner and admin ones carry a lock and open a short note on who can use them.
-  const links: readonly NavItem[] = [...navigation.flatMap(item => item[0] === '/campaigns' ? [...newsletters, item] : [item]), ...session?.identity?.operator || session?.identity?.staffSignIn ? staffLinks : []]
+  const links: readonly NavItem[] = [...navigation.flatMap(item => item[0] === '/campaigns' ? [...newsletters, item] : [item]), ...session?.identity?.operator || session?.identity?.staffSignIn ? staffLinks : session?.identity && !access.multiTenant ? selfHostedLinks : []]
   // An issue open in the composer or its review belongs to its newsletter: that item is marked, not Campaigns.
   const shown = useShownNewsletter(), issueOf = shown && location.pathname.startsWith('/campaigns/') ? newsletters.find(([path]) => path === `/newsletters/${encodeURIComponent(shown)}`)?.[0] ?? (newsletters[0]?.[0] === '/newsletters' ? '/newsletters' : null) : null
   const on = (path: string) => issueOf ? path === issueOf : undefined

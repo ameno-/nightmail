@@ -102,7 +102,7 @@ function configFor(env: Env, keys: readonly string[], loadConfig: (input: Record
   return { ...config };
 }
 
-const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
+const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'FEEDBACK_PRIORITY_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE_NAME' | 'FEEDBACK_DLQ_NAME' | 'LEGACY_FEEDBACK_DLQ_NAME' | 'WORK_QUEUE_NAME', fallback: string) => {
   const value: unknown = (env as unknown as Record<string, unknown>)[key];
   return typeof value === 'string' && value ? value : fallback;
 };
@@ -181,6 +181,20 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     // Dispatch and immediate webhook nudges open no database connection.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
+}
+// Health bookkeeping (src/health.ts, src/health-counters.ts) is never awaited by a request, a queue batch, the minute
+// cron's own steps or a dispatcher: it runs after them in waitUntil, on a connection of its own, with a one-second
+// lock_timeout and a three-second statement_timeout on everything it writes. A health table that is locked or slow
+// costs a dropped sample, never a late batch.
+// Without a context to outlive the handler in (a handler called directly, as the cold-isolate check does) it does not
+// run at all: it is never awaited instead, and it can never throw into its caller.
+function afterwards(env: Env, ctx: ExecutionContext | undefined, work: (runtime: Runtime) => Promise<unknown>) {
+  try { if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(withRuntime(env, async runtime => { await work(runtime); }).catch(() => { /* Health never fails what it reports on. */ })); }
+  catch { /* Health never fails what it reports on. */ }
+}
+// What this isolate counted (its jobs' database errors, its error lines), at most every 20 seconds.
+async function flushDueCounters(env: Env, ctx: ExecutionContext | undefined) {
+  try { const { countersDue, flushCounters } = await import('./health-counters.js'); if (countersDue()) afterwards(env, ctx, runtime => flushCounters(runtime.db)); } catch { /* Counted again with the next batch. */ }
 }
 /**
  * The support platform's service-binding entrypoint (api/README.md "Support integration"): the bane-support Worker in
@@ -276,6 +290,9 @@ export default {
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
+      // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
+      // context (a handler called directly) nothing is written, and nothing here can throw into the request.
+      if (typeof ctx?.waitUntil === 'function') ctx.waitUntil(flushDueCounters(env, ctx));
       // The campaign room's accepted upgrade goes back as it is: a copy would drop its socket.
       if (response.webSocket) return response;
       const responseHeaders = new Headers(response.headers);
@@ -294,12 +311,13 @@ export default {
     }
   },
   // Queue/scheduled continuations preserve worker chains and retry due times.
-  async queue(batch, env) {
+  async queue(batch, env, ctx) {
     const { jobConcurrency, followDueJobs, core, settleFeedbackBatch, legacyFeedbackCutover } = await loadRuntimeDeps();
     stampLogs(env, core);
     const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
     // Queue names differ per installation (wrangler config); an unrecognized queue is retried, never acknowledged as a wake.
     const feedbackLane = batch.queue === queueName(env, 'FEEDBACK_QUEUE_NAME', 'bane-feedback') ? 'tagged'
+      : (queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '') && batch.queue === queueName(env, 'FEEDBACK_PRIORITY_QUEUE_NAME', '')) ? 'priority'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_QUEUE_NAME', '') ? 'legacy'
       : batch.queue === queueName(env, 'FEEDBACK_DLQ_NAME', '') ? 'tagged-dlq'
       : batch.queue === queueName(env, 'LEGACY_FEEDBACK_DLQ_NAME', '') ? 'legacy-dlq' : undefined;
@@ -323,6 +341,7 @@ export default {
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
       });
+      await flushDueCounters(env, ctx);
       return;
     }
     const hooks = batch.queue === env.WEBHOOK_QUEUE_NAME, pool = hooks ? 'webhooks' : 'work';
@@ -340,8 +359,9 @@ export default {
       core.log('info', { code: 'QUEUE_FOLLOW', outcome });
     }, concurrency);
     batch.ackAll();
+    await flushDueCounters(env, ctx);
   },
-  async scheduled(controller, env) {
+  async scheduled(controller, env, ctx) {
     const { jobConcurrency, followDueJobs, core } = await loadRuntimeDeps();
     stampLogs(env, core);
     const [{ dispatchPartitions, drainJobs }, { reconcileSharedConnections }, { syncOutboundMessages }, { publicStatsTick }] = await core.wrapModuleLoad(() => Promise.all([
@@ -358,13 +378,17 @@ export default {
       // Mailbox outbound status and Message-IDs follow the sending pipeline; best-effort.
       if (controller.cron !== '* * * * *') return;
       // Independent of PostgreSQL: even a total DB outage must not hide DLQ growth.
+      // A queue added here is on the Health page at once; its "falling behind" line is in src/health-thresholds.ts (QUEUES).
+      const queues: import('./health.js').QueueSample[] = [];
       await Promise.all([['feedback',env.FEEDBACK_QUEUE],['feedback-dlq',env.FEEDBACK_DLQ],['legacy-feedback-dlq',env.LEGACY_FEEDBACK_DLQ],['work',env.WAKE_QUEUE],['webhooks',env.WEBHOOK_QUEUE]].map(async pair=>{
         const [name,q]=pair as [string,Queue]; if(!q?.metrics)return;
         try{const m=await q.metrics(),oldestMs=m.oldestMessageTimestamp?Math.max(0,Date.now()-m.oldestMessageTimestamp.getTime()):0;
           const alarm=(name.endsWith('feedback-dlq') && m.backlogCount>0) || oldestMs>60000;
           core.log(alarm?'error':'info',{code:alarm?'QUEUE_BACKLOG_ALERT':'QUEUE_BACKLOG',queue:name,depth:m.backlogCount,oldestMs});
+          queues.push({name,depth:m.backlogCount,oldestMs});
         }catch{core.log('warn',{code:'QUEUE_METRICS_UNAVAILABLE',queue:name});}
       }));
+      try {
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
@@ -372,9 +396,20 @@ export default {
       // Received mail queued for the refilling budget comes due within minutes; the drain below runs its release.
       try { await (await core.wrapModuleLoad(() => import('./mailbox-staging.js'))).scheduleHoldRelease(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
       await Promise.allSettled((await dispatchPartitions(runtime, true)).map(({ region, accountId, kind }) => wakeDispatchers(env, region, accountId, undefined, kind)));
+      } finally {
+        // Health (src/health.ts), once dispatch recovery has run or failed: what is falling behind, on the Health page and as
+        // Slack cards, including a database that refuses the tick's own write. Started here and awaited by nothing: it runs
+        // beside the steps below on a connection of its own, so neither can delay or skip the other.
+        afterwards(env, ctx, async health => {
+          const [{ healthTick }, { flushCounters }] = await Promise.all([import('./health.js'), import('./health-counters.js')]);
+          await flushCounters(health.db); await healthTick(health, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) });
+        });
+      }
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
+      // Fold sending_campaign_tallies and sending_metrics_hourly delta rows in bounded chunks every minute.
+      try { await (await core.wrapModuleLoad(() => import('./sending-tallies.js'))).foldSendingTallies(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'SENDING_TALLIES_FOLD_FAILED' }); }
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.

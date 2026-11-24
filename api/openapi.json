@@ -9077,6 +9077,24 @@
         ],
         "additionalProperties": false
       },
+      "RoutingConfig": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer"
+          },
+          "routes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MailRoute"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "routes"
+        ]
+      },
       "MailRoute": {
         "type": "object",
         "properties": {
@@ -9152,79 +9170,6 @@
           "createdAt"
         ],
         "additionalProperties": false
-      },
-      "RoutingChange": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "type": "integer",
-            "description": "Routing version after the change; unchanged for a dry run or when nothing changed."
-          },
-          "diff": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RoutingDiff"
-            },
-            "description": "before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit."
-          },
-          "diffCount": {
-            "type": "integer",
-            "description": "Present when diff was shortened: total changed routes in this version."
-          },
-          "diffTruncated": {
-            "type": "boolean",
-            "enum": [
-              true
-            ],
-            "description": "Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit."
-          },
-          "warnings": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        },
-        "required": [
-          "version",
-          "diff",
-          "warnings"
-        ]
-      },
-      "RoutingDiff": {
-        "type": "object",
-        "properties": {
-          "before": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MailRoute"
-              },
-              {
-                "type": [
-                  "object",
-                  "null"
-                ]
-              }
-            ]
-          },
-          "after": {
-            "allOf": [
-              {
-                "$ref": "#/components/schemas/MailRoute"
-              },
-              {
-                "type": [
-                  "object",
-                  "null"
-                ]
-              }
-            ]
-          }
-        },
-        "required": [
-          "before",
-          "after"
-        ]
       },
       "RoutingConfigFile": {
         "type": "object",
@@ -9309,6 +9254,79 @@
           "routes"
         ],
         "additionalProperties": false
+      },
+      "RoutingChange": {
+        "type": "object",
+        "properties": {
+          "version": {
+            "type": "integer",
+            "description": "Routing version after the change; unchanged for a dry run or when nothing changed."
+          },
+          "diff": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RoutingDiff"
+            },
+            "description": "before null: created; after null: deleted. Shortened to fit the response size budget when large; read the full history from getRoutingAudit."
+          },
+          "diffCount": {
+            "type": "integer",
+            "description": "Present when diff was shortened: total changed routes in this version."
+          },
+          "diffTruncated": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "Present and true when diff was shortened to fit the response size budget; read full changes from getRoutingAudit."
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "version",
+          "diff",
+          "warnings"
+        ]
+      },
+      "RoutingDiff": {
+        "type": "object",
+        "properties": {
+          "before": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          },
+          "after": {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/MailRoute"
+              },
+              {
+                "type": [
+                  "object",
+                  "null"
+                ]
+              }
+            ]
+          }
+        },
+        "required": [
+          "before",
+          "after"
+        ]
       },
       "CreateMailRoute": {
         "type": "object",
@@ -9560,35 +9578,31 @@
         ]
       },
       "RoutingVersionDetail": {
-        "type": "object",
-        "properties": {
-          "version": {
-            "type": "integer"
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/RoutingConfig"
           },
-          "routes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/MailRoute"
-            }
-          },
-          "diff": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/RoutingDiff"
-            }
-          },
-          "nextCursor": {
-            "type": [
-              "string",
-              "null"
+          {
+            "type": "object",
+            "properties": {
+              "diff": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/RoutingDiff"
+                }
+              },
+              "nextCursor": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "diff",
+              "nextCursor"
             ]
           }
-        },
-        "required": [
-          "version",
-          "routes",
-          "diff",
-          "nextCursor"
         ]
       },
       "RoutingTestResult": {
@@ -15832,7 +15846,20 @@
             "properties": {
               "emailed": {
                 "type": "boolean",
-                "description": "Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself."
+                "description": "Whether the invitation was emailed to the invitee, with acceptUrl. When false, share acceptUrl yourself; notEmailedReason says why."
+              },
+              "notEmailedReason": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "enum": [
+                  "not_available",
+                  "new_workspace",
+                  "allowance_used",
+                  null
+                ],
+                "description": "Why no email went out, null when one did. not_available: this installation sends no invitation email, or your account has no verified address to be named by. new_workspace: invitations are emailed once the workspace has a verified domain or has finished its evaluation. allowance_used: the invitation emails for today, or to this address, are used."
               },
               "nextStep": {
                 "type": "string",
@@ -15841,6 +15868,7 @@
             },
             "required": [
               "emailed",
+              "notEmailedReason",
               "nextStep"
             ]
           }
@@ -15915,13 +15943,15 @@
             "type": "string"
           },
           "workspaceName": {
-            "type": "string"
+            "type": "string",
+            "description": "The workspace’s name as plain words, at most 40 characters; empty when nothing of it can be shown."
           },
           "workspaceSlug": {
             "type": "string"
           },
           "inviterName": {
-            "type": "string"
+            "type": "string",
+            "description": "The inviter’s display name as plain words, like workspaceName; may be empty. Identify the inviter by inviterEmail."
           },
           "inviterEmail": {
             "type": "string"
@@ -20202,7 +20232,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Active contacts with current list IDs. Search is a case-insensitive literal email/name substring. Consent and suppression filters are independent.",
+        "description": "Active contacts with current list IDs. A search that is one complete email address returns that contact (exact, any case). Any other search is a case-insensitive literal substring of the email or name. Consent and suppression filters are independent.",
         "parameters": [
           {
             "schema": {
@@ -21684,10 +21714,10 @@
                 "false"
               ],
               "default": "true",
-              "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list."
+              "description": "false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members."
             },
             "required": false,
-            "description": "false skips member counts (counts is null), for pickers that only need names. Counting scans every membership of each list.",
+            "description": "false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.",
             "name": "counts",
             "in": "query"
           }
@@ -24269,7 +24299,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it.",
+        "description": "Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most 50 uncommitted previews (oldest evicted) and allows 40 previews per minute.",
         "requestBody": {
           "required": true,
           "content": {
@@ -24867,7 +24897,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing.",
+        "description": "Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).",
         "parameters": [
           {
             "schema": {
@@ -39960,7 +39990,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Metrics"
         ],
@@ -40188,7 +40218,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 500 real recipients are its evaluation, at 500 a day until their delivery results are in (gradedBy says by when); for 24 clean hours after it, sending grows from 1,000 recipients an hour, doubling with each clean hour (limit.growth). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
+        "description": "The workspace sender score, the daily limit it sets and the enforcement step (Hosted). In good standing (a score of 75 or more, no warning) there is no daily limit: limit.unlimited is true, limit.daily null, and only the per-minute pace (limit.perMinute) applies. A new workspace's first 500 real recipients are its evaluation, at 500 a day until their delivery results are in (gradedBy says by when); for 24 clean hours after it, sending grows from 1,000 recipients an hour, doubling with each clean hour (limit.growth). Under 75 the limit is 500 (70–74), 200 (65–69) or 100, and a warning freezes it. The score (0–100) is the quality of what the workspace sends (complaints, the spam screen, bounces, list quality, authentication and engagement), decayed with a 30-day half-life and recounted hourly. Self-hosted and BYO get the score for display only. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. A change of standing or limit shows at once. Workspace-wide: keys restricted to domains get 403.",
         "responses": {
           "200": {
             "description": "Success",
@@ -40495,7 +40525,7 @@
           }
         ],
         "summary": "Plan, pricing and sending limits",
-        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 5,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
+        "description": "Hosted only. Pricing and whether billing charges yet, this month's sent and received counts against their free allowances, 5,000 each, counted separately (received only for credentials that may read all received mail), and the rolling daily sending limit (none in good standing) with the evaluation before it. Workspace-wide: keys restricted to domains get 403. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.",
         "responses": {
           "200": {
             "description": "Success",
@@ -41490,7 +41520,7 @@
         ],
         "operationId": "getRouting",
         "summary": "Read the routing config",
-        "description": "Explicit routes and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. Large route sets are bounded by response size; pass nextCursor as cursor to read remaining routes. An inbox's own addresses route to it without a route. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. Always returns the complete config (writes are bounded to 2 MiB total so a round-trip apply never drops routes). An inbox's own addresses route to it without a route. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -41502,26 +41532,6 @@
             "required": false,
             "name": "format",
             "in": "query"
-          },
-          {
-            "schema": {
-              "type": "string",
-              "maxLength": 254
-            },
-            "required": false,
-            "name": "cursor",
-            "in": "query"
-          },
-          {
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "maximum": 10000,
-              "default": 10000
-            },
-            "required": false,
-            "name": "limit",
-            "in": "query"
           }
         ],
         "responses": {
@@ -41532,120 +41542,10 @@
                 "schema": {
                   "anyOf": [
                     {
-                      "type": "object",
-                      "properties": {
-                        "version": {
-                          "type": "integer"
-                        },
-                        "routes": {
-                          "type": "array",
-                          "items": {
-                            "$ref": "#/components/schemas/MailRoute"
-                          }
-                        },
-                        "nextCursor": {
-                          "type": [
-                            "string",
-                            "null"
-                          ],
-                          "description": "Pass as cursor to read the next page of routes when non-null."
-                        }
-                      },
-                      "required": [
-                        "version",
-                        "routes"
-                      ]
+                      "$ref": "#/components/schemas/RoutingConfig"
                     },
                     {
-                      "type": "object",
-                      "properties": {
-                        "version": {
-                          "type": "integer",
-                          "description": "Ignored on apply; send the version in If-Match."
-                        },
-                        "routes": {
-                          "type": "array",
-                          "items": {
-                            "type": "object",
-                            "properties": {
-                              "key": {
-                                "type": [
-                                  "string",
-                                  "null"
-                                ],
-                                "pattern": "^[a-z0-9][a-z0-9-]{0,62}$",
-                                "description": "Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>."
-                              },
-                              "match": {
-                                "type": "string",
-                                "maxLength": 254,
-                                "description": "Recipient, case-insensitive: an address (support@acme.com), a local-part pattern (reply+*@acme.com, *-invoices@acme.com) or a catch-all (*@acme.com, or @acme.com). The most specific route wins: exact address, then the pattern with the most literal characters, then the plus-address base, then the catch-all, then the domain default."
-                              },
-                              "to": {
-                                "anyOf": [
-                                  {
-                                    "type": "string",
-                                    "enum": [
-                                      "drop"
-                                    ]
-                                  },
-                                  {
-                                    "type": "array",
-                                    "items": {
-                                      "anyOf": [
-                                        {
-                                          "type": "string",
-                                          "maxLength": 128,
-                                          "pattern": "^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$",
-                                          "description": "An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>)."
-                                        },
-                                        {
-                                          "type": "string",
-                                          "maxLength": 128,
-                                          "pattern": "^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$",
-                                          "description": "A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule's endpoints.<name>() call sends it."
-                                        }
-                                      ],
-                                      "description": "An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>)."
-                                    },
-                                    "maxItems": 10
-                                  }
-                                ],
-                                "description": "Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it."
-                              },
-                              "subaddresses": {
-                                "type": "boolean",
-                                "description": "Also route user+tag@host here when nothing more specific matches. Default true."
-                              },
-                              "enabled": {
-                                "type": "boolean",
-                                "description": "A disabled route is skipped; its mail falls through to the next tier. Default true."
-                              },
-                              "note": {
-                                "type": "string",
-                                "maxLength": 500
-                              }
-                            },
-                            "required": [
-                              "match",
-                              "to"
-                            ],
-                            "additionalProperties": false
-                          },
-                          "maxItems": 10000
-                        },
-                        "nextCursor": {
-                          "type": [
-                            "string",
-                            "null"
-                          ],
-                          "description": "Pass as cursor to read the next page of routes when non-null."
-                        }
-                      },
-                      "required": [
-                        "routes"
-                      ],
-                      "additionalProperties": false
+                      "$ref": "#/components/schemas/RoutingConfigFile"
                     }
                   ]
                 }
@@ -41790,7 +41690,7 @@
         ],
         "operationId": "applyRouting",
         "summary": "Replace every route",
-        "description": "Declarative apply: routes are matched by key (or, without a key, by match), so applying the same file again changes nothing. Routes missing from the file are deleted. Requires If-Match with the version you read. dryRun=true returns the diff without saving.",
+        "description": "Declarative apply: routes are matched by key (or, without a key, by match), so applying the same file again changes nothing. Routes missing from the file are deleted. Requires If-Match with the version you read. Total stored routes are bounded to 2 MiB (422 ROUTE_CONFIG_TOO_LARGE). dryRun=true returns the diff without saving.",
         "parameters": [
           {
             "schema": {
@@ -53807,7 +53707,7 @@
         ],
         "operationId": "listInboxes",
         "summary": "List agent inboxes",
-        "description": "Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pages are also bounded by response size and may return fewer than limit inboxes; pass nextCursor as cursor for the next page.",
+        "description": "Inboxes this credential can see, ordered by ID, with status and usage. A provisioning key sees the inboxes it created. Pages are also bounded by response size and may return fewer than limit inboxes; pass nextCursor as cursor for the next page. Filtered queries (type, status, q): Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -54771,7 +54671,7 @@
         ],
         "operationId": "listInboxMessages",
         "summary": "List or wait for inbox messages",
-        "description": "Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget.",
+        "description": "Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {
@@ -64359,7 +64259,7 @@
       },
       "post": {
         "operationId": "inviteWorkspaceMember",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.",
         "tags": [
           "Workspaces"
         ],
@@ -64515,7 +64415,7 @@
     "/v1/workspaces/current/invitations": {
       "post": {
         "operationId": "createWorkspaceInvitation",
-        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
+        "description": "Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most 20 invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard. Owners and admins, in the dashboard or over their own MCP sign-in; API keys and agent tokens get 403 DASHBOARD_AUTH_REQUIRED.",
         "tags": [
           "Workspaces"
         ],
@@ -65376,7 +65276,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Shows the signed-in recipient the invitation they followed (workspace, inviter, role). Read-only; acceptWorkspaceInvitation joins.",
+        "description": "Shows the signed-in recipient the invitation they followed (the workspace’s and the inviter’s names as plain words, the inviter’s address, the role). Read-only; acceptWorkspaceInvitation joins.",
         "parameters": [
           {
             "schema": {

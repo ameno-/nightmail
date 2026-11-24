@@ -73,6 +73,7 @@
     "WORK_QUEUE_NAME": "nightmail-dev-work",
     "WEBHOOK_QUEUE_NAME": "nightmail-dev-webhooks",
     "FEEDBACK_QUEUE_NAME": "nightmail-dev-feedback-v2",
+    "FEEDBACK_PRIORITY_QUEUE_NAME": "nightmail-dev-feedback-priority",
     "FEEDBACK_DLQ_NAME": "nightmail-dev-feedback-v2-dlq",
     "LEGACY_FEEDBACK_DLQ_NAME": "nightmail-dev-feedback-dlq",
     // The queue the previous Worker version wrote to; consumed until it and its dead letters are drained, then removed.

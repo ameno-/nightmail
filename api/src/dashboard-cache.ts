@@ -1,17 +1,20 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, chargeBudget, digest, type Ctx, type Runtime } from './core.js';
 import { headerPrefix, requestHeader } from './brand.js';
+import { talliesEnabled } from './sending-tallies.js';
 
 const TTL_SECONDS = 60;
 /** Expensive Overview reads (Metrics, Sender score, Usage) one dashboard session may compute in a minute. */
 export const DASHBOARD_RECOMPUTES_PER_MINUTE = 30;
+/** Above this many emails in the current UTC hour, Overview cache keys quantize to DASHBOARD_ACTIVE_BUCKET_SECONDS instead of invalidating on every email. */
+export const DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD = 500;
+export const DASHBOARD_ACTIVE_BUCKET_SECONDS = 10;
 /** How the three cached Overview reads behave for dashboard sessions, in their OpenAPI descriptions. */
-export const DASHBOARD_CACHE_NOTE = `Dashboard sessions may receive a cached result until the workspace creates an email or records an email event, or for up to 60 seconds, and compute at most ${DASHBOARD_RECOMPUTES_PER_MINUTE} such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.`;
+export const DASHBOARD_CACHE_NOTE = `Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to ${DASHBOARD_ACTIVE_BUCKET_SECONDS}-second buckets during high-volume sending), or for up to 60 seconds, and compute at most ${DASHBOARD_RECOMPUTES_PER_MINUTE} such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results.`;
 
-// The newest email and the newest email event in a workspace, as one revision: a dashboard read cached before the latest
-// send or delivery is never served after it, so Overview's figures agree with Logs on the next read. Only email events
-// count (data ? 'emailId', the partial index operation_events_email_metrics): contact, consent and other workspace events
-// change none of these figures, so they can't be used to force them to be computed again. One statement, two index probes.
+// The newest email and the newest email event in a workspace, as one revision: used by background counts and
+// interactive Overview reads. Only email events count (data ? 'emailId', the partial index operation_events_email_metrics):
+// contact, consent and other workspace events change none of these figures. One statement, two index probes.
 export async function mailRevision(runtime: Pick<Runtime, 'db'>, workspaceId: string): Promise<string> {
   const { rows: [row] } = await runtime.db.execute<{ emails: string | null; events: string | null }>(sql`SELECT
     (SELECT max(created_at) FROM sending_emails WHERE workspace_id = ${workspaceId})::text AS emails,
@@ -20,15 +23,35 @@ export async function mailRevision(runtime: Pick<Runtime, 'db'>, workspaceId: st
 }
 
 /**
- * A dashboard session's Overview read: cached per scope until the workspace's mail changes, or for 60 seconds. Each
- * session computes at most DASHBOARD_RECOMPUTES_PER_MINUTE of them a minute; past that it gets the last result for the
- * scope, marked stale, or a 429 when there is none, so neither fresh mail nor new scopes turn reads into repeated scans.
- * The scope must name everything the result depends on, including what the caller may see.
+ * Revision for dashboard Overview reads (Metrics, Sender score, Usage; never Pause, Cancel or campaign state).
+ * Interactive senders (< 500 emails in the current UTC hour) keep exact per-email invalidation so a test email shows
+ * on the next read; active high-volume sends quantize to 10-second buckets so polling never busts the cache every second
+ * or exhausts DASHBOARD_RECOMPUTES_PER_MINUTE.
+ */
+export async function dashboardRevision(runtime: Pick<Runtime, 'db'>, workspaceId: string): Promise<string> {
+  if (await talliesEnabled(runtime.db)) {
+    const { rows: [row] } = await runtime.db.execute<{ hour_emails: string; emails: string | null; events: string | null }>(sql`SELECT
+      coalesce((SELECT sum(emails) FROM sending_metrics_hourly WHERE workspace_id = ${workspaceId} AND hour = date_trunc('hour', now(), 'UTC')), 0)::text AS hour_emails,
+      (SELECT max(created_at) FROM sending_emails WHERE workspace_id = ${workspaceId})::text AS emails,
+      (SELECT max(created_at) FROM operation_events WHERE workspace_id = ${workspaceId} AND data ? 'emailId')::text AS events`);
+    if (Number(row?.hour_emails ?? 0) >= DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD) {
+      return `bucket:${Math.floor(Date.now() / (DASHBOARD_ACTIVE_BUCKET_SECONDS * 1000))}`;
+    }
+    return `${row?.emails ?? ''}/${row?.events ?? ''}`;
+  }
+  return mailRevision(runtime, workspaceId);
+}
+
+/**
+ * A dashboard session's Overview read: cached per scope until the workspace's mail changes (or every 10 seconds during
+ * high-volume sending), or for 60 seconds. Each session computes at most DASHBOARD_RECOMPUTES_PER_MINUTE of them a
+ * minute; past that it gets the last result for the scope, marked stale, or a 429 when there is none, so neither fresh
+ * mail nor new scopes turn reads into repeated scans. The scope must name everything the result depends on.
  */
 export async function dashboardRead<T>(c: Ctx, scope: string, compute: () => Promise<T>): Promise<{ value: T; cache: 'hit' | 'miss' | 'stale' }> {
   const a = c.get('actor');
   const result = await cachedDashboardRead(new URL(c.req.url).origin, scope, compute, TTL_SECONDS, {
-    revision: await mailRevision(c.env, a.workspaceId),
+    revision: await dashboardRevision(c.env, a.workspaceId),
     admit: () => chargeBudget(c.env, a.workspaceId, `dashboard-reads:${a.keyId}`, DASHBOARD_RECOMPUTES_PER_MINUTE),
     refuse: () => {
       c.header('Retry-After', '60');

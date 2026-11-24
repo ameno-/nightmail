@@ -4,10 +4,10 @@ import { boundMailBucket, isS3Bucket } from './mail-objects.js';
 import type { S3Client } from '@aws-sdk/client-s3';
 import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, desc, eq, inArray, sql, type SQLWrapper } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { actorMailAccess, ApiError, budgetedRead, denied, errors, isoTime, json, lazyModule, page, readLimit, readLimitNote, response, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { PAGE_MAX_BYTES, READ_RESERVATION_BYTES, withBoundedReadMemory } from './read-bounds.js';
-import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, INBOUND_READ_RESERVATION_BYTES, messageFieldCount, sliceJsonbArray } from './inbound-bounds.js';
+import { PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, messageFieldCount, sliceJsonbArray } from './inbound-bounds.js';
 import { productName } from './brand.js';
 
 const loadS3Presign = lazyModule(() => Promise.all([import('@aws-sdk/client-s3'), import('@aws-sdk/s3-request-presigner')]));
@@ -82,26 +82,116 @@ export function visibleThreadAddresses(value: MailboxAccess, threadId: string, a
 async function threadPage(db: DbExecutor, value: MailboxAccess, filter: Filter, options: { view?: z.infer<typeof View>; q?: string; cursor?: string; limit: number }) {
   const after = decodeCursor(options.cursor), view = options.view;
   const t = mailboxThreads;
-  const state = view === 'trash' ? sql`${t.trashedAt} IS NOT NULL` : view && view !== 'all' ? sql`${t.trashedAt} IS NULL AND ${
-    view === 'inbox' ? sql`NOT ${t.archived} AND NOT ${t.spam}` : view === 'archive' ? t.archived : view === 'spam' ? t.spam : t.starred}` : null;
+  const viewMatch = (alias: string) => {
+    const a = sql.raw(alias);
+    if (view === 'trash') return sql`${a}.trashed_at IS NOT NULL`;
+    if (!view || view === 'all') return null;
+    if (view === 'inbox') return sql`${a}.trashed_at IS NULL AND NOT ${a}.archived AND NOT ${a}.spam`;
+    if (view === 'archive') return sql`${a}.trashed_at IS NULL AND ${a}.archived`;
+    if (view === 'spam') return sql`${a}.trashed_at IS NULL AND ${a}.spam`;
+    return sql`${a}.trashed_at IS NULL AND ${a}.starred`;
+  };
   // Match search/view at the thread level. An older matching message (or one matching address)
   // must not replace the newest visible snippet, narrow the address list, or reduce the count.
   const visibility = visibleLinks(value, filter); // Also validates an explicit address filter against the grant.
-  // Page the per-address summaries first: opening Inbound shouldn't aggregate every message ever received.
-  const rows = await db.execute<{ id: string; subject: string; snippet: string; from_name: string | null; from_address: string; at: string; address_ids: string[]; message_count: number }>(sql`
-    WITH threads AS MATERIALIZED (
-      SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids
-      FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
-        filter.addressId ? eq(t.mailboxId,filter.addressId) : value.mailboxIds ? inArray(t.mailboxId,value.mailboxIds) : undefined)}
-        ${options.q ? sql`AND ${t.threadId} IN (SELECT ${links.threadId} FROM ${links} JOIN ${messages} ON ${messages.id} = ${links.messageId} WHERE ${visibility} AND mail_messages.search @@ websearch_to_tsquery('simple', ${options.q}))` : sql``}
-      GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
-        ${state ? sql`AND bool_or(${state})` : sql``}
-      ORDER BY last_at DESC, id DESC LIMIT ${options.limit + 1}
-    ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, detail.message_count
-      FROM threads CROSS JOIN LATERAL (SELECT count(DISTINCT mm.message_id)::int AS message_count,
-        (array_agg(mm.message_id ORDER BY mm.received_at DESC, mm.message_id DESC))[1] AS latest_id
-        FROM mailbox_messages mm WHERE mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) detail
-      JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  type PageRow = { id: string; subject: string; snippet: string; from_name: string | null; from_address: string; at: string; address_ids: string[]; message_count: number };
+  const singleAddress = !filter.threadId && !options.q
+    ? (filter.addressId ?? (value.mailboxIds?.length === 1 ? value.mailboxIds[0] : undefined))
+    : undefined;
+  const latest = (boxFilter: SQL) => sql`CROSS JOIN LATERAL (
+      SELECT mm.message_id AS latest_id FROM mailbox_messages mm
+      WHERE mm.workspace_id=${value.workspaceId} AND mm.held_reason IS NULL AND mm.thread_id=threads.id AND ${boxFilter}
+      ORDER BY mm.received_at DESC, mm.message_id DESC LIMIT 1
+    ) detail`;
+  const countExpr = sql`CASE WHEN cardinality(threads.address_ids)=1 THEN threads.single_count
+      ELSE (SELECT count(DISTINCT mm.message_id)::int FROM mailbox_messages mm
+            WHERE mm.workspace_id=${value.workspaceId} AND mm.held_reason IS NULL AND mm.thread_id=threads.id AND mm.mailbox_id=ANY(threads.address_ids)) END`;
+  let rows: { rows: PageRow[] } | undefined;
+  if (singleAddress) {
+    // One address has at most one mailbox_threads row per thread: walk the index directly without GROUP BY.
+    // Check liveBox once as a constant InitPlan so the planner keeps the index scan instead of misestimating an anti-join.
+    const state = viewMatch('t');
+    rows = await db.execute<PageRow>(sql`
+      WITH threads AS MATERIALIZED (
+        SELECT t.thread_id AS id, t.last_message_at AS last_at, ARRAY[t.mailbox_id] AS address_ids, t.message_count
+        FROM mailbox_threads t
+        WHERE t.workspace_id=${value.workspaceId} AND t.mailbox_id=${singleAddress}
+          AND NOT EXISTS(SELECT FROM mailboxes ended WHERE ended.id=${singleAddress} AND ended.delete_after<=statement_timestamp())
+          ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          ${state ? sql`AND ${state}` : sql``}
+        ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${options.limit + 1}
+      ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, threads.message_count
+        FROM threads ${latest(sql`mm.mailbox_id=${singleAddress}`)}
+        JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  } else if (!filter.threadId && !options.q && (!view || view === 'all' || view === 'inbox')) {
+    // REVIEW CANDIDATE (round 2). Read a bounded batch of the newest rows, keep the first row of each conversation in it,
+    // and check each such conversation ONCE for a better row outside the batch. Whatever index the planner picks for that
+    // check, a conversation on N addresses costs N once, not N per row. If the batch cannot fill the page (one very wide
+    // conversation, or a nearly empty Inbox), try a batch ten times larger, then fall back to the grouped statement below.
+    const scopeList = value.mailboxIds ? sql.param(value.mailboxIds) : null;
+    const scoped = (alias: string) => scopeList ? sql`AND ${sql.raw(alias)}.mailbox_id=ANY(${scopeList}::text[])` : sql``;
+    const state = viewMatch('s');
+    const want = options.limit + 1;
+    for (const batch of [want * 8, want * 80]) {
+      const res = await db.execute<PageRow & { scanned: number; found: number }>(sql`
+        WITH head AS MATERIALIZED (
+          SELECT t.thread_id, t.last_message_at, t.mailbox_id, t.message_count
+          FROM mailbox_threads t
+          WHERE t.workspace_id=${value.workspaceId} ${scoped('t')}
+            AND ${liveBox(sql`t.mailbox_id`)}
+            ${after ? sql`AND (t.last_message_at, t.thread_id) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          ORDER BY t.last_message_at DESC, t.thread_id DESC LIMIT ${batch}
+        ), firsts AS MATERIALIZED (
+          SELECT DISTINCT ON (h.thread_id) h.thread_id AS id, h.last_message_at AS last_at, h.mailbox_id, h.message_count AS single_count
+          FROM head h ORDER BY h.thread_id, h.last_message_at DESC, h.mailbox_id
+        ), winners AS MATERIALIZED (
+          SELECT f.id, f.last_at, f.single_count FROM firsts f
+          WHERE NOT EXISTS (
+            SELECT FROM mailbox_threads n
+            WHERE n.workspace_id=${value.workspaceId} AND n.thread_id=f.id ${scoped('n')}
+              AND ${liveBox(sql`n.mailbox_id`)}
+              AND (n.last_message_at > f.last_at OR (n.last_message_at = f.last_at AND n.mailbox_id < f.mailbox_id))
+          )
+          ${state ? sql`AND EXISTS (
+            SELECT FROM mailbox_threads s
+            WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=f.id ${scoped('s')}
+              AND ${liveBox(sql`s.mailbox_id`)} AND ${state}
+          )` : sql``}
+          ORDER BY f.last_at DESC, f.id DESC LIMIT ${want}
+        ), threads AS MATERIALIZED (
+          SELECT w.id, w.last_at, w.single_count,
+                 ARRAY(SELECT s.mailbox_id FROM mailbox_threads s
+                       WHERE s.workspace_id=${value.workspaceId} AND s.thread_id=w.id ${scoped('s')} AND ${liveBox(sql`s.mailbox_id`)}
+                       ORDER BY s.mailbox_id) AS address_ids
+          FROM winners w
+        ), page AS (
+          SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count, threads.last_at
+          FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
+          JOIN mail_messages m ON m.id=detail.latest_id
+        ) SELECT page.id, page.subject, page.snippet, page.from_name, page.from_address, page.at, page.address_ids, page.message_count, meta.scanned, meta.found
+          FROM (SELECT (SELECT count(*)::int FROM head) AS scanned, (SELECT count(*)::int FROM winners) AS found) meta
+          LEFT JOIN page ON true ORDER BY page.last_at DESC NULLS LAST, page.id DESC`);
+      const meta = res.rows[0]!;
+      if (meta.found >= want || meta.scanned < batch) { rows = { rows: res.rows.filter(r => r.id !== null) }; break; }
+    }
+  }
+  if (!rows) {
+    // Single-thread lookup or full-text search: drive from mailbox_threads_workspace or mail_messages_search GIN.
+    const state = view === 'trash' ? sql`${t.trashedAt} IS NOT NULL` : view && view !== 'all' ? sql`${t.trashedAt} IS NULL AND ${
+      view === 'inbox' ? sql`NOT ${t.archived} AND NOT ${t.spam}` : view === 'archive' ? t.archived : view === 'spam' ? t.spam : t.starred}` : null;
+    rows = await db.execute<PageRow>(sql`
+      WITH threads AS MATERIALIZED (
+        SELECT ${t.threadId} AS id, max(${t.lastMessageAt}) AS last_at, array_agg(${t.mailboxId} ORDER BY ${t.mailboxId}) AS address_ids, max(${t.messageCount}) AS single_count
+        FROM ${t} WHERE ${liveBox(t.mailboxId)} AND ${and(eq(t.workspaceId,value.workspaceId),filter.threadId ? eq(t.threadId,filter.threadId) : undefined,
+          filter.addressId ? eq(t.mailboxId,filter.addressId) : value.mailboxIds ? inArray(t.mailboxId,value.mailboxIds) : undefined)}
+          ${options.q ? sql`AND ${t.threadId} IN (SELECT ${links.threadId} FROM ${links} JOIN ${messages} ON ${messages.id} = ${links.messageId} WHERE ${visibility} AND mail_messages.search @@ websearch_to_tsquery('simple', ${options.q}))` : sql``}
+        GROUP BY ${t.threadId} HAVING true ${after ? sql`AND (max(${t.lastMessageAt}), ${t.threadId}) < (${after[0]}::timestamptz, ${after[1]})` : sql``}
+          ${state ? sql`AND bool_or(${state})` : sql``}
+        ORDER BY last_at DESC, id DESC LIMIT ${options.limit + 1}
+      ) SELECT threads.id, m.subject, m.snippet, m.from_name, m.from_address, ${preciseTime(sql`threads.last_at`)} AS at, threads.address_ids, ${countExpr} AS message_count
+        FROM threads ${latest(sql`mm.mailbox_id=ANY(threads.address_ids)`)}
+        JOIN mail_messages m ON m.id=detail.latest_id ORDER BY threads.last_at DESC, threads.id DESC`);
+  }
   const last = rows.rows[options.limit - 1];
   return { data: rows.rows.slice(0, options.limit).map(row => ({ id: row.id, subject: row.subject, snippet: row.snippet, from: { name: row.from_name, address: row.from_address }, lastMessageAt: timestamp(row.at), addressIds: row.address_ids, messageCount: row.message_count })),
     nextCursor: rows.rows.length > options.limit && last ? encodeCursor(last.at, last.id) : null };
@@ -267,7 +357,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
         throw error;
       }
       return c.json(result, 200);
-    }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
+    }) as never;
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
   const accessible = accessibleMessages;
@@ -345,7 +435,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       const fitted = fitPageByBytes(mapped, candidateCount > mapped.length, PAGE_MAX_BYTES, 256);
       const last = fitted.items[fitted.items.length - 1];
       return c.json({ data: fitted.items.map(x => x.item), nextCursor: fitted.hasMore && last ? encodeCursor(last.at, last.item.id) : null }, 200);
-    }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
+    }) as never;
   });
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
   const DeliveryDetail = deliverySchema.omit({to:true,toCount:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
@@ -398,7 +488,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
         return { row, attachments };
       }, readLimit(INBOUND_READ));
       return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
-    }, { bytes: READ_RESERVATION_BYTES }) as never;
+    }, { maxActivePerWorkspace: 1 }) as never;
   });
   // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{

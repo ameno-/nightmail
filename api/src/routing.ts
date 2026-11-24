@@ -2,8 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
 import { actor, ApiError, budgetedRead, denied, errors, id, json, readLimit, readLimitNote, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { PAGE_MAX_BYTES, READ_RESERVATION_BYTES, withBoundedReadMemory } from './read-bounds.js';
-import { fitPageByBytes, INBOUND_READ_RESERVATION_BYTES } from './inbound-bounds.js';
+import { PAGE_MAX_BYTES, utf8Bytes, withBoundedReadMemory } from './read-bounds.js';
+import { fitPageByBytes, ROUTING_CONFIG_MAX_BYTES } from './inbound-bounds.js';
 import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { PARSE_LIMIT } from './mailbox-mime.js';
@@ -47,18 +47,11 @@ export const MailRoute = RouteFields.extend({
 }).openapi('MailRoute');
 export type Route = z.infer<typeof MailRoute>;
 type RouteInput = z.infer<typeof RouteFields>;
-const routingConfigShape = { version: z.number().int(), routes: z.array(MailRoute) };
-const RoutingConfig = z.object(routingConfigShape).openapi('RoutingConfig');
-const RoutingConfigPage = z.object({
-  ...routingConfigShape,
-  nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
-});
-const routingConfigFileShape = { version: z.number().int().optional().describe('Ignored on apply; send the version in If-Match.'), routes: z.array(RouteFields).max(10000) };
-const RoutingConfigFile = z.object(routingConfigFileShape).strict().openapi('RoutingConfigFile');
-const RoutingConfigFileResponse = z.object({
-  ...routingConfigFileShape,
-  nextCursor: z.string().nullable().optional().describe('Pass as cursor to read the next page of routes when non-null.'),
-}).strict();
+const RoutingConfig = z.object({ version: z.number().int(), routes: z.array(MailRoute) }).openapi('RoutingConfig');
+const RoutingConfigFile = z
+  .object({ version: z.number().int().optional().describe('Ignored on apply; send the version in If-Match.'), routes: z.array(RouteFields).max(10000) })
+  .strict()
+  .openapi('RoutingConfigFile');
 const RoutingDiff = z.object({ before: MailRoute.nullable(), after: MailRoute.nullable() }).openapi('RoutingDiff');
 const RoutingChange = z
   .object({
@@ -310,6 +303,9 @@ export async function save(
   { dryRun = false, lenient = false, note = '', audit }: { dryRun?: boolean; lenient?: boolean; note?: string; audit?: { action: string; details?: Record<string, unknown> } } = {},
 ) {
   if(after.length>10000)throw fail(422,'ROUTE_LIMIT','A workspace supports at most 10,000 routes.');
+  const afterBytes = utf8Bytes(JSON.stringify(after));
+  if (afterBytes > ROUTING_CONFIG_MAX_BYTES && afterBytes >= utf8Bytes(JSON.stringify(before)))
+    throw fail(422, 'ROUTE_CONFIG_TOO_LARGE', 'The workspace routing config exceeds 2 MiB. Shorten route notes or consolidate routes with patterns.', 'routes');
   checkRoutes(after);
   const previous = new Map(before.map((r) => [r.id, r])),
     kept = new Set(after.map((r) => r.id));
@@ -481,18 +477,21 @@ export function registerRouting(app: App) {
       operationId: 'getRouting',
       summary: 'Read the routing config',
       description:
-        "Explicit routes and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. Large route sets are bounded by response size; pass nextCursor as cursor to read remaining routes. An inbox's own addresses route to it without a route. " + readLimitNote(5),
-      request: { query: z.object({ format: z.enum(['config']).optional(), cursor: z.string().max(254).optional(), limit: z.coerce.number().int().min(1).max(10000).default(10000) }) },
-      responses: { 200: response(z.union([RoutingConfigPage, RoutingConfigFileResponse])), ...errors },
+        "Every explicit route and the current version (also the ETag). With format=config, routes omit IDs and refer to keyed inboxes, webhooks and forwards as inbox:<key>, webhook:<key> and forward:<name>, ready to edit and PUT back. Always returns the complete config (writes are bounded to 2 MiB total so a round-trip apply never drops routes). An inbox's own addresses route to it without a route. " + readLimitNote(5),
+      request: { query: z.object({ format: z.enum(['config']).optional() }) },
+      responses: { 200: response(z.union([RoutingConfig, RoutingConfigFile])), ...errors },
     }),
     async (c) => {
       const w = workspace(c), q = c.req.valid('query');
       return await withBoundedReadMemory(c, async () => {
-        const { version, routes, nextCursor, keys } = await budgetedRead(c.env.db, async (db) => {
-          const version = await currentVersion(db, w);
-          const page = await boundedRoutePage(db, w, q.limit, q.cursor);
-          if (q.format !== 'config') return { version, ...page, keys: null as Map<string, string> | null };
-          const destIds = [...new Set(page.routes.flatMap((r) => (Array.isArray(r.to) ? r.to : [])))];
+        const { version, routes, keys } = await budgetedRead(c.env.db, async (db) => {
+          const config = (
+            await db.execute<{ version: number; routes: Route[] }>(
+              sql`SELECT coalesce((SELECT version FROM mail_routing_state WHERE workspace_id=${w}),0) AS version,coalesce((SELECT jsonb_agg(r ORDER BY match) FROM (SELECT ${columns} FROM mail_routes WHERE workspace_id=${w}) r),'[]') AS routes`,
+            )
+          ).rows[0]!;
+          if (q.format !== 'config') return { ...config, keys: null as Map<string, string> | null };
+          const destIds = [...new Set(config.routes.flatMap((r) => (Array.isArray(r.to) ? r.to : [])))];
           const keyRows = destIds.length
             ? (await db.execute<{ id: string; ref: string }>(
                 sql`SELECT id,'inbox:'||key AS ref FROM mailboxes WHERE workspace_id=${w} AND key IS NOT NULL AND id = ANY(${sql.param(destIds)}::text[])
@@ -500,14 +499,13 @@ export function registerRouting(app: App) {
                   UNION ALL SELECT id,'forward:'||key FROM mailbox_webhooks h WHERE workspace_id=${w} AND key IS NOT NULL AND ${forward} AND id = ANY(${sql.param(destIds)}::text[])`,
               )).rows
             : [];
-          return { version, ...page, keys: new Map(keyRows.map((r) => [r.id, r.ref])) };
+          return { ...config, keys: new Map(keyRows.map((r) => [r.id, r.ref])) };
         }, readLimit(5));
         c.header('ETag', `"${version}"`);
-        const cursorField = nextCursor ? { nextCursor } : {};
-        if (q.format !== 'config') return c.json({ version, routes, ...cursorField }, 200);
+        if (q.format !== 'config') return c.json({ version, routes }, 200);
         const mapped = routes.map(({ id: _id, createdAt: _at, ...r }) => ({ ...r, to: Array.isArray(r.to) ? r.to.map((d) => keys!.get(d) ?? d) : r.to }));
-        return c.json({ version, routes: mapped, ...cursorField }, 200);
-      }, { bytes: READ_RESERVATION_BYTES }) as never;
+        return c.json({ version, routes: mapped }, 200);
+      }, { maxActivePerWorkspace: 1 }) as never;
     },
   );
   app.openapi(
@@ -518,7 +516,7 @@ export function registerRouting(app: App) {
       operationId: 'applyRouting',
       summary: 'Replace every route',
       description:
-        'Declarative apply: routes are matched by key (or, without a key, by match), so applying the same file again changes nothing. Routes missing from the file are deleted. Requires If-Match with the version you read. dryRun=true returns the diff without saving.',
+        'Declarative apply: routes are matched by key (or, without a key, by match), so applying the same file again changes nothing. Routes missing from the file are deleted. Requires If-Match with the version you read. Total stored routes are bounded to 2 MiB (422 ROUTE_CONFIG_TOO_LARGE). dryRun=true returns the diff without saving.',
       request: {
         headers: z.object({ 'if-match': IfMatch }),
         query: z.object({ dryRun: z.enum(['true', 'false']).optional() }),
@@ -533,7 +531,7 @@ export function registerRouting(app: App) {
           dryRun: c.req.valid('query').dryRun === 'true', audit: { action: 'routing.apply' },
         }),
         200,
-      ), { bytes: READ_RESERVATION_BYTES }) as never;
+      ), { maxActivePerWorkspace: 1 }) as never;
     },
   );
   app.openapi(
@@ -552,7 +550,7 @@ export function registerRouting(app: App) {
       return await withBoundedReadMemory(c, async () => {
         const page = await budgetedRead(c.env.db, db => boundedRoutePage(db, w, q.limit, q.cursor), readLimit(5));
         return c.json({ data: page.routes, nextCursor: page.nextCursor }, 200);
-      }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
+      }) as never;
     },
   );
   app.openapi(
@@ -698,7 +696,7 @@ export function registerRouting(app: App) {
       summary: 'Read a routing version',
       description: 'One page of routes as they were at v and that version’s changes. Pass nextCursor for the next page. History retains the latest 256 versions for up to one year.',
       request: { params: VersionParam,query:Page.extend({cursor:z.string().regex(/^\d{1,5}$/).optional()}) },
-      responses: { 200: response(z.object({ ...routingConfigShape, diff: z.array(RoutingDiff), nextCursor: z.string().nullable() }).openapi('RoutingVersionDetail')), ...errors },
+      responses: { 200: response(RoutingConfig.extend({ diff: z.array(RoutingDiff), nextCursor: z.string().nullable() }).openapi('RoutingVersionDetail')), ...errors },
     }),
     async (c) => {
       const w = workspace(c),

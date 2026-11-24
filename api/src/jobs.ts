@@ -1,7 +1,8 @@
 import {ActionRetry,actionDelay} from './ritual-retry.js';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { and, eq, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { ApiError, databaseCodeOf, databaseConflict, databaseUnavailable, rowId, log, logError, ModuleLoadError, transientDatabaseError } from './core.js';
+import { countDatabaseError } from './health-counters.js';
 import type { ClaimedWebhook, DbExecutor, JobHandler, Runtime } from './core.js';
 import { jobs } from './db/core.js';
 import { resolveRegionRuntime } from './ses-region-state.js';
@@ -51,11 +52,15 @@ export async function countEnqueued(work: () => Promise<void>) {
   await enqueued.run(scope, work);
   return scope.count;
 }
+export function noteEnqueued(count: number) {
+  if (count <= 0) return;
+  const scope = enqueued.getStore();
+  if (scope) scope.count += count;
+}
 export async function enqueue(db: DbExecutor, input: { type: string; workspaceId: string; payload: Record<string, unknown>; availableAt?: string }) {
   const jobId = rowId('job');
   await db.insert(jobs).values({ id: jobId, ...input });
-  const scope = enqueued.getStore();
-  if (scope) scope.count++;
+  noteEnqueued(1);
   return jobId;
 }
 // Thrown by a handler that is polling (not failing): the runner returns the same row to pending at
@@ -170,13 +175,16 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // refusal used to strand a campaign in preparing.
       // So does a deadlock or serialization victim, which used to fail any handler not wrapped in retryDatabaseFailures.
       const failure = transientDatabaseError(error) || databaseConflict(error) ? databaseUnavailable(true) : error;
+      countDatabaseError(databaseCodeOf(error)); // For the health tick: a job's timeout or deadlock counts like a request's.
       const code = failure instanceof ApiError ? failure.code : 'JOB_INTERNAL_ERROR';
       // Domain failure-state persistence must eventually commit; stopping at the
       // ordinary attempt ceiling would strand a campaign in pending forever.
       const hook=job.type==='operation.webhook' || job.type==='mailbox.webhook';
       const retry = failure instanceof ApiError && failure.retryable && (job.attempts < (job.type==='mailbox.webhook'?mailboxWebhookAttempts(job.webhook):hook?WEBHOOK_ATTEMPTS:MAX_ATTEMPTS) || failure.code === 'JOB_FINALIZATION_FAILED');
       const delay=error instanceof ActionRetry?actionDelay(job.attempts,error.afterMs):Math.min(hook ? 12*3600000 : 3600000,15000 * 4 ** (job.attempts - 1));
-      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + delay).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
+      // A job that fails for good is never due again: its available_at is when it failed, which the health tick counts
+      // within the hour (src/health.ts jobs-failed), where a retry's is when it is next due.
+      await settle(runtime.db.update(jobs).set({ status: retry ? 'pending' : 'failed', leaseUntil: null, lastError: code, availableAt: new Date(Date.now() + (retry ? delay : 0)).toISOString(), ...(job.type==='mailbox.webhook' && job.webhook?{payload:{...handlerPayload,maxAttempts:mailboxWebhookAttempts(job.webhook)}}:handlerPayload!==job.payload?{payload:handlerPayload}:{}) }).where(fence));
       logError(error, { ...context, code, retryable: retry, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
     } finally {
       activeJobs--;
@@ -235,7 +243,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
         -- campaign: one busy in a cancel, reschedule or release under way is left for the next claim.
         SELECT e.workspace_id,e.id FROM sending_emails e WHERE (e.workspace_id,e.id) IN (SELECT workspace_id,email_id FROM exhausted)
         ORDER BY e.id FOR NO KEY UPDATE SKIP LOCKED
-      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL FROM exhausted x WHERE j.id=x.id AND
+      ), failed AS (UPDATE jobs j SET status='failed',last_error='JOB_LEASE_EXHAUSTED',lease_until=NULL,available_at=now() /* when it failed, as above */ FROM exhausted x WHERE j.id=x.id AND
         (x.campaign_id IS NULL OR EXISTS(SELECT FROM parents p WHERE (p.workspace_id,p.id)=(x.workspace_id,x.campaign_id)) OR NOT EXISTS(SELECT FROM sending_campaigns c WHERE (c.workspace_id,c.id)=(x.workspace_id,x.campaign_id)))
         AND (x.email_id IS NULL OR EXISTS(SELECT FROM releases r WHERE (r.workspace_id,r.id)=(x.workspace_id,x.email_id)) OR NOT EXISTS(SELECT FROM sending_emails e WHERE (e.workspace_id,e.id)=(x.workspace_id,x.email_id)))
         RETURNING j.workspace_id,j.type,j.payload,x.campaign_id,x.email_id), ${failScheduledRelease(sql`SELECT workspace_id,email_id AS id FROM failed WHERE email_id IS NOT NULL`)}, campaigns_failed AS (${failCampaign(sql`(workspace_id,id) IN (SELECT workspace_id,campaign_id FROM failed WHERE campaign_id IS NOT NULL)`,{code:'JOB_LEASE_EXHAUSTED',message:'The campaign worker exhausted its leases.'})}),

@@ -1,13 +1,12 @@
 import { sql, type SQL, type SQLWrapper } from 'drizzle-orm';
-import { ApiError, type Ctx } from './core.js';
-import { memoryWaiting, withMemory } from './isolate-memory.js';
-import { PAGE_MAX_BYTES, READ_MAX_WAITERS, utf8Bytes } from './read-bounds.js';
+import type { Ctx } from './core.js';
+import { PAGE_MAX_BYTES, utf8Bytes, withBoundedReadMemory, type BoundedReadMemoryOptions } from './read-bounds.js';
 
 export const INBOUND_ADDRESS_STORE_LIMIT = 100;
 export const INBOUND_ADDRESS_PAGE_LIMIT = 20;
 export const INBOUND_ADDRESS_NAME_LIMIT = 256;
 export const INBOUND_ADDRESS_ADDR_LIMIT = 320;
-export const INBOUND_READ_RESERVATION_BYTES = 4 * 1024 * 1024;
+export const ROUTING_CONFIG_MAX_BYTES = 2 * 1024 * 1024;
 
 /**
  * Slices a jsonb array column in SQL to at most `limit` elements.
@@ -47,11 +46,13 @@ export function fitPageByBytes<T>(items: T[], hasMoreFromQuery: boolean, maxByte
   return { items, hasMore: hasMoreFromQuery };
 }
 
-/** Reserves isolate memory for one non-Response read step (e.g. a single longPoll tick, never held across sleep). */
-export async function withReadLease<T>(c: Ctx, bytes: number, work: () => Promise<T>): Promise<T> {
-  if (memoryWaiting() >= READ_MAX_WAITERS) {
-    c.header('Retry-After', '2');
-    throw new ApiError(503, 'READ_BUSY', 'Reads are temporarily busy. Retry shortly.', undefined, true);
-  }
-  return withMemory(bytes, work, c.req.raw.signal);
+/** Reserves a FairPool read slot for one non-Response step (e.g. a single longPoll tick, never held across sleep). */
+export async function withReadLease<T>(c: Ctx, work: () => Promise<T>, opts: BoundedReadMemoryOptions = {}): Promise<T | null> {
+  let out: T | undefined;
+  const res = await withBoundedReadMemory(c, async () => {
+    out = await work();
+    return new Response(null, { status: 204 });
+  }, opts);
+  if (res.status === 499) return null;
+  return out as T;
 }

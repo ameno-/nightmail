@@ -3,7 +3,7 @@ import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, statementTimedOut, unrestrictedRequired, region, response, security, type Actor, type App, type DbExecutor, type MailboxAccess } from './core.js';
 import { PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
-import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_READ_RESERVATION_BYTES, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
+import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
@@ -210,6 +210,6 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
         received,
         ...counts && { counts },
       }, 200);
-    }, { bytes: INBOUND_READ_RESERVATION_BYTES }) as never;
+    }) as never;
   });
 }
