@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router'
 import { Button, Dialog } from '../components/ui'
+import { registerDirtyGuard } from './preloadable'
 
 /**
  * Asks before unsaved work is lost: reloading or closing the tab (the browser's own prompt) and following a link
@@ -13,6 +14,7 @@ export function useLeaveGuard(dirty: boolean, { what = 'your changes', save }: {
   const [saving, setSaving] = useState(false)
   const latest = useRef(dirty)
   latest.current = dirty
+  useEffect(() => dirty ? registerDirtyGuard() : undefined, [dirty])
   useEffect(() => {
     const unload = (event: BeforeUnloadEvent) => { if (latest.current) { event.preventDefault(); event.returnValue = '' } }
     const click = (event: MouseEvent) => {

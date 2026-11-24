@@ -132,8 +132,11 @@ function Queue() {
   return <>
     <QueueToolbar search={search} step={step} onSearch={setSearch} onStep={setStep} />
     {queue.isError && !queue.data ? <ErrorState error={queue.error} onRetry={() => void queue.refetch()} />
-      : <DataTable className="op-table" loading={queue.isPending} skeletonRows={6} rows={queue.data ?? []} rowKey={row => row.workspaceId} rowHref={row => `/operator/workspaces/${encodeURIComponent(row.workspaceId)}`}
-        empty={<EmptyState title={q ? 'No workspace matches' : 'Nothing to review'} action={q ? <Button onClick={() => setSearch('')}>Clear search</Button> : undefined} />} columns={queueColumns} />}
+      : <>
+        <DataTable className="op-table" loading={queue.isPending} skeletonRows={6} rows={queue.data ?? []} rowKey={row => row.workspaceId} rowHref={row => `/operator/workspaces/${encodeURIComponent(row.workspaceId)}`}
+          empty={<EmptyState title={q ? 'No workspace matches' : 'Nothing to review'} action={q ? <Button onClick={() => setSearch('')}>Clear search</Button> : undefined} />} columns={queueColumns} />
+        {(queue.data?.length ?? 0) >= 200 && <p className="op-total muted">Showing first 200 workspaces — filter by standing or search to narrow.</p>}
+      </>}
   </>
 }
 

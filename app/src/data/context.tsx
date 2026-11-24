@@ -14,7 +14,7 @@ import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import type { QueryDef } from './queries'
-import { resourceOf, staleAfterWrite } from './invalidation'
+import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
 import { productName } from '../../../api/src/brand'
@@ -107,15 +107,16 @@ function invitationError(error: unknown) {
   return `Couldn’t open the invitation. ${errorText(error, 'Try the link again.')}`
 }
 const expiry = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
-// Shown before anything changes: the question, its facts and the two answers. The slug tells apart workspaces that
-// share a name. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
+// Shown before anything changes: the question, its facts and the two answers. The question is the product's own words;
+// the workspace's name comes as plain words (the API's shownName) and the inviter is their address, which also tells
+// apart two workspaces that share a name. The slug is not shown: it is made from the name the workspace began with. An account whose only way in is this invitation has no workspace yet (M9): cancelling signs it out
 // instead, and its button says so.
 function InvitationReview({ invitation, email, firstWorkspace, joining, error, onJoin, onCancel }: { invitation: WorkspaceInvitationPreview; email: string | null; firstWorkspace: boolean; joining: boolean; error: unknown; onJoin: () => void; onCancel: () => void }) {
   return <main className="page-surface"><PageHeader title={productName} /><div className="stack" style={{maxWidth: 520}}>
-    <h2>Join {invitation.workspaceName}?</h2>
+    <h2>Join this workspace?</h2>
     <dl className="invitation-facts">
-      <dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi> <code>{invitation.workspaceSlug}</code></dd>
-      <dt>Invited by</dt><dd><bdi>{invitation.inviterName}</bdi> <code><PrivateAddress value={invitation.inviterEmail} /></code></dd>
+      {invitation.workspaceName ? <><dt>Workspace</dt><dd><bdi>{invitation.workspaceName}</bdi></dd></> : null}
+      <dt>Invited by</dt><dd><code><PrivateAddress value={invitation.inviterEmail} /></code></dd>
       {email ? <><dt>Invited as</dt><dd><bdi><PrivateAddress value={email} /></bdi></dd></> : null}
       <dt>Role</dt><dd>{roleLabel[invitation.role]}</dd>
       <dt>Expires</dt><dd>{expiry.format(new Date(invitation.expiresAt))}</dd>
@@ -216,7 +217,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       // Joined from the homepage (an invitation link from before it moved to /overview): open the dashboard.
       await switchWorkspace(workspaceId, window.location.pathname === '/' ? '/overview' : undefined)
       clearInvitation()
-      toast(`Joined ${pending.workspaceName}`, 'success')
+      toast(pending.workspaceName ? `Joined ${pending.workspaceName}` : 'Joined the workspace', 'success')
     },
   })
   useEffect(() => {
@@ -513,7 +514,7 @@ export function useApiQuery<T>(key: readonly unknown[], read: (api: Api, signal:
 export function useApiDef<T>(query: QueryDef<T>, poll?: Poll<T>) { return useApiQuery(query.key, query.read, poll) }
 /** `target`: what the write acts on when its function closes over it rather than taking it as input (a thread, a
  *  domain, a campaign). It keys the in-flight guard with the operation and input (lib/single-flight.ts). */
-export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate = true, target?: unknown) {
+export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput) => Promise<TResult>, successMessage?: string, refreshSes = false, invalidate: InvalidationTarget<TInput, TResult> = true, target?: unknown) {
   const api = useApi()
   const scope = useRequestScope()
   const client = useQueryClient()
@@ -529,12 +530,17 @@ export function useApiMutation<TInput, TResult>(write: (api: Api, input: TInput)
       if (!isCurrentScope(scope)) throw aborted()
       return result
     },
-    onSuccess: () => {
+    onSuccess: (result, input) => {
       if (!isCurrentScope(scope)) return
       if (successMessage) toast(successMessage, 'success')
       if (!invalidate) return
-      void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
-      if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
+      if (invalidate === true) {
+        void client.invalidateQueries({predicate: query => staleAfterWrite(query.queryKey, refreshSes)}).catch(() => {})
+        if (!refreshSes) void client.invalidateQueries({predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'campaign-options', refetchType: 'none'}).catch(() => {})
+        return
+      }
+      const resources = typeof invalidate === 'function' ? invalidate(result, input) : invalidate
+      void invalidateResources(client, resources).catch(() => {})
     },
   })
 }

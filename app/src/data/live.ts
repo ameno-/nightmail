@@ -87,6 +87,14 @@ export function selectAccount(id: string | null) {
   if ((previousAccount !== null && accountSelection !== previousAccount) || (previousWorkspace !== null && workspaceSelection !== previousWorkspace)) bumpScope()
   try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
+/** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
+ *  other request carries, so the API reads them from the query for its sockets (the campaign room). */
+export function socketUrl(path: string, query: Record<string, string> = {}) {
+  const url = new URL(path, window.location.href)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  for (const [name, value] of Object.entries({ ...query, ...(accountSelection ? { account: accountSelection } : {}), ...(workspaceSelection ? { workspace: workspaceSelection } : {}) })) url.searchParams.set(name, value)
+  return url.href
+}
 // Responses public/theme.js started before the app loaded. Each is used once, and only while fresh
 // and for the account and workspace the app would have asked about.
 type EarlyRequests = { account?: string | null; workspace: string | null; at: number; responses: Record<string, Promise<Response> | undefined> }
@@ -306,7 +314,7 @@ export function createLiveApi(scope?: RequestScope): Api {
       preview: async ({ source, ...options }, signal) => (await call<{ previews: import('./types').ClientPreview[] }>('/emails/preview', 'POST', { ...source, ...options }, signal)).previews,
     },
     newsletters: {
-      list: async signal => (await call<{ data: import('./types').Newsletter[] }>('/newsletters?limit=100', 'GET', undefined, signal)).data,
+      list: async (signal, cursor) => { const result = await call<{ data: import('./types').Newsletter[]; nextCursor: string | null }>(`/newsletters?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       get: (id, signal) => call<import('./types').Newsletter>(`/newsletters/${idPath(id)}`, 'GET', undefined, signal),
       create: (input, signal) => call<import('./types').Newsletter>('/newsletters', 'POST', input, signal),
     },
@@ -360,9 +368,11 @@ export function createLiveApi(scope?: RequestScope): Api {
         const body = {name: input.name, properties: {...current?.properties, country: input.country}, ...(!input.id ? {email: input.email} : {})}
         const result = await call(input.id ? `/contacts/${idPath(input.id)}` : '/contacts', input.id ? 'PATCH' : 'POST', body, signal)
         const oldLists: string[] = current?.listIds ?? []
-        for (const listId of input.listIds.filter(x => !oldLists.includes(x))) await call(`/lists/${idPath(listId)}/members`, 'POST', {contactIds: [result.id]}, signal)
-        for (const listId of oldLists.filter(x => !input.listIds.includes(x))) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
-        return getContact(result.id, signal)
+        const added = input.listIds.filter(x => !oldLists.includes(x))
+        const removed = oldLists.filter(x => !input.listIds.includes(x))
+        for (const listId of added) await call(`/lists/${idPath(listId)}/members`, 'POST', {contactIds: [result.id]}, signal)
+        for (const listId of removed) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
+        return added.length || removed.length ? getContact(result.id, signal) : mapContact({ ...result, listIds: oldLists })
       },
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
@@ -435,7 +445,7 @@ export function createLiveApi(scope?: RequestScope): Api {
       attachmentUrl: (messageId, attachmentId, input, signal) => inboundCall<{ url: string; expiresAt: string }>(`/messages/${idPath(messageId)}/attachments/${idPath(attachmentId)}${input.addressId ? `?addressId=${encodeURIComponent(input.addressId)}` : ''}`, 'GET', undefined, signal),
       reply: (threadId, { idempotencyKey, ...input }, signal) => request<InboundMessage>(`/v1/inbound/threads/${idPath(threadId)}/reply`, { method: 'POST', body: input, signal, idempotencyKey, scope }),
       startThread: ({ idempotencyKey, ...input }, signal) => request<InboundMessage>('/v1/inbound/threads', { method: 'POST', body: input, signal, idempotencyKey, scope }),
-      webhooks: async signal => (await inboundCall<{ data: InboundWebhook[] }>('/webhooks', 'GET', undefined, signal)).data,
+      webhooks: async (signal, cursor) => { const result = await inboundCall<{ data: InboundWebhook[]; nextCursor: string | null }>(`/webhooks?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`, 'GET', undefined, signal); return Object.assign(result.data, { nextCursor: result.nextCursor }) },
       forwards: async signal => {
         const all: ForwardEndpoint[] = []
         for (let cursor: string | null = null; ;) {
