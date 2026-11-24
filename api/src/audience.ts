@@ -13,7 +13,7 @@ import { SEND_LIMITS } from './send-limits.js';
 
 export const CONTACT_PROPERTIES_MAX_KEYS = 50;
 export const CONTACT_PROPERTIES_MAX_BYTES = 16 * 1024;
-/** Matches migration 452's CHECK constraint (16 KiB compact JSON + 256 B Postgres jsonb::text formatting slack). */
+/** Matches migration 453's CHECK constraint (16 KiB compact JSON + 256 B Postgres jsonb::text formatting slack). */
 export const CONTACT_PROPERTIES_DB_MAX_BYTES = 16_640;
 export const CONTACT_LIST_IDS_PAGE_MAX = 50;
 export const CONTACT_LIST_IDS_SINGLE_MAX = 200;
