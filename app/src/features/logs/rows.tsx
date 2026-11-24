@@ -42,17 +42,18 @@ function ReceivedTo({ row }: { row: LogEntry }) {
   const to = receivedTo(row)
   return to ? <PrivateAddress value={to} /> : <span className="muted">—</span>
 }
-function SentTo({ to }: { to: string[] }) {
+function SentTo({ to, total }: { to: string[]; total?: number }) {
   if (!to.length) return <span className="muted">—</span>
-  return <PrivateAddress value={to[0]!}>{to.length > 1 && <span className="muted">&nbsp;+{to.length - 1}</span>}</PrivateAddress>
+  const more = Math.max(to.length, total ?? to.length) - 1
+  return <PrivateAddress value={to[0]!}>{more > 0 && <span className="muted">&nbsp;+{more}</span>}</PrivateAddress>
 }
 
 export const logColumns: Column<LogEntry>[] = [
   { ...logColumnDefs[0]!, render: row => <LogTime at={row.at} />, cardRender: row => <time dateTime={row.at} title={`${logTimestamp(row.at)} UTC`}>{cardTime(row.at)}</time> },
   { ...logColumnDefs[1]!, render: row => <span className="log-direction" data-direction={row.direction} title={row.direction === 'sent' ? 'Sent' : 'Received'}>{row.direction === 'sent' ? 'Out' : 'In'}</span> },
   { ...logColumnDefs[2]!, render: row => row.direction === 'sent' ? <StatusBadge status={row.status} /> : row.status === 'spam' ? <StatusBadge status="Spam" tone="danger" /> : <StatusBadge status="Received" tone="success" /> },
-  { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} />, cardRender: row => row.direction === 'sent' ? <>To <SentTo to={row.to} /></> : <>From <PrivateAddress value={row.from.address} /></> },
-  { ...logColumnDefs[4]!, render: row => row.direction === 'sent' ? <SentTo to={row.to} /> : <ReceivedTo row={row} /> },
+  { ...logColumnDefs[3]!, render: row => <PrivateAddress value={row.from.address} />, cardRender: row => row.direction === 'sent' ? <>To <SentTo to={row.to} total={row.toCount} /></> : <>From <PrivateAddress value={row.from.address} /></> },
+  { ...logColumnDefs[4]!, render: row => row.direction === 'sent' ? <SentTo to={row.to} total={row.toCount} /> : <ReceivedTo row={row} /> },
   { ...logColumnDefs[5]!, render: row => <span className="log-subject" title={row.subject}>{(row.attachmentCount ?? 0) > 0 && <Paperclip size={12} aria-label={`${row.attachmentCount} attachment${row.attachmentCount === 1 ? '' : 's'}`} />}<span className={row.subject ? undefined : 'muted'}>{row.subject || '(no subject)'}</span>{(row.threadCount ?? 0) > 1 && <ThreadCount count={row.threadCount!} />}</span> },
   { ...logColumnDefs[6]!, render: row => <span className="muted">{row.stream ? label(row.stream) : '—'}</span> },
   { ...logColumnDefs[7]!, render: () => <ChevronRight size={14} aria-hidden /> },

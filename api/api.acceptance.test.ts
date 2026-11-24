@@ -37561,6 +37561,214 @@ test('Audit trail: sensitive actions each write one redacted row', async t => {
   });
 });
 
+test('bounded inbound page sizes: address caps, byte-bounded pagination, routing diff bounds and unrouted claim projection', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, fetch }) => {
+      const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
+      const { SESv2Client, GetAccountCommand, GetEmailIdentityCommand, SendEmailCommand } = await import('@aws-sdk/client-sesv2');
+      const { credentialFingerprint, discoveryTarget } = await import('./src/ses-region-state.js');
+      const { acceptInboundNotification, mailboxIngestJobs } = await import('./src/mailbox-ingest.js');
+      const scope = runtime.config.workspaceId, topic = 'arn:aws:sns:' + REGION + ':111122223333:bounded-inbound';
+      const domainId = unique('domain'), domain = 'inbox.example.com', publicAddress = 'support@example.com', address = 'support@' + domain, base = '/v1/inbound';
+      runtime.config.aws = { accessKeyId: 'synthetic-fixture', secretAccessKey: 'synthetic-fixture' }; runtime.config.liveEnabled = true;
+      await db.query("INSERT INTO ses_region_discovery(workspace_id,region,report,credentials_fingerprint,public_url,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4,$5,'111122223333',$6)", [scope, REGION, { provisioned: true, account: { id: '111122223333', sendingEnabled: true }, resources: { topic: { arn: topic }, transactional: { sendingEnabled: true }, marketing: { sendingEnabled: true } } }, await credentialFingerprint(runtime.config), discoveryTarget(runtime.config), topic]);
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'example.com',$3),($4,$2,$5,$3)", [unique('dom'), scope, REGION, domainId, domain]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'fixture-inbox',$3)", [scope, REGION, topic]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$3,$4,$5,'active','store')", [unique('mdom'), scope, domainId, domain, REGION]);
+      t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
+        if (cmd instanceof GetEmailIdentityCommand) return { IdentityType: 'DOMAIN', VerifiedForSendingStatus: true, VerificationStatus: 'SUCCESS', DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true } };
+        if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 100, Max24HourSend: 10000, SentLast24Hours: 0 } };
+        assert.ok(cmd instanceof SendEmailCommand); return { MessageId: 'synthetic-' + unique('sent') };
+      });
+      const box = ok(await local('POST', base + '/addresses', { address, publicAddress }, 'live'), 201);
+      const rawObjects = new Map<string, string>();
+      t.mock.method(S3Client.prototype, 'send', async (cmd: any) => {
+        const key = String(cmd.input.Key);
+        if (cmd.constructor.name === 'HeadObjectCommand') return { ContentLength: Buffer.byteLength(rawObjects.get(key)!), ETag: '"fixture"' };
+        if (cmd.constructor.name === 'CopyObjectCommand' || cmd.constructor.name === 'PutObjectCommand') return {};
+        assert.ok(cmd instanceof GetObjectCommand);
+        return { Body: { transformToByteArray: async () => Buffer.from(rawObjects.get(key)!) } };
+      });
+      const receive = async (to: string, mime: string) => {
+        const receipt = unique('receipt'), objectKey = 'raw/' + receipt; rawObjects.set(objectKey, mime);
+        const input = { region: REGION, topicArn: topic, message: { notificationType: 'Received', mail: { messageId: receipt, source: 'sender@example.net' }, receipt: { ...cleanScans, timestamp: new Date().toISOString(), recipients: [to], dmarcVerdict: { status: 'PASS' }, dkimVerdict: { status: 'PASS' }, spfVerdict: { status: 'PASS' }, spamVerdict: { status: 'PASS' }, action: { type: 'S3', bucketName: 'fixture-inbox', objectKey, topicArn: topic } } } };
+        assert.equal(await acceptInboundNotification(runtime, input), 1);
+        await mailboxIngestJobs['mailbox.ingest']!(runtime, { sesMessageId: receipt }, { id: unique('job'), workspaceId: scope, attempts: 1 });
+        await expandFixtureOutbox(runtime, scope);
+      };
+      const rawRequest = (path: string, init: { method?: string; body?: string; headers?: Record<string, string> } = {}) => new Request(PUBLIC_ORIGIN + path, {
+        method: init.method ?? 'GET',
+        headers: { origin: PUBLIC_ORIGIN, cookie: manager!.cookie, 'x-bane-environment': 'live', ...init.headers },
+        ...(init.body !== undefined ? { body: init.body } : {}),
+      });
+      const f = { scope, base, domain, address, publicAddress, id: box.id as string, receive };
+      // 1. Ingest caps To/Cc/Reply-To/References at 100 while preserving exact counts.
+      const toLines: string[] = []; let line = 'To: ' + f.publicAddress;
+      for (let i = 0; i < 8200; i++) { if (line.length + 7 > 900) { toLines.push(line + ','); line = ' a@b.c'; } else line += ', a@b.c'; }
+      toLines.push(line);
+      const ccList = Array.from({ length: 130 }, (_, i) => `c${i}@b.c`).join(', ');
+      const refsList = Array.from({ length: 120 }, (_, i) => `<ref-${i}@example.net>`).join(' ');
+      const raw = (i: number) => [
+        'From: Sender <sender@example.net>', ...toLines, 'Cc: ' + ccList, 'Reply-To: ' + ccList,
+        'Subject: ' + (i ? 'Re: ' : '') + 'Many recipients',
+        'Message-ID: <many-' + i + '@example.net>',
+        ...(i ? ['In-Reply-To: <many-0@example.net>', 'References: <many-0@example.net> ' + refsList] : ['References: ' + refsList]),
+        '', 'hello ' + i,
+      ].join('\r\n');
+      for (let i = 0; i < 5; i++) await f.receive(f.address, raw(i));
+      const stored = (await db.query('SELECT count(*)::int AS n, max(jsonb_array_length("to"))::int AS to_len, max(jsonb_array_length(cc))::int AS cc_len, max(jsonb_array_length(reply_to))::int AS rt_len, max(jsonb_array_length("references"))::int AS ref_len, min(thread_id) AS thread, min(id) AS first_id FROM mail_messages WHERE workspace_id=$1', [f.scope])).rows[0];
+      assert.equal(stored.n, 5);
+      assert.deepEqual([stored.to_len, stored.cc_len, stored.rt_len, stored.ref_len], [100, 100, 100, 100]);
+
+      // Thread page caps address/reference arrays at 20 with exact counts and stays well under 20 KB/message.
+      const threadRes = await fetch(rawRequest(`${f.base}/threads/${stored.thread}?limit=100`));
+      const threadText = await threadRes.text();
+      assert.equal(threadRes.status, 200);
+      const threadBody = JSON.parse(threadText);
+      assert.equal(threadBody.messages.length, 5);
+      assert.ok(threadText.length / threadBody.messages.length < 20 * 1024, `thread page avg ${Math.round(threadText.length / threadBody.messages.length)} B/msg`);
+      for (const m of threadBody.messages) {
+        assert.deepEqual([m.to.length, m.toCount, m.cc.length, m.ccCount, m.replyTo.length, m.replyToCount, m.references.length], [20, 8201, 20, 130, 20, 130, 20]);
+        assert.ok(m.referencesCount >= 120);
+      }
+
+      // Single-message read returns up to 100 stored addresses with exact counts.
+      const detail = ok(await local('GET', `${f.base}/messages/${stored.first_id}?includeDelivery=true`, undefined, 'live'));
+      assert.deepEqual([detail.to.length, detail.toCount, detail.cc.length, detail.ccCount, detail.replyTo.length, detail.replyToCount, detail.references.length], [100, 8201, 100, 130, 100, 130, 100]);
+      assert.equal(detail.verdicts.toCount, undefined, 'internal counts stay out of verdicts');
+
+      // listInboundMessages?includeDelivery=true, listLogs, and listInboxMessages all cap to at 20 with toCount 8201.
+      const msgList = ok(await local('GET', `${f.base}/messages?limit=100&includeDelivery=true`, undefined, 'live'));
+      assert.equal(msgList.data[0].to.length, 20);
+      assert.equal(msgList.data[0].toCount, 8201);
+      const logs = ok(await local('GET', '/v1/logs?direction=received&limit=100', undefined, 'live'));
+      assert.equal(logs.data[0].to.length, 20);
+      assert.equal(logs.data[0].toCount, 8201);
+      const inboxList = ok(await local('GET', `/v1/inboxes/${f.id}/messages?limit=100`, undefined, 'live'));
+      assert.equal(inboxList.data[0].to.length, 20);
+      assert.equal(inboxList.data[0].toCount, 8201);
+      const inboxDetail = ok(await local('GET', `/v1/inboxes/${f.id}/messages/${stored.first_id}`, undefined, 'live'));
+      assert.equal(inboxDetail.to.length, 100);
+      assert.equal(inboxDetail.toCount, 8201);
+
+      // 2. Pre-existing oversized row (500 stored addresses, no verdicts count) is bounded on every read.
+      const legacyTo = Array.from({ length: 500 }, (_, i) => ({ name: null, address: `legacy${i}@example.net` }));
+      await db.query('UPDATE mail_messages SET "to"=$2::jsonb, cc=$2::jsonb, reply_to=$2::jsonb, verdicts=verdicts-\x27toCount\x27-\x27ccCount\x27-\x27replyToCount\x27 WHERE id=$1', [stored.first_id, JSON.stringify(legacyTo)]);
+      const legacyThread = ok(await local('GET', `${f.base}/threads/${stored.thread}?limit=100`, undefined, 'live')).messages.find((m: Json) => m.id === stored.first_id);
+      assert.deepEqual([legacyThread.to.length, legacyThread.toCount, legacyThread.cc.length, legacyThread.ccCount], [20, 500, 20, 500]);
+      const legacyDetail = ok(await local('GET', `${f.base}/messages/${stored.first_id}`, undefined, 'live'));
+      assert.deepEqual([legacyDetail.to.length, legacyDetail.toCount, legacyDetail.cc.length, legacyDetail.ccCount], [100, 500, 100, 500]);
+
+      // 3. Byte-bounded page ends early and advances via cursor without skipping (listInboundAddresses).
+      const bigMeta = { pad: 'x'.repeat(15_000) };
+      for (let i = 0; i < 45; i++) ok(await local('POST', `${f.base}/addresses`, { address: `pad${i}@${f.domain}`, metadata: bigMeta }, 'live'), 201);
+      const seenBoxes = new Set<string>();
+      let addrCursor: string | null = null, addrPages = 0;
+      do {
+        const res = await fetch(rawRequest(`${f.base}/addresses?limit=100${addrCursor ? `&cursor=${encodeURIComponent(addrCursor)}` : ''}`));
+        const txt = await res.text();
+        assert.equal(res.status, 200);
+        assert.ok(Buffer.byteLength(txt) <= 524_288 + 4096, `address page ${Buffer.byteLength(txt)} B`);
+        const body = JSON.parse(txt);
+        for (const item of body.data) seenBoxes.add(item.id);
+        addrCursor = body.nextCursor;
+        addrPages++;
+      } while (addrCursor && addrPages < 10);
+      assert.equal(addrCursor, null);
+      assert.ok(addrPages >= 2, '45 x 15 KB addresses split across multiple byte-bounded pages');
+      assert.ok(seenBoxes.size >= 46);
+
+      // 4. Routing: GET /v1/routing returns the complete config so a round-trip PUT never deletes routes;
+      //    writes past 2 MiB are refused (422 ROUTE_CONFIG_TOO_LARGE); listRoutes paginates; applyRouting bounds large diffs.
+      const bigNote = 'n'.repeat(450);
+      const routeCount = 1300;
+      const version0 = ok(await local('GET', '/v1/routing', undefined, 'live')).version;
+      const bulkRoutes = Array.from({ length: routeCount }, (_, i) => ({ match: `r${String(i).padStart(4, '0')}@${f.domain}`, to: [f.id], note: bigNote }));
+      const applied = await fetch(rawRequest('/v1/routing', { method: 'PUT', headers: { 'if-match': `"${version0}"`, 'content-type': 'application/json' }, body: JSON.stringify({ routes: bulkRoutes }) }));
+      const appliedText = await applied.text();
+      assert.equal(applied.status, 200);
+      assert.ok(Buffer.byteLength(appliedText) <= 524_288 + 4096, `applyRouting response ${Buffer.byteLength(appliedText)} B`);
+      const appliedBody = JSON.parse(appliedText);
+      assert.equal(appliedBody.diffTruncated, true);
+      assert.equal(appliedBody.diffCount, routeCount);
+      assert.ok(appliedBody.diff.length > 0 && appliedBody.diff.length < routeCount);
+
+      // Whole-config round-trip: GET /v1/routing?format=config returns all 1,300 routes; dry-run PUT lists 0 deletions.
+      const fullCfg = ok(await local('GET', '/v1/routing?format=config', undefined, 'live'));
+      assert.equal(fullCfg.routes.length, routeCount);
+      const roundTrip = ok(await local('PUT', '/v1/routing?dryRun=true', fullCfg, 'live', { 'if-match': `"${fullCfg.version}"` }));
+      assert.deepEqual(roundTrip.diff, [], 'round-trip PUT of GET /v1/routing?format=config deletes nothing');
+
+      // Writing past 2 MiB total is refused with 422 ROUTE_CONFIG_TOO_LARGE.
+      const tooBigRoutes = Array.from({ length: 3500 }, (_, i) => ({ match: `big${String(i).padStart(4, '0')}@${f.domain}`, to: [f.id], note: 'z'.repeat(490) }));
+      error(await local('PUT', '/v1/routing?dryRun=true', { routes: tooBigRoutes }, 'live', { 'if-match': `"${fullCfg.version}"` }), 422, 'ROUTE_CONFIG_TOO_LARGE');
+
+      // Paginate GET /v1/routing/routes cleanly (100/page, <= 512 KiB).
+      const seenRoutes = new Set<string>();
+      let rCursor: string | null = null, rPages = 0;
+      do {
+        const res = await fetch(rawRequest(`/v1/routing/routes?limit=100${rCursor ? `&cursor=${encodeURIComponent(rCursor)}` : ''}`));
+        const txt = await res.text();
+        assert.equal(res.status, 200);
+        assert.ok(Buffer.byteLength(txt) <= 524_288 + 4096, `listRoutes page ${Buffer.byteLength(txt)} B`);
+        const body = JSON.parse(txt);
+        for (const r of body.data) seenRoutes.add(r.match);
+        rCursor = body.nextCursor;
+        rPages++;
+      } while (rCursor && rPages < 20);
+      assert.equal(rCursor, null);
+      assert.equal(seenRoutes.size, routeCount);
+      assert.equal(rPages, 13);
+
+      // 5. claimUnrouted projects only scalar columns and claims large-body messages cleanly.
+      const claimTarget = `late-claim@${f.domain}`;
+      const bigBody = 'B'.repeat(400_000);
+      const claimThr = unique('thr');
+      await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,3,now())', [claimThr, f.scope, 'Large unrouted']);
+      for (let i = 0; i < 3; i++) {
+        const mid = unique('msg');
+        await db.query('INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,text,html,size_bytes,received_at) VALUES($1,$2,\x27inbound\x27,$3,$4,$5,\x27ext@example.net\x27,$6,$6,$7,now())', [mid, f.scope, claimThr, REGION, 'Large ' + i, bigBody, bigBody.length]);
+        await db.query('INSERT INTO mail_unrouted(workspace_id,message_id,address) VALUES($1,$2,$3)', [f.scope, mid, claimTarget]);
+      }
+      const claimedBox = ok(await local('POST', `${f.base}/addresses`, { address: claimTarget }, 'live'), 201);
+      const claimedMsgs = ok(await local('GET', `${f.base}/messages?addressId=${claimedBox.id}&limit=10`, undefined, 'live'));
+      assert.equal(claimedMsgs.data.length, 3);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_unrouted WHERE workspace_id=$1 AND address=$2', [f.scope, claimTarget])).rows[0].n, 0);
+
+      // 6. Inbox-key reads isolate FairPool shares by workspace (mailboxAccess.workspaceId, not shared 'anonymous').
+      const { readPool, READ_MAX_ACTIVE_PER_WORKSPACE, READ_MAX_WAITING_PER_WORKSPACE } = await import('./src/read-bounds.js');
+      const { digest, randomSecret } = await import('./src/core.js');
+      const wsA = f.scope, wsB = unique('ws_inb_b'), hostB = wsB + '.invalid', boxB = unique('mbx'), keyA = randomSecret('bane_mbx_'), keyB = randomSecret('bane_mbx_');
+      await db.query("INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)", [wsB]);
+      await db.query("INSERT INTO operation_settings(workspace_id,name) VALUES($1,$1)", [wsB]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')", [unique('mdom'), wsB, hostB, REGION]);
+      await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind) VALUES($1,$2,(SELECT id FROM mailbox_domains WHERE workspace_id=$2 LIMIT 1),$3,'inbox')", [boxB, wsB, 'b@' + hostB]);
+      await db.query("INSERT INTO inbox_state(inbox_id,workspace_id,messages,bytes,unread) VALUES($1,$2,0,0,0)", [boxB, wsB]);
+      await db.query(`INSERT INTO mailbox_keys(id,workspace_id,name,hash,prefix,mailbox_ids,permissions,inbox_id) VALUES($1,$2,'keyA',$3,$4,$5::jsonb,'["read"]'::jsonb,$6),($7,$8,'keyB',$9,$10,$11::jsonb,'["read"]'::jsonb,$12)`,
+        [unique('mbk'), wsA, await digest(keyA), keyA.slice(0, 11), JSON.stringify([f.id]), f.id, unique('mbk'), wsB, await digest(keyB), keyB.slice(0, 11), JSON.stringify([boxB]), boxB]);
+      // Saturate wsA's active + waiting slots in readPool, then verify wsA's inbox key gets 429 while wsB's inbox key still gets 200.
+      const heldA: Array<{ release(): void }> = [];
+      const waitingA: Promise<unknown>[] = [];
+      const acA = new AbortController();
+      try {
+        for (let i = 0; i < READ_MAX_ACTIVE_PER_WORKSPACE; i++) {
+          heldA.push(await readPool.acquire(wsA, undefined, { route: 'test.saturate', busyCode: 'READ_CONCURRENCY_LIMIT', busyMessage: 'busy', wsBusyCode: 'READ_CONCURRENCY_LIMIT', wsBusyMessage: 'busy' }));
+        }
+        for (let i = 0; i < READ_MAX_WAITING_PER_WORKSPACE; i++) {
+          waitingA.push(readPool.acquire(wsA, acA.signal, { route: 'test.saturate', busyCode: 'READ_CONCURRENCY_LIMIT', busyMessage: 'busy', wsBusyCode: 'READ_CONCURRENCY_LIMIT', wsBusyMessage: 'busy' }).then(h => h.release()).catch(() => {}));
+        }
+        const aReq = new Request(PUBLIC_ORIGIN + `/v1/inboxes/${f.id}/messages?limit=5`, { headers: { authorization: 'Bearer ' + keyA } });
+        const bReq = new Request(PUBLIC_ORIGIN + `/v1/inboxes/${boxB}/messages?limit=5`, { headers: { authorization: 'Bearer ' + keyB } });
+        const [aRes, bRes] = await Promise.all([fetch(aReq), fetch(bReq)]);
+        assert.equal(aRes.status, 429, 'saturated workspace A inbox key gets 429');
+        assert.equal(bRes.status, 200, 'separate workspace B inbox key stays unaffected (200)');
+      } finally {
+        acA.abort();
+        for (const h of heldA) h.release();
+        await Promise.all(waitingA);
+      }
+    });
+});
+
 // Database disk alert (src/disk-alert.ts): PlanetScale's cluster.storage webhook posts one card straight to the operators'
 // Slack. It runs in-process here with a fake Slack and a database that fails the test if anything touches it.
 test('Database disk alert: a PlanetScale storage event with the derived Authorization header posts one card without the database, once per threshold; a wrong token, a bad signature or a stale event posts nothing', async t => {
