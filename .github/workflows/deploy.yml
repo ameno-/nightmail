@@ -13,9 +13,6 @@ run-name: Deploy ${{ github.ref_name }} ${{ github.sha }}
 # reviewer: the proof, the production branch's ruleset and its fast-forward
 # history gate it (docs/ci.md).
 on:
-  # Expose the real job decisions on changes to the release guards. No PR may authorize a stage.
-  pull_request:
-    paths: ['.github/workflows/deploy.yml', '.github/scripts/dev-proof.sh', '.github/scripts/promote-production.sh']
   push:
     branches: [dev, production]
   workflow_dispatch:
@@ -41,7 +38,6 @@ concurrency:
 jobs:
   authorize:
     name: Authorize
-    if: github.event_name != 'pull_request'
     runs-on: blacksmith-2vcpu-ubuntu-2404
     # Queue CI is already complete when dev is pushed. Direct pushes may still be testing.
     timeout-minutes: 30
@@ -528,56 +524,6 @@ jobs:
             api/e2e-report.json
             api/e2e-worker-logs.json
           if-no-files-found: warn
-
-  promote:
-    name: Promote proven dev SHA to production
-    needs: [authorize, deploy]
-    if: >-
-      !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/dev' &&
-      github.actor == 'github-merge-queue[bot]' && vars.AUTO_SHIP_ENABLED == 'true' &&
-      needs.authorize.result == 'success' && needs.authorize.outputs.stage == 'dev' &&
-      needs.authorize.outputs.attempt == github.run_attempt &&
-      needs.deploy.result == 'success' && needs.deploy.outputs.e2e == 'success'
-    concurrency:
-      group: promote-production
-      cancel-in-progress: false
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 5
-    environment: dev
-    permissions:
-      contents: read
-      actions: read
-    steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
-        with:
-          ref: ${{ needs.authorize.outputs.sha }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify the current queue SHA and find the last healthy production deploy
-        id: proof
-        env:
-          GH_TOKEN: ${{ github.token }}
-          AUTO_SHIP_ENABLED: ${{ vars.AUTO_SHIP_ENABLED }}
-          CI_WAIT_SECONDS: '0'
-        run: |
-          # Actions string comparisons ignore case. Only the literal true enables a write.
-          if [[ $AUTO_SHIP_ENABLED != true ]]; then echo 'Auto-ship paused.'; exit 0; fi
-          tip=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/dev" --jq .object.sha)
-          [[ $tip =~ ^[0-9a-f]{40}$ ]]
-          if [[ $tip != "$GITHUB_SHA" ]]; then echo "Superseded by dev $tip; no promotion."; exit 0; fi
-          bash .github/scripts/dev-proof.sh "$GITHUB_SHA" --queue-only
-          healthy=$(bash .github/scripts/deployed-sha.sh production)
-          [[ $healthy =~ ^[0-9a-f]{40}$ ]]
-          echo "healthy=$healthy" >> "$GITHUB_OUTPUT"
-
-      - name: Fast-forward production if this SHA is still current
-        if: steps.proof.outputs.healthy != ''
-        env:
-          GH_TOKEN: ${{ secrets.NIGHTMAIL_PROMOTION_TOKEN }}
-          HEALTHY: ${{ steps.proof.outputs.healthy }}
-          GIT_TERMINAL_PROMPT: '0'
-        run: bash .github/scripts/promote-production.sh "$GITHUB_SHA" "$HEALTHY"
 
   # A failed live dev E2E opens (or comments on) one issue with the failed steps, their request IDs and the Worker's
   # log lines for those requests. Production stays blocked exactly as before: it requires a passing dev E2E for its SHA.
