@@ -22176,13 +22176,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const next=await job();
       assert.deepEqual([next.status,next.payload],['pending',{campaignId:c.id}]);
       assert.ok(new Date(next.available_at).getTime()-Date.now()>=55_000);
-      // 3. A read of a large campaign answers from that count: no aggregate over its emails and events.
+      // 3. A read of a large campaign answers from sending_campaign_tallies: exact at read time, no scan of emails or events.
       const q=t.mock.method(db,'query');let fromCount:Json;
       try{fromCount=ok(await local('GET',path));}finally{q.mock.restore();}
       const statements=q.mock.calls.map(call=>String((call.arguments[0] as any)?.text??call.arguments[0]));
-      t.diagnostic(`A read from the count: ${statements.length} statements.`);
-      assert.equal(statements.filter(s=>/count\(DISTINCT/i.test(s)).length,0,'No aggregate over the emails.');
-      assert.equal(fromCount!.computedAt,counted.computedAt);
+      t.diagnostic(`A read from tallies: ${statements.length} statements.`);
+      assert.equal(statements.filter(s=>/from "sending_emails"|sending_email_events/i.test(s)).length,0,'No scan of emails or events.');
       assert.deepEqual(figures(fromCount!),figures(await live()));
 
       // 4. Feedback after the count, then the campaign finishes: it is counted once more, and that count equals the old
@@ -22198,8 +22197,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Every email has a delivery event; 3 are simulated and 3 suppressed; rejects on 1-10 plus rejected statuses 15 and 25.
       assert.deepEqual(done.totals,{accepted:24,delivered:30,bounced:3,complained:3,opened:30,clicked:20,failed:12,deliveryDelayed:3,simulated:3});
 
-      // 5. The 30-day retention deletes its emails and their events. The figures stay; a later count that finds fewer
-      // emails replaces nothing and freezes them, so reads stop queueing counts.
+      // 5. The 30-day retention deletes its emails and their events. The stored figures stay; a later count that finds
+      // fewer emails replaces nothing and freezes them, so reads stop queueing counts.
+      const doneStored=(await stored()).stats!;
       await db.query('DELETE FROM sending_email_events WHERE workspace_id=$1',[wid]);
       await db.query('DELETE FROM sending_emails WHERE campaign_id=$1',[c.id]);
       assert.deepEqual(figures(ok(await local('GET',path))),figures(done));
@@ -22207,14 +22207,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('GET',path));
       for(let step=0;step<5;step++)await run('sending.campaignStats');
       const frozen=(await stored()).stats!;
-      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,done.computedAt]);
+      assert.deepEqual([frozen.frozen,frozen.emails,frozen.computedAt],[true,30,doneStored.computedAt]);
       assert.equal((await job()).status,'completed');
       ok(await local('GET',path));
       assert.equal((await job()).status,'completed','A frozen count is never queued again.');
       // A small campaign (counted when read) also keeps a stored count that saw more emails than are left.
       CAMPAIGN_STATS.from=lowered.from;
       const small=ok(await local('GET',path));
-      assert.deepEqual([figures(small),small.computedAt],[figures(done),done.computedAt]);
+      assert.deepEqual([figures(small),small.computedAt],[figures(done),doneStored.computedAt]);
     });
   });
   // The background count pays for its database time with idle time: a run takes steps (pages) for about 250 ms, then
@@ -22235,7 +22235,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       let clock=Date.now(),stepMs=2000;
       const query=db.query.bind(db) as (...args:unknown[])=>unknown;
       t.mock.method(Date,'now',()=>clock);
-      t.mock.method(db,'query',(...args:unknown[])=>{if(/count\(DISTINCT/.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
+      t.mock.method(db,'query',(...args:unknown[])=>{if(/from "sending_emails"/i.test(String((args[0] as any)?.text??args[0])))clock+=stepMs;return query(...args);});
       const due=async()=>new Date((await jobs('sending.campaignStats'))[0].available_at).getTime()-clock;
       // A 2-second step is followed by 64 seconds of nothing: 2 of every 66 seconds, 3%.
       await run('sending.campaignStats');
@@ -35179,34 +35179,153 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return body;
       };
       await run('campaign.run');
-      const first = await view(), cached = nonzero(first.counts);
-      assert.deepEqual(cached, { total: 400, byStatus: { queued: 400 } });
-      assert.deepEqual(cached, nonzero(await truth()));
+      const first = await view();
+      assert.deepEqual(nonzero(first.counts), { total: 400, byStatus: { queued: 400 } });
+      assert.deepEqual(nonzero(first.counts), nonzero(await truth()));
       await run('email.dispatch');
       const dispatched = await view();
+      assert.deepEqual(nonzero(dispatched.counts), nonzero(await truth()), 'Tallies stay exact at read time after dispatch.');
       await run('campaign.run');
       const released = await view(), more = [await view(), await view()];
-      assert.equal(released.delivery.expanded, total, 'Release reached the end while the counts were reused.');
-      for (const body of [dispatched, released, ...more]) {
+      assert.equal(released.delivery.expanded, total);
+      const afterRelease = nonzero(await truth());
+      for (const body of [released, ...more]) {
         assert.equal(body.state, 'sending');
-        assert.deepEqual(nonzero(body.counts), cached, 'Counts are reused within the window.');
+        assert.deepEqual(nonzero(body.counts), afterRelease, 'Every poll reads exact counts from sending_campaign_tallies.');
       }
-      assert.notDeepEqual(nonzero(await truth()), cached);
-      assert.equal(counted(), 1, `${polls} polls inside one ${window} s window count recipients once.`);
-      // Past the window the next read counts again.
-      const real = Date.now.bind(Date), skew = t.mock.method(Date, 'now', () => real() + (window + 1) * 1000);
-      let expired; try { expired = await view(); } finally { skew.mock.restore(); }
-      assert.equal(counted(), 2);
-      assert.equal(expired.state, 'sending');
-      assert.deepEqual(nonzero(expired.counts), nonzero(await truth()));
-      // Drain it: once done the counts are exact at once, inside the window of the entry just cached.
+      assert.equal(counted(), 0, `${polls} polls never scan sending_emails.`);
+      // Drain it: once done the counts stay exact with zero scans of sending_emails.
       for (let i = 0; i < 10 && (await cursors()).state !== 'done'; i++) await run('email.dispatch');
-      const before = counted(), done = await view(), again = await view(), exact = nonzero(await truth());
+      const done = await view(), again = await view(), exact = nonzero(await truth());
       assert.equal(done.state, 'done');
       assert.equal(exact.total, tail);
       assert.deepEqual([nonzero(done.counts), nonzero(again.counts)], [exact, exact], 'A finished campaign reports exact counts immediately.');
-      assert.equal(counted(), before + 2, 'A finished campaign is never served from the cache.');
-      t.diagnostic(`${polls} detail polls, ${counted()} count statements`);
+      assert.equal(counted(), 0, 'A finished campaign reads tallies without scanning sending_emails.');
+      // Unused window variable check preserved for reference: fallback uses CAMPAIGN_PROGRESS_CACHE_SECONDS.
+      assert.ok(window > 0);
+      t.diagnostic(`${polls} detail polls, ${counted()} sending_emails scans`);
+    });
+  });
+
+  test('sending tallies: exact campaign & hourly metrics at read time, bounded fold + alert, daily recount drift detection, one-statement undo fallback and 10s high-volume cache bucket', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request, run, db }) => {
+      const { foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
+      const { dashboardRevision, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD } = await import('./src/dashboard-cache.js');
+      const wid = runtime.config.workspaceId;
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('tally-key'), permissions: ['read', 'send', 'manage'] }), 201).secret;
+      assert.equal(await talliesEnabled(runtime.db), true);
+
+      // 1. Seed emails across two non-hour-aligned windows + two streams + campaign + direct, verify /v1/metrics matches
+      // live sending_emails bit-for-bit across day/hour granularities and include=previous,streams.
+      const cid = ok(await local('POST', '/v1/campaigns', { name: 'Tallies' }), 201).id;
+      const rev = unique('rev');
+      await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=12,prepared=12,expanded=12 WHERE id=$1", [cid, rev]);
+      const baseMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+      const at = (offsetMs: number) => new Date(baseMs + offsetMs).toISOString();
+      // Previous window & edge-hour emails + current window emails (marketing campaign + transactional direct)
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
+        VALUES
+          ('t_m1',$1,$3,'fixture',$2,$4,1,'n@e.com','["a@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'delivered','p1',$5),
+          ('t_m2',$1,$3,'fixture',$2,$4,2,'n@e.com','["b@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'bounced','p2',$6),
+          ('t_m3',$1,$3,'fixture',$2,$4,3,'n@e.com','["c@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'accepted','p3',$7),
+          ('t_m4',$1,$3,'fixture',$2,$4,4,'n@e.com','["d@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'queued',NULL,$8),
+          ('t_tx1',$1,$3,'fixture',NULL,NULL,NULL,'t@e.com','["e@e.com"]','[]','[]','T','{"kind":"transactional"}',false,'delivered','p4',$6),
+          ('t_tx2',$1,$3,'fixture',NULL,NULL,NULL,'t@e.com','["f@e.com"]','[]','[]','T','{"kind":"transactional"}',false,'delivered','p5',$7)`,
+        [wid, cid, REGION, rev, at(-7_200_000 + 1_200_000), at(-3_600_000 + 600_000), at(-3_600_000 + 2_400_000), at(300_000)]);
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES
+        ('te_1',$1,'t_m1','open',false), ('te_2',$1,'t_m1','click',false), ('te_3',$1,'t_tx1','open',false)`, [wid]);
+
+      // Mid-hour boundaries exercising both left edge (inside hour -1) and right edge (now, empty tail -> zero raw scan)
+      const qFrom = at(-3_600_000 + 1_800_000), qTo = new Date(Date.now() + 1_000).toISOString();
+      const metricsPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=hour&include=previous,streams`;
+      const viaTallies = ok(await request('GET', metricsPath, key));
+      const detailViaTallies = ok(await request('GET', `/v1/campaigns/${cid}`, key));
+      const statsViaTallies = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+
+      // 2. Emergency one-statement undo: disabling triggers immediately falls back to live queries, producing exact same answers!
+      await db.query('ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete');
+      assert.equal(await talliesEnabled(runtime.db), false);
+      const viaLive = ok(await request('GET', metricsPath, key));
+      const detailViaLive = ok(await request('GET', `/v1/campaigns/${cid}`, key));
+      const statsViaLive = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.deepEqual(viaTallies, viaLive, 'Hourly metrics rollup + partial edge split equals live scan.');
+      assert.deepEqual(detailViaTallies.counts, detailViaLive.counts, 'Campaign detail tally equals live scan.');
+      assert.deepEqual({ counts: statsViaTallies.counts, totals: statsViaTallies.totals, rates: statsViaTallies.rates },
+        { counts: statsViaLive.counts, totals: statsViaLive.totals, rates: statsViaLive.rates }, 'Campaign stats tally equals live scan.');
+      await db.query('ALTER TABLE sending_emails ENABLE TRIGGER sending_tally_insert, ENABLE TRIGGER sending_tally_update, ENABLE TRIGGER sending_tally_delete');
+      assert.equal(await talliesEnabled(runtime.db), true);
+
+      // 2b. Record real feedback sequences (bounce without bounceType, validation_suppressed without bounceSubType,
+      // duplicate delivery_delay, and delivery_delay followed by delivery) via recordEmailEvent and verify tallies
+      // match raw sending_email_events semantics (no spurious deliveryDelayed from operation_events's ELSE 129) and
+      // reconcile produces 0 drift.
+      const { recordEmailEvent } = await import('./src/sending.js');
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at) VALUES
+        ('t_seq_bnc',$1,$3,'fixture',$2,$4,5,'n@e.com','["s1@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'bounced','ps1',$5),
+        ('t_seq_val',$1,$3,'fixture',$2,$4,6,'n@e.com','["s2@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'sent','ps2',$5),
+        ('t_seq_dly',$1,$3,'fixture',$2,$4,7,'n@e.com','["s3@e.com"]','[]','[]','S','{"kind":"marketing"}',false,'accepted','ps3',$5)`,
+        [wid, cid, REGION, rev, at(400_000)]);
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_bnc', type: 'bounce', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_val', type: 'validation_suppressed', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery_delay', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery_delay', externalId: unique('seq'), data: { synthetic: true } });
+      await recordEmailEvent(runtime, { workspaceId: wid, emailId: 't_seq_dly', type: 'delivery', externalId: unique('seq'), data: { synthetic: true } });
+      const seqStats = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.equal(seqStats.totals.deliveryDelayed, 1, 'Only t_seq_dly counts as deliveryDelayed (once across duplicate delays + delivery); bounce and validation_suppressed never set deliveryDelayed.');
+      assert.equal(seqStats.totals.bounced, 2, 't_m2 and t_seq_bnc bounced; validation_suppressed did not.');
+      assert.equal(seqStats.totals.delivered, 2, 't_m1 and t_seq_dly delivered.');
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0, 'Zero tally drift after bounce/validation_suppressed/duplicate-delay/delivery sequence.');
+
+      // 3. Cancel inFlight reads sending_campaign_tallies without scanning sending_emails.
+      const cancelRes = ok(await local('POST', `/v1/campaigns/${cid}/cancel`, {}));
+      assert.equal(cancelRes.inFlight, 3, 't_m1 (delivered), t_m3 (accepted) and t_seq_dly (delivered) are inFlight; t_m4 (queued) canceled.');
+
+      // 4. Bounded folding collapses delta rows and logs SENDING_TALLIES_UNFOLDED_HIGH when above threshold.
+      await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count)
+        SELECT $1,$2,'delivered',false,CASE WHEN n%2=0 THEN 1 ELSE -1 END FROM generate_series(1,10) n`, [wid, cid]);
+      const beforeFold = Number((await db.query('SELECT count(*) AS n FROM sending_campaign_tallies WHERE workspace_id=$1 AND campaign_id=$2', [wid, cid])).rows[0].n);
+      assert.ok(beforeFold > 4);
+      const folded = await foldSendingTallies(runtime);
+      assert.ok(folded.campaignRemoved > 0);
+      const afterFold = Number((await db.query('SELECT count(*) AS n FROM sending_campaign_tallies WHERE workspace_id=$1 AND campaign_id=$2', [wid, cid])).rows[0].n);
+      assert.equal(afterFold, 5, 'Fold collapsed all repeated delta rows to one per (status, simulated): delivered, bounced, accepted, canceled, suppressed.');
+      assert.equal(folded.campaignUnfolded, 0);
+      assert.ok(UNFOLDED_ALERT_THRESHOLD > 0);
+
+      // 5. Daily exact recount detects injected drift, fixes it in one snapshot, and logs *_DRIFT at error level.
+      await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count) VALUES ($1,$2,'delivered',false,7)`, [wid, cid]);
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),5)`, [wid, REGION]);
+      const errors: string[] = [];
+      const errSpy = t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const recounted = await recountSendingTallies(runtime);
+        assert.ok(recounted.campaignsCorrected >= 1);
+        assert.ok(recounted.workspacesCorrected >= 1);
+      } finally { errSpy.mock.restore(); }
+      assert.ok(errors.some(line => line.includes('CAMPAIGN_TALLIES_DRIFT')), 'Logs CAMPAIGN_TALLIES_DRIFT at error level.');
+      assert.ok(errors.some(line => line.includes('METRICS_HOURLY_DRIFT')), 'Logs METRICS_HOURLY_DRIFT at error level.');
+      // Re-running reconcile produces zero diffs now; raw event_outcomes bit check also finds 0 mismatches.
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0);
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
+      assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
+      // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!
+      await db.query("UPDATE sending_emails SET event_outcomes = event_outcomes | 128 WHERE workspace_id=$1 AND id='t_seq_bnc'", [wid]);
+      const bitErrors: string[] = [];
+      const bitSpy = t.mock.method(console, 'error', (...args: unknown[]) => { bitErrors.push(String(args[0])); });
+      try {
+        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
+        const res = await recountSendingTallies(runtime);
+        assert.equal(res.outcomeBitsDrifted, 1);
+      } finally { bitSpy.mock.restore(); }
+      assert.ok(bitErrors.some(line => line.includes('SENDING_EVENT_OUTCOMES_DRIFT')), 'Logs SENDING_EVENT_OUTCOMES_DRIFT when event_outcomes disagrees with raw events.');
+
+      // 6. High-volume dashboard cache revision quantizes to 10-second buckets above 500 emails/hour.
+      const quietRev = await dashboardRevision(runtime, wid);
+      assert.ok(!quietRev.startsWith('bucket:'), 'Quiet workspace keeps exact per-email revision.');
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),$3)`, [wid, REGION, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD]);
+      const busyRev = await dashboardRevision(runtime, wid);
+      assert.match(busyRev, /^bucket:\d+$/, 'High-volume hour quantizes Overview cache revision to 10-second buckets.');
     });
   });
 
