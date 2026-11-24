@@ -166,6 +166,8 @@
 .cb-console .cb-key { box-shadow: 0 0 0 6px rgb(30 33 40 / 9%), 0 -3px 0 6px rgb(30 33 40 / 9%), 0 3px 0 6px rgb(255 255 255 / 30%); }
 .cb-hall[data-frame='steel'] .cb-console .cb-key { box-shadow: none; }
 .cb-try:focus-visible { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 2px; border-radius: 2px; }
+/* Links keep the board's ring too, now that ui.css drops the dashboard's global one. */
+.price-page--board a:focus-visible { outline: var(--focus-width) solid var(--cb-mine); outline-offset: 2px; border-radius: 2px; }
 /* The homepage's lit key (page.css .srt-cta), in the console: its top and left side show; pressed it goes in flush. */
 .cb-key { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 224px; height: 56px; padding: 3px 0 0 2px; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-size: 18px; font-weight: 600; line-height: 1; letter-spacing: -.012em; text-decoration: none; white-space: nowrap; cursor: pointer; }
 .cb-key::before { content: ''; position: absolute; inset: 3px 0 0 2px; background: var(--srt-cta); box-shadow: 0 -2px 0 var(--srt-cta-top), -1px 0 0 var(--srt-cta-side), -1px -2px 0 var(--srt-cta-side), 2px 3px 4px rgb(0 0 0 / 22%); outline: 1px solid var(--srt-cta-edge); outline-offset: -5px; transition: background-color 150ms var(--cb-ease), translate 90ms var(--cb-ease), box-shadow 90ms var(--cb-ease); }
