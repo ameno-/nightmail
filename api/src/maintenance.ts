@@ -520,8 +520,10 @@ async function retire(runtime: Runtime, drains: Drain[], budgetMs: number, first
   await pass(order.filter(d => behind.has(d)));
   const unreached = order.filter(d => !reached.has(d)).map(d => d.name);
   const waiting: ByLane = {};
+  // Reserve time to report oldest waiting rows even when the final statement ran past `until` (bounded within grace).
+  const oldestDeadline = clock() < ceiling ? ceiling : Math.min(clock() + OLDEST_RESERVE_MS, ceiling + 55_000);
   for (const d of [...order.filter(d => failed.includes(d.name)), ...order.filter(d => behind.has(d) || capped.has(d))]) {
-    if (!d.oldest || clock() >= ceiling) continue;
+    if (!d.oldest || clock() >= oldestDeadline) continue;
     try {
       const age = (await runtime.db.execute<{ s: string | null }>(sql`SELECT floor(extract(epoch FROM now() - (${d.oldest})))::bigint AS s`)).rows[0]?.s;
       if (age != null) note(waiting, d, Number(age));
