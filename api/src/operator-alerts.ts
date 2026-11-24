@@ -55,9 +55,9 @@ const share = (slow: number, mail: number) => mail / slow >= 2 ? `1 in ${Math.ro
 const whole = (v: unknown) => typeof v === 'number' && Number.isSafeInteger(v) && v >= 0;
 
 /** One card: an emoji, a bold label and a few words, an Open button, and the same words as the plain-text fallback. */
-export const slackCard = (card: { emoji: string; label: string }, words: string, url: string) => ({
-  text: `${card.label}: ${words}`, unfurl_links: false, unfurl_media: false,
-  blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `${card.emoji} *${card.label}* ${words}`, verbatim: true },
+export const slackCard = (card: { emoji: string; label: string } | null, words: string, url: string) => ({
+  text: card ? `${card.label}: ${words}` : words, unfurl_links: false, unfurl_media: false,
+  blocks: [{ type: 'section', text: card ? { type: 'mrkdwn', text: `${card.emoji} *${card.label}* ${words}`, verbatim: true } : { type: 'plain_text', text: words, emoji: false },
     accessory: { type: 'button', action_id: 'open', text: { type: 'plain_text', text: 'Open', emoji: false }, url } }],
 });
 

@@ -671,6 +671,8 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['SENDING_TALLIES_RECOUNT_FAILED', async () => { await recountSendingTallies(runtime); }],
     // The daily exact recount of every list's counts.
     ['AUDIENCE_LIST_RECOUNT_FAILED', async () => { await recountLists(runtime); }],
+    // The sign-ups list: contacts whose address got in by an invitation or staff since (src/signups.ts).
+    ['SIGNUPS_RECONCILE_FAILED', async () => { await (await import('./signups.js')).queueSignupsReconcile(runtime); }],
     ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
   ] as const) {
     try { await step(); } catch (error) {

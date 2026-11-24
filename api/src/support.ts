@@ -376,20 +376,27 @@ export function registerSupport(app: App) {
     const q = c.req.valid('query'), { scope, ids: list, workspaces } = scoped(c), cursor = keyset(q.cursor), routed = receivedAsMember(workspaces);
     // Email reads sending only: an email conversation lists no received mail.
     if (!list.length || (q.direction === 'received' && scope.conversation.channel === 'email')) return c.json({ data: [], nextCursor: null }, 200);
-    const rows = q.direction === 'sent' ? (await c.env.db.execute<z.infer<typeof EmailSummary> & { at_text: string; key: string }>(sql`SELECT workspace_id AS "workspaceId", id, 'sent' AS direction, created_at::text AS at_text,
+    // Equality on the leading workspace column lets each ordered index seek stop after one page. An exact address matches
+    // too few rows for that: the seek would read the whole window one row at a time, so it keeps the parallel scan and sort.
+    const seek = !q.address;
+    const wid = !seek ? sql`ANY(${ids(list)})` : list.length === 1 ? sql`${list[0]}` : sql`granted.wid`;
+    const page = q.direction === 'sent' ? sql`SELECT workspace_id AS "workspaceId", id, 'sent' AS direction, created_at::text AS at_text,
         id AS key, created_at::text AS at, from_address AS "from", to_addresses AS "to", subject, status, error_code AS "errorCode", suppression_reason AS "suppressionReason", campaign_id AS "campaignId",
         snapshot ->> 'kind' AS kind, simulated, provider_id AS "providerMessageId" FROM sending_emails
-      WHERE workspace_id = ANY(${ids(list)}) AND created_at >= ${sinceOf(q.since)}::timestamptz ${q.status ? sql`AND status = ${q.status}` : sql``}
+      WHERE workspace_id = ${wid} AND created_at >= ${sinceOf(q.since)}::timestamptz ${q.status ? sql`AND status = ${q.status}` : sql``}
         ${q.address ? sql`AND (lower(from_address) = ${q.address} OR to_addresses ? ${q.address} OR cc_addresses ? ${q.address} OR bcc_addresses ? ${q.address})` : sql``}
         ${cursor ? sql`AND (created_at, id) < (${cursor.at}::timestamptz, ${cursor.key})` : sql``}
-      ORDER BY created_at DESC, id DESC LIMIT ${q.limit + 1}`)).rows
-      : (await c.env.db.execute<z.infer<typeof EmailSummary> & { at_text: string; key: string }>(sql`SELECT workspace_id AS "workspaceId", id, 'received' AS direction, received_at::text AS at_text, id AS key,
+      ORDER BY created_at DESC, id DESC LIMIT ${q.limit + 1}`
+      : sql`SELECT workspace_id AS "workspaceId", id, 'received' AS direction, received_at::text AS at_text, id AS key,
         received_at::text AS at, from_address AS "from", envelope_to AS "to", subject, status, error_code AS "errorCode", suppression_reason AS "suppressionReason", NULL AS "campaignId",
         CASE WHEN spam THEN 'spam' WHEN automated THEN 'automated' END AS kind, NULL::boolean AS simulated, ses_message_id AS "providerMessageId" FROM mail_messages
-      WHERE workspace_id = ANY(${ids(list)}) AND direction = 'inbound' AND received_at >= ${sinceOf(q.since)}::timestamptz ${routed} ${q.status ? sql`AND status = ${q.status}` : sql``}
+      WHERE workspace_id = ${wid} AND direction = 'inbound' AND received_at >= ${sinceOf(q.since)}::timestamptz ${routed} ${q.status ? sql`AND status = ${q.status}` : sql``}
         ${q.address ? sql`AND (lower(from_address) = ${q.address} OR envelope_to ? ${q.address})` : sql``}
         ${cursor ? sql`AND (received_at, id) < (${cursor.at}::timestamptz, ${cursor.key})` : sql``}
-      ORDER BY received_at DESC, id DESC LIMIT ${q.limit + 1}`)).rows;
+      ORDER BY received_at DESC, id DESC LIMIT ${q.limit + 1}`;
+    const { rows } = await c.env.db.execute<z.infer<typeof EmailSummary> & { at_text: string; key: string }>(!seek || list.length === 1 ? page : sql`
+      SELECT p.* FROM unnest(${ids(list)}) AS granted(wid) CROSS JOIN LATERAL (${page}) p
+      ORDER BY p.at_text::timestamptz DESC, p.key DESC LIMIT ${q.limit + 1}`);
     return c.json({ data: rows.slice(0, q.limit).map(r => ({ ...strip(r), at: new Date(r.at).toISOString() })), nextCursor: nextCursor(rows, q.limit) }, 200);
   });
   const EmailDetail = EmailSummary.extend({

@@ -88,7 +88,9 @@ try {
       await client.query('RESET lock_timeout; RESET statement_timeout');continue;
     }
     if(source.startsWith('-- bane:no-transaction\n')) {
-      await client.query("SET lock_timeout='2s'; SET statement_timeout='10min'");
+      // CONCURRENTLY takes only SHARE UPDATE EXCLUSIVE (never blocks reads or writes) and waits for older snapshots.
+      // Keep each wait bounded at 5 s and allow up to 12 retries (~60 s total) so busy tables do not abort deploys.
+      await client.query("SET lock_timeout='5s'; SET statement_timeout='10min'");
       for(const statement of source.split('\n').map(s=>s.trim()).filter(s=>s && !s.startsWith('--'))) {
         const drop=/^DROP INDEX CONCURRENTLY IF EXISTS ([a-z_][a-z0-9_]*);$/i.exec(statement);
         const match=drop??/^CREATE (?:UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS ([a-z_][a-z0-9_]*) ON .+;$/i.exec(statement);
@@ -101,9 +103,9 @@ try {
             if(!drop&&(await client.query('SELECT FROM pg_index WHERE indexrelid=to_regclass($1) AND NOT indisvalid',[idx])).rowCount)await client.query(`DROP INDEX CONCURRENTLY "${idx}"`);
             await client.query(statement); break;
           } catch(error) {
-            if((error as {code?:string}).code!=='55P03' || attempt>=5) throw error;
+            if((error as {code?:string}).code!=='55P03' || attempt>=12) throw error;
             log('warn',{code:'INDEX_LOCK_RETRY',migration:name,index:idx,attempt});
-            await new Promise(resolve=>setTimeout(resolve,attempt*250));
+            await new Promise(resolve=>setTimeout(resolve,Math.min(1000,attempt*250)));
           }
         }
       }

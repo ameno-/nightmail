@@ -105,6 +105,8 @@ export interface Config {
   platformDomainWorkspace?: string;
   /** Hosted only: From for Nightmail's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
+  /** Hosted only: the platform workspace's list of waitlist joins and sign-ups (src/signups.ts signupsList). */
+  signupsListId?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
   support?: { url?: string; signingKey?: { kty: 'OKP'; crv: 'Ed25519'; d: string; x: string }; addressIds?: string[] };
   /** Hosted only: where support reads this Worker's request lines (Workers Logs, src/support-logs.ts). */
@@ -146,7 +148,7 @@ export interface Config {
   liveEnabled: boolean;
   simulatedSes: { latencyMs: number; maxSendRate: number; deliveryDelayMs: number };
   // Pacing target relative to the provider quota: factor (1.1 aims 10% above) and an optional absolute live rate.
-  dispatch: { rateFactor: number; targetRate?: number; dailyHeadroomPercent: number; customerSharePercent: number };
+  dispatch: { rateFactor: number; txReservePercent?: number; targetRate?: number; dailyHeadroomPercent: number; customerSharePercent: number };
   encryptionKey: string;
   previousEncryptionKey?: string;
   awsAccountId?: string;
@@ -155,7 +157,7 @@ export interface Config {
   inboundTopicArns?: string[];
   reputationAlertUrl?: string;
   // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
-  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number };
+  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number; failover?: Config['shadow'] };
   // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
   // JEVF_API_KEY (or without a screen), and then nothing of it runs.
   shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };

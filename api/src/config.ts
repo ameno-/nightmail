@@ -58,6 +58,9 @@ const values = z.object({
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
+  // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
+  // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
+  NIGHTMAIL_SIGNUPS_LIST_ID: z.unknown().optional(),
   // Hosted only, support integration (api/README.md "Support integration"): where "Contact support" sends a member, and
   // the Ed25519 private JWK (with "x") that signs the handoff it carries. Treat the key as a secret. The support
   // platform itself has no credential here: it calls the SupportPlatform service-binding entrypoint (src/worker.ts).
@@ -126,6 +129,7 @@ const values = z.object({
   // Aim the dispatcher at a share of the provider quota (1 = exactly the quota). Overshoot is self-correcting:
   // a throttled response drops the target back to the quota for ten seconds.
   DISPATCH_RATE_FACTOR: z.coerce.number().min(0.1).max(10).default(1),
+  DISPATCH_TX_RESERVE_PERCENT: z.coerce.number().min(0).max(90).default(15),
   DISPATCH_DAILY_HEADROOM_PERCENT: z.coerce.number().min(0).max(100).default(10),
   // Hosted: the percent of a shared account's daily SES limit all outside (non-exempt) workspaces together may use.
   HOSTED_CUSTOMER_SHARE_PERCENT: z.coerce.number().min(0).max(100).default(50),
@@ -149,9 +153,7 @@ const values = z.object({
   // (about 7 KB for a message with few link hosts): src/screen.ts chunksFor.
   JEV_MESSAGE_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.messageBytes)),
   JEV_CAMPAIGN_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.campaignBytes)),
-  // A second classifier in the shadow of the content screen (src/screen-shadow.ts): each request the screen makes is
-  // repeated to it afterwards and both answers are kept (screen_comparisons). It decides nothing. Off without the key,
-  // which is a secret.
+  // Second classifier for shadow comparisons and for failover when the primary refuses its credentials or billing.
   JEVF_API_KEY: optional(z.string().min(1)),
   JEVF_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://jevf-inference.opencode.ai/v1/systemone')),
   JEVF_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jevf')),
@@ -182,6 +184,15 @@ function planetscaleSecret(value: string | undefined) {
   if (!value || value.length >= 32 && value.length <= 200) return value;
   if (!signingSecretIgnored) log('warn', { code: 'PLANETSCALE_WEBHOOK_SECRET_IGNORED', message: 'PLANETSCALE_WEBHOOK_SECRET is not 32 to 200 characters, so it is not used: the database disk alert checks its Authorization header alone.' });
   signingSecretIgnored = true;
+  return undefined;
+}
+let signupsListIgnored = false;
+/** The sign-ups list, or undefined for a value that isn't a list ID: the optional sync is off, and nothing else is. Said once, never with the value. */
+function signupsListId(value: unknown): string | undefined {
+  if (value == null || value === '') return undefined;
+  if (typeof value === 'string' && /^lst_[0-9a-f]{32}$/.test(value)) return value;
+  if (!signupsListIgnored) log('warn', { code: 'SIGNUPS_LIST_IGNORED', message: 'NIGHTMAIL_SIGNUPS_LIST_ID is not a list ID (lst_ and 32 hex digits), so sign-ups are not kept in a list.' });
+  signupsListIgnored = true;
   return undefined;
 }
 // Separate from Better Auth's signing/encryption uses even though installers manage one root secret.
@@ -242,6 +253,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const supportAddressIds = list(v.NIGHTMAIL_SUPPORT_ADDRESS_IDS ?? '');
   if (supportAddressIds.some(id => !/^mbx_[0-9a-f]{32}$/.test(id))) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_ADDRESS_IDS to inbound address IDs (mbx_…) separated by commas.');
   const url = new URL(v.PUBLIC_URL);
+  const jevf = v.TYPESAFE_API_KEY && v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined;
   const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
@@ -250,6 +262,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
+    signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
       ? { token: v.CF_OBSERVABILITY_TOKEN, accountId: v.CF_OBSERVABILITY_ACCOUNT_ID, script: v.CF_OBSERVABILITY_SCRIPT } : undefined, receivingRedrive:v.NIGHTMAIL_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_REGIONAL_SENDING === 'true',
@@ -275,14 +288,13 @@ export function loadConfig(input: Record<string, unknown>): Config {
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
     publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
-    dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
+    dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: v.DISPATCH_TX_RESERVE_PERCENT, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
     aws,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
-    screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD } : undefined,
-    // Only beside a content screen: with no screen there is no request to repeat.
-    shadow: v.TYPESAFE_API_KEY && v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined,
+    screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD, ...(jevf && { failover: jevf }) } : undefined,
+    shadow: jevf, // Workers without a comparison queue disable only this handoff, not the failover gate.
     screenLimits: { messageBytes: v.JEV_MESSAGE_LIMIT_BYTES, campaignBytes: v.JEV_CAMPAIGN_LIMIT_BYTES },
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },

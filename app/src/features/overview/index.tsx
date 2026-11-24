@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
-import { ArrowUpRight } from 'lucide-react'
+import { ArrowUpRight, PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
 import { campaignEditable, type Campaign, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
-import { DataTable, EmptyState, ErrorState, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
+import { DataTable, EmptyState, ErrorState, IconButton, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
 import { NextSteps, SidebarScore, StandingCard, useNextSteps, useSenderScore } from '../score'
@@ -18,6 +18,7 @@ import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
 import { composer } from '../campaigns/composer-chunk'
 import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './setup'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
+import { setPanelHidden, usePanelHidden } from './panel'
 
 // Overview: is sending healthy? The range and stream over the figures they filter; four figure tiles, each a link to
 // that mail in Logs; the activity chart; and the latest emails, failures first (down to the card's bottom) on the
@@ -67,7 +68,7 @@ export function OverviewPage() {
   useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head && !metricsFailed) void refetch(); seen.current = head }, [head, refetch, metricsFailed])
   const latestEmails = <LatestEmails params={latestParams} count={count} reserve={!stacked} held={held} range={range} figures={data} figuresFailed={query.isError} />
   return <>
-    <PageHeader title="Overview" actions={controls} />
+    <PageHeader title="Overview" actions={<>{controls}<PanelToggle /></>} />
     <div className="ov-split">
       <div className="ov-split__main">
         {stacked && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
@@ -95,6 +96,13 @@ function useDetail(setup: ReturnType<typeof useSetupSteps>, recentReady: boolean
   const limitPending = useSendingLimitPending()
   return { score, next, ready: Boolean((score.data || score.isError) && !setup.loading && next.ready && !limitPending && recentReady) }
 }
+// Hides or shows the detail column beside the main one (panel.ts). It keeps the header's top-right corner either way
+// (overview.css), and is not there where the column stacks under the main one.
+function PanelToggle() {
+  const hidden = usePanelHidden()
+  return <IconButton className="ov-panel-toggle" label={hidden ? 'Show panel' : 'Hide panel'} aria-expanded={!hidden} aria-controls="overview-panel" onClick={() => setPanelHidden(!hidden)}>{hidden ? <PanelRightOpen size={16} aria-hidden="true" /> : <PanelRightClose size={16} aria-hidden="true" />}</IconButton>
+}
+
 // The detail column renders in one go once setup, the score and the next steps are known, so nothing in it moves.
 // The standing card (Warn and up) leads it; the banner's fix link and the sidebar score scroll here by hash. Recent
 // campaigns come with the overview's figures and close the column, so arriving later moves nothing above them.
@@ -106,12 +114,14 @@ function Aside({ setup, detail: { score, next, ready }, showSetup, placeholder, 
   const { multiTenant } = useWorkspaceAccess()
   const compact = useCompactShell()
   const { hash, key } = useLocation()
+  // The banner's fix link leads to the standing card, so it brings back a hidden column.
+  useEffect(() => { if (hash === '#standing' && placeholder) setPanelHidden(false) }, [hash, key, placeholder])
   useEffect(() => {
     if (!ready || hash !== '#standing') return
     const frame = requestAnimationFrame(() => document.getElementById('standing')?.scrollIntoView({ block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' }))
     return () => cancelAnimationFrame(frame)
   }, [ready, hash, key])
-  return <aside className="ov-split__aside" aria-label="Status">{!ready ? placeholder && <AsideSkeleton /> : <>
+  return <aside id="overview-panel" className="ov-split__aside" aria-label="Status">{!ready ? placeholder && <AsideSkeleton /> : <>
     {score.data && <StandingCard report={score.data} />}
     {showSetup && setup.steps && <SetupRail steps={setup.steps} current={setup.current} open={setup.open} />}
     {showSetup && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}

@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, log, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
@@ -42,7 +42,7 @@ export function propertiesByteLength(properties: Record<string, unknown>): numbe
 const Email = mailAddress(z.string().trim()).transform(v => v.toLowerCase()).openapi({format:'email'});
 const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= CONTACT_PROPERTIES_MAX_KEYS, 'At most 50 properties are supported.');
 export const PropertiesInput = Properties.refine(v => propertiesByteLength(v) <= CONTACT_PROPERTIES_MAX_BYTES, 'Contact properties must total at most 16 KiB of JSON.').describe('Up to 50 key/value pairs, at most 16 KiB of JSON total.');
-const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
+export const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
 const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional() }).strict();
 export function withAudienceReadMemory(c: Ctx, work: () => Promise<Response>): Promise<Response> {
   return withBoundedRead(c, () => work(), { route: 'audience.read' });
@@ -144,13 +144,15 @@ async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infe
   const { listId } = query, filtered = !!query.search || !!query.consent || query.suppressed !== undefined;
   const byMembership = !!listId && !query.email && !wholeAddress(query.search) && (!filtered
     || !(await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} OFFSET ${SMALL_LIST} LIMIT 1`)).rows.length);
+  // Bound both sides of the membership join so a merge can seek instead of scanning contacts up to the cursor.
+  const membershipCursor = query.cursor ? and(gt(listMembers.contactId, query.cursor), gt(contacts.id, query.cursor)) : undefined;
   const candidateSql = byMembership
     ? sql`SELECT ${contacts.id} AS id, ${contacts.workspaceId} AS workspace_id, ${contacts.email} AS email, ${contacts.name} AS name, ${contacts.properties} AS properties, ${contacts.marketingConsent} AS marketing_consent, ${contacts.suppressed} AS suppressed, ${contacts.suppressionReason} AS suppression_reason,
         ${contacts.lastOpenAt} AS last_open_at, ${contacts.lastClickAt} AS last_click_at, ${contacts.observedSince} AS observed_since, ${contacts.openObservedSince} AS open_observed_since, ${contacts.clickObservedSince} AS click_observed_since, ${contacts.deletedAt} AS deleted_at, ${contacts.createdAt} AS created_at, ${contacts.updatedAt} AS updated_at,
         (octet_length(${contacts.properties}::text) + octet_length(${contacts.email}) + coalesce(octet_length(${contacts.name}), 0) + 384) AS row_bytes
       FROM ${listMembers}
       JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId}
-      WHERE ${and(scope(listMembers, identity), eq(listMembers.listId, listId!), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }), query.cursor ? gt(listMembers.contactId, query.cursor) : undefined)}
+      WHERE ${and(scope(listMembers, identity), eq(listMembers.listId, listId!), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }), membershipCursor)}
       ORDER BY ${listMembers.contactId} ASC LIMIT ${query.limit + 1}`
     : sql`SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason,
         last_open_at, last_click_at, observed_since, open_observed_since, click_observed_since, deleted_at, created_at, updated_at,
@@ -564,13 +566,58 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
     if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
     if (contact.marketingConsent === 'unsubscribed') return { contactId: contact.id, changed: false };
     const now = new Date().toISOString();
-    await tx.update(contacts).set({ marketingConsent: 'unsubscribed', updatedAt: now }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
-    const auditId = rowId('cns');
     const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token; no human identity asserted.';
-    await tx.insert(consentAudit).values({ id: auditId, ...identity, contactId: contact.id, email: normalized.data, status: 'unsubscribed', source, evidence, actorKeyId: null, occurredAt: now });
-    await enqueue(tx, { type: 'operation.publish', ...identity, payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: now, ...identity, region: null, data: { contactId: contact.id, status: 'unsubscribed', source } } } });
+    await recordConsent(tx, identity, contact, { status: 'unsubscribed', source, evidence, occurredAt: now, actorKeyId: null }, now);
     return { contactId: contact.id, changed: true };
   });
+}
+/**
+ * A consent decision for a contact its caller holds FOR UPDATE: its audit record, the contact.subscription_changed event
+ * when the status changes, and the contact itself. The consent route, an unsubscribe and the sign-ups list (signups.ts)
+ * all write consent through here. `at`: one time for the event and the contact (an unsubscribe's decision time);
+ * without it each is stamped when it is written, after the audit, as the consent route always has.
+ */
+export async function recordConsent(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, contact: Pick<ContactRow, 'id' | 'email' | 'marketingConsent'>,
+  decision: { status: 'subscribed' | 'unsubscribed'; source: string; policyVersion?: string; evidence?: string; occurredAt: string; actorKeyId: string | null }, at?: string) {
+  const auditId = rowId('cns');
+  await tx.insert(consentAudit).values({ id: auditId, ...scopeValues(identity), contactId: contact.id, email: contact.email, status: decision.status, source: decision.source, policyVersion: decision.policyVersion ?? null, evidence: decision.evidence ?? null, occurredAt: decision.occurredAt, actorKeyId: decision.actorKeyId });
+  if (contact.marketingConsent !== decision.status) await enqueue(tx, { type: 'operation.publish', ...scopeValues(identity), payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: at ?? new Date().toISOString(), ...scopeValues(identity), region: null, data: { contactId: contact.id, status: decision.status, source: decision.source } } } });
+  const [updated] = await tx.update(contacts).set({ marketingConsent: decision.status, updatedAt: at ?? new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contact.id))).returning();
+  return updated!;
+}
+export type ListContactResult = 'added' | 'updated' | 'deleted' | 'invalid' | 'no_list' | 'gone';
+/**
+ * A contact the installation keeps in a list from records of its own (the sign-ups list, signups.ts), under the API's
+ * rules: the address and name are checked as createContact checks them, properties merge into the contact's own within
+ * the 50-key and 16 KiB limits (a merge past them leaves the properties as they were), and the contact joins the list.
+ * Consent is recorded only for a contact with no decision yet that isn't suppressed: an opt-out stays an opt-out, and
+ * suppression is never touched. A deleted contact stays deleted: what deletion retains is there to keep it from being
+ * enrolled again. A waitlist sync marks the membership so reconciliation can distinguish it from a manual addition.
+ * Takes the list, then the contact, as an import does.
+ */
+export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string,
+  input: { email: string; name: string | null; fromWaitlist?: boolean; properties: Record<string, string | number | boolean | null>; consent: { source: string; evidence: string; occurredAt: string } }): Promise<ListContactResult> {
+  const parsed = ContactInput.safeParse({ email: input.email, ...input.name ? { name: input.name } : {}, properties: input.properties });
+  if (!parsed.success) return 'invalid';
+  const { email, name, properties } = parsed.data;
+  const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('share');
+  if (!list) return 'no_list';
+  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
+  const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email))).limit(1).for('update');
+  if (!contact) throw new ApiError(500, 'CONTACT_WRITE_FAILED', 'Unable to persist the contact.', undefined, true);
+  if (contact.deletedAt) return 'deleted';
+  if (!added) {
+    const merged = { ...contact.properties, ...properties }, fits = PropertiesInput.safeParse(merged).success;
+    const changed = fits && Object.entries(properties).some(([key, value]) => contact.properties[key] !== value);
+    if (!fits) log('warn', { code: 'LIST_CONTACT_PROPERTIES_FULL', workspaceId: identity.workspaceId, contactId: contact.id });
+    if (changed || (name && name !== contact.name)) await tx.update(contacts).set({ ...changed ? { properties: merged } : {}, ...name ? { name } : {}, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contact.id)));
+  }
+  if (contact.marketingConsent === 'unknown' && !contact.suppressed) await recordConsent(tx, identity, contact, { status: 'subscribed', ...input.consent, actorKeyId: null });
+  if (input.fromWaitlist) await tx.execute(sql`INSERT INTO audience_list_members(workspace_id,list_id,contact_id,signup_waitlist)
+    VALUES(${identity.workspaceId},${listId},${contact.id},true) ON CONFLICT(workspace_id,list_id,contact_id)
+    DO UPDATE SET signup_waitlist=true WHERE audience_list_members.signup_waitlist IS DISTINCT FROM true`);
+  else await tx.insert(listMembers).values({ ...scopeValues(identity), listId, contactId: contact.id }).onConflictDoNothing();
+  return added ? 'added' : 'updated';
 }
 
 function utf8ByteLength(text: string): number {
@@ -812,11 +859,7 @@ export function registerAudience(app: App) {
         const [latest] = await tx.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId))).orderBy(sql`${consentAudit.occurredAt} DESC`).limit(1);
         if (latest && Date.parse(occurredAt) <= Date.parse(latest.occurredAt)) throw new ApiError(409, 'STALE_CONSENT', 'Renewed consent must be newer than the prior consent decision.');
       }
-      const auditId = rowId('cns');
-      await tx.insert(consentAudit).values({ id: auditId, ...scopeValues(identity), contactId, email: existing.email, status: input.status, source, policyVersion: input.policyVersion ?? null, evidence: input.evidence ?? null, occurredAt, actorKeyId: identity.keyId });
-      if (existing.marketingConsent !== input.status) await enqueue(tx, { type: 'operation.publish', ...scopeValues(identity), payload: { event: { id: auditId, type: 'contact.subscription_changed', createdAt: new Date().toISOString(), ...scopeValues(identity), region: null, data: { contactId, status: input.status } } } });
-      const [updated] = await tx.update(contacts).set({ marketingConsent: input.status, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId))).returning();
-      return updated!;
+      return recordConsent(tx, identity, existing, { status: input.status, source, policyVersion: input.policyVersion, evidence: input.evidence, occurredAt, actorKeyId: identity.keyId });
     }); return c.json(contact, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}/consent', operationId: 'listContactConsentEvents', tags: ['Consent'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Audit)), ...errors } }), async c => {

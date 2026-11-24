@@ -80,9 +80,10 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   async fetch(request: Request): Promise<Response> {
-    // First, before anything can await: this request is now the current one (see the top of this file).
-    if (this.alarmActive) this.landed = true;
+    // First, before anything can await: only visitor-originated HTTP requests carry a Cloudflare visitor country
+    // label (queue and cron wakes pass internal=1 and have no visitor, so they must not abort running alarms).
     const url = new URL(request.url);
+    if (this.alarmActive && url.searchParams.get('internal') !== '1') this.landed = true;
     if (url.pathname !== '/wake' || url.searchParams.has('environment')) return new Response('Not found', { status: 404 });
     const identity: Identity = {
       region: url.searchParams.get('region') ?? '',
@@ -153,17 +154,38 @@ export class DispatcherShard extends DurableObject<Env> {
       deps.setLogContext({ service: 'worker', deploy: (this.env as unknown as Record<string, unknown>).DEPLOY_SHA });
       const { initialGate, runDispatcher } = deps;
       this.gate ??= (await this.ctx.storage.get<GateState>('gate')) ?? initialGate();
-      // Once a request lands, no classifier call in this run (screenHandover), no more leases (stop), and a follow-up below.
-      const runtime: Runtime = { ...await this.runtime(), screenHandover: () => this.landed };
+      // Once a visitor request lands, no classifier call in this run (screenHandover). Only stop early for a clean
+      // follow-up alarm when a message genuinely hits screenHandover (needs an external classifier call); otherwise keep
+      // serving priorityWake and normal batches without interrupting pre-screened or cached sends.
+      const baseRuntime = await this.runtime();
+      let handedOver = false;
+      const runtime: Runtime = {
+        ...baseRuntime,
+        screenHandover: () => {
+          if (!this.landed) return false;
+          handedOver = true;
+          return true;
+        },
+      };
       // An alarm persisted by an older MX deployment must not drain an unpartitioned region.
       if (runtime.config.multiTenant && !identity.accountId) return;
+      // Throttle and guard gate persistence: a transient DO storage error must never crash a healthy run into a 15 s retry.
+      const GATE_PERSIST_MS = 2000;
+      let lastPersistAt = 0, lastPersistKey = '';
+      const gateKey = (s: GateState) => `${s.quota?.checkedAt ?? 0}:${s.brakeUntil ?? 0}:${s.marketingBrakeUntil ?? 0}:${s.outageUntil ?? 0}:${s.accountPauseAt ?? 0}:${s.dailyBlockedUntil ?? 0}`;
+      const persistGate = async (state: GateState, force = false) => {
+        const now = Date.now(), key = gateKey(state);
+        if (!force && key === lastPersistKey && now - lastPersistAt < GATE_PERSIST_MS) return;
+        lastPersistAt = now; lastPersistKey = key;
+        try { await this.ctx.storage.put('gate', state, { allowUnconfirmed: true }); }
+        catch (error) { deps?.log('warn', { code: 'DISPATCHER_GATE_PERSIST_FAILED', shard: dispatcherName(identity), cause: deps.platformMessage(error) }); }
+      };
       const report = await runDispatcher(runtime, {
-        ...identity, gate: this.gate, priorityWake: this.priorityWake, stop: () => this.landed,
+        ...identity, gate: this.gate, priorityWake: this.priorityWake, stop: () => handedOver,
         until: started + RUN_MS, lanes: 2, batchSize: deps.shardLeaseSize(this.gate.quota?.maxSendRate,identity.shard.count), sendConcurrency: 6, wakeMs,
-        // Unconfirmed: a confirmed write holds the object's outgoing calls (SES, the classifier) until it is confirmed, about
-        // 25 ms after each batch. If the write fails the object is reset and the alarm runs again.
-        onGate: async state => { await this.ctx.storage.put('gate', state, { allowUnconfirmed: true }); },
+        onGate: state => persistGate(state),
       });
+      await persistGate(this.gate, true);
       if (!this.placementLogged) { this.placementLogged = true; this.ctx.waitUntil(this.logPlacement(identity, runtime)); }
       // Work remained when the run budget ended: continue immediately. Otherwise sleep until the next wake (an API nudge or
       // the scheduler's minute ping) or the run's own retry. A wake only arms this alarm, so every run, and all queued mail,
@@ -186,15 +208,14 @@ export class DispatcherShard extends DurableObject<Env> {
     } finally {
       this.running = false;
     }
-    // A request landed during the run: the follow-up alarm (a newer request, with no visitor) screens what this run gave back.
+    // A visitor request landed during the run: the follow-up alarm (a newer request, with no visitor) screens what this run gave back.
     await this.rearm(this.landed ? Date.now() : next);
   }
 
   private async runtime(): Promise<Runtime> {
     const { Pool, drizzle, loadConfig, r2Storage, feedbackSink, workWake, enqueueShadow } = await loadDeps();
     const config = loadConfig({ ...this.env });
-    // The second classifier (src/screen-shadow.ts) is never called from this object, whose six connections are for SES and
-    // the screen: when a run has ended, what it kept goes onto the second classifier's queue, in sends nothing waits for.
+    // Shadow comparisons go to their own queue. Only failover gate calls share the object's SES connections (at most two).
     const shadowQueue = this.env.JEVF_QUEUE;
     if (!shadowQueue) config.shadow = undefined;
     // A small persistent pool: claims are sequential per lane and provider calls do not hold connections.

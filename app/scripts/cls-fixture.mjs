@@ -168,8 +168,11 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
     const fontDir = join(repo, 'app/dist/fonts');
     const fonts = new Map(readdirSync(fontDir).filter(f => f.endsWith('.woff2')).map(f => [f, readFileSync(join(fontDir, f))]));
     const assetCache = new Map(), links = new Map();
-    const agent = new Agent({ keepAlive: true, maxSockets: 128 });
-    cleanups.push(() => agent.destroy());
+    const bulk = new Agent({ keepAlive: true, maxSockets: 128 });
+    // Twenty browser jobs share Dana's workspace. Admit ordinary API calls per origin within the real read pool's
+    // two active + four waiting slots; do not retry or ignore a 429. Assets and the live rule poll have their own lane.
+    const reads = new Agent({ keepAlive: true, maxSockets: 6 });
+    cleanups.push(() => { reads.destroy(); bulk.destroy(); });
     let serverLog = '';
     const serve = async () => {
       const apiPort = await freePort(), proxyPort = await freePort();
@@ -186,6 +189,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       }
       const proxy = createHttpServer(async (req, res) => {
         const rawUrl = req.url || '/', q = rawUrl.indexOf('?'), pathname = q === -1 ? rawUrl : rawUrl.slice(0, q);
+        const agent = pathname.startsWith('/v1/') && pathname !== '/v1/rules/version' ? reads : bulk;
         const page = req.headers['x-cls-page'];
         delete req.headers['x-cls-page'];
         // Fonts skip the page's network unless they are meant to arrive late (CLS_FONTS=late).
@@ -255,15 +259,15 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
         // A kept-alive socket the API closed for idling (Node's 5 s keepAliveTimeout) just as it was reused resets
         // before any response: a GET or HEAD has no body to lose, so it goes again once on a fresh socket. Without this
         // the page saw an empty response (ERR_EMPTY_RESPONSE), now and then, on whichever load drew that socket.
-        const forward = (retry) => {
-          const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent }, upRes => {
+        const forward = fresh => {
+          const up = httpRequest({ hostname: '127.0.0.1', port: apiPort, method: req.method, path: rawUrl, headers: req.headers, agent: fresh ? false : agent }, upRes => {
             answered = true;
             res.writeHead(upRes.statusCode ?? 502, upRes.headers);
             if (req.method === 'HEAD') { upRes.resume(); res.end(); return; }
             upRes.pipe(res);
           });
           up.on('error', error => {
-            if (retry && up.reusedSocket && error.code === 'ECONNRESET' && !answered && !res.destroyed) { forward(false); return; }
+            if (!fresh && bodyless && up.reusedSocket && error.code === 'ECONNRESET' && !answered && !res.destroyed) { forward(true); return; }
             if (!res.headersSent) res.writeHead(502); res.destroy();
           });
           res.on('close', () => { if (!res.writableEnded) up.destroy(); });
@@ -272,7 +276,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
         };
         const bodyless = req.method === 'GET' || req.method === 'HEAD';
         let answered = false;
-        const up = forward(bodyless);
+        const up = forward(false);
         req.on('error', () => up.destroy());
         if (body) up.end(body); else if (!bodyless) req.pipe(up);
       });

@@ -7,8 +7,8 @@ run-name: Deploy ${{ github.ref_name }} ${{ github.sha }}
 # then health and the live dev E2E run — in one run, so a Pulumi Worker-secret
 # write can never race the E2E as it could when pulumi.yml was separate.
 #
-# A dev deploy starts on the push itself, alongside that push's CI. Production
-# deploys only a pushed commit with passing dev push CI and a passing
+# A dev deploy starts on the push itself. Production deploys only a pushed
+# commit with passing dev merge-group (or direct dev push) CI and a passing
 # live dev E2E for that SHA (dev-proof.sh), and needs no
 # reviewer: the proof, the production branch's ruleset and its fast-forward
 # history gate it (docs/ci.md).
@@ -39,7 +39,7 @@ jobs:
   authorize:
     name: Authorize
     runs-on: blacksmith-2vcpu-ubuntu-2404
-    # Production waits here for a dev push CI that is still running (up to 25 minutes).
+    # Queue CI is already complete when dev is pushed. Direct pushes may still be testing.
     timeout-minutes: 30
     permissions:
       contents: read
