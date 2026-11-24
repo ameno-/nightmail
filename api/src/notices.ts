@@ -56,6 +56,8 @@ const hostName = (value: string) => value.length <= 253 && /^[A-Za-z0-9-]+(\.[A-
 const recordName = (value: string) => value.length <= 253 && /^[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)*$/.test(value);
 const recordValue = (value: string) => value.length <= 255 && /^[A-Za-z0-9 ._:=~-]+$/.test(value);
 const day = (value: Date) => value.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+// A deadline to the minute: a day alone reads as "all of that day", and in most time zones the moment falls on another date.
+const moment = (value: Date) => `${day(value)} at ${value.toISOString().slice(11, 16)} UTC`;
 const count = (value: number) => value.toLocaleString('en-US');
 const owes = (workspace: string, owed: string, since: Date | null) => since ? `${workspace} has owed ${owed} since ${day(since)}.` : `${workspace} owes ${owed}.`;
 
@@ -165,7 +167,7 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
         why: `${productName} sends this once for each domain, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, records,
         link: provider && n.host?.url ? { label: `Open ${provider} DNS`, url: n.host.url } : undefined, lines: [
           `${host ? `${host} was` : 'A domain was'} added over an hour ago, but ${gap}.`,
-          `Mail from addresses at ${name} can’t be sent until they are published.${n.releasesAt ? ` If the ownership record is still missing on ${day(n.releasesAt)}, the domain is released.` : ''}`,
+          `Mail from addresses at ${name} can’t be sent until they are published.${n.releasesAt ? ` If the ownership record is still missing on ${moment(n.releasesAt)}, the domain is released.` : ''}`,
           provider ? `Its DNS is hosted at ${provider}. Add ${records.length === 1 ? 'this record' : 'these records'} there:` : `Add ${records.length === 1 ? 'this record' : 'these records'} where its DNS is hosted:`] });
     }
     case 'no_domain': return notice({ subject: 'Add your domain to start sending', action: { label: 'Add your domain', url: `${base}/domains` },
