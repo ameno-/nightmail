@@ -37526,10 +37526,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2'), send = SESv2Client.prototype.send, sent: Json[] = [];
       t.mock.method(SESv2Client.prototype, 'send', async function (this: unknown, cmd: unknown, ...rest: unknown[]) { if (cmd instanceof SendEmailCommand) sent.push(cmd.input); return (send as (...a: unknown[]) => unknown).call(this, cmd, ...rest); });
       const input = (id: string) => sent.find(s => s.EmailTags.some((tag: Json) => tag.Name === 'bane_email_id' && tag.Value === id))!;
-      // Raw MIME as SES received it, or the same message built from simple content; quoted-printable soft breaks undone.
+      // Raw MIME as SES received it, or the same message built from simple content; readable with quoted-printable decoded.
       const message = (s: Json) => Buffer.from(s.Content.Raw ? s.Content.Raw.Data : inlineMessage({ kind: 'marketing', testCampaignId: null, from: 'sender@example.com', to: s.Destination.ToAddresses, cc: [], bcc: [], replyTo: [], region: REGION,
         subject: s.Content.Simple.Subject.Data, html: s.Content.Simple.Body.Html?.Data, text: s.Content.Simple.Body.Text?.Data, tracking: false, attachments: [], headers: s.Content.Simple.Headers ?? [] }, s.Content.Simple.Attachments ?? []));
-      const readable = (s: Json) => message(s).toString('latin1').replace(/=\r\n/g, '');
+      const readable = (s: Json) => message(s).toString('latin1').replace(/=\r\n/g, '').replace(/=([0-9A-F]{2})/g, (_: string, hex: string) => String.fromCharCode(parseInt(hex, 16)));
       const contentId = `bane-${randomUUID()}`;
       const image = ok(await local('POST', '/v1/attachments', { filename: 'image-57c04568d0ca.png', content: png.toString('base64'), contentType: 'image/png', disposition: 'inline', contentId }), 201);
       const checksum: string = (await db.query('SELECT checksum FROM sending_attachments WHERE id=$1', [image.id])).rows[0].checksum;
@@ -37557,7 +37557,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(after < 8_000, `Linked, the message is its HTML (${after} bytes).`);
       assert.equal(linked.sent.Content.Raw, undefined);
       assert.equal(linked.sent.Content.Simple.Attachments?.length ?? 0, 0);
-      assert.ok(linked.sent.Content.Simple.Body.Html.Data.includes(`<img src="${url}" alt="logo" width="100">`) && !linked.sent.Content.Simple.Body.Html.Data.includes('cid:'), linked.sent.Content.Simple.Body.Html.Data);
+      assert.ok(linked.sent.Content.Simple.Body.Html.Data.includes(`<img src="${url}" alt="logo" width="100"`) && !linked.sent.Content.Simple.Body.Html.Data.includes('cid:'), linked.sent.Content.Simple.Body.Html.Data);
       assert.ok(ok(await local('GET', `/v1/emails/${linked.id}/content`)).html.includes(`cid:${contentId}`), 'The sent message still reads back from its frozen review.');
 
       // The link is public, cached for a year and serves the picture byte for byte; nothing else answers under /i/.
@@ -37583,7 +37583,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const test = ok(await local('POST', `/v1/campaigns/${mixed.id}/test`, { to: address() }), 202);
       await run('email.dispatch');
       const tested = readable(input(test.id));
-      assert.ok(tested.includes(`<img src="${url}" alt="logo" width="100">`) && tested.includes('<img src="cid:fake" alt="fake">') && tested.includes('Content-ID: <fake>') && !tested.includes(`Content-ID: <${contentId}>`), tested.slice(0, 4000));
+      assert.ok(tested.includes(`<img src="${url}" alt="logo" width="100"`) && tested.includes('<img src="cid:fake" alt="fake"') && tested.includes('Content-ID: <fake>') && !tested.includes(`Content-ID: <${contentId}>`), tested.slice(0, 4000));
       const fakeChecksum: string = (await db.query('SELECT checksum FROM sending_attachments WHERE id=$1', [fake.id])).rows[0].checksum;
       assert.equal((await get(`/i/${fake.id.slice('attachment_'.length)}${fakeChecksum.slice(0, 32)}.png`)).status, 404);
 
