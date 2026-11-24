@@ -142,6 +142,14 @@ const values = z.object({
   // (about 7 KB for a message with few link hosts): src/screen.ts chunksFor.
   JEV_MESSAGE_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.messageBytes)),
   JEV_CAMPAIGN_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.campaignBytes)),
+  // A second classifier in the shadow of the content screen (src/screen-shadow.ts): each request the screen makes is
+  // repeated to it afterwards and both answers are kept (screen_comparisons). It decides nothing. Off without the key,
+  // which is a secret.
+  JEVF_API_KEY: optional(z.string().min(1)),
+  JEVF_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://jevf-inference.opencode.ai/v1/systemone')),
+  JEVF_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jevf')),
+  JEVF_DEADLINE_MS: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(100).max(30000).default(5000)),
+  JEVF_MAX_CONCURRENCY: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(1).max(64).default(8)),
 });
 // Each NIGHTMAIL_<x> setting is also read under its earlier names (brand.ts settingNames: BANE_<x>, then MX_<x>), and
 // PREVIOUS_NIGHTMAIL_ROOT_SECRET as PREVIOUS_BANE_ROOT_SECRET. The NIGHTMAIL_ name wins. Remove after rename cleanup.
@@ -253,6 +261,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
     screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD } : undefined,
+    // Only beside a content screen: with no screen there is no request to repeat.
+    shadow: v.TYPESAFE_API_KEY && v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined,
     screenLimits: { messageBytes: v.JEV_MESSAGE_LIMIT_BYTES, campaignBytes: v.JEV_CAMPAIGN_LIMIT_BYTES },
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },

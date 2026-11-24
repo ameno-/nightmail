@@ -2628,7 +2628,7 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
         const charged = await runtime.db.execute(sql`UPDATE sending_campaign_reviews SET screen_charged=screen_charged+1
           WHERE workspace_id=${ref.workspaceId} AND id=${ref.reviewId} AND screen_charged<screen_budget`);
         if (!charged.rowCount) throw new ApiError(422, 'CONTENT_SCREEN_BUDGET_EXCEEDED', 'This campaign has used the classifier requests its audience allows; its unscreened copies are not sent.');
-        const result = await screen.screenWindow(runtime, input, row.windows, call);
+        const result = await screen.screenWindow(runtime, input, row.windows, call, key);
         const [moved] = (await runtime.db.execute<Row>(sql`UPDATE sending_campaign_screens SET windows=windows+1,spam=greatest(spam,${result.spam}),model=${result.model},
           judged_at=CASE WHEN windows+1>=requests THEN clock_timestamp() END
           WHERE campaign_id=${ref.campaignId} AND copy_hash=${key} AND windows=${row.windows}

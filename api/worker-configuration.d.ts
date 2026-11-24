@@ -42,6 +42,7 @@ interface __BaseEnv_Env {
 	LEGACY_FEEDBACK_CUTOVER: "";
 	DISPATCHER: DurableObjectNamespace<import("./src/worker").DispatcherShard>;
 	CAMPAIGN_ROOMS?: DurableObjectNamespace<import("./src/worker").CampaignRoom>;
+	SCREEN_SHADOW?: DurableObjectNamespace<import("./src/worker").ScreenShadow>;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {

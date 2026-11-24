@@ -9,6 +9,7 @@ import { clearProbe, queueCampaignRun, resumeCampaign } from './states.js';
 import { productName } from './brand.js';
 import { placesOpened, readPlaces, setLimit } from './signups.js';
 import { waitlistNoticeStatus } from './account-notices.js';
+import { ScreenComparison, screenComparison } from './screen-comparison.js';
 
 // The operator API: Anomaly staff with a platform role act on any Hosted workspace through one audited path. The
 // /operator dashboard area, Ryan's support platform (phase 2) and scripts are its clients. Roles live in
@@ -362,6 +363,16 @@ export function registerOperator(app: App) {
     });
     // After the commit: an email that fails or is slow can't undo the change. Each address is emailed once, ever.
     return c.json({ ...result, ...await placesOpened(c.env) }, 200);
+  });
+  // The content screen beside the second classifier that repeats its requests (src/screen-shadow.ts): how often they
+  // agree at the threshold, how far their scores are apart, how each one's requests ended and how long they took. Read
+  // from screen_comparisons alone; IDs and digests, never content. `since` defaults to the last 24 hours (rows are kept 90 days).
+  app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/screen-comparison', operationId: 'operatorScreenComparison',
+    request: { query: z.object({ since: z.string().datetime({ offset: true }).optional().describe('RFC 3339; default 24 hours ago.') }) },
+    responses: { 200: response(ScreenComparison), ...errors } }), async c => {
+    await operatorActor(c, 'operator:read');
+    const { since } = c.req.valid('query'), oldest = Date.now() - 90 * 86400_000;
+    return c.json(await screenComparison(c.env.db, new Date(Math.max(oldest, since ? Date.parse(since) : Date.now() - 86400_000)), !!c.env.config.shadow), 200);
   });
   // Every workspace, newest first, with what judging sign-ups needs: when it joined, its owner, a verified domain, what
   // it sent and its standing. Paged by the API's cursor.

@@ -170,6 +170,8 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('agent_tokens', 'agent_tokens', at('expires_at'), sql`expires_at < ${cutoff}`),
     // Classifier requests (src/screen-calls.ts), kept 30 days.
     expired('content_screen_calls', 'content_screen_calls', at('created_at'), sql`created_at < ${cutoff}`),
+    // The second classifier's comparisons (src/screen-shadow.ts), kept 90 days.
+    expired('screen_comparisons', 'screen_comparisons', at('created_at'), sql`created_at < now() - interval '90 days'`),
     // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
     expired('abuse_signals', 'abuse_signals', at('last_at'), abuseExpired),
     expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`, unordered),

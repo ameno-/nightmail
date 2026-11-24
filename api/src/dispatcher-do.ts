@@ -7,9 +7,9 @@ function initDeps() {
   return Promise.all([
     import('pg'), import('drizzle-orm/node-postgres'), import('drizzle-orm/sql'),
     import('./config.js'), import('./adapters/storage.js'), import('./dispatcher.js'),
-    import('./core.js'), import('./adapters/feedback-queue.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, setLogContext }, { feedbackSink, workWake }]) => ({
-    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, setLogContext, feedbackSink, workWake,
+    import('./core.js'), import('./adapters/feedback-queue.js'), import('./screen-shadow.js'),
+  ]).then(([{ Pool }, { drizzle }, { sql }, { loadConfig }, { r2Storage }, { initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize }, { ApiError, log, logError, setLogContext }, { feedbackSink, workWake }, { handOver }]) => ({
+    Pool, drizzle, sql, loadConfig, r2Storage, initialGate, runDispatcher, dispatchWakeKey,shardLeaseSize, ApiError, log, logError, setLogContext, feedbackSink, workWake, handOver,
   }));
 }
 let depsPromise: ReturnType<typeof initDeps> | undefined;
@@ -185,14 +185,18 @@ export class DispatcherShard extends DurableObject<Env> {
   }
 
   private async runtime(): Promise<Runtime> {
-    const { Pool, drizzle, loadConfig, r2Storage, feedbackSink, workWake } = await loadDeps();
+    const { Pool, drizzle, loadConfig, r2Storage, feedbackSink, workWake, handOver } = await loadDeps();
     const config = loadConfig({ ...this.env });
+    // The second classifier (src/screen-shadow.ts) is never called from this object, whose six connections are for SES and
+    // the screen: when a run has ended, what it kept goes to the ScreenShadow object in one request nothing waits for.
+    const shadowObject = this.env.SCREEN_SHADOW;
+    if (!shadowObject) config.shadow = undefined;
     // A small persistent pool: claims are sequential per lane and provider calls do not hold connections.
     if (!this.pool) {
       this.pool = new Pool({ connectionString: this.env.HYPERDRIVE.connectionString, connectionTimeoutMillis: 10000, max: 2, idleTimeoutMillis: 30000 });
       this.pool.on('error', () => { /* Idle client errors surface on the next query; the run loop then recreates the pool. */ });
     }
-    return { db: drizzle(this.pool), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
+    return { db: drizzle(this.pool), shadow: shadowObject && (items => { this.ctx.waitUntil(handOver(shadowObject, items)); }), storage: r2Storage(this.env.ATTACHMENTS), config, feedback: feedbackSink(this.env.FEEDBACK_QUEUE, config.authSecret), wake: (count,kind)=>workWake(kind==='webhook' && this.env.WEBHOOK_QUEUE ? this.env.WEBHOOK_QUEUE : this.env.WAKE_QUEUE,6)(count) };
   }
 
   private async closePool() {

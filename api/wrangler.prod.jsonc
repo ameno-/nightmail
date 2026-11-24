@@ -94,10 +94,11 @@
     "BANE_SUPPORT_URL": "https://support.nightmail.dev/chat"
   },
   // CAMPAIGN_ROOMS: one per campaign, who has it open in the dashboard (src/campaign-room.ts).
-  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }, { "name": "CAMPAIGN_ROOMS", "class_name": "CampaignRoom" }] },
+  // SCREEN_SHADOW: the one object that calls the second classifier (src/shadow-do.ts); it makes no call without JEVF_API_KEY.
+  "durable_objects": { "bindings": [{ "name": "DISPATCHER", "class_name": "DispatcherShard" }, { "name": "CAMPAIGN_ROOMS", "class_name": "CampaignRoom" }, { "name": "SCREEN_SHADOW", "class_name": "ScreenShadow" }] },
   // Run HTTP requests next to the bane-prod database (PlanetScale aws-us-east-2), as production does.
   "placement": { "region": "aws:us-east-2" },
-  "migrations": [{ "tag": "transfer-from-bane-production", "transferred_classes": [{ "from_script": "bane-production", "from": "DispatcherShard", "to": "DispatcherShard" }] }, { "tag": "campaign-rooms", "new_sqlite_classes": ["CampaignRoom"] }],
+  "migrations": [{ "tag": "transfer-from-bane-production", "transferred_classes": [{ "from_script": "bane-production", "from": "DispatcherShard", "to": "DispatcherShard" }] }, { "tag": "campaign-rooms", "new_sqlite_classes": ["CampaignRoom"] }, { "tag": "screen-shadow", "new_sqlite_classes": ["ScreenShadow"] }],
   // Operator-verified nightmail/production runtime origin; the workflow checks the matching migrator.
   "hyperdrive": [{ "binding": "HYPERDRIVE", "id": "4e85373aed5e4d5ca66e62fd13b254d2" }],
   "browser": { "binding": "BROWSER" },

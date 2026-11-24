@@ -152,6 +152,9 @@ export interface Config {
   reputationAlertUrl?: string;
   // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
   screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number };
+  // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
+  // JEVF_API_KEY (or without a screen), and then nothing of it runs.
+  shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };
   // Screened-text limits (src/screen.ts): one message, and one campaign screened once for all its recipients.
   screenLimits: { messageBytes: number; campaignBytes: number };
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
@@ -178,6 +181,10 @@ export interface Runtime {
   /** True once the content classifier must not be called in this run (src/dispatcher-do.ts: a request landed on the shard,
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;
+  /** Where the screen's requests go to be repeated to the second classifier (src/screen-shadow.ts flushShadow), on a
+   *  platform that must not make those calls in the invocation that sends mail: Cloudflare hands them to the ScreenShadow
+   *  object. Returns at once and never throws. Without it they run in this process, in the background. */
+  shadow?: (items: import('./screen-shadow.js').ShadowItem[]) => void;
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.
   feedback?: { enqueue: (items: FeedbackItem[]) => Promise<void> };
