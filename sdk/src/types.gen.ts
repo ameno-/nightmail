@@ -988,8 +988,6 @@ export type SingleEmailQueued = {
  */
 export type EmailScreenSummary = {
     status: 'passed' | 'skipped';
-    model?: string;
-    digest?: string;
 };
 
 export type SendEmailInput = {

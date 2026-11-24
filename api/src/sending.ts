@@ -161,8 +161,6 @@ const Email = z.object({ untrustedContent: UntrustedContent, id: z.string(), reg
   scheduledAt: z.string().nullable().describe('When a scheduled send goes (UTC). Also set while queued mail waits to be retried.'), createdAt: z.string().describe('When the email was submitted; a scheduled send\u2019s moves to the moment it was released at its time.'), updatedAt: z.string() }).openapi('Email');
 const ScreenSummary = z.object({
   status: z.enum(['passed', 'skipped']),
-  model: z.string().optional(),
-  digest: z.string().optional(),
 }).openapi('EmailScreenSummary');
 const Receipt = z.object({
   id: z.string(),
@@ -1177,7 +1175,7 @@ async function endRelease(runtime: Runtime, wid: string, emailId: string, run: u
 }
 
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
-type ScreenSummaryValue = { status: 'passed' | 'skipped'; model?: string; digest?: string };
+type ScreenSummaryValue = { status: 'passed' | 'skipped' };
 type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError; emailId?: string; screenSummary?: ScreenSummaryValue; countScreened?: boolean };
 /** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size.
  *  `postalAddress`: the workspace's, for the footer of its marketing mail (admitEmails reads it). */
@@ -1359,7 +1357,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
     await flushScreenObservability(runtime).catch(() => {});
     const first = rejected[0]!;
     const err = new ApiError(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this message to be unsolicited advertising.', batch ? `emails.${first.task.index}` : undefined);
-    err.details = rejected.map(r => ({ ...(batch ? { index: r.task.index } : {}), spam: r.result.spam, model: r.result.model, threshold: settings.threshold }));
+    if (batch) err.details = rejected.map(r => ({ index: r.task.index, code: 'CONTENT_REJECTED_SPAM' }));
     throw err;
   }
   for (const v of verdicts) {
@@ -1367,7 +1365,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
       log('warn', { code: 'CONTENT_SPAM_SUSPECTED', workspaceId: a.workspaceId, emailId: v.task.message.emailId, spam: v.result.spam, model: v.result.model });
     }
     v.task.message.snapshot.screenVerdict = { status: 'passed', spam: v.result.spam, model: v.result.model, digest: v.result.digest, rules: v.task.rules };
-    v.task.message.screenSummary = { status: 'passed', model: v.result.model, ...(v.result.digest ? { digest: v.result.digest } : {}) };
+    v.task.message.screenSummary = { status: 'passed' };
     if (v.task.hosted) v.task.message.countScreened = true;
   }
   await flushScreenObservability(runtime).catch(() => {});
@@ -3826,6 +3824,7 @@ const runCampaign: JobHandler = async (runtime, payload, job) => {
       return;
     }
     const retry = !(error instanceof ApiError) || error.retryable;
+    if (!(error instanceof ApiError)) log('warn', { code: 'CAMPAIGN_RUN_RETRY', campaignId, jobId: job.id, message: error instanceof Error ? error.message : String(error) });
     if (retry && job.attempts < MAX_ATTEMPTS) throw new ApiError(503, error instanceof ApiError ? error.code : 'CAMPAIGN_RUN_FAILED', 'The campaign run will retry from its durable cursors.', undefined, true);
     try {
       const failed = await runtime.db.execute(failCampaign(ref, backgroundFailure(error)));

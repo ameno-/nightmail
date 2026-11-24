@@ -473,8 +473,8 @@ async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | und
       timing.outcome='ok';
       return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
     } catch (error) {
-      // A body read can throw a raw stream error. A failed backup must take the existing retryable outage path.
-      if (timing.classifier === 'jevf' && !(error instanceof ApiError)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
+      // A body read can throw a raw stream error/AbortError. Wrap it as retryable outage for both primary and failover.
+      if (!(error instanceof ApiError)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
       throw error;
     } finally {
       logCall(timing,call,window,windows,sample,at,runtime.db);

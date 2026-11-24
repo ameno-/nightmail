@@ -3203,12 +3203,6 @@
               "passed",
               "skipped"
             ]
-          },
-          "model": {
-            "type": "string"
-          },
-          "digest": {
-            "type": "string"
           }
         },
         "required": [
