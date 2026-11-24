@@ -56,7 +56,7 @@ export function postgresConnection(connectionString: string | undefined) {
  * nor mail orchestration holds its own connection while the background source is read. */
 export function nodeLogFacetLane(runtime:Runtime, connectionString:string|undefined) {
   let pool:Pool|undefined, worker:Runtime|undefined, stopping=false, closed:Promise<void>|undefined;
-  const inflight=new Map<string,Promise<void>>();
+  const inflight=new Map<string,Promise<void>>(), again=new Set<string>();
   const get=()=>{
     if(!worker) {
       pool=new Pool({...postgresConnection(connectionString),max:5,idleTimeoutMillis:30000,application_name:'logs-facet-background'});
@@ -66,10 +66,15 @@ export function nodeLogFacetLane(runtime:Runtime, connectionString:string|undefi
     return worker;
   };
   const nudge=(slot:string)=>{
-    if(stopping||inflight.has(slot))return;
+    if(stopping)return;
+    if(inflight.has(slot)){again.add(slot);return;}
     const independent=get();
     const work=import('../log-facet-fold.js').then(m=>m.foldLogFacetSlot(independent,slot))
-      .catch(()=>log('warn',{code:'LOG_FACET_SLOT_FAILED',jobId:slot})).finally(()=>{inflight.delete(slot);});
+      .catch(()=>log('warn',{code:'LOG_FACET_SLOT_FAILED',jobId:slot})).finally(()=>{
+        inflight.delete(slot);
+        // A newly admitted run can reuse this PK while the previous promise is settling.
+        if(again.delete(slot))nudge(slot);
+      });
     inflight.set(slot,work);
   };
   return {get,nudge,close:()=>{stopping=true;return closed??=(async()=>{await Promise.all(inflight.values());await pool?.end();})();}};

@@ -17046,6 +17046,13 @@ describe('Sealed Logs facets', () => {
       await seedSent(db, wid, recent, 'transactional', 'delivered');
       assert.deepEqual((await exact(published.from)).status, { accepted: 1, delivered: 2 });
       assert.deepEqual(ok(await last()), published, 'Last reports the earlier completed counts and timestamp.');
+      const poll = () => local('GET', facetPath({ mode: 'refresh', range: '24h', prefer: 'recent', region: REGION, from }));
+      const beforePoll = await jobs('logs.facetFold');
+      const displayed = ok(await poll());
+      assert.equal(displayed.from, from);
+      assert.equal(displayed.asOf, published.asOf, 'A display poll never restamps an older cut.');
+      assert.deepEqual(displayed.counts.status, { delivered: 1 }, 'Use the exact anchored result, not the rolling or live counts.');
+      assert.deepEqual(await jobs('logs.facetFold'), beforePoll, 'A recent display poll does not enroll a source fold.');
 
       const refresh = await parkedRead(runtime, () => local('GET', facetPath({ mode: 'refresh', range: '24h', region: REGION, from })), async () => {
         const before = await jobs('logs.facetFold');
@@ -17062,6 +17069,7 @@ describe('Sealed Logs facets', () => {
       assert.equal(next.asOf, anchored.asOf, 'Both boundaries share the exact source statement clock.');
       assert.equal(Date.parse(next.from), Date.parse(rollingFrom(anchored.asOf, 1)));
       assert.deepEqual(next.counts.status, { accepted: 1, delivered: 2 });
+      assert.deepEqual(ok(await poll()), anchored, 'An unconditional refresh can advance the shared display result immediately.');
 
       assert.deepEqual(ok(await last('7d')), missing);
       assert.deepEqual(ok(await last('24h', otherRegion)), missing);
@@ -17101,9 +17109,9 @@ describe('Sealed Logs facets', () => {
 
   test('sealed Logs tickets coalesce before seal and later demands cannot use the earlier publication', { timeout: 10_000 }, async t => {
     await facetFixture(t, async ({ runtime, db }) => {
-      const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut } = await import('./src/log-facet-fold.js');
+      const { enroll24hPoll, enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut } = await import('./src/log-facet-fold.js');
       const wid = runtime.config.workspaceId, from = floorMinute();
-      const first = await enrollLogFacet(runtime, wid, from, null), alongside = await enrollLogFacet(runtime, wid, from, null);
+      const first = await enrollLogFacet(runtime, wid, from, null, '24h'), alongside = await enrollLogFacet(runtime, wid, from, null, '24h');
       assert.deepEqual([alongside.slot, alongside.run, alongside.generation], [first.slot, first.run, first.generation]);
       assert.deepEqual(await dueLogFacetSlots(runtime.db), [first.slot]);
       assert.deepEqual([await readTicketCut(runtime.db, first), await readTicketCut(runtime.db, alongside)], [null, null]);
@@ -17113,7 +17121,10 @@ describe('Sealed Logs facets', () => {
       const work = foldLogFacetSlot({ ...runtime, db: stageDatabase(runtime.db, [firstRead, nextRead]) }, first.slot);
       try {
         await waitAt(firstRead, work);
-        const later = await enrollLogFacet(runtime, wid, from, null);
+        const poll = await enroll24hPoll(runtime, wid, from, null);
+        assert.ok(poll);
+        assert.equal(poll.generation, first.generation, 'An automatic poll joins the already-sealed same-anchor cut without forcing a successor.');
+        const later = await enrollLogFacet(runtime, wid, from, null, '24h');
         assert.deepEqual([later.slot, later.run, later.generation], [first.slot, first.run, first.generation + 1]);
         await seedSent(db, wid, from, 'marketing', 'bounced');
         firstRead.release();
@@ -17123,6 +17134,7 @@ describe('Sealed Logs facets', () => {
         assert.ok(earlier);
         assert.deepEqual(earlier.sent, [{ kind: 'transactional', status: 'delivered', n: 1 }]);
         assert.deepEqual(await readTicketCut(runtime.db, alongside), earlier);
+        assert.deepEqual(await readTicketCut(runtime.db, poll), earlier);
         assert.equal(await readTicketCut(runtime.db, later), null, 'The earlier cut is published but cannot satisfy the later demand.');
         await seedSent(db, wid, from, 'marketing', 'bounced');
         assert.deepEqual(await readTicketCut(runtime.db, first), earlier, 'New mail does not invalidate the published ticket.');
@@ -17140,13 +17152,14 @@ describe('Sealed Logs facets', () => {
 
   test('sealed Logs rejects stale lease publication and tickets for replaced slots', { timeout: 10_000 }, async t => {
     await facetFixture(t, async ({ runtime, db, local }) => {
-      const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut } = await import('./src/log-facet-fold.js');
+      const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut, releaseLogFacetTicket } = await import('./src/log-facet-fold.js');
       const wid = runtime.config.workspaceId, from = floorMinute();
       const last = (region?: string) => local('GET', facetPath({ mode: 'last', range: '24h', ...(region ? { region } : {}) }));
       const missing = { counts: null, asOf: null, from: null, visibility: 'admin' };
       await db.query('UPDATE ses_installation_settings SET enabled_regions=jsonb_build_array($2::text,$3::text) WHERE workspace_id=$1',
         [wid, REGION, otherRegion]);
       const original = await enrollLogFacet(runtime, wid, from, null, '24h');
+      const otherWaiter = await enrollLogFacet(runtime, wid, from, null, '24h');
       await seedSent(db, wid, from, 'transactional', 'delivered');
       const delayed = stage('after');
       const stale = foldLogFacetSlot({ ...runtime, db: stageDatabase(runtime.db, [delayed]) }, original.slot);
@@ -17182,7 +17195,11 @@ describe('Sealed Logs facets', () => {
         ];
         assert.equal(new Set([original, ...occupants].map(ticket => ticket.slot)).size, 4);
         await assert.rejects(enrollLogFacet(runtime, wid, from, otherRegion), { code: 'FACET_FOLD_CAPACITY' });
-        assert.equal((await db.query("UPDATE jobs SET created_at=statement_timestamp()-interval '1 day' WHERE id=$1 AND workspace_id=$2 AND status='completed'", [original.slot, wid])).rowCount, 1);
+        await releaseLogFacetTicket(runtime.db, original);
+        await releaseLogFacetTicket(runtime.db, original);
+        await assert.rejects(enrollLogFacet(runtime, wid, from, otherRegion), { code: 'FACET_FOLD_CAPACITY' });
+        assert.deepEqual(await readTicketCut(runtime.db, otherWaiter), recovered, 'A completed slot protects the viewer that still needs its result.');
+        await releaseLogFacetTicket(runtime.db, otherWaiter);
         const replacement = await enrollLogFacet(runtime, wid, from, otherRegion, '24h');
         assert.equal(replacement.slot, original.slot);
         assert.notEqual(replacement.run, original.run);
@@ -17233,7 +17250,7 @@ describe('Sealed Logs facets', () => {
       ok(await publicAs(wid));
       assert.equal(await selected(), wid);
       ok(await publicAs(alternate));
-      for (const path of [last, refresh]) {
+      for (const path of [last, refresh, refresh+'&prefer=recent']) {
         for (const [keyOrSession, headers, status, code] of [
           [key.secret, {}, 403, 'DASHBOARD_AUTH_REQUIRED'],
           [MANAGER, select(foreign), 403, 'WORKSPACE_ACCESS_DENIED'],
@@ -17261,6 +17278,7 @@ describe('Sealed Logs facets', () => {
       const lastMember = ok(await target(last));
       assert.equal(lastMember.visibility, 'member');
       assert.deepEqual(lastMember.counts, downgraded.body.counts);
+      assert.deepEqual(ok(await target(refresh+'&prefer=recent')), downgraded.body, 'A reused cut is reauthorized and projected for the current member.');
       ok(await publicAs(alternate));
       const removed = await parkedRead(runtime, () => target(refresh), async () => {
         assert.equal((await db.query('DELETE FROM workspace_members WHERE workspace_id=$1 AND user_id=$2', [wid, manager!.userId])).rowCount, 1);
@@ -40606,4 +40624,3 @@ describe('dashboard analytics', () => {
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 0, batches: 0, expired: 0 });
   });
 });
-

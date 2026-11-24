@@ -5,7 +5,7 @@ import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDire
 import { headerPrefix, productName } from '../../../api/src/brand'
 import { analytics } from '../lib/analytics'
 import { webhookPatchBody } from '../features/settings/webhook-patch'
-import { decodeLogFacets } from './log-facets'
+import { decodeLogFacets, foldableFacetView } from './log-facets'
 type Json = Record<string, any>
 const idPath = (id: string) => encodeURIComponent(id)
 // The account this tab acts as (a browser can connect several, data/accounts.ts), sent as X-Nightmail-Account. It is per tab
@@ -307,6 +307,7 @@ export function createLiveApi(scope?: RequestScope): Api {
       list: (input, signal) => page('/logs', input, mapLog, logFilters(input), signal),
       facets: async (input, signal) => {
         const params = new URLSearchParams({ mode: input.mode, range: input.range })
+        if (input.mode === 'refresh' && input.range === '24h' && foldableFacetView(input)) params.set('prefer', 'recent')
         const { from, to, search, campaignId, ...rolling } = logFilters(input)
         const filters = input.mode === 'last' ? rolling : { ...rolling, from, to, search, campaignId }
         for (const [key, value] of Object.entries(filters)) if (value !== undefined && value !== '') params.set(key, String(value))

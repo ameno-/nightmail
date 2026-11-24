@@ -5,7 +5,7 @@ import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, re
 import { createFairPool, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_MAX_WAITING_PER_WORKSPACE, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
-import { enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readTicketCut } from './log-facet-fold.js';
+import { enroll24hPoll, enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readRecent24hFacet, readTicketCut, releaseLogFacetTicket, type FacetTicket } from './log-facet-fold.js';
 import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows, type LogFacetCut } from './log-facet-source.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
@@ -185,6 +185,8 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     const mode=c.req.query('mode'), askedPeriod=c.req.query('range'), period=logFacetPeriod(askedPeriod);
     if ((mode !== undefined && mode !== 'last' && mode !== 'refresh') || (askedPeriod !== undefined && !period))
       throw new ApiError(422,'VALIDATION_FAILED','Choose a supported Logs facet view and time range.');
+    const prefer=c.req.query('prefer'), poll24h=mode==='refresh' && period==='24h' && prefer==='recent';
+    if (prefer!==undefined && !poll24h) throw new ApiError(422,'VALIDATION_FAILED','Only a 24h refresh can prefer a recent cut.');
     if (mode==='last') {
       // This is a relative range *as of the saved source statement*, not an older answer
       // mislabeled with a new absolute from. Private custom searches/dates never use this matrix.
@@ -213,6 +215,18 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
     // A fold reads every email in its window (no index-only path). Refuse a window too large to fold, as the live count
     // refuses one, before anything is parked or enrolled: it would read gigabytes for 12 seconds, fail and be retried.
     const fromIso = new Date(fromMs).toISOString();
+    // The dashboard's automatic 24h poll accepts an already completed absolute cut for one minute.
+    // Authorize and project it in the same read snapshot, before sizing mail or occupying a worker.
+    const recent = () => withBoundedRead(c,()=>budgetedRead(c.env.db,async db=>{
+      const current=await currentFacetScope(c,db,q,scope,mailAccess);
+      const cut=await readRecent24hFacet(db,current.a.workspaceId,q.region??null,fromIso);
+      return cut ? {counts:projectCut(q,current,cut),asOf:cut.asOf,from:fromIso,visibility:facetVisibility(current)} : null;
+    },readLimit(COUNTS_READ),'repeatable read'),opts);
+    if (poll24h) {
+      const found=await recent();
+      if (found instanceof Response) return found;
+      if (found) return c.json(found,200);
+    }
     const rolling = period ? Math.floor(Date.now() / 60_000) * 60_000 - { '24h': 1, '7d': 7, '30d': 30 }[period] * 86_400_000 : fromMs;
     const sized = await withBoundedRead(c, () => budgetedRead(c.env.db,
       db => logFacetSourceRows(db, scope.a.workspaceId, new Date(Math.min(fromMs, rolling)).toISOString(), q.region ?? null), readLimit(COUNTS_READ)), opts);
@@ -234,8 +248,18 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       c.header('Retry-After', '1');
       return new ApiError(503, 'FACET_CATCHUP_UNAVAILABLE', 'Exact Logs counts are temporarily unavailable.', undefined, true);
     };
+    let ticket:FacetTicket|null=null;
     try {
-      const ticket = await enrollLogFacet(c.env, scope.a.workspaceId, fromIso, q.region ?? null, period);
+      if (poll24h) {
+        ticket=await enroll24hPoll(c.env,scope.a.workspaceId,fromIso,q.region??null);
+        if (!ticket) {
+          const found=await recent();
+          if (found instanceof Response) return found;
+          if (found) return c.json(found,200);
+        }
+      }
+      ticket??=await enrollLogFacet(c.env,scope.a.workspaceId,fromIso,q.region??null,period);
+      const admitted=ticket;
       if (ticket.wake) c.env.startLogFacetFold?.(ticket.slot);
       let probes = 0;
       while (performance.now() < end) {
@@ -247,7 +271,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
           if (performance.now() >= end) throw unavailable();
           // Every probe resolves the real session and role against the same snapshot that reads the published cut.
           const current=await currentFacetScope(c,db,q,scope,mailAccess);
-          const cut=await readTicketCut(db,ticket);
+          const cut=await readTicketCut(db,admitted);
           if(!cut)return null;
           return {counts:projectCut(q,current,cut),asOf:cut.asOf,
             ...(mode==='refresh' && {from:new Date(fromMs).toISOString(),visibility:facetVisibility(current)})};
@@ -258,7 +282,10 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       }
       // A platform/worker failure is not a successful numerical bound; never substitute the previous generation.
       throw unavailable();
-    } finally { hold.release(); }
+    } finally {
+      hold.release();
+      if (ticket) await releaseLogFacetTicket(c.env.db,ticket);
+    }
   });
 
   app.openapi(createRoute({ method: 'get', path: '/v1/logs', operationId: 'listLogs', tags: ['Emails'], security, summary: 'List sent and received mail together',

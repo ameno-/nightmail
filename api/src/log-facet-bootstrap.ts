@@ -1,13 +1,12 @@
 import { sql } from 'drizzle-orm';
 import { statementTimedOut, type Runtime } from './core.js';
-import { enrollLogFacet, readPublishedLogFacet, type FacetTicket } from './log-facet-fold.js';
+import { enrollLogFacet, readPublishedLogFacet, reusableLogFacetSlot, type FacetTicket } from './log-facet-fold.js';
 import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows } from './log-facet-source.js';
 
 export const LOG_FACET_BOOTSTRAP_TICK_MS = 60_000;
 const CONTROL = 'maintenance:log-facet-bootstrap', TYPE = 'logs.facetBootstrap';
 const PAGE = 16;
-// The four PKs and the admission lock belong to log-facet-fold.ts. Wait a full minute before
-// treating a terminal slot as reusable here, more conservatively than its viewer-ticket hold.
+// The four worker PKs and the admission lock belong to log-facet-fold.ts.
 const SLOTS = Array.from({ length: 4 }, (_, n) => 'job_logfacets_slot_' + n);
 type Cursor = { version: 1; after: string };
 
@@ -64,7 +63,7 @@ export async function bootstrapLogFacet(runtime: Runtime): Promise<FacetTicket |
       const { rows: [gate] } = await tx.execute<{ held: boolean }>(sql`SELECT pg_try_advisory_xact_lock(712006, 1) AS held`);
       if (!gate?.held) { await checkpoint(); return null; }
       const { rows: [room] } = await tx.execute<{ hot: number; blocked: boolean }>(sql`
-        SELECT count(*) FILTER (WHERE created_at >= statement_timestamp() - interval '1 minute')::int AS hot,
+        SELECT count(*) FILTER (WHERE NOT (${reusableLogFacetSlot}))::int AS hot,
           coalesce(bool_or(type<>'logs.facetFold' OR status NOT IN ('completed','failed')),false) AS blocked
         FROM jobs WHERE id=ANY(${sql.param(SLOTS)}::text[])`);
       if (!room || room.blocked || room.hot > 1) { await checkpoint(); return null; }
@@ -74,7 +73,7 @@ export async function bootstrapLogFacet(runtime: Runtime): Promise<FacetTicket |
         await checkpoint();
         return null;
       }
-      const ticket = await enrollLogFacet({ ...runtime, db: tx }, candidate.id, candidate.from, null, '30d');
+      const ticket = await enrollLogFacet({ ...runtime, db: tx }, candidate.id, candidate.from, null, '30d', false);
       after = candidate.id;
       await checkpoint();
       return ticket;
