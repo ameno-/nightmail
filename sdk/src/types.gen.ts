@@ -1522,6 +1522,9 @@ export type CreateCampaignInput = {
             values: Array<string>;
         };
     };
+    /**
+     * Up to 100 key/value pairs, at most 64 KiB of JSON total.
+     */
     defaults?: {
         [key: string]: string | number | boolean | null;
     };
@@ -1813,6 +1816,9 @@ export type CampaignUpdateInput = {
                 values: Array<string>;
             };
         };
+        /**
+         * Up to 100 key/value pairs, at most 64 KiB of JSON total.
+         */
         defaults?: {
             [key: string]: string | number | boolean | null;
         };
@@ -1837,6 +1843,9 @@ export type CampaignArchiveInput = {
 
 export type CampaignTestInput = {
     to: string;
+    /**
+     * Up to 100 key/value pairs, at most 64 KiB of JSON total.
+     */
     data?: {
         [key: string]: string | number | boolean | null;
     };

@@ -7,11 +7,66 @@ import { chooseWorkspace, setDefaultWorkspace, WorkspaceChoice, type McpConnecti
 import { buildMcpCatalog, TOOLSETS, EMAIL_SEND_CONFIRMATION, EMAIL_SEND_ROUTING, type McpOperation } from './mcp-catalog.js';
 import { describeAction, describeTool, listedTool, resourceActions, resourceTools } from './mcp-resources.js';
 import { mcpServerName, productName } from './brand.js';
+import { setResponseByteLimit, withMemory } from './isolate-memory.js';
 
 type ObjectValue = Record<string, any>;
 const INPUT_LIMIT = 12 * 1024 * 1024;
-const RESPONSE_LIMIT = 16 * 1024 * 1024;
+const MCP_REST_RESPONSE_LIMIT = 4 * 1024 * 1024;
+const RESPONSE_LIMIT = 8 * 1024 * 1024;
 const WIRE_LIMIT = RESPONSE_LIMIT + 1024 * 1024;
+const READ_ONLY_POST_OPS = new Set(['queryAudience', 'previewSegment', 'previewEmail', 'testRules', 'checkRule', 'testRouting']);
+const isMutatingOp = (op: Pick<McpOperation, 'method' | 'tool'>) =>
+  !['get', 'head'].includes(op.method.toLowerCase()) && !READ_ONLY_POST_OPS.has(op.tool.name);
+const SUMMARY_FIELDS = ['id', 'workspaceId', 'listId', 'status', 'state', 'imported', 'subscribed', 'added', 'removed', 'updated', 'created', 'skipped', 'failed', 'queued', 'revision', 'version', 'createdAt', 'updatedAt', 'committedAt'] as const;
+function extractWriteSummary(head: string, tail: string): ObjectValue {
+  const out: ObjectValue = {};
+  for (const key of SUMMARY_FIELDS) {
+    const strRe = new RegExp(`"${key}"\\s*:\\s*"([^"\\\\]{0,200})"`);
+    const primRe = new RegExp(`"${key}"\\s*:\\s*(-?\\d+(?:\\.\\d+)?|true|false|null)(?=[,}\\s])`);
+    for (const src of [head, tail]) {
+      if (key in out) break;
+      const ms = strRe.exec(src);
+      if (ms) { out[key] = ms[1]!; break; }
+      const mp = primRe.exec(src);
+      if (mp) { out[key] = JSON.parse(mp[1]!); break; }
+    }
+  }
+  return {
+    ...out,
+    completed: true,
+    responseTruncated: true,
+    note: 'Write succeeded, but the full response exceeded the 4 MiB tool limit so large fields were omitted. Do not retry the write; fetch the resource by ID or paginate to inspect details.',
+  };
+}
+async function readBoundedWriteBody(response: Response, limit: number): Promise<{ truncated: false; text: string } | { truncated: true; summary: ObjectValue }> {
+  if (!response.body) return { truncated: false, text: '' };
+  const reader = response.body.getReader(), decoder = new TextDecoder();
+  let bytes = 0, text = '', head = '', tail = '', truncated = false;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      bytes += value.byteLength;
+      const chunk = decoder.decode(value, { stream: true });
+      if (head.length < 8192) head += chunk.slice(0, 8192 - head.length);
+      if (!truncated) {
+        if (bytes > limit) {
+          truncated = true;
+          tail = (text.slice(-4096) + chunk).slice(-4096);
+          text = '';
+        } else {
+          text += chunk;
+        }
+      } else {
+        tail = (tail + chunk).slice(-4096);
+      }
+    }
+    const rest = decoder.decode();
+    if (!truncated) return { truncated: false, text: text + rest };
+    tail = (tail + rest).slice(-4096);
+    return { truncated: true, summary: extractWriteSummary(head, tail) };
+  } finally { reader.releaseLock(); }
+}
 class Failure extends Error {
   constructor(readonly code: string, message: string, readonly status: number | null = null, readonly required?: Required) { super(message); }
 }
@@ -235,9 +290,9 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
   }
   function result(payload: ObjectValue, isError = false, image?: { data: string; mimeType: string }, status: number | null = null, requestId: string | null = null): CallToolResult {
     const text = redact(JSON.stringify(payload));
-    const output: CallToolResult = { isError, _meta: { status, requestId }, content: [{ type: 'text', text }, ...(image ? [{ type: 'image' as const, data: image.data, mimeType: image.mimeType }] : [])], structuredContent: JSON.parse(text) };
-    if (byteLength(JSON.stringify(output)) > RESPONSE_LIMIT) fail('RESPONSE_TOO_LARGE', 'Tool response exceeds 16 MiB. The operation may already have completed; request a smaller page and reconcile before retrying.');
-    return output;
+    const estimatedBytes = byteLength(text) * 2 + (image ? image.data.length : 0) + 1024;
+    if (estimatedBytes > RESPONSE_LIMIT) fail('RESPONSE_TOO_LARGE', 'Tool response exceeds the 8 MiB limit. The operation may already have completed; request a smaller page and reconcile before retrying.');
+    return { isError, _meta: { status, requestId }, content: [{ type: 'text', text }, ...(image ? [{ type: 'image' as const, data: image.data, mimeType: image.mimeType }] : [])], structuredContent: JSON.parse(text) };
   }
   async function invoke(op: McpOperation, args: ObjectValue, actor: Actor | MailboxAccess) {
       if (op.confirm && args.confirm !== true) fail('CONFIRMATION_REQUIRED', 'Writes require a writable authorization and literal confirm=true.');
@@ -266,19 +321,36 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
       if (typeof args.idempotencyKey === 'string') headers.set('Idempotency-Key', args.idempotencyKey);
       if (typeof args.ifMatch === 'string') headers.set('If-Match', /^".*"$/.test(args.ifMatch) ? args.ifMatch : `"${args.ifMatch}"`);
       if (key) headers.set('Authorization', `Bearer ${key.bearer}`);
+      const mutating = isMutatingOp(op);
       const internal = new Request(url, { method: op.method.toUpperCase(), headers, redirect: 'manual', ...(args.body !== undefined ? { body: JSON.stringify(args.body) } : {}) });
+      if (!mutating) setResponseByteLimit(internal, MCP_REST_RESPONSE_LIMIT);
       const response = key ? await app.fetch(internal, withOuterRequest(runtime, origin)) : 'admin' in actor ? await dispatchAsMailboxAccess(app, internal, runtime, actor, origin) : await dispatchAsActor(app, internal, runtime, actor, origin);
       const status = response.status;
       let apiRequestId = response.headers.get('x-request-id');
-      const text = await boundedText(response, RESPONSE_LIMIT);
-      let data: unknown;
-      try { data = text ? JSON.parse(text) : null; }
-      catch { return fail('INVALID_API_RESPONSE', 'API returned invalid JSON. The operation may already have completed; reconcile before retrying.'); }
-      try { inspect(data); }
-      catch { return fail('INVALID_API_RESPONSE', 'API response exceeds structural limits. The operation may already have completed; reconcile before retrying.'); }
-      apiRequestId ??= object(data) && object(data.error) && typeof data.error.requestId === 'string' ? data.error.requestId : null;
-      if (!response.ok && status !== 303) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
-      return { status, requestId: apiRequestId, response: data };
+      let text: string;
+      if (mutating && response.ok) {
+        const read = await readBoundedWriteBody(response, MCP_REST_RESPONSE_LIMIT);
+        if (read.truncated) return { status, requestId: apiRequestId, response: read.summary, truncated: true as const };
+        text = read.text;
+      } else {
+        text = await boundedText(response, MCP_REST_RESPONSE_LIMIT);
+      }
+      const parseAndCheck = async () => {
+        let data: unknown;
+        try { data = text ? JSON.parse(text) : null; }
+        catch { return fail('INVALID_API_RESPONSE', 'API returned invalid JSON. The operation may already have completed; reconcile before retrying.'); }
+        try { inspect(data); }
+        catch {
+          if (mutating && response.ok) {
+            return { status, requestId: apiRequestId, response: extractWriteSummary(text.slice(0, 8192), text.slice(-4096)), truncated: true as const };
+          }
+          return fail('INVALID_API_RESPONSE', 'API response exceeds structural limits. The operation may already have completed; reconcile before retrying.');
+        }
+        apiRequestId ??= object(data) && object(data.error) && typeof data.error.requestId === 'string' ? data.error.requestId : null;
+        if (!response.ok && status !== 303) throw new ApiFailure({ status, requestId: apiRequestId, error: object(data) && object(data.error) ? data.error : { code: 'API_ERROR', message: 'API request failed.' } });
+        return { status, requestId: apiRequestId, response: data, truncated: false as const };
+      };
+      return text.length > 256 * 1024 ? await withMemory(text.length * 4, parseAndCheck, { route: 'mcp.parse', workspaceId: actor.workspaceId }) : await parseAndCheck();
   }
   // Over MCP an invitation is revoked by its address (mcp-catalog.ts INVITATIONS): find the workspace's pending one, then
   // revoke it by ID. REST checks both requests as this actor, and the revoke again under the workspace lock.
@@ -354,8 +426,26 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
       }
       if (op.pollPage) payload = { data: payload.data, nextCursor: payload.cursor };
       if (op.view) payload = op.view(payload);
-      const output = result(payload, false, image, status, apiRequestId);
-      if (!op.validateOutput(status, output.structuredContent)) fail('INVALID_API_RESPONSE', 'API response does not match the tool output schema. The operation may already have completed; reconcile before retrying.');
+      const truncatedWrite = 'truncated' in value && value.truncated === true;
+      let output: CallToolResult;
+      if (truncatedWrite) {
+        output = result(payload, false, undefined, status, apiRequestId);
+      } else {
+        try {
+          output = result(payload, false, image, status, apiRequestId);
+        } catch (err) {
+          if (isMutatingOp(op) && err instanceof Failure && err.code === 'RESPONSE_TOO_LARGE') {
+            const scalars: ObjectValue = {};
+            for (const k of SUMMARY_FIELDS) if (k in payload && (typeof payload[k] !== 'object' || payload[k] === null)) scalars[k] = payload[k];
+            output = result({ ...scalars, completed: true, responseTruncated: true, note: 'Write succeeded, but the full response exceeded the tool limit so large fields were omitted. Do not retry the write; fetch the resource by ID or paginate to inspect details.' }, false, undefined, status, apiRequestId);
+          } else {
+            throw err;
+          }
+        }
+        if (!(object(output.structuredContent) && output.structuredContent.responseTruncated === true) && !op.validateOutput(status, output.structuredContent)) {
+          fail('INVALID_API_RESPONSE', 'API response does not match the tool output schema. The operation may already have completed; reconcile before retrying.');
+        }
+      }
       const notice = op.untrustedContent && object(output.structuredContent) && untrustedNotice(output.structuredContent);
       if (notice) output.content.unshift({ type: 'text', text: notice });
       return output;

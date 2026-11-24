@@ -415,9 +415,12 @@ export function readCursor(value: string | undefined, binding: string): { at: st
     return { at: tuple[0], id: tuple[1] };
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'Use the returned cursor with the same filters.', 'cursor'); }
 }
+export function encodeCursor(last: { id: string; createdAt: string }, binding: string) {
+  return Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url');
+}
 export function nextCursor(rows: { id: string; createdAt: string }[], limit: number, binding: string) {
   const last = rows[limit - 1];
-  return rows.length > limit && last ? Buffer.from(JSON.stringify([last.createdAt.replace(' ', 'T').replace(/([+-]\d{2})$/, '$1:00'), last.id, binding])).toString('base64url') : null;
+  return rows.length > limit && last ? encodeCursor(last, binding) : null;
 }
 /**
  * Where a sending upload is stored. The prefix belongs to uploads alone: every other key family starts

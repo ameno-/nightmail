@@ -5010,7 +5010,8 @@
                 }
               ]
             },
-            "default": {}
+            "default": {},
+            "description": "Up to 100 key/value pairs, at most 64 KiB of JSON total."
           },
           "unsubscribePageUrl": {
             "type": "string",
@@ -5920,7 +5921,8 @@
                     }
                   ]
                 },
-                "default": {}
+                "default": {},
+                "description": "Up to 100 key/value pairs, at most 64 KiB of JSON total."
               },
               "unsubscribePageUrl": {
                 "type": "string",
@@ -5989,7 +5991,8 @@
                 }
               ]
             },
-            "default": {}
+            "default": {},
+            "description": "Up to 100 key/value pairs, at most 64 KiB of JSON total."
           }
         },
         "required": [
@@ -29493,7 +29496,7 @@
     "/v1/emails": {
       "get": {
         "operationId": "listEmails",
-        "description": "Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Emails"
         ],

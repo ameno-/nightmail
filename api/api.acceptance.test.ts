@@ -36168,6 +36168,136 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('bounded response and load sizes: templates, emails, campaigns, idempotency and MCP', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+      const ws = runtime.config.workspaceId;
+      const { CAMPAIGN_DEFAULTS_MAX_KEYS, CAMPAIGN_DEFAULTS_MAX_BYTES, EMAIL_LIST_MAX_BYTES } = await import('./src/sending.js');
+      const { MAX_IDEMPOTENT_RESULT_BYTES } = await import('./src/idempotency.js');
+
+      // 1. Template list projects summary columns in SQL without loading draft/published HTML.
+      const tpl = ok(await local('POST', '/v1/templates', { name: 'large-tpl', description: 'desc' }), 201);
+      const bigHtml = '<p>' + 'a'.repeat(500 * 1024) + '</p>';
+      const saved = ok(await local('PATCH', `/v1/templates/${tpl.id}`, { revision: tpl.revision, draft: { ...tpl.draft, subject: 'Subj', html: bigHtml } }));
+      ok(await local('POST', `/v1/templates/${tpl.id}/publish`, { revision: saved.revision }));
+      await db.query(`INSERT INTO campaign_templates(id, workspace_id, revision, draft, published, published_revision)
+        SELECT 'tpl_' || md5(random()::text || g), workspace_id, revision, draft, published, published_revision
+        FROM campaign_templates, generate_series(1, 29) g WHERE workspace_id = $1 AND id = $2`, [ws, tpl.id]);
+      const listTpl = ok(await local('GET', '/v1/templates?limit=100'));
+      assert.equal(listTpl.data.length, 30);
+      assert.equal(listTpl.data[0].published, true);
+      assert.equal('draft' in listTpl.data[0], false);
+
+      // 2. Template asset content streams exact base64 under isolate memory reservation.
+      const storedObjects = new Map<string, { body: Uint8Array; contentType: string }>();
+      let storageGets = 0;
+      t.mock.method(runtime.storage, 'put', async (k: string, body: Uint8Array, contentType: string) => { storedObjects.set(k, { body, contentType }); });
+      t.mock.method(runtime.storage, 'get', async (k: string) => { storageGets++; return storedObjects.get(k) ?? null; });
+      t.mock.method(runtime.storage, 'delete', async (k: string) => { storedObjects.delete(k); });
+      const assetBytes = Buffer.from('hello-template-asset-'.repeat(4000));
+      const uploaded = ok(await local('POST', '/v1/template-assets', { filename: 'banner.png', contentType: 'image/png', disposition: 'inline', contentId: 'banner-cid', content: assetBytes.toString('base64') }), 201);
+      const assetContent = ok(await local('GET', `/v1/template-assets/${uploaded.id}/content`));
+      assert.equal(Buffer.from(assetContent.content, 'base64').toString('utf8'), assetBytes.toString('utf8'));
+
+      // 3. Campaign defaults enforce key count (100) and serialized byte cap (64 KiB) on writes, while legacy rows remain readable.
+      const tooManyKeys = Object.fromEntries(Array.from({ length: CAMPAIGN_DEFAULTS_MAX_KEYS + 1 }, (_, i) => [`k${i}`, 'v']));
+      assert.equal((await local('POST', '/v1/campaigns', { name: 'too-many-defaults', defaults: tooManyKeys })).status, 422);
+      const tooBigDefaults = { a: 'x'.repeat(40_000), b: 'y'.repeat(30_000) };
+      assert.equal((await local('POST', '/v1/campaigns', { name: 'too-big-defaults', defaults: tooBigDefaults })).status, 422);
+      const okCamp = ok(await local('POST', '/v1/campaigns', { name: 'bounded-defaults', defaults: { k1: 'v1' } }), 201);
+      assert.equal((await local('POST', `/v1/campaigns/${okCamp.id}/test`, { to: 'test@example.com', data: tooManyKeys })).status, 422);
+      // Legacy row exceeding the new 64 KiB total cap (while each value fits the existing 65,536-char scalar limit) still reads cleanly via getCampaign.
+      await db.query(`UPDATE sending_campaigns SET draft = jsonb_set(draft, '{defaults}', $2::jsonb) WHERE id = $1`, [okCamp.id, JSON.stringify({ a: 'z'.repeat(40_000), b: 'z'.repeat(40_000) })]);
+      const readLegacy = ok(await local('GET', `/v1/campaigns/${okCamp.id}`));
+      assert.equal(readLegacy.draft.defaults.a.length + readLegacy.draft.defaults.b.length, 80_000);
+      assert.ok(CAMPAIGN_DEFAULTS_MAX_BYTES === 64 * 1024);
+
+      // 4. Idempotent creates cap stored replay payloads at MAX_IDEMPOTENT_RESULT_BYTES (256 KiB).
+      const smallKey = unique('idem-small');
+      const small1 = ok(await local('POST', '/v1/lists', { name: unique('small-list') }, 'live', { 'Idempotency-Key': smallKey }), 201);
+      const small2 = ok(await local('POST', '/v1/lists', { name: small1.name }, 'live', { 'Idempotency-Key': smallKey }), 201);
+      assert.equal(small2.id, small1.id);
+      const bigKey = unique('idem-big');
+      const bigCampBody = { name: unique('big-camp'), html: '<p>' + 'b'.repeat(MAX_IDEMPOTENT_RESULT_BYTES + 20_000) + '</p>' };
+      const big1 = ok(await local('POST', '/v1/campaigns', bigCampBody, 'live', { 'Idempotency-Key': bigKey }), 201);
+      assert.ok(big1.id);
+      const bigReplay = await local('POST', '/v1/campaigns', bigCampBody, 'live', { 'Idempotency-Key': bigKey });
+      assert.equal(bigReplay.status, 409);
+      assert.equal(bigReplay.body.error.code, 'IDEMPOTENT_RESPONSE_TOO_LARGE');
+      assert.deepEqual(bigReplay.body.error.details, [{ id: big1.id }], '409 replay carries original resource id in error.details');
+
+      // Middleware path (idempotentCreates): 5,000-row import preview (> 256 KiB) with Idempotency-Key answers 201
+      // promptly under Node (no stream-cancel deadlock) and replays 409 carrying the created import id in error.details.
+      const impKey = unique('idem-imp-5k');
+      const csv5k = 'email,name\n' + Array.from({ length: 5000 }, (_, i) => `imp5k-${i}@example.com,User ${i}`).join('\n');
+      const imp1 = ok(await local('POST', '/v1/contact-imports', { csv: csv5k, mapping: { email: 'email', name: 'name' } }, 'live', { 'Idempotency-Key': impKey }), 201);
+      assert.equal(imp1.rows.length, 5000);
+      const impReplay = await local('POST', '/v1/contact-imports', { csv: csv5k, mapping: { email: 'email', name: 'name' } }, 'live', { 'Idempotency-Key': impKey });
+      assert.equal(impReplay.status, 409);
+      assert.equal(impReplay.body.error.code, 'IDEMPOTENT_RESPONSE_TOO_LARGE');
+      assert.deepEqual(impReplay.body.error.details, [{ id: imp1.id }]);
+
+      // 5. listEmails pages by bytes as well as rows and walks all matching emails via nextCursor.
+      const baseSend = ok(await local('POST', '/v1/emails/send', mail({ to: 'seed@example.com', subject: 'Seed', html: '<p>' + 'h'.repeat(80_000) + '</p>' })), 202);
+      // Large email content & detail still succeed through withReadMemory.
+      const emContent = ok(await local('GET', `/v1/emails/${baseSend.id}/content`));
+      assert.ok(emContent.html.length > 80_000);
+      const emDetail = ok(await local('GET', `/v1/emails/${baseSend.id}/detail`));
+      assert.ok(emDetail.content.html.length > 80_000);
+      // Seed 45 wide-recipient emails (~15 KB each -> ~675 KB total > 512 KB page budget).
+      const wideTo = JSON.stringify(Array.from({ length: 50 }, (_, i) => `recipient-${i}-${'r'.repeat(220)}@example.com`));
+      const wideSubj = 'S'.repeat(900);
+      await db.query(`INSERT INTO sending_emails(id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, status, simulated, snapshot, created_at, updated_at)
+        SELECT 'email_wide_' || lpad(g::text, 4, '0'), workspace_id, region, actor_key_id, from_address, $2::jsonb, '[]'::jsonb, '[]'::jsonb, $3, 'accepted', true, '{"kind":"transactional"}'::jsonb, now() - make_interval(secs => g), now() - make_interval(secs => g)
+        FROM sending_emails, generate_series(1, 45) g WHERE id = $1`, [baseSend.id, wideTo, wideSubj]);
+      const seenIds = new Set<string>();
+      let cursor: string | null = null, pages = 0;
+      do {
+        const res = ok(await local('GET', `/v1/emails?limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`));
+        pages++;
+        assert.ok(Buffer.byteLength(JSON.stringify(res), 'utf8') <= EMAIL_LIST_MAX_BYTES + 1024, 'Email list page stays within byte budget');
+        for (const item of res.data) { assert.equal(seenIds.has(item.id), false, 'No duplicate email across byte-bounded pages'); seenIds.add(item.id); }
+        cursor = res.nextCursor;
+      } while (cursor);
+      assert.ok(pages >= 2, `Expected byte-bounded email list to split into >= 2 pages, got ${pages}`);
+      assert.ok(seenIds.size >= 46, `Expected all 46 emails across pages, got ${seenIds.size}`);
+
+      // 6. MCP tools/call fails early when a single object exceeds the caller byte limit (without loading storage).
+      const bigAssetId = 'tasset_' + 'f'.repeat(32);
+      await db.query(`INSERT INTO template_assets(id, workspace_id, filename, content_type, size, disposition, storage_key, checksum)
+        VALUES ($1, $2, 'huge.png', 'image/png', $3, 'inline', 'missing/should-not-read', 'deadbeef')`, [bigAssetId, ws, 5 * 1024 * 1024]);
+      const manageKey = ok(await local('POST', '/v1/api-keys', { name: 'mcp-bounded', permissions: ['read', 'manage'] }), 201).secret;
+      const getsBeforeMcp = storageGets;
+      const mcpRes = await local('POST', '/mcp?codemode=true', { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'getTemplateAssetContent', arguments: { assetId: bigAssetId } } }, 'live', { authorization: `Bearer ${manageKey}`, accept: 'application/json, text/event-stream' });
+      assert.equal(mcpRes.status, 200);
+      const toolResult = mcpRes.body?.result;
+      assert.equal(toolResult?.isError, true, 'Oversized asset fails early over MCP without touching missing storage');
+      assert.match(JSON.stringify(toolResult), /RESPONSE_TOO_LARGE/, 'MCP returns RESPONSE_TOO_LARGE before storage read');
+      assert.equal(storageGets, getsBeforeMcp, 'Oversized MCP asset call refused before calling storage.get');
+
+      // 7. MCP mutating writes whose response exceeds 4 MiB never apply-then-error: they report success with a bounded summary.
+      const bigCsv = 'email,name\n' + Array.from({ length: 36000 }, (_, i) => `mcpimp-${i}-padded-address-text@example.com,Contact Number ${i} With Long Display Name Text`).join('\n');
+      const mcpPrev = await local('POST', '/mcp?codemode=true', { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'previewContactImport', arguments: { confirm: true, body: { csv: bigCsv, mapping: { email: 'email', name: 'name' } } } } }, 'live', { authorization: `Bearer ${manageKey}`, accept: 'application/json, text/event-stream' });
+      assert.equal(mcpPrev.status, 200);
+      const prevResult = mcpPrev.body?.result;
+      assert.equal(prevResult?.isError, false, 'Oversized MCP write previewContactImport reports success, never isError: ' + JSON.stringify(prevResult).slice(0, 300));
+      assert.equal(prevResult?.structuredContent?.completed, true);
+      assert.equal(prevResult?.structuredContent?.responseTruncated, true);
+      assert.equal(prevResult?.structuredContent?.status, 'preview');
+      const bigImpId = prevResult?.structuredContent?.id as string;
+      assert.match(bigImpId, /^imp_/);
+
+      const mcpCommit = await local('POST', '/mcp?codemode=true', { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'commitContactImport', arguments: { confirm: true, importId: bigImpId, body: {} } } }, 'live', { authorization: `Bearer ${manageKey}`, accept: 'application/json, text/event-stream' });
+      assert.equal(mcpCommit.status, 200);
+      const commitResult = mcpCommit.body?.result;
+      assert.equal(commitResult?.isError, false, 'Oversized MCP commitContactImport reports success, never isError: ' + JSON.stringify(commitResult).slice(0, 300));
+      assert.equal(commitResult?.structuredContent?.completed, true);
+      assert.equal(commitResult?.structuredContent?.responseTruncated, true);
+      assert.equal(commitResult?.structuredContent?.id, bigImpId);
+      assert.equal(commitResult?.structuredContent?.status, 'committed');
+      assert.equal(commitResult?.structuredContent?.imported, 36000);
+    });
+  });
+
   test('paced campaigns release one daily window at a time, pause and resume in place, hold for the SES daily quota, and pause automatically on bounces', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const ws = runtime.config.workspaceId;

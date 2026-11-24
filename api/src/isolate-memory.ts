@@ -478,3 +478,14 @@ export const memoryStats = () => {
  * MIME (inline images, at most the lane budget of files) also the message (1.37) and its base64 again (1.83); per byte
  * of body text, the snapshot, its rendered copy and the JSON body. */
 export const sendReservation = (files: number, content: number) => files * (files <= SEND_LIMITS.laneBytes ? 4.25 : 2.5) + content * 3;
+// Trusted per-request response byte budget set by internal callers (such as MCP tools/call) so large single-object
+// handlers fail before loading multi-megabyte payloads and paginated list handlers size pages to fit.
+const responseLimits = new WeakMap<Request, number>();
+export const setResponseByteLimit = (request: Request, bytes: number) => { responseLimits.set(request, bytes); };
+export const responseByteLimit = (request: Request): number | undefined => responseLimits.get(request);
+export function assertResponseWithinLimit(request: Request, estimatedBytes: number) {
+  const limit = responseLimits.get(request);
+  if (limit !== undefined && estimatedBytes > limit) {
+    throw new ApiError(413, 'RESPONSE_TOO_LARGE', 'Response exceeds the caller byte limit; fetch via REST or request a smaller page.');
+  }
+}
