@@ -178,7 +178,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
       else await client.end();
     }
-    // Dispatch and immediate webhook nudges open no database connection; the request counters' flush (app.ts) opens one.
+    // Dispatch and immediate webhook nudges open no database connection.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
   }
 }
@@ -290,6 +290,8 @@ export default {
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), runtime), 1, ctx));
       const runtimeMs = performance.now() - runtimeStarted;
+      // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds.
+      ctx.waitUntil(flushDueCounters(env, ctx));
       // The campaign room's accepted upgrade goes back as it is: a copy would drop its socket.
       if (response.webSocket) return response;
       const responseHeaders = new Headers(response.headers);
