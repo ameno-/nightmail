@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftRight } from 'lucide-react'
@@ -13,7 +13,7 @@ import { mxTone, receivingStatus } from '../inbound/status'
 import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-title'
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
-import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
+import { DnsRecordTable, DnsWaitNote, DomainRecords, dnsChecks, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines, type DnsChecks } from './domain-records'
 import { invalidate, invalidateResources, resourceOf } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 
@@ -125,6 +125,7 @@ function DomainsList() {
   </div>
 }
 
+const CHECK_REST_MS = 8_000
 export function DomainDetailPage() {
   return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" />
 }
@@ -178,7 +179,16 @@ function DomainDetail() {
     try { await choose.mutateAsync({ host }) }
     catch (error) { if (host && error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE') { choose.reset(); setMoveMail({ host, message: error.detail.replace(/^Move mail for \S+\? /, '').replace(/ Send confirm: true to choose it anyway\.$/, '') }) } }
   }
-  async function checkNow() { try { await verify.mutateAsync(id); if (multiTenant) setRecheckUntil(Date.now() + 30_000) } catch { /* Shown inline. */ } }
+  // What Check now found in public DNS for this domain, kept while the page polls. The button rests for a few seconds
+  // after each press ("Checking…"): verification runs in the background meanwhile, and DNS answers are cached for 30 s.
+  const [checks, setChecks] = useState<{ id: string; found: DnsChecks } | null>(null)
+  const [resting, setResting] = useState(false)
+  useEffect(() => { if (!resting) return; const timer = setTimeout(() => setResting(false), CHECK_REST_MS); return () => clearTimeout(timer) }, [resting])
+  async function checkNow() {
+    if (resting) return
+    setResting(true)
+    try { const checked = await verify.mutateAsync(id); setChecks({ id, found: dnsChecks(checked) }); if (multiTenant) setRecheckUntil(Date.now() + 30_000) } catch { /* Shown inline. */ }
+  }
   if (domain.isPending || (!domain.error && (dns.pending || (multiTenant && ((receiving.isPending && !receiving.error) || (hosts.isPending && !hosts.error)))))) return <DomainDetailSkeleton />
   if (domain.error) return <div className="stack"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
@@ -191,14 +201,14 @@ function DomainDetail() {
   return <div className="stack">
     <PageHeader title={current.name} backTo={then || '/domains'} actions={<>
       <StatusBadge status={state.status} tone={state.tone} />
-      <Button loading={verify.isPending} onClick={() => void checkNow()} data-analytics="domains/check">Check now</Button>
+      <Button className="domain-check" disabled={resting} aria-busy={verify.isPending || undefined} onClick={() => void checkNow()} data-analytics="domains/check"><span data-active={!resting || undefined}>Check now</span><span data-active={resting || undefined} aria-hidden={!resting || undefined}>Checking…</span></Button>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
     <div className="domain-sections">
-      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <DomainRecords domain={current} setup={dns.setup} checks={checks?.id === id ? checks.found : new Map()} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
       {multiTenant && <ReceivingSettings domainId={id} domainName={current.name} receiving={receiving} hosts={hosts} />}
       {!multiTenant && <MailboxReceiving domainId={id} domainName={current.name} />}

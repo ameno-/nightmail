@@ -8708,7 +8708,11 @@ describe('Hosted MCP OAuth and tools', () => {
         const id = await chat(deputy, shop), checked = ok(await stamped(id, 'POST', `/v1/support/domains/${domainId}/verify`));
         assert.deepEqual([checked.id, checked.workspaceId, checked.name, checked.verified, checked.recheckQueued], [domainId, shop, name, false, true]);
         assert.equal((await db.query(`SELECT count(*)::int AS n FROM jobs WHERE type = 'domain.verify' AND payload->>'domainId' = $1`, [domainId])).rows[0].n, 1);
-        const own = ok(await send('POST', `/v1/domains/${domainId}/verify`, session(deputy, shop)));
+        // The customer's own Check now also asks public DNS for each pending record (here, nothing is published).
+        const guard = globalThis.fetch;
+        globalThis.fetch = async (input: RequestInfo | URL) => { assert.equal(new URL(String(input)).hostname, 'cloudflare-dns.com'); return Response.json({ Status: 3 }); };
+        const own = await send('POST', `/v1/domains/${domainId}/verify`, session(deputy, shop)).then(ok).finally(() => { globalThis.fetch = guard; });
+        assert.deepEqual(own.dns.filter((r: Json) => r.publicDns).map((r: Json) => [r.type, r.publicDns.state]), [['TXT', 'missing']]);
         assert.deepEqual([checked.verificationStatus, checked.dkimStatus, checked.sending, checked.receiving, checked.mailFromStatus], [own.verificationStatus, own.dkimStatus, own.sending, own.receiving, own.mailFromStatus],
           'The same stored status as the customer’s own Verify.');
         // The customer sees that support re-checked it, for whom; the support trail has it too.
@@ -23940,6 +23944,55 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await runCheck(f);
         assert.deepEqual((await views(f)).hosts, [[otherHost, 'active']]);
       });
+    });
+  });
+
+  test('Check now names each pending record public DNS is missing or has with another value', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      const account = (await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,receiving_state) VALUES ($1,'111122223333',$2,'ready','ready')
+        ON CONFLICT (region) DO UPDATE SET sending_state='ready' RETURNING aws_account_id`, [REGION, `arn:aws:sns:${REGION}:111122223333:receiving-fixture`])).rows[0].aws_account_id;
+      Object.assign(runtime.config, { multiTenant: true, platformAccount: account });
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, account]);
+      const name = `${unique('dns-check')}.example`, tokens = ['tokena', 'tokenb', 'tokenc'], mailFrom = `email.${name}`;
+      const identity = { proven: true, mx: null, note: null, ses: { VerificationStatus: 'PENDING', VerifiedForSendingStatus: false,
+        DkimAttributes: { SigningEnabled: true, Status: 'PENDING', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' },
+        MailFromAttributes: { MailFromDomain: mailFrom, MailFromDomainStatus: 'PENDING', BehaviorOnMxFailure: 'USE_DEFAULT_VALUE' } } };
+      const { token } = (await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,ever_proven,identity)
+        VALUES ($1,$2,$2,'pending','pending',false,$3) RETURNING token`, [name, wid, JSON.stringify(identity)])).rows[0];
+      const id = unique('dom');
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [id, wid, name, REGION]);
+      // The user's case: the proof TXT and DKIM 1 and 3 published, DKIM 2 not; the MAIL FROM MX points elsewhere.
+      const zone = new Map<string, Json[]>([
+        [`CNAME tokena._domainkey.${name}`, [{ name: `tokena._domainkey.${name}.`, type: 5, data: 'tokena.dkim.amazonses.com.' }]],
+        [`CNAME tokenc._domainkey.${name}`, [{ name: `tokenc._domainkey.${name}.`, type: 5, data: 'tokenc.dkim.amazonses.com.' }]],
+        [`MX ${mailFrom}`, [{ name: mailFrom, type: 15, data: '10 mx.other.example.' }]],
+        [`TXT ${mailFrom}`, [{ name: mailFrom, type: 16, data: '"v=spf1 include:amazonses.com" " ~all"' }]],
+      ]);
+      const queried: string[] = [];
+      // Patched by hand and restored before the fixture ends: t.mock would restore the fixture's network guard after it and leak it.
+      const networkGuard = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const type = url.searchParams.get('type')!, host = url.searchParams.get('name')!;
+        queried.push(`${type} ${host}`);
+        if (type === 'TXT' && host.startsWith('_nightmail.')) return Response.json({ Status: 0, Answer: [{ name: host, type: 16, data: JSON.stringify(token) }] });
+        const answer = zone.get(`${type} ${host}`);
+        return Response.json(answer ? { Status: 0, Answer: answer } : { Status: 3 });
+      };
+      try {
+        const checked = ok(await local('POST', `/v1/domains/${id}/verify`));
+        const view = Object.fromEntries(checked.dns.filter((r: Json) => r.publicDns !== undefined).map((r: Json) => [`${r.type} ${r.name}`, r.publicDns && [r.publicDns.state, r.publicDns.values]]));
+        assert.deepEqual(view, {
+          [`CNAME tokena._domainkey.${name}`]: ['found', []], [`CNAME tokenb._domainkey.${name}`]: ['missing', []], [`CNAME tokenc._domainkey.${name}`]: ['found', []],
+          [`MX ${mailFrom}`]: ['wrong_value', ['10 mx.other.example']], [`TXT ${mailFrom}`]: ['found', []],
+        }, 'Each pending sending and MAIL FROM record says what public DNS has; the proven ownership TXT and the receiving MX are not looked up.');
+        // Pressed again within 30 seconds, the answers come from the cache: public DNS is asked nothing more.
+        const asked = queried.length;
+        ok(await local('POST', `/v1/domains/${id}/verify`));
+        assert.equal(queried.length, asked);
+        assert.equal(ok(await local('GET', `/v1/domains/${id}`)).dns.some((r: Json) => 'publicDns' in r), false, 'Reads stay DB-only.');
+      } finally { globalThis.fetch = networkGuard; }
     });
   });
 
