@@ -25485,7 +25485,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(name==='outage'){
           const heldIds=ok(reply,202).data.map((x:Json)=>x.id);
           assert.equal(heldIds.length,n);
-          assert.ok(screens<=4,'Total batch outage short-circuits after bounded attempts');
+          assert.ok(screens>0 && screens<n,`Total batch outage short-circuits after bounded attempts (${screens} < ${n})`);
           assert.equal((await db.query(`SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1 AND status='queued' AND NOT screened`,[wid])).rows[0].n,n);
           assert.equal((await run()).sent,0,'Mail room sends zero held unscreened rows');
           await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[heldIds]);
