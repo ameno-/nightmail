@@ -25485,10 +25485,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(name==='outage'){
           const heldIds=ok(reply,202).data.map((x:Json)=>x.id);
           assert.equal(heldIds.length,n);
-          assert.ok(screens>0 && screens<n,`Total batch outage short-circuits after bounded attempts (${screens} < ${n})`);
+          // Four workers: at most four requests in flight plus one more for each of the first three failures.
+          assert.ok(screens>0 && screens<=7,`Total batch outage short-circuits after bounded attempts (${screens} <= 7)`);
           assert.equal((await db.query(`SELECT count(*)::int n FROM sending_emails WHERE workspace_id=$1 AND status='queued' AND NOT screened`,[wid])).rows[0].n,n);
           assert.equal((await run()).sent,0,'Mail room sends zero held unscreened rows');
           await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[heldIds]);
+          // A verdict in the batch (here a cached one, for a copy screened above) must not switch the bound off.
+          screens=0;
+          const mixed=[{from:'a@bench.invalid',to:'success+0@simulator.amazonses.com',subject:'attachment0',text:'Private fixture',attachments:[asset.id]},
+            ...Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`success+${i}@simulator.amazonses.com`,subject:'mixed'+i,text:'Private fixture',attachments:[asset.id]}))];
+          const mixedIds=ok(await local('POST','/v1/emails/batch',{emails:mixed},'live',{authorization:`Bearer ${key.secret}`}),202).data.map((x:Json)=>x.id);
+          assert.ok(screens>0 && screens<=7,`A verdict earlier in the batch keeps the bound (${screens} <= 7)`);
+          assert.equal((await db.query(`SELECT count(*)::int n FROM sending_emails WHERE id=ANY($1) AND NOT screened`,[mixedIds])).rows[0].n,n,'Everything but the cached copy is held');
+          await db.query(`UPDATE sending_emails SET status='canceled' WHERE id=ANY($1) AND status='queued'`,[mixedIds]);
           continue;
         }
         const ids=ok(reply,202).data.map((x:Json)=>x.id);
@@ -26482,15 +26491,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       let jevCalls = 0, jevfCalls = 0;
       (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
         const body = String(init?.body ?? '');
-        const isSpam = /buy cheap crypto/i.test(body);
+        const isSpam = /buy cheap crypto/i.test(body), poison = /poison row/i.test(body);
         if (String(url) === JEVF_URL) {
           jevfCalls++;
-          if (jevfMode === '503') return new Response(null, { status: 503 });
+          if (jevfMode === '503' || poison) return new Response(null, { status: 503 });
           return jevfAnswers(isSpam ? 0.99 : 0.05);
         }
         jevCalls++;
         if (jevMode === '451') return new Response(null, { status: 451 });
-        if (jevMode === '503') return new Response(null, { status: 503 });
+        if (jevMode === '503' || poison) return new Response(null, { status: 503 });
         if (jevMode === 'timeout') return new Promise<never>((_, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
         return Response.json({ model: 'jev-fixture', answers: { spam: { noul: isSpam ? 0.99 : 0.05 } } });
       });
@@ -26570,6 +26579,27 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const chunkSweep = await screenHeldMail(runtime);
       assert.deepEqual(chunkSweep, { leased: 65, passed: 65, rejected: 0, deferred: 0, remaining: 0 });
       assert.equal(logs.filter(l => l.code === 'HELD_SCREEN_SWEEP').length, 1, 'Single backlog summary log per sweep even across multiple chunks');
+
+      // 8. Rows that keep failing on their own cannot starve the rest: four held rows neither classifier answers for are
+      //    older than a clean held row. The first sweep stops after them; once their backoff has passed, the next sweep
+      //    takes the never-tried clean row before them and it is screened and sent.
+      const held = async (id: string, text: string, ageMinutes: number) => {
+        const snap = JSON.stringify({ kind: 'transactional', from: 'a@outage-hold.invalid', to: [`${id}@example.invalid`], cc: [], bcc: [], replyTo: [], region: REGION, subject: id, text, attachments: [], tracking: false, headers: [] });
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,status,created_at)
+          VALUES($1,$2,$3,$4,'a@outage-hold.invalid',$5::jsonb,'[]','[]',$1,$6::jsonb,false,false,'queued',clock_timestamp() - make_interval(mins => $7))`,
+          [id, wid, key.id, REGION, JSON.stringify([`${id}@example.invalid`]), snap, ageMinutes]);
+      };
+      const poisonIds = ['em_poison_0', 'em_poison_1', 'em_poison_2', 'em_poison_3'];
+      for (const id of poisonIds) await held(id, 'This poison row is never answered', 10);
+      await held('em_behind_poison', 'Your receipt is attached', 1);
+      const firstSweep = await screenHeldMail(runtime);
+      assert.deepEqual([firstSweep.passed, firstSweep.deferred, firstSweep.remaining], [0, 4, 5], 'Four failures in a row stop the sweep');
+      await db.query('UPDATE sending_emails SET lease_until = clock_timestamp() - interval \'1 second\' WHERE id = ANY($1)', [poisonIds]);
+      const nextSweep = await screenHeldMail(runtime);
+      assert.deepEqual([nextSweep.passed, nextSweep.rejected, nextSweep.remaining], [1, 0, 4], 'The clean row behind the failing ones is screened');
+      assert.equal((await db.query("SELECT screened FROM sending_emails WHERE id='em_behind_poison'")).rows[0].screened, true);
+      await dispatch();
+      assert.equal(delivered.has('em_behind_poison@example.invalid'), true);
     }));
   });
 

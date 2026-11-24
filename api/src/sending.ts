@@ -1328,12 +1328,16 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
   type UnavailableVerdict = { kind: 'unavailable'; task: ScreenTask; message: string };
   type Verdict = JudgedVerdict | UnavailableVerdict;
   const verdicts: Verdict[] = new Array(tasks.length);
-  let next = 0, judgedCount = 0, unavailableCount = 0;
+  // failing: unavailable answers since the last verdict. A verdict earlier in the batch (a cached one included) must not
+  // switch the bound off, so this resets on each verdict instead of requiring none at all.
+  let next = 0, failing = 0;
   try {
     await Promise.all(Array.from({ length: Math.min(tasks.length, BATCH_SCREEN_CONCURRENCY) }, async () => {
       while (next < tasks.length) {
         const pos = next++, task = tasks[pos]!;
-        if (unavailableCount >= BATCH_SCREEN_CONCURRENCY && judgedCount === 0) {
+        // Once BATCH_SCREEN_CONCURRENCY requests in a row found no classifier, the rest of the batch is held without asking:
+        // at most 2 × BATCH_SCREEN_CONCURRENCY - 1 requests start after the last verdict, however large the batch.
+        if (failing >= BATCH_SCREEN_CONCURRENCY) {
           verdicts[pos] = { kind: 'unavailable', task, message: 'Content screening is temporarily unavailable.' };
           continue;
         }
@@ -1341,16 +1345,16 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
         try {
           const result = await screen.screenSnapshot(scopedRuntime, task.copy, task.required, call);
           if (!result) {
-            unavailableCount++;
+            failing++;
             verdicts[pos] = { kind: 'unavailable', task, message: 'Content screening is temporarily unavailable.' };
             continue;
           }
-          judgedCount++;
+          failing = 0;
           const rejected = result.spam >= settings.threshold && (task.required || settings.mode === 'reject');
           verdicts[pos] = { kind: 'judged', task, result, rejected };
         } catch (error) {
           if (error instanceof ApiError && error.code === 'CONTENT_SCREEN_UNAVAILABLE') {
-            unavailableCount++;
+            failing++;
             verdicts[pos] = { kind: 'unavailable', task, message: error.message };
             continue;
           }
@@ -4065,17 +4069,19 @@ export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT
   while (leased < limit && Date.now() < deadline && consecutiveOutages < HELD_OUTAGE_ABORT) {
     const chunkLimit = Math.min(HELD_SCREEN_CHUNK, limit - leased);
     const { rows } = await runtime.db.execute<HeldRow>(sql`
+      -- Rows not tried yet first, then the ones whose last try is oldest: a row that keeps failing goes to the back, so a
+      -- few of them can never trip the outage abort ahead of every other held row.
       WITH due AS (
-        SELECT workspace_id, id FROM sending_emails
+        SELECT workspace_id, id, lease_until AS tried FROM sending_emails
         WHERE status IN ('queued', 'scheduled') AND NOT screened
           AND (lease_until IS NULL OR lease_until < clock_timestamp())
-        ORDER BY created_at, id
+        ORDER BY lease_until NULLS FIRST, created_at, id
         LIMIT ${chunkLimit}
         FOR UPDATE SKIP LOCKED
       ), leased AS (
         UPDATE sending_emails e SET lease_until = clock_timestamp() + interval '2 minutes'
         FROM due WHERE e.workspace_id = due.workspace_id AND e.id = due.id
-        RETURNING e.*
+        RETURNING e.*, due.tried
       )
       SELECT leased.id, leased.workspace_id, leased.region, leased.actor_key_id, leased.review_id, leased.review_ordinal,
         leased.campaign_id, leased.from_address, leased.to_addresses, leased.cc_addresses, leased.bcc_addresses,
@@ -4092,7 +4098,7 @@ export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT
       FROM leased
       ${mx ? sql`LEFT JOIN ${sendingConnections(runtime)} pc ON pc.workspace_id = leased.workspace_id AND pc.region = leased.region` : sql``}
       LEFT JOIN sending_campaign_reviews r ON r.workspace_id = leased.workspace_id AND r.campaign_id = leased.campaign_id AND r.id = leased.review_id
-      ORDER BY leased.created_at, leased.id`);
+      ORDER BY leased.tried NULLS FIRST, leased.created_at, leased.id`);
     if (!rows.length) break;
 
     let next = 0;
