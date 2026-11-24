@@ -1,0 +1,200 @@
+{
+  "version": 1,
+  "modelId": "campaign-collab",
+  "cases": [
+    {
+      "name": "smoke-edit-save-reload",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E1",
+          "field": "subject",
+          "val": "Subj A"
+        },
+        {
+          "op": "Save",
+          "actor": "E1"
+        },
+        {
+          "op": "Load",
+          "actor": "E2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: E1 saves at rev 1 -> rev 2, E2 reloads rev 2"
+    },
+    {
+      "name": "canary-stale-overwrite",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E1",
+          "field": "subject",
+          "val": "Subj A"
+        },
+        {
+          "op": "Save",
+          "actor": "E1"
+        },
+        {
+          "op": "EditLocal",
+          "actor": "E2",
+          "field": "html",
+          "val": "<p>Body B</p>"
+        },
+        {
+          "op": "Save",
+          "actor": "E2"
+        }
+      ],
+      "bug": "canary_stale_overwrite",
+      "expected": {
+        "outcome": "fail",
+        "operator": "reply:Save:/code",
+        "verdict": "replyMismatch",
+        "canary": true
+      },
+      "note": "Canary: planted stale-overwrite bug bypasses 409 STALE_CAMPAIGN_REVISION and loses E1's subject"
+    },
+    {
+      "name": "stale-save-refused-and-disjoint-merge-preserves-both",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E1",
+          "field": "subject",
+          "val": "Subj A"
+        },
+        {
+          "op": "EditLocal",
+          "actor": "E2",
+          "field": "previewText",
+          "val": "Prev B"
+        },
+        {
+          "op": "Save",
+          "actor": "E1"
+        },
+        {
+          "op": "Save",
+          "actor": "E2"
+        },
+        {
+          "op": "ReloadMergeSave",
+          "actor": "E2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "E2's stale save gets 409; reload-and-merge preserves E1's subject and E2's previewText"
+    },
+    {
+      "name": "concurrent-round-same-revision-one-wins-one-409",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E1",
+          "field": "subject",
+          "val": "Subj A"
+        },
+        {
+          "op": "EditLocal",
+          "actor": "API",
+          "field": "html",
+          "val": "<p>Body B</p>"
+        },
+        {
+          "op": "RaceSave",
+          "a": "E1",
+          "b": "API"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Concurrent PATCH race at rev 1: exactly one wins (200, rev 2) and the other gets 409 STALE_CAMPAIGN_REVISION"
+    },
+    {
+      "name": "concurrent-race-e1-e2-subject",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E1",
+          "field": "subject",
+          "val": "Subj A"
+        },
+        {
+          "op": "EditLocal",
+          "actor": "E2",
+          "field": "subject",
+          "val": "Subj B"
+        },
+        {
+          "op": "RaceSave",
+          "a": "E1",
+          "b": "E2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Concurrent E1 vs E2 subject race at rev 1 (pins collab-1-no-rowlock)"
+    },
+    {
+      "name": "concurrent-race-e1-e2-html",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E1",
+          "field": "html",
+          "val": "<p>Body A</p>"
+        },
+        {
+          "op": "EditLocal",
+          "actor": "E2",
+          "field": "html",
+          "val": "<p>Body B</p>"
+        },
+        {
+          "op": "RaceSave",
+          "a": "E1",
+          "b": "E2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Concurrent E1 vs E2 html race at rev 1 (pins collab-1-no-rowlock)"
+    },
+    {
+      "name": "concurrent-race-e2-api-preview",
+      "steps": [
+        {
+          "op": "EditLocal",
+          "actor": "E2",
+          "field": "previewText",
+          "val": "Prev A"
+        },
+        {
+          "op": "EditLocal",
+          "actor": "API",
+          "field": "previewText",
+          "val": "Prev B"
+        },
+        {
+          "op": "RaceSave",
+          "a": "E2",
+          "b": "API"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Concurrent E2 vs API previewText race at rev 1 (pins collab-1-no-rowlock)"
+    }
+  ]
+}

@@ -1,0 +1,401 @@
+{
+  "version": 1,
+  "modelId": "ses",
+  "cases": [
+    {
+      "name": "smoke-accept-deliver",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Queue",
+          "msg": "d1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass",
+        "control": true
+      },
+      "note": "Control: basic accept + delivery passes all view, idle and temporal checks"
+    },
+    {
+      "name": "canary-suppression-lifted",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Queue",
+          "msg": "b1"
+        }
+      ],
+      "bug": "canary_lift_suppression",
+      "expected": {
+        "outcome": "fail",
+        "operator": "ses.suppression-monotonic/contact/0",
+        "verdict": "violated",
+        "canary": true
+      },
+      "note": "Canary: planted host bug emits contact.unsuppressed after suppression to prove temporal check bites"
+    },
+    {
+      "name": "job-crash-before-suppress-redelivery",
+      "steps": [
+        {
+          "op": "Http",
+          "msg": "b1"
+        },
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Crash",
+          "worker": "J"
+        },
+        {
+          "op": "Queue",
+          "msg": "b1"
+        },
+        {
+          "op": "Expire"
+        },
+        {
+          "op": "Claim",
+          "worker": "K",
+          "msg": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "85f1765: recovery job crashed before suppress, queue redelivery still suppresses"
+    },
+    {
+      "name": "validation-then-delivery-multi-recip",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2"
+        },
+        {
+          "op": "Http",
+          "msg": "d2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "82fcc96: validation-suppressed Cc never outranks delivery"
+    },
+    {
+      "name": "delivery-validation-bounce-multi-recip",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "d2"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2"
+        },
+        {
+          "op": "Http",
+          "msg": "b2"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b2"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "82fcc96: delivery, validation, hard bounce converge"
+    },
+    {
+      "name": "mixed-version-old-validation-over-delivery",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "d2"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2",
+          "old": true
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Migration 153: pre-153 Worker validation cannot overwrite delivered"
+    },
+    {
+      "name": "mixed-version-old-delivery-over-validation",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2"
+        },
+        {
+          "op": "Queue",
+          "msg": "d2",
+          "old": true
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Migration 153: pre-153 Worker delivery upgrades validation-suppressed"
+    },
+    {
+      "name": "mixed-version-old-validation-over-bounce",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Http",
+          "msg": "b2"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b2"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2",
+          "old": true
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Migration 153: pre-153 Worker validation cannot overwrite hard bounce"
+    },
+    {
+      "name": "mixed-version-old-job-and-repair",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "d2"
+        },
+        {
+          "op": "Http",
+          "msg": "v2"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "v2",
+          "old": true
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Go",
+          "worker": "J"
+        },
+        {
+          "op": "Repair"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Migration 153 + 154: pre-153 recovery job + repair no-op"
+    },
+    {
+      "name": "lost-acceptance-keeps-error-under-validation",
+      "steps": [
+        {
+          "op": "Lost",
+          "email": "e1"
+        },
+        {
+          "op": "Queue",
+          "msg": "v1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Boundary: acceptance_unknown keeps error code under validation suppression"
+    },
+    {
+      "name": "blocked-open-snapshot-predates-complaint-contact",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Hold",
+          "conn": "P",
+          "msg": "c1"
+        },
+        {
+          "op": "Hold",
+          "conn": "Q",
+          "msg": "o1"
+        },
+        {
+          "op": "Commit",
+          "conn": "P",
+          "commit": true
+        },
+        {
+          "op": "Commit",
+          "conn": "Q",
+          "commit": true
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Boundary: READ COMMITTED open waiting on complaint does not engage new contact"
+    },
+    {
+      "name": "job-retries-five-times-then-fails",
+      "steps": [
+        {
+          "op": "Http",
+          "msg": "b1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Claim",
+          "worker": "J",
+          "msg": "b1"
+        },
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Queue",
+          "msg": "b1"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Boundary: recovery job exhausts 6 attempts before email has provider id"
+    },
+    {
+      "name": "bounce-suppression-not-overwritten-by-validation",
+      "steps": [
+        {
+          "op": "Accept",
+          "email": "e1"
+        },
+        {
+          "op": "Queue",
+          "msg": "b1"
+        },
+        {
+          "op": "Accept",
+          "email": "e2"
+        },
+        {
+          "op": "Queue",
+          "msg": "v2"
+        }
+      ],
+      "expected": {
+        "outcome": "pass"
+      },
+      "note": "Hard bounce suppression reason is preserved when a later email_validation result arrives (pins ses-A)"
+    }
+  ]
+}

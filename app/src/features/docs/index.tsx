@@ -184,7 +184,7 @@ function useAgentPrompt() {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const withDomain = Boolean(identity) && canAdminister
   const origin = useDocsOrigin()
-  const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 20, refresh: false }, signal), { enabled: withDomain })
+  const domains = useApiQuery(['domains', 'agent-prompt'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal), { enabled: withDomain })
   if ((!identity && checkingSession) || (withDomain && domains.isPending)) return null
   // Prefer a verified domain for the test send; any domain still gives the agent its DNS context.
   const items = domains.data?.items ?? []

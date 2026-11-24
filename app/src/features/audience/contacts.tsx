@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useWorkspaceAccess } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import type { Contact, ContactInput, ConsentInput } from '../../data/types'
 import { SearchField, Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, fieldError, MutationError, useToast } from '../../components/ui'
@@ -49,7 +50,8 @@ function ContactEditor({ contact, onClose }: { contact?: Contact; onClose: () =>
   const [listSearch, setListSearch] = useState('')
   const [listCursor, setListCursor] = useState<string | undefined>()
   const lists = useAudienceLists(useDebounced(listSearch.trim()), listCursor)
-  const save = useApiMutation((api, value: ContactInput) => api.contacts.save(value), contact ? 'Contact updated' : 'Contact added')
+  const listsChanged = (value: ContactInput) => !contact || value.listIds.length !== contact.listIds.length || value.listIds.some(id => !contact.listIds.includes(id))
+  const save = useApiMutation((api, value: ContactInput) => api.contacts.save(value), contact ? 'Contact updated' : 'Contact added', false, (_saved, value) => listsChanged(value) ? invalidate.contactMembership : invalidate.contactProfile)
   async function submit() {
     try { await save.mutateAsync({ ...input, status: contact ? contact.status : 'unknown' }); onClose() } catch { /* Shown inline. */ }
   }
@@ -85,7 +87,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
   const lists = useAudienceLists()
   const initialConsent = (): ConsentInput => ({ status: contact.status === 'subscribed' ? 'unsubscribed' : 'subscribed', confirmResubscribe: false, evidence: '' })
   const [consentInput, setConsentInput] = useState<ConsentInput>(initialConsent)
-  const status = useApiMutation((api, input: ConsentInput) => api.consent(contact.id, { ...input, evidence: input.evidence?.trim() || undefined }), undefined, false, true, contact.id)
+  const status = useApiMutation((api, input: ConsentInput) => api.consent(contact.id, { ...input, evidence: input.evidence?.trim() || undefined }), undefined, false, invalidate.contactConsent, contact.id)
   const toast = useToast()
   // Matching emails waits for the first page of consent history, so the history's height is known before anything sits below it.
   const history = useApiQuery(['consent-history', contact.id, undefined], api => api.consentHistory(contact.id))

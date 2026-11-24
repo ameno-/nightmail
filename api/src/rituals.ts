@@ -148,6 +148,22 @@ async function prepare(tx: DbExecutor, w: string, c: Config, unchanged?: Readonl
   if (invalid) throw new ApiError(422, 'UNKNOWN_TARGET', `No receiving inbox or address ${invalid.t} in this workspace.`, 'attachments');
   return programs;
 }
+/**
+ * The AI opt-ins name only this workspace's routes and receiving hosts. Another workspace's route ID, or a domain this
+ * workspace doesn't receive on, gets the answer of one that doesn't exist. Ones the saved config already names pass
+ * unchecked, as attachments to a deleted address do: a route or a host can go after it was opted in.
+ */
+async function ownOptIns(tx: DbExecutor, w: string, config: Config, saved?: Config) {
+  const routes = config.evaluateRoutes.filter(id => !saved?.evaluateRoutes?.includes(id)), domains = config.evaluateDomains.filter(d => !saved?.evaluateDomains?.includes(d));
+  if (!routes.length && !domains.length) return;
+  // A receiving host is one mailbox_domains row (coalesce(receiving_host,name)); a host under one of them is its subdomain.
+  const unknown = (await tx.execute<{ route: string | null; domain: string | null }>(sql`SELECT
+    (SELECT r FROM jsonb_array_elements_text(${JSON.stringify(routes)}::jsonb) r WHERE NOT EXISTS(SELECT FROM mail_routes x WHERE x.workspace_id=${w} AND x.id=r) LIMIT 1) AS route,
+    (SELECT d FROM jsonb_array_elements_text(${JSON.stringify(domains)}::jsonb) d WHERE NOT EXISTS(SELECT FROM mailbox_domains x CROSS JOIN LATERAL (VALUES (x.name),(x.receiving_host)) h(host)
+      WHERE x.workspace_id=${w} AND h.host IS NOT NULL AND (d=h.host OR right(d,length(h.host)+1)='.'||h.host)) LIMIT 1) AS domain`)).rows[0];
+  if (unknown?.route) throw new ApiError(422, 'UNKNOWN_ROUTE', `No route ${unknown.route} in this workspace.`, 'evaluateRoutes');
+  if (unknown?.domain) throw new ApiError(422, 'UNKNOWN_DOMAIN', `No receiving domain ${unknown.domain} in this workspace.`, 'evaluateDomains');
+}
 /** Endpoint name → type in this workspace: what a recipe's endpoint fields may name. */
 async function endpointKinds(tx: DbExecutor, w: string) {
   const rows = (await tx.execute<{ name: string; type: EndpointType }>(sql`SELECT key AS name,type FROM mailbox_webhooks WHERE workspace_id=${w} AND key IS NOT NULL`)).rows;
@@ -168,6 +184,7 @@ export async function save(tx: DbExecutor, c: Ctx, w: string, input: Config, ver
   const prior=(await tx.execute<{config:Config;owners:Record<string,string|null>}>(sql`SELECT config,owners FROM mail_ritual_configs WHERE workspace_id=${w} FOR UPDATE`)).rows[0];
   const bindingKey=(b:Config['attachments'][number])=>'attachment:'+b.target+':'+b.ritual;
   let config = await normalize(tx, w, input);
+  await ownOptIns(tx, w, config, prior?.config);
   // Attachments to an address deleted since (deletes before they detached rules left them) don't block a save. They
   // are dropped, except for an approval, which keeps another owner's bindings as they were; a new attachment to a
   // missing address is still refused.

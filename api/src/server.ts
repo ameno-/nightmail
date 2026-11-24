@@ -63,6 +63,8 @@ try {
   const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
   const assets = serveStatic({ root: publicRoot });
   const dashboard = serveStatic({ path: `${publicRoot}index.html` });
+  // A page the build wrote as its own file (pricing.html for /pricing: app/price-pages.ts), as Workers Assets answers it.
+  const pages = serveStatic({ root: publicRoot, rewriteRequestPath: path => `${path.replace(/\/+$/, '')}.html` });
   // "/" on a multi-tenant installation is the homepage: home.html, as the Worker answers it (src/worker.ts).
   const homepage = runtime.config.multiTenant && existsSync(`${publicRoot}home.html`) ? serveStatic({ path: `${publicRoot}home.html` }) : null;
   const app = createApp({ fallback: async (c, next) => {
@@ -70,7 +72,10 @@ try {
     if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
     if (homepage && c.req.path === '/') { const response = await homepage(c, next); if (response) return response; }
     return assets(c, async () => {
-      const response = await dashboard(c, next);
+      const response = await pages(c, async () => {
+        const shell = await dashboard(c, next);
+        if (shell) c.res = shell;
+      });
       if (response) c.res = response;
     });
   } });
