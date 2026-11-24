@@ -28,6 +28,7 @@ export async function boundRequestBody(c: Ctx, max = 12 * 1024 * 1024) {
   if (block && filled) chunks.push(block.subarray(0,filled));
   c.req.raw = new Request(raw, { body: new ReadableStream({ start(controller) {
     for (const chunk of chunks) controller.enqueue(chunk);
+    chunks.length = 0;
     controller.close();
   } }), duplex: 'half' } as RequestInit);
   c.set('boundedBody', true);

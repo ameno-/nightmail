@@ -309,6 +309,10 @@ export class ApiError extends Error {
   readonly reference: string
   /** Every problem, when the API reports several (rule diagnostics). */
   details?: Record<string, unknown>[]
+  /** Retry-After seconds from a 429 or 503 response. */
+  retryAfter?: number
+  /** Whether the server marked this failure as retryable. */
+  retryable?: boolean
   constructor(detail: string, public code: string = 'validation', public fields: Record<string, string> = {}, public requestId?: string, public status?: number) {
     super(friendlyErrors[code]?.(detail) ?? detail)
     this.name = 'ApiError'
@@ -329,7 +333,7 @@ export interface Api {
   emailEvents: (id: string, cursor?: string) => Promise<{items: EmailEvent[]; nextCursor: string | null}>
   attachments: AttachmentApi
   templateAssets: AttachmentApi
-  imports: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}): Promise<ImportPreview>; commit(id: string, input?: ImportCommitInput): Promise<ImportPreview> }
+  imports: { preview(input: {csv: string; mapping: Record<string, string>; listId?: string}, signal?: AbortSignal): Promise<ImportPreview>; commit(id: string, input?: ImportCommitInput, signal?: AbortSignal): Promise<ImportPreview> }
   consent: (id: string, input: ConsentInput) => Promise<Contact>
   /** AudienceQL bulk changes: plan counts and samples the contacts a statement changes; apply changes exactly those. */
   audienceQuery: { plan(statement: string): Promise<AudiencePlan>; apply(input: { planId: string; confirmResubscribe?: boolean; evidence?: string }): Promise<{ affected: number }> }

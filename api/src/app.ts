@@ -4,10 +4,10 @@ import { HTTPException } from 'hono/http-exception';
 import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
 import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
-import { SEND_LIMITS } from './send-limits.js';
+import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { actor, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
+import { actor, budgetExhausted, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, databaseConflict, databaseUnavailable, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, transientDatabaseError, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -250,13 +250,18 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       if (!(c.req.method==='POST' && c.req.path==='/v1/attachments/upload' && c.get('actor')))
         await boundRequestBody(c,snsIngress(c.req.path)||c.req.path==='/v1/billing/stripe'?512*1024:matched && c.get('actor')?undefined:64*1024);
     }
-    // Single self-reclaiming isolate memory gate for contact-import previews before Hono parses the JSON body
-    // (after boundRequestBody finished reading wire bytes). Check domain restriction and editContent permission first.
+    // Reserve isolate memory for contact-import previews before Hono parses the 5 MiB JSON body (after boundRequestBody
+    // finished reading the wire bytes, so stalled slow uploads never hold a lease). Check domain scope, editContent
+    // permission, and the per-minute preview limit first so rejected callers never queue other workspaces behind them.
     if (c.req.method === 'POST' && c.req.path === '/v1/contact-imports' && c.get('actor')) {
       if (c.get('actor')?.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
       const identity = actor(c, 'editContent');
+      if (await budgetExhausted(c.env, identity.workspaceId, 'imports:preview', IMPORT_PREVIEW_RATE_PER_MINUTE)) {
+        c.header('Retry-After', '60');
+        throw new ApiError(429, 'IMPORT_PREVIEW_RATE_LIMITED', `This workspace allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} contact import previews per minute. Retry after the window resets.`, undefined, true);
+      }
       const len = Number(c.req.raw.headers.get('content-length'));
-      const bytes = Math.min(SEND_LIMITS.isolateWorkingBytes, (Number.isFinite(len) && len > 0 ? len : 5 * 1024 * 1024) * 12 + 4 * 1024 * 1024);
+      const bytes = importPreviewReservationBytes(Number.isFinite(len) && len > 0 ? len : 5 * 1024 * 1024);
       let lease: MemoryLease;
       try {
         lease = await reserveMemory(bytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: 15_000, maxMs: 45_000, wsBusyCode: 'IMPORT_CONCURRENCY_LIMIT', busyCode: 'IMPORT_CONCURRENCY_LIMIT' });
