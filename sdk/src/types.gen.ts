@@ -1474,11 +1474,18 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
         until: string;
+    } | null;
+    /**
+     * Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.
+     */
+    feedbackLag: {
+        oldestMs: number;
+        lane: 'routine' | 'priority';
     } | null;
 } | null;
 
@@ -3684,7 +3691,7 @@ export type InboundDomain = {
     region: string;
     status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
     /**
-     * For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted.
+     * For an unknown recipient, create_address creates a receiving address; store keeps the message as unrouted for 30 days.
      */
     catchAll: 'create_address' | 'store';
     /**
@@ -3829,7 +3836,7 @@ export type ReceivingIssue = {
 
 export type AddReceivingHost = {
     /**
-     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     * For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.
      */
     catchAll?: 'create_address' | 'store';
     metadata?: {
@@ -3844,7 +3851,7 @@ export type AddReceivingHost = {
 
 export type UpdateReceivingHost = {
     /**
-     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     * For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.
      */
     catchAll?: 'create_address' | 'store';
     metadata?: {
@@ -3897,7 +3904,7 @@ export type CreateInboundSubdomain = {
      */
     name: string;
     /**
-     * For an unknown recipient, store keeps the message as unrouted (default); create_address creates a receiving address.
+     * For an unknown recipient, store keeps the message as unrouted for 30 days (default); create_address creates a receiving address.
      */
     catchAll?: 'create_address' | 'store';
     metadata?: {

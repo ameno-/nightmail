@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import { actor, ApiError, budgetedRead, denied, errors, PageQuery, readLimit, readLimitNote, statementTimedOut, unrestrictedRequired, region, response, security, type Actor, type App, type DbExecutor, type MailboxAccess } from './core.js';
-import { PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAddressStrings, sliceJsonbArray } from './inbound-bounds.js';
 import { emails } from './db/sending.js';
 import { mailMessages as messages } from './db/mailbox.js';
@@ -188,7 +188,7 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
       sizes AS (SELECT t.thread_id, ${threadSize(access, true, sql`t.thread_id`)} AS thread_count FROM (SELECT DISTINCT thread_id FROM page WHERE thread_id IS NOT NULL) t)
       SELECT page.*, sizes.thread_count FROM page LEFT JOIN sizes USING (thread_id) ORDER BY page.rn` : sql`
       SELECT page.*, NULL::int AS thread_count FROM page ORDER BY page.rn`}`;
-    return await withBoundedReadMemory(c, async () => {
+    return await withBoundedRead(c, async () => {
       const { rows, counts } = await budgetedRead(c.env.db, async db => ({
         rows: (await db.execute<Row>(boundedSql)).rows,
         counts: withCounts === 'true' ? await countWithin(db) : undefined,
@@ -210,6 +210,6 @@ export function registerLogs(app: App, mailAccess: (a: Actor) => MailboxAccess |
         received,
         ...counts && { counts },
       }, 200);
-    }) as never;
+    }, { route: 'logs.list', workspaceId: a.workspaceId }) as never;
   });
 }

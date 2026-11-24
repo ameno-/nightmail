@@ -1,6 +1,6 @@
 import { sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import type { Ctx } from './core.js';
-import { PAGE_MAX_BYTES, utf8Bytes, withBoundedReadMemory, type BoundedReadMemoryOptions } from './read-bounds.js';
+import { PAGE_MAX_BYTES, utf8Bytes, withBoundedRead } from './read-bounds.js';
 
 export const INBOUND_ADDRESS_STORE_LIMIT = 100;
 export const INBOUND_ADDRESS_PAGE_LIMIT = 20;
@@ -46,13 +46,13 @@ export function fitPageByBytes<T>(items: T[], hasMoreFromQuery: boolean, maxByte
   return { items, hasMore: hasMoreFromQuery };
 }
 
-/** Reserves a FairPool read slot for one non-Response step (e.g. a single longPoll tick, never held across sleep). */
-export async function withReadLease<T>(c: Ctx, work: () => Promise<T>, opts: BoundedReadMemoryOptions = {}): Promise<T | null> {
+/** Reserves a per-workspace readPool slot for one non-Response step (e.g. a single longPoll tick, never held across sleep). */
+export async function withReadLease<T>(c: Ctx, work: () => Promise<T>, opts: { route: string; workspaceId: string; idleMs?: number; maxMs?: number }): Promise<T | null> {
   let out: T | undefined;
-  const res = await withBoundedReadMemory(c, async () => {
+  const res = await withBoundedRead(c, async () => {
     out = await work();
     return new Response(null, { status: 204 });
   }, opts);
-  if (res.status === 499) return null;
+  if (res instanceof Response && res.status === 499) return null;
   return out as T;
 }

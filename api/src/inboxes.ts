@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, budgetedRead, denied, digest, id, randomSecret, readLimit, readLimitNote, errors, json, response, type App, type Ctx, type DbExecutor, type MailboxAccess } from './core.js';
-import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, messageFieldCount, sliceJsonbArray, withReadLease } from './inbound-bounds.js';
 import { longPoll, reservePolls } from './auth.js';
 import { auditContext, auditInsert, type AuditContext } from './audit.js';
@@ -223,7 +223,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     responses: { 200: response(z.object({ data: z.array(Inbox), nextCursor: z.string().nullable() }).openapi('InboxPage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query');
-    return await withBoundedReadMemory(c, async () => {
+    return await withBoundedRead(c, async () => {
       const query = (db: DbExecutor) => db.execute<{ box: Box; candidate_count: number }>(sql`
         WITH candidate AS (
           SELECT b.id, inbox_view(b) AS box
@@ -245,7 +245,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
       const pageItems = rows.slice(0, q.limit).map(r => r.box);
       const { json: body } = buildBoundedPageJson(pageItems, candidateCount > pageItems.length);
       return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
-    }) as never;
+    }, { route: 'inboxes.list', workspaceId: v.workspaceId }) as never;
   });
   app.openapi(createRoute({
     ...meta, method: 'get', path: item, operationId: 'getInbox', summary: 'Read an agent inbox', description: 'Address, status, expiry, limits and usage of one inbox.',
@@ -349,7 +349,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
         FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
         ORDER BY rn
       ) page ON true WHERE ${visible(v)} AND b.id=${id} ORDER BY page.inbox_seq::bigint`,
-    )).rows));
+    )).rows), { route: 'inboxes.listMessages', workspaceId: v.workspaceId });
     let lastModseq: string | null = null;
     // No row at all: the inbox isn't visible. A row without an id: visible, nothing new yet.
     const rows = await longPoll(c, q.wait, async () => {
@@ -380,7 +380,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query'), { id, messageId } = c.req.valid('param');
     const storeCap = INBOUND_ADDRESS_STORE_LIMIT;
-    return await withBoundedReadMemory(c, async () => {
+    return await withBoundedRead(c, async () => {
       const r = (await c.env.db.execute<Row>(sql`
         SELECT m.id, m.thread_id, m.direction, m.from_name, m.from_address,
           ${sliceJsonbArray(sql`m."to"`, storeCap)} AS "to", ${messageFieldCount(sql`m."to"`, sql`m.verdicts`, 'toCount')} AS to_count,
@@ -404,7 +404,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
         })));
         return c.json({ ...message, text, replyText: replyText(text), html: q.includeHtml === 'true' && r.html ? safeForwardHtml(r.html) : null, attachments }, 200);
       } finally { s3?.destroy(); }
-    }, { maxActivePerWorkspace: 1 }) as never;
+    }, { route: 'inboxes.getMessage', workspaceId: v.workspaceId }) as never;
   });
   app.openapi(createRoute({
     ...meta, method: 'get', path: `${detail}/attachments/{attachmentId}`, operationId: 'getInboxAttachment', summary: 'Read an inbox attachment',

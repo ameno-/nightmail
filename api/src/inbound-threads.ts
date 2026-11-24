@@ -6,7 +6,7 @@ import { readableMailboxKey, mailboxS3 } from './mailbox-setup.js';
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 import { actorMailAccess, ApiError, budgetedRead, denied, errors, isoTime, json, lazyModule, page, readLimit, readLimitNote, response, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { PAGE_MAX_BYTES, withBoundedReadMemory } from './read-bounds.js';
+import { PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, INBOUND_ADDRESS_STORE_LIMIT, messageFieldCount, sliceJsonbArray } from './inbound-bounds.js';
 import { productName } from './brand.js';
 
@@ -341,7 +341,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     description: 'Returns the most recent visible messages (default 25, maximum 100), oldest first within the page. Ties use message ID. Pages are also bounded by response size and may return fewer than limit messages; pass nextCursor as cursor for the older page. Body previews are capped at 8192 characters and address/reference lists at 20 items (with total counts in toCount, ccCount, replyToCount and referencesCount); getInboundMessage retrieves stored text, up to 100 addresses and attachment metadata. State and counts are scoped to visible addresses. ' + readLimitNote(INBOUND_READ),
     request: { params: ThreadParams, query: PageQuery }, responses: { 200: response(Thread.extend({ messages: z.array(Message), addressStates:z.array(AddressState), nextCursor: z.string().nullable() }).openapi('InboundThreadDetail')), ...errors } }), async c => {
     const value = access(c, 'read'), q = c.req.valid('query'), filter = { threadId: c.req.valid('param').threadId, addressId: q.addressId };
-    return await withBoundedReadMemory(c, async () => {
+    return await withBoundedRead(c, async () => {
       let result;
       try {
         result = await c.env.db.transaction(async db => {
@@ -357,7 +357,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
         throw error;
       }
       return c.json(result, 200);
-    }) as never;
+    }, { route: 'inbound.getThread', workspaceId: value.workspaceId }) as never;
   });
   const addressLinks = (v: MailboxAccess, f: Filter) => sql<string[]>`ARRAY(SELECT ${links.mailboxId} FROM ${links} WHERE ${visibleLinks(v, f)} AND mailbox_messages.message_id=mail_messages.id ORDER BY ${links.mailboxId})`;
   const accessible = accessibleMessages;
@@ -390,7 +390,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       region?: string | null; spam?: boolean; to?: typeof messages.$inferSelect.to; to_count?: number; envelope_to?: string[]; envelope_to_count?: number;
       addresses?: { id: string; address: string }[]; candidate_count: number;
     };
-    return await withBoundedReadMemory(c, async () => {
+    return await withBoundedRead(c, async () => {
       const where = and(accessible(v,q),eq(messages.direction,q.direction),q.region?eq(messages.region,q.region):undefined,q.threadId?eq(messages.threadId,q.threadId):undefined,
         q.q?sql`mail_messages.search @@ websearch_to_tsquery('simple',${q.q})`:undefined,after?sql`(${messages.receivedAt}, ${messages.id}) < (${after[0]}::timestamptz,${after[1]})`:undefined);
       const rows = await budgetedRead(c.env.db, async db => (await db.execute<ListMsgRow>(sql`
@@ -435,7 +435,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       const fitted = fitPageByBytes(mapped, candidateCount > mapped.length, PAGE_MAX_BYTES, 256);
       const last = fitted.items[fitted.items.length - 1];
       return c.json({ data: fitted.items.map(x => x.item), nextCursor: fitted.hasMore && last ? encodeCursor(last.at, last.item.id) : null }, 200);
-    }) as never;
+    }, { route: 'inbound.listMessages', workspaceId: v.workspaceId }) as never;
   });
   const Attachment = z.object({id:Id,filename:z.string(),contentType:z.string(),size:z.number().int(),disposition:z.string(),contentId:z.string().nullable(),url:z.string().nullable().optional()});
   const DeliveryDetail = deliverySchema.omit({to:true,toCount:true}).extend({rawUrl:z.string().nullable(),rawExpiresAt:z.string().nullable(),sentAt:z.string().nullable(),sizeBytes:z.number().int().nullable(),headers:z.array(z.object({name:z.string(),value:z.string()})),verdicts:z.record(z.string(),z.union([z.string(),z.boolean()]))}).partial();
@@ -462,7 +462,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
       html: q.includeHtml === 'true' ? messages.html : sql<string | null>`CASE WHEN ${messages.text} IS NULL THEN ${messages.html} END`,
       bodyTruncated: messages.bodyTruncated, sendingEmailId: messages.sendingEmailId, messageId: messages.messageId, inReplyTo: messages.inReplyTo,
     };
-    return await withBoundedReadMemory(c, async () => {
+    return await withBoundedRead(c, async () => {
       if (q.includeDelivery==='true') {
         const { result, files } = await budgetedRead(c.env.db, async db => {
           const [result]=await db.select({
@@ -488,7 +488,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
         return { row, attachments };
       }, readLimit(INBOUND_READ));
       return c.json({...messageView(row,row.addressIds,row.isRead),...body(row.html),...auth(row),...conversation(row.thread),attachments},200);
-    }, { maxActivePerWorkspace: 1 }) as never;
+    }, { route: 'inbound.getMessage', workspaceId: v.workspaceId }) as never;
   });
   // rawUrl in webhook payloads is the delivery record (it names every recipient): only delivery-detail readers follow it.
   app.get('/v1/inbound/messages/:messageId/raw',async c=>{

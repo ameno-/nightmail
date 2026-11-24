@@ -320,7 +320,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
     };
     const complete = (to: T[]) => ({ to, toTotal: to.length, toTruncated: false, toMore: null });
     const routed = (r: { to: string[] | 'drop' }): T[] => r.to === 'drop' ? [{ type: 'drop', id: null, name: 'Dropped', detail: null, via: null, status: null }]
-      : r.to.length ? r.to.map(resolve).filter((t): t is T => !!t) : [{ type: 'store', id: null, name: 'Stored, no inbox', detail: null, via: null, status: null }];
+      : r.to.length ? r.to.map(resolve).filter((t): t is T => !!t) : [{ type: 'store', id: null, name: 'Stored 30 days, no inbox', detail: null, via: null, status: null }];
 
     const data = page.map(r => {
       const v = r.address_id ? views.get(r.address_id) ?? null : null;
@@ -337,7 +337,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
       if (r.domain_id) {
         const catchAll = r.catch_all === 'create_mailbox' || r.catch_all === 'create_address' ? 'create_address' as const : 'store' as const;
         return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route: null, catchAll, rules: [], rituals: [],
-          ...complete([catchAll === 'create_address' ? { type: 'create_address' as const, id: null, name: 'New address per recipient', detail: null, via: null, status: null } : { type: 'store' as const, id: null, name: 'Stored, no inbox', detail: null, via: null, status: null }]) };
+          ...complete([catchAll === 'create_address' ? { type: 'create_address' as const, id: null, name: 'New address per recipient', detail: null, via: null, status: null } : { type: 'store' as const, id: null, name: 'Stored 30 days, no inbox', detail: null, via: null, status: null }]) };
       }
       const ritualKeys = ritualsFor([r.match]);
       return { id: r.id, kind: r.kind, match: r.match, host: r.host, address: null, route, catchAll: null, rules: ritualKeys, rituals: ritualKeys, ...complete(merge(route ? routed(route) : [], viaRituals(ritualKeys))) };

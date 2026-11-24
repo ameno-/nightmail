@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { retainedMail } from './db/mailbox.js';
 import { actor, ApiError, budgetedRead, denied, errors, id, json, readLimit, readLimitNote, receivingAdmin, response, security, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { PAGE_MAX_BYTES, utf8Bytes, withBoundedReadMemory } from './read-bounds.js';
+import { PAGE_MAX_BYTES, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { fitPageByBytes, ROUTING_CONFIG_MAX_BYTES } from './inbound-bounds.js';
 import { auditContext, auditInsert } from './audit.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
@@ -483,7 +483,7 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       const w = workspace(c), q = c.req.valid('query');
-      return await withBoundedReadMemory(c, async () => {
+      return await withBoundedRead(c, async () => {
         const { version, routes, keys } = await budgetedRead(c.env.db, async (db) => {
           const config = (
             await db.execute<{ version: number; routes: Route[] }>(
@@ -505,7 +505,7 @@ export function registerRouting(app: App) {
         if (q.format !== 'config') return c.json({ version, routes }, 200);
         const mapped = routes.map(({ id: _id, createdAt: _at, ...r }) => ({ ...r, to: Array.isArray(r.to) ? r.to.map((d) => keys!.get(d) ?? d) : r.to }));
         return c.json({ version, routes: mapped }, 200);
-      }, { maxActivePerWorkspace: 1 }) as never;
+      }, { route: 'routing.get', workspaceId: w }) as never;
     },
   );
   app.openapi(
@@ -526,12 +526,13 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       checkReferenceBudget(c.req.valid('json').routes);
-      return await withBoundedReadMemory(c, async () => c.json(
+      const w = receivingAdmin(c, 'change routes').workspaceId;
+      return await withBoundedRead(c, async () => c.json(
         await edit(c, (routes) => applyEntries(routes, c.req.valid('json').routes), {
           dryRun: c.req.valid('query').dryRun === 'true', audit: { action: 'routing.apply' },
         }),
         200,
-      ), { maxActivePerWorkspace: 1 }) as never;
+      ), { route: 'routing.apply', workspaceId: w }) as never;
     },
   );
   app.openapi(
@@ -547,10 +548,10 @@ export function registerRouting(app: App) {
     }),
     async (c) => {
       const w = workspace(c), q = c.req.valid('query');
-      return await withBoundedReadMemory(c, async () => {
+      return await withBoundedRead(c, async () => {
         const page = await budgetedRead(c.env.db, db => boundedRoutePage(db, w, q.limit, q.cursor), readLimit(5));
         return c.json({ data: page.routes, nextCursor: page.nextCursor }, 200);
-      }) as never;
+      }, { route: 'routing.listRoutes', workspaceId: w }) as never;
     },
   );
   app.openapi(

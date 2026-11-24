@@ -5,13 +5,49 @@ import {ADDRESS} from './mailbox-store.js';
 import {mailJson} from './mailbox-text.js';
 import {platformValidationMailbox} from './domain-claims.js';
 
-type Incoming=Omit<typeof mailMessages.$inferInsert,'threadId'> & {receivedAt:string;subject:string;envelopeTo:string[]};
+export type Incoming=Omit<typeof mailMessages.$inferInsert,'threadId'> & {receivedAt:string;subject:string;envelopeTo:string[]};
+export type IncomingBatchEntry = {
+  m: Incoming;
+  files: (typeof mailAttachments.$inferInsert)[];
+  verifiedFrom: boolean;
+  allowCreate: boolean;
+  replyAuthorVerified?: boolean;
+  plan?: import('./routing-match.js').RoutingResult | null;
+  platformHosts?: string | readonly string[] | null;
+  preview?: { prefix: string; complete: boolean };
+};
+
+function encodeIncoming(entry: IncomingBatchEntry) {
+  const { m, files, verifiedFrom, allowCreate, replyAuthorVerified = false, plan, platformHosts = null, preview } = entry;
+  const columns = getTableColumns(mailMessages);
+  const row = Object.fromEntries(Object.entries(m).filter(([, v]) => v !== undefined).map(([k, v]) => [columns[k as keyof typeof columns].name, v]));
+  const refs = [...new Set([m.inReplyTo, ...[...(m.references ?? [])].reverse(), m.messageId].filter((s): s is string => !!s))].slice(0, 101);
+  // An existing inbox still receives; `valid` only gates automatic address creation for an unknown recipient.
+  const envelopes = m.envelopeTo.map((addr, n) => ({ addr, n, valid: ADDRESS.test(addr) && !platformValidationMailbox(addr, platformHosts) }));
+  return {
+    msg: { ...row, reply_author_verified: replyAuthorVerified },
+    files,
+    refs,
+    envelopes,
+    authenticated_from: verifiedFrom,
+    can_create: allowCreate,
+    plan: plan ?? null,
+    prefix: preview?.prefix ?? null,
+    complete: preview?.complete ?? false,
+  };
+}
+
 /** One implicit transaction; the routine takes the write lane before the DML snapshot. */
 export async function storeIncoming(db:DbExecutor,m:Incoming,files:(typeof mailAttachments.$inferInsert)[],verifiedFrom:boolean,allowCreate:boolean,replyAuthorVerified=false,plan?:import('./routing-match.js').RoutingResult|null,policy?:string,platformHosts:string|readonly string[]|null=null,preview?:{prefix:string;complete:boolean}){
-  const columns=getTableColumns(mailMessages);
-  const row=Object.fromEntries(Object.entries(m).filter(([,v])=>v!==undefined).map(([k,v])=>[columns[k as keyof typeof columns].name,v]));
-  const refs=[...new Set([m.inReplyTo,...[...(m.references??[])].reverse(),m.messageId].filter((s):s is string=>!!s))].slice(0,101);
-  // An existing inbox still receives; `valid` only gates automatic address creation for an unknown recipient.
-  const recipients=m.envelopeTo.map((addr,n)=>({addr,n,valid:ADDRESS.test(addr) && !platformValidationMailbox(addr,platformHosts)}));
-  return (await db.execute<{queued_count:number;wait_ms:number;hold_ms:number}>(sql`SELECT * FROM mail_store_incoming(${mailJson({...row,reply_author_verified:replyAuthorVerified})}::jsonb,${mailJson(files)}::jsonb,${mailJson(refs)}::jsonb,${mailJson(recipients)}::jsonb,${verifiedFrom},${allowCreate},${plan?mailJson(plan):null}::jsonb,${policy??null}::jsonb,${preview?.prefix??null},${preview?.complete??false})`)).rows[0]!;
+  const e = encodeIncoming({ m, files, verifiedFrom, allowCreate, replyAuthorVerified, plan, platformHosts, preview });
+  return (await db.execute<{queued_count:number;wait_ms:number;hold_ms:number}>(sql`SELECT * FROM mail_store_incoming(${mailJson(e.msg)}::jsonb,${mailJson(e.files)}::jsonb,${mailJson(e.refs)}::jsonb,${mailJson(e.envelopes)}::jsonb,${e.authenticated_from},${e.can_create},${e.plan?mailJson(e.plan):null}::jsonb,${policy??null}::jsonb,${e.prefix},${e.complete})`)).rows[0]!;
+}
+
+/** Stores a workspace's batch of prepared inbound messages under one ingest lane lock and one commit. */
+export async function storeIncomingBatch(db: DbExecutor, workspaceId: string, entries: IncomingBatchEntry[], policy?: string) {
+  if (!entries.length) return [];
+  const encoded = entries.map(encodeIncoming);
+  return (await db.execute<{ ses_message_id: string; queued_count: number; wait_ms: number; hold_ms: number }>(
+    sql`SELECT * FROM mail_store_incoming_batch(${workspaceId}, ${mailJson(encoded)}::jsonb, ${policy ?? null}::jsonb)`,
+  )).rows;
 }
