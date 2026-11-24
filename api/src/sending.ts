@@ -39,6 +39,7 @@ import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages
 import { actorJson, admission, admitted, charges, duplicateAttachment, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
 import { reserveMemory, withMemory } from './isolate-memory.js';
+import { streamBase64JsonResponse } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -1370,7 +1371,7 @@ async function uploadBody(request: Request, length: number | null): Promise<Uint
   } finally { void reader.cancel().catch(() => {}); }
 }
 /** How long a download's response may take to be read before it is ended and its file let go (tests shorten it). */
-export const attachmentDownload = { readMs: 120_000 };
+export const attachmentDownload = { idleMs: 6_000, readMs: 60_000 };
 async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES) {
   sesAttachment(metadata);
   const input = validateAttachment(metadata, bytes, max);
@@ -1723,48 +1724,37 @@ export function registerSending(app: App) {
     // The isolate's memory for this file is held before a byte is read (isolate-memory.ts): with a Content-Length the
     // body is read into one buffer of that size; without one, into chunks of at most the limit, then one copy.
     const known = Number.isFinite(contentLength) && contentLength >= 0;
-    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null)));
+    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null)), { route: 'attachment.upload', workspaceId: a.workspaceId, signal: c.req.raw.signal });
     return c.json(AttachmentInfo.parse(result), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
     const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]); return c.json(AttachmentInfo.parse(row), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}/content', operationId: 'getAttachmentContent', description: 'Returns the private attachment as canonical base64 JSON, scoped like its metadata. At most 25 MiB decoded; never a public object URL or executable inline response.', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo.extend({ content: z.string().max(Math.ceil(MAX_ATTACHMENT_BYTES / 3) * 4) }).openapi('AttachmentContent')), ...errors } }), async c => {
-    const [row] = await attachmentRows(c.env.db, actor(c), [c.req.valid('param').id]);
-    // The file counts against the isolate's budget (isolate-memory.ts) until its response has been read, and the JSON
-    // streams out with the base64 written from the file a chunk at a time: the file is the only large buffer.
-    const lease = await reserveMemory(row!.size * 1.15 + 1024 * 1024);
-    let file: Uint8Array | null;
+    const a = actor(c);
+    const [row] = await attachmentRows(c.env.db, a, [c.req.valid('param').id]);
+    // The file counts against the isolate's self-reclaiming budget (isolate-memory.ts) until read, canceled, or past
+    // its idle/hard deadline, and streams out base64 a chunk at a time so the file is the only large buffer.
+    let lease: import('./isolate-memory.js').MemoryLease;
+    try {
+      lease = await reserveMemory(row!.size * 1.15 + 1024 * 1024, { route: 'attachment.download', workspaceId: a.workspaceId, signal: c.req.raw.signal, idleMs: attachmentDownload.idleMs, maxMs: attachmentDownload.readMs });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let file: Uint8Array;
     try {
       const asset = await c.env.storage.get(row!.storageKey);
       if (!asset || asset.body.length !== row!.size || asset.body.length > MAX_ATTACHMENT_BYTES || await bytesDigest(asset.body) !== row!.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An immutable attachment is missing or changed.', undefined, true);
       file = asset.body;
     } catch (error) { lease.release(); throw error; }
-    const json = JSON.stringify({ ...AttachmentInfo.parse(row), content: '' }), encoder = new TextEncoder();
-    let at = 0, stream: ReadableStreamDefaultController<Uint8Array> | undefined;
-    // Read to the end, canceled, or not read within attachmentDownload.readMs: the response is ended and the file let go
-    // first, so its bytes are unreachable when they return to the budget. Once only.
-    const end = (timedOut: boolean) => {
-      if (!file) return;
-      file = null; clearTimeout(watchdog as never);
-      if (timedOut) try { stream?.error(new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The attachment was not read in time.')); } catch { /* already closed */ }
-      lease.release();
-    };
-    const watchdog = setTimeout(() => end(true), attachmentDownload.readMs) as unknown as { unref?: () => void };
-    watchdog.unref?.();
-    const body = new ReadableStream<Uint8Array>({
-      start(controller) { stream = controller; controller.enqueue(encoder.encode(json.slice(0, -2))); },
-      pull(controller) {
-        if (!file) return;
-        if (at >= file.length) { controller.enqueue(encoder.encode(json.slice(-2))); controller.close(); end(false); return; }
-        const next = Math.min(file.length, at + 3 * 64 * 1024);
-        controller.enqueue(encoder.encode(Buffer.from(file.buffer, file.byteOffset + at, next - at).toString('base64')));
-        at = next;
-      },
-      cancel() { end(false); },
-    });
-    c.header('X-Content-Type-Options', 'nosniff');
-    return c.body(body, 200, { 'content-type': 'application/json' }) as never;
+    const jsonMeta = JSON.stringify({ ...AttachmentInfo.parse(row), content: '' });
+    return streamBase64JsonResponse(c, lease, jsonMeta, file, {
+      idleMs: attachmentDownload.idleMs,
+      maxMs: attachmentDownload.readMs,
+      timeoutError: () => new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The attachment was not read in time.'),
+    }) as never;
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;

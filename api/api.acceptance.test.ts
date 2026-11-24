@@ -35146,6 +35146,87 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('memory budget and fair pools reclaim abandoned holds by deadline without relying on the dead caller',async t=>{
+    const [{MEMORY_LIMITS,memoryInUse,memoryStats,reserveMemory},{READ_POOL_LIMITS,createFairPool}]=await Promise.all([import('./src/isolate-memory.js'),import('./src/read-bounds.js')]);
+    const prevIdle=MEMORY_LIMITS.defaultIdleMs,prevMax=MEMORY_LIMITS.defaultMaxMs,prevConfirm=MEMORY_LIMITS.confirmMs;
+    const prevPoolIdle=READ_POOL_LIMITS.defaultIdleMs,prevPoolMax=READ_POOL_LIMITS.defaultMaxMs;
+    try {
+      // Simulate a holder whose request context was cancelled and never ran finally/cancel/timers.
+      const beforeReclaimed=memoryStats().reclaimedTotal;
+      let reclaimHookCalled=0;
+      const dead=await reserveMemory(64*1024*1024,{route:'attachment.download',workspaceId:'ws_dead',idleMs:60,maxMs:200,onReclaim:()=>{reclaimHookCalled++;}});
+      assert.equal(memoryInUse(),64*1024*1024);
+      // A live waiter from another workspace wakes automatically once the dead hold crosses its idle deadline.
+      const t0=Date.now();
+      const live=await reserveMemory(8*1024*1024,{route:'attachment.download',workspaceId:'ws_live',idleMs:5000,maxMs:10000});
+      assert.ok(Date.now()-t0>=45,'Live waiter waited until the dead hold expired.');
+      assert.equal(dead.released,true);
+      assert.equal(reclaimHookCalled,1);
+      assert.ok(memoryStats().reclaimedTotal>beforeReclaimed);
+      // A late release from the dead holder is a strict no-op and never underflows memoryInUse().
+      dead.release();
+      assert.equal(memoryInUse(),8*1024*1024);
+      // touch() extends the idle deadline up to hardDeadlineAt, but never past hardDeadlineAt.
+      const hardHold=await reserveMemory(56*1024*1024,{route:'template.asset',workspaceId:'ws_hard',idleMs:80,maxMs:150});
+      await new Promise(r=>setTimeout(r,50));
+      hardHold.touch();
+      await new Promise(r=>setTimeout(r,50));
+      assert.equal(hardHold.released,false,'touch() kept hold alive before hard cap.');
+      await new Promise(r=>setTimeout(r,80));
+      assert.equal(memoryInUse(),8*1024*1024,'hardDeadlineAt reclaimed hold despite touch().');
+      assert.equal(hardHold.released,true);
+      hardHold.release();
+      live.release();
+      assert.equal(memoryInUse(),0);
+
+      // Same self-reclamation guarantee on FairPool slots (dead holder never calls release()).
+      const pool=createFairPool({name:'test-reclaim',maxActive:1,maxPerWorkspace:1,maxWaitingPerWorkspace:2,maxWaitingTotal:4});
+      const deadSlot=await pool.acquire('ws_a',undefined,{route:'import.read',idleMs:60,maxMs:200,busyCode:'BUSY',busyMessage:'busy',wsBusyCode:'WS_BUSY',wsBusyMessage:'ws busy'});
+      const liveSlot=await pool.acquire('ws_b',undefined,{route:'import.read',idleMs:5000,maxMs:10000,busyCode:'BUSY',busyMessage:'busy',wsBusyCode:'WS_BUSY',wsBusyMessage:'ws busy'});
+      assert.equal(deadSlot.released,true);
+      assert.equal(pool.stats().active,1);
+      assert.ok(pool.stats().reclaimedTotal>=1);
+      deadSlot.release();
+      assert.equal(pool.stats().active,1,'Late release after reclaim must not decrement active.');
+      liveSlot.release();
+      assert.equal(pool.stats().active,0);
+
+      // Two different workspaces authenticating via inbox keys (mailboxAccess, no actor) must get independent shares,
+      // and a caller with no workspace ID must be refused rather than sharing a fallback bucket.
+      const { withBoundedRead, resolveReadWorkspaceId } = await import('./src/read-bounds.js');
+      const fakeCtx = (vars: Record<string, unknown>) => ({
+        get: (k: string) => vars[k],
+        header: () => {},
+        req: { raw: new Request('http://127.0.0.1/v1/inboxes/inb_1/messages') },
+      }) as unknown as import('./src/core.js').Ctx;
+      assert.throws(() => resolveReadWorkspaceId(fakeCtx({})), (err: any) => err?.status === 401 && err?.code === 'AUTH_REQUIRED');
+      assert.throws(() => resolveReadWorkspaceId(fakeCtx({ actor: { workspaceId: '' } })), (err: any) => err?.status === 401 && err?.code === 'AUTH_REQUIRED');
+      const inbA = fakeCtx({ mailboxAccess: { workspaceId: 'ws_inb_a', keyId: 'k_a', admin: false, mailboxIds: ['inb_a'], permissions: ['read'] } });
+      const inbB = fakeCtx({ mailboxAccess: { workspaceId: 'ws_inb_b', keyId: 'k_b', admin: false, mailboxIds: ['inb_b'], permissions: ['read'] } });
+      assert.equal(resolveReadWorkspaceId(inbA), 'ws_inb_a');
+      assert.equal(resolveReadWorkspaceId(inbB), 'ws_inb_b');
+      const gates: Array<() => void> = [];
+      const holdA = () => withBoundedRead(inbA, () => new Promise<string>(resolve => { gates.push(() => resolve('a')); }), { route: 'inbox.read' });
+      const activeA = [holdA(), holdA()]; // saturates ws_inb_a's 2 active slots
+      await new Promise(r => setTimeout(r, 20));
+      const queuedA = [holdA(), holdA(), holdA(), holdA()]; // saturates ws_inb_a's 4 waiting slots
+      await new Promise(r => setTimeout(r, 20));
+      await assert.rejects(() => holdA(), (err: any) => err?.status === 429 && err?.code === 'READ_CONCURRENCY_LIMIT', '7th inbox-key read from ws_inb_a must get 429.');
+      // Another workspace's inbox-key read must succeed immediately without sharing ws_inb_a's slots.
+      const resB = await withBoundedRead(inbB, async () => 'ok-b', { route: 'inbox.read' });
+      assert.equal(resB, 'ok-b', 'Inbox-key reads from ws_inb_b must not share slots with ws_inb_a.');
+      while (gates.length) {
+        const releaseAll = gates.splice(0);
+        for (const fn of releaseAll) fn();
+        await new Promise(r => setTimeout(r, 10));
+      }
+      await Promise.all([...activeA, ...queuedA]);
+    } finally {
+      MEMORY_LIMITS.defaultIdleMs=prevIdle;MEMORY_LIMITS.defaultMaxMs=prevMax;MEMORY_LIMITS.confirmMs=prevConfirm;
+      READ_POOL_LIMITS.defaultIdleMs=prevPoolIdle;READ_POOL_LIMITS.defaultMaxMs=prevPoolMax;
+    }
+  });
+
   test('missing immutable attachment stops after five preflights without any SES attempt',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       runtime.storage={put:async()=>{},get:async()=>null,delete:async()=>{}};

@@ -1,12 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, getTableColumns, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
-import { actor, ApiError, AudienceSpec, chargeBudget, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, response, rowId, security, statementTimedOut, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { actor, ApiError, AudienceSpec, chargeBudget, unrestrictedRequired, errors, id, IdParams, json, notFound, page, PageQuery, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
-import { withMemory } from './isolate-memory.js';
+import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
+import { streamTextPartsResponse } from './read-bounds.js';
 import { mailAddress } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 
@@ -427,8 +428,12 @@ function previewImport(input: z.infer<typeof ImportInput>) {
   seen.clear();
   return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count };
 }
-// Stream large import JSON responses one 64 KiB chunk at a time on pull(), avoiding a second 8 MB copy or 50,000 JS objects.
-function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: string, status: 200 | 201, subscribed?: number): Response {
+export const importStream = { idleMs: MEMORY_LIMITS.streamIdleMs, maxMs: MEMORY_LIMITS.streamMaxMs };
+const importStreamBytes = (chars: number) => Math.min(12 * 1024 * 1024, Math.max(256 * 1024, Math.ceil(chars)));
+
+// Stream large import JSON responses one 64 KiB chunk at a time on pull(), holding a shrunk self-reclaiming memory lease.
+function streamImportResponse(c: Ctx, meta: ImportMeta, rowsJson: string, errorsJson: string, status: 200 | 201, subscribed?: number, lease?: MemoryLease): Response {
+  lease?.shrink(importStreamBytes(rowsJson.length + errorsJson.length));
   const parts = [
     `{"id":${JSON.stringify(meta.id)},"workspaceId":${JSON.stringify(meta.workspaceId)},"listId":${JSON.stringify(meta.listId)},"status":${JSON.stringify(meta.status)},"rows":`,
     rowsJson,
@@ -436,28 +441,7 @@ function streamImportResponse(meta: ImportMeta, rowsJson: string, errorsJson: st
     errorsJson,
     `,"imported":${meta.imported},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
   ];
-  const encoder = new TextEncoder();
-  let partIndex = 0, offset = 0;
-  const stream = new ReadableStream<Uint8Array>({
-    pull(controller) {
-      while (partIndex < parts.length) {
-        const part = parts[partIndex]!;
-        if (offset < part.length) {
-          const next = Math.min(part.length, offset + 65536);
-          controller.enqueue(encoder.encode(part.slice(offset, next)));
-          offset = next;
-          return;
-        }
-        parts[partIndex] = '';
-        partIndex++;
-        offset = 0;
-      }
-      parts.length = 0;
-      controller.close();
-    },
-    cancel() { parts.length = 0; },
-  });
-  return new Response(stream, { status, headers: { 'content-type': 'application/json; charset=UTF-8' } });
+  return streamTextPartsResponse(c, parts, status, { lease, idleMs: importStream.idleMs, maxMs: importStream.maxMs });
 }
 
 export function registerAudience(app: App) {
@@ -569,39 +553,78 @@ export function registerAudience(app: App) {
       c.header('Retry-After', '60');
       throw new ApiError(429, 'IMPORT_PREVIEW_RATE_LIMITED', `This workspace allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} contact import previews per minute. Retry after the window resets.`, undefined, true);
     }
-    // Hold the isolate memory budget only through parse + DB write (never across the response stream, so a stalled
-    // or dropped client cannot wedge the isolate). 12 B/char covers two-byte non-Latin strings + wire buffers.
-    const built = await withMemory(Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 12 + 2 * 1024 * 1024), async () => {
-      if (c.req.raw.signal?.aborted) return null;
-      const { rowsJson, errorsJson } = previewImport(input);
-      const newId = id('imp');
-      const meta = await c.env.db.transaction(async tx => {
-        // Transaction-scoped advisory lock (supported by Hyperdrive and PgBouncer transaction pooling) keeps the
-        // newest IMPORT_OPEN_PREVIEW_CAP uncommitted previews per workspace even under concurrent previews.
-        await tx.execute(sql`SELECT pg_advisory_xact_lock(275818, hashtext(${identity.workspaceId}))`);
-        const [row] = await tx.insert(imports).values({ id: newId, ...scopeValues(identity), listId: input.listId, rows: sql`${rowsJson}::jsonb` as unknown as never, errors: sql`${errorsJson}::jsonb` as unknown as never, createdAt: sql`clock_timestamp()` as unknown as string, updatedAt: sql`clock_timestamp()` as unknown as string }).returning(importMetaColumns);
-        await tx.execute(sql`DELETE FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId}
-          AND id IN (SELECT id FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId} ORDER BY created_at DESC, id DESC OFFSET ${IMPORT_OPEN_PREVIEW_CAP - 1})`);
-        return row!;
-      });
-      return { meta, rowsJson, errorsJson };
-    });
-    if (!built) return new Response(null, { status: 499 }) as never;
-    return streamImportResponse(built.meta, built.rowsJson, built.errorsJson, 201) as never;
+    // Reserve parse peak from the self-reclaiming budget, then shrink and hand the lease to the response stream.
+    const reserveBytes = Math.min(SEND_LIMITS.isolateWorkingBytes, input.csv.length * 12 + 2 * 1024 * 1024);
+    let lease: MemoryLease;
+    try {
+      lease = await reserveMemory(reserveBytes, { route: 'import.preview', workspaceId: identity.workspaceId, signal: c.req.raw.signal });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let transferred = false;
+    try {
+      const built = await runInMemoryScope(reserveBytes, async () => {
+        if (c.req.raw.signal?.aborted) return null;
+        const { rowsJson, errorsJson } = previewImport(input);
+        const newId = id('imp');
+        const meta = await c.env.db.transaction(async tx => {
+          // Transaction-scoped advisory lock (supported by Hyperdrive and PgBouncer transaction pooling) keeps the
+          // newest IMPORT_OPEN_PREVIEW_CAP uncommitted previews per workspace even under concurrent previews.
+          await tx.execute(sql`SELECT pg_advisory_xact_lock(275818, hashtext(${identity.workspaceId}))`);
+          const [row] = await tx.insert(imports).values({ id: newId, ...scopeValues(identity), listId: input.listId, rows: sql`${rowsJson}::jsonb` as unknown as never, errors: sql`${errorsJson}::jsonb` as unknown as never, createdAt: sql`clock_timestamp()` as unknown as string, updatedAt: sql`clock_timestamp()` as unknown as string }).returning(importMetaColumns);
+          await tx.execute(sql`DELETE FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId}
+            AND id IN (SELECT id FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId} ORDER BY created_at DESC, id DESC OFFSET ${IMPORT_OPEN_PREVIEW_CAP - 1})`);
+          return row!;
+        });
+        return { meta, rowsJson, errorsJson };
+      }, () => lease.touch());
+      if (!built) return new Response(null, { status: 499 }) as never;
+      transferred = true;
+      return streamImportResponse(c, built.meta, built.rowsJson, built.errorsJson, 201, undefined, lease) as never;
+    } finally {
+      if (!transferred) lease.release();
+    }
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports', operationId: 'listContactImports', tags: ['Audience'], security, request: { query: PageQuery }, responses: { 200: response(page(Import.omit({ rows: true, errors: true }))), ...errors } }), async c => {
     const identity = actor(c), query = c.req.valid('query'); const rows = await c.env.db.select(importMetaColumns).from(imports).where(and(scope(imports, identity), query.cursor ? gt(imports.id, query.cursor) : undefined)).orderBy(asc(imports.id)).limit(query.limit + 1); return c.json(paginate(rows, query.limit), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contact-imports/{id}', operationId: 'getContactImport', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(Import), ...errors } }), async c => {
     const identity = actor(c);
-    const [row] = await c.env.db.select({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1);
-    if (!row) importNotFound();
-    return streamImportResponse(row, row.rowsText, row.errorsText, 200) as never;
+    const reserveBytes = 24 * 1024 * 1024;
+    let lease: MemoryLease;
+    try {
+      lease = await reserveMemory(reserveBytes, { route: 'import.read', workspaceId: identity.workspaceId, signal: c.req.raw.signal });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let transferred = false;
+    try {
+      const [row] = await runInMemoryScope(reserveBytes, () => c.env.db.select({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, c.req.valid('param').id))).limit(1), () => lease.touch());
+      if (!row) importNotFound();
+      transferred = true;
+      return streamImportResponse(c, row, row.rowsText, row.errorsText, 200, undefined, lease) as never;
+    } finally {
+      if (!transferred) lease.release();
+    }
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports/{id}/commit', operationId: 'commitContactImport', tags: ['Audience'], security, description: 'Imports every valid row of a previewed import. Without consent, imported contacts keep their consent decision (new contacts have none, so campaigns skip them). With consent, everyone imported who had no decision is marked subscribed with your evidence. A repeated commit changes nothing. One import commits at a time per workspace (503 IMPORT_COMMIT_BUSY if another is running; retryable).', request: { params: IdParams, body: { ...json(ImportCommit), required: false } }, responses: { 200: response(CommittedImport), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), importId = c.req.valid('param').id, consent = c.req.valid('json').consent;
+    const reserveBytes = 48 * 1024 * 1024;
+    let lease: MemoryLease;
     try {
-      const result = await withMemory(48 * 1024 * 1024, async () => {
+      lease = await reserveMemory(reserveBytes, { route: 'import.commit', workspaceId: identity.workspaceId, signal: c.req.raw.signal });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let transferred = false;
+    try {
+      const result = await runInMemoryScope(reserveBytes, async () => {
         if (c.req.raw.signal?.aborted) return null;
         return c.env.db.transaction(async tx => {
           // One commit at a time per workspace (transaction-scoped try-lock: supported by Hyperdrive and PgBouncer
@@ -714,10 +737,13 @@ export function registerAudience(app: App) {
         });
       });
       if (!result) return new Response(null, { status: 499 }) as never;
-      return streamImportResponse(result.meta, result.rowsText, result.errorsText, 200, result.subscribed) as never;
+      transferred = true;
+      return streamImportResponse(c, result.meta, result.rowsText, result.errorsText, 200, result.subscribed, lease) as never;
     } catch (error) {
       if (statementTimedOut(error)) throw new ApiError(503, 'IMPORT_COMMIT_TIMEOUT', 'The contact import commit ran out of time and nothing was imported. Retry the commit.', undefined, true);
       throw error;
+    } finally {
+      if (!transferred) lease.release();
     }
   });
 }

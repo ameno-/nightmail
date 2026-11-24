@@ -2,6 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { and, desc, eq, inArray, isNotNull, isNull, lt, or, sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { actor, ApiError, chargeRenderBudget, requiredOf, unrestrictedRequired, errors, id, IdParams, json, notFound, PageQuery, page, response, security, type Actor, type App, type DbExecutor, type Runtime } from './core.js';
+import { MEMORY_LIMITS, reserveMemory, type MemoryLease } from './isolate-memory.js';
+import { streamBase64JsonResponse } from './read-bounds.js';
 import { attachmentLinks, attachments } from './db/sending.js';
 import { templateAssetLinks, templateAssets, templates, type TemplateDraft } from './db/templates.js';
 import { BlockContentError, renderBlockHtml, renderBlockText, validateBlockHtml } from './campaign-blocks.js';
@@ -118,6 +120,29 @@ export function registerTemplates(app: App) {
     return c.json({ asset, src: `cid:${contentId}` }, 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/template-assets/{id}', operationId: 'getTemplateAsset', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Asset), ...errors } }), async c => { const identity = actor(c), [row] = await c.env.db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, c.req.valid('param').id))).limit(1); return c.json(Asset.parse(row ?? notFound('Template asset')), 200); });
-  app.openapi(createRoute({ method: 'get', path: '/v1/template-assets/{id}/content', operationId: 'getTemplateAssetContent', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Asset.extend({ content: z.string() })), ...errors } }), async c => { const identity = actor(c), [row] = await c.env.db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, c.req.valid('param').id))).limit(1); if (!row) notFound('Template asset'); const stored = await c.env.storage.get(row!.storageKey); if (!stored || stored.body.length !== row!.size || await checksum(stored.body) !== row!.checksum) throw new ApiError(503, 'TEMPLATE_ASSET_STORAGE_UNAVAILABLE', 'A template asset is missing or changed.', undefined, true); return c.json({ ...Asset.parse(row), content: Buffer.from(stored.body).toString('base64') }, 200); });
+  app.openapi(createRoute({ method: 'get', path: '/v1/template-assets/{id}/content', operationId: 'getTemplateAssetContent', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Asset.extend({ content: z.string() })), ...errors } }), async c => {
+    const identity = actor(c), [row] = await c.env.db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, c.req.valid('param').id))).limit(1);
+    if (!row) notFound('Template asset');
+    let lease: MemoryLease;
+    try {
+      lease = await reserveMemory(row.size * 1.15 + 1024 * 1024, { route: 'template.asset', workspaceId: identity.workspaceId, signal: c.req.raw.signal, idleMs: MEMORY_LIMITS.streamIdleMs, maxMs: MEMORY_LIMITS.streamMaxMs });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === 'AbortError') return new Response(null, { status: 499 }) as never;
+      if (error instanceof ApiError && (error.status === 429 || error.status === 503)) c.header('Retry-After', '1');
+      throw error;
+    }
+    let file: Uint8Array;
+    try {
+      const stored = await c.env.storage.get(row.storageKey);
+      if (!stored || stored.body.length !== row.size || await checksum(stored.body) !== row.checksum) throw new ApiError(503, 'TEMPLATE_ASSET_STORAGE_UNAVAILABLE', 'A template asset is missing or changed.', undefined, true);
+      file = stored.body;
+    } catch (error) { lease.release(); throw error; }
+    const jsonMeta = JSON.stringify({ ...Asset.parse(row), content: '' });
+    return streamBase64JsonResponse(c, lease, jsonMeta, file, {
+      idleMs: MEMORY_LIMITS.streamIdleMs,
+      maxMs: MEMORY_LIMITS.streamMaxMs,
+      timeoutError: () => new ApiError(504, 'DOWNLOAD_TIMEOUT', 'The template asset was not read in time.'),
+    }) as never;
+  });
   app.openapi(createRoute({ method: 'delete', path: '/v1/template-assets/{id}', operationId: 'deleteTemplateAsset', tags: ['Templates'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => { const identity = manageTemplates(c), assetId = c.req.valid('param').id; await c.env.db.transaction(async db => { const [row] = await db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, assetId))).limit(1).for('update'); if (!row) notFound('Template asset'); const linked = await db.select({ id: templateAssetLinks.assetId }).from(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, identity.workspaceId), eq(templateAssetLinks.assetId, assetId))).limit(1); const cloned = await db.select({ id: attachments.id }).from(attachments).where(and(eq(attachments.workspaceId, identity.workspaceId), eq(attachments.sourceTemplateAssetId, assetId))).limit(1); if (linked.length || cloned.length) throw new ApiError(409, 'TEMPLATE_ASSET_IN_USE', 'Remove this asset from template drafts, published revisions, and retained campaigns first.'); await c.env.storage.delete(row!.storageKey); await db.delete(templateAssets).where(and(eq(templateAssets.workspaceId, identity.workspaceId), eq(templateAssets.id, assetId))); }); return c.json({ id: assetId, deleted: true as const }, 200); });
 }
