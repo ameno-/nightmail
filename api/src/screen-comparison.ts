@@ -20,6 +20,7 @@ export const ScreenComparison = z.object({
     email: Count, campaignTest: Count, campaignCopy: Count, jevAnswered: Count, jevfAnswered: Count, bothAnswered: Count }),
   coverage: z.object({ called: Count.describe('Requests repeated to the second classifier.'), answered: Count, refusedTooLarge: Count.describe('Refused as over its input limit.'),
     skippedBreaker: Count, skippedRateLimited: Count, skippedBacklog: Count,
+    lost: Count.describe('Its queue message was delivered again and no row had been written: never asked a second time.'),
     answeredShare: z.number().nullable().describe('Of the screen\'s requests, the share the second classifier answered.') }),
   outcomes: z.object({ jev: z.record(z.string(), Count), jevf: z.record(z.string(), Count) }),
   agreement: z.object({ threshold: z.object({ min: z.number().nullable(), max: z.number().nullable() }).describe('The thresholds in force on the compared requests.'),
@@ -28,7 +29,7 @@ export const ScreenComparison = z.object({
     histogram: z.array(z.object({ from: z.number(), to: z.number(), count: Count })).describe('Second classifier minus screen, in steps of 0.1 from -1 to 1; empty steps are left out.') }),
   latencyMs: z.object({ jev: Quantiles, jevf: Quantiles }),
   tokens: z.object({ jev: Tokens, jevf: Tokens, jevOver4096: Count.describe('Screen requests of more than 4,096 input tokens.') }),
-  hourly: z.array(z.object({ hour: z.string(), pairs: Count, jev: Hour, jevf: Hour.extend({ skipped: Count, refusedTooLarge: Count }) })).describe('Newest first, at most 168 hours.'),
+  hourly: z.array(z.object({ hour: z.string(), pairs: Count, jev: Hour, jevf: Hour.extend({ skipped: Count.describe('Not asked, or lost.'), refusedTooLarge: Count }) })).describe('Newest first, at most 168 hours.'),
   disagreements: z.array(z.object({ at: z.string(), pairId: z.string(), kind: z.string(), workspaceId: z.string().nullable(), emailId: z.string().nullable(), campaignId: z.string().nullable(),
     digest: z.string(), window: Count, windows: Count, threshold: z.number(), jevScore: z.number(), jevfScore: z.number(), jevModel: z.string().nullable(), jevfModel: z.string().nullable(),
     jevfRequestId: z.string().nullable() })).describe('The 50 most recent requests the two decided differently: IDs and digests, never content.'),
@@ -45,7 +46,7 @@ export async function screenComparison(db: Database, since: Date, configured: bo
     const { rows: [t] } = await tx.execute<Record<string, unknown>>(sql`SELECT to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS until,count(*)::int AS pairs,count(DISTINCT digest)::int AS digests,
       count(*) FILTER (WHERE kind='email')::int AS email,count(*) FILTER (WHERE kind='campaign_test')::int AS campaign_test,count(*) FILTER (WHERE kind='campaign_copy')::int AS campaign_copy,
       count(*) FILTER (WHERE jev_outcome='ok')::int AS jev_ok,count(*) FILTER (WHERE jevf_outcome='ok')::int AS jevf_ok,count(*) FILTER (WHERE jev_outcome='ok' AND jevf_outcome='ok')::int AS both_ok,
-      count(*) FILTER (WHERE jevf_outcome NOT LIKE 'skipped%')::int AS called,count(*) FILTER (WHERE jevf_outcome='refused_too_large')::int AS refused,
+      count(*) FILTER (WHERE jevf_outcome NOT LIKE 'skipped%' AND jevf_outcome<>'lost')::int AS called,count(*) FILTER (WHERE jevf_outcome='refused_too_large')::int AS refused,count(*) FILTER (WHERE jevf_outcome='lost')::int AS lost,
       count(*) FILTER (WHERE jevf_outcome='skipped_breaker')::int AS skipped_breaker,count(*) FILTER (WHERE jevf_outcome='skipped_rate_limited')::int AS skipped_rate_limited,
       count(*) FILTER (WHERE jevf_outcome='skipped_backlog')::int AS skipped_backlog,
       count(*) FILTER (WHERE jev_flagged AND jevf_flagged)::int AS both_flag,count(*) FILTER (WHERE NOT jev_flagged AND NOT jevf_flagged)::int AS both_pass,
@@ -69,10 +70,10 @@ export async function screenComparison(db: Database, since: Date, configured: bo
     const hours = (await tx.execute<Record<string, unknown>>(sql`SELECT to_char(date_trunc('hour',created_at) AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS hour,count(*)::int AS pairs,
       count(*) FILTER (WHERE jev_outcome='http_429')::int AS jev_limited,count(*) FILTER (WHERE jev_outcome='timeout')::int AS jev_timeouts,
       count(*) FILTER (WHERE jev_outcome NOT IN ('ok','http_429','timeout'))::int AS jev_errors,
-      count(*) FILTER (WHERE jevf_outcome NOT LIKE 'skipped%')::int AS jevf_calls,count(*) FILTER (WHERE jevf_outcome LIKE 'skipped%')::int AS jevf_skipped,
+      count(*) FILTER (WHERE jevf_outcome NOT LIKE 'skipped%' AND jevf_outcome<>'lost')::int AS jevf_calls,count(*) FILTER (WHERE jevf_outcome LIKE 'skipped%' OR jevf_outcome='lost')::int AS jevf_skipped,
       count(*) FILTER (WHERE jevf_outcome='rate_limited')::int AS jevf_limited,count(*) FILTER (WHERE jevf_outcome='timeout')::int AS jevf_timeouts,
       count(*) FILTER (WHERE jevf_outcome='refused_too_large')::int AS jevf_refused,
-      count(*) FILTER (WHERE jevf_outcome NOT IN ('ok','rate_limited','timeout','refused_too_large') AND jevf_outcome NOT LIKE 'skipped%')::int AS jevf_errors
+      count(*) FILTER (WHERE jevf_outcome NOT IN ('ok','rate_limited','timeout','refused_too_large','lost') AND jevf_outcome NOT LIKE 'skipped%')::int AS jevf_errors
       FROM screen_comparisons WHERE created_at>=${from}::timestamptz GROUP BY date_trunc('hour',created_at) ORDER BY date_trunc('hour',created_at) DESC LIMIT ${HOURS}`)).rows;
     const recent = (await tx.execute<Record<string, unknown>>(sql`SELECT to_char(created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS at,pair_id,kind,workspace_id,email_id,campaign_id,digest,window_index,windows,
       threshold,jev_score,jevf_score,jev_model,jevf_model,jevf_request_id FROM screen_comparisons
@@ -84,7 +85,7 @@ export async function screenComparison(db: Database, since: Date, configured: bo
     return {
       since: from, until: String(t?.until ?? new Date().toISOString()), configured,
       counts: { pairs: n('pairs'), digests: n('digests'), email: n('email'), campaignTest: n('campaign_test'), campaignCopy: n('campaign_copy'), jevAnswered: n('jev_ok'), jevfAnswered: n('jevf_ok'), bothAnswered: n('both_ok') },
-      coverage: { called: n('called'), answered: n('jevf_ok'), refusedTooLarge: n('refused'), skippedBreaker: n('skipped_breaker'), skippedRateLimited: n('skipped_rate_limited'), skippedBacklog: n('skipped_backlog'), answeredShare: rate(n('jevf_ok'), n('pairs')) },
+      coverage: { called: n('called'), answered: n('jevf_ok'), refusedTooLarge: n('refused'), skippedBreaker: n('skipped_breaker'), skippedRateLimited: n('skipped_rate_limited'), skippedBacklog: n('skipped_backlog'), lost: n('lost'), answeredShare: rate(n('jevf_ok'), n('pairs')) },
       outcomes: { jev: by('jev'), jevf: by('jevf') },
       agreement: { threshold: { min: number(t?.threshold_min), max: number(t?.threshold_max) }, requests: agreement(t, n('both_flag') + n('both_pass') + n('jev_only') + n('jevf_only')), messages: agreement(m, Number(m?.compared ?? 0)) },
       scoreDifference: { mean: number(t?.diff), meanAbsolute: number(t?.diff_abs), p50Absolute: q('diff_q', 0), p95Absolute: q('diff_q', 1), p99Absolute: q('diff_q', 2),

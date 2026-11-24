@@ -5,11 +5,10 @@ import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount } from './dispatcher-do.js';
 import { CampaignRoom } from './campaign-room.js';
 import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
-import { ScreenShadow } from './shadow-do.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-export { DispatcherShard, CampaignRoom, ScreenShadow };
+export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
 // loading OpenAPI/Zod schemas, Better Auth, MCP, Drizzle, pg or AWS SDK clients.
@@ -25,8 +24,8 @@ function initRuntimeDeps() {
     import('./config.js'), import('./adapters/storage.js'),
     import('./jobs.js'), import('./core.js'),
     import('./adapters/browser-rendering.js'), import('./adapters/public-image.js'), import('./adapters/feedback-queue.js'), import('./screen-shadow.js'),
-  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake }, { handOver }]) => ({
-    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake, handOver,
+  ]).then(([{ Pool }, { drizzle }, { sql }, { CONFIG_KEYS, loadConfig }, { r2Storage }, { followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY }, core, { browserImageRenderer }, { publicImageImporter }, { feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake }, { enqueueShadow, consumeShadow, writeComparisons, writtenComparisons }]) => ({
+    Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, followDueJobs, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, settleFeedbackBatch, legacyFeedbackCutover, workWake, enqueueShadow, consumeShadow, writeComparisons, writtenComparisons,
   }));
 }
 async function toModuleLoadError(error: unknown): Promise<never> {
@@ -108,15 +107,15 @@ const queueName = (env: Env, key: 'FEEDBACK_QUEUE_NAME' | 'LEGACY_FEEDBACK_QUEUE
   return typeof value === 'string' && value ? value : fallback;
 };
 async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, max = 1, ctx?: ExecutionContext): Promise<T> {
-  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake, handOver } = await loadRuntimeDeps();
+  const { Pool, drizzle, sql, CONFIG_KEYS, loadConfig, r2Storage, jobConcurrency, WAKE_SCHEDULE_KEY, core, browserImageRenderer, publicImageImporter, feedbackSink, workWake, enqueueShadow } = await loadRuntimeDeps();
   // Optional Worker variable, default two active jobs; six matches the platform's
   // simultaneous outbound-connection ceiling while the shared SES gate limits rate.
   const concurrency = jobConcurrency('JOB_CONCURRENCY' in env ? env.JOB_CONCURRENCY : undefined, 6);
   const config = configFor(env, CONFIG_KEYS, loadConfig);
-  // The second classifier's calls are made by the ScreenShadow object (src/shadow-do.ts), never in this invocation: with
-  // no object bound there is nowhere to make them, so it is off.
-  const shadowObject = env.SCREEN_SHADOW, handovers: Promise<void>[] = [];
-  if (!shadowObject) config.shadow = undefined;
+  // The second classifier's calls are made by its queue's consumer (queue() below), never in this invocation: what a
+  // job drain kept goes onto the queue when the drain has ended. With no queue bound there is nowhere to make them: off.
+  const shadowQueue = env.JEVF_QUEUE, handovers: Promise<void>[] = [];
+  if (!shadowQueue) config.shadow = undefined;
   // Defer Hyperdrive/Pool creation until a handler actually touches db: missing-auth,
   // validation and cached responses never allocate a pool or touch Hyperdrive.
   let client: InstanceType<typeof Pool> | undefined;
@@ -140,7 +139,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
   const rooms = env.CAMPAIGN_ROOMS;
   try {
     const notify = workWake(env.WAKE_QUEUE, concurrency);
-    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowObject && (items => { handovers.push(handOver(shadowObject, items)); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
+    return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowQueue && (items => { handovers.push(enqueueShadow(shadowQueue, items)); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
       allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
       allowMalformedSns: async peer => (await env.ADMISSION.limit({key:`bane:sns-malformed:${await core.digest(peer)}`})).success,
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
@@ -183,7 +182,7 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
       if (ctx) ctx.waitUntil(client.end().catch(() => {}));
       else await client.end();
     }
-    // Hand-overs to the second classifier's object started when a job drain ended: a request each, already on its way.
+    // Sends to the second classifier's queue started when a job drain ended, already on their way.
     if (handovers.length) { if (ctx) ctx.waitUntil(Promise.all(handovers)); else await Promise.all(handovers); }
     // Dispatch and immediate webhook nudges open no database connection.
     if (ctx && nudges.length) ctx.waitUntil(withRuntime(env, async runtime => { for (const nudge of nudges) await nudge(runtime); }));
@@ -329,6 +328,22 @@ export default {
           archive: (source,body,error) => archiveQueueFeedback(runtime,source,body,error) });
         const { outcomes: _, ...counts } = settled, oldestMs=Math.max(0,...messages.map(m=>Date.now()-m.timestamp.getTime()));
         core.log(counts.failed || counts.untagged || counts.unauthenticated || counts.held || oldestMs>60000?'warn':'info', { code: 'FEEDBACK_BATCH', lane: feedbackLane, size: messages.length, ...counts, oldestMs });
+      });
+      return;
+    }
+    // The second classifier's queue (src/screen-shadow.ts): each message is one request the content screen made. Its
+    // consumer is the only place on Cloudflare that calls the second classifier: wrangler gives it at most
+    // max_batch_size 4 messages an invocation (four calls and the database's connection, of an invocation's six) and
+    // max_concurrency 2 invocations, eight calls in all. A batch whose rows are written is acknowledged; one whose rows
+    // could not be written is delivered again (max_retries, no dead-letter queue), and then only recorded as lost.
+    if (env.JEVF_QUEUE_NAME && batch.queue === env.JEVF_QUEUE_NAME) {
+      const { consumeShadow, writeComparisons, writtenComparisons } = await loadRuntimeDeps();
+      await withRuntime(env, async runtime => {
+        const settings = runtime.config.shadow;
+        if (!settings) { batch.ackAll(); return; } // Turned off since they were queued: the messages are dropped.
+        const done = await consumeShadow(settings, { write: rows => writeComparisons(runtime.db, rows), written: ids => writtenComparisons(runtime.db, ids) },
+          batch.messages.map(message => ({ body: message.body, attempts: message.attempts })));
+        if (done) batch.ackAll(); else batch.retryAll();
       });
       return;
     }

@@ -184,8 +184,8 @@ export interface Runtime {
    *  and a call now would carry its visitor). Checked right before each request; a call not made throws ScreenHandover. */
   screenHandover?: () => boolean;
   /** Where the screen's requests go to be repeated to the second classifier (src/screen-shadow.ts flushShadow), on a
-   *  platform that must not make those calls in the invocation that sends mail: Cloudflare hands them to the ScreenShadow
-   *  object. Returns at once and never throws. Without it they run in this process, in the background. */
+   *  platform that must not make those calls in the invocation that sends mail: Cloudflare puts them on a queue whose
+   *  consumer makes them. Returns at once and never throws. Without it they run in this process, in the background. */
   shadow?: (items: import('./screen-shadow.js').ShadowItem[]) => void;
   // Verified provider feedback (and simulated callbacks) leave the request path through this
   // sink and are ingested in batches, never through the sending jobs table.

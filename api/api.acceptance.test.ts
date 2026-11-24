@@ -24033,7 +24033,26 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     return sent;
   }
   const jevfAnswers = (noul: number) => Response.json({ model: 'jevf', answers: { spam: { type: 'noul', noul } }, usage: { input_tokens: 239, output_tokens: 1 } }, { headers: { 'x-request-id': `req_jevf_${randomUUID()}`, 'x-jevf-preview': 'team-4096' } });
-  const shadowSettings = (deadlineMs = 5000) => ({ apiKey: 'jevf-fixture-key', endpoint: JEVF_URL, model: 'jevf', deadlineMs, maxConcurrency: 8 });
+  const shadowSettings = (deadlineMs = 5000, model = 'jevf') => ({ apiKey: 'jevf-fixture-key', endpoint: JEVF_URL, model, deadlineMs, maxConcurrency: 8 });
+  // The second classifier's queue as Cloudflare runs it under the wrangler config: messages wait, a consumer invocation
+  // takes at most four, two invocations run at once, and a batch that is not acknowledged is delivered again, twice at most.
+  function jevfQueue(consume: (messages: { body: unknown; attempts: number }[]) => Promise<boolean>, size = 4, concurrency = 2, retries = 2) {
+    const waiting: { body: unknown; attempts: number }[] = [], sends: { body: string; contentType: 'text' }[][] = [], idle: (() => void)[] = [];
+    let active = 0, dropped = 0;
+    const pump = () => {
+      while (active < concurrency && waiting.length) {
+        const batch = waiting.splice(0, size); active++;
+        void consume(batch).catch(() => false).then(done => {
+          active--;
+          if (!done) for (const message of batch) { if (message.attempts > retries) dropped++; else waiting.push({ ...message, attempts: message.attempts + 1 }); }
+          pump();
+          if (!active && !waiting.length) for (const resolve of idle.splice(0)) resolve();
+        });
+      }
+    };
+    return { sends, get dropped() { return dropped; }, settled: () => active || waiting.length ? new Promise<void>(resolve => { idle.push(resolve); }) : Promise.resolve(),
+      queue: { sendBatch: async (messages: { body: string; contentType: 'text' }[]) => { sends.push(messages); for (const message of messages) waiting.push({ body: message.body, attempts: 1 }); pump(); } } };
+  }
 
   test('second classifier: every request the screen makes is repeated after the run and both answers are kept, for an email, a campaign test and campaign copies of several requests; a cached verdict, a retried dispatch and a batch written twice add nothing; nothing runs without its key', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => t.test('classifiers', async t => {
@@ -24135,7 +24154,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const report = ok(await local('GET', `/v1/operator/screen-comparison?since=${encodeURIComponent(started)}`));
       const n = (test: (x: Json) => boolean) => all.filter(test).length, both = (x: Json) => x.jev_flagged !== null && x.jevf_flagged !== null;
       assert.deepEqual(report.counts, { pairs: all.length, digests: new Set(all.map(x => x.digest)).size, email: 4, campaignTest: windows, campaignCopy: copyRows.length, jevAnswered: all.length - 1, jevfAnswered: all.length, bothAnswered: all.length - 1 });
-      assert.deepEqual(report.coverage, { called: all.length, answered: all.length, refusedTooLarge: 0, skippedBreaker: 0, skippedRateLimited: 0, skippedBacklog: 0, answeredShare: 1 });
+      assert.deepEqual(report.coverage, { called: all.length, answered: all.length, refusedTooLarge: 0, skippedBreaker: 0, skippedRateLimited: 0, skippedBacklog: 0, lost: 0, answeredShare: 1 });
       assert.deepEqual(report.outcomes, { jev: { ok: all.length - 1, http_503: 1 }, jevf: { ok: all.length } });
       // They decide differently both ways: the screen alone refuses SampleMarker, the second classifier alone the copy that greets Ben.
       const onlyJevf = n(x => x.jev_flagged === false && x.jevf_flagged === true); assert.ok(onlyJevf >= 1);
@@ -24172,11 +24191,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('second classifier slow, down, rate limited, answering garbage or hanging past its deadline: the same mail goes out under the same verdicts and no later, nothing is retried, and what became of each repeat is kept', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => t.test('classifiers', async t => {
-      const [{ ShadowRunner, writeComparisons }, { drizzle }, { runDispatcher, initialGate }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('./src/screen-shadow.js'), import('drizzle-orm/node-postgres'), import('./src/dispatcher.js'), import('@aws-sdk/client-sesv2')]);
+      const [{ enqueueShadow, consumeShadow, writeComparisons, writtenComparisons }, { drizzle }, { runDispatcher, initialGate }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('./src/screen-shadow.js'), import('drizzle-orm/node-postgres'), import('./src/dispatcher.js'), import('@aws-sdk/client-sesv2')]);
       const acct = '112223330022', { wid } = await hostedScreenFixture(t, runtime, db, acct, 'unmoved.invalid');
-      // The repeats outlive the run that made them, so their rows are written on a connection of their own, as a deployment's
-      // are (the fixture's one connection is a transaction in use): committed, and removed when the test ends.
-      const writer = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await writer.connect();
+      // As on Cloudflare: the run puts its requests on the second classifier's queue and the queue's consumer asks, on
+      // connections of its own (the fixture's one connection is a transaction in use). Its rows are committed, and
+      // removed when the test ends.
+      const writer = new pg.Pool({ connectionString: FIXTURE_DATABASE_URL, max: 3 }), store = { write: (rows: Json[]) => writeComparisons(drizzle(writer), rows), written: (ids: string[]) => writtenComparisons(drizzle(writer), ids) };
       cleanup(t, async () => { await writer.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await writer.end(); });
       type Mode = 'off' | 'ok' | 'slow' | 'down' | '429' | 'garbage' | 'hang';
       let mode: Mode = 'off';
@@ -24198,13 +24218,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
       const key = ok(await local('POST', '/v1/api-keys', { name: 'unmoved', permissions: ['send', 'read'] }), 201);
       const long = Array.from({ length: 160 }, (_, i) => `Line ${i}: your order, its items and where each one is on its way to you.`).join('\n');
-      let runner: InstanceType<typeof ShadowRunner> | undefined, tags = 0;
+      // Each use has a queue and a model of its own: the pause and the breaker are kept per endpoint and model.
+      let queued: ReturnType<typeof jevfQueue> | undefined, sending: Promise<void> = Promise.resolve(), tags = 0, uses = 0;
       const use = (next: Mode) => {
-        mode = next; runner = undefined; runtime.config.shadow = undefined; runtime.shadow = undefined;
+        mode = next; queued = undefined; runtime.config.shadow = undefined; runtime.shadow = undefined;
         if (next === 'off') return;
-        const settings = runtime.config.shadow = shadowSettings(1000), made = runner = new ShadowRunner(settings, batch => writeComparisons(drizzle(writer), batch));
-        runtime.shadow = items => made.accept(items);
+        const settings = runtime.config.shadow = shadowSettings(1000, `jevf-${++uses}`), made = queued = jevfQueue(messages => consumeShadow(settings, store, messages));
+        runtime.shadow = items => { sending = enqueueShadow(made.queue, items); };
       };
+      const consumed = async () => { await sending; await queued!.settled(); };
       // One round: twelve emails (one the screen refuses, one of several requests) and one dispatch run. What it returns is
       // everything a sender or SES could see, with the round's tag and email IDs taken out.
       const round = async () => {
@@ -24234,7 +24256,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const expected: Record<Exclude<Mode, 'off'>, (counts: Record<string, number>, calls: number) => boolean> = {
         ok: (c, calls) => c.ok === requests && calls === requests,
         slow: (c, calls) => c.ok === requests && calls === requests,
-        // Five failures in a row open the breaker; the four calls already allowed by then end too. The rest are skipped.
+        // Five failures in a row open the breaker; the calls already out by then end too. The rest are skipped.
         down: (c, calls) => c.network >= 5 && c.network <= 12 && c.network === calls && c.skipped_breaker === requests - calls,
         garbage: (c, calls) => c.invalid >= 5 && c.invalid <= 12 && c.invalid === calls && c.skipped_breaker === requests - calls,
         hang: (c, calls) => c.timeout >= 5 && c.timeout <= 12 && c.timeout === calls && c.skipped_breaker === requests - calls,
@@ -24245,8 +24267,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         use(next);
         const now = await round();
         assert.deepEqual(now.seen, baseline.seen, `${next}: the round is unchanged`);
-        await runner!.settled();
+        await consumed();
         const rows = await kept(now.ids), calls = sent.jevf.length - now.from;
+        assert.equal(queued!.dropped, 0); assert.ok(queued!.sends.flat().length === requests && queued!.sends.flat().every(message => message.contentType === 'text'), 'a message per request');
         assert.equal(rows.length, requests, `${next}: a row per request of the screen`); assert.equal(new Set(rows.map(row => row.pair_id)).size, requests);
         assert.ok(rows.every(row => row.jev_outcome === 'ok' && typeof row.jev_score === 'number'));
         assert.ok(expected[next](tally(rows), calls), `${next}: ${JSON.stringify(tally(rows))} after ${calls} calls`);
@@ -24257,7 +24280,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const asked = sent.jevf.length; await new Promise(resolve => setTimeout(resolve, 100)); assert.equal(sent.jevf.length, asked); assert.equal((await kept(now.ids)).length, requests);
       }
       const breaker = logs.filter(l => l.code === 'SCREEN_SHADOW_BREAKER').map(l => l.state);
-      assert.deepEqual(breaker, ['opened', 'opened', 'opened'], 'down, garbage and hang each opened their runner\'s breaker');
+      assert.deepEqual(breaker, ['opened', 'opened', 'opened'], 'down, garbage and hang each opened the breaker');
       assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_RATE_LIMITED').length, 1); assert.equal(logs.filter(l => l.code === 'SCREEN_SHADOW_TIMEOUT').length, 1);
 
       // No later: a dispatch run while the second classifier's calls from the run before are hanging takes what a run
@@ -24270,7 +24293,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.ok(primed.jevf >= 8, 'eight calls are hanging');
         const during = await round(); timed.hanging.push(during.ms);
         assert.deepEqual(during.seen, baseline.seen); assert.equal((await kept(primed.ids)).length, 0, 'They were still hanging when the run ended.');
-        await runner!.settled();
+        await consumed();
       }
       const median = (values: number[]) => { const sorted = [...values].sort((a, b) => a - b); return (sorted[1]! + sorted[2]!) / 2; };
       t.diagnostic(`dispatch run of 12 emails, straight after another: without the second classifier ${timed.off.join(', ')} ms; with its calls from the run before hanging ${timed.hanging.join(', ')} ms (its deadline here: 1000 ms)`);
@@ -24329,64 +24352,109 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     for (const secret of ['Private', 'jevf-fixture-key']) assert.ok(!written.includes(secret), secret);
   });
 
-  test('second classifier on Cloudflare: a hand-over only queues, the ScreenShadow object asks only inside its alarm, five at a time, and not once a request has landed on it; both Worker configs bind it', async t => {
-    // Node has no DO host; provide only its base constructor, storage and waitUntil.
+  test('second classifier on Cloudflare: a run only puts messages on its queue; the consumer asks at most four at a time, writes each pair once, never asks twice for a message delivered again, and gives up after the queue\'s retries; both Worker configs bind the queue and nothing else', async t => {
+    const { enqueueShadow, consumeShadow } = await import('./src/screen-shadow.js');
+    const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
+    let calls = 0, active = 0, peak = 0, made = 0;
+    t.mock.method(globalThis, 'fetch', async () => { calls++; peak = Math.max(peak, ++active); await new Promise(resolve => setTimeout(resolve, 20)); active--; return jevfAnswers(0.2); });
+    const items = (count: number, body = 'Private body') => Array.from({ length: count }, () => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body } }, questions: { spam: {} } } }));
+    // Where rows go: a pair is kept once, as the table keeps it; `fail` makes the next writes fail.
+    const rows = new Map<string, Json>(); let fail = 0, lookups = 0;
+    const store = { write: async (batch: Json[]) => { if (fail-- > 0) throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }); for (const row of batch) if (!rows.has(row.pair_id)) rows.set(row.pair_id, row); },
+      written: async (ids: string[]) => { lookups++; return new Set(ids.filter(id => rows.has(id))); } };
+    const outcomes = (from: number) => [...rows.values()].slice(from).map(row => row.jevf_outcome);
+
+    // What a run does: one message per request, as text, in as few sends as a queue takes (100 messages and 256 KB a
+    // send, 128 KB a message). A request too large for a message goes without its text. Nothing is asked from here.
+    const plain = jevfQueue(async () => true), many = [...items(120), ...items(40, 'x'.repeat(8000)), ...items(1, 'y'.repeat(130_000))];
+    await enqueueShadow(plain.queue, many);
+    assert.equal(plain.sends.flat().length, 161); assert.ok(plain.sends.length >= 3 && plain.sends.every(send => send.length <= 100 && send.reduce((bytes, message) => bytes + Buffer.byteLength(message.body), 0) <= 256_000));
+    assert.ok(plain.sends.flat().every(message => message.contentType === 'text' && Buffer.byteLength(message.body) <= 128_000));
+    assert.deepEqual(plain.sends.flat().map(message => JSON.parse(message.body)), many.map((item, index) => index === 160 ? { ...item, request: undefined } : item).map(item => JSON.parse(JSON.stringify(item))));
+    assert.equal(calls, 0);
+    // A send that fails loses what was not sent, with one line; it never throws where the run ended.
+    await enqueueShadow({ sendBatch: async () => { throw new TypeError('Network connection lost.'); } }, items(3));
+    assert.deepEqual(logs.filter(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED').map(l => [l.level, l.items, l.sent]), [['warn', 3, 0]]);
+
+    // The consumer: four messages an invocation, two invocations at once. Every pair gets its row.
+    const settings = shadowSettings(2000, 'jevf-queue'), queue = jevfQueue(messages => consumeShadow(settings, store, messages));
+    await enqueueShadow(queue.queue, items(10)); await queue.settled();
+    assert.deepEqual([calls, rows.size, peak <= 8, peak >= 5, lookups, queue.dropped], [10, 10, true, true, 0, 0], `peak ${peak}`);
+    assert.deepEqual(outcomes(0), Array(10).fill('ok'));
+    // The rows of a batch cannot be written: the queue delivers it again. The second classifier is not asked again:
+    // what the first delivery learned is gone, and the row says lost.
+    let from = rows.size, asked = calls; fail = 1;
+    await enqueueShadow(queue.queue, items(4)); await queue.settled();
+    assert.deepEqual([calls - asked, outcomes(from), lookups, queue.dropped], [4, Array(4).fill('lost'), 1, 0]);
+    assert.ok([...rows.values()].slice(from).every(row => row.jev_score === 0.9 && row.jevf_score === null && row.jevf_ms === null));
+    // A message delivered again whose first delivery did write its row (only the acknowledgement was lost) adds nothing.
+    from = rows.size; asked = calls;
+    const [once] = items(1); await consumeShadow(settings, store, [{ body: JSON.stringify(once), attempts: 1 }]);
+    assert.equal(await consumeShadow(settings, store, [{ body: JSON.stringify(once), attempts: 2 }]), true);
+    assert.deepEqual([calls - asked, outcomes(from)], [1, ['ok']]);
+    // Rows that can never be written: three deliveries, one request to the second classifier, then the message is gone.
+    from = rows.size; asked = calls; fail = Number.POSITIVE_INFINITY;
+    await enqueueShadow(queue.queue, items(4)); await queue.settled(); fail = 0;
+    assert.deepEqual([calls - asked, rows.size - from, queue.dropped], [4, 0, 4]);
+    assert.equal(logs.filter(l => l.code === 'SCREEN_COMPARISONS_UNWRITTEN').length, 1 + 3);
+    // Anything that is not one of its messages is dropped, not retried.
+    assert.equal(await consumeShadow(settings, store, [{ body: 'not json', attempts: 1 }, { body: '{"id":7}', attempts: 1 }]), true); assert.equal(rows.size, from);
+    assert.ok(!JSON.stringify([[...rows.values()], logs]).includes('Private'));
+
+    // Both Worker configs: the queue is bound and consumed with no dead-letter queue, four messages an invocation (and
+    // the database's connection, of the six an invocation waits on), eight calls in all; no Durable Object is added for it.
+    const ts = (await import('typescript')).default;
+    for (const file of ['wrangler.dev.jsonc', 'wrangler.prod.jsonc']) {
+      const config = ts.parseConfigFileTextToJson(file, await readFile(new URL(file, import.meta.url), 'utf8')).config;
+      const name = config.queues.producers.find((producer: Json) => producer.binding === 'JEVF_QUEUE')?.queue, consumer = config.queues.consumers.find((queue: Json) => queue.queue === name);
+      assert.ok(name && config.vars.JEVF_QUEUE_NAME === name && consumer, file);
+      assert.ok(consumer.max_batch_size <= 5 && consumer.max_batch_size * consumer.max_concurrency <= 8 && consumer.max_retries <= 3 && !('dead_letter_queue' in consumer), JSON.stringify(consumer));
+      assert.ok(!config.queues.consumers.some((queue: Json) => queue.dead_letter_queue === name));
+      assert.ok(!('JEVF_API_KEY' in config.vars), 'The key is a secret, never a variable.');
+      assert.ok(!JSON.stringify([config.durable_objects, config.migrations]).includes('Shadow'));
+    }
+  });
+
+  test('second classifier on Cloudflare: the Worker\'s queue handler consumes its queue, writes the rows and acknowledges; without the key it drops what is queued and asks nothing', async t => {
+    // Node has no Workers host; provide only the base classes worker.ts extends.
     const { registerHooks } = await import('node:module');
     const hook = registerHooks({ resolve(specifier, context, next) {
       return specifier === 'cloudflare:workers' ? { shortCircuit: true, url: 'data:text/javascript,export class DurableObject {constructor(ctx,env){this.ctx=ctx;this.env=env}} export class WorkerEntrypoint {constructor(ctx,env){this.ctx=ctx;this.env=env}}' } : next(specifier, context);
     } });
-    const { ScreenShadow } = await import('./src/shadow-do.js').finally(() => hook.deregister()), { handOver } = await import('./src/screen-shadow.js');
-    const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch { /* not a log line */ } });
-    const rows: Json[] = [], waiting: (() => void)[] = [];
-    let alarm: number | null = null, calls = 0, active = 0, peak = 0, hold = false, made = 0;
-    t.mock.method(globalThis, 'fetch', async () => {
-      calls++; peak = Math.max(peak, ++active);
-      if (hold) await new Promise<void>(resolve => waiting.push(resolve));
-      active--; return jevfAnswers(0.2);
-    });
-    // The platform, as the object sees it: one alarm, consumed when it fires (getAlarm is null in the handler until something sets another).
-    const ctx = { waitUntil: () => undefined, storage: { getAlarm: async () => alarm, setAlarm: async (at: number) => { alarm = at; } } };
-    const object = (parts: unknown) => { const made = new ScreenShadow(ctx as unknown as DurableObjectState, {} as Env); Object.assign(made, { parts: async () => parts }); return made; };
-    const shadow = object({ settings: shadowSettings(), write: async (batch: Json[]) => { rows.push(...batch); } });
-    const namespace = { idFromName: (name: string) => name, get: () => ({ fetch: (url: string, init: RequestInit) => shadow.fetch(new Request(url, init)) }) } as never;
-    const items = (count: number) => Array.from({ length: count }, () => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
-      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } }));
-    const fire = async () => { assert.ok(alarm !== null && alarm <= Date.now() + 50, `an alarm is due (${alarm})`); alarm = null; await shadow.alarm(); };
-    const until = async (done: () => boolean) => { for (let i = 0; i < 400 && !done(); i++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(done()); };
-
-    // A hand-over is taken into memory and arms the alarm: no request to the second classifier is made from it.
-    await handOver(namespace, items(3)); assert.deepEqual([calls, rows.length, alarm !== null], [0, 0, true]);
-    // The alarm asks, and writes each pair's row.
-    await fire(); assert.deepEqual([calls, rows.length, alarm], [3, 3, null]);
-    assert.deepEqual(rows.map(row => [row.pair_id, row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged]), [1, 2, 3].map(i => [`pair-${i}`, 0.9, true, 'ok', 0.2, false]));
-    // Seven wait; the alarm asks five at a time (an invocation waits on six connections, one of them the database's). A
-    // hand-over lands while they are out: that alarm starts no more, waits for its five and ends, and the alarm the
-    // hand-over armed goes on with the rest.
-    hold = true; await handOver(namespace, items(7));
-    const running = fire(); await until(() => calls === 8); assert.equal(active, 5);
-    await handOver(namespace, items(1)); assert.ok(alarm !== null);
-    hold = false; for (const release of waiting.splice(0)) release();
-    await running; assert.deepEqual([calls, rows.length, peak], [8, 8, 5], 'No request started after the hand-over landed.');
-    await fire(); assert.deepEqual([calls, rows.length, peak, alarm], [11, 11, 5, null]);
-    assert.equal(new Set(rows.map(row => row.pair_id)).size, 11);
-    // Anything but a hand-over is not found; with the second classifier not configured a hand-over keeps nothing.
-    assert.equal((await shadow.fetch(new Request('https://screen-shadow/wake'))).status, 404);
-    const unset = object(null), ignored = await unset.fetch(new Request('https://screen-shadow/items', { method: 'POST', body: JSON.stringify({ items: items(2) }) }));
-    assert.deepEqual([ignored.status, alarm, calls], [204, null, 11]);
-    // A hand-over that fails is one log line, never an error where the run ended.
-    await handOver({ idFromName: (name: string) => name, get: () => ({ fetch: async () => { throw new TypeError('Network connection lost.'); } }) } as never, items(2));
-    await handOver({ idFromName: (name: string) => name, get: () => ({ fetch: async () => new Response(null, { status: 500 }) }) } as never, items(2));
-    assert.deepEqual(logs.filter(l => l.code === 'SCREEN_SHADOW_HANDOFF_FAILED').map(l => [l.level, l.items, l.httpStatus]), [['warn', 2, undefined], ['warn', 2, 500]]);
-    assert.ok(!JSON.stringify([rows, logs]).includes('Private'));
-
-    const ts = (await import('typescript')).default;
-    for (const file of ['wrangler.dev.jsonc', 'wrangler.prod.jsonc']) {
-      const config = ts.parseConfigFileTextToJson(file, await readFile(new URL(file, import.meta.url), 'utf8')).config;
-      assert.ok(config.durable_objects.bindings.some((binding: Json) => binding.name === 'SCREEN_SHADOW' && binding.class_name === 'ScreenShadow'), file);
-      assert.ok(config.migrations.some((migration: Json) => migration.new_sqlite_classes?.includes('ScreenShadow')), file);
-      assert.ok(!('JEVF_API_KEY' in config.vars), 'The key is a secret, never a variable.');
-    }
+    const worker = (await import('./src/worker.js').finally(() => hook.deregister())).default as unknown as { queue(batch: unknown, env: unknown): Promise<void> };
+    const db = new pg.Client({ connectionString: FIXTURE_DATABASE_URL }); await db.connect();
+    const wid = unique('jevf-queue-workspace');
+    cleanup(t, async () => { await db.query('DELETE FROM screen_comparisons WHERE workspace_id=$1', [wid]).catch(() => undefined); await db.end(); });
+    for (const level of ['warn', 'info', 'error'] as const) t.mock.method(console, level, () => undefined);
+    let calls = 0; const asked: string[] = [];
+    t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init: RequestInit) => { calls++; assert.equal(String(url), JEVF_URL); asked.push(String(init.body)); return jevfAnswers(0.2); });
+    const env = (key?: string) => ({ PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', ...(key ? { JEVF_API_KEY: key, JEVF_ENDPOINT: JEVF_URL } : {}),
+      HYPERDRIVE: { connectionString: FIXTURE_DATABASE_URL }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
+      FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, JEVF_QUEUE: { async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } } });
+    let made = 0;
+    const batch = (count: number, attempts = 1) => {
+      const state = { acked: 0, retried: 0 };
+      return { state, queue: 'fixture-jevf', ackAll() { state.acked++; }, retryAll() { state.retried++; }, messages: Array.from({ length: count }, () => ({ attempts, timestamp: new Date(), ack() {}, retry() {},
+        body: JSON.stringify({ id: `${wid}-${++made}`, at: Date.now(), workspaceId: wid, kind: 'email', emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
+          jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } }) })) };
+    };
+    const stored = async () => (await db.query('SELECT pair_id,jev_score,jev_flagged,jevf_outcome,jevf_score,jevf_flagged,jevf_model FROM screen_comparisons WHERE workspace_id=$1 ORDER BY created_at,id', [wid])).rows;
+    // Without the key: acknowledged, so the queue empties, with no request and no row.
+    const dropped = batch(2); await worker.queue(dropped, env());
+    assert.deepEqual([dropped.state, calls, (await stored()).length], [{ acked: 1, retried: 0 }, 0, 0]);
+    // With it: each message's request goes to the second classifier under its key's model, and its row is written.
+    const first = batch(3); await worker.queue(first, env('jevf-fixture-key'));
+    assert.deepEqual([first.state, calls], [{ acked: 1, retried: 0 }, 3]);
+    assert.deepEqual(asked.map(body => JSON.parse(body)), Array(3).fill({ model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } }));
+    assert.deepEqual((await stored()).map(row => [row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged, row.jevf_model]), Array(3).fill([0.9, true, 'ok', 0.2, false, 'jevf']));
+    // The same messages delivered again: no request, no second row. A message delivered again that never had a row: lost.
+    await worker.queue({ ...first, messages: first.messages.map(message => ({ ...message, attempts: 2 })) }, env('jevf-fixture-key'));
+    const again = batch(1, 2); await worker.queue(again, env('jevf-fixture-key'));
+    assert.deepEqual([calls, again.state, (await stored()).map(row => row.jevf_outcome)], [3, { acked: 1, retried: 0 }, ['ok', 'ok', 'ok', 'lost']]);
   });
+
   test('hosted campaign copy keys: the customer copy byte for byte, with only the unsubscribe slots Nightmail generates set for a placeholder', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => t.test('classifier', async t => {
       await hostedScreenFixture(t, runtime, db, '112223330015', 'keyed.invalid');

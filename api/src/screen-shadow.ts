@@ -13,15 +13,18 @@ import { log } from './log.js';
 // - When a dispatch run or a job drain has ended (src/dispatcher.ts runDispatcher, src/jobs.ts processJobs), flushShadow
 //   hands the buffer over and returns at once. Nothing in a run or a drain ever waits for the second classifier.
 // - On Node the hand-over is to a ShadowRunner in this process, which calls the second classifier in the background.
-//   On Cloudflare it is one request to the ScreenShadow Durable Object (src/shadow-do.ts), which runs the same
-//   ShadowRunner in its own alarm: an invocation waits on at most six connections at once, so a call that takes seconds
-//   must not share one with SES sends or the screen's own 500 ms requests.
+//   On Cloudflare it is messages on a queue of its own (the JEVF_QUEUE binding, enqueueShadow), one per request, and
+//   the queue's consumer (src/worker.ts queue, consumeShadow) runs the same ShadowRunner over each batch: an invocation
+//   waits on at most six connections at once, so a call that takes seconds must not share one with SES sends or the
+//   screen's own 500 ms requests. With no queue bound there is nowhere to make the calls, and the feature is off.
 // The runner has its own deadline per call, a cap on calls in flight, a pause for as long as a 429 or 503 says
 // (Retry-After), and a breaker: after FAILURES_TO_OPEN failures in a row it stops calling for OPEN_MS (doubling to
 // MAX_OPEN_MS while a single probe keeps failing). A request that isn't repeated still gets its row, with the screen's
-// side and why (skipped_breaker, skipped_rate_limited, skipped_backlog). Nothing is retried. Rows hold IDs, digests,
-// scores, codes and milliseconds: the request's text exists only in memory (and, on Cloudflare, in the one hand-over
-// request) until its call ends. Unset JEVF_API_KEY and none of this runs.
+// side and why (skipped_breaker, skipped_rate_limited, skipped_backlog). The second classifier is never asked twice
+// for one request: a queue message that is delivered again is not called again, its row says lost unless the first
+// delivery wrote it, and a pair is written once (pair_id). Rows hold IDs, digests, scores, codes and milliseconds:
+// the request's text exists only in memory and, on Cloudflare, in its queue message until that is consumed. Unset
+// JEVF_API_KEY and none of this runs.
 
 export type ShadowSettings = NonNullable<Config['shadow']>;
 /** One request the screen made, to be repeated. */
@@ -61,8 +64,8 @@ export function keepShadow(db: object | undefined, item: ShadowItem, bytes: numb
 }
 
 const runners = new WeakMap<object, ShadowRunner>();
-/** Hands the requests kept for this runtime's database client to the second classifier's runner and returns at once:
- *  Runtime.shadow where the platform has one, else a runner in this process. Never throws. */
+/** Hands the requests kept for this runtime's database client over and returns at once: to Runtime.shadow where the
+ *  platform has one (Cloudflare's queue), else to a runner in this process. Never throws. */
 export function flushShadow(runtime: Runtime): void {
   try {
     const buffer = buffers.get(runtime.db);
@@ -81,19 +84,59 @@ export function flushShadow(runtime: Runtime): void {
 /** Resolves once this process's runner for `db` has nothing in flight and nothing left to write. For tests and a clean shutdown. */
 export function shadowSettled(db: object): Promise<void> { return runners.get(db)?.settled() ?? Promise.resolve(); }
 
-type ShadowNamespace = { idFromName(name: string): unknown; get(id: never, options?: never): { fetch(input: string, init: RequestInit): Promise<Response> } };
-/** Cloudflare's hand-over: one request to the ScreenShadow object, which takes the items into memory and answers at once.
- *  Two seconds at most; a hand-over that fails loses its items with one log line. Never rejects. */
-export async function handOver(namespace: ShadowNamespace, items: ShadowItem[]): Promise<void> {
+type ShadowQueue = { sendBatch(messages: { body: string; contentType: 'text' }[]): Promise<unknown> };
+// A queue takes 100 messages and 256 KB a call, and 128 KB a message.
+const SEND_MESSAGES = 100, SEND_BYTES = 240_000, MESSAGE_BYTES = 120_000;
+/** Cloudflare's hand-over: each request as one message on the second classifier's queue, as many a call as a call takes,
+ *  one call after another. A request too large for a message goes without its text (its row will say skipped_backlog).
+ *  A send that fails loses what was not sent yet, with one log line. Never rejects. */
+export async function enqueueShadow(queue: ShadowQueue, items: ShadowItem[]): Promise<void> {
+  let sent = 0;
   try {
-    const stub = namespace.get(namespace.idFromName('screen-shadow') as never, { locationHint: 'enam' } as never);
-    const response = await stub.fetch('https://screen-shadow/items', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ items }), signal: AbortSignal.timeout(2000) });
-    await response.body?.cancel().catch(() => undefined);
-    if (response.status !== 202 && response.status !== 204) log('warn', { code: 'SCREEN_SHADOW_HANDOFF_FAILED', httpStatus: response.status, items: items.length });
-  } catch (error) { logError(error, { code: 'SCREEN_SHADOW_HANDOFF_FAILED', items: items.length }, 'warn'); }
+    let batch: { body: string; contentType: 'text' }[] = [], bytes = 0;
+    const send = async () => { if (!batch.length) return; const messages = batch; batch = []; bytes = 0; await queue.sendBatch(messages); sent += messages.length; };
+    for (const item of items) {
+      let body = JSON.stringify(item), size = Buffer.byteLength(body);
+      if (size > MESSAGE_BYTES) { const { request: _text, ...rest } = item; body = JSON.stringify(rest); size = Buffer.byteLength(body); }
+      if (batch.length >= SEND_MESSAGES || bytes + size > SEND_BYTES) await send();
+      batch.push({ body, contentType: 'text' }); bytes += size;
+    }
+    await send();
+  } catch (error) { logError(error, { code: 'SCREEN_SHADOW_HANDOFF_FAILED', items: items.length, sent }, 'warn'); }
 }
 
-const FAILURES_TO_OPEN = 5, OPEN_MS = 30_000, MAX_OPEN_MS = 600_000, MAX_AGE_MS = 60_000, MAX_QUEUE = 2000, MAX_ROWS = 5000, WRITE_ROWS = 500;
+// An invocation waits on six connections: its calls and the one database connection.
+const CONSUMER_CALLS = 5;
+/**
+ * One batch of the second classifier's queue: asks it for each message delivered for the first time (at most
+ * CONSUMER_CALLS at once, under this isolate's pause and breaker) and writes every pair's row in one INSERT. A message
+ * delivered again is never asked again: its row says lost, unless its first delivery wrote one. Returns whether the
+ * batch is done (acknowledge it); false when the rows could not be written (let the queue deliver it again, up to its
+ * max_retries, after which it is gone). Never throws.
+ */
+export async function consumeShadow(settings: ShadowSettings, store: { write(rows: ComparisonRow[]): Promise<void>; written(ids: string[]): Promise<Set<string>> }, messages: { body: unknown; attempts: number }[]): Promise<boolean> {
+  const rows: Row[] = [];
+  try {
+    const first: ShadowItem[] = [], again: ShadowItem[] = [];
+    for (const message of messages) {
+      let item: ShadowItem | undefined;
+      try { item = typeof message.body === 'string' ? JSON.parse(message.body) : message.body as ShadowItem; } catch { /* Not one of ours: dropped. */ }
+      if (item && typeof item === 'object' && typeof item.id === 'string' && item.jev && typeof item.jev === 'object') (message.attempts > 1 ? again : first).push(item);
+    }
+    if (again.length) {
+      const have = await store.written(again.map(item => item.id));
+      for (const item of again) if (!have.has(item.id)) { const row = rowOf(item, { outcome: 'lost' }); if (row) rows.push(row); }
+    }
+    if (first.length) {
+      const runner = new ShadowRunner(settings, async batch => { rows.push(...batch); }, { limit: CONSUMER_CALLS, gate: gateFor(settings) });
+      runner.accept(first); await runner.settled();
+    }
+    await store.write(rows);
+    return true;
+  } catch (error) { logError(error, { code: 'SCREEN_COMPARISONS_UNWRITTEN', rows: rows.length, redelivery: true }, 'warn'); return false; }
+}
+
+const FAILURES_TO_OPEN = 5, OPEN_MS = 30_000, MAX_OPEN_MS = 600_000, MAX_AGE_MS = 300_000, MAX_QUEUE = 2000, MAX_ROWS = 5000, WRITE_ROWS = 500;
 const DEFAULT_PAUSE_MS = 5000, MIN_PAUSE_MS = 1000, MAX_PAUSE_MS = 600_000, LOG_EVERY_MS = 60_000, MAX_RESPONSE = 32768;
 // What an over-long request is refused with: 413, or a 400/422 whose body says so. Recorded as an answer of its own, not a failure.
 const TOO_LARGE = /too (large|long|many)|context (length|window|size)|max(imum)?[ _-]?(input[ _-]?)?tokens|token limit|exceeds/i;
@@ -109,24 +152,50 @@ function retryAfter(value: string | null, now: number): number | undefined {
   return Number.isFinite(ms) ? Math.max(MIN_PAUSE_MS, Math.min(MAX_PAUSE_MS, Math.round(ms))) : undefined;
 }
 
+/** The pause and the breaker, and when each failure class was last logged: one per endpoint and model in a process or
+ *  an isolate (gateFor), shared by every runner there. Plain state: nothing in it belongs to one invocation. */
+export type ShadowGate = { failures: number; openMs: number; openUntil: number; openedAt: number; probeUntil: number; pausedUntil: number; logged: Map<string, { at: number; count: number }> };
+const newGate = (): ShadowGate => ({ failures: 0, openMs: 0, openUntil: 0, openedAt: 0, probeUntil: 0, pausedUntil: 0, logged: new Map() });
+const gates = new Map<string, ShadowGate>();
+function gateFor(settings: ShadowSettings): ShadowGate {
+  const key = `${settings.endpoint}\n${settings.model}`;
+  let gate = gates.get(key);
+  if (!gate) gates.set(key, gate = newGate());
+  return gate;
+}
+
+/** A pair's row: the screen's side as it was kept, the second classifier's as `result` says. Every value bounded. */
+function rowOf(item: ShadowItem, result: Result): Row | undefined {
+  try {
+    const threshold = score(item.threshold), jev = score(item.jev.score), jevf = score(result.score);
+    return { pair_id: item.id.slice(0, 64), at: typeof item.at === 'number' && Number.isFinite(item.at) ? item.at : Date.now(), workspace_id: text(item.workspaceId),
+      kind: text(item.kind, 20) ?? 'email', email_id: text(item.emailId), campaign_id: text(item.campaignId), digest: text(item.digest, 128) ?? '',
+      window_index: integer(item.window, SMALL) ?? 0, windows: integer(item.windows, SMALL) ?? 1, threshold,
+      jev_outcome: text(item.jev.outcome, 40) ?? 'unknown', jev_http_status: integer(item.jev.httpStatus, SMALL), jev_ms: integer(item.jev.ms, INT), jev_score: jev,
+      jev_model: text(item.jev.model), jev_input_tokens: integer(item.jev.inputTokens, INT), jev_flagged: jev === null || threshold === null ? null : jev >= threshold,
+      jevf_outcome: text(result.outcome, 40) ?? 'unknown', jevf_http_status: integer(result.httpStatus, SMALL), jevf_ms: integer(result.ms, INT), jevf_score: jevf,
+      jevf_model: text(result.model), jevf_input_tokens: integer(result.inputTokens, INT), jevf_request_id: text(result.requestId, 80),
+      jevf_flagged: jevf === null || threshold === null ? null : jevf >= threshold };
+  } catch { return undefined; /* A record never changes what happens next. */ }
+}
+
 /**
- * Repeats requests to the second classifier and writes each pair's row. accept() only queues; calls start in pump(), at
- * most `limit` at once and only while may() says so (always, in a process; inside its alarm with no request landed, on
- * a Durable Object). write() gets rows in batches, one write at a time; a batch that fails is dropped with one log line.
+ * Repeats requests to the second classifier and writes each pair's row. accept() queues and starts what may start, at
+ * most `limit` at once. write() gets rows in batches, one write at a time; a batch that fails is dropped with one
+ * log line. The pause and the breaker are its gate's: its own, or the one it is given to share.
  */
 export class ShadowRunner {
   private queue: ShadowItem[] = []; private active = 0; private rows: Row[] = []; private writing = false; private unwritten = 0;
-  private failures = 0; private openMs = 0; private openUntil = 0; private openedAt = 0; private probing = false; private pausedUntil = 0;
-  private waiters: (() => void)[] = []; private logged = new Map<string, { at: number; count: number }>();
-  private limit: number; private may: () => boolean; private firstOpenMs: number; private failuresToOpen: number;
-  constructor(private settings: ShadowSettings, private write: (rows: Row[]) => Promise<void>, options: { limit?: number; may?: () => boolean; openMs?: number; failuresToOpen?: number } = {}) {
+  private waiters: (() => void)[] = []; private gate: ShadowGate;
+  private limit: number; private firstOpenMs: number; private failuresToOpen: number;
+  constructor(private settings: ShadowSettings, private write: (rows: Row[]) => Promise<void>, options: { limit?: number; gate?: ShadowGate; openMs?: number; failuresToOpen?: number } = {}) {
     this.limit = Math.max(1, Math.min(settings.maxConcurrency, options.limit ?? settings.maxConcurrency));
-    this.may = options.may ?? (() => true); this.firstOpenMs = options.openMs ?? OPEN_MS; this.failuresToOpen = options.failuresToOpen ?? FAILURES_TO_OPEN;
+    this.gate = options.gate ?? newGate(); this.firstOpenMs = options.openMs ?? OPEN_MS; this.failuresToOpen = options.failuresToOpen ?? FAILURES_TO_OPEN;
   }
   /** Requests waiting for a call. */
   get waiting() { return this.queue.length; }
   /** Whether the breaker is open (or half-open, waiting on its probe). */
-  get open() { return this.openMs > 0; }
+  get open() { return this.gate.openMs > 0; }
 
   accept(items: ShadowItem[]) {
     try {
@@ -141,14 +210,16 @@ export class ShadowRunner {
   /** Starts what may start now. A request too old, without its text, inside a pause or behind the open breaker is recorded as skipped. */
   pump() {
     try {
-      while (this.queue.length && this.active < this.limit && this.may()) {
+      const gate = this.gate;
+      while (this.queue.length && this.active < this.limit) {
         const item = this.queue.shift()!, now = Date.now();
-        const skip = !item.request || now - item.at > MAX_AGE_MS ? 'skipped_backlog' : now < this.pausedUntil ? 'skipped_rate_limited' : undefined;
+        const skip = !item.request || now - item.at > MAX_AGE_MS ? 'skipped_backlog' : now < gate.pausedUntil ? 'skipped_rate_limited' : undefined;
         if (skip) { this.record(item, { outcome: skip }); continue; }
         let probe = false;
-        if (this.openMs) {
-          if (now < this.openUntil || this.probing) { this.record(item, { outcome: 'skipped_breaker' }); continue; }
-          this.probing = probe = true; // Half-open: this one request finds out.
+        if (gate.openMs) {
+          if (now < gate.openUntil || now < gate.probeUntil) { this.record(item, { outcome: 'skipped_breaker' }); continue; }
+          // Half-open: this one request finds out. Its claim lapses a little after its deadline, in case it never reports.
+          probe = true; gate.probeUntil = now + this.settings.deadlineMs + 1000;
         }
         this.active++;
         void this.call(item).then(result => { this.active--; this.learn(result, probe); this.record(item, result); this.pump(); });
@@ -157,11 +228,11 @@ export class ShadowRunner {
     } catch (error) { logError(error, { code: 'SCREEN_SHADOW_FAILED' }, 'warn'); }
   }
 
-  /** Resolves when nothing is in flight, nothing is left to write, and nothing queued may start. */
+  /** Resolves when nothing is in flight or waiting and nothing is left to write. */
   settled(): Promise<void> {
     return this.idle() ? Promise.resolve() : new Promise(resolve => { this.waiters.push(resolve); });
   }
-  private idle() { return !this.active && !this.writing && !this.rows.length && (!this.queue.length || !this.may()); }
+  private idle() { return !this.active && !this.writing && !this.rows.length && !this.queue.length; }
   private check() { if (this.waiters.length && this.idle()) for (const resolve of this.waiters.splice(0)) resolve(); }
 
   // One request, under one deadline that includes reading the answer. Never rejects: how it ended is the result.
@@ -208,52 +279,44 @@ export class ShadowRunner {
   // anything else is a failure.
   private learn(result: Result, probe: boolean) {
     try {
-      const now = Date.now(), outcome = result.outcome;
+      const now = Date.now(), outcome = result.outcome, gate = this.gate;
+      if (probe) gate.probeUntil = 0;
       if (outcome === 'rate_limited' || result.retryAfterMs) {
         const pause = result.retryAfterMs ?? DEFAULT_PAUSE_MS;
-        this.pausedUntil = Math.max(this.pausedUntil, now + pause);
+        gate.pausedUntil = Math.max(gate.pausedUntil, now + pause);
         if (outcome === 'rate_limited') this.note('SCREEN_SHADOW_RATE_LIMITED', { retryAfterMs: pause });
       }
       if (outcome === 'ok' || outcome === 'refused_too_large') {
-        this.failures = 0;
-        if (probe) { log('info', { code: 'SCREEN_SHADOW_BREAKER', state: 'closed', openMs: now - this.openedAt }); this.openMs = 0; this.openUntil = 0; this.probing = false; }
+        gate.failures = 0;
+        if (probe) { log('info', { code: 'SCREEN_SHADOW_BREAKER', state: 'closed', openMs: now - gate.openedAt }); gate.openMs = 0; gate.openUntil = 0; }
         if (outcome !== 'ok') this.note('SCREEN_SHADOW_ERROR', { outcome, httpStatus: result.httpStatus });
         return;
       }
-      if (outcome === 'rate_limited') { if (probe) this.probing = false; return; } // The next request after the pause is the probe.
-      this.failures++;
+      if (outcome === 'rate_limited') return; // Not a failure: the next request after the pause is the probe.
+      gate.failures++;
       if (outcome === 'timeout') this.note('SCREEN_SHADOW_TIMEOUT', { deadlineMs: this.settings.deadlineMs });
       else this.note('SCREEN_SHADOW_ERROR', { outcome, httpStatus: result.httpStatus });
       if (probe) {
-        this.openMs = Math.min(this.openMs * 2, MAX_OPEN_MS); this.openUntil = now + this.openMs; this.probing = false;
-        log('warn', { code: 'SCREEN_SHADOW_BREAKER', state: 'opened', again: true, outcome, pauseMs: this.openMs });
-      } else if (!this.openMs && this.failures >= this.failuresToOpen) {
-        this.openMs = this.firstOpenMs; this.openUntil = now + this.openMs; this.openedAt = now;
-        log('warn', { code: 'SCREEN_SHADOW_BREAKER', state: 'opened', failures: this.failures, outcome, pauseMs: this.openMs });
+        gate.openMs = Math.min(gate.openMs * 2, MAX_OPEN_MS); gate.openUntil = now + gate.openMs;
+        log('warn', { code: 'SCREEN_SHADOW_BREAKER', state: 'opened', again: true, outcome, pauseMs: gate.openMs });
+      } else if (!gate.openMs && gate.failures >= this.failuresToOpen) {
+        gate.openMs = this.firstOpenMs; gate.openUntil = now + gate.openMs; gate.openedAt = now;
+        log('warn', { code: 'SCREEN_SHADOW_BREAKER', state: 'opened', failures: gate.failures, outcome, pauseMs: gate.openMs });
       }
     } catch { /* A record never changes what happens next. */ }
   }
   // One line per failure class a minute, saying how many it stands for. Never the request, its answer or the key.
   private note(code: string, fields: Record<string, unknown>) {
-    const now = Date.now(), last = this.logged.get(code);
+    const now = Date.now(), last = this.gate.logged.get(code);
     if (last && now - last.at < LOG_EVERY_MS) { last.count++; return; }
     log('warn', { code, ...fields, count: (last?.count ?? 0) + 1, model: this.settings.model });
-    this.logged.set(code, { at: now, count: 0 });
+    this.gate.logged.set(code, { at: now, count: 0 });
   }
 
   private record(item: ShadowItem, result: Result) {
-    try {
-      const threshold = score(item.threshold), jev = score(item.jev.score), jevf = score(result.score);
-      if (this.rows.length >= MAX_ROWS) { this.unwritten++; return; }
-      this.rows.push({ pair_id: item.id.slice(0, 64), at: typeof item.at === 'number' && Number.isFinite(item.at) ? item.at : Date.now(), workspace_id: text(item.workspaceId),
-        kind: text(item.kind, 20) ?? 'email', email_id: text(item.emailId), campaign_id: text(item.campaignId), digest: text(item.digest, 128) ?? '',
-        window_index: integer(item.window, SMALL) ?? 0, windows: integer(item.windows, SMALL) ?? 1, threshold,
-        jev_outcome: text(item.jev.outcome, 40) ?? 'unknown', jev_http_status: integer(item.jev.httpStatus, SMALL), jev_ms: integer(item.jev.ms, INT), jev_score: jev,
-        jev_model: text(item.jev.model), jev_input_tokens: integer(item.jev.inputTokens, INT), jev_flagged: jev === null || threshold === null ? null : jev >= threshold,
-        jevf_outcome: text(result.outcome, 40) ?? 'unknown', jevf_http_status: integer(result.httpStatus, SMALL), jevf_ms: integer(result.ms, INT), jevf_score: jevf,
-        jevf_model: text(result.model), jevf_input_tokens: integer(result.inputTokens, INT), jevf_request_id: text(result.requestId, 80),
-        jevf_flagged: jevf === null || threshold === null ? null : jevf >= threshold });
-    } catch { /* As above. */ }
+    if (this.rows.length >= MAX_ROWS) { this.unwritten++; return; }
+    const row = rowOf(item, result);
+    if (row) this.rows.push(row);
   }
   private flush() {
     if (this.writing || !this.rows.length) { this.check(); return; }
@@ -287,4 +350,10 @@ export async function writeComparisons(db: Runtime['db'], rows: Row[]): Promise<
       ON CONFLICT (pair_id) DO NOTHING RETURNING 1)
       SELECT set_config('statement_timeout',${before!.statement},true),set_config('lock_timeout',${before!.lock},true) FROM (SELECT count(*) FROM written) n`);
   });
+}
+/** Which of these pairs have a row. */
+export async function writtenComparisons(db: Runtime['db'], ids: string[]): Promise<Set<string>> {
+  if (!ids.length) return new Set();
+  const { rows } = await db.execute<{ pair_id: string }>(sql`SELECT pair_id FROM screen_comparisons WHERE pair_id IN (SELECT jsonb_array_elements_text(${JSON.stringify(ids)}::jsonb))`);
+  return new Set(rows.map(row => row.pair_id));
 }

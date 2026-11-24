@@ -13,7 +13,8 @@
 -- - threshold: the spam probability the screen acted at then; jev_flagged and jevf_flagged: score >= threshold.
 -- - jev_outcome: ok, timeout, network, http_<status> or invalid (as content_screen_calls.outcome).
 -- - jevf_outcome: ok, rate_limited, timeout, network, http_<status>, invalid, refused_too_large (the request was over
---   its input limit), or the request was not repeated: skipped_breaker, skipped_rate_limited, skipped_backlog.
+--   its input limit), or the request was not repeated: skipped_breaker, skipped_rate_limited, skipped_backlog; or lost:
+--   its queue message was delivered a second time with no row written, and it is never asked twice.
 -- - *_ms: to the end of the answer, or to the failure. *_input_tokens: as each classifier reported them.
 -- Rows are written in batches after the fact and kept 90 days (src/maintenance.ts retentionDrains). A new table:
 -- nothing existing is locked or changed.
