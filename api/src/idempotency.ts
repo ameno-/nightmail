@@ -26,9 +26,10 @@ const keyHeader = (lifetime: string) => z.object({
     description: `Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. ${lifetime} Without a key, every request is processed, so a retried send can deliver twice.`,
   }),
 });
-export const IdempotencyHeaders = keyHeader('They are retained indefinitely.');
+/** Not a send route: retention never deletes these keys (maintenance.ts SEND_PATH lists the routes whose keys expire). */
+export const IdempotencyHeaders = keyHeader("This route's keys do not expire: a repeat with the same key replays the original result at any later time.");
 /** Sends: a key lives as long as the email log of what it sent (maintenance.ts SEND_KEYS), a scheduled send's 30 days past its latest time. */
-export const SendIdempotencyHeaders = keyHeader(`A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept ${30 + SEND_LIMITS.schedule.horizonSeconds / 86_400} days, after which a repeat is refused because its time has passed.`);
+export const SendIdempotencyHeaders = keyHeader(`A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least ${30 + SEND_LIMITS.schedule.horizonSeconds / 86_400} days, after which a repeat is refused because its time has passed.`);
 // The OpenAPI constraints above are documentation: the handler validates the key itself, so a bad key is
 // INVALID_IDEMPOTENCY_KEY rather than a generic validation error.
 export const validIdempotencyKey = (key: string) => key.length <= 200 && /^[\x21-\x7e]+$/.test(key);
