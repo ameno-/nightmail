@@ -72,6 +72,9 @@ export const initialGate = (): GateState => ({ nextAllowedAt: 0, quota: null, se
 export const shardLeaseSize=(rate:number|undefined,count:number)=>rate!==undefined && count>1 ? Math.min(24,Math.max(6,Math.ceil(rate/count/6)*6)) : 24;
 export type Pacing = { rateFactor: number; txReservePercent?: number; targetRate?: number; live: boolean };
 const RECENT_TX_MS = 2000;
+const holdUntil = (gate: GateState) => Math.max(gate.outageUntil ?? 0, gate.accountPauseAt !== undefined ? gate.accountPauseAt + 300000 : 0);
+const txReadyAt = (gate: GateState, now: number) => Math.max(gate.txAllowedAt ?? 0, holdUntil(gate), (gate.brakeUntil ?? 0) > now ? gate.nextAllowedAt : 0);
+const mktReadyAt = (gate: GateState) => Math.max(gate.nextAllowedAt, gate.marketingAllowedAt ?? 0, holdUntil(gate));
 const BRAKE_MS = 10000;
 // SES gave no usable answer (transport error, timeout, 5xx, or no MessageId): an ambiguous call is never replayed, so stop starting new
 // calls instead of turning every queued email into acceptance_unknown. Doubles while SES stays silent.
@@ -233,7 +236,7 @@ export function reserve(gate: GateState, recipients: number, shard?: { index: nu
   const spacing = 1000 * recipients / rate;
   const jitter = Math.min(2, spacing / 2);
   if (kind === 'transactional') {
-    const txStart = Math.max(now, gate.txAllowedAt ?? 0, (gate.brakeUntil ?? 0) > now ? gate.nextAllowedAt : 0);
+    const txStart = Math.max(now, txReadyAt(gate, now));
     gate.txAllowedAt = Math.max(gate.txAllowedAt || now, now - jitter) + spacing;
     gate.nextAllowedAt = Math.max(gate.nextAllowedAt || now, now - jitter) + spacing;
     gate.marketingAllowedAt = Math.max(gate.marketingAllowedAt ?? 0, gate.nextAllowedAt);
@@ -980,8 +983,8 @@ function pacedSender(gate: GateState, options: DispatcherOptions, pacing: Pacing
     const now = Date.now(); let earliest = Infinity;
     // Transactional mail never waits behind marketing's clock or marketing's brake, and always dequeues first.
     // When transactional was active recently, marketing leaves one in-flight slot free; otherwise it uses all slots.
-    const txAt = Math.max(gate.txAllowedAt ?? 0, (gate.brakeUntil ?? 0) > now ? gate.nextAllowedAt : 0);
-    const mktAt = Math.max(gate.nextAllowedAt, gate.marketingAllowedAt ?? 0);
+    const txAt = txReadyAt(gate, now);
+    const mktAt = mktReadyAt(gate);
     for (const queue of [queues.transactional, queues.marketing]) for (let i = queue.length - 1; i >= 0; i--) {
       const entry = queue[i]!;
       if (gate.dailyBlockedUntil || entry.deadline <= Math.max(now, queue === queues.transactional ? txAt : mktAt)) { queue.splice(i, 1); entry.defer(); }
@@ -1365,8 +1368,8 @@ export async function runDispatcher(runtime: Runtime, options: DispatcherOptions
   const lease = async (priorityOnly = false, first = false) => {
     if (options.stop?.()) return [];
     const now = Date.now();
-    const txAt = Math.max(gate.txAllowedAt ?? 0, (gate.brakeUntil ?? 0) > now ? gate.nextAllowedAt : 0);
-    const mktAt = Math.max(gate.nextAllowedAt, gate.marketingAllowedAt ?? 0);
+    const txAt = txReadyAt(gate, now);
+    const mktAt = mktReadyAt(gate);
     if (txAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(txAt); return []; }
     if (mktAt >= now + MAX_PRE_SEND_MS) { counters.paceRetryAt = Math.ceil(mktAt); priorityOnly = true; }
     for (let i = lane.deferred.length - 1; i >= 0; i--) if ((lane.deferred[i]!.until ?? Infinity) <= now) lane.deferred.splice(i, 1);
