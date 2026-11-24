@@ -15,7 +15,8 @@ type Role = z.infer<typeof WorkspaceRole>;
 export const Workspace = z.object({ id: z.string(), name: z.string(), slug: z.string(), role: WorkspaceRole }).openapi('Workspace');
 const Member = z.object({ id: z.string(), userId: z.string(), email: z.string(), name: z.string(), role: WorkspaceRole }).openapi('WorkspaceMember');
 const Invitation = z.object({ id: z.string(), workspaceId: z.string(), email: z.string(), role: WorkspaceRole, expiresAt: z.string(), acceptUrl: z.string().url() }).openapi('WorkspaceInvitation');
-const CreatedInvitation = Invitation.extend({ emailed: z.boolean().describe('Whether the invitation was emailed to the invitee, with acceptUrl. False when this installation sends no account email or the day’s invitation emails are used: share acceptUrl yourself.'),
+const CreatedInvitation = Invitation.extend({ emailed: z.boolean().describe('Whether the invitation was emailed to the invitee, with acceptUrl. When false, share acceptUrl yourself; notEmailedReason says why.'),
+  notEmailedReason: z.enum(['not_available', 'new_workspace', 'allowance_used']).nullable().describe('Why no email went out, null when one did. not_available: this installation sends no invitation email, or your account has no verified address to be named by. new_workspace: invitations are emailed once the workspace has a verified domain or has finished its evaluation. allowance_used: the invitation emails for today, or to this address, are used.'),
   nextStep: z.string().describe('What to do next, for people and agents: whether the invitee was emailed, or acceptUrl is yours to share.') }).openapi('CreatedWorkspaceInvitation');
 const InvitationPreview = z.object({ id: z.string(), workspaceId: z.string(), workspaceName: z.string(), workspaceSlug: z.string(), inviterName: z.string(), inviterEmail: z.string(), role: WorkspaceRole, expiresAt: z.string(), status: z.enum(['pending', 'accepted']) }).openapi('WorkspaceInvitationPreview');
 const Invite = z.object({ email: z.email().toLowerCase(), role: WorkspaceRole }).strict().openapi('InviteWorkspaceMember');
@@ -155,12 +156,13 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
     SELECT * FROM invited`);
     if (!result.rows[0]) throw new ApiError(409, 'ALREADY_INVITED_OR_MEMBER', 'This address already has a pending invitation or membership.');
     const view = invitationView(c, result.rows[0]);
-    // Its email is queued with it. Without one (no sender for account email here, or the day's allowance is used)
-    // the inviter shares the link, as before.
-    const emailed = await inviteByEmail(c.env, db, result.rows[0], await digest(view.email));
+    // Its email is queued with it. Without one the inviter shares the link, and is told why there is none.
+    const notEmailedReason = await inviteByEmail(c.env, db, result.rows[0], uid, await digest(view.email)), emailed = !notEmailedReason;
     if (emailed) { const a = c.get('actor'); a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); }
     const joins = `they join as ${view.role} after signing in with that verified address, before ${view.expiresAt}`;
-    return { ...view, emailed, nextStep: emailed ? `${view.email} was emailed the invitation: ${joins}. acceptUrl is the same link, if you want to share it yourself.` : `No email was sent. Share acceptUrl with ${view.email} yourself: ${joins}.` };
+    const why = notEmailedReason === 'new_workspace' ? `No email was sent: ${productName} emails invitations once this workspace has a verified domain or has finished its evaluation.`
+      : notEmailedReason === 'allowance_used' ? 'No email was sent: the invitation emails for today, or to this address, are used.' : 'No email was sent.';
+    return { ...view, emailed, notEmailedReason, nextStep: emailed ? `${view.email} was emailed the invitation: ${joins}. acceptUrl is the same link, if you want to share it yourself.` : `${why} Share acceptUrl with ${view.email} yourself: ${joins}.` };
   }, caller);
 }
 
@@ -202,7 +204,7 @@ export function registerWorkspaces(app: App) {
   });
   // inviteWorkspaceMember is the dashboard's older name for createWorkspaceInvitation; agents use the latter.
   for (const [resource, operationId] of [['members', 'inviteWorkspaceMember'], ['invitations', 'createWorkspaceInvitation']] as const) {
-    app.openapi(createRoute({ method: 'post', path: `${base}/${resource}` as const, operationId, description: `Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link (emailed says so; at most ${INVITATION_EMAILS.workspaceDay} invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.${resource === 'invitations' ? ` ${inPerson}` : ''}`, tags, security, request: { body: json(Invite) }, responses: { 201: response(CreatedInvitation), ...errors } }), async c => c.json(await invite(c, c.req.valid('json')), 201));
+    app.openapi(createRoute({ method: 'post', path: `${base}/${resource}` as const, operationId, description: `Invite an email address. Membership starts only after acceptance by the verified address. Hosted, the invitee is emailed the link once the workspace has a verified domain or has finished its evaluation (emailed says so; at most ${INVITATION_EMAILS.workspaceDay} invitation emails a workspace a day); otherwise share the returned URL. An invitation never grants more than the inviter's role, and an owner invitation is made only in the dashboard.${resource === 'invitations' ? ` ${inPerson}` : ''}`, tags, security, request: { body: json(Invite) }, responses: { 201: response(CreatedInvitation), ...errors } }), async c => c.json(await invite(c, c.req.valid('json')), 201));
   }
   app.openapi(createRoute({ method: 'patch', path: `${base}/members/{id}`, operationId: 'updateWorkspaceMember', tags, security, request: { params: IdParams, body: json(z.object({ role: WorkspaceRole }).strict()) }, responses: { 200: response(z.object({ id: z.string(), role: WorkspaceRole })), ...errors } }), async c => {
     const { id } = c.req.valid('param'), { role } = c.req.valid('json'); await changeMember(c, id, role); return c.json({ id, role }, 200);

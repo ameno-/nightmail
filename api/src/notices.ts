@@ -6,6 +6,10 @@ import { addresses, productName } from './brand.js';
 // same words; the HTML part sets a line length, the link as a button and its own dark colours, and nothing else (no
 // images, no background). A notice never says how a check works: no scores, rates, thresholds or provider names.
 //
+// Words a customer chose (a workspace's name, a campaign's) are shown through shownName, an address through
+// plainAddress and a domain through hostName, and nowhere but where a template puts them. The invitation goes to an
+// address outside the workspace, so its subject is fixed and it names the inviter by address only.
+//
 // The jobs that send them: standing.notify (standing.ts), billing.notify (billing/notify.ts) and account.notify
 // (account-notices.ts). scripts/render-notices.ts renders every one in a mail client, for review.
 
@@ -13,8 +17,30 @@ export type Notice = { subject: string; text: string; html: string };
 type Parts = { subject: string; lines: string[]; action: { label: string; url: string }; why: string };
 
 const escapeHtml = (v: string) => v.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
-/** A customer's name (workspace, campaign, person) on one bounded line, so a subject is always a valid header. */
-export const oneLine = (v: string, fallback: string) => v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim().slice(0, 100) || fallback;
+const NAME_LENGTH = 40;
+// A word that would read as somewhere to go: an address, a URL, or labels joined by a dot (a host).
+const pointsSomewhere = (word: string) => word.includes('@') || word.includes('://') || /[\p{L}\p{N}][.\u3002][\p{L}\p{N}]/u.test(word);
+// Latin letters beside Cyrillic or Greek ones in one word: letters picked to look like other letters.
+const mixedScripts = (word: string) => /\p{Script=Latin}/u.test(word) && /[\p{Script=Cyrillic}\p{Script=Greek}]/u.test(word);
+/**
+ * A name a customer chose (a workspace's, a campaign's) as an account email shows it: a few plain words on one line.
+ * Compatibility forms are folded (full-width letters and dots become the ordinary ones), invisible characters go, words
+ * that read as an address, a URL or a host, or that mix look-alike scripts, are left out whole, and of the rest only
+ * letters, digits, spaces, dashes, underscores, apostrophes and "&" stay, up to NAME_LENGTH characters. '' when
+ * nothing is left.
+ */
+export function shownName(value: string): string {
+  const words = value.normalize('NFKC').replace(/\p{Cf}+/gu, '').replace(/[\p{C}\p{Z}]+/gu, ' ').split(' ')
+    .filter(word => !pointsSomewhere(word) && !mixedScripts(word))
+    .flatMap(word => word.replace(/[^\p{L}\p{M}\p{N}\p{Pd}_'’&]+/gu, ' ').split(' '))
+    .filter(word => word === '&' || /[\p{L}\p{N}]/u.test(word));
+  const letters = [...words.join(' ')];
+  return letters.length > NAME_LENGTH ? letters.slice(0, NAME_LENGTH).join('').trimEnd() + '…' : letters.join('');
+}
+/** An email address an account email may print: plain ASCII, lowercased, or null. */
+export const plainAddress = (value: string) => value.length <= 254 && /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(value) ? value.toLowerCase() : null;
+/** A domain's name an account email may print: a host's letters, digits, hyphens and dots, or null. */
+const hostName = (value: string) => value.length <= 253 && /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$/.test(value) ? value.toLowerCase() : null;
 const day = (value: Date) => value.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
 const count = (value: number) => value.toLocaleString('en-US');
 const owes = (workspace: string, owed: string, since: Date | null) => since ? `${workspace} has owed ${owed} since ${day(since)}.` : `${workspace} owes ${owed}.`;
@@ -51,7 +77,7 @@ export type NoticeInput =
   | Workspace & { kind: 'receive_hold_soon'; owed: string; since: Date | null; holdAt: Date | null }
   | Workspace & { kind: 'receive_held'; owed: string; since: Date | null }
   | Workspace & { kind: 'credit_expiring'; amount: string; expiresAt: Date | null }
-  | Workspace & { kind: 'invitation'; inviter: { name: string; email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
+  | Workspace & { kind: 'invitation'; inviter: { email: string }; role: 'owner' | 'admin' | 'member'; expiresAt: Date; acceptUrl: string }
   | { kind: 'waitlist_admitted' };
 export type NoticeKind = NoticeInput['kind'];
 
@@ -60,7 +86,7 @@ export type NoticeKind = NoticeInput['kind'];
  * whatever paused the workspace: the ladder, a review or the provider.
  */
 export function customerNotice(origin: string, n: NoticeInput): Notice {
-  const base = origin.replace(/\/$/, ''), w = 'workspace' in n ? oneLine(n.workspace, 'your workspace') : '';
+  const base = origin.replace(/\/$/, ''), w = 'workspace' in n ? shownName(n.workspace) || 'your workspace' : '';
   const members = `${productName} sent this to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`;
   const dashboard = { label: 'Open the dashboard', url: `${base}/overview` }, billing = (label: string) => ({ label, url: `${base}/settings#billing` });
   switch (n.kind) {
@@ -94,15 +120,15 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
         'You can send more now. Over the next day the amount grows on its own as your mail keeps being delivered.',
         'The dashboard shows how much you can send right now.'] });
     case 'campaign_paused': {
-      const name = oneLine(n.campaign.name, 'A campaign');
-      return notice({ subject: `The campaign "${name}" is paused`, action: { label: 'Open the campaign', url: `${base}/campaigns/${encodeURIComponent(n.campaign.id)}/review` }, why: members, lines: [
-        `${productName} paused the campaign "${name}" before it finished, because of a problem with its recipients or its content.`,
+      const name = shownName(n.campaign.name), campaign = name ? `the campaign "${name}"` : 'a campaign';
+      return notice({ subject: name ? `The campaign "${name}" is paused` : 'A campaign is paused', action: { label: 'Open the campaign', url: `${base}/campaigns/${encodeURIComponent(n.campaign.id)}/review` }, why: members, lines: [
+        `${productName} paused ${campaign} before it finished, because of a problem with its recipients or its content.`,
         'People it already reached keep their email. Nobody else is sent to until you resume it. Your other mail is not affected.',
         'The campaign’s page shows what to check before you resume or cancel it.'] });
     }
     case 'domain_unverified': {
-      const name = oneLine(n.domain.name, 'A domain');
-      return notice({ subject: `${name} is no longer verified`, action: { label: 'Open the domain', url: `${base}/domains/${encodeURIComponent(n.domain.id)}` }, why: members, lines: [
+      const host = hostName(n.domain.name), name = host ?? 'the domain';
+      return notice({ subject: `${host ?? 'A domain'} is no longer verified`, action: { label: 'Open the domain', url: `${base}/domains/${encodeURIComponent(n.domain.id)}` }, why: members, lines: [
         `${productName} can no longer find the DNS records that verify ${name}.`,
         `Mail from addresses at ${name} is refused until the records are back. Your other domains are not affected.`,
         'The domain’s page lists the records to publish.'] });
@@ -132,10 +158,13 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       `Nothing changes for your mail. Usage spends the oldest credit first. Whatever is left of this credit ${n.expiresAt ? `on ${day(n.expiresAt)}` : 'then'} leaves the balance and is not refunded.`,
       'There is nothing you need to do. Billing shows the balance.'] });
     case 'invitation': {
-      const inviter = oneLine(n.inviter.name, n.inviter.email);
-      return notice({ subject: `${inviter} invited you to ${w} on ${productName}`, action: { label: 'Accept the invitation', url: n.acceptUrl },
-        why: `${productName} sent this because ${inviter} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.`, lines: [
-          `${inviter} (${n.inviter.email}) invited you to join the workspace ${w} on ${productName} as ${n.role === 'member' ? 'a member' : `an ${n.role}`}.`,
+      // To someone outside the workspace: the subject is fixed, the inviter is their address, and the workspace's name
+      // stands in quotes at the end of its sentence. A sign-up without a name has "<local part>'s workspace", which
+      // leaves "workspace": that one is not named.
+      const inviter = plainAddress(n.inviter.email), name = shownName(n.workspace).replace(/^workspace$/i, '');
+      return notice({ subject: `You are invited to a ${productName} workspace`, action: { label: 'Accept the invitation', url: n.acceptUrl },
+        why: `${productName} sent this because ${inviter ?? 'someone'} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.`, lines: [
+          `${inviter ?? 'Someone'} invited you to join a workspace on ${productName} as ${n.role === 'member' ? 'a member' : `an ${n.role}`}.${name ? ` They call it "${name}".` : ''}`,
           `The invitation is for this address only and expires on ${day(n.expiresAt)}.`,
           'To accept, sign in with this address.'] });
     }

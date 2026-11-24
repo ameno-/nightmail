@@ -2,7 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
-import { customerNotice, type Notice, type NoticeInput } from './notices.js';
+import { customerNotice, plainAddress, type Notice, type NoticeInput } from './notices.js';
 
 // Sending the account emails (src/notices.ts writes them). Three jobs send one each, every one through deliverNotice:
 // standing.notify (standing.ts: paused, marketing on hold, warning, resumed, campaign paused), billing.notify
@@ -120,25 +120,35 @@ export const INVITATION_EMAILS = { workspaceDay: 20, addressDay: 5, pair: 3 } as
 const budget = (db: DbExecutor, workspace: string, key: string, limit: number) => db.execute(sql`INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) VALUES(${workspace},${key},date_trunc('day',now()),1)
   ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN b.used+1 ELSE 1 END,window_start=excluded.window_start
   WHERE b.window_start<>excluded.window_start OR b.used<${limit} RETURNING 1`).then(r => r.rows.length > 0);
+/** Why an invitation was not emailed: nothing here sends one, the workspace is not yet one that may, or an allowance is used. */
+export type InvitationNotEmailed = 'not_available' | 'new_workspace' | 'allowance_used';
 /**
- * The invitation's email, queued in the transaction that made the invitation. False when none goes out: the
- * installation has no sender for it, or the day's allowance is used (the inviter then shares the link, as before).
+ * The invitation's email, queued in the transaction that made the invitation. Null when it is queued, otherwise why
+ * none goes out (the inviter then shares the link): the installation has no sender for it or the inviter no verified
+ * plain address to be named by; the workspace has neither a verified domain nor finished its evaluation (an email from
+ * this installation's own address to any address is not for an account that signed up a minute ago); or an allowance
+ * is used. The order matters: a workspace that may not email spends no allowance.
  */
-export async function inviteByEmail(runtime: Runtime, tx: DbExecutor, invitation: { id: string; workspaceId: string; email: string }, addressHash: string): Promise<boolean> {
-  if (!runtime.config.multiTenant || !runtime.config.notifyFrom || !runtime.config.platformDomainWorkspace) return false;
+export async function inviteByEmail(runtime: Runtime, tx: DbExecutor, invitation: { id: string; workspaceId: string; email: string }, inviterId: string, addressHash: string): Promise<InvitationNotEmailed | null> {
+  if (!runtime.config.multiTenant || !runtime.config.notifyFrom || !runtime.config.platformDomainWorkspace) return 'not_available';
   try {
     await tx.execute(sql`SAVEPOINT invitation_email`);
+    const { rows: [may] } = await tx.execute<{ inviter: string | null; established: boolean }>(sql`SELECT (SELECT u.email FROM nightmail_users u WHERE u.id=${inviterId} AND u.email_verified) AS inviter,
+      EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=${invitation.workspaceId} AND dc.sending_state='verified')
+        OR EXISTS (SELECT FROM sender_standing s WHERE s.workspace_id=${invitation.workspaceId} AND s.phase='graded') AS established`);
+    const refused = !may?.inviter || !plainAddress(may.inviter) ? 'not_available' : !may.established ? 'new_workspace' : null;
+    if (refused) { await tx.execute(sql`RELEASE SAVEPOINT invitation_email`); return refused; }
     const queued = await budget(tx, invitation.workspaceId, 'invitation-email', INVITATION_EMAILS.workspaceDay) && await budget(tx, 'global', `invitation-email:${addressHash}`, INVITATION_EMAILS.addressDay)
       && (await tx.execute(noticeInsert({ workspaceId: invitation.workspaceId, kind: 'invitation', dedupe: `invitation:${invitation.id}`, data: { invitationId: invitation.id, address: addressHash },
         // The address is kept as its hash; a notice that was never sent (revoked first, or failed) does not count.
         when: sql`(SELECT count(*) FROM account_notices p WHERE p.workspace_id=${invitation.workspaceId} AND p.kind='invitation' AND p.data->>'address'=${addressHash} AND p.status IN ('pending','sending','sent')
           AND p.created_at>coalesce((SELECT max(i.created_at) FROM workspace_invitations i WHERE i.workspace_id=${invitation.workspaceId} AND i.email=${invitation.email} AND i.status='accepted'),'-infinity'))<${INVITATION_EMAILS.pair}` }))).rows.length > 0;
     await tx.execute(queued ? sql`RELEASE SAVEPOINT invitation_email` : sql`ROLLBACK TO SAVEPOINT invitation_email`);
-    return queued;
+    return queued ? null : 'allowance_used';
   } catch {
     await tx.execute(sql`ROLLBACK TO SAVEPOINT invitation_email`).catch(() => {});
     log('warn', { code: 'NOTICE_NOT_QUEUED', workspaceId: invitation.workspaceId, kind: 'invitation' });
-    return false;
+    return 'not_available';
   }
 }
 
@@ -155,7 +165,7 @@ export const waitlistNoticeStatus = (email: SQL) => sql`(SELECT n.status FROM ac
 
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
-  domain: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterName: string; inviterEmail: string } | null };
+  domain: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null };
 
 /** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
 function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput } | null {
@@ -172,7 +182,7 @@ function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput 
     case 'evaluation_finished': return row.exempt || held ? null : { to: row.recipients, input: { kind: 'evaluation_finished', workspace, limited: row.data.limited === true } };
     case 'invitation': {
       const i = row.invitation;
-      return i && { to: [i.email], input: { kind: 'invitation', workspace, inviter: { name: i.inviterName, email: i.inviterEmail }, role: i.role, expiresAt: new Date(i.expiresAt),
+      return i && { to: [i.email], input: { kind: 'invitation', workspace, inviter: { email: i.inviterEmail }, role: i.role, expiresAt: new Date(i.expiresAt),
         acceptUrl: `${origin}/overview?invitation=${encodeURIComponent(String(row.data.invitationId))}` } };
     }
     case 'waitlist_admitted': return typeof row.data.email === 'string' ? { to: [row.data.email], input: { kind: 'waitlist_admitted' } } : null;
@@ -190,7 +200,7 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
       (SELECT pc.paused_at IS NOT NULL FROM provider_connections pc WHERE pc.workspace_id=l.workspace_id AND pc.kind='shared') AS paused,
       CASE WHEN l.kind='limit_reached' THEN billing_position(l.workspace_id) END AS position,
       (SELECT dc.sending_state FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id AND dc.name=l.data->>'name') AS domain,
-      (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterName',u.name,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
+      (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
         WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation
     FROM leased l LEFT JOIN workspaces w ON w.id=l.workspace_id`);
   if (!row) return heldNotice(runtime.db, 'account_notices', noticeId);

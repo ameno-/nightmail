@@ -25331,6 +25331,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const wid = runtime.config.workspaceId, platform = unique('platform'), pool = '111122223333';
     Object.assign(runtime.config, { multiTenant: true, platformDomainWorkspace: platform, notifyFrom: 'notices@platform.example' });
     await db.query(`INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)`, [platform]);
+    // The name the emails show: a few plain words (notices.ts shownName).
+    const name = 'Driftwood & Co';
+    await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, name]);
     await db.query(`INSERT INTO ses_installation_settings(workspace_id,installation_id,default_region,enabled_regions) SELECT $1,'install_'||md5($1),default_region,enabled_regions FROM ses_installation_settings WHERE workspace_id=$2`, [platform, wid]);
     await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
     for (const id of [wid, platform]) await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [id, REGION, pool]);
@@ -25339,14 +25342,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const seen = new Set<string>();
     const sent = async () => (await db.query(`SELECT id,from_address,snapshot->>'fromName' AS from_name,to_addresses,subject,snapshot->>'text' AS text,snapshot->>'html' AS html,snapshot->>'kind' AS kind FROM sending_emails WHERE workspace_id=$1 ORDER BY id`, [platform])).rows;
     const fresh = async () => { const out = (await sent()).filter(r => !seen.has(r.id)); for (const r of out) seen.add(r.id); return out; };
-    return { wid, platform, pool, sent, fresh };
+    return { wid, name, platform, pool, sent, fresh };
   }
   // What no account email may print: a rate, a threshold, a provider's name, an error code.
   const HOW_IT_WORKS = /\d\s*%|line is|threshold|\bSES\b|AWS|Amazon|Stripe|\b[A-Z]{3,}_[A-Z_]+\b/;
 
   test('owner notices: a standing change emails owners and admins once, from the platform workspace, in plain words with no rates, thresholds or provider names', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, pool, sent: emails } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, sent: emails } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js');
       const reasons = [{ code: 'COMPLAINTS_WARN', metric: 'complaints' as const, value: 0.002, count: 2, threshold: 0.0005, minimum: 2, window: '24h' as const, step: 'warn' as const, message: '2 of 1,000 accepted emails were marked as spam in 24 hours (0.2%; the warn line is 0.05% and 2).' }];
       const change = await runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, kind: 'step', step: 'warn', reasons }));
@@ -25355,7 +25358,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) await notifyJob(runtime, job[0].payload, { id: job[0].id, attempts: 1, workspaceId: wid });
       const sent = await emails();
       assert.deepEqual(sent.map(r => [r.from_name, r.from_address, r.to_addresses, r.kind]), [['Nightmail', 'notices@platform.example', [AUTH_EMAIL], 'transactional']], 'One email per owner, deduplicated on retry.');
-      assert.equal(sent[0].subject, `A warning about mail from ${wid}`);
+      assert.equal(sent[0].subject, `A warning about mail from ${name}`);
       // Review of #115: the notices were admitted but always canceled at dispatch (ORIGIN_KEY_REVOKED). They now dispatch
       // under their own narrow origin; a forged one (an event that does not exist) is still canceled.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
@@ -25366,7 +25369,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(['accepted', 'sent', 'delivered'].includes(outcome.notice[0]) && outcome.notice[1] === null, JSON.stringify(outcome));
       assert.deepEqual(outcome.forged, ['canceled', 'ORIGIN_KEY_REVOKED']);
       // What happened, what it means for mail now and the one thing to do, with one link; the same words in both parts.
-      for (const part of [`There is a problem with recent mail from ${wid}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${wid}`]) assert.ok(sent[0].text.includes(part), part);
+      for (const part of [`There is a problem with recent mail from ${name}.`, 'Nothing is held and your mail still sends', `\nOpen the dashboard: ${PUBLIC_ORIGIN}/overview\n`, `sent this to the owners and admins of ${name}`]) assert.ok(sent[0].text.includes(part), part);
       assert.ok(sent[0].html.includes('There is a problem with recent mail from ') && sent[0].html.includes(`href="${PUBLIC_ORIGIN}/overview"`), 'The HTML part carries the same words and link.');
       assert.equal(sent[0].text.match(/https?:\/\//g)!.length, 1, 'One link.');
       // The reason's numbers stay in the dashboard: an email never says how a check works.
@@ -25386,7 +25389,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('owner notices: one problem sends its most serious email only, a pause that was told is told when it ends, and a retry or an earlier build\'s send is never a second email', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, platform, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
       const { applyChange, notifyJob } = await import('./src/standing.js'), { JobDeferred } = await import('./src/jobs.js');
       const reasons = (step: 'warn' | 'restrict' | 'pause') => [{ code: 'BOUNCES', metric: 'bounces' as const, value: 0.05, count: 60, threshold: 0.04, minimum: 25, window: '24h' as const, step, message: '60 of 1,200 emails hard-bounced in 24 hours (5%; the line is 4% and 25).' }];
       const change = (c: Omit<Parameters<typeof applyChange>[1], 'workspaceId' | 'actor'>) => runtime.db.transaction(tx => applyChange(tx, { workspaceId: wid, actor: { kind: 'system' }, ...c }));
@@ -25411,7 +25414,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'quarantine', details: campaign });
       await change({ kind: 'step', step: 'restrict', reasons: reasons('restrict') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Marketing mail is on hold for ${name}`]);
 
       // A warning and a campaign's pause: both wait, and the campaign's is the one sent.
       await reset();
@@ -25432,7 +25435,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await change({ kind: 'step', step: 'warn', reasons: reasons('warn') });
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
       assert.deepEqual(await deliver(), [false, true]);
-      assert.deepEqual(await subjects(), [`Sending is paused for ${wid}`]);
+      assert.deepEqual(await subjects(), [`Sending is paused for ${name}`]);
       await change(resume);
       // While its SES tenants are still being enabled sending is not on yet: the email waits.
       const [resumed] = (await db.query(`SELECT id,payload FROM jobs WHERE workspace_id=$1 AND type='standing.notify' AND status='pending'`, [wid])).rows;
@@ -25442,7 +25445,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL,resume_pending_at=NULL WHERE workspace_id=$1`, [wid]);
       assert.deepEqual(await deliver(), [false]);
       const [again] = await fresh();
-      assert.equal(again.subject, `Sending has resumed for ${wid}`);
+      assert.equal(again.subject, `Sending has resumed for ${name}`);
       assert.match(again.text, /Sending from .* is on again\..*and new mail goes out again\. For now the daily limit may be lower than before\.\n\nThe dashboard shows the limit\.\n/s);
       // A second pause inside the day is not emailed (once per step in 24 hours), so its end is not either.
       await change({ kind: 'step', step: 'pause', pause: { message: 'Hosted sending paused.' }, reasons: reasons('pause') });
@@ -25478,9 +25481,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('account notices: an invitation, the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
+  test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words whatever the names), the daily limit, the evaluation\'s end, a lost domain and a waitlist admission are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
-      const { wid, platform, pool, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
       const { accountNotifyJob, domainUnverified, evaluationFinished, limitReached, waitlistAdmitted, INVITATION_EMAILS } = await import('./src/account-notices.js');
       const { ApiError } = await import('./src/core.js'), { JobDeferred, MAX_ATTEMPTS } = await import('./src/jobs.js');
       const { applyChange } = await import('./src/standing.js');
@@ -25493,14 +25496,72 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const notices = async (kind: string) => (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind=$2`, [wid, kind])).rows[0].n;
       const invite = async (email: string) => ok(await local('POST', '/v1/workspaces/current/invitations', { email, role: 'admin' }), 201);
 
+      // A workspace with no verified domain that has not finished its evaluation emails nobody: the invitation is made,
+      // the inviter is told why and shares its link, and no allowance is spent.
+      const allowances = async () => (await db.query(`SELECT count(*)::int AS n FROM api_request_budgets WHERE key_id LIKE 'invitation-email%'`)).rows[0].n;
+      const early = await invite('early@elsewhere.example');
+      assert.deepEqual([early.emailed, early.notEmailedReason], [false, 'new_workspace']);
+      assert.match(early.nextStep, /^No email was sent: Nightmail emails invitations once this workspace has a verified domain or has finished its evaluation\. Share acceptUrl with early@elsewhere\.example yourself/);
+      assert.deepEqual([await notices('invitation'), await allowances(), await deliver()], [0, 0, []]);
+      // One with a verified domain does (one past its evaluation: below, where its standing is set).
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('team.example',$1,$1,'verified')`, [wid]);
+
+      // The names in an invitation are the inviting account's to choose, and it goes to an address outside the
+      // workspace from this installation's own sender. So the subject is fixed, the inviter is their address and
+      // nothing else, and of the workspace's name only plain words are shown, in quotes: nothing that reads as a host,
+      // a URL or an address, no look-alike letters, no line of their own, and no more than 40 characters.
+      const { rows: [inviter] } = await db.query('SELECT name FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
+      const rename = async (workspace: string, inviter: string) => { await db.query('UPDATE workspaces SET name=$2 WHERE id=$1', [wid, workspace]); await db.query('UPDATE nightmail_users SET name=$2 WHERE email=$1', [AUTH_EMAIL, inviter]); };
+      const pointing = /@|:\/\/|[\p{L}\p{N}][.\u3002\uff0e][\p{L}\p{N}]/u;
+      for (const [i, [workspace, inviter, called]] of ([
+        ['ACTION REQUIRED: your domain is suspended, restore it at nightmail-dev.example.com/restore', 'Quagga Nightmail Security Team (security@nightmail.dev)', 'ACTION REQUIRED your domain is suspended…'],
+        ['Verify now → https://nightmail.dev.evil.example/login\r\nBcc: victim@elsewhere.example', 'Quagga support@nightmail.dev', 'Verify now Bcc'],
+        ['ｎｉｇｈｔｍａｉｌ．ｄｅｖ billing night\u200bmail.dev nightmail\u3002dev \u202egro.liamthgin www.evil.example Nіghtmail <b>team</b>', 'Quagga <no-reply@nightmail.dev>', 'billing b team b'],
+        ['nightmail.dev', 'Quagga', null],
+        ['W'.repeat(120), 'Quagga '.repeat(14), `${'W'.repeat(40)}…`],
+      ] as const).entries()) {
+        await rename(workspace, inviter);
+        const made = await invite(`named-${i}@elsewhere.example`);
+        assert.equal(made.emailed, true);
+        assert.deepEqual(await deliver(), ['invitation:sent']);
+        const [mail] = await fresh();
+        assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
+        assert.ok(mail.text.startsWith(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.${called === null ? '' : ` They call it "${called}".`}\n\nThe invitation is for this address only`), mail.text);
+        // What a reader sees, in either part, apart from the inviter's address and the link: no address, no URL, no host.
+        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, ' ').replaceAll('&quot;', '"');
+        for (const part of [mail.text.replace(`Accept the invitation: ${made.acceptUrl}`, ''), words]) {
+          assert.doesNotMatch(part.replaceAll(AUTH_EMAIL, ''), pointing, part);
+          assert.doesNotMatch(part, /Quagga|[\u0000-\u0009\u000b-\u001f\u200b\u202e]|і/, part);
+        }
+        assert.ok(called === null || words.includes(`They call it "${called}".`), words);
+        assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
+      }
+      // The same rule in the emails a workspace's own owners and admins get: its name and a campaign's.
+      const { customerNotice: written } = await import('./src/notices.js');
+      const pausedCampaign = written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'Acme, Inc. (see acme.example)', campaign: { id: 'cmp_1', name: 'Sale\r\nat https://evil.example/now for you@elsewhere.example' } });
+      assert.equal(pausedCampaign.subject, 'The campaign "Sale at for" is paused');
+      assert.ok(pausedCampaign.text.includes('sent this to the owners and admins of Acme Inc see. To reach us'), pausedCampaign.text);
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'campaign_paused', workspace: 'www.evil.example', campaign: { id: 'cmp_1', name: 'evil.example' } }).subject, 'A campaign is paused');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
+      // An address every workspace together has mailed five times in a day is not mailed a sixth.
+      await db.query(`UPDATE api_request_budgets SET used=$1 WHERE workspace_id='global' AND key_id LIKE 'invitation-email:%'`, [INVITATION_EMAILS.addressDay]);
+      const sixth = (await db.query(`SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND email='named-0@elsewhere.example' AND status='pending'`, [wid])).rows[0].id;
+      ok(await local('DELETE', `/v1/workspaces/current/invitations?id=${sixth}`));
+      const refused = await invite('named-0@elsewhere.example');
+      assert.deepEqual([refused.emailed, refused.notEmailedReason, await deliver()], [false, 'allowance_used', []]);
+      assert.match(refused.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with named-0@elsewhere\.example yourself/);
+      await rename(name, inviter.name);
+
       // An invitation is emailed to the invited address, once, with the link the inviter was given.
       const invited = await invite('teammate@elsewhere.example');
-      assert.equal(invited.emailed, true); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
+      assert.deepEqual([invited.emailed, invited.notEmailedReason], [true, null]); assert.match(invited.nextStep, /^teammate@elsewhere\.example was emailed the invitation/);
       assert.deepEqual(await deliver(), ['invitation:sent']);
       const [invitation] = await fresh();
       assert.deepEqual([invitation.from_address, invitation.to_addresses, invitation.kind], ['notices@platform.example', ['teammate@elsewhere.example'], 'transactional']);
-      assert.match(invitation.subject, new RegExp(` invited you to ${wid} on Nightmail$`));
-      for (const part of [`(${AUTH_EMAIL}) invited you to join the workspace ${wid} on Nightmail as an admin.`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
+      assert.equal(invitation.subject, 'You are invited to a Nightmail workspace');
+      for (const part of [`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin. They call it "${name}".`, 'The invitation is for this address only and expires on ', `\nAccept the invitation: ${invited.acceptUrl}\n`, `because ${AUTH_EMAIL} entered your address`, 'nothing happens unless you accept']) assert.ok(invitation.text.includes(part), part);
       assert.ok(invitation.html.includes(`href="${invited.acceptUrl.replaceAll('&', '&amp;')}"`));
       // It dispatches under its own origin, as a standing notice does; nothing else may use that origin.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
@@ -25521,7 +25582,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (let i = 0; i < 2; i++) { await revoke(last); last = await invite('teammate@elsewhere.example'); assert.equal(last.emailed, true); assert.deepEqual(await deliver(), ['invitation:sent']); }
       await revoke(last);
       const fourth = await invite('teammate@elsewhere.example');
-      assert.equal(fourth.emailed, false); assert.match(fourth.nextStep, /^No email was sent\./);
+      assert.deepEqual([fourth.emailed, fourth.notEmailedReason], [false, 'allowance_used']); assert.match(fourth.nextStep, /^No email was sent: /);
       // Another address is not held back by it, and the count starts again once the address has accepted an invitation.
       await db.query(`UPDATE workspace_invitations SET status='accepted' WHERE id=$1`, [last.id]);
       await revoke(fourth);
@@ -25531,13 +25592,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The day's allowance: past it the invitation is made as before, and the inviter shares its link.
       await db.query(`UPDATE api_request_budgets SET used=$2 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid, INVITATION_EMAILS.workspaceDay]);
       const over = await invite('later@elsewhere.example');
-      assert.equal(over.emailed, false); assert.match(over.nextStep, /^No email was sent\. Share acceptUrl with later@elsewhere\.example yourself/);
+      assert.deepEqual([over.emailed, over.notEmailedReason], [false, 'allowance_used']); assert.match(over.nextStep, /^No email was sent: the invitation emails for today, or to this address, are used\. Share acceptUrl with later@elsewhere\.example yourself/);
       // An installation with no sender for account email emails nobody.
       await db.query(`UPDATE api_request_budgets SET used=0 WHERE workspace_id=$1 AND key_id='invitation-email'`, [wid]);
       runtime.config.notifyFrom = undefined;
-      assert.equal((await invite('nobody@elsewhere.example')).emailed, false);
+      const senderless = await invite('nobody@elsewhere.example');
+      assert.deepEqual([senderless.emailed, senderless.notEmailedReason], [false, 'not_available']); assert.match(senderless.nextStep, /^No email was sent\. Share acceptUrl with nobody@elsewhere\.example yourself/);
       runtime.config.notifyFrom = 'notices@platform.example';
-      assert.equal(await notices('invitation'), 5);
+      // Nor does an inviter whose own address is not verified: an invitation names them by it.
+      await db.query('UPDATE nightmail_users SET email_verified=false WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal((await invite('unnamed@elsewhere.example')).notEmailedReason, 'not_available');
+      await db.query('UPDATE nightmail_users SET email_verified=true WHERE email=$1', [AUTH_EMAIL]);
+      assert.equal(await notices('invitation'), 10);
       assert.deepEqual((await fresh()).map(r => r.subject), []);
 
       // The daily limit: a workspace in its evaluation, one with no daily limit and an exempt one are told nothing.
@@ -25548,6 +25614,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await limitReached(runtime, wid);
       }
       assert.equal(await notices('limit_reached'), 0);
+      // Invitations again: without its verified domain, the workspace emails them once it is past its evaluation.
+      await db.query(`UPDATE domain_claims SET sending_state='pending' WHERE workspace_id=$1 AND name='team.example'`, [wid]);
+      await standing("phase='calibrating'");
+      assert.equal((await invite('calibrating@elsewhere.example')).notEmailedReason, 'new_workspace');
+      await standing("phase='graded'");
+      assert.equal((await invite('graded@elsewhere.example')).emailed, true);
+      assert.deepEqual([await deliver(), (await fresh()).map(r => r.to_addresses[0])], [['invitation:sent'], ['graded@elsewhere.example']]);
       // At a daily limit the owners are told, once in 24 hours however often a send is refused.
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=false WHERE id=$1', [wid]);
       for (let i = 0; i < 3; i++) await limitReached(runtime, wid);
@@ -25568,7 +25641,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       failing(false);
       assert.deepEqual(await deliver(), ['limit_reached:sent']);
       const [limit] = await fresh();
-      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${wid} has reached its daily sending limit`]);
+      assert.deepEqual([limit.to_addresses, limit.subject], [[AUTH_EMAIL], `${name} has reached its daily sending limit`]);
       assert.doesNotMatch(limit.text, /\b500\b/, 'The limit itself is on the dashboard.');
       assert.ok(limit.text.includes('Mail over the limit is refused for now.'), limit.text);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':yesterday' WHERE workspace_id=$1 AND kind='limit_reached'`, [wid]);
@@ -25585,7 +25658,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await evaluationFinished(runtime.db, wid, false), await evaluationFinished(runtime.db, wid, true)], [true, false]);
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
-      assert.equal(evaluation.subject, `${wid} has passed its evaluation`);
+      assert.equal(evaluation.subject, `${name} has passed its evaluation`);
       assert.match(evaluation.text, /so its starting limit is lifted\..*Over the next day the amount grows on its own/s);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');

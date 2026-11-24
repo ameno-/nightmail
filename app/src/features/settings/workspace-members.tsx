@@ -92,6 +92,15 @@ export function Invitations({ owner }: { owner: boolean }) {
   </section>
 }
 
+// How the answer to an invitation opens: it was emailed, or why the link is the inviter's to send. The address follows
+// on its own line.
+const inviteAnswer = {
+  emailed: 'We emailed this link to:',
+  new_workspace: 'Invitations are emailed once this workspace has a verified domain or finishes its evaluation. For now, send this link to:',
+  allowance_used: 'Today’s invitation emails are used. Send this link to:',
+  not_available: 'No email was sent. Send this link to:',
+} as const
+
 export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; owner: boolean; onOpenChange: (open: boolean) => void }) {
   const toast = useToast()
   const create = useApiMutation((_api, input: { email: string; role: WorkspaceRole }) => workspaceApi.invite(input), undefined, false, invalidate.workspaceInvitations)
@@ -108,22 +117,32 @@ export function InviteDialog({ open, owner, onOpenChange }: { open: boolean; own
     try { setCreated(await create.mutateAsync({ email: value, role })) } catch { /* The mutation error is shown in the form. */ }
   }
   function close() { onOpenChange(false); setCreated(null); setEmail(''); setRole('member'); setEmailError(''); create.reset() }
-  // The link works only for the invited address; its expiry is in Invitations, where it can be copied again. When the
-  // invitation was emailed, the link is the same one, for sharing another way.
-  if (created) return <Dialog sensitive open={open} onOpenChange={next => { if (!next) close() }} title={created.emailed ? 'Invitation sent' : 'Share this invitation link'}
-    description={created.emailed ? <>We emailed <PrivateAddress value={created.email} /> this link. Only that address can accept it, signed in with an emailed link to it or its Google account.</>
-      : <>No email was sent. Only <PrivateAddress value={created.email} /> can accept it, signed in with an emailed link to that address or its Google account.</>} footer={<Button variant="primary" onClick={close}>Done</Button>}>
-    <div className="ui-secret"><SecretCode>{created.acceptUrl}</SecretCode><CopyButton value={created.acceptUrl} label="Copy invitation link" /></div>
-    {canShare() && <Button className="settings-share" onClick={() => void shareLink(created.acceptUrl, toast)}><Share size={16} />Share link</Button>}
-  </Dialog>
-  // The invitee is emailed the link when the installation sends account email; the next step says whether, and shows it.
-  return <Dialog open={open} onOpenChange={next => { if (!create.isPending) { if (next) onOpenChange(true); else close() } }} title="Invite teammate" footer={<><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button variant="primary" loading={create.isPending} type="submit" form="invite-member">Invite</Button></>}>
-    <form id="invite-member" className="stack" onSubmit={submit} noValidate>
-      <MutationError error={create.error} />
-      <Field label="Their sign-in email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>
-      <Field label="Role" htmlFor="invite-role"><Select id="invite-role" value={role} onValueChange={value => setRole(value as WorkspaceRole)} disabled={create.isPending} options={roleOptions(owner)} /></Field>
-      <RoleGuide owner={owner} />
-    </form>
+  // One dialog from the form to the answer, and nothing in it moves when the answer arrives, however late: the form
+  // and the answer share one grid cell (settings-invite), the one not shown laid out but hidden, so the body is as tall
+  // as the taller of the two from the start and the footer stays where it is. The answer's height does not depend on
+  // what the answer is: every opening line is laid out and one shown, and the address and the link keep to one line each.
+  // The link works only for the invited address; its expiry is in Invitations, where it can be copied again.
+  const answer = created ? created.emailed ? 'emailed' : created.notEmailedReason ?? 'not_available' : null
+  return <Dialog sensitive={created !== null} open={open} onOpenChange={next => { if (created) { if (!next) close() } else if (!create.isPending) { if (next) onOpenChange(true); else close() } }}
+    title={created ? created.emailed ? 'Invitation sent' : 'Share this invitation link' : 'Invite teammate'}
+    footer={created ? <Button key="done" variant="primary" autoFocus onClick={close}>Done</Button> : <><Button disabled={create.isPending} onClick={close}>Cancel</Button><Button className="settings-invite__submit" variant="primary" loading={create.isPending} type="submit" form="invite-member">Invite</Button></>}>
+    <div className="settings-invite">
+      <form id="invite-member" className="stack" onSubmit={submit} noValidate inert={created !== null}>
+        <MutationError error={create.error} />
+        <Field label="Their sign-in email" htmlFor="invite-email" error={emailError || fieldError(create.error, 'email')}><Input id="invite-email" type="email" value={email} onChange={event => { setEmail(event.target.value); if (emailError) setEmailError(''); if (create.error) create.reset() }} autoFocus required disabled={create.isPending} placeholder="name@company.com" /></Field>
+        <Field label="Role" htmlFor="invite-role"><Select id="invite-role" value={role} onValueChange={value => setRole(value as WorkspaceRole)} disabled={create.isPending} options={roleOptions(owner)} /></Field>
+        <RoleGuide owner={owner} />
+      </form>
+      <div className="settings-invite__answer" inert={created === null}>
+        <div>
+          <p className="settings-invite__lead">{Object.entries(inviteAnswer).map(([key, text]) => <span key={key} aria-hidden={key !== answer || undefined}>{text}</span>)}</p>
+          <p className="settings-invite__address">{created ? <PrivateAddress value={created.email} /> : '\u00a0'}</p>
+        </div>
+        <div className="ui-secret"><SecretCode className="settings-invite__link">{created?.acceptUrl ?? '\u00a0'}</SecretCode><CopyButton value={created?.acceptUrl ?? ''} label="Copy invitation link" /></div>
+        {canShare() && <Button className="settings-share" onClick={() => { if (created) void shareLink(created.acceptUrl, toast) }}><Share size={16} />Share link</Button>}
+        <p className="muted">Only that address can accept it, by signing in with an emailed link or its Google account.</p>
+      </div>
+    </div>
   </Dialog>
 }
 
