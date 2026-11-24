@@ -10,7 +10,7 @@ import { log, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
 // missing at Cloudflare"). With DOMAIN_SETUP_REMINDER=on, a check that finds a sending record missing or different also
 // queues the one email to the workspace's owners and admins (account-notices.ts domainSetup), at most once per domain.
 // The same tick, with NO_DOMAIN_REMINDER=on, emails a new workspace that has added no domain at all an hour after it was
-// created (noDomainNotices), once; Overview asks for one either way (features/overview/no-domain.tsx).
+// created (noDomainNotices), once; Overview asks for one either way (features/overview/onboarding-card.tsx).
 
 export async function domainSetupTick(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;

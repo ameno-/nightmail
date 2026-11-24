@@ -20,7 +20,9 @@ import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { setPanelHidden, usePanelHidden } from './panel'
 import { DomainSetupAlert } from '../settings/domain-setup-alert'
-import { NO_DOMAIN_SPACE, NoDomainCard, useNoDomainCard } from './no-domain'
+import { ONBOARDING_CARD_SPACE, OnboardingCard, useOnboardingCard } from './onboarding-card'
+import { useQueryClient } from '@tanstack/react-query'
+import { resourceOf } from '../../data/invalidation'
 
 // Overview: is sending healthy? The range and stream over the figures they filter; four figure tiles, each a link to
 // that mail in Logs; the activity chart; and the latest emails, failures first (down to the card's bottom) on the
@@ -57,12 +59,15 @@ export function OverviewPage() {
   const setup = useSetupSteps()
   const detail = useDetail(setup, Boolean(recent.data || recent.isError))
   const held = stacked && setup.loading
-  const noDomain = useNoDomainCard(setup.hasDomain)
-  // The card leads with Add domain, so the setup steps' own domain step doesn't offer it again beside it.
-  const rail = noDomain ? withoutDomainAction(setup) : setup
+  const card = useOnboardingCard(setup)
+  const client = useQueryClient()
+  // A test from the first-send card shows in Latest emails and the figures; the card keeps its confirmation for this visit.
+  const sentFromCard = () => void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
+  // The card leads with its own actions, so the setup steps don't offer them again beside it.
+  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : ['key', 'send']) : setup
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
-  const count = useLatestRowCount(noDomain ? NO_DOMAIN_SPACE : 0)
+  const count = useLatestRowCount(card ? ONBOARDING_CARD_SPACE[card] : 0)
   // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
   const latestParams = latestRequest(regionId, stream)
   const latest = useApiDef(queries.logs(latestParams), { interval: 60_000, keepPrevious: sameRegion(regionId) })
@@ -76,7 +81,7 @@ export function OverviewPage() {
     <PageHeader title="Overview" actions={<>{controls}<PanelToggle /></>} />
     <div className="ov-split">
       <div className="ov-split__main">
-        {noDomain && <NoDomainCard />}
+        {card && (card === 'no-domain' || !held) && <OnboardingCard kind={card} domain={setup.verifiedDomain} onSent={sentFromCard} />}
         {stacked && setup.stuck && <DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} />}
         {stacked && rail.steps && <SetupRail steps={rail.steps} current={rail.current} open={rail.open} />}
         {stacked && setup.error ? <ErrorState error={setup.error} onRetry={setup.retry} /> : null}
@@ -96,9 +101,9 @@ export function OverviewPage() {
   </>
 }
 
-function withoutDomainAction(setup: ReturnType<typeof useSetupSteps>) {
+function withoutActions(setup: ReturnType<typeof useSetupSteps>, keys: string[]) {
   if (!setup.steps) return setup
-  const same = new Map(setup.steps.map(step => [step, step.key === 'domain' ? { ...step, action: undefined } : step]))
+  const same = new Map(setup.steps.map(step => [step, keys.includes(step.key) ? { ...step, action: undefined } : step]))
   return { ...setup, steps: setup.steps.map(step => same.get(step)!), current: setup.current && same.get(setup.current), open: setup.open?.map(step => same.get(step)!) }
 }
 

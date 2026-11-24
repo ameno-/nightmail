@@ -1,0 +1,28 @@
+/* Overview's onboarding card (onboarding-card.tsx): its sentence, its actions and a dismiss button in the corner. */
+.ov-onboarding { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-8) var(--space-16); padding: var(--space-16); border-radius: var(--radius-sm); background: var(--color-layer-1); }
+.ov-onboarding__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.ov-onboarding__text h2 { font-size: var(--text-md); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.ov-onboarding__text p { color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.ov-onboarding__text p[data-tone='danger'] { color: var(--color-danger); }
+.ov-onboarding__text p a { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+.ov-onboarding__dismiss { align-self: start; }
+/* First send: the sentence over a row of actions. */
+.ov-onboarding[data-kind='first-send'] { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'text dismiss' 'actions actions'; align-items: start; row-gap: var(--space-12); }
+.ov-onboarding[data-kind='first-send'] .ov-onboarding__text { grid-area: text; }
+.ov-onboarding[data-kind='first-send'] .ov-onboarding__dismiss { grid-area: dismiss; }
+.ov-onboarding__actions { grid-area: actions; display: flex; flex-wrap: wrap; gap: var(--space-8); }
+/* A desktop's card is one fixed height per kind, so Latest emails can fit its rows under it from the first frame (latest.ts). */
+@media (min-width: 900px) {
+  .ov-onboarding { box-sizing: border-box; height: 76px; }
+  .ov-onboarding[data-kind='first-send'] { height: 120px; }
+  .ov-onboarding__text p { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ov-onboarding__actions { flex-wrap: nowrap; }
+}
+@media (max-width: 640px) {
+  .ov-onboarding { grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: 'text dismiss' 'action action'; align-items: start; }
+  .ov-onboarding__text { grid-area: text; }
+  .ov-onboarding__dismiss { grid-area: dismiss; }
+  .ov-onboarding__action { grid-area: action; height: 44px; justify-content: center; }
+  .ov-onboarding__actions { flex-direction: column; }
+  .ov-onboarding__actions > .ui-button { height: 44px; justify-content: center; }
+}
