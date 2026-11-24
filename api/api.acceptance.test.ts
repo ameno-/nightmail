@@ -25103,6 +25103,58 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  // tear/campaign-lifecycle witness BUG-LC-01. A Hosted sender with a list of `size` subscribed contacts and a launched campaign to it.
+  async function releasingCampaign({ runtime, db, local }: Parameters<Parameters<typeof simulatedSesFixture>[1]>[0], size: number) {
+    const wid = runtime.config.workspaceId, pool = '111122223335', domain = 'settles.example', from = `news@${domain}`;
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    await gradedSender(db, wid, 10000);
+    const list = ok(await local('POST', '/v1/lists', { name: unique('settles') }), 201);
+    await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'settles-'||n||'@example.net','subscribed' FROM generate_series(1,$3::int)n RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id, size]);
+    const c = ok(await local('POST', '/v1/campaigns', { name: 'Settles', from, subject: 'Settles', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201), path = `/v1/campaigns/${c.id}`;
+    ok(await local('POST', `${path}/send`, { revision: c.revision }), 202);
+    // What the campaign shows, and how many of its emails are still queued or attempting.
+    const shown = async () => { const v = ok(await local('GET', path)); return [v.state, v.delivery.expanded, v.delivery.canceled, (await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1 AND status IN ('queued','attempting')`, [c.id])).rows[0].n]; };
+    return { c, path, shown };
+  }
+  test('a resumed list-probe quarantine that skips everyone left finishes the campaign instead of leaving it sending', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local, run } = fixture, { c, path, shown } = await releasingCampaign(fixture, 150);
+      await run('campaign.run');
+      // The probe of 100 went out and 4 bounced (4%, over the 3% line): the campaign is quarantined at 100 of 150.
+      await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=4 THEN 'bounced' ELSE 'delivered' END,provider_id='probe-'||id WHERE campaign_id=$1`, [c.id]);
+      await run('campaign.run');
+      await db.query(`UPDATE sending_campaigns SET probe_wait_until=now()-interval '1 second',waiting_until=now()-interval '1 second' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE jobs SET available_at=now() WHERE id=$1`, [`campaign.run:${c.id}`]);
+      await run('campaign.run');
+      const quarantined = ok(await local('GET', path));
+      assert.deepEqual([quarantined.state, quarantined.delivery.pauseReason.code, quarantined.delivery.expanded], ['paused', 'LIST_QUALITY', 100]);
+      // The owner resumes. The rest goes only to contacts this workspace delivered to before, and it delivered to none of
+      // the 50: the release skips them all and queues nothing, so no row is left whose leaving the queue finishes the campaign.
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['done', 150, 50, 0]);
+    });
+  });
+  test('a campaign whose last emails went out while it was paused finishes when it is resumed', async t => {
+    await simulatedSesFixture(t, async fixture => {
+      const { db, local, run } = fixture, { c, path, shown } = await releasingCampaign(fixture, 30);
+      await db.query('UPDATE sending_campaigns SET probe_cleared_at=now() WHERE id=$1', [c.id]); // A clean list; the probe is tested above.
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['sending', 30, 0, 30]);
+      // The dispatcher pauses a campaign it cannot verify even with everyone released (dispatcher.ts rejectPreflight). Queued
+      // mail still dispatches while it is paused, and the dispatcher finishes only a sending campaign.
+      await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"CAMPAIGN_HASH_FORMAT_UNSUPPORTED","message":"Paused."}' WHERE id=$1`, [c.id]);
+      await db.query(`UPDATE sending_emails SET status='delivered',provider_id='settles-'||id WHERE campaign_id=$1 AND status='queued'`, [c.id]);
+      assert.deepEqual(await shown(), ['paused', 30, 0, 0]);
+      ok(await local('POST', `${path}/resume`, {}));
+      await run('campaign.run');
+      assert.deepEqual(await shown(), ['done', 30, 0, 0]);
+    });
+  });
   test('campaign list probe follows standing: in good standing, recipients an earlier campaign delivered to with clean, mature feedback go out without the probe; swapped or unresolved recipients, a growing or capped sender, and a sender that falls below mid-campaign are probed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const wid = runtime.config.workspaceId, pool = '111122223334', domain = 'clean-list.example', from = `news@${domain}`;
