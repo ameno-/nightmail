@@ -21,7 +21,7 @@ type Draft = ComposedDraft
 export type EmailComposerRef = { prepare: () => Promise<Draft> }
 // personalize offers {{placeholder}} insertions. The composer sits in the campaign studio (campaigns.css): from 900 px its
 // tools are a floating rail at the desk's left edge (Text, Image, Components, Variables, then formatting, Undo and Redo,
-// and Style), and from 1150 px the Blocks & Style panel is docked open at the right edge; below 900 px the tools are a
+// and Style), and from 1150 px the Style panel is docked open at the right edge; below 900 px the tools are a
 // toolbar on the sheet and the panel opens over the page.
 // knownAttachmentIds: the attachments of this draft's other versions (a merge can leave the form without an image the
 // body still shows); the composer looks there for an image's attachment when attachmentIds lacks it.
@@ -359,7 +359,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         {tool('Redo', Redo2, () => command(e => e.chain().focus().redo().run()), `Redo ${modKey}⇧Z`)}
       </div>
       <div className="composer-rail__group">
-        <IconButton label="Style" title={panelShown ? 'Hide blocks and style' : 'Show blocks and style'} disabled={inactive} aria-pressed={panelShown} onClick={togglePanel}><Icon icon={SlidersHorizontal} /></IconButton>
+        <IconButton label="Style" title={panelShown ? 'Hide style' : 'Show style'} disabled={inactive} aria-pressed={panelShown} onClick={togglePanel}><Icon icon={SlidersHorizontal} /></IconButton>
       </div>
       {busy && <span className="composer-rail__busy" role="status"><Icon icon={LoaderCircle} size="sm" className="ui-spinner" /><span className="sr-only">Preparing…</span></span>}
       {fileField}
@@ -380,15 +380,10 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /><span className="sr-only">Loading visual composer</span></div>}
         <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write, or type / for blocks…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info(`[${productName} timing] campaign editor ready`, { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }}>
           <Inspector.Root ref={inspector} className="composer-inspector" hidden={!panelShown} data-docked={docked || undefined} data-closed={panelShown ? undefined : ''}>
-            <div className="composer-inspector-header"><span className="composer-inspector-title">Blocks</span><IconButton size="sm" label="Close blocks and style" onClick={() => setPanelChoice(false)}><Icon icon={X} /></IconButton></div>
-            <div className="composer-blocks" role="group" aria-label="Insert a block" onMouseDown={keepFocus}>
-              {blocks.map(block => <button key={block.label} type="button" className="composer-block" disabled={inactive} onClick={block.run}><Icon icon={block.icon} size="sm" /><span>{block.label}</span></button>)}
-              {personalize && <DropdownMenu label="Insert a variable" align="start" trigger={<button type="button" className="composer-block" disabled={inactive}><Icon icon={Braces} size="sm" /><span>Variable</span></button>} items={variableItems} />}
-            </div>
-            <div className="composer-inspector-title composer-inspector-label">Style</div>
+            <div className="composer-inspector-header"><span className="composer-inspector-title">Style</span><IconButton size="sm" label="Close style" onClick={() => setPanelChoice(false)}><Icon icon={X} /></IconButton></div>
             <Inspector.Breadcrumb />
             {/* Styles are per block (api/src/block-style.ts): no document-wide controls, and a text selection offers its block's. */}
-            <Inspector.Document>{() => <p className="composer-inspector-hint">No block selected</p>}</Inspector.Document>
+            <Inspector.Document>{() => <p className="composer-inspector-hint">Select a block to style it.</p>}</Inspector.Document>
             <Inspector.Node />
             <Inspector.Text>{() => <Inspector.Breadcrumb>{segments => { const block = segments.at(-1); return block && block.node.nodeType !== 'body' ? <Button size="sm" variant="secondary" className="composer-inspector-action" onClick={block.focus}>Style this block</Button> : null }}</Inspector.Breadcrumb>}</Inspector.Text>
           </Inspector.Root>
