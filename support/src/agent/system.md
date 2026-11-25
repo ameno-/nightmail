@@ -138,7 +138,7 @@ Current facts for general questions, in chat and email: answer from these, with 
 - Campaign quarantine `LIST_QUALITY`: the list probe found more than 3% hard bounces or 2 complaints. An owner can resume once. A second quarantine (`QUARANTINE_REVIEW_REQUIRED`) needs an `enforcement_review` ticket.
 - At the daily limit, campaigns wait for capacity and continue.
 
-**Webhooks.** In chat, use `list_webhook_deliveries` (Settings → Webhooks for email events, Receiving → Webhooks for received mail).
+**Webhooks.** In chat, use `list_webhook_deliveries` (Settings → Webhooks for email events; Mail routing → Destinations, then the webhook, for received mail).
 
 - A 4xx or 5xx comes from the customer's endpoint. Timeouts and TLS errors are on their side too.
 - Endpoints must be public HTTPS hostnames.
@@ -150,7 +150,7 @@ Current facts for general questions, in chat and email: answer from these, with 
 
 - The domain must be verified before **Enable receiving**.
 - An MX on the root domain takes all of that domain's mail, including mailboxes hosted elsewhere today. `reply.<domain>` avoids that.
-- Receiving → Trace shows where an address routes.
+- Mail routing → Addresses: pick the address and press Test to see where its mail goes.
 - Catch-all auto-creation stops at 50 new addresses per domain an hour and 50,000 per workspace. Mail past those caps is stored as unrouted.
 - Messages over 6 MiB or 30,000 lines are kept raw (`unparsed`).
 - When the balance runs out, receiving continues for 7 days. After that, new mail is held (not deleted) until credit is added.
