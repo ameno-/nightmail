@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, restrictedArea, fullAccessRefusal, unrestrictedRequired, RECEIVING_HOST_CHANGE, admits, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, restrictedArea, fullAccessRefusal, unrestrictedRequired, receivedMailRead, receivedMailRefusal, RECEIVING_HOST_CHANGE, admits, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
@@ -74,6 +74,9 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   }
   return authenticate(c, async () => {
     const value = workspaceMailAccess(c.get('actor'), c.req.method, c.req.path);
+    // An API key reading received mail is told the key that reads it, and how to make one.
+    if (typeof value === 'string' && c.get('actor').credential === 'apiKey' && receivedMailRead(c.req.method, c.req.path))
+      throw receivedMailRefusal(value, c.get('actor'), requiredOf(c), new URL(c.env.config.publicUrl).origin);
     if (value === 'UNRESTRICTED_KEY_REQUIRED') throw unrestrictedRequired(c.get('actor'), restrictedArea(c.req.path), requiredOf(c), 'For mail at some addresses only, a key limited to those addresses also works.');
     if (value === 'ADMIN_REQUIRED') throw c.get('actor').credential === 'apiKey'
       ? fullAccessRefusal(value, c.get('actor'), restrictedArea(c.req.path), requiredOf(c), 'For mail at some addresses only, a key limited to those addresses also works.')

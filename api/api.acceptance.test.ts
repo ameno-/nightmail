@@ -13065,6 +13065,33 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       `This key can only read mail sent from allowed.example.com. Add Send to it ${editKey} Needs Send email.`);
     // A key without manage on all domains, unrestricted otherwise, on received mail: the same style, with the address-key option.
     assert.match(error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound addresses need a full-access key: .* For mail at some addresses only, a key limited to those addresses also works\./);
+    // Reading replies with a key limited to its sender domain (a production agent tried, then guessed at POST /v1/api-keys):
+    // the refusal names the key that reads them and the request that makes one. A key without the domain limit is told how
+    // to make itself Full access, on its own ID.
+    const replyKey = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
+    for (const [key, path] of [[sender, '/v1/inbound/messages'], [replyKey, '/v1/inbound/messages/msg_fixture'], [replyKey, '/v1/inbound/messages/msg_fixture/attachments/att_fixture'], [replyKey, '/v1/inbound/threads']] as const) {
+      const refused = error(await http('GET', path, key.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+      assert.match(refused.message, /^This key can only send from allowed\.example\.com(?: and read what was sent from there)?\. A limit to sender domains doesn't reach received mail, so it can't read replies\. To read the replies to allowed\.example\.com, use a key limited to the receiving addresses there \(Read, and Send to answer from them\): with a full-access key, find their IDs with GET \/v1\/inbound\/addresses, then POST \/v1\/api-keys with \{"name":"Replies","access":\{"type":"addresses","addressIds":\["mbx_…"\],"mail":\["read","send"\]\}\}; or in the dashboard, API keys → Create key → Mail at chosen addresses\. A full-access key reads all received mail\. Docs: https?:\/\/[^ ]+\/docs\/operations\/createApiKey\.md$/, path);
+      assert.equal(refused.required.scope, 'workspace', path);
+    }
+    const unscoped = error(await http('GET', '/v1/inbound/messages', reader.secret), 403, 'ADMIN_REQUIRED');
+    assert.ok(unscoped.message.startsWith(`This key can only read. Received mail needs Full access, or a key limited to receiving addresses. Make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${reader.id} with {"permissions":["read","send","manage"]}. Or, for replies at some addresses only, use a key limited to them: with a full-access key`), unscoped.message);
+    // Making that key, guessed at: every problem at once, each with what was sent and the values allowed, then what keys can
+    // be. A key that can't make keys hears that first.
+    const full = (await keyFixture(t)).secret;
+    const guessed = error(await http('POST', '/v1/api-keys', full, { name: 'Replies', permissions: ['read', 'receive'], access: { type: 'addresses', addresses: ['jon@allowed.example.com'], mail: ['read', 'reply'] } }), 422, 'VALIDATION_FAILED');
+    assert.deepEqual([guessed.field, guessed.details.map((d: Json) => d.field)], ['permissions.1', ['permissions.1', 'access.mail.1', 'access.addresses']]);
+    for (const part of ['3 problems with this key: permissions.1 is "receive": a workspace key\'s permissions are a list of read (sent mail and its logs), send (send email) and manage (everything else, received mail included; with no domains, Full access). Received mail is read with manage, or by a key limited to receiving addresses (access)',
+      'access.mail.1 is "reply": a key for addresses or an inbox takes a list of read, send (reply and start conversations from those addresses), modify (mark read, archive, label) and create (create agent inboxes)',
+      'access.addresses is not a field of a key with access type addresses, which takes type, addressIds, mail.', 'For example, Full access: {"name":"Server","permissions":["read","send","manage"]};', '/docs/operations/createApiKey.md'])
+      assert.ok(guessed.message.includes(part), `${part} in ${guessed.message}`);
+    assert.match(error(await http('POST', '/v1/api-keys', full, { name: 'Replies', access: { type: 'domain', domains: ['allowed.example.com'] } }), 422, 'VALIDATION_FAILED').message,
+      /^A problem with this key: access\.type is "domain": access\.type is workspace \(the default\), addresses \(mail at chosen receiving addresses\) or inbox \(one agent inbox\)\. To limit a workspace key to sender domains, set domains beside permissions, not access\. For example/);
+    const misplaced = error(await http('POST', '/v1/api-keys', full, { name: 'Replies', permissions: ['read', 'send'], access: { type: 'addresses', mail: ['read'] } }), 422, 'VALIDATION_FAILED');
+    assert.deepEqual([misplaced.field, misplaced.message.startsWith('A key with access type addresses takes its permissions in access.mail (read, send (reply and start conversations from those addresses), modify (mark read, archive, label) and create (create agent inboxes)) and has no sender domains: move ["read","send"] from permissions to access.mail.')], ['permissions', true]);
+    assert.match(error(await http('POST', '/v1/api-keys', sender.secret, { name: 'Replies', permissions: ['receive'] }), 403, 'PERMISSION_DENIED').message, /so it can't create, list or revoke API keys\. Create keys in the dashboard under API keys → Create key, or with a full-access key via POST \/v1\/api-keys\./);
+    // A guessed route says where the endpoint is.
+    assert.match(error(await http('DELETE', `/v1/api-keys/${replyKey.id}`, full), 404, 'NOT_FOUND').message, /^Route not found\. Revoke a key with POST \/v1\/api-keys\/\{id\}\/revoke\. Every endpoint is listed in \/llms\.txt and \/docs\.md\.$/);
     const visible = await allPages('/v1/emails', domainReader.secret);
     assert.ok(visible.some(row => row.id === allowed.id));
     assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));

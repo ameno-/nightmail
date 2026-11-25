@@ -122,6 +122,15 @@ function routeOf(c: Ctx) {
  * them: the query is dropped, and each segment that isn't a short plain word becomes a placeholder: {mbx_id} for a
  * prefixed ID, {email}, {uuid}, {n}, {host} for a dotted name, {token} for anything long or random, {value} for the rest.
  */
+/** The endpoint an unmatched request most likely meant: the routes agents guessed at in production, and where they are. */
+const ROUTE_HINTS: [RegExp, RegExp, string][] = [
+  [/^DELETE$/, /^\/v1\/api-keys\/[^/]+$/, 'Revoke a key with POST /v1/api-keys/{id}/revoke.'],
+  [/./, /^\/v1\/inbound\/messages\/[^/]+\/deliver(?:y|ies)$/, 'A message\'s delivery details: GET /v1/inbound/messages/{id}?includeDelivery=true.'],
+  [/./, /^\/v1\/(?:inbound\/routes|forwarding|forwards|inbound\/forwarding)(?:\/|$)/, 'Receiving routes: GET /v1/routing/routes; forward and webhook destinations: GET /v1/endpoints.'],
+  [/./, /^\/v1\/(?:inbound\/rules|automations|inbound\/automations)(?:\/|$)/, 'Receiving rules: GET /v1/rules; routes: GET /v1/routing/routes.'],
+  [/./, /^\/v1\/webhook-endpoints(?:\/|$)/, 'Sending event webhooks: GET /v1/webhooks; received mail webhooks: GET /v1/inbound/webhooks; forward destinations: GET /v1/endpoints.'],
+];
+const routeHint = (method: string, path: string) => { const hint = ROUTE_HINTS.find(([m, p]) => m.test(method) && p.test(path)); return hint ? ` ${hint[2]}` : ''; };
 export function unmatchedTemplate(path: string) {
   const segments = path.split('?')[0]!.split('/').filter(Boolean);
   const shown = segments.slice(0, 12).map(raw => {
@@ -386,7 +395,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: apiFailureBody(responseError, requestId) }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: `Route not found.${routeHint(c.req.method, c.req.path)} Every endpoint is listed in /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
   // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
   // security.txt (RFC 9116) for the hosted service; a self-hosted installation has its own contact, so it has none.

@@ -435,6 +435,23 @@ const RESTRICTED_AREAS: [RegExp, string][] = [
   [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
 ];
 export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]) => pattern.test(path))?.[1] ?? 'This needs';
+/** Reading received mail: messages, threads, their attachments and events, which a key limited to addresses also reads. */
+export const receivedMailRead = (method: string, path: string) => method.toUpperCase() === 'GET' && /^\/v1\/(?:inbound\/(?:messages|threads|events)|inboxes\/[^/]+\/messages)(?:\/|$)/.test(path);
+const ADDRESS_KEY_EXAMPLE = '{"name":"Replies","access":{"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}}';
+/**
+ * Why an API key can't read received mail (a production agent with a key limited to its sender domain hit this reading
+ * its replies, then guessed at POST /v1/api-keys), and exactly what to change: the key limited to receiving addresses
+ * that reads them, made with the request shown or in the dashboard, or Full access. `origin` links the docs.
+ */
+export function receivedMailRefusal(code: 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_REQUIRED', a: Pick<Actor, 'permissions' | 'domains' | 'credential' | 'keyId'>, need: Required, origin: string) {
+  const domains = a.domains.length <= 2 ? a.domains.join(' and ') : `${a.domains[0]}, ${a.domains[1]} and ${a.domains.length - 2} more`;
+  const addressKey = `with a full-access key, find their IDs with GET /v1/inbound/addresses, then POST /v1/api-keys with ${ADDRESS_KEY_EXAMPLE}; or in the dashboard, API keys → Create key → Mail at chosen addresses`;
+  const docs = `Docs: ${origin}/docs/operations/createApiKey.md`;
+  return denied(code, a.domains.length
+    ? `${credentialLimits(a)} A limit to sender domains doesn't reach received mail, so it can't read replies. To read the replies to ${domains}, use a key limited to the receiving addresses there (Read, and Send to answer from them): ${addressKey}. A full-access key reads all received mail. ${docs}`
+    : `${credentialLimits(a)} Received mail needs Full access, or a key limited to receiving addresses. Make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${a.keyId} with {"permissions":["read","send","manage"]}. Or, for replies at some addresses only, use a key limited to them: ${addressKey}. ${docs}`,
+    code === 'UNRESTRICTED_KEY_REQUIRED' ? { ...need, scope: 'workspace' } : need);
+}
 /**
  * UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. The message says
  * what the credential is, what the area needs and where to get it: "This key can only send from acme.com. Inbound
