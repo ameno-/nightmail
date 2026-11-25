@@ -4908,7 +4908,9 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE agent_setup_id=$1', [minted.id])).rows[0].n, 1);
       // Revoking the key ends it, like any key, and its requests say so: when, how, and to run setup again.
       ok(await request('POST', `/v1/api-keys/${agent.keyId}/revoke`, MANAGER));
-      assert.match(error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED').message, /^This key was revoked on \d{4}-\d{2}-\d{2} at \d{2}:\d{2}:\d{2} UTC with an API key; get a new one by running setup again/);
+      const { rows: [revocation] } = await db.query("SELECT via FROM audit_events WHERE workspace_id=$1 AND action='api_key.revoke' AND target_id=$2", [w, agent.keyId]);
+      assert.match(error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED').message,
+        new RegExp(`^This key was revoked on \\d{4}-\\d{2}-\\d{2} at \\d{2}:\\d{2}:\\d{2} UTC ${({ dashboard: 'from the dashboard', api: 'with an API key' } as Json)[revocation.via]}; get a new one by running setup again`));
       assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again\.$/);
     });
   });
