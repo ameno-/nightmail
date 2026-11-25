@@ -2,7 +2,7 @@ import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { ApiError, log } from './core.js';
 import type { Config } from './core.js';
-import { envNames, settingNames } from './brand.js';
+import { envNames, linkHostTarget, settingNames } from './brand.js';
 import { mailServerHosts } from './mail-servers.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { EVALUATION } from './standing-model.js';
@@ -132,9 +132,9 @@ const values = z.object({
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   // Links in customer mail (unsubscribe, forwarding) go on the sending domain's own links.<domain> (src/link-domains.ts):
-  // a CNAME to NIGHTMAIL_LINK_SAAS_TARGET (default edge.<PUBLIC_URL's host>), served as a custom hostname of the Cloudflare
-  // for SaaS zone NIGHTMAIL_LINK_SAAS_ZONE_ID, which NIGHTMAIL_LINK_SAAS_TOKEN may edit. Unset: Hosted sends no mail that
-  // needs a link; self-hosted links on PUBLIC_URL.
+  // a CNAME to NIGHTMAIL_LINK_SAAS_TARGET (Hosted default: brand.ts linkHostTarget; required self-hosted), served as a
+  // custom hostname of the Cloudflare for SaaS zone NIGHTMAIL_LINK_SAAS_ZONE_ID, which NIGHTMAIL_LINK_SAAS_TOKEN may edit.
+  // Unset: Hosted sends no mail that needs a link; self-hosted links on PUBLIC_URL.
   NIGHTMAIL_LINK_SAAS_ZONE_ID: optional(z.string().trim().regex(/^[0-9a-f]{32}$/)),
   NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().min(20).max(500)),
   NIGHTMAIL_LINK_SAAS_TARGET: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
@@ -299,8 +299,12 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
   if (!v.NIGHTMAIL_LINK_SAAS_ZONE_ID !== !v.NIGHTMAIL_LINK_SAAS_TOKEN) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_ZONE_ID and NIGHTMAIL_LINK_SAAS_TOKEN together, or neither.');
-  const linkHosts = v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN
-    ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: v.NIGHTMAIL_LINK_SAAS_TARGET ?? `edge.${url.hostname}` } : undefined;
+  // The target is a name in the SaaS zone, which is a domain of its own: Hosted's is brand.ts linkHostTarget; a self-hosted
+  // installation names its own.
+  const linkTarget = v.NIGHTMAIL_LINK_SAAS_TARGET ?? (v.MULTI_TENANT === 'true' ? linkHostTarget : undefined);
+  if (v.NIGHTMAIL_LINK_SAAS_ZONE_ID && !linkTarget) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_TARGET to the name in the Cloudflare for SaaS zone that links.<domain> CNAMEs point to.');
+  const linkHosts = v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN && linkTarget
+    ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: linkTarget } : undefined;
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,

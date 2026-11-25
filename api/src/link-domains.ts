@@ -10,7 +10,7 @@ import { cname, fqdn } from './public-dns.js';
  * would then list for every customer's mail at once.
  *
  * Each sending domain has its own link host, links.<domain>: a standard record of the domain's setup, a CNAME to the
- * installation's target (config.linkHosts.target, edge.nightmail.dev on Hosted), which is a name in its Cloudflare for
+ * installation's target (config.linkHosts.target, cname.nightmailedge.com on Hosted), which is a name in its Cloudflare for
  * SaaS zone. Once public DNS shows the CNAME, the domain's check makes it a custom hostname of that zone (checkLinkHost),
  * and once Cloudflare has issued its certificate, the host is active: mail from the domain links there, served by the
  * Worker on the customer's own name. Hosted refuses campaign and marketing mail from a domain whose link host isn't

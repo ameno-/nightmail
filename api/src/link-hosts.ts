@@ -9,6 +9,7 @@ export const LINK_LABEL = 'links';
 // Unsubscribe links (the page and the one-click POST), forwarding's confirm and stop pages, linked images (/i/), and the
 // fonts the unsubscribe page uses. One segment after each prefix: nothing else is a link.
 const LINK_PATH = /^\/(?:unsubscribe|v1\/forwarding\/(?:confirm|stop)|i|fonts)\/[^/]+$/;
+const DCV_PATH = /^\/\.well-known\/(?:acme-challenge|pki-validation)\//;
 
 /**
  * How the Worker answers a request on `host`. `other`: one of this installation's own hosts (`own`), or link hosts are
@@ -21,5 +22,7 @@ export function linkHostRequest(enabled: boolean, host: string, path: string, ow
   // Not a link host (always links.<domain>): a name of the zone the zone-wide route caught by mistake, such as another
   // Worker's custom domain or an R2 bucket's. Routes run before custom domains, so the Worker passes it on to its origin.
   if (!name.startsWith(`${LINK_LABEL}.`)) return 'pass';
+  // Certificate validation (HTTP DCV) for the host's own certificate: Cloudflare answers it, never this Worker's 404.
+  if (DCV_PATH.test(path)) return 'pass';
   return LINK_PATH.test(path) ? 'link' : 'missing';
 }

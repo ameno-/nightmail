@@ -38861,7 +38861,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await page(new Request(`https://links.example.com/unsubscribe/${foreign}`,{headers:{accept:'text/html'}}))).status,404);
       // The Worker's rule for a link host: its links, and nothing else; this installation's own hosts are untouched.
       for(const [host,path,answer] of [['links.example.com','/unsubscribe/u_x','link'],['links.example.com','/v1/forwarding/stop/x','link'],['links.example.com','/i/x.png','link'],
-        ['links.example.com','/','missing'],['links.example.com','/overview','missing'],['links.example.com','/v1/campaigns','missing'],['links.example.com','/unsubscribe/u_x/y','missing'],['nightmail.dev','/overview','other'],['dev.nightmail.dev','/overview','pass'],['media.nightmail.dev','/a.png','pass']] as const)
+        ['links.example.com','/','missing'],['links.example.com','/overview','missing'],['links.example.com','/v1/campaigns','missing'],['links.example.com','/unsubscribe/u_x/y','missing'],['nightmail.dev','/overview','other'],['dev.nightmail.dev','/overview','pass'],['media.nightmail.dev','/a.png','pass'],
+        ['links.example.com','/.well-known/acme-challenge/token','pass'],['links.example.com','/.well-known/pki-validation/fileauth.txt','pass'],['links.example.com','/.well-known/other','missing']] as const)
         assert.equal(linkHostRequest(true,host,path,['nightmail.dev']),answer,`${host}${path}`);
       assert.equal(linkHostRequest(false,'links.example.com','/overview',['nightmail.dev']),'other');
       } finally { globalThis.fetch=prior; }

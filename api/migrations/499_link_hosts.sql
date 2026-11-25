@@ -1,6 +1,6 @@
 SET LOCAL lock_timeout='2s';
 -- A domain's link host (src/link-domains.ts): links.<domain>, a CNAME to the installation's Cloudflare for SaaS target
--- (edge.nightmail.dev on Hosted), served as a custom hostname of that zone (custom_hostname_id) with its own certificate.
+-- (cname.nightmailedge.com on Hosted), served as a custom hostname of that zone (custom_hostname_id) with its own certificate.
 -- Once active, the unsubscribe and other links in campaign and marketing mail from the domain use it. One row per
 -- workspace and domain name, written by the domain's checks (with public_dns, what public DNS showed for the CNAME then)
 -- and removed with the domain.

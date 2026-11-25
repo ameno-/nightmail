@@ -21,6 +21,9 @@ export const hostedDomain = 'nightmail.dev';
 /** Domains the hosted service answered on before `hostedDomain`, still served. */
 export const previousDomains: readonly string[] = ['bane.mx'];
 export const servedDomains: readonly string[] = [hostedDomain, ...previousDomains];
+/** The hosted service's customer link hosts (api/src/link-domains.ts): each sending domain's links.<domain> is a CNAME to
+ *  this name, in a Cloudflare for SaaS zone of its own that carries nothing else (no mail, no other site). */
+export const linkHostTarget = 'cname.nightmailedge.com';
 /** Every dashboard and API host of the hosted service: production and dev, on each served domain. */
 export const hostedHosts: readonly string[] = servedDomains.flatMap(domain => [domain, `dev.${domain}`]);
 /** The support Worker's host beside a dashboard host (support.nightmail.dev, support.dev.nightmail.dev). */
