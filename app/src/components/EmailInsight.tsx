@@ -5,7 +5,7 @@ import { useApiQuery } from '../data/context'
 import type { ClientPreview, PreviewClient, PreviewIssue, SendabilityCategory, SendabilityFinding, SendabilityReport } from '../data/types'
 import { usePhone } from '../lib/media'
 import { AddressText } from './AddressText'
-import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice } from './EmailFrame'
+import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice, type FrameScheme } from './EmailFrame'
 import { Alert, Button, Disclosure, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
 import './email-insight.css'
 
@@ -294,11 +294,12 @@ function ViewPicker({ value, current, options, onChange, loading }: { value: str
   </>
 }
 
-/** The email as sent: its sandboxed document (null while it is prepared) and its parts. */
-export type OriginalEmail = { doc: string | null; html: string; text: string; error?: string }
+/** The email as sent: its sandboxed document (null while it is prepared), the same on a dark canvas when the email
+ *  opts in to dark mode (`dark`; undefined when it doesn't), and its parts. */
+export type OriginalEmail = { doc: string | null; dark?: string | null; html: string; text: string; error?: string }
 type PreviewSource = { emailId: string } | { html: string }
 type Slot = { key: string; view: string; device: FrameDevice }
-type Column = Slot & { doc: string }
+type Column = Slot & { doc: string; scheme: FrameScheme }
 
 const GAP = 16
 // The phone width joins the desktop one only where both fit at FIT of their size or more (800 + 390 px at FIT).
@@ -351,16 +352,26 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const device = compact && phone ? 'mobile' : chosenDevice
   const [openIssues, setOpenIssues] = useState<Record<string, boolean>>({})
   const both = wide && room >= BOTH_ROOM
-  const needs = { desktop: both || device === 'desktop', mobile: both || device === 'mobile' }
+  // A wide preview may show both widths below BOTH_ROOM too, when the view's desktop span is narrow (arrange), so it
+  // fetches both: a column waiting on a width nobody fetched never shows.
+  const needs = { desktop: wide || device === 'desktop', mobile: wide || device === 'mobile' }
   const queries = { desktop: useClientPreviews(source, previewSource, theme, 'desktop', needs.desktop), mobile: useClientPreviews(source, previewSource, theme, 'mobile', needs.mobile) }
   const docs = { desktop: useClientDocs(queries.desktop.data), mobile: useClientDocs(queries.mobile.data) }
   const readers = { desktop: issueReader(check.data, queries.desktop.data), mobile: issueReader(check.data, queries.mobile.data) }
   const client = CLIENTS.find(item => item.value === view)
   const sourceView = view === 'html' || view === 'text'
   const frameView = view === 'original' ? Boolean(original) && hasHtml : Boolean(client && previewSource)
+  // Light or dark: a client's emulation for the chosen theme; the email as sent dark only where it opts in to dark mode,
+  // as Apple Mail shows it (otherwise it shows light in any theme), and plain text in the chosen theme.
+  const originalDark = original?.dark !== undefined
+  const themed = Boolean(client) || (view === 'original' && Boolean(original) && (!hasHtml || originalDark))
+  const shownTheme: Theme = themed ? theme : 'light'
+  // A frame's color-scheme: dark only for the email as sent on its dark canvas. An emulation has resolved the client's
+  // dark mode already, and its frame stays light.
+  const schemeOf = (of: string): FrameScheme => of === 'original' && originalDark ? shownTheme : 'light'
   // A column's document: null while it is on its way, undefined when there is none (no preview for that client).
   const docOf = (of: string, on: FrameDevice): string | null | undefined => {
-    if (of === 'original') return original?.doc ?? null
+    if (of === 'original') return (schemeOf(of) === 'dark' ? original?.dark : original?.doc) ?? null
     const item = CLIENTS.find(entry => entry.value === of)
     return !item ? undefined : !queries[on].data ? null : docs[on].get(item.clients[on])
   }
@@ -368,16 +379,16 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   // Whether the phone width fits beside the desktop one depends on the span the view takes at desktop width, so that is
   // measured first.
   const deciding = frameView ? [view] : []
-  const decided = useFrameSizes(deciding.map(of => ({ doc: docOf(of, 'desktop') ?? null, width: FRAME_WIDTH.desktop })))
+  const decided = useFrameSizes(deciding.map(of => ({ doc: docOf(of, 'desktop') ?? null, width: FRAME_WIDTH.desktop, scheme: schemeOf(of) })))
   const widthOf = (on: FrameDevice) => on === 'desktop' && decided[0] ? shownWidth(decided[0]) : FRAME_WIDTH[on]
   const slots = frameView ? arrange(view, device, room, wide, widthOf) : []
-  const wanted = slots.map(slot => ({ ...slot, doc: docOf(slot.view, slot.device) }))
-  const measured = useFrameSizes(wanted.map(column => ({ doc: column.doc ?? null, width: FRAME_WIDTH[column.device] })))
+  const wanted = slots.map(slot => ({ ...slot, doc: docOf(slot.view, slot.device), scheme: schemeOf(slot.view) }))
+  const measured = useFrameSizes(wanted.map(column => ({ doc: column.doc ?? null, width: FRAME_WIDTH[column.device], scheme: column.scheme })))
   const failedQuery = slots.map(slot => slot.view === 'original' ? null : queries[slot.device]).find(query => query?.isError && !query.data)
   const missing = !failedQuery && wanted.some(column => column.doc === undefined)
   const ready = room > 0 && wanted.length > 0 && deciding.every((of, index) => !docOf(of, 'desktop') || decided[index]) && wanted.every((column, index) => column.doc && measured[index])
   // The columns on screen change only once every new one has its size, all at once: until then the last ones stay, dimmed.
-  const signature = ready ? wanted.map(column => `${column.key}:${frameKey(column.doc!, FRAME_WIDTH[column.device])}`).join(' ') : null
+  const signature = ready ? wanted.map(column => `${column.key}:${frameKey(column.doc!, FRAME_WIDTH[column.device], column.scheme)}`).join(' ') : null
   const [shown, setShown] = useState<{ signature: string; columns: Column[] } | null>(null)
   if (signature && signature !== shown?.signature) setShown({ signature, columns: wanted as Column[] })
 
@@ -398,7 +409,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   ]
 
   const columns = shown?.columns ?? []
-  const sizes = columns.map(column => frameSize(column.doc, FRAME_WIDTH[column.device]))
+  const sizes = columns.map(column => frameSize(column.doc, FRAME_WIDTH[column.device], column.scheme))
   // A column's width before scaling: its span; at phone width an email wider than the phone shrinks to fit, as phone
   // apps show it. Every column then scales alike to fit the room.
   const naturals = columns.map((column, index) => { const size = sizes[index]; return !size ? 0 : column.device === 'mobile' ? Math.min(shownWidth(size), FRAME_WIDTH.mobile) : shownWidth(size) })
@@ -415,7 +426,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const showDevice = !(slots.some(slot => slot.device === 'desktop') && slots.some(slot => slot.device === 'mobile'))
   const showFrames = frameView && !failedQuery && !missing
   const listing = hasHtml && !clientsReady && (loading || Boolean(previewSource))
-  const offTheme = !client ? 'Dark mode depends on the client' : undefined, offWidth = sourceView || !hasHtml ? 'Width applies to previews' : undefined
+  const offTheme = themed ? undefined : view === 'original' && hasHtml ? 'This email doesn’t opt in to dark mode. Pick a client to see it dark.' : 'Dark mode depends on the client', offWidth = sourceView || !hasHtml ? 'Width applies to previews' : undefined
   const more = original && <DropdownMenu label="More views" align="end" items={[{ label: 'HTML source', onSelect: () => setChosen('html'), disabled: !hasHtml }, { label: 'Plain text', onSelect: () => setChosen('text') }]}
     trigger={<button type="button" className="ev-more" data-active={(sourceView && !compact) || undefined} aria-label={sourceView ? `More views: ${view === 'html' ? 'HTML source' : 'Plain text'}` : 'More views'} title="More views">{sourceView && !compact ? (view === 'html' ? 'HTML' : 'Text') : <MoreHorizontal size={16} aria-hidden="true" />}</button>} />
   if (!original && !previewSource && !loading) return <p className="muted ev-note">Nothing to preview</p>
@@ -425,7 +436,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
       {client && clientsReady && frameView && <IssuesButton caption={client.captions[device]} issues={readers[device](client.clients[device])} classic={client.value === 'outlook' && device === 'desktop' ? readers.desktop(CLASSIC_OUTLOOK) : []} />}
       <div className="ev-toolbar__end">
         {!phone && <Toggle label="Width" value={device} options={DEVICES} onChange={setDevice} off={offWidth} />}
-        {client && <ThemeButton theme={theme} onChange={setTheme} />}
+        {themed && <ThemeButton theme={theme} onChange={setTheme} />}
         {more}
         {toolbarEnd}
       </div>
@@ -433,7 +444,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
       <ViewSwitcher value={view} options={options} onChange={setChosen} loading={listing} />
       <div className="ev-toolbar__end">
         {showDevice && <Toggle label="Width" value={device} options={DEVICES} onChange={setDevice} off={offWidth} />}
-        <Toggle label="Color scheme" value={theme} options={THEMES} onChange={setTheme} off={offTheme} />
+        <Toggle label="Color scheme" value={shownTheme} options={THEMES} onChange={setTheme} off={offTheme} />
         {more}
         {toolbarEnd}
       </div>
@@ -447,7 +458,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
       </div>}
       <div ref={canvas} className={fill ? 'ev-canvas ui-scroll-fade' : 'ev-canvas'}>
         {sourceView && original ? <pre className="email-source">{view === 'html' ? original.html || 'No HTML part.' : original.text || 'No plain-text part.'}</pre>
-          : view === 'original' && original && !hasHtml ? <pre className="email-text">{original.text || 'This email has no body.'}</pre>
+          : view === 'original' && original && !hasHtml ? <pre className="email-text" data-scheme={shownTheme}>{original.text || 'This email has no body.'}</pre>
           : failedQuery ? <Alert tone="neutral" title="Couldn’t emulate the email clients"><ErrorText error={failedQuery.error} /><div className="ei-retry"><Button size="sm" onClick={() => void failedQuery.refetch()}>Try again</Button></div></Alert>
           : missing ? <div className="email-frame--empty muted">No preview for this client.</div>
           : shown ? <>
@@ -456,7 +467,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
               const size = sizes[index], about = describe(column)
               return size ? <div key={column.key} className="ev-column" style={{ width: widths[index] }}>
                 {!compact && about.item && about.issues!.length + about.classic!.length > 0 && <IssuePanel id={`${id}-${column.key}`} issues={about.issues!} classic={about.classic!} open={Boolean(openIssues[about.key!])} />}
-                <EmailFrame doc={column.doc} size={size} scale={scale * naturals[index] / shownWidth(size)} title={about.title} pending={pending} />
+                <EmailFrame doc={column.doc} scheme={column.scheme} size={size} scale={scale * naturals[index] / shownWidth(size)} title={about.title} pending={pending} />
               </div> : null
             })}</div>
           </> : <div className="ev-placeholder" aria-hidden="true" />}

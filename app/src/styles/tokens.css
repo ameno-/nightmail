@@ -101,6 +101,9 @@
   color-scheme: light;
   --color-email-surface: #FFFFFF;
   --color-email-text: #181818;
+  /* An email on a dark mail client's canvas (Apple Mail's): the preview's dark mode. */
+  --color-email-dark-surface: #1E1E1E;
+  --color-email-dark-text: #FFFFFF;
   --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.0:1 on deep */
   --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the stamp on a pale ground; docs/brand.md */
   --color-contrast: #111111;
