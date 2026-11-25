@@ -380,6 +380,8 @@ const pages = ids => [
   ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
   ['Receiving · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
   ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],
+  // A member imports without a list: the list picker is off and says who can add to one.
+  ['Audience · import dialog · member', '/audience', { user: 'max', dialog: 'Import contacts' }],
   ['Settings · invite dialog', '/settings#members', { dialog: 'Invite teammate' }],
   // General's postal address: Edit opens its dialog (the same one a campaign's Send opens when the address is missing).
   ['Settings · postal address dialog', '/settings', { dialog: 'Edit' }],
