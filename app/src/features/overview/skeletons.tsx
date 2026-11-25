@@ -46,7 +46,7 @@ export function FactTilesSkeleton() {
 // The sender score's place under the tiles where there is no sidebar to carry it, as its card draws itself while it
 // loads (features/score).
 export function ScoreTileSkeleton() {
-  return <div className="gauge-card gauge-card--compact" aria-hidden="true"><span className="gauge-skeleton" /></div>
+  return <div className="score-card" data-loading aria-hidden="true" />
 }
 export function ChartSkeleton() {
   return <section className="ov-chart" aria-hidden="true"><div className="ov-chart__head"><span className="ov-label">Activity</span></div><div className="ov-chart__plot ov-chart__plot--loading" /></section>

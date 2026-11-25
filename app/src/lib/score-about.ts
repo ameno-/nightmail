@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-// Opens the sender score explainer from anywhere (the sidebar gauge, Overview's card and breakdown, Settings), with one
+// Opens the sender score explainer from anywhere (the sidebar's score card, Overview's card and breakdown, Settings), with one
 // dialog mounted by the shell. `focus` names a factor to highlight. Kept outside the score chunk so callers stay small.
 type State = { open: boolean; focus: string | null }
 let state: State = { open: false, focus: null }
