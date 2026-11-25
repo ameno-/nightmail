@@ -2859,9 +2859,34 @@ export type DomainReadiness = {
         suggestion?: string | null;
     } | null;
     /**
-     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
+     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
      */
     builtIn?: boolean;
+    /**
+     * Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.
+     */
+    limits?: {
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace’s members.
+         */
+        scope: 'anyone' | 'members';
+        /**
+         * Recipients in a rolling 24 hours.
+         */
+        perDay: number;
+        /**
+         * Recipients in a minute.
+         */
+        perMinute: number;
+        /**
+         * Request fields a send from it can’t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign.
+         */
+        unsupported: Array<'from' | 'replyTo' | 'headers' | 'attachments' | 'template' | 'scheduledAt' | 'kind' | 'campaign'>;
+        /**
+         * The same, in one sentence.
+         */
+        summary: string;
+    };
 };
 
 export type CreateDomain = {

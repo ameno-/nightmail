@@ -250,7 +250,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   if(current.kind==='inbox'&&!message.protocolArchive){
     if(!message.threadId)throw new ApiError(422,'EPHEMERAL_REPLY_ONLY','An ephemeral inbox cannot start a thread.');
-    if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
+    if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Replies are off for this inbox: it was created without send: {"enabled": true}, and sandbox inboxes never send. Reply from an address or inbox that sends, or create one with send enabled.');
     if(!recipients.every(r=>locked.replyAuthors?.includes(r.toLowerCase())))throw new ApiError(403,'RECIPIENT_NOT_ALLOWED','Replies may go only to authors in this inbox and thread.');
   }
   await enforceLimits(tx, message);
