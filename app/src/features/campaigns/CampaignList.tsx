@@ -52,7 +52,7 @@ export function CampaignsPage() {
       return next
     })
   }
-  return <>
+  return <div className="campaigns-page measure-list">
     <CampaignsHeader actions={<>{canAdminister && <Button onClick={() => navigate('/newsletters/new')}>New newsletter</Button>}<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button></>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={draft} onChange={event => type(event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
@@ -71,5 +71,5 @@ export function CampaignsPage() {
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}
     </>}
-  </>
+  </div>
 }

@@ -135,6 +135,10 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .app-shell:not(.app-shell--compact) .page-surface:has(> :is(.ov-page, .logs-page, .email-detail)) > :is(.standing-banner, .page-notice) { margin: var(--space-8) var(--space-16) 0; padding: var(--space-8) var(--space-12); }
 .app-shell:not(.app-shell--compact) .page-surface:has(> :is(.ov-page, .logs-page, .email-detail)) > .page-notice { padding: 0; }
 .page-surface > :is(.stack, .audience-page, .ui-loading-layout) { flex: 1; }
+/* A list page (header, toolbar, table and pager together) stops widening on a wide window, left-aligned, so a row's
+   columns read as one group instead of spreading across the window; its skeleton carries the same classes. */
+.page-surface > .measure-list { width: 100%; max-width: var(--measure-list); }
+.page-surface > .measure-list.measure-list--narrow { max-width: var(--measure-list-narrow); }
 .page-surface > .stack { gap: var(--page-gap); }
 .page-surface > .stack > .section { margin-block: 0; }
 /* Route transitions: a new page (or a skeleton giving way to content) crossfades in 120 ms. Opacity only, no movement. */

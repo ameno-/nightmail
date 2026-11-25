@@ -103,7 +103,7 @@ function DomainsList() {
       navigate(`/domains/${domain.id}${then ? `?then=${encodeURIComponent(then)}` : ''}`)
     } catch { /* Shown inline. */ }
   }
-  return <div className="stack">
+  return <div className="stack measure-list measure-list--narrow">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[

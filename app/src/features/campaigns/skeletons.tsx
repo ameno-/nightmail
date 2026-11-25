@@ -69,11 +69,11 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
   const [search] = useSearchParams(), issueOf = isNew ? search.get('newsletter') : null
   if (kind === 'list' || kind === 'templates') {
     const templates = kind === 'templates'
-    return <>
+    return <div className="campaigns-page measure-list">
       <CampaignsHeader actions={<>{!templates && canAdminister && <Button disabled>New newsletter</Button>}<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button></>} />
       <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
       <TableSkeleton className="campaigns-table ui-table--two-line" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
-    </>
+    </div>
   }
   if (kind === 'template') return <div className="campaign-compose-page template-compose-page">
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>{!phone && <span className="campaign-sync-status"><span className="campaign-sync-dot" /></span>}{phone ? <><Button variant="primary" disabled>Publish</Button><IconButton label="More actions" disabled><Icon icon={MoreHorizontal} /></IconButton></> : <><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>}</>} />

@@ -379,7 +379,7 @@ button.ui-card__link { display: block; max-width: 100%; overflow: hidden; text-o
 .ui-card__segment:has(> .private-address) { display: flex; white-space: pre; }
 .ui-table td .settings-cell-stack { min-width: 0; max-width: 100%; }
 /* A stacked cell is two lines at most: each of its lines ends in an ellipsis rather than wrapping past the row. */
-.ui-table td .settings-cell-stack > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:where(.ui-table td .settings-cell-stack) > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-card :is(a, button, input, select, label, [role='checkbox'], [role='switch']):not(.ui-card__link) { position: relative; z-index: 1; }
 .ui-card:has(.ui-card__link:focus-visible)::before { background: var(--color-hover); }
 /* An empty list keeps a page of cards' height (filtering to nothing doesn't collapse the page), but its message sits at

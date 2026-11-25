@@ -37,21 +37,29 @@
 .settings-row__label > span { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* Above a phone, every settings page but Billing (whose rows lay themselves out, billing.css) is a two-column form: a
+   200px label, then the value or control left-aligned right beside it, with any action (Copy, Edit) right after it, so a
+   label and its value are never a panel apart. Rows keep their 53px, so nothing in them moves as values load. Kept at a
+   single class's weight (:where), so a row that stacks on a tablet (.settings-mcp, below) still does. */
+@media (min-width: 641px) {
+  :where(.settings-rows:not(.billing-rows)) > .settings-row { grid-template-columns: 200px minmax(0, 1fr); gap: var(--space-16); }
+  :where(.settings-rows:not(.billing-rows)) > .settings-row > .settings-row__control { justify-content: flex-start; text-align: left; }
+}
 .settings-inline { flex-wrap: nowrap; }
 .settings-version .ui-button[aria-hidden='true'] { display: none; }
 /* A connected AWS account's health finding: the message, in the warning tone. */
-.settings-attention { color: var(--color-warning); text-align: right; }
-.settings-name { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); width: 100%; }
-.settings-name-input.ui-input { width: min(440px, 100%); }
+.settings-attention { color: var(--color-warning); text-align: left; }
+.settings-name { position: relative; display: flex; align-items: center; justify-content: flex-start; gap: var(--space-8); width: 100%; }
+.settings-name-input.ui-input { width: min(380px, 100%); }
 .settings-name .ui-button[data-hidden] { visibility: hidden; }
 .settings-mcp { position: relative; display: flex; align-items: center; gap: var(--space-8); }
 .settings-mcp .ui-button[data-hidden] { visibility: hidden; }
 .settings-mcp__workspace { width: 200px; }
-.settings-name-error { position: absolute; top: calc(100% + 6px); right: 0; z-index: 2; width: min(360px, 100%); text-align: left; white-space: normal; }
+.settings-name-error { position: absolute; top: calc(100% + 6px); left: 0; z-index: 2; width: min(360px, 100%); text-align: left; white-space: normal; }
 .settings-score { display: inline-flex; align-items: baseline; gap: var(--space-8); padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: none; cursor: pointer; }
 /* The postal address on one line, cut at the edge with the full address in its title (on a phone it wraps); Edit stays at the end. */
 /* The cluster fills the control, so its box is the same while the address loads and after. */
-.settings-address { flex: 1; justify-content: flex-end; min-width: 0; }
+.settings-address { flex: 1; justify-content: flex-start; min-width: 0; }
 .settings-address__value { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .settings-address > svg { flex: none; color: var(--color-muted); }
 .settings-readonly { min-width: 0; }
@@ -112,8 +120,10 @@
   .settings-mcp__workspace { flex: 1 0 100%; width: auto; }
 }
 
-/* The MCP connection page (mcp-approval.tsx): one 53px row per connected account, a radio to pick it. */
+/* The MCP connection page (mcp-approval.tsx): one 53px row per connected account, a radio to pick it. The account (its
+   radio, avatar, name and address) takes a wider first column than a label, its badges right after it. */
 .mcp-approval { max-width: 760px; }
+@media (min-width: 641px) { .mcp-approval [role='radiogroup'] > .settings-row { grid-template-columns: minmax(0, 320px) minmax(0, 1fr); } }
 .mcp-approval__account { cursor: pointer; }
 .mcp-approval__who { display: flex; align-items: center; gap: var(--space-12); min-width: 0; }
 .mcp-approval__who input { flex: none; margin: 0; accent-color: var(--color-contrast); }
