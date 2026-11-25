@@ -135,7 +135,7 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     return { status, body: { error: { code, message, requestId, retryable: false } } as T, requestId, retryAfter: null };
   };
   async function send<T>(method: string, url: URL, body: unknown, conversation?: string): Promise<PlatformReply<T>> {
-    const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'bane-support (service binding)' };
+    const headers: Record<string, string> = { accept: 'application/json', 'user-agent': 'nightmail-support (service binding)' };
     if (body !== undefined) headers['content-type'] = 'application/json';
     const response = await dispatch(new Request(origin() + url.pathname + url.search, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }), conversation);
     const text = await response.text();

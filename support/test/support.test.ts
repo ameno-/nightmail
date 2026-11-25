@@ -215,7 +215,7 @@ export default {
 };`;
 
 const baseEnv = (overrides: Record<string, unknown> = {}) => ({
-  STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), BANE_ORIGIN: text(ORIGIN),
+  STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), NIGHTMAIL_ORIGIN: text(ORIGIN),
   SUPPORT_ADDRESS: text('support@dev.bane.mx'), SUPPORT_ADDRESS_ID: text('adr_support'), TICKET_TO: text('ryan@anoma.ly'), GATEWAY_URL: text('https://opencode.ai/inference/anthropic/v1'),
   CONSOLE_GATEWAY_KEY: text(GATEWAY_KEY), SUPPORT_ROOT_SECRET: text(ROOT), BANE_INBOUND_WEBHOOK_SECRET: text(WEBHOOK_SECRET), BANE_SUPPORT_INBOX_KEY: text(`bane_mbx_${'7'.repeat(64)}`),
   CONVERSATION: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportConversation' },
@@ -1028,14 +1028,14 @@ describe('support Worker', () => {
   test('M3: a ticket from an unverified sender names no customer and says so first; one verified by email says it is for reading only', () => {
     const base = { conversationId: 'conv_x', channel: 'email' as const, threadId: 'thr', costUsd: 0, model: 'm', attachments: [], customer: { userId: null, email: null, name: null, role: null, workspaces: [] } };
     const input = { type: 'billing' as const, title: 'Refund', severity: 'P3' as const, summary: 's', ask: 'refund', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
-    const unverified = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
+    const unverified = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(unverified.text.startsWith('UNVERIFIED SENDER (DMARC FAIL): not a confirmed customer.'), unverified.text);
     assert.ok(!unverified.text.includes('Customer:') && unverified.text.includes('Sender (unverified): victim@acme.test'));
     assert.equal(unverified.subject, '[Nightmail billing] [UNVERIFIED] tkt_x: Refund (P3)');
-    const verified = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
+    const verified = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(verified.text.includes('Verified: dmarc (DMARC PASS)') && verified.text.includes('Customer: Ada <ada@acme.test>, owner') && !verified.text.includes('UNVERIFIED'));
     assert.ok(verified.text.startsWith('VERIFIED BY EMAIL, FOR READING ONLY: not grounds for a change.'), verified.text);
-    const chat = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, channel: 'chat', verified: 'handoff', dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
+    const chat = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, channel: 'chat', verified: 'handoff', dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(!chat.text.includes('FOR READING ONLY'), 'A signed-in chat’s ticket is not.');
   });
 

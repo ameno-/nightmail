@@ -13,7 +13,7 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
    distance to its hover, focus, selection and controls as the canvas does: the raised set, a step off layer-1. */
 :is(.email-detail__preview, .ui-card, .ui-alert) { --color-hover: var(--color-raised-hover); --color-active-bg: var(--color-raised-active); --color-pressed: var(--color-raised-active); --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed); }
 /* A selected row already wears the selection fill: keyboard focus on it takes one step past it. */
-.ui-table tr[data-selected]:is(:focus-visible, :has(.ui-row-link:focus-visible)) > td { background: var(--color-raised-control-focus); }
+.ui-table tr[data-selected]:is(:focus-visible, :has(.ui-row-link:focus-visible)) > td { background-color: var(--color-raised-control-focus); }
 .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 20; display: flex; flex-direction: column; width: var(--sidebar-width); padding: 0; overflow-y: auto; background: var(--color-deep); }
 /* The wordmark's row is as tall as the command bar beside it, so the two read as one band. */
 .sidebar-head { display: flex; flex: none; align-items: center; height: var(--topbar-height); padding: 0 var(--space-16); }
@@ -217,7 +217,7 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .logs-table { --table-row-height: var(--row-height-log); }
 .logs-table .ui-table { font-family: var(--font-mono); font-size: var(--text-xs); letter-spacing: -.01em; }
 .logs-table .ui-table .log-subject { font-family: var(--font-body); font-size: var(--text-md); letter-spacing: 0; }
-.logs-table :where(.ui-table tbody tr:not(.ui-table-spacer):nth-child(even)) > td { background: var(--color-row-alt); }
+.logs-table :where(.ui-table tbody tr:not(.ui-table-spacer):nth-child(even)) > td { background-color: var(--color-row-alt); }
 .logs-table .ui-status { font-family: var(--font-mono); font-size: var(--text-xs); }
 /* The time: a muted date, the bright time. */
 .log-time { color: var(--color-text); white-space: nowrap; }
@@ -226,7 +226,7 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .logs-controls { flex-wrap: nowrap; gap: var(--space-12); }
 .logs-controls .ui-tabs { min-height: var(--control-height); }
 .logs-controls .ui-tab { height: var(--control-height); }
-.logs-table .ui-table th { height: 28px; padding-block: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.logs-table .ui-table th { padding-block: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .logs-table .ui-table td { padding-block: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .logs-table .ui-table :is(th, td):last-child { padding-inline: var(--space-6); text-overflow: clip; }
 .logs-table .ui-table td:last-child svg { display: block; }

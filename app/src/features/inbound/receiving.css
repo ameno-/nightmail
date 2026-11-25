@@ -282,7 +282,7 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .rcv-browse__list { display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
 .rcv-browse__list > .flow-panel { margin-top: var(--space-12); }
 .rcv-browse > .flow-panel { position: sticky; top: 0; }
-.rcv-table tr[data-selected] > td { background: var(--color-active-bg); }
+.rcv-table tr[data-selected] > td { background-color: var(--color-active-bg); }
 
 /* The flow: Receive, Process, Deliver, each a flat solid box one step off the canvas, joined by a short stem with an
    arrowhead. Neutral; a test ticks what the email took, fills the boxes it went through a step stronger and quiets the
