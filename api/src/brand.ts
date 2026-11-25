@@ -28,7 +28,7 @@ export const supportHost = (host: string) => `support.${host}`;
 
 /**
  * The hosted origin. A running installation uses its own: PUBLIC_URL in the API, VITE_PUBLIC_URL or the page's origin
- * in the dashboard, BANE_ORIGIN in the support Worker. This is their default and the origin examples are written for.
+ * in the dashboard, NIGHTMAIL_ORIGIN in the support Worker. This is their default and the origin examples are written for.
  */
 export const publicOrigin = `https://${hostedDomain}`;
 export const docsUrl = `${publicOrigin}/docs`;

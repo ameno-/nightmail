@@ -1,4 +1,4 @@
-# Hosted Bane infrastructure
+# Hosted Nightmail infrastructure
 
 One project, two stacks: `dev` (AWS `905840579680`, Cloudflare `d8e944f537ceef3f06a5bd3aec1d7a53`, Worker `bane-dev`) and `production` (AWS `009882681002`, Cloudflare `15d29c8639fd3733b1b5486a2acfd968`, Worker `bane-production`). Pulumi 3.274.1 runs the TypeScript directly with `runtime: bun`; use Bun 1.3.14 and `bun install --frozen-lockfile`. Type-check with `bun run tsc --noEmit`.
 
@@ -139,6 +139,6 @@ The deploy role's S3 and SNS permissions name their resources, so it can't creat
 
 ## Tenant status events
 
-EventBridge rules, targets (including their entire input), delivery roles and their grants are operator-owned. CI verifies the exact rule patterns and unchanged SNS envelopes; it cannot rewrite them. Signed SNS notifications are hints only: Bane checks workspace/topic ownership and reads `GetReputationEntity` for the exact tenant and origin before recording a transition. Stale notifications do nothing, lookup failures retry, and enables never resume a workspace.
+EventBridge rules, targets (including their entire input), delivery roles and their grants are operator-owned. CI verifies the exact rule patterns and unchanged SNS envelopes; it cannot rewrite them. Signed SNS notifications are hints only: Nightmail checks workspace/topic ownership and reads `GetReputationEntity` for the exact tenant and origin before recording a transition. Stale notifications do nothing, lookup failures retry, and enables never resume a workspace.
 
 Before rollout, allow `ses:GetReputationEntity` alongside the existing status-update permission on the same tenant ARNs in the runtime boundary and identity policies. Provision/verify both regional routes (Virginia after signed enrollment). Do not enqueue until these prerequisites are verified. `python3 infra/pulumi/tenant-status/plan.py --plan --stage dev` (or `production`) simulates the proposed grants without writing AWS state.
