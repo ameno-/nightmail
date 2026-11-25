@@ -170,7 +170,8 @@ async function score(runtime: Hosted, component: Component): Promise<Scored> {
   return { accounts, reasons, score: Math.min(100, reasons.reduce((sum, reason) => sum + reason.points, 0)) };
 }
 
-export type ClusterChange = { id: string; score: number; band: Band; reasons: Reason[]; workspaces: string[]; accounts: number; members: number; previous: { score: number; band: Band; members: number } | null };
+/** keys: the members as type:id, what an alert records it was about. */
+export type ClusterChange = { id: string; score: number; band: Band; reasons: Reason[]; workspaces: string[]; accounts: number; members: number; keys: string[]; previous: { score: number; band: Band; members: number } | null };
 /**
  * Groups and scores what one entity belongs to and stores it. The cluster keeps the ID of the oldest stored cluster its
  * members were in; the others merge into it. A component of fewer than two accounts is no cluster: what was stored for
@@ -197,7 +198,7 @@ export async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterC
         members=excluded.members,edges=excluded.edges,scored_at=now(),changed_at=CASE WHEN ${changed} THEN now() ELSE abuse_clusters.changed_at END`);
     await tx.execute(sql`DELETE FROM abuse_cluster_members WHERE cluster_id=${id}`);
     await tx.execute(sql`INSERT INTO abuse_cluster_members(entity_type,entity_id,cluster_id) SELECT type,id,${id} FROM jsonb_to_recordset(${JSON.stringify(members)}::jsonb) AS m(type text,id text)`);
-    return { id, score: scored.score, band, reasons: scored.reasons, workspaces, accounts: scored.accounts.length, members: members.length, previous: kept ? { score: kept.score, band: kept.band, members: kept.members.length } : null };
+    return { id, score: scored.score, band, reasons: scored.reasons, workspaces, accounts: scored.accounts.length, members: members.length, keys: members.map(keyOf), previous: kept ? { score: kept.score, band: kept.band, members: kept.members.length } : null };
   });
 }
 /**

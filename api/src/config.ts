@@ -105,8 +105,8 @@ const values = z.object({
   // Hosted only: abuse monitoring (src/abuse.ts) is off until this names the instant it starts (RFC 3339, with Z or an
   // offset). Nothing is recorded before it, or before the database first ran with it. Unset turns it off; expiry still runs.
   NIGHTMAIL_ABUSE_MONITORING: optional(z.iso.datetime({ offset: true })),
-  // Hosted only: a Slack incoming webhook for abuse-monitoring alerts (src/abuse-alerts.ts). Unset, alerts are stored
-  // for operators and nothing is posted. Treat as a secret.
+  // Hosted only: a Slack incoming webhook for abuse-monitoring alerts (src/abuse-alerts.ts). Unset, they go to
+  // OPERATOR_SLACK_WEBHOOK_URL; with neither, alerts are stored for operators and nothing is posted. Treat as a secret.
   ABUSE_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
   // Hosted only: a Slack incoming webhook for the operator alerts (src/operator-alerts.ts): a new sign-up, a pause, a
   // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
@@ -412,7 +412,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
     hygieneLists: v.NIGHTMAIL_HYGIENE_LISTS === 'on',
     hygieneDnsUrl: v.NIGHTMAIL_HYGIENE_DNS === 'off' ? null : v.NIGHTMAIL_HYGIENE_DNS ?? (v.MULTI_TENANT === 'true' ? 'https://cloudflare-dns.com/dns-query' : null),
-    abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
+    abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL ?? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
     deploy: { sha: typeof v.DEPLOY_SHA === 'string' && /^[0-9a-f]{7,40}$/.test(v.DEPLOY_SHA) ? v.DEPLOY_SHA : null,
