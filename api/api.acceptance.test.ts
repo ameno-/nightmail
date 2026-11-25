@@ -24056,6 +24056,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
       assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
       assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
+      // The parent's own role addresses (abuse@, postmaster@, dmarc@, tls-reports@) reach the platform workspace, here this one,
+      // through its built-in domain once an operator adds them (scripts/builtin-domain.ts apex), routed like any address.
+      const operator='arn:aws:sts::111122225555:assumed-role/operator/fixture',platformBefore=runtime.config.platformDomainWorkspace;
+      runtime.config.platformDomainWorkspace=wid;
+      assert.equal((await receive([`abuse@${parent}`])).n,0,'Nothing reaches the parent before an operator adds its host.');
+      await assert.rejects(builtin.ensureBuiltinApex(runtime,{ceo:[support.id]} as never,operator,'Not a role address'),/Only abuse, postmaster, dmarc, tls-reports receive/);
+      const apexHost=await builtin.ensureBuiltinApex(runtime,{abuse:[support.id],dmarc:[inbox.id]},operator,'Role addresses for the parent');
+      assert.equal(await builtin.ensureBuiltinApex(runtime,{abuse:[support.id],dmarc:[inbox.id]},operator,'Role addresses for the parent'),apexHost,'Running it again changes nothing.');
+      assert.deepEqual((await deliver([`abuse@${parent}`])).boxes,[support.id]);
+      assert.deepEqual((await deliver([`dmarc@${parent}`])).boxes,[inbox.id]);
+      assert.equal((await receive([`ceo@${parent}`])).n,0,'Any other address at the parent is dropped,');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mail_receipt_holds WHERE recipients ? $1',[`ceo@${parent}`])).rows[0].n,0,'not held.');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='builtin-apex'",[wid])).rows[0].n,2);
+      runtime.config.platformDomainWorkspace=`ws_${'0'.repeat(32)}`;
+      assert.equal((await receive([`abuse@${parent}`])).n,0,'Only the platform workspace receives them.');
+      runtime.config.platformDomainWorkspace=platformBefore;
+      assert.deepEqual((await deliver([`support@${host}`])).boxes,[support.id],'The built-in domain itself receives as before.');
 
       // 6. A pause stops sending (receiving goes on); an own domain closes it; a revoke stops everything for good.
       await db.query("UPDATE provider_connections SET paused_at=now(),pause_reason='Synthetic hold' WHERE id=$1",[wid]);
