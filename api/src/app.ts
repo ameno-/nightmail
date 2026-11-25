@@ -183,7 +183,7 @@ function logRequest(c: Ctx, durationMs: number) {
     code, field: failure?.field, databaseCode: failure?.databaseCode,
     // Which endpoint a caller expected, scrubbed (unmatchedTemplate): only for a path no route answered.
     path: route === 'unmatched' ? unmatchedPath(c, workspace || undefined) : undefined,
-    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : undefined,
+    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : failure?.origin?.originClass, fetchSite: failure?.origin?.fetchSite,
     workspace, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
   });
@@ -382,7 +382,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Messages, record keys and unsupported keys are caller text: log only the schema's own top-level field names.
     const field = responseError.logField !== undefined ? responseError.logField || undefined : schemaFields(responseError.field);
     // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
-    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
+    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error), origin: responseError.origin });
     // Best effort, and never this request's failure: limitReached and dailyLimitAlert log what they could not queue.
     if (responseError.limitReachedFor) {
       await (await import('./account-notices.js')).limitReached(c.env, responseError.limitReachedFor).catch(() => {});

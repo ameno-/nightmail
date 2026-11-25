@@ -264,7 +264,7 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
   /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
   pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
-  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string } };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
   principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
@@ -312,6 +312,8 @@ export class ApiError extends Error {
   required?: Required;
   /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
+  /** What the request log may say about a refused request's Origin: its class and Sec-Fetch-Site, never the origin. */
+  origin?: { originClass: string; fetchSite?: string };
   /** Seconds for the HTTP Retry-After header when a retryable 503/429 has a fixed backoff instead of resetAt. */
   retryAfterSeconds?: number;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
