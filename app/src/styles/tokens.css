@@ -153,6 +153,10 @@
   --font-weight-medium: 500;
   --font-weight-semibold: 600;
   --font-weight-bold: 600;
+  /* --space-2 is an inset or a split, never a nudge: a segmented control's or switch's track around what slides in it, and
+     the gap that keeps two filled rows or segments side by side from reading as one. Alignment comes from line-height
+     and box sizes (an icon in a box of its line's height), never a 1–3px margin. */
+  --space-2: 2px;
   --space-4: 4px;
   --space-6: 6px;
   --space-8: 8px;
