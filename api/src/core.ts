@@ -280,7 +280,7 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
   /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
   pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
-  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string } };
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string }; attachmentTypes?: AttachmentTypes };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
   principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
@@ -322,6 +322,8 @@ export type JobHandler = ((runtime: Runtime, payload: Record<string, unknown>, j
   batch?: (runtime: Runtime, items: JobBatchItem[]) => Promise<JobBatchOutcome[]>;
 };
 
+/** A refused attachment's declared type, the type its bytes are and its name's extension. */
+export type AttachmentTypes = { declaredType: string; detectedType: string; extension: string };
 export class ApiError extends Error {
   /** Structured detail for errors that have several parts, such as rule compile diagnostics. */
   details?: Record<string, unknown>[];
@@ -335,6 +337,8 @@ export class ApiError extends Error {
   origin?: { originClass: string; fetchSite?: string };
   /** Seconds for the HTTP Retry-After header when a retryable 503/429 has a fixed backoff instead of resetAt. */
   retryAfterSeconds?: number;
+  /** What the request log may say about a refused attachment (screened-html.ts attachmentTypes): types, never its name or content. */
+  attachmentTypes?: AttachmentTypes;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
 }
 /** Classify once, whether the error is the whole response or a failed part of a private dashboard read. */

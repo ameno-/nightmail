@@ -28649,6 +28649,36 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(screenedName('re\u202Eport\u200B\u115F\u200D.txt'),'report.txt');
       // An unspecified type is delivered as the extension's; a declared one is kept as declared.
       assert.deepEqual([screenedAttachment('re\u202Eport.txt','application/octet-stream',bytes.txt,false),screenedAttachment('scan.pdf','application/pdf; name=x',bytes.pdf,false)],[{filename:'report.txt',contentType:'text/plain'},{filename:'scan.pdf',contentType:'application/pdf; name=x'}]);
+      // Text that starts with "BM" is text, not a bitmap; a .log file is text like a .txt one.
+      assert.deepEqual([screenedAttachment('notes.txt','text/plain',Buffer.from('BMW service invoice, two pages'),false),screenedAttachment('server.log','text/plain',bytes.txt,false)],[{filename:'notes.txt',contentType:'text/plain'},{filename:'server.log',contentType:'text/plain'}]);
+      // A mail app labels a file as its system does, and its user can't change that: its bytes decide what it goes out as,
+      // under its own name, inline only as a raster image; a label is never refused, only what no label makes safe. The
+      // API's own sends keep their rule: a nameless inline picture is still refused there.
+      const {mailAppAttachment}=await import('./src/screened-html.js');
+      const pe=new Uint8Array(256);pe.set([0x4d,0x5a]);pe[0x3c]=0x80;pe.set([0x50,0x45,0,0],0x80);
+      const unknown=new Uint8Array([0,1,2,3,4,5,6,7]);
+      const app=(filename:string,type:string,body:Uint8Array,inline=false,probation=true)=>{try{return mailAppAttachment(filename,type,body,inline,probation);}catch(error){return (error as {code:string}).code;}};
+      assert.equal(refusal('attachment','image/png','png',true),'ATTACHMENT_CONTENT_MISMATCH');
+      assert.deepEqual([app('attachment','image/png',bytes.png,true),app('logo.jpg','image/png',bytes.png,true),app('photo.jpg','image/jpg',bytes.jpeg),app('scan.png','image/png',bytes.jpeg),
+        app('Invoice.pdf','application/pdf; x-unix-mode=0644; name="Invoice.pdf"',bytes.pdf,true),app('export.csv','application/vnd.ms-excel',Buffer.from('a;b\r\n1;2\r\n')),
+        app('export.csv','text/plain; charset=windows-1252',new Uint8Array([0x63,0x61,0x66,0xe9,0x3b,0x31,0x0d,0x0a])),app('server.log','text/x-log; charset=UTF-8',bytes.txt),
+        app('report.docx','application/octet-stream',bytes.zip),app('report.xls','application/vnd.ms-excel',Buffer.from('a\tb\n1\t2\n')),app('README','application/octet-stream',bytes.txt),app('data.txt','application/octet-stream',unknown)],
+        [{filename:'attachment',contentType:'image/png',inline:true},{filename:'logo.jpg',contentType:'image/png',inline:true},{filename:'photo.jpg',contentType:'image/jpeg',inline:false},{filename:'scan.png',contentType:'image/jpeg',inline:false},
+        {filename:'Invoice.pdf',contentType:'application/pdf; x-unix-mode=0644; name="Invoice.pdf"',inline:false},{filename:'export.csv',contentType:'text/csv',inline:false},
+        {filename:'export.csv',contentType:'text/csv; charset=windows-1252',inline:false},{filename:'server.log',contentType:'text/plain; charset=UTF-8',inline:false},
+        {filename:'report.docx',contentType:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',inline:false},{filename:'report.xls',contentType:'text/plain',inline:false},
+        {filename:'README',contentType:'text/plain',inline:false},{filename:'data.txt',contentType:'application/octet-stream',inline:false}]);
+      // Still refused whatever the labels say: programs, markup and mail, SVG, a name a recipient's system would open by an
+      // extension outside the standard ones, and bytes of no known type under a name that isn't text.
+      assert.deepEqual([app('invoice.pdf','application/pdf',pe),app('photo.png','image/png',Buffer.from('#!/bin/sh\necho hi\n')),app('page.html','text/html',Buffer.from('<p>x</p>')),app('notes.txt','text/plain',bytes.html),
+        app('forwarded.eml','message/rfc822',bytes.mail),app('logo.png','image/png',bytes.svg,true),app('IMG_0001.HEIC','image/heic',bytes.jpeg),app('scan.pdf','application/pdf',unknown),app('blob','application/octet-stream',unknown)],
+        ['ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH']);
+      assert.throws(()=>mailAppAttachment('invoice.pdf','application/pdf',pe,false,true),{code:'ATTACHMENT_CONTENT_MISMATCH',message:'attachment "invoice.pdf" is a Windows program, whatever it is called, and programs are never sent',
+        attachmentTypes:{declaredType:'application/pdf',detectedType:'program',extension:'pdf'}});
+      // Off probation only the picture rules apply: SVG is refused, an inline part goes out inline only as a raster image,
+      // and every other file goes out as labelled, as the API's would.
+      assert.deepEqual([app('attachment','image/png',bytes.png,true,false),app('Invoice.pdf','application/pdf',bytes.pdf,true,false),app('tool.bin','application/x-thing',pe,false,false),app('logo.png','image/png',bytes.svg,false,false)],
+        [{filename:'attachment',contentType:'image/png',inline:true},{filename:'Invoice.pdf',contentType:'application/pdf',inline:false},{filename:'tool.bin',contentType:'application/x-thing',inline:false},'ATTACHMENT_TYPE_UNSCREENABLE']);
       await assert.rejects(async()=>screenedHtml('<div>'.repeat(257)),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
       await assert.rejects(async()=>screenedHtml(`<style>${'*{padding:1px}'.repeat(3000)}</style>${'<p>t</p>'.repeat(5000)}`),{code:'CONTENT_TOO_LARGE_TO_SCREEN'});
       // Ordinary templates: the delivered copy keeps their text, loses sheets and comments, and screens in one request
@@ -28767,6 +28797,89 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(!/\bdir=|direction:/.test(delivered.get('rtlTable')!.html!) && delivered.get('rtlTable')!.html!.includes('<td>o</td><td>n</td>') && screened.get('rtlTable')!.join('').includes('onisac'));
       assert.ok(!delivered.get('minSized')!.html!.includes('min-') && delivered.get('minSized')!.html!.includes('width="1" height="1"'));
       assert.deepEqual([...delivered.get('logoShort')!.files!].sort(),['invoice.pdf','logo.png']);
+    }));
+  });
+
+  test('mail apps on probation: a file goes out as what its bytes are under its own name, a label is never refused, and what no label makes safe is refused in a reply that names the file',async t=>{
+    // A subtest, as the other classifier scenarios, so its fetch mock is lifted before the fixture's own.
+    await simulatedSesFixture(t,async({runtime,db,local,fetch})=>t.test('mail app files',async t=>{
+      const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
+      const wid=runtime.config.workspaceId,acct='112223330041',origin='https://screen.synthetic.invalid',gatewayToken=randomUUID()+randomUUID();
+      runtime.config.hostedSendCaps.firstWeek=10000;
+      const key=ok(await local('POST','/v1/api-keys',{name:'mail app',permissions:['send'],domains:['app.invalid']}),201);secrets.add(key.secret);
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,mailGatewayToken:gatewayToken,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } }});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('app.invalid',$1,$1,'verified')`,[wid]);
+      const store=new Map<string,{body:Uint8Array;contentType:string}>();
+      runtime.storage={put:async(key,body,contentType)=>{store.set(key,{body,contentType});},get:async key=>store.get(key)??null,delete:async()=>{}};
+      const delivered=new Map<string,Json[]>(), lines:Json[]=[];
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),origin);return Response.json({answers:{harm:{noul:0.01}}});});
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};
+        delivered.set(cmd.input.Content.Simple.Subject.Data,(cmd.input.Content.Simple.Attachments??[]).map((a:any)=>({name:a.FileName,type:a.ContentType,disposition:a.ContentDisposition,...a.ContentId?{cid:a.ContentId}:{}})));return {MessageId:randomUUID()};});
+      for (const level of ['info','warn','error'] as const) t.mock.method(console,level,(line:string)=>{try{lines.push(JSON.parse(String(line)));}catch{/* not a log line */}});
+      // The gateway's signed submission, with a message as mail apps write one: text, or HTML with its pictures beside it.
+      const hash=(s:string)=>createHash('sha256').update(s).digest('hex');
+      const submit=async(subject:string,files:string[][],html=false)=>{
+        const words='Here is the file from this morning, with the numbers from last week and my notes from the call. Tell me if anything is missing.';
+        const body=html?['Content-Type: multipart/related; type="text/html"; boundary="rel"','','--rel','Content-Type: text/html; charset=utf-8','',`<p>${words}</p><p>Person<br><img src="cid:logo@app.invalid" width="120" height="40" alt="App"></p>`]
+          :['Content-Type: multipart/mixed; boundary="mix"','','--mix','Content-Type: text/plain; charset=utf-8','',words];
+        const sep=html?'--rel':'--mix';
+        const raw=['From: Person <person@app.invalid>','To: reader@example.net',`Subject: ${subject}`,'MIME-Version: 1.0',...body,...files.flatMap(([bytes,...headers])=>[sep,...headers!,'Content-Transfer-Encoding: base64','',Buffer.from(bytes!,'latin1').toString('base64').replace(/.{76}/g,'$&\r\n')]),`${sep}--`,''].join('\r\n');
+        const rpc=JSON.stringify({op:'submit',kid:key.id,from:'person@app.invalid',to:['reader@example.net'],content:Buffer.from(raw).toString('base64')});
+        const ts=String(Math.floor(Date.now()/1000)),digest=hash(rpc),scope=hash(key.id.toLowerCase());
+        const res=await fetch(new Request(`${PUBLIC_ORIGIN}/internal/v1/mail`,{method:'POST',body:rpc,headers:{'content-type':'application/json','x-bane-content':digest,'x-bane-timestamp':ts,'x-bane-scope':scope,
+          'x-bane-signature':createHmac('sha256',gatewayToken).update(['POST','/internal/v1/mail',ts,digest,scope].join('\n')).digest('hex')}}));
+        return {status:res.status,body:await res.json() as Json,requestId:res.headers.get('x-request-id')};
+      };
+      const latin=(bytes:ArrayLike<number>)=>Buffer.from(bytes as Uint8Array).toString('latin1');
+      const png=latin(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=','base64')),jpeg=latin([0xff,0xd8,0xff,0xe0,0,0x10,0x4a,0x46,0x49,0x46,0,1]);
+      const pdf='%PDF-1.4\n%fixture\n',zip=latin([0x50,0x4b,0x03,0x04,0x14,0,0,0]),pe=latin(Object.assign(new Uint8Array(256),{0:0x4d,1:0x5a,0x3c:0x80,0x80:0x50,0x81:0x45}));
+      // Files as Apple Mail, Outlook, Thunderbird and Gmail label them. The first is a pasted signature picture as mail apps
+      // send one: a Content-ID and no name (stored as "attachment"), which probation refused for its missing extension.
+      const sent:Record<string,{files:string[][];html?:boolean;expect:Json[]}>={
+        signature:{html:true,files:[[png,'Content-Type: image/png','Content-Disposition: inline','Content-ID: <logo@app.invalid>']],expect:[{name:'attachment',type:'image/png',disposition:'INLINE',cid:'logo@app.invalid'}]},
+        inlinePdf:{files:[[pdf,'Content-Disposition: inline;\r\n\tfilename=Invoice.pdf','Content-Type: application/pdf;\r\n\tx-unix-mode=0644;\r\n\tname="Invoice.pdf"','Content-Id: <invoice@app.invalid>']],
+          expect:[{name:'Invoice.pdf',type:'application/pdf',disposition:'ATTACHMENT'}]},
+        inlineNoId:{files:[[pdf,'Content-Disposition: inline;\r\n\tfilename=Quote.pdf','Content-Type: application/pdf;\r\n\tx-unix-mode=0644;\r\n\tname="Quote.pdf"']],expect:[{name:'Quote.pdf',type:'application/pdf',disposition:'ATTACHMENT'}]},
+        outlookCsv:{files:[['Week,Orders\r\n47,312\r\n','Content-Type: application/vnd.ms-excel; name="export.csv"','Content-Disposition: attachment; filename="export.csv"']],expect:[{name:'export.csv',type:'text/csv',disposition:'ATTACHMENT'}]},
+        thunderbirdLog:{files:[['started\nready\n','Content-Type: text/x-log; charset=UTF-8; name="server.log"','Content-Disposition: attachment; filename="server.log"']],expect:[{name:'server.log',type:'text/plain',disposition:'ATTACHMENT'}]},
+        jpgSubtype:{files:[[jpeg,'Content-Type: image/jpg; name="photo.jpg"','Content-Disposition: attachment; filename="photo.jpg"']],expect:[{name:'photo.jpg',type:'image/jpeg',disposition:'ATTACHMENT'}]},
+        otherExtension:{files:[[jpeg,'Content-Type: image/png; name="scan.png"','Content-Disposition: attachment; filename="scan.png"']],expect:[{name:'scan.png',type:'image/jpeg',disposition:'ATTACHMENT'}]},
+        octetDocx:{files:[[zip,'Content-Type: application/octet-stream; name="report.docx"','Content-Disposition: attachment; filename="report.docx"']],expect:[{name:'report.docx',type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document',disposition:'ATTACHMENT'}]},
+      };
+      const ids=new Map<string,string>(), outcome:Record<string,string>={};
+      for (const [subject,{files,html}] of Object.entries(sent)) { const r=await submit(subject,files,html); outcome[subject]=r.status===200?'accepted':r.body.error?.code; if (r.status===200) ids.set(subject,r.body.id); }
+      assert.deepEqual(outcome,Object.fromEntries(Object.keys(sent).map(s=>[s,'accepted'])));
+      // What no label makes safe is refused before anything is sent, in plain words that name each file: the reply the
+      // mail app shows its user (the gateway passes them on as its SMTP reply). The request line logs the types.
+      const program=[pe,'Content-Type: application/pdf; name="invoice.pdf"','Content-Disposition: attachment; filename="invoice.pdf"'], page=['<!DOCTYPE html><p>Sign in</p>','Content-Type: text/html; name="page.html"','Content-Disposition: attachment; filename="page.html"'];
+      const refused:Record<string,{files:string[][];code:string;message:string}>={
+        program:{files:[program],code:'ATTACHMENT_CONTENT_MISMATCH',message:'Message not sent: attachment "invoice.pdf" is a Windows program, whatever it is called, and programs are never sent.'},
+        both:{files:[program,page],code:'ATTACHMENT_CONTENT_MISMATCH',message:'Message not sent: attachment "invoice.pdf" is a Windows program, whatever it is called, and programs are never sent; attachment "page.html" is a web page or XML file, which can\'t be sent while the sender is on probation: send it as a PDF instead.'},
+        svg:{files:[['<svg xmlns="http://www.w3.org/2000/svg"><text>x</text></svg>','Content-Type: image/png; name="logo.png"','Content-Disposition: attachment; filename="logo.png"']],code:'ATTACHMENT_TYPE_UNSCREENABLE',message:'Message not sent: attachment "logo.png" is an SVG image, and SVG images are never sent: send it as a PNG or JPEG instead.'},
+        heic:{files:[[jpeg,'Content-Type: image/heic; name="IMG_0001.HEIC"','Content-Disposition: attachment; filename="IMG_0001.HEIC"']],code:'ATTACHMENT_CONTENT_MISMATCH',message:'Message not sent: attachment "IMG_0001.HEIC" has a name ending in .heic, and while the sender is on probation only images, PDFs, office documents, archives, audio, video and text files can be sent.'},
+        unknown:{files:[[latin([0,1,2,3,4,5,6,7]),'Content-Type: application/pdf; name="scan.pdf"','Content-Disposition: attachment; filename="scan.pdf"']],code:'ATTACHMENT_CONTENT_MISMATCH',message:'Message not sent: attachment "scan.pdf" isn\'t a PDF or any other file type Nightmail recognizes, and while the sender is on probation only files it recognizes can be sent.'},
+      };
+      for (const [subject,{files,code,message}] of Object.entries(refused)) {
+        const r=await submit(subject,files);
+        assert.deepEqual([r.status,r.body.error?.code,r.body.error?.message],[422,code,message],subject);
+      }
+      const logged=lines.find(l=>l.event==='request'&&l.code==='ATTACHMENT_CONTENT_MISMATCH'&&l.route==='/internal/v1/mail');
+      assert.deepEqual([logged?.principal,logged?.attachment],['gateway',{declaredType:'application/pdf',detectedType:'program',extension:'pdf'}]);
+      assert.ok(!lines.some(l=>JSON.stringify(l).includes('invoice.pdf')),'The log names types, never a file.');
+      // A program named as one stays refused before it is stored, as SES refuses it, with words that name it too.
+      const exe=await submit('exe',[[pe,'Content-Type: application/x-msdownload; name="setup.exe"','Content-Disposition: attachment; filename="setup.exe"']]);
+      assert.deepEqual([exe.status,exe.body.error?.code],[422,'UNSUPPORTED_ATTACHMENT_TYPE']);
+      assert.match(exe.body.error.message,/setup\.exe/);
+      // The same picture through the API keeps the API's rule: its caller can name it.
+      const upload=ok(await local('POST','/v1/attachments',{filename:'attachment',contentType:'image/png',content:Buffer.from(png,'latin1').toString('base64'),disposition:'inline',contentId:'logo'},'live',{authorization:`Bearer ${key.secret}`}),201);
+      error(await local('POST','/v1/emails/send',{from:'person@app.invalid',to:'reader@example.net',subject:'api',html:'<p>Here is the file from this morning, with the numbers from last week and my notes from the call.</p><img src="cid:logo" width="120" height="40" alt="App">',attachments:[upload.id]},'live',{authorization:`Bearer ${key.secret}`}),422,'ATTACHMENT_CONTENT_MISMATCH');
+      // Dispatch sends each accepted message's files as their bytes are, under their names.
+      await runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate:initialGate()});
+      const rows=(await db.query('SELECT subject,status,error_code,snapshot->>\'mailApp\' AS app FROM sending_emails WHERE id=ANY($1)',[[...ids.values()]])).rows;
+      assert.deepEqual(Object.fromEntries(rows.map(r=>[r.subject,[r.status,r.error_code,r.app]])),Object.fromEntries(Object.keys(sent).map(s=>[s,['accepted',null,'true']])));
+      assert.deepEqual(Object.fromEntries(Object.keys(sent).map(s=>[s,delivered.get(s)])),Object.fromEntries(Object.entries(sent).map(([s,{expect}])=>[s,expect])));
     }));
   });
 
@@ -33055,8 +33168,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         subject: 'Relay fixture', text: 'Synthetic relay message.\r\n', headers: [{ name: 'Precedence', value: 'first-class' }, { name: 'X-Entity-Ref-ID', value: 'order-42' }] }), 202);
       const row = async (id: string) => (await db.query(`SELECT actor_key_id,status,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,simulated,error_code,suppression_reason,
         snapshot-'text' AS snapshot,snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 AND id=$2`, [wid, id])).rows[0];
-      const sent = await row(relayed.body.id);
-      assert.deepEqual({ ...sent, text: sent.text.trimEnd() }, { ...await row(direct.id), text: 'Synthetic relay message.' });
+      const sent = await row(relayed.body.id), same = await row(direct.id);
+      assert.deepEqual({ ...sent, text: sent.text.trimEnd() }, { ...same, snapshot: { ...same.snapshot, mailApp: true }, text: 'Synthetic relay message.' }, 'The same email, marked as a mail app’s so Hosted judges its files by their bytes.');
       assert.equal(sent.actor_key_id, smtp.id); assert.deepEqual(sent.bcc_addresses, ['hidden@example.net']);
       assert.deepEqual(sent.snapshot.headers, [{ Name: 'Precedence', Value: 'first-class' }, { Name: 'X-Entity-Ref-ID', Value: 'order-42' }], 'Allowed headers pass through, list and threading headers first; Received is Nightmail’s own.');
       // Suppression at accept: a suppressed recipient is refused synchronously on both SMTP relay and sendEmail.
