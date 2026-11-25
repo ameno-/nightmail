@@ -103,14 +103,14 @@
 .email-status__facts:focus-visible { color: var(--color-text); }
 /* The sheets: the delivery above the facts; the checks. */
 .email-detail-sheet .ui-sheet__body { display: flex; flex-direction: column; gap: var(--space-16); }
-.email-fact-list { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); margin: 0; padding-top: var(--space-16); }
+.email-fact-list { display: grid; grid-template-columns: minmax(64px, max-content) minmax(0, 1fr); gap: var(--space-12); margin: 0; padding-top: var(--space-16); }
 .email-fact-list > div { display: contents; }
 .email-fact-list dt { color: var(--color-muted); }
 .email-fact-list dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .email-fact-list .email-sender { flex-wrap: wrap; }
 .email-fact-list__id { display: flex; align-items: center; gap: var(--space-4); }
 /* The ID's copy button makes its row taller: its label sits level with the ID, not above it. */
-.email-fact-list dt:has(+ .email-fact-list__id) { align-self: center; }
+.email-fact-list dt:has(+ .email-fact-list__id, + dd > .received-facts__id) { align-self: center; }
 .email-fact-list__id .identifier { min-width: 0; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; }
 /* A phone: the email from edge to edge, and the status line without the stream (the Details sheet names it). In a dark
    dashboard a light email keeps the page's margins and its corners instead: a sheet on the page, not a white band
