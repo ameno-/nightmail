@@ -37,6 +37,8 @@ function keyLines(origin: string, token: string | null | undefined) {
 
 // domain is undefined when the reader is signed out and the workspace's domains are unknown. setupToken: the token a
 // copy carries, null for its placeholder (the prompt as shown before copying), undefined for a prompt without one.
+// One line in each agent prompt: an agent that hit friction tells us (api/src/feedback.ts), then carries on.
+const feedbackLine = `- If something in ${productName} gets in your way, report it with sendFeedback (POST /v1/feedback): say what would have made it easier, then carry on.`
 export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: { origin: string; domain: Domain | null | undefined; email: string | null; multiTenant: boolean; setupToken?: string | null }) {
   const lines = [
     `Set up ${productName} email in this project.`,
@@ -48,6 +50,7 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     `- Auth: bearer API key from the ${apiKeyEnv} environment variable. Never hardcode it or ship it to a browser.`,
     // The attachment rules up front, so the agent doesn't find them one refused upload or send at a time.
     `- Attachments: ${ATTACHMENT_LIMITS_TEXT} ${ATTACHMENT_RULES_TEXT} A refusal names every attachment problem at once, in error.details.`,
+    feedbackLine,
   ]
   if (domain === undefined) {
     lines.push(`- Sending domain: use a verified domain from Domains in the ${productName} dashboard. Ask me which one before sending.`)
@@ -90,6 +93,7 @@ export function agentInboxPrompt({ origin, address, inboxId, setupToken }: { ori
     `- To be told when mail arrives instead of waiting for it, if your MCP client supports MCP Events (OpenCode does): subscribe to the server's message.received event with {"addressIds":["${inboxId ?? '{id}'}"]}, then read each message it names.`,
     `- Or use the REST API with the key as a bearer token: wait for mail with GET ${messages}?wait=30 (it answers as soon as one arrives) and read one with GET ${messages}/{messageId}.${inboxId ? '' : ` Find the inbox's id with GET ${origin}/v1/inboxes?q=${address}.`}`,
     `- Test it: ask me to send an email to ${address}, wait for it, then tell me who sent it and its subject.`,
+    feedbackLine,
   ].join('\n')
 }
 

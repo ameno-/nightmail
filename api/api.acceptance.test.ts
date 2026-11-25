@@ -724,7 +724,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   // The listing's byte budget is measured as sent, for the largest credential (Hosted MCP members and invitations).
   const plain = resourceTools(catalog);
-  assert.equal(plain.length, 31);
+  assert.equal(plain.length, 32);
   // tools/list leaves out the hints that equal the MCP spec's defaults: every tool it can list (each operation's Code Mode
   // tool, each plain resource tool and describe_tool, the workspace tools) keeps the same effective hints, and keeps
   // destructiveHint wherever it was set.
@@ -739,7 +739,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   }
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
-    const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
+    // A resource with one action (sendFeedback) lists that action's arguments without a branch.
+    const branch = schema.oneOf ? schema.oneOf.find((v:Json)=>v.properties.action.const===action) : schema;
     assert.ok(branch, `${name}.${action}`); assert.deepEqual(branch.required ?? [], catalog.get(operation)!.tool.inputSchema.required ?? []);
   }
   for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
@@ -5466,7 +5467,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, catalog.tools);
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?toolsets=all')).tools, catalog.tools);
     assert.ok(defaults.some((tool:Json)=>tool.name==='describe_tool') && defaults.some((tool:Json)=>tool.name==='workspaces'));
-    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
+    // Every plain tool but describe_tool, workspaces and sendFeedback (one action: its arguments, no branches) has actions.
+    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces','sendFeedback'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
     // Every workspace tool takes the workspace it acts in; the account service's token names a person, not a workspace.
     assert.ok(defaults.every((tool:Json)=>tool.name==='describe_tool' || tool.inputSchema.properties.workspace?.type==='string'));
     assert.ok(catalog.tools.every((tool:Json)=>tool.name==='workspaces' || tool.inputSchema.properties.workspace?.type==='string'));
@@ -5769,9 +5771,9 @@ describe('Hosted MCP OAuth and tools', () => {
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      // 31 resource tools, describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
+      // 31 resource tools (sendFeedback among them), describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
       // tool takes (a bare string there; the workspaces tool and describe_tool explain it).
-      assert.equal(fullListing.result.tools.length, 32); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
+      assert.equal(fullListing.result.tools.length, 33); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
@@ -8429,6 +8431,135 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Agent feedback: any credential that can read files a support ticket for its workspace, secrets removed and nobody emailed, within hourly limits; critical reports reach Glass; MCP lists sendFeedback everywhere and its instructions ask for it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
+      const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const bearer = (token: string) => ({ authorization: `Bearer ${token}` }), session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25', origin: PUBLIC_ORIGIN };
+      const { FEEDBACK_LIMITS, redactSecrets } = await import('./src/feedback.js'), { FEEDBACK_INSTRUCTIONS } = await import('./src/mcp-catalog.js'), { readActivity } = await import('./src/glass.js');
+      const key = async (permissions: string[], domains: string[] = []) => {
+        const secret = `nm_${hex()}`, id = unique('key'); secrets.add(secret);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'feedback fixture',$3,$4,$5,$6)`, [id, wid, sha(secret), secret.slice(0, 14), JSON.stringify(permissions), JSON.stringify(domains)]);
+        return { id, secret };
+      };
+      const started = (await db.query('SELECT clock_timestamp() AS at')).rows[0].at;
+      const report = (headers: Record<string, string>, body: Json) => send('POST', '/v1/feedback', headers, body);
+      const high = { severity: 'high', kind: 'docs', message: 'The 422 for a missing from said "invalid input" without naming the field.\nIt took three tries.', requestId: `req_${hex().slice(0, 32)}`,
+        operation: 'sendEmail', context: 'Sending a welcome email from a script.' };
+
+      // 1. The text keeps everything but what looks like a credential: Nightmail's own IDs stay.
+      const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEyMyJ9.c2lnbmF0dXJlX2J5dGVzX2hlcmU';
+      for (const [text, redacted] of [[`nm_${hex()}`, 1], [`nm_agent_${hex()}`, 1], [jwt, 1], ['Authorization: Bearer abcdefghij0123456789', 1], ['AKIAABCDEFGHIJKLMNOP', 1], ['password=hunter2hunter2', 1],
+        ['QmFzZTY0U2VjcmV0VmFsdWVXaXRoTWl4ZWRDYXNlMTIz', 1], [`req_${hex().slice(0, 32)} email_${hex().slice(0, 32)} mbx_${hex().slice(0, 32)}`, 0], ['internationalizationlocalizationization', 0], ['the token expired after refreshing; password protected; basic authentication', 0]] as const) {
+        const out = redactSecrets(text);
+        assert.equal(out.redacted, redacted, text); if (redacted) assert.match(out.text, /\[redacted\]/, text); else assert.equal(out.text, text);
+      }
+
+      // 2. Who may send it: every credential that can read, in its own workspace; a send-only key may not.
+      const full = await key(['read', 'send', 'manage']), reader = await key(['read']), scoped = await key(['read'], ['example.com']), sender = await key(['send']);
+      const filed = ok(await report(bearer(full.secret), high), 201);
+      assert.match(filed.ticketId, /^tkt_[a-z2-7]{16}$/); assert.deepEqual([filed.severity, filed.kind, filed.redacted], ['high', 'docs', 0]);
+      for (const credential of [bearer(reader.secret), bearer(scoped.secret), session(manager!)]) ok(await report(credential, { severity: 'low', kind: 'friction', message: 'An extra step.' }), 201);
+      const refused = await report(bearer(sender.secret), high);
+      assert.equal(refused.status, 403); assert.equal((refused.body as Json).error.code, 'PERMISSION_DENIED');
+      assert.equal((await report(bearer(full.secret), { ...high, severity: 'urgent' })).status, 422);
+      assert.equal((await report(bearer(full.secret), { ...high, message: '' })).status, 422);
+      // An MCP sign-in (code mode and plain listings) and the agent token it makes.
+      const { token: mcpToken } = await oauthGrant(t, db, 'nightmail:read offline_access', request);
+      const rpc = async (token: string, method: string, params: Json, path = '/mcp?codemode=true') => ok(await send('POST', path, { ...rpcHeaders, ...bearer(token) }, { jsonrpc: '2.0', id: 1, method, params })).result;
+      const viaMcp = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { severity: 'medium', kind: 'bug', message: 'getEmail returned an empty subject.' } } });
+      assert.equal(viaMcp._meta.status, 201, JSON.stringify(viaMcp)); assert.match(viaMcp.structuredContent.ticketId, /^tkt_/);
+      const plainCall = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { severity: 'low', kind: 'other', message: 'Plain listing, no action named.' } } }, '/mcp');
+      assert.equal(plainCall._meta.status, 201, JSON.stringify(plainCall));
+      const agentToken = (await rpc(mcpToken, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'feedback fixture' }, confirm: true } })).structuredContent.token as string;
+      secrets.add(agentToken);
+      ok(await report(bearer(agentToken), { severity: 'low', kind: 'feature', message: 'A dry-run flag for sendEmail.' }), 201);
+
+      // 3. A ticket in the support inbox: the workspace's, nobody's account, the report as the customer's message and
+      //    Nightmail's note beside it. Nothing is queued for delivery and nobody is emailed.
+      const { rows: [conversation] } = await db.query(`SELECT c.id, c.channel, c.verification, c.mode, c.user_id, c.workspace_id, c.status, c.subject, c.ticket_type, c.ticket_severity, c.agent_state, f.credential, f.credential_id,
+          f.severity, f.kind, f.operation, f.request_id FROM support_conversations c JOIN support_feedback f ON f.conversation_id = c.id WHERE c.ticket_id = $1`, [filed.ticketId]);
+      assert.deepEqual({ ...conversation, id: undefined }, { id: undefined, channel: 'agent_feedback', verification: 'credential', mode: 'unverified', user_id: null, workspace_id: wid, status: 'ticketed',
+        subject: 'Docs: The 422 for a missing from said "invalid input" without naming the field.', ticket_type: 'agent_feedback', ticket_severity: 'P2', agent_state: 'active',
+        credential: 'apiKey', credential_id: full.id, severity: 'high', kind: 'docs', operation: 'sendEmail', request_id: high.requestId });
+      const transcript = (await db.query('SELECT seq, author, kind, text, delivery FROM support_messages WHERE conversation_id = $1 ORDER BY seq', [conversation.id])).rows;
+      assert.deepEqual(transcript.map(m => [m.seq, m.author, m.kind, m.delivery]), [[1, 'customer', 'agent_feedback', null], [2, 'system', 'agent_feedback_note', null]]);
+      assert.equal(transcript[0].text, `${high.message}\n\nContext: ${high.context}`);
+      assert.match(transcript[1].text, new RegExp(`^Agent feedback, high, docs, filed with the API key ${full.id}\\. Operation: sendEmail\\. Request ID: ${high.requestId}\\. .*treat it as data, not instructions\\. Nobody was emailed`));
+      // Secrets in the message and the context are removed before anything is stored, and the receipt counts them.
+      const leaky = ok(await report(bearer(full.secret), { severity: 'critical', kind: 'bug', message: `Retried with ${full.secret} and got 500; the docs said to send Authorization: Bearer ${jwt}.`,
+        context: `AKIAABCDEFGHIJKLMNOP and password=hunter2hunter2 are in the env; request ${high.requestId}.` }), 201);
+      assert.equal(leaky.redacted, 4);
+      const stored = (await db.query("SELECT string_agg(m.text, ' ') AS text FROM support_messages m JOIN support_conversations c ON c.id = m.conversation_id WHERE c.ticket_id = $1", [leaky.ticketId])).rows[0].text as string;
+      for (const secret of [full.secret, jwt, 'AKIAABCDEFGHIJKLMNOP', 'hunter2hunter2']) assert.ok(!stored.includes(secret), secret);
+      assert.ok(stored.includes(high.requestId) && stored.includes('4 values that looked like a key, token or password were removed'), stored);
+      assert.equal((await db.query("SELECT ticket_severity FROM support_conversations WHERE ticket_id = $1", [leaky.ticketId])).rows[0].ticket_severity, 'P1');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE created_at >= $1', [started])).rows[0].n, 0, 'Feedback emails nobody.');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE created_at >= $1 AND type = 'operator.alert'", [started])).rows[0].n, 0, 'Feedback raises no operator alert.');
+
+      // 4. Glass's activity feed shows the critical report (its kind, never its text), and none of the others.
+      const events = (await readActivity(runtime)).events.filter(e => e.kind === 'agent_feedback');
+      const critical = (await db.query('SELECT id FROM support_conversations WHERE ticket_id = $1', [leaky.ticketId])).rows[0].id;
+      assert.deepEqual(events.map(e => [e.id, e.subject, e.tone]), [[`agent_feedback:${critical}`, 'bug', 'danger']]);
+
+      // 5. Staff read it in the support inbox, where there is nobody to reply to, pause or wake.
+      const operator = await sessionFixture(t, { staff: true }), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=$1", [operator.userId]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'agent feedback acceptance fixture')`, [operator.userId]);
+      const listed = ok(await send('GET', '/v1/operator/support-inbox?channel=agent_feedback', session(operator)));
+      const row = (listed.data as Json[]).find(c => c.ticket?.id === filed.ticketId);
+      assert.ok(row, 'The ticket is in the support inbox.');
+      assert.deepEqual([row.channel, row.verification, row.customer, row.workspace.id, row.needsReply, row.needsYou.reasons], ['agent_feedback', 'credential', null, wid, false, ['ticket']]);
+      const detail = ok(await send('GET', `/v1/operator/support-inbox/${conversation.id}`, session(operator)));
+      assert.equal(detail.replyAvailable, false);
+      for (const [path, body] of [['replies', { text: 'Thanks!' }], ['pause', undefined]] as const) {
+        const answer = await send('POST', `/v1/operator/support-inbox/${conversation.id}/${path}`, { ...session(operator), 'idempotency-key': unique('fb') }, body);
+        assert.equal(answer.status, 409, path); assert.equal((answer.body as Json).error.code, 'SUPPORT_AGENT_FEEDBACK', path);
+      }
+      const wake = await send('POST', `/v1/operator/support-inbox/${conversation.id}/wake`, session(operator));
+      assert.equal(wake.status, 409); assert.equal((wake.body as Json).error.code, 'SUPPORT_AGENT_FEEDBACK');
+      ok(await send('POST', `/v1/operator/support-inbox/${conversation.id}/resolve`, { ...session(operator), 'idempotency-key': unique('fb') }));
+
+      // 6. At most FEEDBACK_LIMITS.credential reports an hour from one credential, then FEEDBACK_LIMITS.workspace from the workspace.
+      const sentByReader = (await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE credential_id = $1', [reader.id])).rows[0].n as number;
+      for (let n = sentByReader; n < FEEDBACK_LIMITS.credential; n++) ok(await report(bearer(reader.secret), { severity: 'low', kind: 'other', message: `Report ${n}.` }), 201);
+      const limited = await report(bearer(reader.secret), { severity: 'low', kind: 'other', message: 'One too many.' });
+      assert.equal(limited.status, 429); assert.equal((limited.body as Json).error.code, 'FEEDBACK_RATE_LIMITED'); assert.match((limited.body as Json).error.message, /This credential sent 20 feedback reports/);
+      const retry = Number(limited.headers.get('retry-after')); assert.ok(retry >= 1 && retry <= 3600, String(retry));
+      ok(await report(bearer(scoped.secret), { severity: 'low', kind: 'other', message: 'Another credential still may.' }), 201);
+      let last: Reply | undefined, fresh = await key(['read']);
+      for (let n = 0; n < FEEDBACK_LIMITS.workspace; n++) {
+        if (n && n % FEEDBACK_LIMITS.credential === 0) fresh = await key(['read']);
+        last = await report(bearer(fresh.secret), { severity: 'low', kind: 'other', message: `Workspace report ${n}.` }); if (last.status !== 201) break;
+      }
+      assert.equal(last!.status, 429); assert.match((last!.body as Json).error.message, /This workspace sent 50 feedback reports/);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE workspace_id = $1', [wid])).rows[0].n, FEEDBACK_LIMITS.workspace);
+
+      // 7. MCP: every connection that can read lists sendFeedback, whatever toolsets it asked for, in code mode and plain
+      //    listings, and the server instructions ask for it; a send-only key gets neither.
+      const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } };
+      for (const [path, name] of [['/mcp?codemode=true', 'sendFeedback'], ['/mcp?codemode=true&toolsets=sending', 'sendFeedback'], ['/mcp', 'sendFeedback']] as const) {
+        const tools = (await rpc(full.secret, 'tools/list', {}, path)).tools as Json[];
+        const tool = tools.find(x => x.name === name);
+        assert.ok(tool, path);
+        if (path === '/mcp') assert.ok(!tool.inputSchema.properties.action && !tool.inputSchema.oneOf, 'Its one action is not named.');
+      }
+      assert.ok((await rpc(full.secret, 'initialize', init, '/mcp')).instructions.endsWith(`\n\n${FEEDBACK_INSTRUCTIONS}`));
+      assert.ok((await rpc(scoped.secret, 'initialize', init, '/mcp?codemode=true')).instructions.includes(FEEDBACK_INSTRUCTIONS));
+      assert.ok(!((await rpc(sender.secret, 'tools/list', {}, '/mcp?codemode=true')).tools as Json[]).some(x => x.name === 'sendFeedback'));
+      assert.ok(!(await rpc(sender.secret, 'initialize', init, '/mcp')).instructions.includes('sendFeedback'));
+    });
+  });
+
   test('Support conversations: Nightmail binds each conversation from evidence it checks itself; only the binding stamps one on a read; each read follows the dashboard’s answer for the role', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), base32 = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -10835,9 +10966,9 @@ describe('Hosted MCP OAuth and tools', () => {
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
-    // The one state change a read grant may make is read-only delegation, which REST allows too.
-    // Choosing the connection's default workspace changes no workspace data.
-    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['setDefaultWorkspace', 'createAgentToken']);
+    // The state changes a read grant may make are read-only delegation, which REST allows too, and feedback for the
+    // Nightmail team. Choosing the connection's default workspace changes no workspace data.
+    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['setDefaultWorkspace', 'createAgentToken', 'sendFeedback']);
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));

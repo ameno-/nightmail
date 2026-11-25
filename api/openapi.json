@@ -20407,6 +20407,101 @@
           "monthlyCapCents"
         ],
         "additionalProperties": false
+      },
+      "FeedbackReceipt": {
+        "type": "object",
+        "properties": {
+          "ticketId": {
+            "type": "string",
+            "description": "The support ticket it was filed as."
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "bug",
+              "friction",
+              "feature",
+              "docs",
+              "other"
+            ]
+          },
+          "redacted": {
+            "type": "integer",
+            "description": "How many values that looked like keys, tokens or passwords were removed from message and context."
+          },
+          "createdAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "ticketId",
+          "severity",
+          "kind",
+          "redacted",
+          "createdAt"
+        ]
+      },
+      "FeedbackRequest": {
+        "type": "object",
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ],
+            "description": "low: a confusing message or an extra step. medium: needed a workaround. high: a task done only partly or the long way. critical: blocked, wrong data, or a security worry."
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "bug",
+              "friction",
+              "feature",
+              "docs",
+              "other"
+            ],
+            "description": "bug: something behaved wrongly. friction: it worked but took more than it should. feature: something missing. docs: documentation or an error message was wrong or unclear. other: anything else."
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000,
+            "description": "What happened and what would have made it easier. Plain text. Anything that looks like a key, token or password is removed before it is stored."
+          },
+          "requestId": {
+            "type": "string",
+            "pattern": "^req_[0-9a-f]{32}$",
+            "description": "The request ID of a call that went wrong: its x-request-id header, or error.requestId."
+          },
+          "operation": {
+            "type": "string",
+            "pattern": "^[A-Za-z][A-Za-z0-9_.:-]{0,79}$",
+            "description": "The operation or MCP tool involved, such as sendEmail."
+          },
+          "context": {
+            "type": "string",
+            "maxLength": 1000,
+            "description": "What you were trying to do, in a sentence or two."
+          }
+        },
+        "required": [
+          "severity",
+          "kind",
+          "message"
+        ],
+        "additionalProperties": false
       }
     },
     "parameters": {}
@@ -74047,6 +74142,166 @@
           }
         ]
       }
+    },
+    "/v1/feedback": {
+      "post": {
+        "operationId": "sendFeedback",
+        "tags": [
+          "Feedback"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "summary": "Tell Nightmail what got in your way",
+        "description": "Report something in Nightmail that caused friction while doing a task: from low (a confusing message, an extra step) through medium and high to critical (blocked, wrong data, a security worry). Say what would have made it easier, and pass the request ID of a call that went wrong if you have one. It is filed as a support ticket for the Nightmail team, who read every one; nobody is emailed and no reply comes back, so carry on with the task after sending it.\n\nAny credential that can read may send it (API keys, including ones limited to sender domains, agent tokens and MCP sign-ins), for its own workspace: at most 20 reports an hour from one credential and 50 from one workspace (429 FEEDBACK_RATE_LIMITED, with Retry-After). Anything in message or context that looks like a key, token or password is removed before it is stored; redacted says how many. Send one report per distinct problem.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FeedbackReceipt"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "configuration",
+          "level": "read",
+          "text": "Needs Configuration: read."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendFeedback } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendFeedback({\n  client,\n  body: {\n    \"severity\": \"low\",\n    \"kind\": \"bug\",\n    \"message\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/feedback' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"severity\": \"low\",\n  \"kind\": \"bug\",\n  \"message\": \"example\"\n}'"
+          }
+        ]
+      }
     }
   },
   "webhooks": {},
@@ -74110,6 +74365,9 @@
     },
     {
       "name": "Workspaces"
+    },
+    {
+      "name": "Feedback"
     },
     {
       "name": "Auth"
