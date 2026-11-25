@@ -28671,8 +28671,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Still refused whatever the labels say: programs, markup and mail, SVG, a name a recipient's system would open by an
       // extension outside the standard ones, and bytes of no known type under a name that isn't text.
       assert.deepEqual([app('invoice.pdf','application/pdf',pe),app('photo.png','image/png',Buffer.from('#!/bin/sh\necho hi\n')),app('page.html','text/html',Buffer.from('<p>x</p>')),app('notes.txt','text/plain',bytes.html),
-        app('forwarded.eml','message/rfc822',bytes.mail),app('logo.png','image/png',bytes.svg,true),app('IMG_0001.HEIC','image/heic',bytes.jpeg),app('scan.pdf','application/pdf',unknown),app('blob','application/octet-stream',unknown)],
-        ['ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH']);
+        app('forwarded.eml','message/rfc822',bytes.mail),app('logo.png','image/png',bytes.svg,true),app('IMG_0001.HEIC','image/heic',bytes.jpeg),app('scan.pdf','application/pdf',unknown),app('blob','application/octet-stream',unknown),
+        app('report.doc','application/msword',Buffer.from('Quarterly report\r\n<html><body><a href="https://pay.example">Pay now</a></body></html>'))],
+        ['ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_TYPE_UNSCREENABLE','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_CONTENT_MISMATCH','ATTACHMENT_TYPE_UNSCREENABLE']);
       assert.throws(()=>mailAppAttachment('invoice.pdf','application/pdf',pe,false,true),{code:'ATTACHMENT_CONTENT_MISMATCH',message:'attachment "invoice.pdf" is a Windows program, whatever it is called, and programs are never sent',
         attachmentTypes:{declaredType:'application/pdf',detectedType:'program',extension:'pdf'}});
       // Off probation only the picture rules apply: SVG is refused, an inline part goes out inline only as a raster image,

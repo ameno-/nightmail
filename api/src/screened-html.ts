@@ -221,11 +221,23 @@ export function mailAppAttachment(filename: string, contentType: string, bytes: 
   if (extension && !named) throw refuse('ATTACHMENT_CONTENT_MISMATCH', `has a name ending in .${extension}, and ${PROBATION} only ${STANDARD_KINDS} can be sent`);
   // Bytes of no type this reader knows go out only under a text type's name, as screenedAttachment lets them.
   const unknown = !found && !textBytes(bytes), textName = named && !named.family;
+  // Text under an office or other binary format's name opens in the app that name picks, and Word and Excel render the
+  // markup they find anywhere in it, past whatever text comes first.
+  if (!found && !unknown && named?.family && tagged(bytes))
+    throw refuse('ATTACHMENT_TYPE_UNSCREENABLE', `is a web page or XML file, which can't be sent ${PROBATION}: send it as a PDF instead`);
   if (unknown && !textName) throw refuse('ATTACHMENT_CONTENT_MISMATCH', `isn't ${named?.family ? `${FAMILY_NAMES[named.family]} or any other` : 'any'} file type Nightmail recognizes, and ${PROBATION} only files it recognizes can be sent`);
   const delivered = found ? familyType(found, extension, type) : unknown ? 'application/octet-stream' : textName ? named.types.includes(type) ? type : named.types[0]! : 'text/plain';
   return { filename: screenedName(filename), contentType: sameType(contentType, delivered), inline: inline && raster };
 }
 export type DeliveredAttachment = { filename: string; contentType: string; inline: boolean };
+/** Bytes with a markup tag anywhere: '<' then a letter, '/', '!' or '?'. */
+function tagged(bytes: Uint8Array) {
+  for (let i = bytes.indexOf(0x3c); i >= 0 && i < bytes.length - 1; i = bytes.indexOf(0x3c, i + 1)) {
+    const next = bytes[i + 1]! | 0x20;
+    if ((next >= 0x61 && next <= 0x7a) || bytes[i + 1] === 0x2f || bytes[i + 1] === 0x21 || bytes[i + 1] === 0x3f) return true;
+  }
+  return false;
+}
 /** The type a family's bytes go out as: the declared one when it is one of the family's types, else the one the name's
  *  extension gives the family, else the family's own (FAMILY_TYPES). */
 function familyType(found: Family, extension: string, type: string) {
