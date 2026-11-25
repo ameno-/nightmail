@@ -24555,6 +24555,71 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }));
   });
 
+  test('built-in domain: a send while the domain is still being set up, by its job as well as by the request that made the workspace, is held until it is ready and then queued once; a setup that stopped is refused plainly',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
+      const [{runDispatcher},{SESv2Client,GetAccountCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,SendEmailCommand},builtin]=await Promise.all([
+        import('./src/dispatcher.js'),import('@aws-sdk/client-sesv2'),import('./src/builtin-domain.js')]);
+      const wid=runtime.config.workspaceId,acct='111122227777',oh='us-east-2',parent='nightmail-fixture.email',topic=`arn:aws:sns:${oh}:${acct}:bane-feedback`;
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'fixture-setup-hold',secretAccessKey:'fixture-only'},builtinDomain:parent,builtinScope:'members',platformAccount:undefined,hostedScreen:false,screen:undefined});
+      await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket,inbound_topic_arn,receiving_state) VALUES($1,$2,$3,'ready',$4,$5,'ready')`,[oh,acct,topic,'setup-hold-mail',`arn:aws:sns:${oh}:${acct}:bane-inbound`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
+      const verifiedParent={IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningAttributesOrigin:'AWS_SES',SigningEnabled:true,Status:'SUCCESS',Tokens:['a','b','c']},
+        MailFromAttributes:{MailFromDomain:`bounce.${parent}`,MailFromDomainStatus:'SUCCESS'},Tags:[{Key:'bane:purpose',Value:'builtin-domains'}],Policies:{},FeedbackForwardingStatus:false};
+      await db.query('INSERT INTO builtin_parent(name,ok,ses,checked_at) VALUES($1,true,$2,now())',[parent,JSON.stringify(verifiedParent)]);
+      const sent:Json[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
+        if(cmd instanceof GetEmailIdentityCommand)return verifiedParent;
+        if(cmd instanceof CreateTenantResourceAssociationCommand)return {};
+        assert.ok(cmd instanceof SendEmailCommand,cmd.constructor.name);sent.push(cmd.input);return {MessageId:unique('ses')};
+      });
+      const pace=()=>db.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+      const host=(await builtin.allocateBuiltinDomain(runtime.db,runtime.config,wid,'Acme'))!,from=`hello@${host}`;
+      const claim=async()=>(await db.query('SELECT sending_state FROM domain_claims WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0]?.sending_state;
+      const setUpAgain=async(job:'pending'|'failed')=>{await db.query("UPDATE domain_claims SET sending_state='pending' WHERE workspace_id=$1 AND name=$2",[wid,host]);
+        await db.query("UPDATE jobs SET status=$2,available_at=now() WHERE id=$1",['domain.builtin:'+wid,job]);};
+      const sleep=(ms:number)=>new Promise(resolve=>setTimeout(resolve,ms));
+
+      // 1. The domain exists and its job sets it up (no request doing it inline, as when onboarding chose Hosted mail itself).
+      await builtin.ensureBuiltinDomain(runtime,wid);
+      assert.equal(await claim(),'pending');
+      assert.equal(ok(await local('GET','/v1/me')).connection.builtinDomain.sending,'pending');
+
+      // 2. An agent's first send in those seconds, and its retry with the same Idempotency-Key, both wait for the setup and
+      //    are then accepted: one email, queued as any send, sent once.
+      const key=unique('setup-hold'),mail={from,to:AUTH_EMAIL,subject:'First send',text:'Sent while the domain was still being set up.'};
+      const t0=Date.now(),first=local('POST','/v1/emails/send',mail,'live',{'idempotency-key':key}),again=local('POST','/v1/emails/send',mail,'live',{'idempotency-key':key});
+      await sleep(600);
+      assert.equal(await claim(),'pending','Nothing is accepted before the domain is ready.');
+      await pace();await run('domain.builtin');
+      assert.equal(await claim(),'verified');
+      const [a,b]=[ok(await first,202),ok(await again,202)],held=Date.now()-t0;
+      t.diagnostic(`A send while the domain was set up was held ${held} ms, then accepted`);
+      assert.ok(held>=600,String(held));assert.equal(a.id,b.id,'The retry is the same email.');
+      assert.deepEqual((await db.query("SELECT status FROM sending_emails WHERE workspace_id=$1 AND subject='First send'",[wid])).rows,[{status:'queued'}]);
+      await runDispatcher(runtime,{region:oh,accountId:acct});await runDispatcher(runtime,{region:oh,accountId:acct});
+      assert.equal(sent.filter(s=>JSON.stringify(s).includes('First send')).length,1,'Sent once.');
+      assert.notEqual((await db.query('SELECT status FROM sending_emails WHERE id=$1',[a.id])).rows[0].status,'queued');
+
+      // 3. The dashboard's test email is held the same way.
+      await setUpAgain('pending');
+      const domainId=(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id;
+      const test=local('POST',`/v1/domains/${domainId}/test-send`,undefined,'live',{'idempotency-key':unique('test-send')});
+      await sleep(400);await db.query("UPDATE domain_claims SET sending_state='verified' WHERE workspace_id=$1 AND name=$2",[wid,host]);
+      assert.equal(ok(await test,202).status,'queued');
+
+      // 4. Past the wait it is a plain, retryable 503; a setup that stopped (its job failed, the parent healthy) is a plain
+      //    409 at once, not a refusal about the domain's DNS.
+      await setUpAgain('pending');
+      await assert.rejects(builtin.awaitBuiltinSetup(runtime,wid,300),(e:any)=>e.status===503&&e.code==='BUILTIN_DOMAIN_SETTING_UP'&&e.retryable===true);
+      await setUpAgain('failed');
+      const t1=Date.now(),failed=error(await local('POST','/v1/emails/send',{...mail,subject:'After a failed setup'}),409,'BUILTIN_DOMAIN_UNAVAILABLE');
+      assert.ok(Date.now()-t1<2000,'Refused at once.');assert.match(failed.message,/couldn’t finish setting it up/);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND subject='After a failed setup'",[wid])).rows[0].n,0);
+    }));
+  });
+
   test('built-in domain breaker: all built-in mail over 5% permanent bounces or 0.1% complaints, even without its worst workspace, stops every built-in domain sending, not receiving, pages the reputation channel, and stays tripped until an operator resets it; one workspace alone only alerts',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
       const [{runDispatcher},{SESv2Client,GetAccountCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,SendEmailCommand},builtin,{reputationAlertJobs},{JobDeferred}]=await Promise.all([

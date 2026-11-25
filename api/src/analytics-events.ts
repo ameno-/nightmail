@@ -8,8 +8,8 @@ export const ANALYTICS_EVENT_TYPES = ['page_view', 'page_hide', 'click', 'dialog
 export type AnalyticsEventType = typeof ANALYTICS_EVENT_TYPES[number];
 /** The funnel steps the dashboard reports with track(). focus_chosen names the picks, the lead first: focus/agents/developer,
  *  or focus/skip; or landing/agents[/<comparison page slug>] for a focus a landing link brought. onboarding names a step
- *  and what happened on it: email/shown, email/sent, email/replied, email/skip, focus/shown, focus/skip,
- *  next/<focus>/shown and finished. */
+ *  and what happened on it: start/shown (Get started) and finished. Before 26 Nov 2026 it also named email/shown,
+ *  email/sent, email/replied, email/skip, focus/shown, focus/skip and next/<focus>/shown (screens Get started replaced). */
 export const FUNNEL_STEPS = ['signed_up', 'domain_added', 'domain_verified', 'first_send', 'key_created', 'inbox_created', 'campaign_sent', 'byo_connected', 'focus_chosen', 'onboarding'] as const;
 export type FunnelStep = typeof FUNNEL_STEPS[number];
 /** Why a field failed the browser's own validation: a ValidityState flag, never the value. */
