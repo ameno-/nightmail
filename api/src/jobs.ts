@@ -110,12 +110,13 @@ const ingestSlots=36;
 let ingestReserved=0;
 let hookCursor='';
 export type JobHandlerResolver = Record<string, JobHandler> | ((type: string) => Promise<JobHandler | undefined> | JobHandler | undefined);
-export type JobPool = 'all' | 'work' | 'webhooks';
-const classes = (pool: JobPool) => pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool === 'all' ? ['hook'] : [])];
+export type JobPool = 'all' | 'work' | 'webhooks' | 'ingest';
+const classes = (pool: JobPool) => pool === 'ingest' ? [] : pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool === 'all' ? ['hook'] : [])];
 const jobDue = sql`CASE WHEN j.status='running' THEN j.lease_until ELSE j.available_at END`;
 export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver, limit = 1, concurrency = 1, maxDurationMs = 20000, pool: JobPool = 'all') {
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
   const effectiveConcurrency = jobConcurrency(concurrency);
+  const hooks = pool === 'all' || pool === 'webhooks';
   const laneJobs = Array<number>(effectiveConcurrency).fill(0);
   const freeLanes = new Set(laneJobs.map((_, index) => index));
   const active = new Set<Promise<void>>();
@@ -268,7 +269,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       // Bound owner probes even if every job belongs to a different owner in
       // backoff. Include the due-index head so a cold cursor never reports
       // idle while work exists beyond this fair page.
-      const hookPage=pool==='work'?sql``:sql`owners(wid,step) AS (
+      const hookPage=!hooks?sql``:sql`owners(wid,step) AS (
         (SELECT workspace_id,1 FROM jobs WHERE ${hookOwners} AND workspace_id>${hookCursor} ORDER BY workspace_id LIMIT 1) UNION ALL
         SELECT h.workspace_id,step+1 FROM owners CROSS JOIN LATERAL (SELECT workspace_id FROM jobs WHERE ${hookOwners} AND workspace_id>wid ORDER BY workspace_id LIMIT 1) h WHERE step<${4*claimBatchSize}
       ),`;
@@ -285,7 +286,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       let claimed:{rows:(Claimed & {hook_cursor?:string})[]}|undefined;
       try { claimed = await runtime.db.execute<Claimed>(sql`WITH RECURSIVE ${hookPage} exhausted AS (
         SELECT j.id,j.workspace_id,CASE WHEN starts_with(j.type,'campaign.') THEN j.payload->>'campaignId' END AS campaign_id,CASE WHEN j.type='sending.release' THEN j.payload->>'emailId' END AS email_id
-        FROM jobs j WHERE j.status='running' AND j.lease_until < now() AND ${exhausted} ORDER BY j.lease_until,j.id LIMIT 100 FOR UPDATE SKIP LOCKED
+        FROM jobs j WHERE j.status='running' AND j.lease_until < now() AND ${exhausted} ${pool==='ingest'?sql`AND j.type='mailbox.ingest'`:sql``} ORDER BY j.lease_until,j.id LIMIT 100 FOR UPDATE SKIP LOCKED
       ), parents AS MATERIALIZED (
         SELECT c.workspace_id,c.id FROM sending_campaigns c WHERE (c.workspace_id,c.id) IN (SELECT workspace_id,campaign_id FROM exhausted)
         ORDER BY c.id FOR NO KEY UPDATE SKIP LOCKED
@@ -301,7 +302,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       deliveries_failed AS (UPDATE operation_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f
         WHERE f.type='operation.webhook' AND d.workspace_id=f.workspace_id AND d.id=f.payload->>'deliveryId' AND to_jsonb(d.generation)=f.payload->'generation' AND d.status='pending'), mailbox_failed AS (
         UPDATE mailbox_webhook_deliveries d SET status='failed',last_error='JOB_LEASE_EXHAUSTED',updated_at=now() FROM failed f WHERE f.type='mailbox.webhook' AND d.id=f.payload->>'deliveryId' AND d.workspace_id=f.workspace_id AND d.status='pending' AND d.generation=coalesce((f.payload->>'generation')::int,0)), feedback AS (
-        SELECT id FROM (${head('feedback', pool!=='webhooks' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
+        SELECT id FROM (${head('feedback', pool!=='webhooks' && pool!=='ingest' && effectiveConcurrency > 1 && activeFeedback === 0 ? 1 : 0)}) f
       ), ingest_head AS MATERIALIZED (
         SELECT t.workspace_id FROM mail_ingest_turns t WHERE t.active>0 AND EXISTS(
           SELECT FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})))
@@ -309,7 +310,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
       ), ingest_first AS MATERIALIZED (
         SELECT h.id FROM ingest_head t CROSS JOIN LATERAL (SELECT j.id FROM jobs j WHERE j.workspace_id=t.workspace_id AND j.type='mailbox.ingest' AND j.status IN ('pending','running') AND ${jobDue}<=now() AND (j.status='pending' OR NOT (${exhausted})) ORDER BY ${jobDue},j.id LIMIT 1 FOR UPDATE OF j SKIP LOCKED) h
       ), regular AS MATERIALIZED (
-        SELECT j.id FROM (${sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
+        SELECT j.id FROM (${pool==='ingest'?sql`SELECT NULL::text AS id,NULL::text AS type,NULL::timestamptz AS available_at WHERE false`:sql.join(classes(pool).map(kind=>sql`SELECT * FROM (${head(kind,claimBatchSize)}) page`),sql` UNION ALL `)}) j
         WHERE NOT EXISTS (SELECT 1 FROM feedback f WHERE f.id = j.id)
         ORDER BY CASE WHEN j.type IN ('operation.ses','operation.simulatedFeedback','operation.simulatedFeedbackRecovery','operation.publish','operation.publishBatch') THEN 1 ELSE 0 END,
           CASE WHEN ${Math.floor((rotation + claimRequests) / 4) % 2}::int = CASE WHEN starts_with(j.type, 'campaign.') THEN 1 ELSE 0 END THEN 0 ELSE 1 END,
@@ -348,12 +349,12 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
           -- attempt dead-letters it.
           payload = CASE WHEN jobs.type='mailbox.webhook' AND NOT jobs.payload ? 'maxAttempts' THEN jobs.payload||coalesce((SELECT jsonb_build_object('maxAttempts',1+h.retry_attempts,'fenced',d.routed OR d.payload ? 'ritualAction') FROM mailbox_webhook_deliveries d JOIN mailbox_webhooks h ON h.id=d.webhook_id WHERE d.workspace_id=jobs.workspace_id AND d.id=jobs.payload->>'deliveryId'),jsonb_build_object('maxAttempts',${WEBHOOK_ATTEMPTS}::int)) ELSE jobs.payload END
         FROM due WHERE jobs.id = due.id RETURNING jobs.*,jobs.lease_until::text AS lease_fence), served AS (INSERT INTO mail_ingest_turns(workspace_id,served_at) SELECT DISTINCT ON (workspace_id) workspace_id,clock_timestamp() FROM claimed WHERE type='mailbox.ingest' AND workspace_id IN (SELECT workspace_id FROM ingest_head) ORDER BY workspace_id
-          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${pool==='work'?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
+          ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at), ${!hooks?sql``:sql`hook_served AS (INSERT INTO webhook_turns SELECT DISTINCT workspace_id,statement_timestamp() FROM claimed WHERE public.job_class(type)='hook' ORDER BY 1
           ON CONFLICT(workspace_id) DO UPDATE SET served_at=excluded.served_at),`} ${webhookClaimCtes},${inboundHookClaim}
-        SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,${pool==='work'?sql`NULL`:sql`(SELECT wid FROM owners WHERE step=${claimBatchSize*4})`} AS hook_cursor,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest,${runtime.config.multiTenant ? sql`CASE WHEN j.type='mail.deleteObjects' AND strpos(j.payload->>'bucket',':')=0 THEN ${storageBinding(sql`j.workspace_id`,sql`j.payload->>'region'`,sql`j.payload->>'bucket'`)} END` : sql`NULL`} AS delete_binding FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
+        SELECT j.id,j.workspace_id,j.type,j.payload,j.attempts,j.lease_fence,${!hooks?sql`NULL`:sql`(SELECT wid FROM owners WHERE step=${claimBatchSize*4})`} AS hook_cursor,coalesce(to_jsonb(h),to_jsonb(mh)) AS webhook,CASE WHEN j.type='mailbox.ingest' THEN ${ingestInput(runtime.config,sql`j.workspace_id`,sql`j.payload->>'sesMessageId'`)} END AS ingest,${runtime.config.multiTenant ? sql`CASE WHEN j.type='mail.deleteObjects' AND strpos(j.payload->>'bucket',':')=0 THEN ${storageBinding(sql`j.workspace_id`,sql`j.payload->>'region'`,sql`j.payload->>'bucket'`)} END` : sql`NULL`} AS delete_binding FROM claimed j ${hookJoin} LEFT JOIN inbound_hooks mh ON mh.job_id=j.id AND mh.blocked IS NULL`); }
       finally { ingestReserved-=slots-(claimed?.rows.filter(j=>j.type==='mailbox.ingest').length??0); }
       claimRequests++;
-      if(pool!=='work')hookCursor=claimed.rows[0]?.hook_cursor??'';
+      if(hooks)hookCursor=claimed.rows[0]?.hook_cursor??'';
       const claimMs = Date.now() - claimStarted;
       if (!claimed.rows.length) {
         // A finishing handler can enqueue more work after the claim's snapshot.

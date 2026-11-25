@@ -1587,8 +1587,9 @@ function registerPublicEvents(app: App) {
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
     // Mailbox receipt notifications arrive on a separate Nightmail-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
-      const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
-      if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
+      const {acceptInboundNotification,wakeReceivedMail}=await wrapModuleLoad(() => import('./mailbox-receipts.js'));
+      const runnable = await acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
+      try { await wakeReceivedMail(c.env,runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
     // An SES tenant status event (EventBridge) has no mail object: it is judged by its topic, account, region and an

@@ -197,6 +197,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
+    // SES owns its two lanes: a newly queued inbound receipt starts ingest; sending feedback uses its own queue.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
     const actor = c.get('actor'), targets = actor?.dispatchTargets;
