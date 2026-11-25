@@ -7014,6 +7014,10 @@ export type GetCurrentIdentityResponses = {
         mcpScopes: Array<string>;
         connection: ConnectionSummary;
         /**
+         * A hosted dashboard session in a workspace made seconds ago whose Hosted mail (its connection and built-in domain) is still being written: starting. Read /v1/me again shortly; null otherwise.
+         */
+        hostedSetup?: 'starting' | null;
+        /**
          * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
          */
         focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;

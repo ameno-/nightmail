@@ -505,7 +505,7 @@ export async function startHostedMail(runtime: Runtime, wid: string, context: Au
  * A new workspace's Hosted mail, started after the request that made it has answered (the sign-up callback, a new
  * workspace): its connection and built-in domain rows, then its SES setup, all on the Worker's waitUntil (runtime.detach),
  * on Node without being awaited. The jobs startHostedMail queues are the fallback, and onboarding starts Hosted mail
- * itself if even the rows were never written. Until they are, the workspace's /v1/me waits for them (awaitHostedStart).
+ * itself if even the rows were never written. Until they are, the workspace's /v1/me says so at once (hostedSetup).
  */
 export function startHostedMailAfter(runtime: Runtime, wid: string, context: AuditContext) {
   const run = async (rt: Runtime) => {
@@ -514,27 +514,12 @@ export function startHostedMailAfter(runtime: Runtime, wid: string, context: Aud
   };
   return runtime.detach ? runtime.detach(run) : run(runtime);
 }
-/** How long a new workspace's first reads wait for the Hosted mail its sign-up starts after answering, and for how long
- *  after the workspace was made. */
-export const HOSTED_START_WAIT = { ms: 2000, freshSeconds: 15 } as const;
 /**
- * connectionSummary for /v1/me, which a new workspace reads while its sign-up's Hosted mail is still being written
- * (startHostedMailAfter, a few hundred ms): a workspace made in the last 15 s without its connection or built-in domain
- * waits for them, up to 2 s, re-reading every 100 ms, so onboarding opens on "Your domain is ready" rather than a choice
- * or a form. Any other workspace answers at once (one more read only when its summary has no built-in domain).
+ * For how long after a workspace is made GET /v1/me says its Hosted mail is still starting (hostedSetup: 'starting') while
+ * its connection or built-in domain isn't written yet: the sign-up writes them after answering (startHostedMailAfter, a few
+ * hundred ms). Onboarding reads /v1/me again meanwhile; after it, onboarding starts Hosted mail itself (createConnection).
  */
-export async function settledConnectionSummary(runtime: Runtime, wid: string) {
-  const summary = await connectionSummary(runtime, wid);
-  if (!runtime.config.multiTenant || !runtime.config.builtinDomain || (summary && summary.builtinDomain)) return summary;
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  for (const deadline = Date.now() + HOSTED_START_WAIT.ms; Date.now() < deadline; await sleep(100)) {
-    const { rows: [row] } = await runtime.db.execute<{ fresh: boolean; ready: boolean }>(sql`SELECT w.created_at > now() - make_interval(secs => ${HOSTED_START_WAIT.freshSeconds}) AS fresh,
-      EXISTS (SELECT FROM provider_connections c WHERE c.workspace_id=w.id) AND EXISTS (SELECT FROM builtin_domains b WHERE b.workspace_id=w.id) AS ready FROM workspaces w WHERE w.id=${wid}`);
-    if (!row?.fresh) return summary;
-    if (row.ready) return connectionSummary(runtime, wid);
-  }
-  return connectionSummary(runtime, wid);
-}
+export const HOSTED_STARTING_SECONDS = 15;
 export function registerProviderConnections(app: App) {
   const path = '/v1/connection';
   app.openapi(createRoute({ method: 'get', path, operationId: 'getConnection', tags, security, description: 'Get the current MX workspace connection or null. Poll during BYO setup for awaiting_role, provisioning, ready or failed and the imported domain count. Owner/admin dashboard only.', responses: { 200: response(z.object({ connection: z.union([Connection, z.null()]) })), ...errors } }), async c => {

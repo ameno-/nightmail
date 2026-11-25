@@ -167,8 +167,16 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
       if (next === 'shared') shared.mutate(undefined, { onError: () => setPicked(null) })
     })()
   }
+  // A workspace made seconds ago whose sign-up is still writing its Hosted mail (GET /v1/me's hostedSetup): the session is
+  // read again until it is there, rather than starting Hosted mail here as well.
+  const starting = identity?.hostedSetup === 'starting'
+  useEffect(() => {
+    if (!starting) return
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') refreshIdentity() }, 250)
+    return () => clearInterval(timer)
+  }, [starting]) // eslint-disable-line react-hooks/exhaustive-deps
   // Without a choice to make, a workspace with no connection starts Hosted mail at once, as choosing it would.
-  const autoHosted = sending && !offerByo && !picked && connection.data === null
+  const autoHosted = sending && !offerByo && !picked && !starting && connection.data === null
   useEffect(() => { if (autoHosted && !shared.error) choose('shared') }, [autoHosted, shared.error]) // eslint-disable-line react-hooks/exhaustive-deps
   const flow: ConnectionKind | null = sending ? picked ?? current?.kind ?? (offerByo ? null : 'shared') : identity?.connection?.kind ?? null
   const ready = stage.step !== 'sending'
@@ -227,6 +235,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
       ? <ConnectAwsRegional connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} onChosen={chooseRegional} />
       : <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} />
   }
+  else if (starting && !picked && (sending || (choosingDomain && !builtin?.id))) { view = 'loading'; content = <BootLoader inline /> }
   else if (autoHosted && shared.error) { view = 'error'; content = <HostedError error={shared.error} onRetry={() => shared.reset()} /> }
   else if (sending && !picked && connection.error) { view = 'error'; content = <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> }
   else if ((sending && !picked && connection.isPending) || (choosingDomain && flow === 'byo' && connection.isPending)) { view = 'loading'; content = <BootLoader inline /> }

@@ -23733,16 +23733,23 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.diagnostic(`A send in the domain's first seconds waited ${Date.now()-t1} ms for its setup`);
       assert.ok(early.id);assert.equal(await claim(own),'verified');await rc.started;
 
-      // 4. The sign-up answers before its Hosted mail is even written (startHostedMailAfter): the new workspace's /v1/me waits
-      //    for the rows instead of showing no connection or no domain, and any other workspace without them answers at once.
-      const {settledConnectionSummary,startHostedMailAfter,HOSTED_START_WAIT}=await import('./src/provider-connections.js');
-      const d=await signUp(),late=new Promise(resolve=>setTimeout(resolve,300)).then(()=>startHostedMailAfter(runtime,d.wid,d.context));
-      const t2=Date.now(),settled=await settledConnectionSummary(runtime,d.wid),waited=Date.now()-t2;
-      t.diagnostic(`A new workspace's first /v1/me waited ${waited} ms for the Hosted mail its sign-up wrote after answering`);
-      assert.ok(settled?.builtinDomain,'It answers with the built-in domain.');assert.ok(waited>=250&&waited<HOSTED_START_WAIT.ms,String(waited));
-      await late;assert.equal(await claim(d.wid),'verified');
-      const old=await signUp();await db.query("UPDATE workspaces SET created_at=now()-interval '1 minute' WHERE id=$1",[old.wid]);
-      const t3=Date.now();assert.equal(await settledConnectionSummary(runtime,old.wid),null);assert.ok(Date.now()-t3<250,'An older workspace answers at once.');
+      // 4. The sign-up answers before its Hosted mail is even written (startHostedMailAfter). The new workspace's /v1/me never
+      //    waits for it: it answers at once that it is starting (onboarding reads it again), then with the built-in domain once
+      //    it is written. An older workspace without it never says starting (onboarding then starts Hosted mail itself).
+      const {startHostedMailAfter}=await import('./src/provider-connections.js');
+      const session=async(user:string)=>{const token=createHash('sha256').update(randomUUID()).digest('base64url');secrets.add(token);
+        const issuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
+        await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$2) ON CONFLICT DO NOTHING',[issuer,user]);
+        await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,expires_at) VALUES($1,$2,$3,$2,now()+interval '1 hour')",[createHash('sha256').update(token).digest('hex'),user,issuer]);
+        return async()=>ok(await local('GET','/v1/me',undefined,'live',{cookie:`${COOKIE_NAME}=${token}`}));};
+      const d=await signUp(),meD=await session(d.context.actor.userId);
+      const t2=Date.now(),first=await meD(),firstMs=Date.now()-t2;
+      t.diagnostic(`A new workspace's first /v1/me answered in ${firstMs} ms before its Hosted mail was written`);
+      assert.deepEqual([first.workspaceId,first.connection,first.hostedSetup],[d.wid,null,'starting']);assert.ok(firstMs<250,String(firstMs));
+      await startHostedMailAfter(runtime,d.wid,d.context);assert.equal(await claim(d.wid),'verified');
+      const then=await meD();assert.equal(then.hostedSetup,null);assert.equal(then.connection.builtinDomain.sending,'ready');
+      const old=await signUp(),meOld=await session(old.context.actor.userId);await db.query("UPDATE workspaces SET created_at=now()-interval '1 minute' WHERE id=$1",[old.wid]);
+      const later=await meOld();assert.deepEqual([later.connection,later.hostedSetup],[null,null],'An older workspace without Hosted mail is not starting.');
     }));
   });
 
