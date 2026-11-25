@@ -31,6 +31,29 @@ export function setPrivacy(on: boolean) {
   publish()
 }
 export const togglePrivacy = () => setPrivacy(!preference)
+// Reading one address while privacy mode is on: hold ⇧ (Shift) and point at it (components/PrivateAddress.tsx). Pointing
+// alone never reveals one, so moving the pointer across a list on a shared screen shows nothing. The root carries data-peek
+// while ⇧ is held, for fields that blur with CSS (app.css .private-field). ⇧ held to type a capital in a field doesn't count.
+const peekListeners = new Set<() => void>()
+let peeking = false
+function setPeek(on: boolean) {
+  if (on === peeking) return
+  peeking = on
+  if (on) document.documentElement.dataset.peek = ''
+  else delete document.documentElement.dataset.peek
+  for (const listener of peekListeners) listener()
+}
+const typing = (target: EventTarget | null) => target instanceof HTMLElement && (target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(target.tagName))
+if (typeof window !== 'undefined') {
+  window.addEventListener('keydown', event => { if (event.key === 'Shift') setPeek(!typing(event.target)); else if (!event.shiftKey) setPeek(false) }, true)
+  window.addEventListener('keyup', event => { if (event.key === 'Shift') setPeek(false) }, true)
+  // A pointer event says whether ⇧ is down, including one pressed while the window wasn't focused.
+  window.addEventListener('pointermove', event => setPeek(event.shiftKey && !typing(document.activeElement)), { capture: true, passive: true })
+  window.addEventListener('blur', () => setPeek(false))
+}
+const subscribePeek = (listener: () => void) => { peekListeners.add(listener); return () => { peekListeners.delete(listener) } }
+/** Whether ⇧ is held for reading the address under the pointer; `read` narrows the snapshot (only a hovered address re-renders). */
+export const usePeek = (read: (peeking: boolean) => boolean = on => on) => useSyncExternalStore(subscribePeek, () => read(peeking))
 /** This browser's setting, for the switch. */
 export const usePrivacy = () => useSyncExternalStore(subscribe, () => preference)
 /** Whether addresses are masked now: the setting, or a capture holding forceMask(). */

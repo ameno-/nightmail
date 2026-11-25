@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Download, Search } from 'lucide-react'
 import { useSearchParams } from 'react-router'
 import { useRegion, useWorkspaceAccess } from '../../data/context'
-import { BackLink, Button, FactsRow, Icon, Input, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type Fact } from '../../components/ui'
+import { BackLink, Button, FactsRow, Icon, Input, LoadingRegion, PageHeader, Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type Fact } from '../../components/ui'
 import { rememberedPageSize } from '../../lib/pagination'
 import { logsViewColumnDefs } from './rows'
 import { label } from '../../lib/format'
@@ -28,23 +28,26 @@ export function LogsRouteSkeleton() {
     <div className="logs-bar__tools">{campaign && <Skeleton width={160} height="var(--control-height-sm)" />}<div className="search-box logs-search"><Icon icon={Search} size="sm" /><Input type="search" aria-label="Search logs" placeholder="Search logs" disabled /><kbd className="ui-kbd" aria-hidden="true">/</kbd></div><Select className="logs-filter" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: statusLabel }]} /><Select className="logs-filter" value="all" onValueChange={() => {}} disabled options={[{ value: 'all', label: streamLabel }]} /><Button className="logs-export" disabled><Icon icon={Download} /><span>Export</span></Button></div></div>
     <LogsBody counts={undefined} filters={{ statuses, streams }}><TableSkeleton className="logs-table" columns={logsViewColumnDefs(direction)} rows={rememberedPageSize('logs') || 16} pagination /></LogsBody></div>
 }
-/** A sent email's 44px header bar on a desktop: back, the kind of mail in mono, the subject on one line, and at its end
- *  the status and the copyable ID (email-detail.tsx). */
-export function EmailBar({ title, end }: { title: ReactNode; end?: ReactNode }) {
-  return <header className="email-bar"><BackLink to="/logs" /><span className="email-bar__tag">Sent email</span><h1 className="email-bar__title" title={typeof title === 'string' ? title : undefined}>{title}</h1>{end && <div className="email-bar__end">{end}</div>}</header>
+// Sent and received mail open in one layout (email-detail.tsx, received-detail.tsx); only what the data holds differs.
+export type EmailKind = 'sent' | 'received'
+/** An email's 44px header bar on a desktop: back, the kind of mail in mono, the subject on one line, and at its end
+ *  the status and the copyable ID. */
+export function EmailBar({ kind, title, end }: { kind: EmailKind; title: ReactNode; end?: ReactNode }) {
+  return <header className="email-bar"><BackLink to="/logs" /><span className="email-bar__tag">{kind === 'sent' ? 'Sent email' : 'Received email'}</span><h1 className="email-bar__title" title={typeof title === 'string' ? title : undefined}>{title}</h1>{end && <div className="email-bar__end">{end}</div>}</header>
 }
-// A sent email's facts on a desktop (email-detail.tsx EmailFacts), in two groups: who it's from and to, over the preview;
-// the stream, when and the region, over the details column (logs.css). Its ID is in the bar.
-export const emailFactGroups = (multiTenant: boolean) => [['From', 'To'], ['Stream', 'Sent', ...multiTenant ? [] : ['Region']]]
+// An email's facts on a desktop, in two groups: who it's from and to, over the preview; then over the details column
+// (logs.css) a sent email's stream, when it was sent and the region, or when a received one arrived and the region. Its
+// ID is in the bar.
+export const emailFactGroups = (kind: EmailKind, multiTenant: boolean) => [['From', 'To'], [...kind === 'sent' ? ['Stream', 'Sent'] : ['Received'], ...multiTenant ? [] : ['Region']]]
 /** The facts strip under the bar: a FactsRow per group, the second starting on the details column's edge. */
-export function EmailFactsStrip({ multiTenant, fact, label }: { multiTenant: boolean; fact: (name: string) => Omit<Fact, 'label'>; label?: string }) {
-  return <div className="email-facts" role="group" aria-label={label}>{emailFactGroups(multiTenant).map(names => <FactsRow key={names[0]} items={names.map(name => ({ label: name, ...fact(name) }))} />)}</div>
+export function EmailFactsStrip({ kind, multiTenant, fact, label }: { kind: EmailKind; multiTenant: boolean; fact: (name: string) => Omit<Fact, 'label'>; label?: string }) {
+  return <div className="email-facts" role="group" aria-label={label}>{emailFactGroups(kind, multiTenant).map(names => <FactsRow key={names[0]} items={names.map(name => ({ label: name, ...fact(name) }))} />)}</div>
 }
-const factWidths: Record<string, number> = { From: 160, To: 160, Stream: 80, Sent: 120, Region: 72 }
-// A sent email in the window's layout (detail-layout.ts): the header, the delivery, the preview's toolbar and its empty
-// stage, and from 1200 px the details column. The score's place has a placeholder only in that column: elsewhere it
-// appears where nothing else depends on it.
-export function EmailDetailSkeleton() {
+const factWidths: Record<string, number> = { From: 160, To: 160, Stream: 80, Sent: 120, Received: 120, Region: 72 }
+// An email in the window's layout (detail-layout.ts): the header, a sent email's delivery, the preview's toolbar and its
+// empty stage, and from 1200 px the details column (a sent email's delivery and checks, a received one's checks and
+// details). The score's place has a placeholder only in that column: elsewhere it appears where nothing else depends on it.
+export function EmailDetailSkeleton({ kind }: { kind: EmailKind }) {
   const { mode } = useDetailLayout()
   const { multiTenant } = useWorkspaceAccess()
   // A phone or tablet: the subject, the status line, the preview's one row of controls and its frame.
@@ -52,20 +55,18 @@ export function EmailDetailSkeleton() {
     <LoadingRegion label="Loading email"><div className="email-detail__body"><section className="email-detail__preview"><div className="ev" data-compact><div className="ev-toolbar"><Skeleton width={112} height={28} /></div>
       <div className="ev-stage"><div className="ev-canvas"><div className="ev-placeholder" /></div></div></div></section></div></LoadingRegion></div>
   const delivery = <div className="delivery" data-vertical={mode !== 'panel' || undefined}>{mode === 'panel' ? <SkeletonText width={300} lineHeight={28} /> : <div className="delivery__skeleton">{[96, 80, 112].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div>}</div>
-  return <div className="email-detail" data-mode={mode}><EmailBar title={<SkeletonText width={320} lineHeight={24} />} end={<><SkeletonText width={72} /><SkeletonText width={180} /></>} />
-    <EmailFactsStrip multiTenant={multiTenant} fact={name => ({ value: <SkeletonText width={factWidths[name]} /> })} />
+  const lines = (widths: number[]) => <div className="delivery__skeleton">{widths.map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div>
+  return <div className="email-detail" data-mode={mode}><EmailBar kind={kind} title={<SkeletonText width={320} lineHeight={24} />} end={<><SkeletonText width={72} /><SkeletonText width={180} /></>} />
+    <EmailFactsStrip kind={kind} multiTenant={multiTenant} fact={name => ({ value: <SkeletonText width={factWidths[name]} /> })} />
     <LoadingRegion label="Loading email">
-      {mode === 'panel' && delivery}
+      {mode === 'panel' && kind === 'sent' && delivery}
       <div className="email-detail__body">
         <section className="email-detail__preview"><div className="ev" data-fill><div className="ev-toolbar"><Skeleton width={360} height={28} /></div>
           <div className="ev-stage"><div className="ev-captions" /><div className="ev-canvas"><div className="ev-placeholder" /></div></div></div></section>
-        {mode === 'column' && <aside className="email-detail__side"><section className="email-detail__delivery"><h2 className="ss__title">Delivery</h2>{delivery}</section>
-          <section className="ss"><h2 className="ss__title">Checks</h2><div className="ss__fixes">{['86%', '70%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section></aside>}
+        {mode === 'column' && (kind === 'sent' ? <aside className="email-detail__side"><section className="email-detail__delivery"><h2 className="ss__title">Delivery</h2>{delivery}</section>
+          <section className="ss"><h2 className="ss__title">Checks</h2><div className="ss__fixes">{['86%', '70%'].map(width => <SkeletonText key={width} width={width} lineHeight={28} />)}</div></section></aside>
+          : <aside className="email-detail__side"><section className="email-detail__section"><h2 className="ss__title">Checks</h2>{lines([88, 72, 96])}</section>
+            <section className="email-detail__section"><h2 className="ss__title">Details</h2>{lines([200, 160])}</section></aside>)}
       </div>
     </LoadingRegion></div>
-}
-// A received message: its facts, the body with its views beside the details, and its identifiers.
-export function ReceivedEmailSkeleton() {
-  const { multiTenant } = useWorkspaceAccess()
-  return <><PageHeader title={<SkeletonText width={320} lineHeight={28} />} backTo="/logs" actions={<Skeleton width={80} height={22} />} /><LoadingRegion label="Loading email"><dl className="email-metadata">{['From', 'To', 'Address'].map(label => <div key={label}><dt>{label}</dt><dd><SkeletonText width="75%" /></dd></div>)}</dl><div className="email-detail-grid"><section><Tabs value="preview" onValueChange={() => {}} items={[{ value: 'preview', label: 'Preview' }, { value: 'plain', label: 'Plain text' }, { value: 'html', label: 'HTML' }, { value: 'headers', label: 'Headers' }]} /><div className="email-preview-skeleton"><SkeletonText width="55%" lineHeight={32} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /></div></section><section className="delivery-timeline received-details"><SectionHeader title="Details" /><ol>{[0, 1, 2].map(i => <li key={i}><Skeleton width={6} height={6} /><div><div className="cluster between"><SkeletonText width={90} /><Skeleton width={60} /></div></div></li>)}</ol></section></div><div className="message-identifiers"><Skeleton width={260} height={34} /><Skeleton width={180} />{!multiTenant && <Skeleton width={120} />}</div></LoadingRegion></>
 }

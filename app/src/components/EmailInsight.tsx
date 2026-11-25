@@ -4,6 +4,7 @@ import { ArrowUpRight, Check as CheckIcon, ChevronDown, ChevronRight, ExternalLi
 import { useApiQuery } from '../data/context'
 import type { ClientPreview, PreviewClient, PreviewIssue, SendabilityCategory, SendabilityFinding, SendabilityReport } from '../data/types'
 import { usePhone } from '../lib/media'
+import { useTheme } from '../lib/theme'
 import { AddressText } from './AddressText'
 import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice, type FrameScheme } from './EmailFrame'
 import { Alert, Button, Disclosure, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
@@ -294,9 +295,9 @@ function ViewPicker({ value, current, options, onChange, loading }: { value: str
   </>
 }
 
-/** The email as sent: its sandboxed document (null while it is prepared), the same on a dark canvas when the email
- *  opts in to dark mode (`dark`; undefined when it doesn't), and its parts. */
-export type OriginalEmail = { doc: string | null; dark?: string | null; html: string; text: string; error?: string }
+/** The email as sent or received: its sandboxed document (null while it is prepared), the same on a dark canvas when the
+ *  email opts in to dark mode (`dark`; undefined when it doesn't), and its parts; a received one's `headers` too. */
+export type OriginalEmail = { doc: string | null; dark?: string | null; html: string; text: string; headers?: string; error?: string }
 type PreviewSource = { emailId: string } | { html: string }
 type Slot = { key: string; view: string; device: FrameDevice }
 type Column = Slot & { doc: string; scheme: FrameScheme }
@@ -333,13 +334,14 @@ function useClientPreviews(source: InsightSource, previewSource: PreviewSource |
 const useClientDocs = (previews: ClientPreview[] | undefined) => useMemo(() => new Map((previews ?? []).flatMap(item => item.html ? [[item.client, frameDocument(item.html)] as const] : [])), [previews])
 
 /**
- * The preview with one switcher. With `original` (a sent email): Original, the email as sent with its images, then each
- * client; the HTML source and plain text sit behind More. Without it (a draft): the clients. Each client is an offline
+ * The preview with one switcher. With `original` (a sent or received email): Original, the email as sent with its
+ * images, then each client where there is a `previewSource` and a `check` (a sent email); the HTML source, plain text
+ * and a received email's headers sit behind More. Without it (a draft): the clients. Each client is an offline
  * emulation with its issue count. `fill`: the preview fills its parent's height and scrolls inside; otherwise it is as
  * tall as the email. `wide`: where there is room, the phone width beside the desktop one. `compact` (a phone or tablet): one row of controls, the view picked from a sheet, no captions;
  * a phone always shows phone width. `loading`: the draft's HTML is on its way.
  */
-export function EmailViews({ source, previewSource, check, original, loading = false, fill = false, wide = false, compact = false, toolbarEnd }: { source: InsightSource; previewSource: PreviewSource | null; check: Check; original?: OriginalEmail; loading?: boolean; fill?: boolean; wide?: boolean; compact?: boolean; toolbarEnd?: ReactNode }) {
+export function EmailViews({ source, previewSource, check, original, loading = false, fill = false, wide = false, compact = false, toolbarEnd }: { source: InsightSource; previewSource: PreviewSource | null; check?: Check; original?: OriginalEmail; loading?: boolean; fill?: boolean; wide?: boolean; compact?: boolean; toolbarEnd?: ReactNode }) {
   const phone = usePhone()
   const id = useId()
   const [room, canvas] = useRoom()
@@ -347,7 +349,10 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const [chosen, setChosen] = useState<string | null>(null)
   // A sent email opens on Original; a draft, which has no Original, on the first client.
   const view = chosen ?? (original ? 'original' : CLIENTS[0].value)
-  const [theme, setTheme] = useState<Theme>('light')
+  // In a dark dashboard, an email that opts in to dark mode opens dark, as a dark mail client shows it. Any other email
+  // shows as it is, light (the frame around it is the matte, never a recoloured email).
+  const dashboard = useTheme().theme
+  const [theme, setTheme] = useState<Theme>(() => dashboard === 'dark' && original?.dark !== undefined ? 'dark' : 'light')
   const [chosenDevice, setDevice] = useState<FrameDevice>(() => phone ? 'mobile' : 'desktop')
   const device = compact && phone ? 'mobile' : chosenDevice
   const [openIssues, setOpenIssues] = useState<Record<string, boolean>>({})
@@ -357,9 +362,9 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const needs = { desktop: wide || device === 'desktop', mobile: wide || device === 'mobile' }
   const queries = { desktop: useClientPreviews(source, previewSource, theme, 'desktop', needs.desktop), mobile: useClientPreviews(source, previewSource, theme, 'mobile', needs.mobile) }
   const docs = { desktop: useClientDocs(queries.desktop.data), mobile: useClientDocs(queries.mobile.data) }
-  const readers = { desktop: issueReader(check.data, queries.desktop.data), mobile: issueReader(check.data, queries.mobile.data) }
+  const readers = { desktop: issueReader(check?.data, queries.desktop.data), mobile: issueReader(check?.data, queries.mobile.data) }
   const client = CLIENTS.find(item => item.value === view)
-  const sourceView = view === 'html' || view === 'text'
+  const sourceView = view === 'html' || view === 'text' || view === 'headers'
   const frameView = view === 'original' ? Boolean(original) && hasHtml : Boolean(client && previewSource)
   // Light or dark: a client's emulation for the chosen theme; the email as sent dark only where it opts in to dark mode,
   // as Apple Mail shows it (otherwise it shows light in any theme), and plain text in the chosen theme.
@@ -394,7 +399,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
 
   // Client options join the switcher once their counts are known, so no option moves after it appears. Where both
   // widths show, a client's count covers both.
-  const clientsReady = Boolean(previewSource) && !check.isPending && (!needs.desktop || !queries.desktop.isPending) && (!needs.mobile || !queries.mobile.isPending)
+  const clientsReady = Boolean(previewSource && check) && !check?.isPending && (!needs.desktop || !queries.desktop.isPending) && (!needs.mobile || !queries.mobile.isPending)
   const counted: FrameDevice[] = both ? ['desktop', 'mobile'] : [device]
   // At desktop width Outlook's count takes in classic Outlook's, as its caption does.
   const issuesOf = (item: Client) => {
@@ -427,12 +432,13 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   const showFrames = frameView && !failedQuery && !missing
   const listing = hasHtml && !clientsReady && (loading || Boolean(previewSource))
   const offTheme = themed ? undefined : view === 'original' && hasHtml ? 'This email doesn’t opt in to dark mode. Pick a client to see it dark.' : 'Dark mode depends on the client', offWidth = sourceView || !hasHtml ? 'Width applies to previews' : undefined
-  const more = original && <DropdownMenu label="More views" align="end" items={[{ label: 'HTML source', onSelect: () => setChosen('html'), disabled: !hasHtml }, { label: 'Plain text', onSelect: () => setChosen('text') }]}
-    trigger={<button type="button" className="ev-more" data-active={(sourceView && !compact) || undefined} aria-label={sourceView ? `More views: ${view === 'html' ? 'HTML source' : 'Plain text'}` : 'More views'} title="More views">{sourceView && !compact ? (view === 'html' ? 'HTML' : 'Text') : <MoreHorizontal size={16} aria-hidden="true" />}</button>} />
+  const sourceName = view === 'html' ? 'HTML source' : view === 'headers' ? 'Headers' : 'Plain text'
+  const more = original && <DropdownMenu label="More views" align="end" items={[{ label: 'HTML source', onSelect: () => setChosen('html'), disabled: !hasHtml }, { label: 'Plain text', onSelect: () => setChosen('text') }, ...original.headers !== undefined ? [{ label: 'Headers', onSelect: () => setChosen('headers') }] : []]}
+    trigger={<button type="button" className="ev-more" data-active={(sourceView && !compact) || undefined} aria-label={sourceView ? `More views: ${sourceName}` : 'More views'} title="More views">{sourceView && !compact ? (view === 'html' ? 'HTML' : view === 'headers' ? 'Headers' : 'Text') : <MoreHorizontal size={16} aria-hidden="true" />}</button>} />
   if (!original && !previewSource && !loading) return <p className="muted ev-note">Nothing to preview</p>
   return <div className="ev" data-fill={fill || undefined} data-compact={compact || undefined}>
     {compact ? <div className="ev-toolbar">
-      <ViewPicker value={view} current={sourceView ? (view === 'html' ? 'HTML source' : 'Plain text') : options.find(option => option.value === view)?.label ?? client?.label ?? 'Original'} options={options} onChange={setChosen} loading={listing} />
+      <ViewPicker value={view} current={sourceView ? sourceName : options.find(option => option.value === view)?.label ?? client?.label ?? 'Original'} options={options} onChange={setChosen} loading={listing} />
       {client && clientsReady && frameView && <IssuesButton caption={client.captions[device]} issues={readers[device](client.clients[device])} classic={client.value === 'outlook' && device === 'desktop' ? readers.desktop(CLASSIC_OUTLOOK) : []} />}
       <div className="ev-toolbar__end">
         {!phone && <Toggle label="Width" value={device} options={DEVICES} onChange={setDevice} off={offWidth} />}
@@ -451,13 +457,13 @@ export function EmailViews({ source, previewSource, check, original, loading = f
     </div>}
     <div className="ev-stage">
       {!compact && <div className="ev-captions">
-        {sourceView ? <Caption label={view === 'html' ? 'HTML source' : 'Plain text'} />
+        {sourceView ? <Caption label={sourceName} />
           : view === 'original' && original && !hasHtml ? null
           : showFrames && columns.map((column, index) => { const about = describe(column); return <Caption key={column.key} label={about.label} width={widths[index]} issues={about.issues} classic={about.classic}
             open={Boolean(about.key && openIssues[about.key])} onOpenChange={open => setOpenIssues(state => ({ ...state, [about.key!]: open }))} panel={`${id}-${column.key}`} /> })}
       </div>}
       <div ref={canvas} className={fill ? 'ev-canvas ui-scroll-fade' : 'ev-canvas'}>
-        {sourceView && original ? <pre className="email-source">{view === 'html' ? original.html || 'No HTML part.' : original.text || 'No plain-text part.'}</pre>
+        {sourceView && original ? <pre className="email-source">{view === 'html' ? original.html || 'No HTML part.' : view === 'headers' ? original.headers || 'No headers stored.' : original.text || 'No plain-text part.'}</pre>
           : view === 'original' && original && !hasHtml ? <pre className="email-text" data-scheme={shownTheme}>{original.text || 'This email has no body.'}</pre>
           : failedQuery ? <Alert tone="neutral" title="Couldn’t emulate the email clients"><ErrorText error={failedQuery.error} /><div className="ei-retry"><Button size="sm" onClick={() => void failedQuery.refetch()}>Try again</Button></div></Alert>
           : missing ? <div className="email-frame--empty muted">No preview for this client.</div>
