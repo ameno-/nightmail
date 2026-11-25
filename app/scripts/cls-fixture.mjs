@@ -253,7 +253,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
             const me = await fetch(apiOrigin + '/v1/me', { headers }).then(r => r.ok ? r.json() : null, () => null);
             if (me?.multiTenant) {
               const conn = await hosted(db, me.workspaceId);
-              // Starting Hosted mail sets up the workspace's built-in domain too (startHostedMail): the first email sends from it.
+              // Starting Hosted mail sets up the workspace's built-in domain too (startHostedMail): Get started sends from it.
               // Pages measured at once (light, dark, phone) start it together: whichever comes second finds it made.
               if (!(await db.query('SELECT 1 FROM builtin_domains WHERE workspace_id=$1', [me.workspaceId])).rowCount) await builtin(db, me.workspaceId, conn, me.workspaceId.replace(/[^a-z0-9]/g, '').slice(0, 16) + '-e5').catch(() => {});
               const read = await fetch(apiOrigin + '/v1/connection', { headers }), json = await read.json();
@@ -972,13 +972,13 @@ export async function seed(fx) {
   const verifiedConn = await hosted(db, 'ws_verified');
   await builtin(db, 'ws_verified', verifiedConn, 'rowan-bakery-m2');
   await domain(db, 'ws_verified', verifiedConn, 'rowanbakery.example');
-  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its first email.
+  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: Get started.
   await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
   await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
   // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
   await fx.signIn('ula', 'ula@ulmus.example', 'Ula Berg', { id: 'ws_builtin_pending', name: 'Ulmus' });
   await builtin(db, 'ws_builtin_pending', await hosted(db, 'ws_builtin_pending'), 'ulmus-r8', { pending: true });
-  // What each workspace said it is here for (onboarding's focus question): the step and Overview card each focus leads to.
+  // What each workspace said it is here for (Settings, or a landing link's focus): the Overview card each focus leads to.
   // Alder: agent inboxes, its agent@ inbox made and two emails in it. Aspen: the same focus, nothing received yet (Overview's card).
   const focused = async (user, email, name, workspace, label, focus) => {
     await fx.signIn(user, email, name, { id: workspace, name: label })

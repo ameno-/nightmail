@@ -28,14 +28,18 @@ export function sendSnippets({ origin, apiKey, from, to }: { origin: string; api
   }
 }
 
-const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'TypeScript' }]
+export const sendLanguages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'TypeScript' }]
 
 // Sends a first email from hello@<domain> to the signed-in user's own address. The server picks the
 // recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
-/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. */
-export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string) => void) {
-  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
-    onSuccess: data => onSent?.(data.id) })
+/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. `ms` is the send's
+ *  round trip through the API, measured in this browser. */
+export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string, ms: number) => void) {
+  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: async () => {
+    const started = performance.now()
+    const sent = await request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() })
+    return { ...sent, ms: performance.now() - started }
+  }, onSuccess: data => onSent?.(data.id, data.ms) })
 }
 /** A just-sent email's status, read alone every 1.5 s while it is on its way and less than two minutes old (a deferral
  *  past that is Logs' to show). `onSettled` runs once it has a final status (delivered, bounced…). */
@@ -60,18 +64,20 @@ export function TestSentLine({ id, to, simulated, onLeave, onSettled }: { id: st
 // `onLeave` runs before View in Logs opens the email: onboarding finishes there, so the dashboard opens instead of sending
 // the browser back to the step it came from. `ready`: whether it can send, where the caller knows better than the domain's
 // status (a new built-in domain still being set up sends: its send waits for the setup). `onSettled`: the test has its outcome.
-export function TestSend({ domain, onSent, onSettled, primary = false, onLeave, ready }: { domain: Domain; onSent?: (id: string) => void; onSettled?: () => void; primary?: boolean; onLeave?: () => void; ready?: boolean }) {
+// A null domain is one still being made (onboarding, while the account is set up). The line before the send lays out both
+// of its states in one cell, so the domain becoming ready never re-wraps it.
+export function TestSend({ domain, onSent, onSettled, primary = false, onLeave, ready, label = 'Send your first email' }: { domain: Pick<Domain, 'id' | 'name' | 'builtIn' | 'status'> | null; onSent?: (id: string, ms: number) => void; onSettled?: () => void; primary?: boolean; onLeave?: () => void; ready?: boolean; label?: string }) {
   const identity = useSession()?.identity
   const to = identity?.email
-  const from = `hello@${domain.name}`
-  const verified = ready ?? domain.status === 'verified'
+  const verified = domain !== null && (ready ?? domain.status === 'verified')
   const test = useTestSend(domain, onSent)
   if (!to) return null
+  const waiting = !domain || domain.builtIn ? `Available in a moment, once ${domain?.name ?? 'your account'} is ready.` : `Available once ${domain.name} is verified.`
   return <>
     <div className="first-send-test">
-      <Button variant={primary ? 'primary' : undefined} loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send your first email</Button>
-      <span className="muted" role="status">{test.isSuccess ? <TestSentLine id={test.data.id} to={to} simulated={test.data.simulated} onLeave={onLeave} onSettled={onSettled} /> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></>
-        : domain.builtIn ? `Available in a moment, once ${domain.name} is ready.` : `Available once ${domain.name} is verified.`}</span>
+      <Button variant={primary ? 'primary' : undefined} loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />{label}</Button>
+      <span className="muted" role="status">{test.isSuccess ? <TestSentLine id={test.data.id} to={to} simulated={test.data.simulated} onLeave={onLeave} onSettled={onSettled} />
+        : <span className="first-send-test__line"><span data-active={verified || undefined} aria-hidden={!verified || undefined}>From <PrivateAddress value={`hello@${domain?.name ?? 'example.com'}`} /> to <PrivateAddress value={to} /></span><span data-active={!verified || undefined} aria-hidden={verified || undefined}>{waiting}</span></span>}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}
   </>
@@ -90,10 +96,10 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
   return <section className="section stack developer-section" aria-label={title}>
     <SectionHeader title={title} />
     <div className="developer-client-bar">
-      <Tabs label="Example language" value={language} onValueChange={setLanguage} items={languages} />
+      <Tabs label="Example language" value={language} onValueChange={setLanguage} items={sendLanguages} />
       <CopyAction key={language} value={snippets[language as 'curl' | 'sdk']} label={`Copy ${language === 'curl' ? 'cURL' : 'TypeScript'} example`} variant="ghost" size="sm" compact className="developer-copy-icon" />
     </div>
-    <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{languages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
+    <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{sendLanguages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
     {!compact && <p className="muted developer-copy">To test each outcome without a real inbox, send to {simulator.map((address, index) => <span key={address}>{index > 0 && (index === simulator.length - 1 ? ' or ' : ', ')}<code>{address}</code></span>)}. They use your daily limit like any send, but never count towards your sender score.</p>}
     {testButton && domain && <TestSend domain={domain} />}
   </section>
