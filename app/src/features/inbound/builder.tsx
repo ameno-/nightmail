@@ -14,7 +14,7 @@ import { Alert, Button, ConfirmDialog, Dialog, Field, Input, SearchField, Select
 import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApi, useApiDef, useRequestScope, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useRequestScope, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { isSubdomainName, rootMxWarning } from '../settings/domain-records'
 import { moveReason } from '../settings/receiving-hosts'
@@ -193,7 +193,11 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   // The domain an address at a host belongs to (the longest of the workspace's domains it is on), for its MX record.
   const domainOf = (host: string) => domains.flatMap(d => 'domain' in d && typeof d.domain === 'string' && (host === d.domain || host.endsWith(`.${d.domain}`)) ? [{ id: d.id, name: d.domain }] : []).sort((a, b) => b.name.length - a.name.length)[0]
   // Every host addresses can be made at: a domain's first host and any it receives at beside it (an added host).
-  const hosts = [...new Set([...receiving.map(d => d.name), ...domains.flatMap(d => 'hosts' in d && Array.isArray(d.hosts) ? d.hosts : [])])]
+  const listed = [...new Set([...receiving.map(d => d.name), ...domains.flatMap(d => 'hosts' in d && Array.isArray(d.hosts) ? d.hosts : [])])]
+  // Most likely first: a domain of the workspace's own (the domain itself, then its other hosts) before the built-in domain.
+  const builtin = useSession()?.identity?.connection?.builtinDomain?.name
+  const rank = (host: string) => (host === builtin ? 2 : 0) + (roots.includes(host) ? 0 : 1)
+  const hosts = [...listed].sort((a, b) => rank(a) - rank(b))
   const turnsOn = (host: string) => multiTenant && !hosts.includes(host) && roots.some(root => host === root || host.endsWith(`.${root}`))
   // What creating it said about receiving: the MX record to publish, until its host routes mail here.
   const [receivingSetup, setReceivingSetup] = useState<CreatedReceiving | null>(null)
@@ -204,6 +208,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [saved, setSaved] = useState<InboundAddress | null>(address ?? null)
   const [form, setForm] = useState({ address: initial, displayName: '', lifetime: '', publicAddress: '' })
   const [errors, setErrors] = useState<Record<string, string>>({})
+  const [codes, setCodes] = useState<Record<string, string>>({})
+  const [pulse, setPulse] = useState(0)
   const [problem, setProblem] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
   const [waiting, setWaiting] = useState<string | null>(null)
@@ -233,7 +239,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [opened, setOpened] = useState<{ entry: RouteEntry; overview: Overview } | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   // Opening starts afresh. Before the effects below, so the flow they capture from cached data isn't cleared after.
-  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setCodes({}); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (open && editing && !opened && entry && overview.data && !boxes.isPending && !resolvedBoxes.pending) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.isPending, resolvedBoxes.pending])
   // A rule given by key changes that rule only (its fork and its sides), on an address with any number of rules:
   // the address's route and its other rules stay.
@@ -265,25 +271,29 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && hosts.includes(typed.split('@')[1]!) ? typed : null
   const existing = errors.address ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
   // The name typed without its domain: offered back with the first host, one press away.
-  const completed = errors.address && LOCAL.test(typed) && hosts[0] ? `${typed}@${hosts[0]}` : null
+  // A rejected address that one of the workspace's hosts would fix (a name alone, or another domain): one button per host.
+  const fixLocal = codes.address === 'missing_domain' ? typed : codes.address === 'not_your_domain' ? typed.split('@')[0]! : ''
+  const fixes = fixLocal ? hosts.slice(0, 4).map(host => `${fixLocal}@${host}`) : []
   async function next(event: FormEvent) {
     event.preventDefault()
     if (boxes.isPending || checkingAddress) return
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
     // Said exactly: an empty field, a name without its domain (the common slip), or something else that isn't an address.
     const example = `support@${hosts[0] ?? 'example.com'}`
-    if (!value) found.address = `Enter an address, such as ${example}.`
-    else if (LOCAL.test(value)) found.address = hosts[0] ? `Add the domain: ${value}@${hosts[0]}.` : `Add the domain, such as ${value}@example.com.`
-    else if (!EMAIL.test(value)) found.address = `${value} isn’t a full email address: use a name, @ and a domain, such as ${example}.`
+    // Each rejection has a code for analytics (never the value): empty, missing_domain, invalid, not_your_domain, exists.
+    const code: Record<string, string> = {}
+    if (!value) { found.address = `Enter an address, such as ${example}.`; code.address = 'empty' }
+    else if (LOCAL.test(value)) { found.address = hosts.length > 1 ? `Add the domain, such as ${value}@${hosts[0]}.` : hosts[0] ? `Add the domain: ${value}@${hosts[0]}.` : `Add the domain, such as ${value}@example.com.`; code.address = 'missing_domain' }
+    else if (!EMAIL.test(value)) { found.address = `${value} isn’t a full email address: use a name, @ and a domain, such as ${example}.`; code.address = 'invalid' }
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
-    else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'
-    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) found.address = onDomains([...new Set([...hosts, ...roots])], value.split('@')[1])
-    else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) found.address = `${value} already exists.`
+    else if (value.split('@')[0]!.includes('*')) { found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'; code.address = 'invalid' }
+    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) { found.address = onDomains([...new Set([...hosts, ...roots])], value.split('@')[1]); code.address = 'not_your_domain' }
+    else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) { found.address = `${value} already exists.`; code.address = 'exists' }
     else if (boxes.hasMore) {
       setCheckingAddress(true)
       try {
         const matches = await api.inbound.addresses({ search: value })
-        if (matches.some(b => b.address === value || b.aliases.includes(value))) found.address = `${value} already exists.`
+        if (matches.some(b => b.address === value || b.aliases.includes(value))) { found.address = `${value} already exists.`; code.address = 'exists' }
       } catch { /* Server validates uniqueness on submit if lookup fails. */ }
       finally { setCheckingAddress(false) }
     }
@@ -291,7 +301,9 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     else if (sender && !EMAIL.test(sender)) found.publicAddress = FULL
     // The API takes a public sender only as the same local part on a parent domain.
     else if (sender && EMAIL.test(value) && (sender.split('@')[0] !== value.split('@')[0] || !value.split('@')[1]!.endsWith(`.${sender.split('@')[1]}`))) found.publicAddress = `Use ${value.split('@')[0]}@ on a parent domain of ${value.split('@')[1]}.`
-    setErrors(found)
+    // Pressed again on the same refusal: back to the field, and the message flashes, so the press isn't silent.
+    if (found.address && found.address === errors.address) { setPulse(p => p + 1); document.getElementById('builder-address-input')?.focus() }
+    setErrors(found); setCodes(code)
     if (!Object.keys(found).length) setStep('flow')
   }
 
@@ -475,12 +487,12 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   </div>
   let body: ReactNode
   if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
-    <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
+    <Field label="Address" htmlFor="builder-address-input" error={errors.address} errorCode={codes.address} pulse={pulse}>
       <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
     {!errors.address && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) && domainOf(typed.split('@')[1]!) && <TurnOnReceiving host={typed.split('@')[1]!} domainId={domainOf(typed.split('@')[1]!)!.id} />}
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
-    {completed && <div className="cluster"><Button size="sm" onClick={() => { setForm({ ...form, address: completed }); setErrors({}) }}>Use {completed}</Button></div>}
+    {fixes.length > 0 && <div className="cluster">{fixes.map(fix => <Button key={fix} size="sm" onClick={() => { setForm({ ...form, address: fix }); setErrors({}); setCodes({}) }}>Use {fix}</Button>)}</div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
     <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Name" /></Field>
     <details className="inbound-advanced" open={!!form.lifetime || !!form.publicAddress || !!errors.publicAddress || undefined}>

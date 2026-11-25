@@ -43794,6 +43794,12 @@ describe('dashboard analytics', () => {
     assert.deepEqual([step!.step, step!.route, step!.t], ['domain_added', '/receiving/rules/:id', step!.received]);
     // The envelope is copied onto each row; IDs that aren't Nightmail's shapes are dropped, never kept as text.
     assert.deepEqual([view!.sid, view!.ws, view!.uid, view!.app, view!.vp, view!.v], ['sess_0001abcd', null, null, 'abc123def456', 'desktop', 1]);
+    // A field's rejection code (a constant such as missing_domain, from the address builder) is kept; text in its place isn't.
+    assert.equal((await post(envelope([
+      { id: 'evt_00000014', seq: 14, t: now, type: 'form_invalid', route: '/receiving', role: 'field', label: 'Address', field: 'builder-address-input', reason: 'customError', code: 'missing_domain' },
+      { id: 'evt_00000015', seq: 15, t: now, type: 'form_invalid', route: '/receiving', role: 'field', label: 'Address', field: 'builder-address-input', reason: 'customError', code: typed },
+    ]))).status, 204);
+    assert.deepEqual(rows().slice(-2).map(row => row.code), ['missing_domain', null]);
     // Only the sign-in callback writes sign_in (it links a signed-out session to its account); a batch can't.
     assert.equal((await post(envelope([{ id: 'evt_00000013', seq: 13, t: now, type: 'sign_in', route: '/overview' }]))).status, 204);
     assert.ok(!rows().some(row => row.type === 'sign_in'));

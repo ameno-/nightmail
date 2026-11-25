@@ -158,7 +158,7 @@ export function createTracker(host: TrackerHost) {
     },
     dialog(open: boolean, title: unknown, name?: string, ms?: number) { push(open ? 'dialog_open' : 'dialog_close', { name, role: 'dialog', label: typeof title === 'string' ? title : null, ms }) },
     /** A field showing a validation error the dashboard wrote (components/ui Field). */
-    fieldError(label: unknown, field?: string) { push('form_invalid', { role: 'field', label: typeof label === 'string' ? label : null, field, reason: 'customError' }) },
+    fieldError(label: unknown, field?: string, code?: string) { push('form_invalid', { role: 'field', label: typeof label === 'string' ? label : null, field, reason: 'customError', ...(code && /^[a-z][a-z_]{0,31}$/.test(code) ? { code } : {}) }) },
     /** A failed API request. The same error from the same request is reported once every 30 seconds. */
     apiError(method: string, path: string, status: number | undefined, code: string, field?: string) {
       // /v1/me answering 401 is how a signed-out page learns it is signed out, not an error anyone sees.

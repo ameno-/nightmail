@@ -62,7 +62,7 @@ export function analyticsRows(body: unknown, now: number): { rows: AnalyticsRow[
     const label = name ? null : scrubLabel(event.label);
     rows.push({ ...base, ...(event.type === 'page_view' ? attribution(envelope.data.r, envelope.data.u) : {}), id: event.id, t: new Date(Math.abs(event.t - now) > DAY_MS ? now : event.t).toISOString(), seq: event.seq, type: event.type, route,
       ref: routeTemplate(event.ref), target: name ?? (ELEMENT_EVENTS.has(event.type) && (role || label) ? (role ?? 'element') + ':' + (label ?? '') : null), name, role, label,
-      field: fieldName(event.field), reason: event.reason ?? null, code: event.code && /^[A-Z][A-Z0-9_]{0,63}$/.test(event.code) ? event.code : null,
+      field: fieldName(event.field), reason: event.reason ?? null, code: event.code && /^(?:[A-Z][A-Z0-9_]{0,63}|[a-z][a-z_]{0,31})$/.test(event.code) ? event.code : null,
       op: operationTemplate(event.op), status: event.status ?? null, ms: event.ms ?? null, step: event.step ?? null });
   }
   return { rows, dropped: events.length - rows.length };
