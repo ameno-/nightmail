@@ -15849,6 +15849,9 @@ describe('Dashboard API capabilities', () => {
     assert.ok(preview.html.includes('role="presentation"') && preview.html.includes('>Go</a>'), 'Buttons and columns render as presentation tables.');
     assert.ok(!preview.html.includes('data-button') && !preview.html.includes('data-columns') && !preview.html.includes('<section'), 'Rendered output contains no block markers.');
     assert.ok(preview.html.includes('font-size:32px') && preview.html.includes('background-color:#3156c7') && preview.html.includes('border-radius:8px'), 'Email-safe advanced styles survive rendering.');
+    // No web fonts: a system stack, and no URL a stylesheet loads.
+    assert.ok(preview.html.includes("font-family:Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;"), 'Text is set in a system font stack.');
+    assert.ok(!/@font-face|data-bane-fonts|\/fonts\/|url\(/.test(preview.html), 'Campaign HTML links no web fonts.');
     // The footer every email gets, as it will look: the Unsubscribe link (a placeholder here) and the postal address under it.
     const placeholder = `${PUBLIC_ORIGIN}/unsubscribe/u_${'0'.repeat(64)}`;
     assert.ok(preview.html.includes(`<a href="${placeholder}" style="color:#595959;text-decoration:underline">Unsubscribe</a></p><p style="`) && preview.html.includes(`>${FIXTURE_POSTAL_ADDRESS.split('\n').join('<br>')}</p>`), 'Preview shows the footer with the postal address.');
@@ -15864,6 +15867,7 @@ describe('Dashboard API capabilities', () => {
     assert.ok(content.html.includes('Hello Block Reader') && content.html.includes(`href="https://example.com/${contact.email}"`), 'Rendered email is personalized.');
     assert.ok(/<a href="[^"]+" style="[^"]*">Unsubscribe<\/a><\/p><p style="[^"]*">[^<]+(<br>[^<]+)*<\/p><\/td>/.test(content.html), 'The unsubscribe footer and the postal address under it sit inside the rendered layout.');
     assert.ok(content.text.startsWith('Hello Block Reader') && content.text.includes('\n\nUnsubscribe: '), 'A plain-text alternative is derived from the blocks.');
+    assert.ok(!/@font-face|data-bane-fonts|\/fonts\/|url\(/.test(content.html), 'The sent email links no web fonts.');
   });
 
   test('campaign archive filters lists, binds pagination and restores failed launches unchanged', async t => {
@@ -38263,19 +38267,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('a frozen v1 campaign reproduces the legacy preheader at dispatch and on readback',async t=>{
+  test('a frozen v1 campaign reproduces the legacy preheader at dispatch and on readback, without its web-font block',async t=>{
     await simulatedSesFixture(t,async({db,local,run})=>{
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){if(cmd instanceof SendEmailCommand)delivered.push(cmd.input.Content?.Simple?.Body?.Html?.Data??'');return (send as any).call(this,cmd,...rest);});
       const list=ok(await local('POST','/v1/lists',{name:unique('legacy-render')}),201);
       const contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
       ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Synthetic fixture.',occurredAt:new Date().toISOString()}));
       ok(await local('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]}));
       const c=ok(await local('POST','/v1/campaigns',{name:'Frozen fixture',from:'sender@example.com',subject:'Fixture',previewText:'Preview',html:'<p>Body</p>',audience:{listId:list.id}}),201);
       ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);
-      await db.query("UPDATE sending_campaign_reviews SET renderer_version=1, rendered=replace(rendered::text,'data-bane-fonts','data-opensend-fonts')::jsonb WHERE campaign_id=$1",[c.id]);
+      // Reviews frozen before campaign mail stopped linking web fonts carry the renderer's font block, which names this installation.
+      await db.query("UPDATE sending_campaign_reviews SET renderer_version=1, rendered=replace(rendered::text,'</title>',$2)::jsonb WHERE campaign_id=$1",[c.id,`</title><style data-opensend-fonts>@font-face{font-family:Inter;src:url('${PUBLIC_ORIGIN}/fonts/inter-variable.woff2') format('woff2')}</style>`]);
       await run('campaign.run');await run('email.dispatch');
       const [mail]=page(await local('GET',`/v1/emails?campaignId=${c.id}`));
       const content=ok(await local('GET',`/v1/emails/${mail!.id}/content`));
-      assert.match(content.html,/data-opensend-preview="true"/);assert.match(content.html,/data-opensend-fonts/);
+      assert.equal(delivered.length,1);
+      for(const html of [content.html,delivered[0]!]){assert.match(html,/data-opensend-preview="true"/);assert.doesNotMatch(html,/data-opensend-fonts|@font-face|\/fonts\//,'The frozen font block is neither delivered nor read back.');}
     });
   });
 

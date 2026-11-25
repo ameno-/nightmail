@@ -13,7 +13,8 @@
   font-display: swap;
 }
 /* Inter in two files per style: Latin (preloaded, ~110 KB) and every other script Inter covers, fetched only for text
-   that uses it. The full inter-variable*.woff2 files stay for sent email, which links them (api/src/campaign-blocks.ts). */
+   that uses it. The full inter-variable*.woff2 files stay for the API's hosted pages (operations.ts) and for mail sent before
+   campaigns stopped linking web fonts. */
 @font-face {
   font-family: 'Inter';
   src: url('/fonts/inter-latin.woff2') format('woff2');

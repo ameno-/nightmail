@@ -290,7 +290,7 @@ export function registerSupportDeliverability(app: App, meta: Meta, WorkspaceFil
       if (draft.html?.trim()) try {
         const blocks = await import('./campaign-blocks.js');
         blocks.validateBlockHtml(draft.html);
-        html = blocks.renderBlockHtml(draft.html, { fontBase: `${c.env.config.publicUrl}/fonts/`, title: draft.subject }); text = blocks.renderBlockText(draft.html) || null;
+        html = blocks.renderBlockHtml(draft.html, { title: draft.subject }); text = blocks.renderBlockText(draft.html) || null;
       } catch { html = draft.html; }
       const metadata: d.LintMetadata = { sizeBytes: (html?.length ?? 0) + (text?.length ?? 0) + files.reduce((n, f) => n + f.size, 0), parts: { html: !!html, text: !!text, raw: false },
         attachments: { count: files.length, types: [...new Set(files.map(f => f.content_type.split(';')[0]!.trim().toLowerCase()))] }, listUnsubscribe: true, listUnsubscribePost: true, tracking: !!draft.tracking,
