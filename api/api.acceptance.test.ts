@@ -33607,7 +33607,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     assert.equal(storeNotice({ ...api, channel: undefined }, w, null), null, 'Without a channel (Workers) the store notifies nothing.');
   });
 
-  test('receipt committed_at: the commit stamps it (migration 515), so a write that takes a while counts in full; storedAt and processingMs use it', async t => {
+  test('receipt committed_at: the commit stamps it (migration 517), so a write that takes a while counts in full; storedAt and processingMs use it', async t => {
     const a=await fixtureDatabase(t),w=unique('stampw'),mid=unique('receipt');
     cleanup(t,async()=>{await a.query('DELETE FROM mail_receipts WHERE workspace_id=$1',[w]);});
     await a.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status) VALUES($1,$2,$3,'b','staging/'||$2,'[]','{}','held')`,[w,mid,REGION]);

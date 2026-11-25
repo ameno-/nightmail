@@ -114,7 +114,7 @@ const meta = { tags: ['Agent inboxes'], security };
 const take = z.coerce.number().int().min(1).max(100).default(25);
 const extract = z.enum(['codes', 'links', 'codes,links', 'links,codes']).optional().describe('Extract one-time codes, links or both into each message’s extract field.');
 const absent = () => new ApiError(404, 'NOT_FOUND', 'No such inbox or message for this credential.');
-/** storedAt and processingMs (Message): the receipt's commit stamp (migration 515); before it, when the row was written and
+/** storedAt and processingMs (Message): the receipt's commit stamp (migration 517); before it, when the row was written and
  *  when its write began. */
 const receiptOf = (column: SQL) => sql`(SELECT ${column} FROM mail_receipts r WHERE r.workspace_id=m.workspace_id AND r.ses_message_id=m.ses_message_id AND m.direction='inbound')`;
 const stored = sql`coalesce(${receiptOf(sql`r.committed_at`)}, m.created_at) AS stored_at,
