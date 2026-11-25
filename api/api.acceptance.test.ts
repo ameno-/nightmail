@@ -40642,7 +40642,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         }
         if(url.hostname==='api.cloudflare.com'){
           cloudflare.push({method:init?.method??'GET',path:url.pathname+url.search,...init?.body?{body:JSON.parse(String(init.body))}:{},auth:new Headers(init?.headers).get('authorization')});
-          return Response.json({success:true,errors:[],result:{id:'ch_fixture',hostname:'links.example.com',custom_origin_server:target,status:served?'active':'pending',ssl:{status:served?'active':'pending_validation'}}});
+          return Response.json({success:true,errors:[],result:{id:'ch_fixture',hostname:'links.example.com',status:served?'active':'pending',ssl:{status:served?'active':'pending_validation'}}});
         }
         return prior(input,init);
       }) as typeof fetch;
@@ -40703,7 +40703,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual((await db.query('SELECT status,custom_hostname_id,detail FROM link_hosts WHERE workspace_id=$1 AND domain=$2',[wid,'example.com'])).rows[0],{status:'pending',custom_hostname_id:null,detail:'The CNAME is in place. The link host is set up once the domain verifies.'});}
       const found=await record();
       assert.deepEqual([found.status,found.publicDns.state],['pending','found']);assert.match(found.note,/certificate is being issued/);
-      assert.deepEqual(cloudflare,[{method:'POST',path:`/client/v4/zones/${runtime.config.linkHosts!.zoneId}/custom_hostnames`,body:{hostname:'links.example.com',custom_origin_server:target,ssl:{method:'http',type:'dv',settings:{min_tls_version:'1.2'}}},auth:`Bearer ${runtime.config.linkHosts!.token}`}]);
+      assert.deepEqual(cloudflare,[{method:'POST',path:`/client/v4/zones/${runtime.config.linkHosts!.zoneId}/custom_hostnames`,body:{hostname:'links.example.com',ssl:{method:'http',type:'dv',settings:{min_tls_version:'1.2'}}},auth:`Bearer ${runtime.config.linkHosts!.token}`}]);
       assert.deepEqual(await hosts(),[own,own,own],'Not served yet: still the installation\'s own origin.');
       served=true;
       assert.equal((await record()).status,'verified');
@@ -40760,18 +40760,21 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1',[c.id])).rows[0].n,0);
       assert.ok(Date.parse((await job()).available_at)>Date.now()+14*60_000);
       // The link record verifies (public DNS has the CNAME, Cloudflare serves the custom hostname): the run wakes at once.
-      const prior=globalThis.fetch,deleted:string[]=[];
+      const prior=globalThis.fetch,deleted:string[]=[],posted:string[]=[];
       globalThis.fetch=(async(input:RequestInfo|URL,init?:RequestInit)=>{
         const url=new URL(input instanceof Request?input.url:String(input));
         if(url.hostname==='cloudflare-dns.com'){const name=url.searchParams.get('name')!;return Response.json({Status:0,Answer:[{name:`${name}.`,type:5,data:'edge.links-fixture.example.'}]});}
         if(url.hostname==='api.cloudflare.com'){
-          // Another installation on the zone made ch_foreign and links.taken.example (its own origin): never adopted or deleted here.
-          const id=url.pathname.split('/').at(-1)!,body=init?.body?JSON.parse(String(init.body)):null,origin=(x:string)=>x==='ch_foreign'||x==='ch_taken'?'cname.elsewhere.example':'edge.links-fixture.example';
+          const id=url.pathname.split('/').at(-1)!,body=init?.body?JSON.parse(String(init.body)):null;
           if(init?.method==='DELETE'){deleted.push(id);return Response.json({success:true,errors:[],result:{id}});}
+          if(init?.method==='POST')posted.push(body.hostname);
+          // Another installation on the zone made links.taken.example (ch_taken, recorded by no row here).
           if(init?.method==='POST'&&body?.hostname==='links.taken.example')return Response.json({success:false,errors:[{code:1406}],result:null},{status:409});
-          if(url.searchParams.get('hostname')==='links.taken.example')return Response.json({success:true,errors:[],result:[{id:'ch_taken',custom_origin_server:origin('ch_taken'),status:'active',ssl:{status:'active'}}]});
+          if(url.searchParams.get('hostname')==='links.taken.example')return Response.json({success:true,errors:[],result:[{id:'ch_taken',status:'active',ssl:{status:'active'}}]});
+          // The zone's quota is used up.
+          if(init?.method==='POST'&&/^links\.full\d?\.example$/.test(body?.hostname))return Response.json({success:false,errors:[{code:1405,message:'Quota exceeded.'}],result:null},{status:403});
           const known=id==='custom_hostnames'?'ch_legacy':id;
-          return Response.json({success:true,errors:[],result:{id:known,custom_origin_server:origin(known),status:'active',ssl:{status:'active'}}});
+          return Response.json({success:true,errors:[],result:{id:known,status:'active',ssl:{status:'active'}}});
         }
         return prior(input,init);
       }) as typeof fetch;
@@ -40784,22 +40787,37 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([resumed.delivery.expanded,resumed.delivery.waiting],[3,null]);
         // Gone domains (deleted, released, detached, or their workspace deleted): no operation_domains row. Their link hosts go,
         // with their custom hostnames, unless another row still uses the hostname; a live domain's stays.
-        await db.query(`INSERT INTO link_hosts(workspace_id,domain,hostname,custom_hostname_id,status) VALUES ($1,'gone.example','links.gone.example','ch_gone','active'),($1,'foreign.example','links.foreign.example','ch_foreign','active'),
+        await db.query(`INSERT INTO link_hosts(workspace_id,domain,hostname,custom_hostname_id,status) VALUES ($1,'gone.example','links.gone.example','ch_gone','active'),
           ('ws_link_gone_a','shared.example','links.shared.example','ch_shared','active'),('ws_link_gone_b','shared.example','links.shared.example','ch_shared','active')`,[wid]);
         await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,'ws_link_gone_b','shared.example',$2)",[unique('dom'),REGION]);
         const {domainLinkCleanupJob}=await import('./src/domain-setup.js');
         await domainLinkCleanupJob(runtime,{},{id:'domain.linkCleanup',attempts:1,workspaceId:wid});
-        const left=(await db.query("SELECT workspace_id,domain FROM link_hosts WHERE domain IN ($1,'gone.example','foreign.example','shared.example') ORDER BY workspace_id",[domain])).rows.map(r=>`${r.workspace_id}/${r.domain}`);
+        const left=(await db.query("SELECT workspace_id,domain FROM link_hosts WHERE domain IN ($1,'gone.example','shared.example') ORDER BY workspace_id",[domain])).rows.map(r=>`${r.workspace_id}/${r.domain}`);
         assert.deepEqual(left,['ws_link_gone_b/shared.example',`${wid}/${domain}`].sort());
-        assert.deepEqual(deleted,['ch_gone'],'A hostname another row still uses stays, and so does one another installation made.');
-        // A hostname another installation on the zone made is never adopted: the domain's link host stays pending, saying so.
-        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ('taken.example',$1,$1,'verified')`,[wid]);
-        await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'taken.example',$3)",[unique('dom'),wid,REGION]);
-        await db.query("DELETE FROM link_hosts WHERE workspace_id=$1 AND domain='taken.example'",[wid]);
-        await checkLinkHost(runtime,wid,'taken.example');
-        const taken=(await db.query("SELECT status,custom_hostname_id,detail FROM link_hosts WHERE workspace_id=$1 AND domain='taken.example'",[wid])).rows[0];
+        assert.deepEqual(deleted,['ch_gone'],'A hostname another row still uses stays.');
+        const domainOf=async(name:string)=>{
+          await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[name,wid]);
+          await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)",[unique('dom'),wid,name,REGION]);
+          await db.query("DELETE FROM link_hosts WHERE workspace_id=$1 AND domain=$2",[wid,name]);
+          await checkLinkHost(runtime,wid,name);
+          return (await db.query("SELECT status,custom_hostname_id,detail,quota_full_at FROM link_hosts WHERE workspace_id=$1 AND domain=$2",[wid,name])).rows[0];
+        };
+        // A hostname no row here recorded (another installation on the zone made it) is never adopted: the link host stays pending, saying so.
+        const taken=await domainOf('taken.example');
         assert.deepEqual([taken.status,taken.custom_hostname_id],['pending',null]);assert.match(taken.detail,/another installation/);
-      } finally { globalThis.fetch=prior; }
+        // The zone's quota is used up (1405): the host waits, saying so, and for an hour no check asks Cloudflare again, this
+        // domain's or another's.
+        posted.length=0;
+        const full=await domainOf('full.example');
+        assert.deepEqual([full.status,full.custom_hostname_id],['pending',null]);assert.match(full.detail,/at capacity/);assert.ok(full.quota_full_at);
+        await checkLinkHost(runtime,wid,'full.example');
+        const other=await domainOf('full2.example');
+        assert.match(other.detail,/at capacity/);assert.equal(other.quota_full_at,null);
+        assert.deepEqual(posted,['links.full.example'],'One request to Cloudflare, then none during the backoff.');
+        await db.query("UPDATE link_hosts SET quota_full_at=now()-interval '61 minutes' WHERE quota_full_at IS NOT NULL");
+        await checkLinkHost(runtime,wid,'full2.example');
+        assert.deepEqual(posted,['links.full.example','links.full2.example'],'After the hour, the next check asks again.');
+      } finally { globalThis.fetch=prior; await db.query('UPDATE link_hosts SET quota_full_at=NULL WHERE quota_full_at IS NOT NULL'); }
     });
   });
 

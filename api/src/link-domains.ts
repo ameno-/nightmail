@@ -86,16 +86,20 @@ export async function servesWorkspace(runtime: Pick<Runtime, 'config' | 'db'>, r
 // ----- Custom hostnames (Cloudflare for SaaS) ---------------------------------------------------------------------
 
 type Saas = NonNullable<Config['linkHosts']>;
-type CustomHostname = { id: string; status?: string; custom_origin_server?: string | null; ssl?: { status?: string; validation_errors?: { message?: string }[] } | null; verification_errors?: string[] };
+type CustomHostname = { id: string; status?: string; ssl?: { status?: string; validation_errors?: { message?: string }[] } | null; verification_errors?: string[] };
 class CloudflareUnavailable extends Error { constructor(readonly status?: number) { super('Cloudflare unavailable'); } }
-/** A custom hostname another installation sharing the zone made (production, dev): never adopted or deleted here. */
-class NotOurs extends Error {}
 /**
- * Which installation a custom hostname is: each makes its own with its target as the custom origin (production
- * cname.nightmailedge.com, dev cname-dev.nightmailedge.com, both names in the zone), so installations sharing a zone never
- * adopt or delete each other's.
+ * A custom hostname this installation didn't make: another installation sharing the zone (production and dev share
+ * nightmailedge.com) has the name. A custom hostname is this installation's only if one of its link_hosts rows records its
+ * id, which works on every plan (per-hostname origins and metadata are Enterprise add-ons), so it never adopts, and so
+ * never deletes, another's.
  */
-const ours = (saas: Saas, custom: CustomHostname) => custom.custom_origin_server === saas.target;
+class NotOurs extends Error {}
+/** 1405: the zone's custom hostname quota is used up (a 30-day preview allows one; more are a request to Cloudflare). */
+class QuotaFull extends Error { constructor(readonly answered: boolean) { super('Custom hostname quota full'); } }
+/** After a 1405, no installation-wide attempt to make a custom hostname for this long: checks keep their own pace without
+ *  asking Cloudflare again, and the first check after it tries once more. */
+const QUOTA_BACKOFF = '1 hour';
 /** One call to the zone's custom hostnames API (https://developers.cloudflare.com/api/resources/custom_hostnames/). */
 async function customHostnames(saas: Saas, method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown) {
   let response: Response;
@@ -108,16 +112,21 @@ async function customHostnames(saas: Saas, method: 'GET' | 'POST' | 'DELETE', pa
   return { status: response.status, success: json.success === true, result: json.result, codes: (json.errors ?? []).map(error => error.code) };
 }
 /** The custom hostname for `hostname`, created with an HTTP-validated certificate if the zone has none yet. */
-async function ensureCustomHostname(saas: Saas, hostname: string): Promise<CustomHostname> {
-  const created = await customHostnames(saas, 'POST', '', { hostname, custom_origin_server: saas.target, ssl: { method: 'http', type: 'dv', settings: { min_tls_version: '1.2' } } });
+async function ensureCustomHostname(runtime: Runtime, saas: Saas, hostname: string): Promise<CustomHostname> {
+  const { rows: [full] } = await runtime.db.execute<{ full: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM link_hosts WHERE quota_full_at > now() - ${QUOTA_BACKOFF}::interval) AS full`);
+  if (full?.full) throw new QuotaFull(false);
+  const created = await customHostnames(saas, 'POST', '', { hostname, ssl: { method: 'http', type: 'dv', settings: { min_tls_version: '1.2' } } });
   if (created.success) return created.result as CustomHostname;
-  // 1406: the zone already has it: an earlier check here, or another workspace here with the domain (adopted), or another
-  // installation sharing the zone (refused).
+  if (created.codes.includes(1405)) throw new QuotaFull(true);
+  // 1406: the zone already has it: another workspace here with the domain (adopted), or another installation sharing the
+  // zone (refused).
   if (created.codes.includes(1406)) {
     const found = await customHostnames(saas, 'GET', `?hostname=${encodeURIComponent(hostname)}`);
     const [existing] = found.success && Array.isArray(found.result) ? found.result as CustomHostname[] : [];
-    if (existing && !ours(saas, existing)) throw new NotOurs();
-    if (existing) return existing;
+    if (!existing) throw new CloudflareUnavailable(found.status);
+    const { rows: [mine] } = await runtime.db.execute<{ mine: boolean }>(sql`SELECT EXISTS (SELECT 1 FROM link_hosts WHERE custom_hostname_id=${existing.id}) AS mine`);
+    if (!mine?.mine) throw new NotOurs();
+    return existing;
   }
   throw new CloudflareUnavailable(created.status);
 }
@@ -141,6 +150,8 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
   const hostname = linkHostName(domain), checkedAt = new Date().toISOString();
   const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active'; public_dns: Seen | null }>(sql`SELECT custom_hostname_id, status, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
   let id = row?.custom_hostname_id ?? null, status = row?.status ?? 'pending', detail: string | null = null, seen: Seen | null = row?.public_dns ?? null;
+  // 'hit': Cloudflare just answered 1405 (the backoff starts now); 'waiting': within the backoff, nothing was asked.
+  let quota: 'hit' | 'waiting' | null = null;
   // Hosted: only a domain this workspace has proven it controls gets a custom hostname (self-hosted: the operator's own): a pending claim (anyone can add one, and a
   // wildcard CNAME answers for any name under a domain they own) would otherwise make hostnames in the SaaS zone at will.
   const { rows: [claim] } = await runtime.db.execute<{ proven: boolean }>(sql`SELECT ever_proven OR sending_state IN ('verified','lost') AS proven FROM domain_claims WHERE workspace_id=${workspaceId} AND name=${domain}`);
@@ -151,8 +162,8 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
   try {
     if (seen?.state === 'found' || id) {
       let custom: CustomHostname | null = null;
-      if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(read.status); if (custom && !ours(saas, custom)) throw new NotOurs(); }
-      if (!custom && seen?.state === 'found' && proven) custom = await ensureCustomHostname(saas, hostname);
+      if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(read.status); }
+      if (!custom && seen?.state === 'found' && proven) custom = await ensureCustomHostname(runtime, saas, hostname);
       id = custom?.id ?? null;
       status = custom && served(custom) ? 'active' : 'pending';
       if (custom && status !== 'active') detail = waiting(custom);
@@ -163,6 +174,10 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
       id = null; status = 'pending';
       detail = `${hostname} is already a custom hostname of another installation on this zone, so it isn\u2019t set up here.`;
       log('warn', { code: 'LINK_HOST_NOT_OURS', workspaceId });
+    } else if (error instanceof QuotaFull) {
+      id = null; status = 'pending'; quota = error.answered ? 'hit' : 'waiting';
+      detail = 'The CNAME is in place. Link hosts are at capacity right now; this one is set up automatically when there is room, with nothing to do on your side.';
+      log('warn', { code: 'LINK_HOST_QUOTA_FULL', workspaceId });
     } else {
       if (!(error instanceof CloudflareUnavailable)) throw error;
       log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
@@ -170,10 +185,11 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
     }
   }
   const woke = status === 'active' && row?.status !== 'active';
-  await runtime.db.execute(sql`INSERT INTO link_hosts(workspace_id, domain, hostname, custom_hostname_id, status, detail, public_dns, verified_at)
-    VALUES(${workspaceId}, ${domain}, ${hostname}, ${id}, ${status}, ${detail}, ${seen ? JSON.stringify(seen) : null}::jsonb, CASE WHEN ${status}='active' THEN now() END)
+  await runtime.db.execute(sql`INSERT INTO link_hosts(workspace_id, domain, hostname, custom_hostname_id, status, detail, public_dns, verified_at, quota_full_at)
+    VALUES(${workspaceId}, ${domain}, ${hostname}, ${id}, ${status}, ${detail}, ${seen ? JSON.stringify(seen) : null}::jsonb, CASE WHEN ${status}='active' THEN now() END, CASE WHEN ${quota}='hit' THEN now() END)
     ON CONFLICT (workspace_id, domain) DO UPDATE SET custom_hostname_id=excluded.custom_hostname_id, status=excluded.status, detail=excluded.detail,
-      public_dns=excluded.public_dns, checked_at=now(), verified_at=CASE WHEN excluded.status='active' THEN coalesce(link_hosts.verified_at, now()) END`);
+      public_dns=excluded.public_dns, checked_at=now(), verified_at=CASE WHEN excluded.status='active' THEN coalesce(link_hosts.verified_at, now()) END,
+      quota_full_at=CASE WHEN ${quota}='hit' THEN now() WHEN ${quota}='waiting' THEN link_hosts.quota_full_at END`);
   if (woke) await wakeLinkRecordHolds(runtime, workspaceId);
 }
 /** A link host just became active: the workspace's campaigns waiting for a link record (releaseStep, 'link_record') look
@@ -245,14 +261,10 @@ export async function forgetLinkHost(runtime: Runtime, workspaceId: string, doma
   if (!saas || !row?.custom_hostname_id || row.shared) return;
   if (!await deleteOwnHostname(saas, row.custom_hostname_id)) log('warn', { code: 'LINK_HOST_DELETE_FAILED', workspaceId });
 }
-/** Deletes a custom hostname this installation made; one another installation on the zone made is left alone. True when it
- *  is gone or isn't ours to delete; false when Cloudflare didn't answer. */
+/** Deletes a custom hostname of this installation's (only ids its link_hosts rows recorded reach here: NotOurs). True when
+ *  it is gone; false when Cloudflare didn't answer. */
 async function deleteOwnHostname(saas: Saas, id: string) {
   try {
-    const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`);
-    if (read.status === 404) return true;
-    if (!read.success) return false;
-    if (!ours(saas, read.result as CustomHostname)) { log('warn', { code: 'LINK_HOST_NOT_OURS' }); return true; }
     const done = await customHostnames(saas, 'DELETE', `/${encodeURIComponent(id)}`);
     return done.success || done.status === 404;
   } catch { return false; }

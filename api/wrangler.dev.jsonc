@@ -20,6 +20,13 @@
     "BANE_MAIL_BUCKET": "nightmail-dev-mail",
     "BANE_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://dev.nightmail.dev",
+    // Link hosts (src/link-domains.ts): the same nightmailedge.com zone as production, with its own target (cname-dev) and
+    // token (nightmail/dev/NIGHTMAIL_LINK_SAAS_TOKEN, bound by .github/scripts/deploy-worker.sh). Dev makes and checks its
+    // custom hostnames (links.e2e.bane.mx) but has no route there: the zone is in anomaly-production and a route reaches only
+    // a Worker of the zone's own account, so dev's link hosts are served by production's */* route, which answers 404 for
+    // links it didn't make. Never adopts or deletes a custom hostname production made (NotOurs).
+    "NIGHTMAIL_LINK_SAAS_ZONE_ID": "7b0d7306312182f66e12368f93efbb96",
+    "NIGHTMAIL_LINK_SAAS_TARGET": "cname-dev.nightmailedge.com",
     // Mail apps connect to imap.dev.bane.mx and smtp.dev.bane.mx, the names on dev's gateway certificate. Shown only
     // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.dev.yaml).
     "MAILGW_PUBLIC_DOMAIN": "dev.bane.mx",
