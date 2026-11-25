@@ -17,7 +17,7 @@ import { applyClaim, connectionReady, domainHosts, receivingSetup, type Receivin
 import { WORKSPACE_FOCUS, type WorkspaceFocus } from './workspace-focus.js';
 import { SETUP_LIMITS, SETUP_SENDER } from './setup-email.js';
 import { jobs } from './db/core.js';
-import { contacts, mergeSuppression } from './db/audience.js';
+import { contacts, mergeSuppression, topics } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, withoutVerdict, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import { emails } from './db/sending.js';
 import { sesRegions } from './db/ses-regions.js';
@@ -296,10 +296,11 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
   if (wake && readyJobs > 0) try { await runtime.wake?.(readyJobs,'webhook'); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
-/** A new unsubscribe link on `origin`, the mail's link host (src/link-domains.ts), and the token record that makes it work. */
-export async function createUnsubscribeLink(origin: string, workspaceId: string, email: string) {
+/** A new unsubscribe link on `origin`, the mail's link host (src/link-domains.ts), and the token record that makes it work.
+ *  `topicId`: the topic of the mail (src/topics.ts), which the link then unsubscribes from alone. */
+export async function createUnsubscribeLink(origin: string, workspaceId: string, email: string, topicId: string | null = null) {
   const token = randomSecret('u_');
-  return { url: `${origin.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, email: email.trim().toLowerCase() } };
+  return { url: `${origin.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, email: email.trim().toLowerCase(), topicId } };
 }
 const claimTag = tagKey('domain-claim');
 type Readiness = z.infer<typeof domainSchema>;
@@ -1773,7 +1774,7 @@ function registerPublicEvents(app: App) {
   const tokenParams = z.object({ token: z.string().regex(TOKEN) }).openapi('UnsubscribeToken');
   const invalidPage = { 404: { ...errors[404], description: 'The link is malformed or unknown: an HTML page saying so to a browser (Accept: text/html), the JSON error otherwise.', content: { ...errors[404]!.content, 'text/html': { schema: z.string() } } } };
   const pageRedirect = { 303: { description: 'The confirmation form of a campaign with its own unsubscribe page: the opt-out is recorded, then the browser continues to that page with unsubscribe_token. A one-click POST is never redirected (RFC 8058 section 3.1).', headers: { Location: { schema: { type: 'string' as const } } } } };
-  for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: method === 'get' ? 'Confirmation page; GET never changes consent (link scanners prefetch footer links).' : 'Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...(method === 'post' ? pageRedirect : {}), ...errors, ...(method === 'get' ? invalidPage : {}) } }), async c => {
+  for (const method of ['get', 'post'] as const) app.openapi(createRoute({ method, path: '/unsubscribe/{token}', operationId: method === 'get' ? 'unsubscribeByLink' : 'unsubscribeOneClick', tags: ['Consent'], security: [], request: { params: tokenParams }, responses: { 200: { description: method === 'get' ? 'Confirmation page; GET never changes consent (link scanners prefetch footer links).' : 'Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form); for a link from mail with a topic, the contact is unsubscribed from that topic only.', content: { 'text/html': { schema: z.string().openapi('UnsubscribeConfirmationHtml') } } }, ...(method === 'post' ? pageRedirect : {}), ...errors, ...(method === 'get' ? invalidPage : {}) } }), async c => {
     const raw = c.req.valid('param').token;
     const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(raw)));
     // The confirmation form may continue to the campaign's own page: browsers apply form-action to that redirect too.
@@ -1782,17 +1783,23 @@ function registerPublicEvents(app: App) {
     // Link scanners and mail security gateways fetch every link in a message, so a footer GET only asks for
     // confirmation. Mailbox one-click (RFC 8058, List-Unsubscribe-Post) and the confirmation form are POSTs.
     // A page's host may contain & and quotes (a URL host allows them): written as text, never markup.
-    const destination = token.pageUrl ? ` After unsubscribing, you’ll continue to ${new URL(token.pageUrl).host.replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`)}.` : '';
-    if (method === 'get') return c.html(unsubscribePage('Unsubscribe from marketing emails?', `<p>You will no longer receive marketing emails from this workspace.${destination}</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>`), 200);
-    const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>));
-    // The audience helper commits consent, audit, and the subscription event outbox atomically.
-    await (await wrapModuleLoad(() => import('./audience.js'))).recordUnsubscribe(c.env, token.workspaceId, token.email, form.confirm === 'footer' ? 'footer-confirm' : 'rfc8058-post');
+    const destination = token.pageUrl ? ` After unsubscribing, you’ll continue to ${escapeText(new URL(token.pageUrl).host)}.` : '';
+    // Mail with a topic unsubscribes from that topic alone (src/topics.ts); its name is the sender's text, written as text.
+    const [topic] = token.topicId ? await c.env.db.select({ name: topics.name }).from(topics).where(and(eq(topics.workspaceId, token.workspaceId), eq(topics.id, token.topicId))).limit(1) : [];
+    const what = topic ? `${escapeText(topic.name)} emails` : 'marketing emails', from = topic ? 'this sender. Their other emails are unchanged' : 'this workspace';
+    if (method === 'get') return c.html(unsubscribePage(`Unsubscribe from ${what}?`, `<p>You will no longer receive ${what} from ${from}.${destination}</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>`), 200);
+    const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>)), source = form.confirm === 'footer' ? 'footer-confirm' as const : 'rfc8058-post' as const;
+    // The audience helpers commit consent, audit, and the subscription event outbox atomically.
+    const audience = await wrapModuleLoad(() => import('./audience.js'));
+    if (token.topicId) await audience.recordTopicUnsubscribe(c.env, token.workspaceId, token.email, token.topicId, source);
+    else await audience.recordUnsubscribe(c.env, token.workspaceId, token.email, source);
     // Only a person confirming in a browser continues to the campaign's own page; RFC 8058 forbids redirecting one-click.
     if (form.confirm === 'footer' && token.pageUrl) return c.redirect(unsubscribePageLink(token.pageUrl, raw), 303);
-    return c.html(unsubscribePage('You’re unsubscribed', '<p>You will no longer receive marketing emails from this workspace.</p>'), 200);
+    return c.html(unsubscribePage('You’re unsubscribed', `<p>You will no longer receive ${what} from ${from}.</p>`), 200);
   });
 }
 
+const escapeText = (text: string) => text.replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
 function unsubscribePage(title: string, body: string) {
   return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>body,body *{letter-spacing:-0.01em}</style><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">${title}</h1>${body}</main></body></html>`;
 }

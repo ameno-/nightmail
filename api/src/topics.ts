@@ -1,5 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi';
-import { and, asc, eq, gt, isNotNull, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, gt, isNotNull, isNull, sql, type SQL } from 'drizzle-orm';
 import { actor, ApiError, databaseCodeOf, errors, IdParams, isoTime, json, notFound, page, PageQuery, response, rowId, security, type Actor, type App, type DbExecutor } from './core.js';
 import { consentAudit, topics } from './db/audience.js';
 import { enqueue } from './jobs.js';
@@ -48,19 +48,43 @@ export async function contactTopicStates(db: DbExecutor, workspaceId: string, co
   return rows.map(row => ({ ...row, updatedAt: isoTime(row.updatedAt) }));
 }
 
+/** A send's topic as its audience reads it (src/audience.ts consented). subscribedByDefault never changes. */
+export type TopicRule = { id: string; subscribedByDefault: boolean };
+/**
+ * The topic a send names: TOPIC_NOT_FOUND unless the workspace has it, and, with `active`, it isn't archived (a new send
+ * or launch). A launched send reads it again with `active` false: archiving a topic never lets its opt-outs through.
+ */
+export async function topicRule(db: DbExecutor, workspaceId: string, topicId: string, active = true): Promise<TopicRule> {
+  const [row] = await db.select({ id: topics.id, subscribedByDefault: topics.subscribedByDefault }).from(topics)
+    .where(and(eq(topics.workspaceId, workspaceId), eq(topics.id, topicId), active ? isNull(topics.archivedAt) : undefined)).limit(1);
+  if (!row) throw new ApiError(422, 'TOPIC_NOT_FOUND', `Topic ${topicId} was not found${active ? ' or is archived' : ''}.`, 'topicId');
+  return row;
+}
+/** Whether a topic's sends reach a contact, as far as the topic goes, for one topic known in advance: written as EXISTS or
+ *  NOT EXISTS so a whole audience is read with one join (a contact without a choice gets the topic's default). */
+export const topicReaches = (topic: TopicRule, workspace: SQL, contact: SQL) => topic.subscribedByDefault
+  ? sql`NOT EXISTS (SELECT 1 FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.contact_id = ${contact} AND ct.topic_id = ${topic.id} AND NOT ct.subscribed)`
+  : sql`EXISTS (SELECT 1 FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.contact_id = ${contact} AND ct.topic_id = ${topic.id} AND ct.subscribed)`;
+/** The same for a topic each row names (`topic`, an ID or NULL for none): accept and dispatch, a few rows at a time. Archived
+ *  topics count; an unknown one reaches nobody. */
+export const topicAllows = (workspace: SQL, contact: SQL, topic: SQL) => sql`(${topic} IS NULL OR coalesce(
+  (SELECT ct.subscribed FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.contact_id = ${contact} AND ct.topic_id = ${topic}),
+  (SELECT t.subscribed_by_default FROM audience_topics t WHERE t.workspace_id = ${workspace} AND t.id = ${topic}), false))`;
+
 /**
  * Records choices about topics for a contact its caller holds FOR UPDATE: each choice is stored, and each one that
  * changes whether the topic reaches the contact gets a consent record with its topic and a contact.subscription_changed
  * event with topicId. An unknown or archived topic is refused (TOPIC_NOT_FOUND). `resubscribe`: whether turning back on
- * a topic the contact opted out of is allowed (RESUBSCRIBE_CONFIRMATION_REQUIRED otherwise). Returns the topics it changed.
+ * a topic the contact opted out of is allowed (RESUBSCRIBE_CONFIRMATION_REQUIRED otherwise). `archived`: an archived topic
+ * is accepted too (a recipient's unsubscribe from mail sent before it was archived). Returns the topics it changed.
  */
 export async function recordTopicChoices(tx: DbExecutor, workspaceId: string, contact: { id: string; email: string }, choices: { topicId: string; subscribed: boolean }[],
-  decision: { source: string; policyVersion?: string; evidence?: string; occurredAt: string; actorKeyId: string | null }, resubscribe: boolean): Promise<string[]> {
+  decision: { source: string; policyVersion?: string; evidence?: string; occurredAt: string; actorKeyId: string | null }, resubscribe: boolean, archived = false): Promise<string[]> {
   const ids = choices.map(choice => choice.topicId);
   const { rows: current } = await tx.execute<{ id: string; subscribed: boolean; chosen: boolean | null }>(sql`
     SELECT t.id, coalesce(c.subscribed, t.subscribed_by_default) AS subscribed, c.subscribed AS chosen
     FROM audience_topics t LEFT JOIN audience_contact_topics c ON c.workspace_id = t.workspace_id AND c.contact_id = ${contact.id} AND c.topic_id = t.id
-    WHERE t.workspace_id = ${workspaceId} AND t.id = ANY(${sql.param(ids)}::text[]) AND t.archived_at IS NULL ORDER BY t.id FOR SHARE OF t`);
+    WHERE t.workspace_id = ${workspaceId} AND t.id = ANY(${sql.param(ids)}::text[]) ${archived ? sql`` : sql`AND t.archived_at IS NULL`} ORDER BY t.id FOR SHARE OF t`);
   const known = new Map(current.map(row => [row.id, row]));
   const missing = ids.find(id => !known.has(id));
   if (missing) throw new ApiError(422, 'TOPIC_NOT_FOUND', `Topic ${missing} was not found.`, 'topicId');

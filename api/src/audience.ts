@@ -7,7 +7,7 @@ import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type PropertyRule, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
-import { ContactTopic, contactTopicStates, recordTopicChoices } from './topics.js';
+import { ContactTopic, contactTopicStates, recordTopicChoices, topicReaches, type TopicRule } from './topics.js';
 import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
@@ -402,7 +402,7 @@ const engagedAt = sql`greatest(${contacts.lastOpenAt}, ${contacts.lastClickAt})`
 const neverMailed = (lastSent: string | null) => sql`(${contacts.observedSince} IS NULL AND ${lastSent === null ? sql`true` : sql`lm.created_at > ${lastSent}::timestamptz`})`;
 const tierSql = (lastSent: string | null) => sql`(CASE WHEN ${engagedAt} >= now() - make_interval(days => ${RAMP.plan.engagedDays}::int) THEN 0 WHEN ${neverMailed(lastSent)} THEN 2 ELSE 1 END)::smallint`;
 /** Of the audience a campaign would reach, how many were never mailed (tier 2); null when counting takes over a second. */
-export async function countNeverMailed(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice: boolean, lastSent: string | null): Promise<number | null> {
+export async function countNeverMailed(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice: boolean, lastSent: string | null, topic?: TopicRule | null): Promise<number | null> {
   const conditions = await audienceConditions(db, identity, spec, false, true);
   return (db as Database).transaction(async tx => {
     await tx.execute(sql`SAVEPOINT never_mailed`);
@@ -410,7 +410,7 @@ export async function countNeverMailed(db: DbExecutor, identity: Actor, spec: z.
       await tx.execute(sql`SET LOCAL statement_timeout = '1s'`);
       await tx.execute(sql`SET LOCAL enable_nestloop = off`);
       const [row] = (await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM ${contacts} ${memberJoin(identity, spec.listId)}
-        WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice)} AND ${neverMailed(lastSent)}`)).rows;
+        WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice, topic)} AND ${neverMailed(lastSent)}`)).rows;
       return row?.n ?? 0;
     } catch (error) {
       if (!statementTimedOut(error)) throw error;
@@ -423,24 +423,26 @@ export async function countNeverMailed(db: DbExecutor, identity: Actor, spec: z.
   });
 }
 // Who a campaign may reach: subscribers, or for a required notice everyone who is not suppressed (bounced, complained),
-// people who unsubscribed from marketing or never subscribed included.
+// people who unsubscribed from marketing or never subscribed included. A campaign with a topic (src/topics.ts) reaches the
+// subscribers who didn't opt out of it (or, for a topic nobody gets by default, opted in); a required notice has none.
 // Contacts flagged as risky are skipped unless their owner allowed them (src/list-hygiene.ts), whatever the campaign.
-const consented = (requiredNotice: boolean) => requiredNotice ? sql`true` : sql`${contacts.marketingConsent} = 'subscribed'`;
+const consented = (requiredNotice: boolean, topic?: TopicRule | null) => requiredNotice ? sql`true`
+  : topic ? sql`(${contacts.marketingConsent} = 'subscribed' AND ${topicReaches(topic, sql`${contacts.workspaceId}`, sql`${contacts.id}`)})` : sql`${contacts.marketingConsent} = 'subscribed'`;
 const skipped = skippedRisk(sql`${contacts.risk}`, sql`${contacts.riskAllowed}`);
-const reachable = (requiredNotice: boolean) => sql`NOT ${contacts.suppressed} AND ${consented(requiredNotice)} AND (${contacts.risk} IS NULL OR ${contacts.riskAllowed})`;
+const reachable = (requiredNotice: boolean, topic?: TopicRule | null) => sql`NOT ${contacts.suppressed} AND ${consented(requiredNotice, topic)} AND (${contacts.risk} IS NULL OR ${contacts.riskAllowed})`;
 /** Who campaigns skip as risky out of the reachable, by reason: counted aggregates named risky_<reason>. */
 const riskyColumns = (risk: SQL, risky: SQL = sql`true`) => sql.join(RISKS.map(r => sql`count(*) FILTER (WHERE ${risky} AND ${risk} = ${r})::int AS ${sql.identifier(`risky_${r}`)}`), sql`, `);
 type RiskyRow = { [K in `risky_${Risk}`]: number };
 const riskyOf = (row: RiskyRow) => riskCounts(RISKS.map(r => ({ risk: r, count: row[`risky_${r}`] })));
 export type AudienceCountsResult = { matched: number; eligible: number; suppressed: number; unsubscribed: number; risky: number; riskyByReason: RiskCounts };
 /** Read-only counts of the live audience (the dashboard's pre-send check); nothing is frozen or locked. */
-export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false): Promise<AudienceCountsResult> {
+export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false, topic?: TopicRule | null): Promise<AudienceCountsResult> {
   const conditions = await audienceConditions(db, identity, spec, false);
   const [row] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number } & RiskyRow>(sql`SELECT count(*)::int AS matched,
-      count(*) FILTER (WHERE ${reachable(requiredNotice)})::int AS eligible,
+      count(*) FILTER (WHERE ${reachable(requiredNotice, topic)})::int AS eligible,
       count(*) FILTER (WHERE ${contacts.suppressed})::int AS suppressed,
-      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${consented(requiredNotice)}))::int AS unsubscribed,
-      ${riskyColumns(sql`${contacts.risk}`, sql`NOT ${contacts.suppressed} AND ${consented(requiredNotice)} AND ${skipped}`)}
+      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${consented(requiredNotice, topic)}))::int AS unsubscribed,
+      ${riskyColumns(sql`${contacts.risk}`, sql`NOT ${contacts.suppressed} AND ${consented(requiredNotice, topic)} AND ${skipped}`)}
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
   const risky = riskyOf(row!);
   return { matched: row!.matched, eligible: row!.eligible, suppressed: row!.suppressed, unsubscribed: row!.unsubscribed, risky: risky.total, riskyByReason: risky.byReason };
@@ -464,9 +466,10 @@ async function riskyByHash<T>(db: DbExecutor, work: (db: DbExecutor) => Promise<
 }
 
 /** Display-only whole-list counts. The list tally includes every committed delta, not just its last fold. */
-export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false): Promise<AudienceCountsResult> {
-  if (identity.domains.length || spec.segmentId || spec.excludeListIds?.length || spec.excludeSegmentIds?.length) {
-    return countCampaignAudience(db, identity, spec, requiredNotice);
+export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false, topic?: TopicRule | null): Promise<AudienceCountsResult> {
+  // The list's counts know nothing of topics: a campaign with one is counted.
+  if (identity.domains.length || spec.segmentId || spec.excludeListIds?.length || spec.excludeSegmentIds?.length || topic) {
+    return countCampaignAudience(db, identity, spec, requiredNotice, topic);
   }
   // Anchor to the scoped list so a missing or foreign list still returns 404, not the counts of an empty list.
   const { rows: [row] } = await riskyByHash(db, db => db.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number; risky: Record<string, number> | null }>(sql`
@@ -502,6 +505,8 @@ export type SnapshotOptions = {
   onProgress?: (progress: SnapshotProgress) => Promise<'continue' | 'abort'>;
   /** How many of the first recipients are a uniform sample of the whole audience (the Hosted list probe's size). */
   leading?: (eligible: number) => number;
+  /** The campaign's topic: its opt-outs are left out like the unsubscribed. */
+  topic?: TopicRule | null;
 };
 
 /** O(SYNC_CAPTURE_MAX_LIST_MEMBERS) PK Index-Only Scan (~0.5 ms regardless of whether the list has 2M or 20M members). */
@@ -531,9 +536,10 @@ export async function estimateCampaignAudience(
   spec: z.infer<typeof AudienceSpec>,
   requiredNotice: boolean,
   cachedEstimate: number | null,
+  topic?: TopicRule | null,
 ): Promise<{ queued: number; definitive?: 'empty' | 'over_limit'; risky?: { total: number; byReason: RiskCounts }; approximate?: true }> {
   const conditions = await audienceConditions(db, identity, spec, true);
-  if (!spec.segmentId && !spec.excludeListIds?.length && !spec.excludeSegmentIds?.length) {
+  if (!spec.segmentId && !spec.excludeListIds?.length && !spec.excludeSegmentIds?.length && !topic) {
     const hasTally = (await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok;
     if (hasTally) {
       const [tally] = (await riskyByHash(db, db => db.execute<{ subscribed: number; reachable: number; risky: Record<string, number> | null }>(sql`
@@ -552,7 +558,7 @@ export async function estimateCampaignAudience(
     const [row] = (await db.execute<{ eligible: number }>(sql`
       SELECT count(*)::int AS eligible FROM (
         SELECT 1 FROM ${contacts}
-        WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice)}
+        WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice, topic)}
         LIMIT ${SNAPSHOT_MAX_MATCHED + 1}
       ) bounded`)).rows;
     const eligible = row?.eligible ?? 0;
@@ -609,7 +615,8 @@ export async function snapshotCampaignAudience(
     count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed AND skipped_risk IS NULL)::int AS unsubscribed,
     ${riskyColumns(sql`skipped_risk`)}`;
   // The risk of a contact this capture skips for it alone: reachable but for its risk.
-  const skippedRiskSql = sql`CASE WHEN NOT ${contacts.suppressed} AND ${consented(requiredNotice)} AND ${skipped} THEN ${contacts.risk} END`;
+  const topic = options?.topic;
+  const skippedRiskSql = sql`CASE WHEN NOT ${contacts.suppressed} AND ${consented(requiredNotice, topic)} AND ${skipped} THEN ${contacts.risk} END`;
   // The audience's contacts and list members are joined whole, by hash, whatever the statistics say. With stale ones
   // (tables autovacuum found empty, then a list imported before the next analyze) the planner expects one row on each
   // side and compares every contact with every member in a nested loop: minutes at 50,000 members, never done at
@@ -631,10 +638,10 @@ export async function snapshotCampaignAudience(
   await db.execute(sql`DROP TABLE IF EXISTS pg_temp.audience_snapshot, pg_temp.audience_ordered`);
   const staged = await wholeJoins(carriesEmail
     ? sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
-        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${contacts.email} AS email, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${contacts.email} AS email, ${reachable(requiredNotice, topic)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
         FROM ${contacts} ${memberJoin(identity, spec.listId)} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`
     : sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
-        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice, topic)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
         FROM ${contacts} ${memberJoin(identity, spec.listId)} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`);
   if ((staged.rowCount ?? 0) > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   const [snapshotRow] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number } & RiskyRow>(sql`SELECT ${counts} FROM audience_snapshot`)).rows;
@@ -761,6 +768,21 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
     const evidence = source === 'ses-subscription' ? 'Signed SES subscription event reported unsubscribeAll for a single-recipient email.' : source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token; no human identity asserted.';
     await recordConsent(tx, identity, contact, { status: 'unsubscribed', source, evidence, occurredAt: now, actorKeyId: null }, now);
     return { contactId: contact.id, changed: true };
+  });
+}
+/** A recipient's unsubscribe from mail with a topic (src/operations.ts /unsubscribe): that topic only, archived or not; the
+ *  contact's marketing consent stays as it is. A contact deleted since keeps its choice, as it keeps its consent. */
+export async function recordTopicUnsubscribe(runtime: Runtime, workspaceId: string, email: string, topicId: string, source: 'footer-confirm' | 'rfc8058-post'): Promise<{ contactId: string; changed: boolean }> {
+  const normalized = Email.safeParse(email);
+  if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
+  return runtime.db.transaction(async tx => {
+    const identity = { workspaceId };
+    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: staticRiskSql(normalized.data, workspaceId, peekHygieneLists()) as unknown as Risk }).onConflictDoNothing();
+    const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, normalized.data))).limit(1).for('update');
+    if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
+    const evidence = source === 'rfc8058-post' ? 'POST request presented a valid one-click unsubscribe token for this topic; no human identity asserted.' : 'Footer confirmation form submitted with a valid unsubscribe token for this topic; no human identity asserted.';
+    const changed = await recordTopicChoices(tx, workspaceId, contact, [{ topicId, subscribed: false }], { source, evidence, occurredAt: new Date().toISOString(), actorKeyId: null }, false, true);
+    return { contactId: contact.id, changed: changed.length > 0 };
   });
 }
 /**
