@@ -93,7 +93,16 @@ export interface AudienceList { unknown?: number; id: string; name: string; tota
 export interface Segment { rule: Record<string, unknown>; id: string; name: string; updatedAt: ISODate }
 export type SegmentInput = Pick<Segment, 'name' | 'rule'> & { id?: string }
 /** risky: subscribed and not suppressed, but skipped as risky (not in eligible); riskyByReason only for a campaign's audience. */
-export interface AudiencePreview { matched: number; suppressed: number; unsubscribed: number; eligible: number; risky?: number; riskyByReason?: Record<RiskReason, number>; contacts: Contact[] }
+export interface AudiencePreview { matched: number; suppressed: number; unsubscribed: number; eligible: number; risky?: number; riskyByReason?: Record<RiskReason, number>; readiness?: CampaignReadiness | null; contacts: Contact[] }
+// The API's CampaignReadiness: the send review of a marketing campaign (api/src/standing-model.ts RAMP.readiness).
+type HistoryFigures = { largestSend: number; sent: number; bounceRate: number | null; complaintRate: number | null }
+export interface CampaignReadiness {
+  verdict: 'ready' | 'ramp_recommended' | 'ramp_required'; summary: string | null; reasons: { code: string; message: string }[]
+  domain: { name: string; firstSeenAt: ISODate | null; ageDays: number | null; dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null; mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured'; linkHost: 'not_configured' }
+  history: { workspace: HistoryFigures; domain: HistoryFigures }
+  list: { recipients: number; risky: number; neverMailed: number | null; createdAt: ISODate | null; lastSentAt: ISODate | null; lastImport: { at: ISODate; contacts: number; consent: string | null } | null }
+  sizeJump: number | null; plan: { batches: number[]; seconds: number | null } | null; required: { by: 'NEW_DOMAIN' | 'SIZE_JUMP'; maxPerDay: number } | null
+}
 type ReviewDisplayPart<T> = { data: T; error?: never } | { data?: never; status: number; retryAfter?: number;
   error: { code: string; message: string; field?: string; requestId: string; retryable: boolean; details?: Record<string, unknown>[] } }
 export interface CampaignReviewDisplay {
@@ -108,11 +117,15 @@ export interface CampaignListStats { tracking: boolean; accepted: number; delive
 // null while a large list has never been counted.
 export interface NewsletterReaders { count: number; daily: number[]; since: string; countedAt: ISODate }
 export interface Newsletter { id: string; name: string; from: string; fromName: string | null; url: string; createdAt: ISODate; readers?: NewsletterReaders | null }
-export interface Campaign { stats?: CampaignListStats | null; counts?: { total: number; byStatus: Record<string, number> }; delivery?: CampaignDelivery | null; archivedAt?: ISODate | null; revision?: number; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; unsubscribePageUrl: string; requiredNotice: boolean; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; recipients: number; delivered: number; bounced: number; complaints: number }
+export interface Campaign { stats?: CampaignListStats | null; counts?: { total: number; byStatus: Record<string, number> }; delivery?: CampaignDelivery | null; sendEstimate?: CampaignSendEstimate | null; archivedAt?: ISODate | null; revision?: number; draft?: Record<string, any>; attachments?: string[]; sourceTemplateId?: string | null; sourceTemplateRevision?: number | null; id: string; regionId: RegionId; name: string; subject: string; previewText: string; fromName: string; fromEmail: string; replyTo: string[]; unsubscribePageUrl: string; requiredNotice: boolean; listId: string; segmentId: string | null; html: string; status: CampaignStatus; createdAt: ISODate; updatedAt: ISODate; scheduledAt: ISODate | null; recipients: number; delivered: number; bounced: number; complaints: number }
 // pacing, pausedAt, pauseReason, waiting, and rateShare are optional so older API responses still type-check.
 // rateShare is the fraction (0.05–1) of the SES per-second send rate the campaign may use; 1 is the full rate.
-export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null }
-export interface CampaignDelivery { total: number; prepared: number; expanded: number; canceled: number; error: { code: string; message: string } | null; pacing?: CampaignPacing; pausedAt?: ISODate | null; pauseReason?: { code: string; message: string } | null; waiting?: { reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag'; until: ISODate } | null; feedbackLag?: { oldestMs: number; lane: 'routine' | 'priority' } | null }
+export interface CampaignPacing { perDay: number | null; autoPause: boolean; rateShare?: number; windowStartedAt: ISODate | null; windowExpanded: number; nextWindowAt: ISODate | null; plan?: number[] | null; batch?: number | null }
+export interface CampaignDelivery { total: number; prepared: number; expanded: number; canceled: number; error: { code: string; message: string } | null; pacing?: CampaignPacing; pausedAt?: ISODate | null; pauseReason?: { code: string; message: string } | null; waiting?: { reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp'; until: ISODate } | null; feedbackLag?: { oldestMs: number; lane: 'routine' | 'priority' } | null }
+// The API's Campaign.sendEstimate: what is left to release, the region's planned rate, where the sender is on the ramp
+// (api/src/standing-model.ts RAMP; step counts from 1) and when the last recipient is expected to go out.
+export interface CampaignRamp { step: number; steps: number; ceilingPerHour: number; startedAt: ISODate | null; released: number }
+export interface CampaignSendEstimate { recipients: number | null; ratePerSecond: number | null; ramp: CampaignRamp | null; seconds: number | null; finishAt: ISODate | null }
 export interface CampaignPacingInput { perDay: number | null; autoPause?: boolean; rateShare?: number }
 type CampaignRate = { value: number | null; numerator: number; denominator: number }
 // Lifetime distinct email outcomes (GET /v1/campaigns/{id}/stats); outcomes overlap and simulated mail is counted separately.
@@ -120,7 +133,7 @@ export interface CampaignStats { tracking: boolean; totals: { accepted: number; 
 // defaults are the fallback values for {{placeholders}} a contact has no value for (the API's draft.defaults).
 export type CampaignInput = Pick<Campaign, 'regionId' | 'name' | 'subject' | 'previewText' | 'fromName' | 'fromEmail' | 'listId' | 'segmentId' | 'html'> & { replyTo?: string[]; unsubscribePageUrl?: string; requiredNotice?: boolean; id?: string; revision?: number; draft?: Record<string, any>; attachments?: string[]; defaults?: Record<string, string>; templateId?: string; idempotencyKey?: string }
 export interface CampaignState { id: string; revision: number; updatedAt: ISODate; status: CampaignStatus; scheduledAt: ISODate | null; archivedAt: ISODate | null }
-export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number }; confirmRequiredNotice?: boolean }
+export interface SendCampaignInput { revision?: number; id: string; mode: 'now' | 'schedule'; scheduledAt?: ISODate; pacing?: { perDay?: number | null; autoPause?: boolean; rateShare?: number; plan?: 'recommended' }; consent?: { confirmed: true; source: string }; confirmRequiredNotice?: boolean }
 // Settings → Activity's entries (data/activity.ts) and an API key's history: the workspace's audit trail.
 export type AuditActorType = 'member' | 'api_key' | 'mcp_grant' | 'agent_token' | 'inbox_key' | 'app_password' | 'operator' | 'support' | 'system' | 'stripe'
 export type AuditEntry = {
