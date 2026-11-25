@@ -29286,7 +29286,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,kind,from_step,to_step,reasons,actor) VALUES ($1,$2,1,'step','ok','warn','[{"code":"BOUNCE_WARN"}]','{"kind":"system"}')`, [unique('stev'), wid]);
       // A domain of its own verified, a built-in one ready, and a campaign launched then paused: the triggers stamp each.
       const own = `${unique('glass')}.invalid`, builtin = `${unique('glass')}.nightmail.invalid`, campaign = unique('cmp');
-      await db.query(`INSERT INTO domain_claims(name,workspace_id) VALUES ($1,$3),($2,$3)`, [own, builtin, wid]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id) VALUES ($1,$3,$3),($2,$3,$3)`, [own, builtin, wid]);
       await db.query(`UPDATE domain_claims SET identity='{"builtin":true}' WHERE name=$1`, [builtin]);
       await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE name=ANY($1)`, [[own, builtin]]);
       await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total) VALUES ($1,$2,$3,'draft',0)`, [campaign, wid, JSON.stringify({ name: 'Glass launch' })]);
