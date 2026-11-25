@@ -4,6 +4,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount, shardsForRate } from './dispatcher-do.js';
 import { CampaignRoom } from './campaign-room.js';
+import { durableInboxWake } from './inbox-wake.js';
 import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
@@ -228,6 +229,8 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         catch { core.log('warn',{code:'LOG_FACET_AGGREGATE_FAILED',workspaceId:workspace}); }
       }) : undefined,
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined,
+      // Inbox long polls wait on their workspace's object in the dispatcher namespace and end as mail is stored.
+      inboxWake: durableInboxWake(env.DISPATCHER),
       detach: ctx ? detached => { const run = withRuntime(env, detached, 1, ctx); ctx.waitUntil(run.catch(() => {})); return run; } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);

@@ -4502,11 +4502,11 @@ export type InboxMessage = {
      */
     receivedAt: string;
     /**
-     * When Nightmail stored it (the start of the write that stored it), on the clock servedAt uses.
+     * When the write that stored it in Nightmail committed, on the clock servedAt uses.
      */
     storedAt: string;
     /**
-     * Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing and routing the message. Null for mail that came another way (simulated, sent, copied).
+     * Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing, routing and storing the message. Null for mail that came another way (simulated, sent, copied).
      */
     processingMs: number | null;
     read: boolean;

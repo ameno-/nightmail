@@ -81,8 +81,8 @@ const Message = z.object({
   cursor: z.string().describe('Pass as after to continue after this message.'),
   from: address.describe('The claimed sender. Check auth before trusting it.'), to: z.array(address).describe('Addresses in the To header (at most 20 on list pages, up to 100 on getInboxMessage).'), toCount: z.number().int().describe('Total addresses in the To header (may exceed to.length when shortened).'),
   subject: z.string(), snippet: z.string(), receivedAt: z.string().describe('When the sending server handed it over (SES received it).'),
-  storedAt: z.string().describe(`When ${productName} stored it (the start of the write that stored it), on the clock servedAt uses.`),
-  processingMs: z.number().int().nullable().describe(`Milliseconds from the receipt reaching ${productName} to storedAt: fetching, parsing and routing the message. Null for mail that came another way (simulated, sent, copied).`),
+  storedAt: z.string().describe(`When the write that stored it in ${productName} committed, on the clock servedAt uses.`),
+  processingMs: z.number().int().nullable().describe(`Milliseconds from the receipt reaching ${productName} to storedAt: fetching, parsing, routing and storing the message. Null for mail that came another way (simulated, sent, copied).`),
   read: z.boolean(),
   flags:z.array(z.enum(flagNames)), labels:z.array(z.string()), folders:z.array(Location.extend({folder:LegacyRole})), additionalFolders:z.array(Location), modseq:z.string(),
   uid:z.number().nullable(), uidValidity:z.number().nullable(),
@@ -114,8 +114,11 @@ const meta = { tags: ['Agent inboxes'], security };
 const take = z.coerce.number().int().min(1).max(100).default(25);
 const extract = z.enum(['codes', 'links', 'codes,links', 'links,codes']).optional().describe('Extract one-time codes, links or both into each message’s extract field.');
 const absent = () => new ApiError(404, 'NOT_FOUND', 'No such inbox or message for this credential.');
-/** storedAt and processingMs (Message): when the message was stored, and how long after its receipt reached us. */
-const stored = sql`m.created_at AS stored_at, CASE WHEN m.direction='inbound' AND m.ses_message_id IS NOT NULL THEN (SELECT greatest(0,round(extract(epoch FROM m.created_at-r.created_at)*1000))::int FROM mail_receipts r WHERE r.workspace_id=m.workspace_id AND r.ses_message_id=m.ses_message_id) END AS processing_ms`;
+/** storedAt and processingMs (Message): the receipt's commit stamp (migration 517); before it, when the row was written and
+ *  when its write began. */
+const receiptOf = (column: SQL) => sql`(SELECT ${column} FROM mail_receipts r WHERE r.workspace_id=m.workspace_id AND r.ses_message_id=m.ses_message_id AND m.direction='inbound')`;
+const stored = sql`coalesce(${receiptOf(sql`r.committed_at`)}, m.created_at) AS stored_at,
+  ${receiptOf(sql`round(extract(epoch FROM coalesce(r.committed_at, r.processed_at) - r.created_at) * 1000)::int`)} AS processing_ms`;
 const randomLocal = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
 
 type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: string; replay: boolean; inbox: Box };
@@ -313,7 +316,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
   const INBOX_MESSAGES_READ = 5;
   app.openapi(createRoute({
     ...meta, method: 'get', path: messages, operationId: 'listInboxMessages', summary: 'List or wait for inbox messages',
-    description: 'Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: ' + readLimitNote(INBOX_MESSAGES_READ),
+    description: 'Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out, and answers as soon as the message is stored; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: ' + readLimitNote(INBOX_MESSAGES_READ),
     request: { params, query },
     responses: { 200: response(z.object({ data: z.array(Message), cursor: z.string().describe('Pass as after on the next call; unchanged when data is empty.'), hasMore: z.boolean(),
       servedAt: z.string().describe('When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored.') }).openapi('InboxMessagePage')), ...errors },
@@ -371,7 +374,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
       if (next === null) return null as unknown as PollRow[];
       if (next[0]?.state_modseq) lastModseq = next[0].state_modseq;
       return next;
-    }, rows => rows === null || !rows.length || rows.some(r => r.id));
+    }, rows => rows === null || !rows.length || rows.some(r => r.id), { workspaceId: v.workspaceId, inboxId: id });
     if (rows === null) return new Response(null, { status: 499 }) as never;
     if (!rows.length) throw absent();
     const present = rows.filter(r => r.id);

@@ -1,5 +1,6 @@
 import {getTableColumns,sql} from 'drizzle-orm';
 import type {DbExecutor} from './core.js';
+import type {StoreNotice} from './inbox-wake.js';
 import {mailMessages,mailAttachments} from './db/mailbox.js';
 import {ADDRESS} from './mailbox-store.js';
 import {mailJson} from './mailbox-text.js';
@@ -37,17 +38,20 @@ function encodeIncoming(entry: IncomingBatchEntry) {
   };
 }
 
+/** pg_notify in the store's own statement (inbox-wake.ts storeNotice): heard at its commit, for no statement of its own. */
+const noticed = (notice?: StoreNotice | null) => notice ? sql`, pg_notify(${notice[0]}, ${notice[1]})` : sql``;
+
 /** One implicit transaction; the routine takes the write lane before the DML snapshot. */
-export async function storeIncoming(db:DbExecutor,m:Incoming,files:(typeof mailAttachments.$inferInsert)[],verifiedFrom:boolean,allowCreate:boolean,replyAuthorVerified=false,plan?:import('./routing-match.js').RoutingResult|null,policy?:string,platformHosts:string|readonly string[]|null=null,preview?:{prefix:string;complete:boolean}){
+export async function storeIncoming(db:DbExecutor,m:Incoming,files:(typeof mailAttachments.$inferInsert)[],verifiedFrom:boolean,allowCreate:boolean,replyAuthorVerified=false,plan?:import('./routing-match.js').RoutingResult|null,policy?:string,platformHosts:string|readonly string[]|null=null,preview?:{prefix:string;complete:boolean},notice?:StoreNotice|null){
   const e = encodeIncoming({ m, files, verifiedFrom, allowCreate, replyAuthorVerified, plan, platformHosts, preview });
-  return (await db.execute<{queued_count:number;wait_ms:number;hold_ms:number}>(sql`SELECT * FROM mail_store_incoming(${mailJson(e.msg)}::jsonb,${mailJson(e.files)}::jsonb,${mailJson(e.refs)}::jsonb,${mailJson(e.envelopes)}::jsonb,${e.authenticated_from},${e.can_create},${e.plan?mailJson(e.plan):null}::jsonb,${policy??null}::jsonb,${e.prefix},${e.complete})`)).rows[0]!;
+  return (await db.execute<{queued_count:number;wait_ms:number;hold_ms:number}>(sql`SELECT s.* FROM mail_store_incoming(${mailJson(e.msg)}::jsonb,${mailJson(e.files)}::jsonb,${mailJson(e.refs)}::jsonb,${mailJson(e.envelopes)}::jsonb,${e.authenticated_from},${e.can_create},${e.plan?mailJson(e.plan):null}::jsonb,${policy??null}::jsonb,${e.prefix},${e.complete}) s${noticed(notice)}`)).rows[0]!;
 }
 
 /** Stores a workspace's batch of prepared inbound messages under one ingest lane lock and one commit. */
-export async function storeIncomingBatch(db: DbExecutor, workspaceId: string, entries: IncomingBatchEntry[], policy?: string) {
+export async function storeIncomingBatch(db: DbExecutor, workspaceId: string, entries: IncomingBatchEntry[], policy?: string, notice?: StoreNotice | null) {
   if (!entries.length) return [];
   const encoded = entries.map(encodeIncoming);
   return (await db.execute<{ ses_message_id: string; queued_count: number; wait_ms: number; hold_ms: number }>(
-    sql`SELECT * FROM mail_store_incoming_batch(${workspaceId}, ${mailJson(encoded)}::jsonb, ${policy ?? null}::jsonb)`,
+    sql`SELECT s.* FROM mail_store_incoming_batch(${workspaceId}, ${mailJson(encoded)}::jsonb, ${policy ?? null}::jsonb) s${noticed(notice)}`,
   )).rows;
 }
