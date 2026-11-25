@@ -24027,7 +24027,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       c=await edit(c);error(await launch(c),409,'HOSTED_SENDING_PAUSED');
       await db.query(`UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE id=$1`,[wid]);
       pinned=await edit(pinned);error(await launch(pinned),422,'SENDER_REGION_MISMATCH');
-      error(await local('POST',`/v1/campaigns/${pinned.id}/test`,{to:'test@example.net'}),422,'SENDER_REGION_MISMATCH');
+      error(await local('POST',`/v1/campaigns/${pinned.id}/test`,{to:`test@${host}`}),422,'SENDER_REGION_MISMATCH');
       assert.equal((await edit(pinned,{regionPinned:false,region:undefined})).draft.region,va);
       // The launch itself resolves again: the former unbound sender now belongs to Virginia.
       const late=await create({name:'Bound after save',...fields,from:'sender@new.example'});
@@ -26410,7 +26410,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query(`WITH a AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) VALUES('exempt-contact',$1,'subscriber@example.net','subscribed') RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM a`,[wid,list.id]);
       const c=ok(await post('/v1/campaigns',{name:'Synthetic exempt campaign',from,subject:'Fixture',html:'<p>Fixture</p>',audience:{listId:list.id}}),201), path=`/v1/campaigns/${c.id}`;
-      ok(await post(`${path}/test`,{to:'test@example.net'}),202);
+      ok(await post(`${path}/test`,{to:`test@${domain}`}),202);
       ok(await post(`${path}/send`,{revision:c.revision}),202);
       // Older Hosted campaigns could persist auto_pause=false. Real accepted statuses above the threshold still stop release.
       await db.query('UPDATE sending_campaigns SET auto_pause=false WHERE id=$1',[c.id]);
@@ -28271,13 +28271,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const longBytes = (await measureScreen(preview)).screenedBytes;
       assert.ok(longBytes > 65_536 && longBytes < 131_072, `${longBytes}`);
       start = screened.length;
-      const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@example.net', data: {} }), 202);
+      const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@held.invalid', data: {} }), 202);
       assert.equal((await dispatch()).sent, 1); assert.ok(screened.length - start >= 10 && screened.length - start <= 28, `${screened.length - start}`);
       assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1', [tested.id])).rows[0].status, 'accepted');
       await send(long); assert.equal((await dispatch()).sent, 2); assert.ok([...delivered.values()].some(d => d.html?.includes('Section 449')));
       const tooLong = await campaign('Too long', `${paragraphs(700)}<p><a href="https://held.invalid/notes">Read the notes</a></p>`, names(1));
       for (const how of ['send', 'schedule', 'test']) {
-        const refused = error(await local('POST', `/v1/campaigns/${tooLong.id}/${how}`, how === 'test' ? { to: 'me@example.net', data: {} } : { revision: tooLong.revision, ...(how === 'schedule' ? { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() } : {}) }), 422, 'CONTENT_TOO_LARGE_TO_SCREEN');
+        const refused = error(await local('POST', `/v1/campaigns/${tooLong.id}/${how}`, how === 'test' ? { to: 'me@held.invalid', data: {} } : { revision: tooLong.revision, ...(how === 'schedule' ? { scheduledAt: new Date(Date.now() + 3_600_000).toISOString() } : {}) }), 422, 'CONTENT_TOO_LARGE_TO_SCREEN');
         assert.equal(refused.details[0].limitBytes, 131_072); assert.ok(refused.details[0].screenedBytes > 131_072); assert.match(refused.message, /per campaign/);
       }
       assert.equal((await view(tooLong)).state, 'draft');
@@ -28736,7 +28736,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const paragraphs = (n: number) => Array.from({ length: n }, (_, i) => `<p>Section ${i}: what changed this month in sync, search and sharing, and how to try it from your dashboard.</p>`).join('');
       const long = await harness.campaign('Long digest', `<h1>Hello {{first_name}}</h1>${paragraphs(150)}<p><a href="https://shadow.invalid/notes">Read the notes</a></p>`, ['Ana', 'Ben', 'Ana', 'Ben', 'Ana'].map(first_name => ({ first_name })));
       let before = await counts();
-      const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@example.net', data: {} }), 202); assert.equal((await dispatch()).sent, 1);
+      const tested = ok(await local('POST', `/v1/campaigns/${long.id}/test`, { to: 'me@shadow.invalid', data: {} }), 202); assert.equal((await dispatch()).sent, 1);
       const windows = sent.jev.length - before[0]!, testRows = (await rows()).filter(x => x.kind === 'campaign_test');
       assert.ok(windows >= 2, `${windows} requests`); assert.deepEqual([sent.jevf.length - before[1]!, testRows.length], [windows, windows]);
       assert.ok(testRows.every(x => x.email_id === tested.id && x.campaign_id === long.id && x.windows === windows && x.digest === testRows[0]!.digest));
@@ -41058,8 +41058,46 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await send('hosted-warm-key',1,'/v1/emails/send',hosted(),{...bearer,'Idempotency-Key':'budget-warm'});
       await send('hosted-session',2,'/v1/emails/send',hosted());
       const hostedDraft=ok(await local('POST','/v1/campaigns',{name:'budget-hosted',from:'a@budget.invalid',subject:'Budget',html:'<p>Budget</p>'},'live',auth),201);
-      await send('hosted-campaign-test',3,`/v1/campaigns/${hostedDraft.id}/test`,{to:address()},auth);
+      // Hosted, a test's front door (CAMPAIGN_TESTS) is one statement more: its address is the workspace's own, and the hour has room.
+      await send('hosted-campaign-test',4,`/v1/campaigns/${hostedDraft.id}/test`,{to:'tester@budget.invalid'},auth);
       t.diagnostic(`ADMISSION-BUDGETS ${JSON.stringify(budgets)}`);
+    });
+  });
+  // A campaign test is the campaign's copy sent as transactional mail, outside its audience's consent, the marketing ramp,
+  // holds and pacing: on Hosted it goes only to the workspace's own addresses, a limited number an hour.
+  test('a Hosted campaign test goes only to the workspace\'s own addresses, a limited number an hour; self-hosted is unchanged',async t=>{
+    await simulatedSesFixture(t,async({db,runtime,local})=>{
+      const {CAMPAIGN_TESTS}=await import('./src/hosted-sending.js');
+      const wid=runtime.config.workspaceId,acct='112223330046',emails=async()=>(await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1',[wid])).rows[0].n as number;
+      // Self-hosted: the operator's own SES account, any address.
+      const plain=ok(await local('POST','/v1/campaigns',{name:'self-hosted test',from:'sender@example.com',subject:'Spring sale',html:'<p>Spring sale</p>'}),201);
+      ok(await local('POST',`/v1/campaigns/${plain.id}/test`,{to:'anyone@example.net'}),202);
+      runtime.config.multiTenant=true;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('own.invalid',$1,$1,'verified'),('unproven.invalid',$1,$1,'pending')`,[wid]);
+      const draft=ok(await local('POST','/v1/campaigns',{name:'hosted test',from:'news@own.invalid',subject:'Spring sale',html:'<p>Spring sale</p>'}),201);
+      const test=(to:string)=>local('POST',`/v1/campaigns/${draft.id}/test`,{to});
+      const before=await emails();
+      // Not the workspace's own: a stranger, a domain it has not verified, names that only end like its own, and a member
+      // whose email is unverified.
+      for (const to of ['stranger@example.net','someone@unproven.invalid','x@own.invalid.example','x@notown.invalid']) assert.equal(error(await test(to),422,'TEST_RECIPIENT_NOT_OWNED').field,'to');
+      await db.query('UPDATE nightmail_users SET email_verified=false WHERE id=$1',[manager!.userId]);
+      error(await test(AUTH_EMAIL),422,'TEST_RECIPIENT_NOT_OWNED');
+      await db.query('UPDATE nightmail_users SET email_verified=true WHERE id=$1',[manager!.userId]);
+      assert.equal(await emails(),before,'A refused test writes nothing.');
+      // Its own: a member's verified email (in any case), an address at a verified domain or a subdomain of one, the simulator.
+      const own=[AUTH_EMAIL.toUpperCase(),'team@own.invalid','inbox@mail.own.invalid','success@simulator.amazonses.com'];
+      for (const to of own) ok(await test(to),202);
+      assert.deepEqual((await db.query(`SELECT DISTINCT snapshot->>'kind' AS kind,snapshot->>'testCampaignId' AS campaign FROM sending_emails WHERE workspace_id=$1 AND snapshot->>'testCampaignId'=$2`,[wid,draft.id])).rows,[{kind:'transactional',campaign:draft.id}]);
+      // The hour's allowance, refusals uncharged: the rest of it, then 429 until the next hour.
+      for (let i=own.length;i<CAMPAIGN_TESTS.perHour;i++) ok(await test('team@own.invalid'),202);
+      const limited=error(await test('team@own.invalid'),429,'CAMPAIGN_TEST_LIMIT'),hour=3_600_000;
+      assert.equal(limited.retryable,true);
+      assert.equal(Date.parse(limited.resetAt)%hour,0); assert.ok(Math.abs(Date.parse(limited.resetAt)-Date.now())<=hour,'The next clock hour (the fixture transaction\'s).');
+      assert.equal(await emails(),before+CAMPAIGN_TESTS.perHour);
+      await db.query(`UPDATE api_request_budgets SET window_start=window_start-interval '1 hour' WHERE workspace_id=$1 AND key_id='campaign-test'`,[wid]);
+      ok(await test('team@own.invalid'),202);
     });
   });
   // Contract step for #361: migration 329 drops the admission the Worker before send_admission called. It runs while

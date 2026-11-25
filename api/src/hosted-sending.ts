@@ -43,6 +43,14 @@ export const heldStream = (e: SQL) => sql`(${e}.snapshot->>'kind'<>'transactiona
  * the dispatch fence and reputation attribution (snapshot.bulk); it keeps its stream, configuration set and content.
  */
 export const BULK = { recipients: 10, copies: 10 } as const;
+/**
+ * A campaign test is the campaign's copy sent as transactional mail, outside its audience's consent, the marketing ramp,
+ * holds and pacing, and the campaign's own screening. On Hosted sending one goes only to an address the workspace has
+ * proven is its own (a member's verified email, an address at one of its verified domains or their subdomains, which
+ * holds its receiving addresses and inboxes there, or the SES mailbox simulator), and a workspace sends at most
+ * `perHour` in a clock hour. Anyone else gets the campaign itself.
+ */
+export const CAMPAIGN_TESTS = { perHour: 20 } as const;
 const LIST_HEADER = /^list-(?:id|unsubscribe|unsubscribe-post|help|subscribe|post|owner|archive)$/i;
 type BulkInput = { kind?: string; to: string | string[]; cc?: string[]; bcc?: string[]; subject?: string; html?: string; text?: string; template?: unknown; headers?: { name: string; value: string }[] };
 export function bulkFlags(mails: BulkInput[]) {
