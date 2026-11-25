@@ -17,11 +17,12 @@ import { productName } from '../../../../api/src/brand'
 import { checkKey, RECORDS_CORRECT, type DnsChecks } from './domain-setup-alert'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
-export function useDomain(id: string, recheckUntil = 0) {
+// `enabled` false: the domain was just deleted, so nothing may read it again (forgetDomain in data/invalidation.ts).
+export function useDomain(id: string, recheckUntil = 0, enabled = true) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
-    queryKey: ['nightmail', ...queries.domain(id).key],
+    queryKey: ['nightmail', ...queries.domain(id).key], enabled,
     queryFn: ({ signal }) => queries.domain(id).read(api, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
