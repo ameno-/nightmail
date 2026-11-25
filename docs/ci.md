@@ -11,7 +11,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 - **Path-gated checks:** the six required check names always report a result. A check passes only if its selected suite succeeded, or path detection succeeded and deliberately skipped it. Detection uses the PR merge checkout's first parent, or the **live dev tip** on a queue entry's first-parent chain (including pending PRs ahead of it). If dev has already advanced past the group, run everything.
 - **Failures:** a PR that fails in the queue is removed from it with the failing check linked; the entries behind it are rebuilt without it. Fix and re-add.
 - **Deploys:** the queue pushes `dev` as `github-merge-queue[bot]`. The dev deploy accepts that push when the PR merged at exactly that commit was merged (enqueued) by thdxr or R44VC0RP; anything else still fails "Only thdxr and R44VC0RP may deploy".
-- **Breaking API changes:** the `api-breaking` label on the PR still allows them; in the queue, the compatibility check compares that PR's step; a multi-entry batch must also be compatible as a whole without using one PR's label as a blanket waiver.
+- **Breaking API changes:** each queue entry is compared with its first parent, which already includes the PRs ahead of it. Only the `api-breaking` label on the PR supplying this entry's head can waive its breaks. An unlabelled entry must still pass, even if it undoes an earlier entry's change.
 
 ## Which changes select which suites
 
