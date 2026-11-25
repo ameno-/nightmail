@@ -1,11 +1,19 @@
 import { comparisonOf, type Comparison, type Entry } from '../prices.ts'
 import { agentIdentity } from './agent-identity.ts'
 import { agentmail } from './agentmail.ts'
+import { aweber } from './aweber.ts'
+import { beehiiv } from './beehiiv.ts'
 import { bird } from './bird.ts'
+import { brevo } from './brevo.ts'
+import { buttondown } from './buttondown.ts'
 import { deadSimpleEmail } from './dead-simple-email.ts'
+import { emailOctopus } from './emailoctopus.ts'
+import { ghost } from './ghost.ts'
 import { inkbox } from './inkbox.ts'
+import { loops } from './loops.ts'
 import { lumbox } from './lumbox.ts'
 import { mailchimp } from './mailchimp.ts'
+import { mailerLite } from './mailerlite.ts'
 import { mailgun } from './mailgun.ts'
 import { mailjet } from './mailjet.ts'
 import { mailsAi } from './mails-ai.ts'
@@ -26,7 +34,7 @@ export const ENTRIES: Entry[] = [
   // Developer
   resend, sendgrid, postmark, mailgun, mailjet, mandrill, bird,
   // Newsletter
-  mailchimp,
+  mailchimp, beehiiv, mailerLite, buttondown, emailOctopus, ghost, aweber, loops, brevo,
 ]
 
 export const COMPARISONS: Comparison[] = ENTRIES.map(comparisonOf)

@@ -54,6 +54,7 @@ export function comparisonMarkdown(c: Comparison): string {
     c.rows.map(row => `- ${row.text}${row.source ? ` ([${host(row.source.url)}](${row.source.url}), checked ${dayOf(row.source.checked)})` : ''}`).join('\n'),
     `## Also in the box`,
     c.panels.map(id => `- **${PANELS[id].title}** ${PANELS[id].line}`).join('\n'),
+    ...c.without?.length ? [`Not in the box: ${listOf(c.without)}.`] : [],
     FIRST_STEP[c.focus],
     ...c.faq?.length ? [`## Questions`, c.faq.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
     `## ${productName}’s pricing terms`,

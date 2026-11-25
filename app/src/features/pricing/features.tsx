@@ -28,7 +28,9 @@ const RECORDS = [['Built-in', 'acme-k7.nightmail.email'], ['DKIM', 'x7k2._domain
 // A campaign's review (api/src/sending.ts, readiness) and the first hours of the ramp (api/src/standing-model.ts, RAMP).
 const READY = [['DMARC', 'acme.example', '✓'], ['List', 'risky addresses skipped', '✓'], ...RAMP.steps.slice(0, 3).map((step, i) => [`Hour ${i + 1}`, `${formatCount(step.ceilingPerHour)} recipients`, i < 2 ? '✓' : '…'])] as const
 // What list hygiene flags (api/src/list-hygiene.ts, RISKS): campaigns skip those, and send to the rest.
-const HYGIENE = [['OK', 'dana@example.com', '✓'], ['Typo', 'zahir@gmial.com', 'skip'], ['Temp', 'k9@mailinator.com', 'skip'], ['Dead', 'old@acme.example', 'skip'], ['OK', 'mina@example.org', '✓']] as const
+// (On acme.example, the page's other screens' domain: example.com and example.net are the CLS gate's seeded mailboxes,
+// which a page may not spell out.)
+const HYGIENE = [['OK', 'dana@acme.example', '✓'], ['Typo', 'zahir@gmial.com', 'skip'], ['Temp', 'k9@mailinator.com', 'skip'], ['Dead', 'old@acme.example', 'skip'], ['OK', 'mina@acme.example', '✓']] as const
 const free = formatCount(nightmail.freeSent), freeReceived = formatCount(nightmail.freeReceived), flaps = Math.max(free.length, freeReceived.length)
 /** A paper tag on its pin: it swings when the pointer brushes it or it's tapped (and rustles when tapped). */
 function Tag({ name, role, k }: { name: string; role: string; k: number }) {
