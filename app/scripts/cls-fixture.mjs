@@ -567,10 +567,12 @@ async function billing(db) {
   await month(db, 'ws_harbor', 5000, 5000, 3_240_000_000n);
 }
 
-// The support inbox (/support): Sam's ticketed chat that Dana answered (agent paused) and a sender who proved nothing
-// with blocked work need staff; Lee's emailed question and Lee's chat the agent is answering on its own; and a closed,
-// resolved chat. The agent keeps two notes about Sam. The support platform pulled the outbox a minute ago, so staff can
-// reply. IDs follow the support platform's shapes (conv_, msg_, tkt_, snt_).
+// The support inbox (/support): Sam's ticketed chat (every kind of entry: his messages, the agent's sent answer and the
+// one it held when Dana took over, her reply and her note, and what happened besides) and a sender who proved nothing
+// with blocked work need staff; Lee's emailed question (the email as it arrived, quoted history and attachment) the agent
+// answered, waiting on Lee; Lee's chat the agent is handling; and a closed, resolved chat. The agent keeps two notes about
+// Sam. The support platform pulled the outbox a minute ago, so staff can reply. IDs follow the support platform's shapes
+// (conv_, msg_, tkt_, snt_).
 const supportId = (prefix, word, length) => `${prefix}_${word.padEnd(length, 'a')}`;
 async function supportInbox(db, webhookId) {
   const conv = word => supportId('conv', word, 26), msg = word => supportId('msg', word, 16);
@@ -578,7 +580,7 @@ async function supportInbox(db, webhookId) {
   await db.query(`INSERT INTO support_conversations(id,channel,thread_id,user_id,pending_address,verification,evidence,mode,workspace_id,status,subject,ticket_id,ticket_type,ticket_severity,
       ticket_resolved_at,ticket_resolved_by,agent_state,paused_by,paused_at,last_message_at,messages,turns,cost_usd,blocked_work,created_at,closed_at) VALUES
     ($1,'chat',NULL,'user_sam',NULL,'handoff','{"handoff":"sho_00000000000000000000000000000001"}','member','ws_northwind','ticketed','DKIM will not verify for mail.northwind.example',$5,'bug','P2',
-      NULL,NULL,'paused','user_dana',now()-interval '12 minutes',now()-interval '4 minutes',4,3,0.1840,0,now()-interval '40 minutes',NULL),
+      NULL,NULL,'paused','user_dana',now()-interval '12 minutes',now()-interval '4 minutes',7,4,0.1840,0,now()-interval '40 minutes',NULL),
     ($2,'email','thr_cls_lee','user_lee','lee@northwind.example','dmarc','{"message":"msg_00000000000000000000000000000002","dmarc":"PASS","dkimAligned":true}','member',NULL,'open','Why did my test email bounce?',NULL,NULL,NULL,
       NULL,NULL,'active',NULL,NULL,now()-interval '25 minutes',2,1,0.0610,0,now()-interval '30 minutes',NULL),
     ($3,'email','thr_cls_stranger',NULL,'someone@example.org','none','{"message":"msg_00000000000000000000000000000003","dmarc":"FAIL","dkimAligned":false}','unverified',NULL,'open','Account access',NULL,NULL,NULL,
@@ -589,15 +591,35 @@ async function supportInbox(db, webhookId) {
       NULL,NULL,'active',NULL,NULL,now()-interval '6 minutes',2,1,0.0410,0,now()-interval '8 minutes',NULL)`,
     [chat, email, stranger, closed, supportId('tkt', 'samdkim', 16), supportId('tkt', 'samlimit', 16), keys]);
   await db.query(`UPDATE support_conversations SET ticket_at = created_at + interval '2 minutes' WHERE ticket_id IS NOT NULL AND id = ANY($1)`, [[chat, closed]]);
-  const line = (id, conversation, seq, author, text, minutes, extra = {}) => db.query(`INSERT INTO support_messages(id,conversation_id,seq,author,kind,text,tools,staff_user_id,delivery,delivered_at,created_at)
-    VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,CASE WHEN $9 = 'sent' AND $4 = 'staff' THEN now()-make_interval(mins=>$10) END,now()-make_interval(mins=>$10))`,
-    [id, conversation, seq, author, extra.kind ?? null, text, JSON.stringify(extra.tools ?? []), extra.staff ?? null, extra.delivery ?? null, minutes]);
+  const line = (id, conversation, seq, author, text, minutes, extra = {}) => db.query(`INSERT INTO support_messages(id,conversation_id,seq,author,kind,text,tools,staff_user_id,delivery,delivered_at,held_reason,source_message_id,created_at)
+    VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,CASE WHEN $9 = 'sent' AND $4 = 'staff' THEN now()-make_interval(mins=>$10) END,$11,$12,now()-make_interval(mins=>$10))`,
+    [id, conversation, seq, author, extra.kind ?? null, text, JSON.stringify(extra.tools ?? []), extra.staff ?? null, extra.delivery ?? null, minutes, extra.held ?? null, extra.source ?? null]);
   await line(msg('samone'), chat, 1, 'customer', 'DKIM for mail.northwind.example has said pending since yesterday.', 40);
   await line(msg('samtwo'), chat, 2, 'agent', 'Two of the three DKIM records are published. The third, **s3._domainkey**, is missing from your DNS. Add it as a CNAME and verification finishes within the hour.', 39,
     { kind: 'reply', tools: [{ label: 'Read your domains', ok: true }, { label: 'Checked DNS for mail.northwind.example', ok: true }], delivery: 'sent' });
-  await line(msg('samthree'), chat, 3, 'staff', 'I added a note to your ticket. Our DNS check also ran against an old resolver; I re-ran it and it should turn green shortly.', 12, { kind: 'reply', staff: 'user_dana', delivery: 'sent' });
-  await line(msg('samfour'), chat, 4, 'customer', 'Still pending here. Is there anything else I should change?', 4);
-  await line(msg('leeone'), email, 1, 'customer', 'My test email to a Gmail address bounced with 550 5.7.26. What does that mean?', 30);
+  await line(msg('samthree'), chat, 3, 'customer', 'I added s3._domainkey an hour ago and it still says pending. Our agency manages the DNS.', 14);
+  await line(msg('samheld'), chat, 4, 'agent', 'The record is published now. Verification checks again every 15 minutes, so it should turn green within the hour.', 13,
+    { kind: 'held', tools: [{ label: 'Checked DNS for mail.northwind.example', ok: true }], delivery: 'held', held: 'paused' });
+  await line(msg('samfive'), chat, 5, 'staff', 'I added a note to your ticket. Our DNS check also ran against an old resolver; I re-ran it and it should turn green shortly.', 12, { kind: 'reply', staff: 'user_dana', delivery: 'sent' });
+  await line(msg('samnote'), chat, 6, 'staff', 'Their agency’s DNS host caches for a day. If it is still pending tomorrow, check the resolver fix shipped.', 11, { kind: 'note', staff: 'user_dana' });
+  await line(msg('samsix'), chat, 7, 'customer', 'Still pending here. Is there anything else I should change?', 4);
+  await db.query(`UPDATE support_conversations SET ticket_brief = $2 WHERE id = $1`, [chat, JSON.stringify({ title: 'DKIM will not verify for mail.northwind.example', summary: 'Sam added the missing s3._domainkey CNAME, but the domain still shows pending a day later. DNS is managed by their agency.', ask: 'Why is DKIM still pending after adding the record?', recommendation: 'Re-run the DNS check against a fresh resolver; if the record resolves, verify the domain by hand.' })]);
+  const happened = (conversation, kind, minutes, user, details) => db.query('INSERT INTO support_events(conversation_id,kind,user_id,details,created_at) VALUES ($1,$2,$3,$4::jsonb,now()-$5::float8*interval \'1 minute\')', [conversation, kind, user, JSON.stringify(details), minutes]);
+  await happened(chat, 'ticket', 38, null, { ticketId: supportId('tkt', 'samdkim', 16), type: 'bug', severity: 'P3' });
+  await happened(chat, 'priority', 20, null, { from: 'P3', to: 'P2' });
+  await happened(chat, 'paused', 12.02, 'user_dana', { by: 'staff', reply: true });
+  await happened(closed, 'ticket', 4318, null, { ticketId: supportId('tkt', 'samlimit', 16), type: 'account', severity: 'P3' });
+  await happened(closed, 'resolved', 2880, 'user_dana', { ticketId: supportId('tkt', 'samlimit', 16) });
+  // Lee's email as the support address received it: the reply above the quoted history, and the bounce attached.
+  const leeMail = 'msg_' + createHash('sha256').update('cls-support-lee').digest('hex').slice(0, 32), leeThread = 'thr_cls_lee', at30 = ago(30);
+  await db.query('INSERT INTO mail_threads(id,workspace_id,subject,message_count,last_message_at) VALUES($1,$2,$3,1,$4)', [leeThread, 'ws_northwind', 'Why did my test email bounce?', at30]);
+  await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,from_name,"to",envelope_to,received_at,text,html,snippet,attachment_count,verdicts) VALUES($1,'ws_northwind','inbound',$2,$3,$4,'lee@northwind.example','Lee Park',$5::jsonb,$6::jsonb,$7,$8,$9,$10,1,'{"virus":"PASS","spam":"PASS","dmarc":"PASS"}')`,
+    [leeMail, leeThread, REGION, 'Why did my test email bounce?', JSON.stringify([{ name: 'Nightmail support', address: 'support@nightmail.dev' }]), JSON.stringify(['support@nightmail.dev']), at30,
+      'My test email to a Gmail address bounced with 550 5.7.26. What does that mean?\n\nThe bounce is attached.\n\nLee\n\nOn Mon, Nov 23, 2026 at 9:12 AM Mail Delivery Subsystem wrote:\n> Delivery to the following recipient failed permanently:\n>\n>     jordan@gmail.com\n>\n> 550 5.7.26 Unauthenticated email from northwind.example is not accepted due to domain\'s DMARC policy.',
+      '<p>My test email to a Gmail address bounced with 550 5.7.26. What does that mean?</p><p>The bounce is attached.</p><p>Lee</p><blockquote>Delivery to the following recipient failed permanently: jordan@gmail.com</blockquote>',
+      'My test email to a Gmail address bounced with 550 5.7.26.']);
+  await db.query(`INSERT INTO mail_attachments(id,workspace_id,message_id,filename,content_type,size_bytes,disposition,sha256,bucket,storage_key) VALUES('att_cls_lee_bounce','ws_northwind',$1,'bounce.eml','message/rfc822',4812,'attachment','00','fixture-mail',$2)`, [leeMail, `workspaces/ws_northwind/att/${leeMail}/att_cls_lee_bounce`]);
+  await line(msg('leeone'), email, 1, 'customer', 'My test email to a Gmail address bounced with 550 5.7.26. What does that mean?\n\nThe bounce is attached.\n\nLee', 30, { source: leeMail });
   await line(msg('leetwo'), email, 2, 'agent', 'Gmail refused it because the From domain had no DMARC record at the time. Your domain has one now, so the next send should be accepted.', 25,
     { kind: 'reply', tools: [{ label: 'Read the bounce', ok: true }], delivery: 'sent' });
   await line(msg('strangerone'), stranger, 1, 'customer', 'I can’t sign in to my account. Please reset it for this address.', 120);
@@ -621,7 +643,7 @@ async function supportInbox(db, webhookId) {
   await db.query(`INSERT INTO support_actions(id,conversation_id,user_id,workspace_id,kind,target,summary,parts,created_at,expires_at)
     VALUES ($1,$2,'user_dana','ws_northwind','test_webhook',$3,$4,$5,now()-interval '45 minutes',now()+interval '23 hours 15 minutes')`,
     [action, danaChat, JSON.stringify({ webhookId }), parts.template.replace(/\{([a-z]+)\}/g, (_, name) => JSON.stringify(parts.labels[name])), JSON.stringify(parts)]);
-  return { conversation: chat, action };
+  return { conversation: chat, email, action };
 }
 
 /** Driftwood's triage rule, version `n`: each agent save in a live job changes one line in place, so the line count
@@ -918,7 +940,7 @@ export async function seed(fx) {
 
   await billing(db);
   const newsletterIds = await newsletters(fx);
-  const { conversation: supportConversation, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
+  const { conversation: supportConversation, email: supportEmail, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
@@ -1047,6 +1069,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage,
   };
 }
