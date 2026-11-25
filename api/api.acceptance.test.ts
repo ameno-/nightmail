@@ -32640,6 +32640,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Signed as a whole: its own bytes go to SES as raw content.
       const signed = Buffer.from([...top('Signed'), 'Content-Type: multipart/signed; protocol="application/pgp-signature"; micalg=pgp-sha256; boundary=s', '', '--s', 'Content-Type: text/plain', '', 'Signed text.',
         '--s', 'Content-Type: application/pgp-signature; name="signature.asc"', '', '-----BEGIN PGP SIGNATURE-----', 'fixture', '-----END PGP SIGNATURE-----', '--s--', ''].join('\r\n'));
+      const folded = await stream(Buffer.from(signed.toString().replace('From: app@relay.example', 'From:\r\n app@relay.example')), ['reader@example.net']);
+      assert.deepEqual([folded.status, folded.body.error?.code], [422, 'UNSUPPORTED_MESSAGE']);
       const sealed = await stream(signed, ['reader@example.net']);
       assert.equal(sealed.status, 200, JSON.stringify(sealed.body));
       await run('email.dispatch');

@@ -5,7 +5,7 @@ import { ApiError, type Ctx, type Runtime } from './core.js';
 import { sendingConnections } from './domain-claims.js';
 import { withMemory } from './isolate-memory.js';
 import { SMTP_WIRE_LIMIT } from './mailbox-ingest.js';
-import { mib } from './outbound-content.js';
+import { mailAddress, mib } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 import type { SubmittedFile } from './submission-mime.js';
 
@@ -64,6 +64,34 @@ export const submittedFile = (f: SubmittedFile) => ({
   contentId: f.contentId?.replace(/^<|>$/g, ''), size: f.size, bytes: () => f.bytes(),
 });
 
+// Raw delivery preserves the outer fields, so accept only mailboxes with one unambiguous spelling.
+// Other fields may fold; the identity fields must fit on one line and agree with admission.
+const sealedAddress = mailAddress();
+function verifiedOuterHeaders(text: string, from: string, sender?: string) {
+  const end = text.indexOf('\r\n\r\n');
+  if (end < 0 || end > 65536) return false;
+  const seen = new Set<string>();
+  let field = '';
+  for (const line of text.slice(0, end).split('\r\n')) {
+    if (!line.length || line.length > 998 || /[^\t\x20-\x7e]/.test(line)) return false;
+    if (/^[ \t]/.test(line)) {
+      if (!field || field === 'from' || field === 'sender' || /^[ \t]+[\w-]+[ \t]*:/.test(line)) return false;
+      continue;
+    }
+    const header = /^([a-zA-Z0-9-]+):(.*)$/.exec(line);
+    if (!header) return false;
+    field = header[1]!.toLowerCase();
+    if (field.startsWith('resent-')) return false;
+    if (field !== 'from' && field !== 'sender') continue;
+    const value = header[2]!.trim();
+    const address = /^(?:(?:[a-zA-Z0-9 .'-]+|"[a-zA-Z0-9 .'-]+")[ \t]+)?<([^<>]+)>$/.exec(value)?.[1] ?? value;
+    if (seen.has(field) || !sealedAddress.safeParse(address).success ||
+      address.toLowerCase() !== (field === 'from' ? from : sender)?.toLowerCase()) return false;
+    seen.add(field);
+  }
+  return seen.has('from') && seen.has('sender') === !!sender;
+}
+
 /**
  * A signed or encrypted message (submission-mime.ts sealedMime) is sent as the app wrote it: rebuilding its MIME would
  * break the signature or the encryption. It is screened by what it shows (a signed message's signed part; an encrypted
@@ -71,11 +99,12 @@ export const submittedFile = (f: SubmittedFile) => ({
  * as the copy the screen read. Its bytes travel as text in the email's snapshot and, base64 again, inside SES's JSON:
  * at most the dispatcher's lane budget (8 MiB), and valid UTF-8 without NUL, so the text is the same bytes.
  */
-export async function sealedPassthrough(rt: Runtime, workspaceId: string, raw: Uint8Array) {
+export async function sealedPassthrough(rt: Runtime, workspaceId: string, raw: Uint8Array, from: string, sender?: string) {
   if (raw.length > SEND_LIMITS.laneBytes) throw new ApiError(413, 'SEALED_MESSAGE_SIZE', `A signed or encrypted message can be at most ${mib(SEND_LIMITS.laneBytes)}.`);
   let text: string;
-  try { text = new TextDecoder('utf-8', { fatal: true }).decode(raw); } catch { text = '\0'; }
+  try { text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw); } catch { text = '\0'; }
   if (text.includes('\0')) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'A signed or encrypted message must be UTF-8 or 7-bit text.');
+  if (!verifiedOuterHeaders(text, from, sender)) throw new ApiError(422, 'UNSUPPORTED_MESSAGE', 'Use standard outer headers and a single From mailbox for signed or encrypted mail.');
   if (rt.config.multiTenant) {
     const { rows: [row] } = await rt.db.execute<{ ok: boolean }>(sql`SELECT EXISTS(SELECT FROM ${sendingConnections(rt)} c WHERE c.workspace_id=${workspaceId}
       AND (c.kind<>'shared' OR (${!!rt.config.trustedPool} AND c.pool_tier='trusted' AND NOT c.legacy_names))) AS ok`);
