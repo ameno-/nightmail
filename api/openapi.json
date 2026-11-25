@@ -7177,18 +7177,30 @@
                   "linkHost": {
                     "type": "string",
                     "enum": [
-                      "active",
-                      "pending",
                       "not_configured"
                     ],
-                    "description": "The domain's own link host (links.<domain>), where its links go once active: active, its links go there; pending, it isn’t set up yet, so its links go on linkOrigin meanwhile (the link domain); not_configured, it has none."
+                    "description": "Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go."
                   },
-                  "linkHostname": {
+                  "ownLinkHost": {
                     "type": [
-                      "string",
+                      "object",
                       "null"
                     ],
-                    "description": "The name of the domain's own link host, active or pending; null without one."
+                    "properties": {
+                      "hostname": {
+                        "type": "string",
+                        "description": "links.<domain>."
+                      },
+                      "active": {
+                        "type": "boolean",
+                        "description": "true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile."
+                      }
+                    },
+                    "required": [
+                      "hostname",
+                      "active"
+                    ],
+                    "description": "The domain's own link host, when this workspace has them; null without one."
                   },
                   "linkOrigin": {
                     "type": [
@@ -7205,7 +7217,7 @@
                   "dmarc",
                   "mailFrom",
                   "linkHost",
-                  "linkHostname",
+                  "ownLinkHost",
                   "linkOrigin"
                 ]
               },
@@ -7921,18 +7933,30 @@
                   "linkHost": {
                     "type": "string",
                     "enum": [
-                      "active",
-                      "pending",
                       "not_configured"
                     ],
-                    "description": "The domain's own link host (links.<domain>), where its links go once active: active, its links go there; pending, it isn’t set up yet, so its links go on linkOrigin meanwhile (the link domain); not_configured, it has none."
+                    "description": "Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go."
                   },
-                  "linkHostname": {
+                  "ownLinkHost": {
                     "type": [
-                      "string",
+                      "object",
                       "null"
                     ],
-                    "description": "The name of the domain's own link host, active or pending; null without one."
+                    "properties": {
+                      "hostname": {
+                        "type": "string",
+                        "description": "links.<domain>."
+                      },
+                      "active": {
+                        "type": "boolean",
+                        "description": "true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile."
+                      }
+                    },
+                    "required": [
+                      "hostname",
+                      "active"
+                    ],
+                    "description": "The domain's own link host, when this workspace has them; null without one."
                   },
                   "linkOrigin": {
                     "type": [
@@ -7949,7 +7973,7 @@
                   "dmarc",
                   "mailFrom",
                   "linkHost",
-                  "linkHostname",
+                  "ownLinkHost",
                   "linkOrigin"
                 ]
               },

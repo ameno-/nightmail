@@ -18,7 +18,8 @@ const hostOf = (origin: string) => { try { return new URL(origin).host } catch {
 function linksLine(domain: CampaignReadiness['domain']) {
   if (!domain.linkOrigin) return 'none: this campaign can’t launch right now'
   const host = hostOf(domain.linkOrigin)
-  return domain.linkHost === 'active' ? `${host}, this domain’s own` : domain.linkHost === 'pending' && domain.linkHostname ? `${host}, until ${domain.linkHostname} is set up` : host
+  const own = domain.ownLinkHost
+  return own?.active ? `${host}, this domain’s own` : own ? `${host}, until ${own.hostname} is set up` : host
 }
 const rate = (value: number | null) => value === null ? null : percent(value, value < 0.01 ? 2 : 1)
 const added = (days: number | null) => days === null ? 'not added to this workspace' : days === 0 ? 'added today' : days === 1 ? 'added yesterday' : `added ${number(days)} days ago`
@@ -62,7 +63,7 @@ export function ReadinessPanel({ readiness, start, choice, onChoice, consent, on
       <dt>List</dt><dd>{listLine}</dd>
       {readiness.sizeJump !== null && readiness.sizeJump > 1 && <><dt>Size</dt><dd>{number(Math.round(readiness.sizeJump))}× this domain’s largest campaign</dd></>}
     </dl>
-    {domain.linkHost === 'pending' && domain.linkOrigin && <p className="campaign-note" data-tone="warning"><span>Links in this campaign go on {hostOf(domain.linkOrigin)}, not {domain.linkHostname}: that link host isn’t set up yet. Copies made once it is go there.</span></p>}
+    {domain.ownLinkHost && !domain.ownLinkHost.active && domain.linkOrigin && <p className="campaign-note" data-tone="warning"><span>Links in this campaign go on {hostOf(domain.linkOrigin)}, not {domain.ownLinkHost.hostname}: that link host isn’t set up yet. Copies made once it is go there.</span></p>}
     {readiness.reasons.length > 0 && <ul className="campaign-notes" aria-label="What the review found">{readiness.reasons.map(reason => <li key={reason.code} className="campaign-note"><span>{reason.message}</span></li>)}</ul>}
   </section>
 }

@@ -102,7 +102,7 @@ type HistoryFigures = { largestSend: number; sent: number; bounceRate: number | 
 export interface CampaignReadiness {
   verdict: 'ready' | 'ramp_recommended' | 'ramp_required'; summary: string | null; reasons: { code: string; message: string }[]
   domain: { name: string; firstSeenAt: ISODate | null; ageDays: number | null; dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null; mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured'
-    linkHost: 'active' | 'pending' | 'not_configured'; linkHostname: string | null; linkOrigin: string | null }
+    linkHost: 'not_configured'; ownLinkHost: { hostname: string; active: boolean } | null; linkOrigin: string | null }
   history: { workspace: HistoryFigures; domain: HistoryFigures }
   list: { recipients: number; risky: number; neverMailed: number | null; createdAt: ISODate | null; lastSentAt: ISODate | null; lastImport: { at: ISODate; contacts: number; consent: string | null } | null }
   sizeJump: number | null; plan: { batches: number[]; seconds: number | null } | null; required: { by: 'NEW_DOMAIN' | 'SIZE_JUMP'; maxPerDay: number } | null

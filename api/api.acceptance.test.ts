@@ -41846,7 +41846,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // link domain, and its send review says so.
       const {checkLinkHost}=await import('./src/link-domains.js'),other=`ws_${'f'.repeat(32)}`;
       const review=async()=>{const c=ok(await local('POST','/v1/campaigns',{name:unique('link-review'),from,subject:'Links',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
-        const d=ok(await local('GET',`/v1/campaigns/${c.id}/audience?readiness=true`)).readiness.domain;return [d.linkHost,d.linkHostname,d.linkOrigin];};
+        const d=ok(await local('GET',`/v1/campaigns/${c.id}/audience?readiness=true`)).readiness.domain;return [d.linkHost,d.ownLinkHost,d.linkOrigin];};
       for(const workspaces of [[],[other]]){
         runtime.config.linkHosts={...saas,workspaces};
         assert.deepEqual((await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]))[0].dns,[]);
@@ -41860,9 +41860,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       runtime.config.linkHosts={...saas,workspaces:[other,wid]};
       assert.equal((await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]))[0].dns[0].note,`Until it is set up, links in campaign and marketing mail from ${domain} use Nightmail's link domain.`);
       assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),onShared);
-      assert.deepEqual(await review(),['pending',`links.${domain}`,`https://${shared}`]);
+      assert.deepEqual(await review(),['not_configured',{hostname:`links.${domain}`,active:false},`https://${shared}`]);
       await db.query("INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES ($1,$2,'links.'||$2,'active')",[wid,domain]);
-      assert.deepEqual(await review(),['active',`links.${domain}`,`https://links.${domain}`]);
+      assert.deepEqual(await review(),['not_configured',{hostname:`links.${domain}`,active:true},`https://links.${domain}`]);
       await launch();await run('campaign.run');await run('email.dispatch');
       const onOwn=delivered.splice(0);
       assert.deepEqual(hostsOf(onOwn),[`links.${domain}`,`links.${domain}`,`links.${domain}`]);

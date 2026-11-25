@@ -159,21 +159,20 @@ export function foundLinkOrigin(config: Config, workspaceId: string, from: strin
 }
 
 /**
- * For the send review (CampaignReadiness.domain): the From domain's own link host, `active` (its links go there),
- * `pending` (offered and not active yet: its links go on the link domain meanwhile) or `not_configured` (own link hosts
- * aren't for this workspace or domain), with its name; and `origin`, where a campaign's links would go if it launched now
- * (null: it would be refused, the workspace's sending paused or no link host for it). Records nothing.
+ * For the send review (CampaignReadiness.domain): the From domain's own link host when the workspace has them (`active`:
+ * its links go there; not yet, they go on the link domain meanwhile), and `origin`, where a campaign's links would go if
+ * it launched now (null: it would be refused, the workspace's sending paused or no link host for it). Records nothing.
  */
 export async function linkReview(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string) {
-  const sender = domainOf(from), saas = ownLinkHosts(runtime.config, workspaceId);
-  let host: { state: 'active' | 'pending' | 'not_configured'; hostname: string | null } = { state: 'not_configured', hostname: null };
-  if (saas && !isBuiltinHost(runtime.config, sender)) {
+  const sender = domainOf(from);
+  let own: { hostname: string; active: boolean } | null = null;
+  if (ownLinkHosts(runtime.config, workspaceId) && !isBuiltinHost(runtime.config, sender)) {
     const rows = await ownHosts(db, workspaceId, sender), active = rows.find(row => row.hostname);
-    if (active) host = { state: 'active', hostname: active.hostname };
-    else if (rows[0]) host = { state: 'pending', hostname: linkHostName(rows[0].name) };
+    if (active) own = { hostname: active.hostname!, active: true };
+    else if (rows[0]) own = { hostname: linkHostName(rows[0].name), active: false };
   }
   const origin = await linkChoice(runtime, db, workspaceId, sender).then(choice => choice.origin, error => { if (error instanceof ApiError) return null; throw error; });
-  return { ...host, origin };
+  return { own, origin };
 }
 
 /**

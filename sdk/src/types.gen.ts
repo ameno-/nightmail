@@ -2302,13 +2302,22 @@ export type CampaignAudienceCounts = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
-             * The domain's own link host (links.<domain>), where its links go once active: active, its links go there; pending, it isn’t set up yet, so its links go on linkOrigin meanwhile (the link domain); not_configured, it has none.
+             * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
-            linkHost: 'active' | 'pending' | 'not_configured';
+            linkHost: 'not_configured';
             /**
-             * The name of the domain's own link host, active or pending; null without one.
+             * The domain's own link host, when this workspace has them; null without one.
              */
-            linkHostname: string | null;
+            ownLinkHost: {
+                /**
+                 * links.<domain>.
+                 */
+                hostname: string;
+                /**
+                 * true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile.
+                 */
+                active: boolean;
+            } | null;
             /**
              * Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active.
              */
@@ -2563,13 +2572,22 @@ export type CampaignQueued = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
-             * The domain's own link host (links.<domain>), where its links go once active: active, its links go there; pending, it isn’t set up yet, so its links go on linkOrigin meanwhile (the link domain); not_configured, it has none.
+             * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
-            linkHost: 'active' | 'pending' | 'not_configured';
+            linkHost: 'not_configured';
             /**
-             * The name of the domain's own link host, active or pending; null without one.
+             * The domain's own link host, when this workspace has them; null without one.
              */
-            linkHostname: string | null;
+            ownLinkHost: {
+                /**
+                 * links.<domain>.
+                 */
+                hostname: string;
+                /**
+                 * true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile.
+                 */
+                active: boolean;
+            } | null;
             /**
              * Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active.
              */
