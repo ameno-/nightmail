@@ -4866,7 +4866,9 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.ok(status.connectedAt);
       const listed = page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id === agent.keyId);
       assert.deepEqual([listed?.name, listed?.permissions, listed?.domains, listed?.expiresAt, listed?.revokedAt, listed?.agent], [agent.name, ['read', 'send', 'manage'], [], null, null, { client: 'Claude Code' }]);
-      assert.equal(page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id !== agent.keyId)?.agent, null, 'Any other key has no agent');
+      const plain = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('agent-setup'), permissions: ['send'] }), 201);
+      secrets.add(plain.secret);
+      assert.deepEqual([plain.agent, page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id === plain.id)?.agent], [null, null], 'Any other key has no agent');
       // The audit trail names the person who set the agent up, and how.
       assert.equal(listed?.lastChange.action, 'api_key.create');
       const { rows: [created] } = await db.query("SELECT actor_type, actor_id, user_id, via, summary FROM audit_events WHERE workspace_id=$1 AND action='api_key.create' AND target_id=$2", [w, agent.keyId]);
