@@ -47,6 +47,11 @@ const RESERVED = new Set(`www www1 www2 mail mails email emails smtp imap pop po
 const PROTECTED = new Set(`paypal apple icloud google gmail microsoft outlook office365 hotmail live amazon aws facebook meta instagram whatsapp
   netflix linkedin twitter tiktok yahoo chase wellsfargo bankofamerica citi citibank hsbc barclays santander coinbase binance kraken metamask
   stripe venmo cashapp zelle irs hmrc usps ups fedex dhl docusign dropbox adobe github gitlab slack zoom bank banking`.split(/\s+/).filter(Boolean));
+// Words that would pass a label off as the platform itself or as one of its notices, wherever they appear in the name:
+// "Nightmail Support" or "Security Team" must not become nightmail-support-k7.<parent> or security-k7.<parent>.
+const IMPERSONATING = new Set(`nightmail bane opensend anomaly opencode security secure verify verification login signin password postmaster
+  noreply donotreply admin administrator abuse hostmaster webmaster`.split(/\s+/).filter(Boolean));
+const IMPERSONATING_PHRASE = /(?:^|-)(?:no-reply|do-not-reply|sign-in|log-in)(?:-|$)/;
 const FILLER = /^(?:workspace|workspaces|team|org|inc|llc|ltd|co)$/;
 /** The base a workspace name falls back to. */
 export const BUILTIN_FALLBACK = 'mail';
@@ -58,7 +63,7 @@ export const reservedBuiltinLabel = (label: string) => RESERVED.has(label);
 export function builtinBase(name: string) {
   const words = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/['’]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
   const kept = words.filter((word, i) => i === 0 || !FILLER.test(word));
-  if (kept.some(word => PROTECTED.has(word))) return BUILTIN_FALLBACK;
+  if (kept.some(word => PROTECTED.has(word) || IMPERSONATING.has(word)) || IMPERSONATING_PHRASE.test(kept.join('-'))) return BUILTIN_FALLBACK;
   let base = '';
   for (const word of kept) {
     const next = base ? `${base}-${word}` : word;
@@ -216,9 +221,14 @@ export const builtinDomainJob: JobHandler = async (runtime, _payload, job) => {
     if (!facts.ok) wait(3600_000);
     try { await ses.send(new CreateTenantResourceAssociationCommand(binding)); }
     catch (e) { if (!['AlreadyExistsException', 'AlreadyExists'].includes(awsName(e))) throw e; }
-    await runtime.db.execute(sql`UPDATE domain_claims dc SET sending_state='verified',identity=dc.identity||jsonb_build_object('ses',${JSON.stringify(facts.ses)}::jsonb)
+    const { rowCount } = await runtime.db.execute(sql`UPDATE domain_claims dc SET sending_state='verified',identity=dc.identity||jsonb_build_object('ses',${JSON.stringify(facts.ses)}::jsonb)
       FROM builtin_domains b WHERE b.workspace_id=${wid} AND b.revoked_at IS NULL AND dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
         AND dc.connection_id=${connection.id} AND dc.sending_state<>'verified' AND EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND p.ok)`);
+    // Revoked while this run was associating (the revoke's own job request found this one running): take the parent back out.
+    if (!rowCount && (await runtime.db.execute<{ revoked: boolean }>(sql`SELECT revoked_at IS NOT NULL AS revoked FROM builtin_domains WHERE workspace_id=${wid}`)).rows[0]?.revoked) {
+      try { await ses.send(new DeleteTenantResourceAssociationCommand(binding)); }
+      catch (e) { if (!['NotFoundException', 'NotFound'].includes(awsName(e))) throw e; }
+    }
   } catch (e) {
     if (e instanceof JobDeferred || e instanceof ApiError || e instanceof ModuleLoadError) throw e;
     if (/Throttl|TooManyRequests/.test(awsName(e))) wait(5000 + Math.random() * 5000);

@@ -22972,8 +22972,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const pace=()=>db.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
 
       // 1. Names: the workspace name in DNS letters, filler dropped, a protected brand or reserved word replaced, never reissued.
-      assert.deepEqual(["Ryan's workspace",'Acme Corp','Café Crème Inc','PayPal Security','Support','xn--fixture','12345','A','The Very Long Workspace Name For Testing'].map(builtin.builtinBase),
-        ['ryans','acme-corp','cafe-creme','mail','mail','mail','mail','mail','the-very-long-name']);
+      assert.deepEqual(["Ryan's workspace",'Acme Corp','Café Crème Inc','PayPal Security','Support','xn--fixture','12345','A','The Very Long Workspace Name For Testing',
+        'Nightmail Support','Security Team','Acme no-reply','Login Verification','Postmaster Team','Secure Pay'].map(builtin.builtinBase),
+        ['ryans','acme-corp','cafe-creme','mail','mail','mail','mail','mail','the-very-long-name','mail','mail','mail','mail','mail','mail']);
       const labels=new Set<string>();
       for (let i=0;i<40;i++) {const w=unique('ws-acme');await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)',[w,'Acme']);labels.add((await builtin.allocateBuiltinDomain(runtime.db,runtime.config,w,'Acme'))!);}
       assert.equal(labels.size,40,'Every workspace gets its own label.');
@@ -23050,7 +23051,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       ok(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Mine',text:'Mine.'}),202);
       assert.deepEqual((await me()).scope,'members');
       runtime.config.builtinScope='anyone';
-      // Unset, the installation's built-in domains stop sending at once (the kill switch).
+      // Unset, the installation's built-in domains stop sending at once (the kill switch); receiving is checked below.
       runtime.config.builtinDomain=undefined;error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Off',text:'Off.'}),409,'BUILTIN_DOMAIN_UNAVAILABLE');runtime.config.builtinDomain=parent;
 
       // 5. Receiving: every address at it reaches the workspace; one without an inbox or route goes to the default inbox,
@@ -23067,6 +23068,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const level=await window();
       for (const verdicts of [{spam:'FAIL'},{spam:'GRAY'},{virus:'FAIL'}]) assert.equal((await receive([`random-${randomUUID().slice(0,6)}@${host}`],verdicts)).n,0,JSON.stringify(verdicts));
       assert.equal(await window(),level,'Dropped mail takes nothing from the receive budget.');
+      runtime.config.builtinDomain=undefined;assert.equal((await receive([`switched-off@${host}`])).n,0,'The kill switch stops receiving too.');runtime.config.builtinDomain=parent;
       const deliver=async(recipients:string[])=>{const {n,mid}=await receive(recipients);assert.equal(n,1);const message=unique('msg');
         const input=(await runtime.db.execute<{i:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS i`)).rows[0]!.i;
         const plan=matchRouting(input.routing,input.recipients,false,'PASS',new Date().toISOString());
@@ -23098,6 +23100,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(writes.slice(1),[`DeleteTenantResourceAssociationCommand:bane-${wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`]);
       assert.equal((await builtin.ensureBuiltinDomain(runtime,wid)),null,'A revoked domain is never set up again.');
       assert.equal((await db.query("SELECT details->>'reason' AS reason FROM hosted_operator_audit WHERE workspace_id=$1 AND action='builtin-domain-revoked'",[wid])).rows[0].reason,'Synthetic phishing report');
+      // A revoke that lands while the domain.builtin job is associating the parent: the running job takes it back out.
+      const other=(await db.query('SELECT b.workspace_id AS wid,b.name FROM builtin_domains b JOIN workspace_members m ON m.workspace_id=b.workspace_id WHERE m.user_id=$1',[user])).rows[0];
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[other.wid,oh,acct]);
+      await builtin.builtinDomainTick(runtime);
+      assert.equal((await db.query("SELECT status FROM jobs WHERE id=$1",['domain.builtin:'+other.wid])).rows[0]?.status,'pending');
+      const late:string[]=[],raced:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        if(cmd instanceof GetEmailIdentityCommand)return parentIdentity;
+        if(cmd instanceof CreateTenantResourceAssociationCommand&&!raced.length){raced.push(String(cmd.input.TenantName));await builtin.revokeBuiltinDomain(runtime.db,other.wid,'Revoked mid-association','arn:aws:sts::111122225555:assumed-role/operator/fixture');}
+        late.push(`${cmd.constructor.name}:${cmd.input.TenantName}:${cmd.input.ResourceArn}`);return {};
+      });
+      await pace();await builtin.builtinDomainJob(runtime,{},{id:'domain.builtin:'+other.wid,attempts:1,workspaceId:other.wid});
+      assert.deepEqual(late,[`CreateTenantResourceAssociationCommand:bane-${other.wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`,`DeleteTenantResourceAssociationCommand:bane-${other.wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`]);
+      assert.equal((await db.query('SELECT FROM domain_claims WHERE workspace_id=$1 AND name=$2',[other.wid,other.name])).rowCount,0,'Nothing of the revoked domain stays.');
 
       // The runtime key may associate only the tagged parent with a tenant, never another identity.
       const statements=Object.values(render('--fresh',{account:acct,origin:'https://dev.bane.mx'}) as Record<string,{Statement:IamStatement[]}>).flatMap(d=>d.Statement);

@@ -30,8 +30,9 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
   ), env AS (SELECT b.*,addr,split_part(addr,'@',2) AS host FROM bound b CROSS JOIN jsonb_array_elements_text(b.recipients) e(addr)
     -- Spam and viruses to a built-in domain (builtin-domain.ts) are dropped here, before a receipt takes a slot of the
     -- workspace's receive budget or is metered: anyone can write to any address at it (the wildcard MX), wanted or not.
-    ${hosted ? sql`WHERE NOT (coalesce(b.notification#>>'{receipt,spamVerdict,status}','') IN ('FAIL','GRAY') OR coalesce(b.notification#>>'{receipt,virusVerdict,status}','') IN ('FAIL','GRAY'))
-      OR NOT EXISTS (SELECT FROM builtin_domains bd WHERE bd.name=split_part(addr,'@',2))` : sql``}), matched AS MATERIALIZED (
+    -- With built-in domains off (NIGHTMAIL_BUILTIN_DOMAIN unset, the kill switch) everything to them is dropped.
+    ${hosted ? sql`WHERE NOT EXISTS (SELECT FROM builtin_domains bd WHERE bd.name=split_part(addr,'@',2))
+      OR (${!!runtime.config.builtinDomain} AND NOT (coalesce(b.notification#>>'{receipt,spamVerdict,status}','') IN ('FAIL','GRAY') OR coalesce(b.notification#>>'{receipt,virusVerdict,status}','') IN ('FAIL','GRAY')))` : sql``}), matched AS MATERIALIZED (
     SELECT e.bucket,e.mid,m.workspace_id,e.addr FROM env e CROSS JOIN LATERAL (SELECT * FROM mailbox_domains m WHERE ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=e.region AND (e.wid=m.workspace_id OR e.kind='shared') OFFSET 0) m
     WHERE ${replay?sql`e.expires_at>now() AND (e.owners->e.addr) ? m.workspace_id` : sql`NOT EXISTS (SELECT FROM mail_receipt_holds h WHERE h.bucket=e.bucket AND h.ses_message_id=e.mid AND h.binding_workspace IS NOT DISTINCT FROM e.wid AND h.topic_arn=e.topic_arn AND h.recipients ? e.addr AND (h.expires_at<=now() OR NOT (h.owners->e.addr) ? m.workspace_id))`} AND ${hosted ? sql`
       -- The recipient's host routes (each host of a domain on its own row, unique while it routes: mailbox_domains_routing_host),

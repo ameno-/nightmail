@@ -69,8 +69,8 @@ const values = z.object({
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
   // Hosted only: the parent of every workspace's built-in domain (src/builtin-domain.ts), nightmail.email in production, whose
-  // SES identity is tagged for built-in domains in us-east-2 and whose wildcard MX points at Ohio. Unset: no built-in
-  // domains, and mail from existing ones is refused. Never PUBLIC_URL's own domain.
+  // SES identity is tagged for built-in domains in us-east-2 and whose wildcard MX points at Ohio. Unset (the kill switch):
+  // no new built-in domains, mail from existing ones is refused and mail to them is dropped. Never PUBLIC_URL's own domain.
   NIGHTMAIL_BUILTIN_DOMAIN: optional(z.string().trim().toLowerCase().max(200).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   // Hosted only: who a built-in domain sends to. anyone (the default, 100 recipients a day) or members (the workspace
   // members' own verified addresses, 10 a day): SEND_LIMITS.builtin.
