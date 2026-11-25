@@ -3,6 +3,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { z } from 'zod';
 import { ipNetwork, userAgentFamily } from './audit.js';
 import { clientIpHeader, clientNetworkHeader } from './brand.js';
+import { isBuiltinHost } from './builtin-domain.js';
 import { log, type DbExecutor, type Runtime } from './core.js';
 import { placementRoot } from './domain-registry.js';
 import { isKnownDisposable, PUBLIC_MAILBOXES } from './list-hygiene.js';
@@ -156,10 +157,11 @@ const trimSignals = (tx: DbExecutor, entity: Entity) => tx.execute(sql`DELETE FR
 
 // ----- Links -------------------------------------------------------------------------------------------------------------
 // Values two entities can share. A value held by more than LINK_HOLDERS_MOST entities is common infrastructure (a campus
-// network, a popular link shortener) and links nobody.
+// network, a popular link shortener) and links nobody: not when a link is written, and not later, when a value that
+// was rare then has become common (src/abuse-clusters.ts reads links through this too).
 export const LINK_KINDS = ['email', 'email_alias', 'email_domain', 'provider', 'net', 'card', 'send_domain', 'content', 'link'];
 const LINK_HOLDERS_MOST = 25, LINK_PARTNERS_MOST = 100;
-const rare = (kind: SQL, value: SQL) => sql`(SELECT count(*) FROM (SELECT FROM abuse_signals h WHERE h.kind=${kind} AND h.value=${value} LIMIT ${LINK_HOLDERS_MOST + 1}) held)<=${LINK_HOLDERS_MOST}`;
+export const rare = (kind: SQL, value: SQL) => sql`(SELECT count(*) FROM (SELECT FROM abuse_signals h WHERE h.kind=${kind} AND h.value=${value} LIMIT ${LINK_HOLDERS_MOST + 1}) held)<=${LINK_HOLDERS_MOST}`;
 /** A link expires with the signals it came from: its last_at is the latest moment both sides held a shared value. */
 export const linkExpired = sql`last_at < now() - interval '30 days' AND (kind = ANY(${sql.param(MAIL_KINDS)}::text[]) OR last_at < now() - interval '90 days')`;
 /**
@@ -383,9 +385,18 @@ async function foldPayments(runtime: Hosted, run: Run) {
 // a connected account's, or older than the record) never qualifies.
 const hostedAccepted = (mail: SQL) => sql`NOT ${mail}.simulated AND ${mail}.provider_id IS NOT NULL AND ${mail}.status NOT IN ('scheduled','queued','attempting','canceled','suppressed','rejected','rendering_failed','acceptance_unknown','simulated')
   AND EXISTS (SELECT FROM provider_feedback_history h WHERE h.topic_arn=${mail}.feedback_topic_arn AND h.kind='shared')`;
+// Mail that reaches no one outside the workspace, much of it the same for every new workspace, says nothing about what
+// the workspace sends and is never fingerprinted: Nightmail's own words (the dashboard's test email, and onboarding's
+// setup email sent unchanged: screened as 'platform'), a campaign test, and anything addressed only to the members' own
+// verified sign-in addresses (onboarding's setup email as edited, every send from the built-in domain while it sends to
+// members only). The members rule is the built-in domain's (send_admission).
+const ownMail = (mail: SQL) => sql`(${mail}.snapshot @> '{"screenVerdict":{"status":"platform"}}'::jsonb OR ${mail}.snapshot->>'testCampaignId' IS NOT NULL
+  OR NOT EXISTS (SELECT FROM jsonb_array_elements_text(${mail}.to_addresses||${mail}.cc_addresses||${mail}.bcc_addresses) r(address) WHERE NOT EXISTS (
+    SELECT FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=${mail}.workspace_id AND u.email_verified AND lower(u.email)=lower(r.address))))`;
 /**
- * Fingerprints a bounded sample of the mail each workspace had accepted since it was last sampled: content bands and
- * the hashed domains it links to and sends from, dated by the acceptance. Never mail accepted before monitoring
+ * Fingerprints a bounded sample of the mail each workspace had accepted since it was last sampled, its own mail
+ * (ownMail) left out: content bands and the hashed domains it links to and sends from (never the built-in domain, whose
+ * root every workspace shares), dated by the acceptance. Never mail accepted before monitoring
  * started, before the workspace's last erasure or more than a day ago, and never a message (or a campaign's frozen
  * review) created before monitoring started, so nothing scheduled earlier is read. Workspaces are visited in ID order
  * from a stored cursor, a page at a time.
@@ -420,7 +431,7 @@ async function sampleWorkspace(runtime: Hosted, tx: DbExecutor, run: Run, worksp
   const { rows: recent } = await tx.execute<{ id: string; review_id: string | null; campaign_id: string | null; subject: string; at: string }>(sql`SELECT e.id,e.review_id,e.campaign_id,e.subject,${utc(sql`v.created_at`)} AS at
     FROM sending_email_events v JOIN sending_emails e ON e.workspace_id=v.workspace_id AND e.id=v.email_id
     LEFT JOIN sending_campaign_reviews r ON r.workspace_id=e.workspace_id AND r.id=e.review_id
-    WHERE v.workspace_id=${workspaceId} AND v.type='accepted' AND NOT v.simulated AND v.created_at>${floor} AND NOT ${excluded(guards)} AND ${hostedAccepted(sql`e`)}
+    WHERE v.workspace_id=${workspaceId} AND v.type='accepted' AND NOT v.simulated AND v.created_at>${floor} AND NOT ${excluded(guards)} AND ${hostedAccepted(sql`e`)} AND NOT ${ownMail(sql`e`)}
       AND e.created_at>=${run.since}::timestamptz AND (e.review_id IS NULL OR r.created_at>=${run.since}::timestamptz)
     ORDER BY v.created_at DESC LIMIT 40`);
   if (!recent.length) return false;
@@ -435,7 +446,7 @@ async function sampleWorkspace(runtime: Hosted, tx: DbExecutor, run: Run, worksp
     const { subject, at } = picked.find(row => row.id === message.id)!;
     for (const band of contentFingerprint(runtime.config, subject, message.html, message.text) ?? []) signals.push({ kind: 'content', value: band, at });
     for (const domain of await linkDomains(message.html, message.text)) signals.push({ kind: 'link', value: signalHash(runtime.config, 'link', domain), at });
-    const sender = await registrableDomain(message.sender.slice(message.sender.lastIndexOf('@') + 1));
+    const host = message.sender.slice(message.sender.lastIndexOf('@') + 1), sender = isBuiltinHost(runtime.config, host) ? null : await registrableDomain(host);
     if (sender) signals.push({ kind: 'send_domain', value: signalHash(runtime.config, 'send_domain', sender), at });
   }
   run.added += await writeSignals(tx, workspace, guards, signals, false);

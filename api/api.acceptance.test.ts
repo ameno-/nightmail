@@ -29950,13 +29950,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       every waterproof shell in the catalogue, in all sizes, while stock lasts. Returns stay free for thirty days, and gift wrapping is included when you ask for it at the checkout.</p>
       <p>Visit <a href="https://shop.promo-fixture.example.com/deals?u=${order}">the sale page</a> or write to help@promo-fixture.example.com to reserve your size today. <img src="https://tracker:secret@pixel.example.net/p.gif"></p></body></html>`;
     type Mail = { workspace: string; from?: string; subject?: string; html?: string | null; text?: string | null; status?: string; provider?: string | null; simulated?: boolean; topic?: string | null;
-      /** When the provider accepted it (an SQL expression), or null for no acceptance. */ accepted?: string | null; /** When the message was made. */ created?: string; review?: string | null };
+      /** When the provider accepted it (an SQL expression), or null for no acceptance. */ accepted?: string | null; /** When the message was made. */ created?: string; review?: string | null;
+      to?: string[]; /** More of a direct message's snapshot: its screen verdict, a campaign test's ID. */ snapshot?: Json };
     let ordinal = 0;
     const mail = async (m: Mail) => {
-      const id = unique('email'), snapshot = m.review ? { kind: 'marketing', deferredCampaign: true } : { kind: 'transactional', html: m.html ?? undefined, text: m.text ?? undefined };
+      const id = unique('email'), snapshot = m.review ? { kind: 'marketing', deferredCampaign: true } : { kind: 'transactional', html: m.html ?? undefined, text: m.text ?? undefined, ...m.snapshot };
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,snapshot,simulated,feedback_topic_arn,review_id,campaign_id,review_ordinal,created_at)
-        VALUES ($1,$2,$3,'key_fixture',$4,'["seed-inbox@abuse-recipient.example.com"]','[]','[]',$5,$6,$7,$8,$9,$10,$11,$12,$13,${m.created ?? 'now()'})`,
-        [id, m.workspace, REGION, m.from ?? 'offers@mail.abuse-a.example.com', m.subject ?? 'An exclusive spring offer', m.status ?? 'delivered', m.provider === undefined ? `ses-${id}` : m.provider, JSON.stringify(snapshot), m.simulated ?? false, m.topic === undefined ? topic : m.topic, m.review ?? null, m.review ? 'camp_fixture' : null, m.review ? ++ordinal : null]);
+        VALUES ($1,$2,$3,'key_fixture',$4,$14,'[]','[]',$5,$6,$7,$8,$9,$10,$11,$12,$13,${m.created ?? 'now()'})`,
+        [id, m.workspace, REGION, m.from ?? 'offers@mail.abuse-a.example.com', m.subject ?? 'An exclusive spring offer', m.status ?? 'delivered', m.provider === undefined ? `ses-${id}` : m.provider, JSON.stringify(snapshot), m.simulated ?? false, m.topic === undefined ? topic : m.topic, m.review ?? null, m.review ? 'camp_fixture' : null, m.review ? ++ordinal : null, JSON.stringify(m.to ?? ['seed-inbox@abuse-recipient.example.com'])]);
       if (m.accepted !== null) await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,simulated,created_at) VALUES ($1,$2,$3,'accepted',$4,$5,${m.accepted ?? 'clock_timestamp()'})`,
         [unique('evt'), m.workspace, id, m.provider === undefined ? `ses-${id}` : m.provider, m.simulated ?? false]);
       return id;
@@ -30513,6 +30514,80 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // An erasure removes the cluster's alerts with it.
       await h.command('--user', b, '--erase');
       assert.deepEqual(await outbox(), []);
+    });
+  });
+  test('abuse monitoring: mail that reaches no one outside its workspace (Nightmail\'s own test and setup emails, campaign tests, mail to its own members) is never fingerprinted and the built-in domain is nobody\'s sending domain, so new workspaces do not cluster on onboarding; a value that became common links nobody, even through a link written while it was rare; a waitlist refusal counts only when it repeats', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const h = await abuseHarness(runtime, db), { mail, payment, signIn, signals } = h;
+      const values = async (id: string, kind: string) => (await signals('workspace', id)).filter(s => s.kind === kind).map(s => s.value).sort();
+      const linked = async (a: string, b: string) => Object.fromEntries((await db.query('SELECT kind,shared FROM identity_links WHERE (a_id=$1 AND b_id=$2) OR (a_id=$2 AND b_id=$1) ORDER BY kind', [a, b])).rows.map((l: Json) => [l.kind, l.shared]));
+      const clusterOf = async (id: string) => (await db.query(`SELECT c.accounts,c.reasons FROM abuse_clusters c JOIN abuse_cluster_members m ON m.cluster_id=c.id WHERE m.entity_id=$1`, [id])).rows[0] as { accounts: number; reasons: { code: string; points: number; count?: number }[] } | undefined;
+      const reason = async (id: string, code: string) => (await clusterOf(id))?.reasons.find(r => r.code === code);
+
+      // Three new workspaces on the built-in domain, each its own person's. Production's built-in domain sends to members
+      // only; here it sends to anyone, so what its customers send to others from it is sampled too.
+      runtime.config.builtinDomain = 'nm-builtin.example.net';
+      const owner = async (name: string, verified: boolean) => {
+        const user = await h.user(name), email = `${name}.${randomUUID().slice(0, 8)}@gmail.com`;
+        await db.query('UPDATE nightmail_users SET email=$2,email_verified=$3 WHERE id=$1', [user, email, verified]);
+        return { email, workspace: await h.workspace(name, [user]) };
+      };
+      // Three's address is taken by another account, so it is stored unverified.
+      const one = await owner('one', true), two = await owner('two', true), three = await owner('three', false);
+      // Their own mail, in the same words everywhere: fingerprinted, it would join all three.
+      const own = { subject: 'How’s your day going?', text: 'Hit reply and tell us in a few words how your first week is going so far, which part of the setup took longest, and what you would like to send next from your new domain.' };
+      const platform = { screenVerdict: { status: 'platform', reason: 'platform test email' } }, campaignTest = { testCampaignId: 'camp_fixture' };
+      // Onboarding's setup email in the owner's own words (screened as usual), to the owner's address as they typed it.
+      await mail({ workspace: one.workspace, from: 'setup@ws-one.nm-builtin.example.net', to: [one.email.toUpperCase()], ...own });
+      // The dashboard's test email, and a campaign test to an address at the workspace's own domain.
+      await mail({ workspace: two.workspace, from: 'hello@ws-two.nm-builtin.example.net', to: [two.email], ...own, snapshot: platform });
+      await mail({ workspace: two.workspace, from: 'news@ws-two.nm-builtin.example.net', to: ['qa@own-two.example.org'], ...own, snapshot: campaignTest });
+      // The same two where only Nightmail's words, or only the campaign test, set them apart: an owner whose address is
+      // unverified, and a test address that is no member's.
+      await mail({ workspace: three.workspace, from: 'hello@ws-three.nm-builtin.example.net', to: [three.email], ...own, snapshot: platform });
+      await mail({ workspace: three.workspace, from: 'news@ws-three.nm-builtin.example.net', to: ['qa@own-three.example.org'], ...own, snapshot: campaignTest });
+      // Their customers' mail: One and Two send the same offer from the built-in domain to an outside address.
+      await mail({ workspace: one.workspace, from: 'offers@ws-one.nm-builtin.example.net', html: h.offer(5) });
+      await mail({ workspace: two.workspace, from: 'offers@ws-two.nm-builtin.example.net', html: h.offer(6) });
+      await h.hourly();
+      assert.deepEqual([await signals('workspace', three.workspace), (await values(one.workspace, 'content')).length, await values(two.workspace, 'content')], [[], 3, await values(one.workspace, 'content')], 'Only the offer is fingerprinted.');
+      assert.deepEqual([await values(one.workspace, 'send_domain'), await values(two.workspace, 'send_domain')], [[], []], 'The built-in domain\'s root is every workspace\'s: nobody\'s sending domain.');
+      assert.deepEqual([await linked(one.workspace, two.workspace), await linked(one.workspace, three.workspace), await clusterOf(one.workspace)], [{ content: 3, link: 1 }, {}, undefined], 'Similar customer mail is still noted; alone it joins nobody.');
+
+      // A value that became common links nobody. One and Two came to share a sending domain while it had two holders
+      // (as the built-in domain's root once did): with their similar mail, a cluster.
+      const common = 'f'.repeat(32);
+      await db.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at) VALUES ('workspace',$1,'send_domain',$3,now(),now()),('workspace',$2,'send_domain',$3,now(),now())`, [one.workspace, two.workspace, common]);
+      await db.query(`INSERT INTO identity_links(a_type,a_id,b_type,b_id,kind,shared,first_at,last_at) VALUES ('workspace',least($1,$2),'workspace',greatest($1,$2),'send_domain',1,now(),now())`, [one.workspace, two.workspace]);
+      await h.hourly();
+      assert.deepEqual([(await clusterOf(one.workspace))?.accounts, (await reason(one.workspace, 'SIMILAR_CONTENT'))?.points], [2, 20]);
+      // The same message from more than 25 workspaces is a growing ring: the content links written before keep counting.
+      for (const value of await values(one.workspace, 'content'))
+        await db.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at) SELECT 'workspace',$2||n,'content',$1,now(),now() FROM generate_series(1,24) n`, [value, unique('ws-ring')]);
+      await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly();
+      assert.deepEqual([(await clusterOf(one.workspace))?.accounts, (await reason(one.workspace, 'SIMILAR_CONTENT'))?.points], [2, 20]);
+      // More than 25 holders later, the link written then joins nobody: the next rescore finds no cluster.
+      await db.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at) SELECT 'workspace',$2||n,'send_domain',$1,now(),now() FROM generate_series(1,24) n`, [common, unique('ws-common')]);
+      await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly();
+      assert.equal(await clusterOf(one.workspace), undefined);
+
+      // A refusal counts only when it repeats. Five people refused once while the waitlist was on, admitted when a place
+      // opened, then paying with one card: five accounts, and nothing repeated.
+      const people = ['wl-one', 'wl-two', 'wl-three', 'wl-four', 'wl-five'], ip = (i: number) => `198.18.${i}.7`, spaces: string[] = [];
+      for (const [i, name] of people.entries()) await signIn(`sub-${name}`, `${name}@gmail.com`, ip(i));
+      await h.hourly();
+      for (const [i, name] of people.entries()) {
+        spaces.push(await h.workspace(name, [await h.user(name, `sub-${name}`)]));
+        await signIn(`sub-${name}`, `${name}@gmail.com`, ip(i), 'signed_in'); await payment(spaces[i]!, 'fp_abuse_waitlist');
+      }
+      await h.hourly();
+      assert.deepEqual([(await clusterOf(spaces[0]!))?.accounts, await reason(spaces[0]!, 'WAITLIST_REPEAT')], [5, undefined], 'Each refused once: the waitlist at work.');
+      // A sixth, refused on six runs before it was admitted: five refusals after its first.
+      for (let i = 0; i < 6; i++) { await signIn('sub-wl-six', 'wl-six@gmail.com', ip(6)); await h.hourly(); }
+      const six = await h.workspace('wl-six', [await h.user('wl-six', 'sub-wl-six')]);
+      await signIn('sub-wl-six', 'wl-six@gmail.com', ip(6), 'signed_in'); await payment(six, 'fp_abuse_waitlist');
+      await h.hourly();
+      assert.deepEqual([(await clusterOf(six))?.accounts, await reason(six, 'WAITLIST_REPEAT')], [6, { code: 'WAITLIST_REPEAT', points: 5, count: 5 }]);
     });
   });
   test('Glass: everything going on in one read for operators, from rollups and bounded counts, every pool region apart, and a live activity feed; anyone else gets exactly what an operator path that does not exist answers', async t => {

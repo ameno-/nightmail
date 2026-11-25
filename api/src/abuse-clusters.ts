@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { bounded, monitoring, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
+import { bounded, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
 import { operatorContext, recordAudit } from './audit.js';
 import { RATES } from './billing/rates.js';
 import { errors, log, notFound, response, security, type App, type Ctx, type DbExecutor } from './core.js';
@@ -14,7 +14,10 @@ import { operatorActor, type OperatorIdentity } from './operator.js';
 // - Grouping is incremental and bounded: the hourly job (src/abuse.ts) calls refreshClusters for the entities whose
 //   links changed, then rescores the clusters longest unscored. A group is found by walking links outward from one
 //   entity, a few statements a step, up to a fixed size.
-// - A link counts only while both sides still hold a shared value, so erased or excluded entities drop out when read.
+// - A link counts only while both sides still hold a shared value that is still rare (abuse.ts rare), so erased or
+//   excluded entities drop out when read, and so does a value that became common after the link was written. Except
+//   content: the same message from more and more workspaces is a growing ring, not common infrastructure, so the links
+//   written while it was rare keep counting (new ones still stop at the limit).
 // - Every read by a person goes through the operator guard and leaves a staff-only access record: who, which
 //   cluster, when; never a signal's value.
 
@@ -65,7 +68,7 @@ async function gather(runtime: Hosted, seed: Entity): Promise<Component> {
             WHERE x.entity_type=l.a_type AND x.entity_id=l.a_id AND x.kind='browser' AND x.value<>'other')) AS same_browser
         FROM identity_links l WHERE ((l.a_type,l.a_id) IN (${pairsOf(frontier)}) OR (l.b_type,l.b_id) IN (${pairsOf(frontier)}))
           AND EXISTS (SELECT FROM abuse_signals x JOIN abuse_signals y ON y.entity_type=l.b_type AND y.entity_id=l.b_id AND y.kind=x.kind AND y.value=x.value
-            WHERE x.entity_type=l.a_type AND x.entity_id=l.a_id AND x.kind=l.kind)
+            WHERE x.entity_type=l.a_type AND x.entity_id=l.a_id AND x.kind=l.kind AND (x.kind='content' OR ${rare(sql`x.kind`, sql`x.value`)}))
         ORDER BY l.last_at DESC LIMIT ${LINKS_A_STEP}`);
       const users = idsOf(frontier, 'user'), workspaces = idsOf(frontier, 'workspace');
       const { rows: owned } = await tx.execute<{ user_id: string; workspace_id: string }>(sql`SELECT o.user_id,o.workspace_id FROM (
@@ -160,7 +163,9 @@ async function score(runtime: Hosted, component: Component): Promise<Scored> {
   const worst = Math.max(0, ...facts.map(f => ({ warn: 10, restrict: 15, pause: 25 } as Record<string, number>)[f.step ?? ''] ?? 0)), refused = facts.filter(f => f.screened >= 20 && f.rejected > .1 * f.screened).length;
   add('SENDER_STANDING', worst + (refused ? 15 : 0), facts.filter(f => ['warn', 'restrict', 'pause'].includes(f.step ?? '')).length + refused);
   add('FAST_FIRST_SEND', facts.some(f => f.fast_first_send) ? 5 : 0, facts.filter(f => f.fast_first_send).length);
-  const refusals = flagged('waitlisted').reduce((sum, s) => sum + s.seen, 0);
+  // Refused again: an account's first refusal is the waitlist at work (every sign-up while it is on, admitted later when
+  // a place opens), so only the refusals after it count.
+  const refusals = flagged('waitlisted').reduce((sum, s) => sum + Math.max(0, s.seen - 1), 0);
   add('WAITLIST_REPEAT', refusals >= 5 ? 5 : 0, refusals);
   return { accounts, reasons, score: Math.min(100, reasons.reduce((sum, reason) => sum + reason.points, 0)) };
 }
