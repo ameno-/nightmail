@@ -41,6 +41,32 @@ export async function applyDevE2eFixture(db: Pick<Client, 'query'>, env: Record<
   return { workspaceId: row!.id, changed: !!row!.details };
 }
 
+/** One read per region before the first send. Use the deployment's existing dev role with a
+ * GetAccount-only session policy; the GitHub job itself runs in a different AWS account. */
+export async function devSandboxSendPreflight() {
+  if (process.env.STAGE !== 'dev' || !['https://dev.nightmail.dev', 'https://dev.bane.mx'].includes(process.env.PUBLIC_URL ?? '')) throw new Error('SES preflight requires the verified dev deployment.');
+  const [{ STSClient, AssumeRoleCommand }, { SESv2Client, GetAccountCommand }] = await Promise.all([import('@aws-sdk/client-sts'), import('@aws-sdk/client-sesv2')]);
+  const sts = new STSClient({ region: 'us-east-1' });
+  try {
+    const { Credentials: c } = await sts.send(new AssumeRoleCommand({
+      RoleArn: 'arn:aws:iam::905840579680:role/nightmail-deploy', RoleSessionName: 'nightmail-dev-e2e-quota', DurationSeconds: 900,
+      Policy: JSON.stringify({ Version: '2012-10-17', Statement: [{ Effect: 'Allow', Action: 'ses:GetAccount', Resource: '*', Condition: { StringEquals: { 'aws:RequestedRegion': ['us-east-1','us-east-2'] } } }] }),
+    }));
+    if (!c?.AccessKeyId || !c.SecretAccessKey || !c.SessionToken) throw new Error('No dev quota reader credentials.');
+    const credentials = { accessKeyId: c.AccessKeyId, secretAccessKey: c.SecretAccessKey, sessionToken: c.SessionToken };
+    // Ohio: bounce, complaint, campaign recipient and two inbox legs. Virginia: one draft test.
+    return await Promise.all(([['us-east-2', 5], ['us-east-1', 1]] as const).map(async ([region, needed]) => {
+      const ses = new SESv2Client({ region, credentials });
+      try {
+        const a = await ses.send(new GetAccountCommand({})), max = a.SendQuota?.Max24HourSend, used = a.SendQuota?.SentLast24Hours;
+        if (a.SendingEnabled !== true || typeof a.ProductionAccessEnabled !== 'boolean' || !(a.SendQuota?.MaxSendRate && a.SendQuota.MaxSendRate > 0) ||
+          max === undefined || used === undefined || !Number.isFinite(max) || !Number.isFinite(used) || used < 0 || (max <= 0 && max !== -1)) throw new Error(`Missing or disabled dev SES quota in ${region}.`);
+        return { region, max, used, needed, exhausted: !a.ProductionAccessEnabled && max > 0 && used >= max - needed };
+      } finally { ses.destroy(); }
+    }));
+  } finally { sts.destroy(); }
+}
+
 /** A campaign can report ses_daily_quota when GetAccount couldn't refresh, too. Only a fresh
  * provider sample on the fixture's shared Ohio account proves its 200/day sandbox has no
  * marketing capacity (dev keeps the last 10% for transactional mail). No AWS call or write. */
