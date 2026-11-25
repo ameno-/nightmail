@@ -11,6 +11,7 @@ import type { ReadyConnection } from './provider-credentials.js';
 import type { SendScope } from './send-scope.js';
 import { productName } from './brand.js';
 import { builtinPolicy, builtinRefusal } from './builtin-domain.js';
+import { RAMP } from './standing-model.js';
 
 /**
  * Send admission: one decision for every kind of send, made by send_admission (migration 323) in the statement or
@@ -30,7 +31,9 @@ export type AdmittedAsset = { id: string; size: number; contentId: string | null
 export type Admitted = { allowed: true; mails: { region: string; binding: SendingBinding | null; connection: ReadyConnection | null }[]; billing: BillingGate | null; assets: AdmittedAsset[]; shared: boolean };
 export type Released = { allowed: true; hostedLeft: number | null; nextChangeAt: string | null; billing: { enforced: boolean; freeSentLeft: number; affordable: number; availableUc: string } | null };
 export type Refused = { allowed: false; code: string; item?: number; reason?: string | null; cap?: number; window?: 'hour' | 'day' | 'minute'; reserved?: boolean; field?: string; resetAt?: string;
-  allowance?: HostedAllowance; incoming?: number; marketing?: number; regional?: boolean; failed?: boolean; host?: string; billing: BillingGate | null };
+  allowance?: HostedAllowance; incoming?: number; marketing?: number; regional?: boolean; failed?: boolean; host?: string; billing: BillingGate | null;
+  /** RAMP_LIMIT_REACHED (ramp_refusal, migration 501): the step (from 1) of `steps`, what the hour holds, how many more fit and Retry-After's seconds. */
+  step?: number; steps?: number; used?: number; fits?: number; retryAfter?: number };
 
 /** The installation's side of every decision: limits, sending mode and policy. */
 async function policy(runtime: Runtime) {
@@ -40,18 +43,26 @@ async function policy(runtime: Runtime) {
     caps: cfg.hostedSendCaps, headroom: cfg.dispatch.dailyHeadroomPercent, emailUc: RATES.emailUc.toString(), builtin: builtinPolicy(cfg),
     readiness: !cfg.multiTenant && !sim ? { fingerprint: await credentialFingerprint(cfg), target: discoveryTarget(cfg) } : null };
 }
+/** What the database's ramp check (ramp_refusal and ramp_clean_hour, migration 501) is told of RAMP: each step's hourly
+ * ceiling, how much of one an hour must release to prove it, and the clean, mature history that places a sender. */
+export const RAMP_POLICY = { steps: RAMP.steps.map(s => s.ceilingPerHour), advance: RAMP.advance,
+  history: { days: RAMP.historyDays, resolved: RAMP.check.resolved, bounceRate: RAMP.check.bounceRate, complaintRate: RAMP.check.complaintRate, complaints: RAMP.check.complaints } };
 /** Recipients a send charges against the Hosted limit (none when SES is simulated), how many of them are marketing, and
- * how many the balance is asked for (all of them: billing_gate prices simulated mail only when configured to). */
-export function charges(runtime: Runtime, mails: { recipients: number; marketing: boolean }[]) {
+ * how many the balance is asked for (all of them: billing_gate prices simulated mail only when configured to). Its
+ * `kind: "marketing"` recipients on a live Hosted installation also ask the ramp (`ramp`); bulk evidence charges
+ * transactional mail as marketing but never ramps it. */
+export function charges(runtime: Runtime, mails: { recipients: number; marketing: boolean; snapshot?: { kind?: string } }[]) {
   const sim = isSimulatedSes(runtime);
-  let cost = 0, marketing = 0, billable = 0;
-  for (const m of mails) { billable += m.recipients; if (!sim) { cost += m.recipients; if (m.marketing) marketing += m.recipients; } }
-  return { cost, marketing, billable };
+  let cost = 0, marketing = 0, billable = 0, ramped = 0;
+  for (const m of mails) { billable += m.recipients; if (!sim) { cost += m.recipients; if (m.marketing) marketing += m.recipients; if (m.snapshot?.kind === 'marketing') ramped += m.recipients; } }
+  return { cost, marketing, billable, ...(ramped > 0 && runtime.config.multiTenant ? { ramp: { ...RAMP_POLICY, recipients: ramped } } : {}) };
 }
 export type AdmissionRequest = {
   /** take: the statement takes the send locks itself; a SendScope: the caller holds them (send-scope.ts); none: a check
    * outside the send locks, which locks only the sender claim it reads. */
   stage: Stage; locks: 'take' | 'none' | SendScope; mails?: (AdmissionMail & { from?: string; binding?: SendingBinding })[]; cost?: number; marketing?: number; billable?: number;
+  /** A send's `kind: "marketing"` recipients, for the ramp's hourly ceiling (charges). */
+  ramp?: typeof RAMP_POLICY & { recipients: number };
   /** The idempotency claim, made first by a statement that admits by itself. */
   claim?: { path: string; key: string; hash: string; receipt: unknown };
   /** A campaign test admitted by itself: its row is locked first and must still be at the revision that was rendered. */
@@ -92,6 +103,13 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
       }
       const resetAt = h.resetAt ? new Date(h.resetAt).toISOString() : undefined, retryable = incoming <= h.cap! && marketing <= h.marketingCap!;
       return new ApiError(429, d.code, `Hosted sending is limited to ${h.cap} recipients per rolling 24 hours; ${count(h.used)} are used.${d.reserved ? ` Marketing stops at ${h.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''}`, undefined, retryable, resetAt);
+    }
+    case 'RAMP_LIMIT_REACHED': {
+      const opens = new Date(d.resetAt!).toISOString(), fits = d.fits ?? 0, asked = d.marketing ?? 0;
+      const error = new ApiError(429, d.code, `This workspace is still ramping up (step ${d.step} of ${d.steps}): it can send ${count(d.cap!)} marketing recipients an hour right now, and ${fits ? `${count(fits)} more fit` : 'no more fit'} this hour${asked > fits ? `; this request has ${count(asked)}` : ''}. More room opens at ${opens.slice(11, 16)} UTC. For a large list, send a campaign instead: campaigns are paced automatically.`, undefined, true);
+      error.retryAfterSeconds = d.retryAfter;
+      error.details = [{ step: d.step, steps: d.steps, ceilingPerHour: d.cap, usedThisHour: d.used, fitsNow: fits, requested: asked, stepOpensAt: opens }];
+      return error;
     }
     case 'INVALID_SCHEDULE': return new ApiError(422, d.code, `Schedule between now and ${SEND_LIMITS.schedule.horizonSeconds / 86_400} days from now.`, 'scheduledAt');
     case 'SCHEDULED_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This workspace already has ${count(d.cap!)} scheduled emails waiting. Cancel some or wait for them to send.`, 'scheduledAt', true);

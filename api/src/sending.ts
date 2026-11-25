@@ -36,7 +36,7 @@ import { withRedactedReply } from './deliverability.js';
 import { headerPrefix, requestHeader } from './brand.js';
 import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, SendIdempotencyHeaders, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
-import { actorJson, admission, admitted, charges, duplicateAttachment, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
+import { actorJson, admission, admitted, charges, duplicateAttachment, RAMP_POLICY, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
 import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
@@ -132,6 +132,7 @@ const SendInput = z.object({
 }).openapi('BatchSendEmailItem');
 // The screen's limits (src/screen.ts), as the API reference states them; the defaults of JEV_MESSAGE_LIMIT_BYTES and JEV_CAMPAIGN_LIMIT_BYTES.
 const screenBytes = (n: number) => n.toLocaleString('en-US'), SCREEN = SEND_LIMITS.screen;
+const RAMP_NOTE = `Marketing ramp: on Hosted sending, a workspace still ramping up (a new sender, exempt and first-party ones included) sends kind: marketing at most its ramp step's hourly ceiling (${RAMP.steps.map(x => x.ceilingPerHour.toLocaleString('en-US')).join(', ')} recipients an hour), shared with its campaigns. A send that would cross it is refused with nothing queued (a batch as a whole): retryable 429 RAMP_LIMIT_REACHED, with Retry-After (seconds until more room opens) and error.details[0] holding { step, steps, ceilingPerHour, usedThisHour, fitsNow, requested, stepOpensAt }. For a large list, send a campaign instead: campaigns are paced automatically. Transactional mail is never ramped.`;
 const SCREEN_LIMIT_NOTE = `Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).`;
 const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns screen every distinct copy during launch and prepare before any row enters the sending queue, each distinct copy only once: recipients whose personalized copies read the same share one verdict. The campaign\u2019s own copy, placeholders unresolved, is screened first and may hold ${screenBytes(SCREEN.campaignBytes)} bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy. A failing copy never enters the sending queue (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign\u2019s own copy fails it before anyone is sent to.`;
 // The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
@@ -1279,9 +1280,10 @@ function scheduleTime(value: string) {
   if (!(at >= now - skewSeconds * 1000 && at <= now + horizonSeconds * 1000)) throw new ApiError(422, 'INVALID_SCHEDULE', `Schedule between now and ${horizonSeconds / 86_400} days from now.`, 'scheduledAt');
   return new Date(at).toISOString();
 }
-// Refusals that pass on their own within minutes (the dispatch queue is full, Hosted setup is finishing): a scheduled
-// send retries them every 30 seconds for up to 15 minutes past its time, then is rejected like any other refusal.
-const RELEASE_WAITS = new Set(['PENDING_EMAIL_LIMIT_EXCEEDED', 'TENANT_NOT_READY']);
+// Refusals that pass on their own within minutes (the dispatch queue is full, Hosted setup is finishing, the ramp's hour
+// has no room left): a scheduled send retries them every 30 seconds for up to 15 minutes past its time, then is rejected
+// like any other refusal.
+const RELEASE_WAITS = new Set(['PENDING_EMAIL_LIMIT_EXCEEDED', 'TENANT_NOT_READY', 'RAMP_LIMIT_REACHED']);
 const RELEASE_GRACE_MS = 15 * 60_000, RELEASE_RETRY_MS = 30_000;
 /**
  * The release job: at its time, a scheduled email is admitted by send_admission as a send made then, under its row lock:
@@ -1319,7 +1321,7 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     const mail: AdmissionMail = { host: row.from.split('@')[1]!.toLowerCase(), region: s.requestedRegion, kind: s.kind, attachments: files, bodyBytes: contentBytes(s) };
     // Its sender's authority is the dispatcher's to recheck at the claim, as for any queued mail.
     const decision = await admission(runtime, wid, actorJson({ keyId: row.actorKeyId, domains: [] }), { stage: 'send', locks: 'take', mails: [mail],
-      ...charges(runtime, [{ recipients: hostedCost(s.to, s.cc, s.bcc), marketing }]) }, undefined, sql`${JSON.stringify(files)}::jsonb`);
+      ...charges(runtime, [{ recipients: hostedCost(s.to, s.cc, s.bcc), marketing, snapshot: s }]) }, undefined, sql`${JSON.stringify(files)}::jsonb`);
     const d = (await tx.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s;
     shadowBilling(d.billing, wid);
     if (d.allowed) {
@@ -2101,7 +2103,7 @@ export function registerSending(app: App) {
     } else mail=input;
     return c.json(await advisoryCheck(c.env, a, mail, mail === input ? 'draft' : 'email'), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', description: `${SCREEN_LIMIT_NOTE} ${BUILTIN_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', description: `${SCREEN_LIMIT_NOTE} ${RAMP_NOTE} ${BUILTIN_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
     if (replyAddressId) {
@@ -2116,7 +2118,7 @@ export function registerSending(app: App) {
     const result = await admitEmails(sendCall(c), a, input, input.scheduledAt && new Date(Date.parse(input.scheduledAt)).toISOString());
     return c.json(SingleReceipt.parse({ ...result, ...recipientWarnings(sendRecipients(input)) }), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: `${SCREEN_LIMIT_NOTE} ${BUILTIN_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: `${SCREEN_LIMIT_NOTE} ${RAMP_NOTE} ${BUILTIN_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (batchContent(input.emails) > SEND_LIMITS.batchContentChars) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Combined batch body content may not exceed ${SEND_LIMITS.batchContentChars / 1024 / 1024} MiB.`);
     const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input), { workspaceId: a.workspaceId, signal: c.req.raw.signal });
@@ -3276,20 +3278,14 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, host
   return null;
 }
 /**
- * The workspace's largest clean, mature hour of real marketing mail in the last RAMP.historyDays days, as SES accepted it
- * (sending_metrics_hourly, by the hour the mail was released; hours holding simulated mail are left out): where its
- * campaigns start on the ramp (src/standing-model.ts rampStart). Mature: 90% of it delivered or bounced. Clean: within the
- * ramp's bounce and complaint lines (RAMP_CHECK), and so is the whole window, else nothing counts. The hour still running
- * never counts.
+ * The workspace's largest clean, mature hour of real marketing mail in the last RAMP.historyDays days, as SES accepted it:
+ * where its campaigns, and its marketing sent through the API, start on the ramp (src/standing-model.ts rampStart).
+ * ramp_clean_hour (migration 501) says what counts: mature is 90% of it delivered or bounced; clean is within the ramp's
+ * bounce and complaint lines (RAMP_CHECK), and so is the whole window, else nothing counts. The hour still running never
+ * counts.
  */
 async function rampHistory(db: DbExecutor, workspaceId: string) {
-  const clean = (a: SQL, b: SQL, c: SQL) => sql`${b}<=${a}*${RAMP_CHECK.bounceRate}::float8 AND (${c}<${RAMP_CHECK.complaints}::int OR ${c}<=${a}*${RAMP_CHECK.complaintRate}::float8)`;
-  const [found] = (await db.execute<{ best: number }>(sql`WITH hours AS (
-      SELECT hour,sum(accepted)::float8 AS a,sum(delivered)::float8 AS d,sum(bounced)::float8 AS b,sum(complained)::float8 AS c FROM sending_metrics_hourly
-      WHERE workspace_id=${workspaceId} AND kind='marketing' AND hour>=now()-make_interval(days=>${RAMP.historyDays}::int) AND hour<date_trunc('hour',now(),'UTC')
-      GROUP BY hour HAVING sum(simulated)=0 AND sum(accepted)>0)
-    SELECT CASE WHEN ${clean(sql`coalesce(sum(a),0)`, sql`coalesce(sum(b),0)`, sql`coalesce(sum(c),0)`)}
-      THEN coalesce(max(a) FILTER (WHERE d+b>=a*${RAMP_CHECK.resolved}::float8 AND ${clean(sql`a`, sql`b`, sql`c`)}),0) ELSE 0 END::int AS best FROM hours`)).rows;
+  const [found] = (await db.execute<{ best: number }>(sql`SELECT ramp_clean_hour(${workspaceId},${JSON.stringify(RAMP_POLICY.history)}::jsonb) AS best`)).rows;
   return Number(found?.best ?? 0);
 }
 /** What a ramp step's hour released (review ordinals after `from`, through the cursor) and the feedback it has so far. */
@@ -3993,11 +3989,14 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     let step = row.rampStep ?? rampStart(await rampHistory(runtime.db, a.workspaceId)), from = row.rampFrom;
     let opened = row.rampStep !== null && row.rampWindowStartedAt ? Date.parse(row.rampWindowStartedAt) : null;
     if (row.rampStep === null) log('info', { code: 'CAMPAIGN_RAMP_PLACED', campaignId: row.id, step: step + 1, steps: RAMP.steps.length });
-    // The workspace's other ramped campaigns share the step's hourly ceiling: splitting one send into many campaigns (or
-    // sending several at once) doesn't multiply it. What they released in their current hours, from their own rows.
-    const [others] = (await runtime.db.execute<{ n: number }>(sql`SELECT coalesce(sum(greatest(expanded-ramp_from,0)),0)::int AS n FROM sending_campaigns
+    // The workspace's other ramped campaigns and its marketing sent through the API share the step's hourly ceiling:
+    // splitting one send into many campaigns, sending several at once or sending the list through the API doesn't multiply
+    // it. What the campaigns released in their current hours, from their own rows, and the API's marketing this clock hour
+    // (hosted_usage_hourly.api_marketing, migration 501, whose ramp_refusal counts the campaigns' hours the same way).
+    const [others] = (await runtime.db.execute<{ n: number }>(sql`SELECT ((SELECT coalesce(sum(greatest(expanded-ramp_from,0)),0) FROM sending_campaigns
       WHERE workspace_id=${a.workspaceId} AND id<>${row.id} AND state='sending' AND NOT simulated AND ramp_step IS NOT NULL AND ramp_step<${RAMP.steps.length}
-        AND ramp_window_started_at>now()-make_interval(secs=>${RAMP_HOUR_MS / 1000}::int)`)).rows;
+        AND ramp_window_started_at>now()-make_interval(secs=>${RAMP_HOUR_MS / 1000}::int))
+      + coalesce((SELECT api_marketing FROM hosted_usage_hourly WHERE workspace_id=${a.workspaceId} AND hour=date_trunc('hour',now(),'UTC')),0))::int AS n`)).rows;
     const shared = Number(others?.n ?? 0);
     if (step < RAMP.steps.length && opened !== null && dbNow >= opened + RAMP_HOUR_MS) {
       const batch = row.expanded > from ? await rampBatch(runtime.db, a, row, from) : null;
