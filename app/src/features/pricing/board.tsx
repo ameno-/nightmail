@@ -15,7 +15,7 @@ import { PRICE_LINKS } from './live'
 import { Bolts, keySound, reducedMotion, SoundSwitch, useReplay, useTypedWord } from './eggs'
 import { play, wake } from './sound'
 import { OFFERS } from './compare'
-import { claim, formatCount, money, nightmail, nightmailBill, offerSize, sourcesOf, theirPrice, ucOf, UNITS, usageLines, type Comparison, type Usage } from './prices'
+import { claim, formatCount, listOf, money, nightmail, nightmailBill, offerSize, sourcesOf, theirPrice, ucOf, UNITS, usageLines, type Comparison, type Usage } from './prices'
 
 // The price pages' hall (Hall): a dark wall under one pendant lamp, with the board and its console hung in it, the same
 // for the three pages, so moving between them changes the board, not the room (scene.tsx; calculator.tsx is the
@@ -201,6 +201,7 @@ export function ComparisonBelow({ comparison: c, start }: { comparison: Comparis
     <section className="cb-close" aria-labelledby="cb-close" {...keys}>
       <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>Contacts and teammates are free.</span></h2>
       <p className="cb-first">{FIRST_STEP[c.focus]}</p>
+      {c.without?.length ? <p className="cb-without">Not in the box: {listOf(c.without)}.</p> : null}
       {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
     </section>
   </>

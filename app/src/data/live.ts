@@ -294,8 +294,9 @@ export function createLiveApi(scope?: RequestScope): Api {
       settings: signal => call<WorkspaceSettings>('/settings/workspace', 'GET', undefined, signal), updateSettings: (input, signal) => call<WorkspaceSettings>('/settings/workspace', 'PATCH', input, signal) },
     senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal), release: (input, signal) => call<SenderScore>('/sender-score/release', 'POST', input, signal) },
     overview: { get: async (input, signal) => {
-      const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
-      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
+      // The window ends at the API's now, not this device's: a browser clock ahead of the server can't send a start after
+      // the end, and the chart below is laid out from the from/to the API answers with.
+      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: new Date(Date.now() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000).toISOString() })
       if (input.stream) params.set('stream', input.stream)
       // 24h uses 10-minute buckets (sending_metrics_ten_minute); 7d uses 1-hour and 30d folds 1-hour into 4-hour
       // buckets (sending_metrics_hourly), keeping every range around 144–180 points with zero raw table scans.

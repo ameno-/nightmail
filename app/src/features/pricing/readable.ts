@@ -36,7 +36,7 @@ export function comparisonMarkdown(c: Comparison): string {
   const unit = c.offer.unit, vendor = c.offer.vendor
   // The size, then the emails it means: sent to the contacts, or received and sent by the inboxes.
   const sizeCells = (size: number, u: Usage) => unit === 'contacts' ? [formatCount(size), formatCount(u.sent)] : unit === 'inboxes' ? [formatCount(size), formatCount(u.received), formatCount(u.sent)] : [formatCount(size)]
-  const sizeHead = unit === 'contacts' ? ['Contacts', 'Emails a month'] : unit === 'inboxes' ? ['Inboxes', 'Received a month', 'Sent a month'] : ['Emails a month']
+  const sizeHead = unit === 'contacts' ? ['Contacts', 'Emails a month'] : unit === 'inboxes' ? ['Inboxes', 'Received a month', 'Sent a month'] : c.model.per === 'received' ? ['Received a month'] : ['Emails a month']
   const rows = c.steps.map(size => {
     const u = c.use(size), ours = nightmailBill(u.sent, u.received), theirs = theirPrice(c.offer, u)!
     return [...sizeCells(size, u), ours.text, money(theirs.cents), theirs.plan]
@@ -54,6 +54,7 @@ export function comparisonMarkdown(c: Comparison): string {
     c.rows.map(row => `- ${row.text}${row.source ? ` ([${host(row.source.url)}](${row.source.url}), checked ${dayOf(row.source.checked)})` : ''}`).join('\n'),
     `## Also in the box`,
     c.panels.map(id => `- **${PANELS[id].title}** ${PANELS[id].line}`).join('\n'),
+    ...c.without?.length ? [`Not in the box: ${listOf(c.without)}.`] : [],
     FIRST_STEP[c.focus],
     ...c.faq?.length ? [`## Questions`, c.faq.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
     `## ${productName}’s pricing terms`,

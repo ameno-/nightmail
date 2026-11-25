@@ -3,7 +3,7 @@ import { Link } from 'react-router'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { Alert, Button, Checkbox, CopyButton, Dialog, Field, Input, SearchField, SecretInput, Select, type Tone } from '../../components/ui'
 import { request } from '../../data/live'
-import { ApiError, errorText } from '../../data/types'
+import { ApiError, errorText, type InboundAddress } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
 import { useAddressOptions } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
@@ -87,14 +87,16 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
     ...(enabled !== (editing.status !== 'paused') ? { paused: !enabled } : {}),
   } : null
   const serverError = (field: string) => error instanceof ApiError ? error.fields[field] : undefined
-  const generalError = error && !(error instanceof ApiError && ['name', 'url', 'type', 'paused'].some(f => error.fields[f])) ? errorText(error) : ''
+  const generalError = error && !forwardSenderNeeded(error) && !(error instanceof ApiError && ['name', 'url', 'type', 'paused'].some(f => error.fields[f])) ? errorText(error) : ''
   // Single flight: a second Create before the first answers would post the endpoint again.
-  const send = useSingleFlight(editing ? 'endpoints.update' : 'endpoints.create', async () => {
+  // `sender`: the address Create made for it just now (ForwardSenderOffer), sent as from.
+  const send = useSingleFlight(editing ? 'endpoints.update' : 'endpoints.create', async (sender?: string) => {
     setBusy(true); setError(null)
     try {
       if (editing) onSaved?.(await request<Endpoint>(`/v1/endpoints/${encodeURIComponent(editing.name)}`, { method: 'PATCH', body: changes }))
       else {
-        const body = { type, name: finalName, ...(type === 'forward' ? { address: value, ...(from ? { from } : {}), ...(preverify ? { preverify } : {}) } : { url: value }) }
+        const sendFrom = sender ?? from
+        const body = { type, name: finalName, ...(type === 'forward' ? { address: value, ...(sendFrom ? { from: sendFrom } : {}), ...(preverify ? { preverify } : {}) } : { url: value }) }
         onCreated?.(await request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) }))
       }
     }
@@ -144,6 +146,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
       </>}
       {editing && <Checkbox checked={enabled} onCheckedChange={setEnabled} label="Enabled" />}
       {(generalError || serverError('type') || serverError('paused')) && <Alert tone="danger">{generalError || serverError('type') || serverError('paused')}</Alert>}
+      <ForwardSenderOffer error={error} onCreated={box => { setFrom(box.id); return send(box.id) }} />
     </form>
   </Dialog>
 }
@@ -160,6 +163,29 @@ export function CreatedEndpointDialog({ created, onClose, writeRule = true }: { 
   </Dialog>
 }
 export { statusLabel as endpointStatusLabel, statusTone as endpointStatusTone }
+/** The address a refused forward could send its confirmation from (FORWARD_SENDER_REQUIRED's suggestion), or null. */
+export const forwardSenderNeeded = (error: unknown): { suggested: string | null } | null => error instanceof ApiError && error.code === 'FORWARD_SENDER_REQUIRED'
+  ? { suggested: typeof error.details?.[0]?.suggestedFrom === 'string' ? error.details[0].suggestedFrom : null } : null
+/**
+ * A forward refused for want of an address to send its confirmation from: one click creates the suggested address
+ * (forward@ on the workspace's own domain) and `onCreated` sends the forward again from it. Wherever a forward is made.
+ */
+export function ForwardSenderOffer({ error, onCreated }: { error: unknown; onCreated: (address: InboundAddress) => void | Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const [failed, setFailed] = useState<unknown>(null)
+  const need = forwardSenderNeeded(error)
+  if (!need) return null
+  async function create() {
+    setBusy(true); setFailed(null)
+    try { await onCreated(await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body: { address: need!.suggested } })) }
+    catch (e) { setFailed(e) } finally { setBusy(false) }
+  }
+  return <Alert tone="info" title="It needs an address to send from">
+    {need.suggested ? <>Forwarding first emails them a request to confirm, from one of your addresses, and you don’t have one yet.</> : errorText(error)}
+    {need.suggested && <div className="cluster forward-sender-offer"><Button size="sm" variant="primary" loading={busy} onClick={() => void create()}>Create <PrivateAddress value={need.suggested} /> and continue</Button></div>}
+    {failed !== null && <p className="ui-field__error" role="alert">{errorText(failed)}</p>}
+  </Alert>
+}
 /** A new forward waits for its recipient: what Save is waiting for, said once wherever a forward is made. */
 export function AwaitingConfirm({ address }: { address: string }) {
   return <Alert tone="info">We emailed <PrivateAddress value={address} /> to confirm. Save once they agree.</Alert>

@@ -56,10 +56,10 @@ export type CreatedSecret = { secret: string; title: string; description?: strin
  *  is the Connect an agent flow, so choosing it hands over to that dialog. `initial` opens straight on an API key's form,
  *  as Overview's "Create key" does with the domain it just verified, or on an SMTP login's. Render only while open, so form state and the created
  *  secret in mutation state go away on close. */
-export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string; smtp?: boolean } }) {
+export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string; smtp?: boolean; app?: boolean } }) {
   // SMTP needs the installation's mail gateway: without one, the form never opens.
   const servers = useMailServers()
-  const [kind, setKind] = useState<Kind | null>(initial?.smtp && servers ? 'smtp' : initial?.purpose ? 'api' : null)
+  const [kind, setKind] = useState<Kind | null>(initial?.smtp && servers ? 'smtp' : initial?.app ? 'app' : initial?.purpose ? 'api' : null)
   const [pending, setPending] = useState(false)
   useDomainOptions(open)
   // One dialog for every step, so moving between them keeps focus inside it.

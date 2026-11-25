@@ -227,11 +227,13 @@ export interface InboxInput { type: Inbox['type']; domain?: string; name?: strin
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
   id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; toCount?: number; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
+  /** When Nightmail stored it, and how long after its receipt reached it (older APIs: absent). */ storedAt?: ISODate; processingMs?: number | null
   held: 'quota' | 'expired' | null; attachmentCount: number; auth: { spf?: string; dkim?: string; dmarc?: string }; simulated: boolean; hiddenContent: boolean
   extract: { codes: string[]; links: { text: string; href: string; mismatch: boolean }[] }
 }
 export interface InboxMessageDetail extends InboxMessage { text: string; replyText: string; html: string | null; attachments: { id: string; filename: string; contentType: string; size: number; url: string | null; expiresAt: ISODate | null }[] }
-export interface InboxMessagePage { data: InboxMessage[]; cursor: string; hasMore: boolean }
+/** servedAt: when the page was read, on storedAt's clock (older APIs: absent). */
+export interface InboxMessagePage { data: InboxMessage[]; cursor: string; hasMore: boolean; servedAt?: ISODate }
 // Inbound is thread-first: a conversation can be visible through several receiving addresses.
 export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }

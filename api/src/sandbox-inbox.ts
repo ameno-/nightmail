@@ -3,6 +3,7 @@ import { sql } from 'drizzle-orm';
 import { ApiError, id, type Runtime } from './core.js';
 import { mailKey, sandboxMailStore } from './mail-objects.js';
 import { storeIncoming } from './mailbox-ingest-store.js';
+import { storeNotice } from './inbox-wake.js';
 
 // Only literal, validated fields cross this boundary. There is no SMTP, DNS, SES or URL fetch.
 export async function simulateInbox(
@@ -78,6 +79,10 @@ export async function simulateInbox(
     [],
     false,
     false,
+    false, null, undefined, null, undefined,
+    storeNotice(runtime.inboxWake, wid, [bid]),
   );
+  // Stored: a poll waiting on this inbox reads it now (inbox-wake.ts).
+  await runtime.inboxWake?.notify(wid, [bid]);
   return { messageId: mid, simulated: true as const };
 }

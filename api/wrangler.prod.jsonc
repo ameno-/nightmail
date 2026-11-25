@@ -55,6 +55,9 @@
     // Built-in <name>-xx.nightmail.email domain for every workspace (src/builtin-domain.ts). On since 2026-11-25 (Ryan approved, Statusglass A112).
     // Unset it to stop built-in sending and receiving at once (kill switch).
     "NIGHTMAIL_BUILTIN_DOMAIN": "nightmail.email",
+    // Built-in domains send only to workspace members' own verified sign-in addresses for now: nightmail.email is a new
+    // domain, and mail from a domain that young is what blocklists act on first.
+    "NIGHTMAIL_BUILTIN_SEND_SCOPE": "members",
     // Abuse monitoring (src/abuse.ts) records from this instant on, monitor-only (NIGHTMAIL_ABUSE_ENFORCE stays unset).
     "NIGHTMAIL_ABUSE_MONITORING": "2026-11-21T15:30:00Z",
     "ACCOUNT_CLIENT_ID": "bane-production",
@@ -101,7 +104,7 @@
     // CF_OBSERVABILITY_TOKEN secret (api/README.md "Support integration").
     "CF_OBSERVABILITY_ACCOUNT_ID": "15d29c8639fd3733b1b5486a2acfd968",
     "CF_OBSERVABILITY_SCRIPT": "nightmail-production",
-    // The support agent (support/): "Contact support" hands off here, and staff sign-in returns to its /staff/callback.
+    // The support agent (support/): Nightmail wakes its /hooks/nightmail-wake on this origin, and "Contact support" returns this URL.
     // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
     "BANE_SUPPORT_URL": "https://support.nightmail.dev/chat",
     // Email support conversations (src/support-conversations.ts): mail to support@nightmail.dev. On since 2026-11-25 (Ryan approved).
