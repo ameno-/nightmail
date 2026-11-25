@@ -33,7 +33,7 @@ export type Released = { allowed: true; hostedLeft: number | null; nextChangeAt:
 export type Refused = { allowed: false; code: string; item?: number; reason?: string | null; cap?: number; window?: 'hour' | 'day' | 'minute'; reserved?: boolean; field?: string; resetAt?: string;
   allowance?: HostedAllowance; incoming?: number; marketing?: number; regional?: boolean; failed?: boolean; host?: string; billing: BillingGate | null;
   /** RAMP_LIMIT_REACHED (ramp_refusal, migration 501): the step (from 1) of `steps`, what the hour holds, how many more fit and Retry-After's seconds. */
-  step?: number; steps?: number; used?: number; fits?: number; retryAfter?: number };
+  step?: number; steps?: number; used?: number; fits?: number; retryAfter?: number; scheduled?: boolean };
 
 /** The installation's side of every decision: limits, sending mode and policy. */
 async function policy(runtime: Runtime) {
@@ -57,12 +57,18 @@ export function charges(runtime: Runtime, mails: { recipients: number; marketing
   for (const m of mails) { billable += m.recipients; if (!sim) { cost += m.recipients; if (m.marketing) marketing += m.recipients; if (m.snapshot?.kind === 'marketing') ramped += m.recipients; } }
   return { cost, marketing, billable, ...(ramped > 0 && runtime.config.multiTenant ? { ramp: { ...RAMP_POLICY, recipients: ramped } } : {}) };
 }
+/** A send scheduled for later charges nothing now: its release admits it as a send made then. Its marketing recipients
+ * still ask the ramp whether they fit a whole hour of the workspace's step (ramp_refusal). */
+export function scheduledCharges(runtime: Runtime, mails: Parameters<typeof charges>[1], scheduledAt: string) {
+  const { ramp } = charges(runtime, mails);
+  return { cost: 0, marketing: 0, billable: 0, scheduledAt, ...(ramp ? { ramp: { ...ramp, scheduled: true } } : {}) };
+}
 export type AdmissionRequest = {
   /** take: the statement takes the send locks itself; a SendScope: the caller holds them (send-scope.ts); none: a check
    * outside the send locks, which locks only the sender claim it reads. */
   stage: Stage; locks: 'take' | 'none' | SendScope; mails?: (AdmissionMail & { from?: string; binding?: SendingBinding })[]; cost?: number; marketing?: number; billable?: number;
   /** A send's `kind: "marketing"` recipients, for the ramp's hourly ceiling (charges). */
-  ramp?: typeof RAMP_POLICY & { recipients: number };
+  ramp?: typeof RAMP_POLICY & { recipients: number; scheduled?: boolean };
   /** The idempotency claim, made first by a statement that admits by itself. */
   claim?: { path: string; key: string; hash: string; receipt: unknown };
   /** A campaign test admitted by itself: its row is locked first and must still be at the revision that was rendered. */
@@ -106,7 +112,9 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
     }
     case 'RAMP_LIMIT_REACHED': {
       const opens = new Date(d.resetAt!).toISOString(), fits = d.fits ?? 0, asked = d.marketing ?? 0;
-      const error = new ApiError(429, d.code, `This workspace is still ramping up (step ${d.step} of ${d.steps}): it can send ${count(d.cap!)} marketing recipients an hour right now, and ${fits ? `${count(fits)} more fit` : 'no more fit'} this hour${asked > fits ? `; this request has ${count(asked)}` : ''}. More room opens at ${opens.slice(11, 16)} UTC. For a large list, send a campaign instead: campaigns are paced automatically.`, undefined, true);
+      const error = new ApiError(429, d.code, d.scheduled
+        ? `This workspace is still ramping up (step ${d.step} of ${d.steps}): it can send ${count(d.cap!)} marketing recipients an hour, so a send of ${count(asked)} can't be scheduled while it ramps. For a large list, send a campaign instead: campaigns are paced automatically.`
+        : `This workspace is still ramping up (step ${d.step} of ${d.steps}): it can send ${count(d.cap!)} marketing recipients an hour right now, and ${fits ? `${count(fits)} more fit` : 'no more fit'} this hour${asked > fits ? `; this request has ${count(asked)}` : ''}. More room opens at ${opens.slice(11, 16)} UTC. For a large list, send a campaign instead: campaigns are paced automatically.`, undefined, true);
       error.retryAfterSeconds = d.retryAfter;
       error.details = [{ step: d.step, steps: d.steps, ceilingPerHour: d.cap, usedThisHour: d.used, fitsNow: fits, requested: asked, stepOpensAt: opens }];
       return error;

@@ -29593,18 +29593,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await shown(), ['done', 30, 0, 0]);
     });
   });
+  // A Hosted workspace on the shared pool, live, with a verified domain: exempt from Hosted quotas, as the first-party
+  // workspace that went wrong was (and so planning at the pool's full 1,000/s), never from the ramp; graded, with no daily
+  // limit; billing off (tested elsewhere: its free sends would hold these sends).
+  const rampWorkspace = async (runtime: import('./src/core.js').Runtime, db: pg.Client, pool: string, domain: string) => {
+    const wid = runtime.config.workspaceId;
+    Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+    await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+    await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+    await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+    await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
+    await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',500,92,92,92,NULL,NULL,now(),now())`, [wid]);
+    await db.query("UPDATE billing_config SET mode='off' WHERE singleton");
+    await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now()+interval '1 hour',1000,10000000,0)`, [pool, REGION]);
+    return { wid, domain, from: `news@${domain}` };
+  };
   test('campaign ramp: a new Hosted sender\'s large campaign releases in growing hourly steps, exempt workspaces included; each step waits for mature feedback, a bad step pauses it, transactional mail never waits, and clean history lets an established sender skip it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
-      const wid = runtime.config.workspaceId, pool = '111122223341', domain = 'ramp.example', from = `news@${domain}`;
-      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
-      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
-      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
-      // The first-party case that went wrong: exempt from Hosted quotas (and so planning at the pool's full 1,000/s), never from the ramp.
-      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
-      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',500,92,92,92,NULL,NULL,now(),now())`, [wid]);
-      await db.query("UPDATE billing_config SET mode='off' WHERE singleton"); // Billing is tested elsewhere; its free sends would hold these campaigns.
-      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now()+interval '1 hour',1000,10000000,0)`, [pool, REGION]);
+      const { wid, domain, from } = await rampWorkspace(runtime, db, '111122223341', 'ramp.example');
       const { RAMP, rampStart, estimateFinish } = await import('./src/standing-model.js');
       // The curve, and where a sender's largest clean hour starts it: past every step it would have proven (half a ceiling).
       assert.deepEqual(RAMP.steps.map(s => s.ceilingPerHour), [1_000, 2_500, 5_000, 10_000, 20_000, 40_000, 75_000, 150_000, 300_000]);
@@ -29712,18 +29718,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT ramp_step FROM sending_campaigns WHERE id=$1', [next.id])).rows[0].ramp_step, RAMP.steps.length);
     });
   });
-  test('marketing ramp: kind marketing sent through the API takes what the workspace\'s ramp step has left this hour, shared with its campaigns both ways; a send that would cross it is refused whole with a retryable RAMP_LIMIT_REACHED and nothing queued, transactional mail never is, and the next hour frees room', async t => {
+  test('marketing ramp: kind marketing sent through the API takes what the workspace\'s ramp step has left this hour, shared with its campaigns both ways; a send that would cross it is refused whole with a retryable RAMP_LIMIT_REACHED and nothing queued, transactional mail never is, and the next hour frees room; a scheduled one is refused only past a whole hour of the step, and at its time is held for room (never rejected), going after 24 hours held unless the workspace is paused', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
-      const wid = runtime.config.workspaceId, pool = '111122223342', domain = 'api-ramp.example', from = `news@${domain}`;
-      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
-      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
-      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
-      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
-      // Exempt from Hosted quotas, as the first-party workspace is: the ramp is its only hourly bound.
-      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
-      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',500,92,92,92,NULL,NULL,now(),now())`, [wid]);
-      await db.query("UPDATE billing_config SET mode='off' WHERE singleton");
-      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now()+interval '1 hour',1000,10000000,0)`, [pool, REGION]);
+      const { wid, domain, from } = await rampWorkspace(runtime, db, '111122223342', 'api-ramp.example');
       const list = ok(await local('POST', '/v1/lists', { name: unique('api-ramp') }), 201);
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'api-ramp-'||n||'@example.net','subscribed' FROM generate_series(1,2000)n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
@@ -29731,6 +29728,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const queued = async () => Number((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].n);
       const hour = async () => (await db.query(`SELECT coalesce(sum(api_marketing),0)::int AS api, coalesce(sum(marketing),0)::int AS marketing FROM hosted_usage_hourly WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC')`, [wid])).rows[0];
       const [{ now, next }] = (await db.query(`SELECT now() AS now, date_trunc('hour',now(),'UTC')+interval '1 hour' AS next`)).rows;
+      // The next hour, as the clock would bring it: this hour's usage becomes the last hour's (earlier hours don't matter here).
+      const newHour = async () => {
+        await db.query(`DELETE FROM hosted_usage_hourly WHERE workspace_id=$1 AND hour<date_trunc('hour',now(),'UTC')`, [wid]);
+        await db.query(`UPDATE hosted_usage_hourly SET hour=hour-interval '1 hour' WHERE workspace_id=$1`, [wid]);
+      };
       // A new sender (no history, no campaign) is on the first step, 1,000 an hour; 900 went through the API earlier this
       // hour. 90 more go, and the hour charges them as they are queued.
       await db.query(`INSERT INTO hosted_usage_hourly(workspace_id,hour,recipients,marketing,api_marketing) VALUES ($1,date_trunc('hour',now(),'UTC'),900,900,900)`, [wid]);
@@ -29762,10 +29764,73 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([one.details[0].usedThisHour, one.details[0].fitsNow, one.details[0].stepOpensAt], [1000, 0, next.toISOString()]);
       assert.match(one.message, /and no more fit this hour; this request has 1\./);
       // The next hour (the clock and the campaign's hour moved back, as time would): the refused batch goes on retry.
-      await db.query(`UPDATE hosted_usage_hourly SET hour=hour-interval '1 hour' WHERE workspace_id=$1`, [wid]);
+      await newHour();
       await db.query(`UPDATE sending_campaigns SET ramp_window_started_at=ramp_window_started_at-interval '61 minutes' WHERE id=$1`, [c.id]);
       assert.equal(ok(await local('POST', '/v1/emails/batch', batch(91, 20, 'marketing'), 'live', { 'idempotency-key': key }), 202).data.length, 20);
       assert.equal((await hour()).api, 20);
+
+      // Scheduled sends. Scheduling asks only whether a send fits a whole hour of the step. Through the API a scheduled send
+      // is one email, and marketing goes to one recipient, so the decision is asked directly here for 1,200.
+      const [{ admission: admit, actorJson, scheduledCharges, refusal }, { sql }] = await Promise.all([import('./src/admission.js'), import('drizzle-orm')]);
+      const claim = unique('api-ramp-later'), later = new Date(Date.now() + 3_600_000).toISOString();
+      const asked = await admit(runtime, wid, actorJson({ keyId: 'fixture', domains: [] }), { stage: 'send', locks: 'take', mails: [{ host: domain, kind: 'marketing', attachments: [], bodyBytes: 5 }],
+        ...scheduledCharges(runtime, [{ recipients: 1200, marketing: true, snapshot: { kind: 'marketing' } }], later), claim: { path: '/v1/emails/send', key: claim, hash: 'fixture', receipt: {} } });
+      const tooLarge = refusal(runtime, (await runtime.db.execute(sql`SELECT ${asked} AS s`)).rows[0]!.s as never) as import('./src/core.js').ApiError;
+      assert.deepEqual([tooLarge.status, tooLarge.code, tooLarge.retryable, tooLarge.retryAfterSeconds], [429, 'RAMP_LIMIT_REACHED', true, Math.max(1, Math.ceil((next.getTime() - now.getTime()) / 1000))]);
+      assert.deepEqual(tooLarge.details, [{ step: 1, steps: 9, ceilingPerHour: 1000, usedThisHour: 20, fitsNow: 980, requested: 1200, stepOpensAt: next.toISOString() }]);
+      assert.equal(tooLarge.message, "This workspace is still ramping up (step 1 of 9): it can send 1,000 marketing recipients an hour, so a send of 1,200 can't be scheduled while it ramps. For a large list, send a campaign instead: campaigns are paced automatically.");
+      assert.equal(Number((await db.query('SELECT count(*)::int AS n FROM sending_idempotency WHERE workspace_id=$1 AND request_key=$2', [wid, claim])).rows[0].n), 0, 'The claim is freed for a retry.');
+      // One that fits a whole hour is accepted though this hour is full; at its time it is held, not rejected: still
+      // scheduled, to try again when the hour has room, with a Waiting event. A scheduled receipt beside it goes.
+      const fill = () => db.query(`UPDATE hosted_usage_hourly SET api_marketing=1000 WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC')`, [wid]);
+      const schedule = async (n: number, kind: 'marketing' | 'transactional' = 'marketing') => ok(await local('POST', '/v1/emails/send', { from, to: `api-ramp-${n}@example.net`, subject: 'Later', text: 'Later', kind, scheduledAt: new Date(Date.now() + 120_000).toISOString() }), 202).id as string;
+      const waits = async (id: string) => (await db.query(`SELECT e.status, e.error_code, e.scheduled_at, j.payload, (SELECT array_agg(v.data->>'code' ORDER BY v.created_at, v.id) FROM sending_email_events v WHERE v.email_id=e.id AND v.type='dispatch_deferred') AS held
+        FROM sending_emails e JOIN jobs j ON j.id='release:'||e.id WHERE e.id=$1`, [id])).rows[0];
+      const due = async (...ids: string[]) => { await elapse(db, ids, 2 * 3_600_000); await run('sending.release'); };
+      await fill();
+      const s1 = await schedule(301), receipt = await schedule(302, 'transactional');
+      await due(s1, receipt);
+      let w = await waits(s1);
+      assert.deepEqual([w.status, w.error_code, w.held, w.payload.heldBy], ['scheduled', null, ['RAMP_LIMIT_REACHED'], 'RAMP_LIMIT_REACHED']);
+      assert.ok(Math.abs(w.scheduled_at.getTime() - Math.max(next.getTime(), Date.now())) < 5_000, 'It tries again when the next hour opens.');
+      assert.ok(Math.abs(Date.parse(w.payload.heldSince) - Date.now()) < 60_000);
+      const shown = ok(await local('GET', `/v1/emails/${s1}`));
+      assert.deepEqual([shown.status, shown.scheduled, Date.parse(shown.scheduledAt), shown.errorCode], ['queued', true, w.scheduled_at.getTime(), null], 'It reads as waiting for its time, not as an error.');
+      assert.equal((await waits(receipt)).status, 'queued', 'Transactional mail never waits for the ramp.');
+      await due(s1);
+      assert.deepEqual([(await waits(s1)).status, (await waits(s1)).held], ['scheduled', ['RAMP_LIMIT_REACHED']], 'Still no room: held again, with no second event.');
+      // The next hour has room: it goes.
+      await newHour();
+      await due(s1);
+      assert.equal((await waits(s1)).status, 'queued');
+      // Held 24 hours it goes anyway (it fit the step when it was scheduled), but never while the workspace is paused.
+      await fill();
+      const s2 = await schedule(303);
+      await due(s2);
+      const dayHeld = () => db.query(`UPDATE jobs SET payload=payload||jsonb_build_object('heldSince',$2::text) WHERE id='release:'||$1`, [s2, new Date(Date.now() - 25 * 3_600_000).toISOString()]);
+      // The campaign's step: 2 of its 10 marked as spam, so the ramp's check pauses it, and the held email waits with it.
+      await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=2 THEN 'complained' ELSE 'delivered' END,provider_id='ramp-'||id WHERE campaign_id=$1`, [c.id]);
+      await run('campaign.run');
+      assert.deepEqual([ok(await local('GET', `/v1/campaigns/${c.id}`)).state, ok(await local('GET', `/v1/campaigns/${c.id}`)).delivery.pauseReason.code], ['paused', 'COMPLAINT_RATE_HIGH']);
+      await dayHeld();
+      await due(s2);
+      w = await waits(s2);
+      assert.deepEqual([w.status, w.held, w.payload.heldBy], ['scheduled', ['RAMP_LIMIT_REACHED', 'CAMPAIGN_AUTO_PAUSED'], 'CAMPAIGN_AUTO_PAUSED'], 'Past its 24 hours, but the ramp is paused: held.');
+      assert.ok(Date.parse(w.payload.heldSince) > Date.now() - 60_000, 'Its 24 hours count again from the pause.');
+      // The owner resumes the campaign: the email is held only for room again.
+      ok(await local('POST', `/v1/campaigns/${c.id}/resume`, {}));
+      await due(s2);
+      assert.deepEqual([(await waits(s2)).status, (await waits(s2)).held.at(-1)], ['scheduled', 'RAMP_LIMIT_REACHED']);
+      // A standing step that holds the workspace's marketing (MARKETING_HELD) holds it past its 24 hours too.
+      await db.query("UPDATE sender_standing SET step='restrict' WHERE workspace_id=$1", [wid]);
+      await dayHeld();
+      await due(s2);
+      assert.deepEqual([(await waits(s2)).status, (await waits(s2)).held.at(-1)], ['scheduled', 'MARKETING_HELD']);
+      // Lifted, and held 24 hours with the hour still full: it goes.
+      await db.query("UPDATE sender_standing SET step='ok' WHERE workspace_id=$1", [wid]);
+      await dayHeld();
+      await due(s2);
+      assert.deepEqual([(await waits(s2)).status, (await waits(s2)).error_code], ['queued', null]);
     });
   });
   test('campaign order: the list probe is a uniform sample of the whole audience, then the most engaged go first and contacts who joined since the list was last sent to go last; the review counts them', async t => {

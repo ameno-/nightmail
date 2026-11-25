@@ -1412,7 +1412,7 @@ export type SendEmailInput = {
      */
     replyMailboxId?: string;
     /**
-     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId.
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected), except Hosted marketing its ramp hour has no room for, which is held until there is (RAMP_LIMIT_REACHED in sendEmail's description). Not with replyAddressId.
      */
     scheduledAt?: string;
 };

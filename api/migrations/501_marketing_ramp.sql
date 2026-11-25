@@ -11,7 +11,8 @@
 --    (src/sending.ts rampHistory now calls it).
 -- 3. ramp_refusal: the workspace's step (the furthest a ramping campaign of it is on, else where its history starts it),
 --    and the hour's room: the ceiling less this clock hour's api_marketing and what its ramping campaigns released in
---    their current hours. Over it: RAMP_LIMIT_REACHED, with how many fit now and when more room opens.
+--    their current hours. Over it: RAMP_LIMIT_REACHED, with how many fit now and when more room opens. A send scheduled
+--    for later is refused only when it is larger than the step's whole ceiling (src/sending.ts holds it at its time).
 -- 4. send_admission (495) asks ramp_refusal for a live send on the shared pool that names its marketing recipients
 --    (req->'ramp'), after the Hosted limits; otherwise unchanged. A refusal frees the idempotency claim as every refusal does.
 --
@@ -159,7 +160,8 @@ CREATE FUNCTION ramp_clean_hour(wid text,history jsonb) RETURNS int LANGUAGE sql
 $$;
 
 -- Whether `ramp`->>'recipients' more marketing recipients fit in the workspace's ramp hour: NULL when they do or the
--- workspace is past the last step, else the refusal. The step: the furthest a ramping campaign of the workspace is on
+-- workspace is past the last step, else the refusal. A send scheduled for later (`ramp`->>'scheduled') need only fit the
+-- step's whole ceiling: at its time it is admitted again as a send made then, and held until its hour has room. The step: the furthest a ramping campaign of the workspace is on
 -- (src/sending.ts releaseStep places and moves them), else where its clean history starts it (src/standing-model.ts
 -- rampStart). The hour holds this clock hour's API marketing (hosted_usage_hourly.api_marketing) and what its ramping
 -- campaigns released in their current hours, as releaseStep counts them. More room opens at the first moment what the
@@ -167,7 +169,7 @@ $$;
 -- part. `ramp`: src/admission.ts RAMP_POLICY and the request's recipients.
 CREATE FUNCTION ramp_refusal(wid text,ramp jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE AS $$
 DECLARE
-  n_steps int := jsonb_array_length(ramp->'steps'); asked bigint := (ramp->>'recipients')::bigint;
+  n_steps int := jsonb_array_length(ramp->'steps'); asked bigint := (ramp->>'recipients')::bigint; later boolean := coalesce((ramp->>'scheduled')::boolean,false);
   this_hour timestamptz := date_trunc('hour',now(),'UTC'); r_step int; best int; ceiling_now bigint; api_used bigint; held bigint; room bigint; opens timestamptz;
 BEGIN
   SELECT max(ramp_step) INTO r_step FROM sending_campaigns WHERE workspace_id=wid AND state='sending' AND NOT simulated AND ramp_step<n_steps;
@@ -180,7 +182,8 @@ BEGIN
   api_used := coalesce((SELECT api_marketing FROM hosted_usage_hourly WHERE workspace_id=wid AND hour=this_hour),0);
   held := api_used+(SELECT coalesce(sum(greatest(expanded-ramp_from,0)),0) FROM sending_campaigns WHERE workspace_id=wid AND state='sending' AND NOT simulated
     AND ramp_step<n_steps AND ramp_window_started_at>now()-interval '1 hour');
-  IF held+asked<=ceiling_now THEN RETURN NULL; END IF;
+  -- A send scheduled for later is asked only whether it fits a whole hour of the step: at its time it waits for room.
+  IF asked<=ceiling_now AND (later OR held+asked<=ceiling_now) THEN RETURN NULL; END IF;
   room := greatest(0,ceiling_now-held);
   SELECT min(f.at) INTO opens FROM (SELECT x.at,sum(x.n) OVER (ORDER BY x.at) AS freed FROM (
       SELECT this_hour+interval '1 hour' AS at,api_used AS n WHERE api_used>0
@@ -188,7 +191,7 @@ BEGIN
         AND ramp_step<n_steps AND ramp_window_started_at>now()-interval '1 hour' AND expanded>ramp_from) x) f
     WHERE ceiling_now-(held-f.freed)>room;
   opens := coalesce(opens,this_hour+interval '1 hour');
-  RETURN jsonb_build_object('code','RAMP_LIMIT_REACHED','step',r_step+1,'steps',n_steps,'cap',ceiling_now,'used',held,'fits',room,'marketing',asked,
+  RETURN jsonb_build_object('code','RAMP_LIMIT_REACHED','scheduled',later,'step',r_step+1,'steps',n_steps,'cap',ceiling_now,'used',held,'fits',room,'marketing',asked,
     'resetAt',opens,'retryAfter',greatest(1,ceil(extract(epoch FROM opens-now())))::int);
 END $$;
 

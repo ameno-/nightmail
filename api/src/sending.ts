@@ -36,7 +36,7 @@ import { withRedactedReply } from './deliverability.js';
 import { headerPrefix, requestHeader } from './brand.js';
 import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHeaders, idempotentRequest, SendIdempotencyHeaders, replay, requestHash, validIdempotencyKey, type ClaimState, type IdempotentRequest } from './idempotency.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
-import { actorJson, admission, admitted, charges, duplicateAttachment, RAMP_POLICY, refusal, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
+import { actorJson, admission, admitted, charges, duplicateAttachment, RAMP_POLICY, refusal, scheduledCharges, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
 import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
@@ -132,7 +132,7 @@ const SendInput = z.object({
 }).openapi('BatchSendEmailItem');
 // The screen's limits (src/screen.ts), as the API reference states them; the defaults of JEV_MESSAGE_LIMIT_BYTES and JEV_CAMPAIGN_LIMIT_BYTES.
 const screenBytes = (n: number) => n.toLocaleString('en-US'), SCREEN = SEND_LIMITS.screen;
-const RAMP_NOTE = `Marketing ramp: on Hosted sending, a workspace still ramping up (a new sender, exempt and first-party ones included) sends kind: marketing at most its ramp step's hourly ceiling (${RAMP.steps.map(x => x.ceilingPerHour.toLocaleString('en-US')).join(', ')} recipients an hour), shared with its campaigns. A send that would cross it is refused with nothing queued (a batch as a whole): retryable 429 RAMP_LIMIT_REACHED, with Retry-After (seconds until more room opens) and error.details[0] holding { step, steps, ceilingPerHour, usedThisHour, fitsNow, requested, stepOpensAt }. For a large list, send a campaign instead: campaigns are paced automatically. Transactional mail is never ramped.`;
+const RAMP_NOTE = `Marketing ramp: on Hosted sending, a workspace still ramping up (a new sender, exempt and first-party ones included) sends kind: marketing at most its ramp step's hourly ceiling (${RAMP.steps.map(x => x.ceilingPerHour.toLocaleString('en-US')).join(', ')} recipients an hour), shared with its campaigns. A send that would cross it is refused with nothing queued (a batch as a whole): retryable 429 RAMP_LIMIT_REACHED, with Retry-After (seconds until more room opens) and error.details[0] holding { step, steps, ceilingPerHour, usedThisHour, fitsNow, requested, stepOpensAt }. A scheduled marketing send larger than the step's whole ceiling is refused the same way when it is scheduled; one that fits is held at its time until its hour has room (it stays scheduled, scheduledAt moving to when it tries again, with a dispatch_deferred event), never rejected for the ramp. For a large list, send a campaign instead: campaigns are paced automatically. Transactional mail is never ramped.`;
 const SCREEN_LIMIT_NOTE = `Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).`;
 const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns screen every distinct copy during launch and prepare before any row enters the sending queue, each distinct copy only once: recipients whose personalized copies read the same share one verdict. The campaign\u2019s own copy, placeholders unresolved, is screened first and may hold ${screenBytes(SCREEN.campaignBytes)} bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy. A failing copy never enters the sending queue (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign\u2019s own copy fails it before anyone is sent to.`;
 // The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
@@ -147,7 +147,7 @@ const ProtocolSendInput = SendInput.safeExtend({ html: ProtocolBody, text: Proto
 const ReplyAddressId = z.string().min(1).max(120).optional();
 // A send at a later time: an RFC 3339 instant with Z or an offset (a local time without one is refused), stored and
 // returned in UTC. The bounds are send_admission's (SEND_LIMITS.schedule), so an exact retry still replays its receipt.
-const ScheduledAt = z.string().datetime({ offset: true }).describe(`Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to ${SEND_LIMITS.schedule.horizonSeconds / 86_400} days ahead; up to ${SEND_LIMITS.schedule.workspace.toLocaleString('en-US')} scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId.`);
+const ScheduledAt = z.string().datetime({ offset: true }).describe(`Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to ${SEND_LIMITS.schedule.horizonSeconds / 86_400} days ahead; up to ${SEND_LIMITS.schedule.workspace.toLocaleString('en-US')} scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected), except Hosted marketing its ramp hour has no room for, which is held until there is (RAMP_LIMIT_REACHED in sendEmail's description). Not with replyAddressId.`);
 const SingleSendInput = SendInput.safeExtend({ replyAddressId: ReplyAddressId.describe('Track a conversation through this receivable address. Use explicit subject and text/html. Requires unrestricted manage permission; From and Reply-To must belong to the address.'), replyMailboxId: ReplyAddressId.openapi({ deprecated: true, description: 'Legacy spelling of replyAddressId.' }), scheduledAt: ScheduledAt.optional() })
   .refine(v => !(v.replyAddressId && v.replyMailboxId), { path: ['replyAddressId'], message: 'Supply only one reply address ID.' })
   .refine(v => !(v.scheduledAt && (v.replyAddressId || v.replyMailboxId)), { path: ['scheduledAt'], message: 'A tracked conversation send goes now; schedule only untracked sends.' }).openapi('SendEmailInput');
@@ -1280,17 +1280,26 @@ function scheduleTime(value: string) {
   if (!(at >= now - skewSeconds * 1000 && at <= now + horizonSeconds * 1000)) throw new ApiError(422, 'INVALID_SCHEDULE', `Schedule between now and ${horizonSeconds / 86_400} days from now.`, 'scheduledAt');
   return new Date(at).toISOString();
 }
-// Refusals that pass on their own within minutes (the dispatch queue is full, Hosted setup is finishing, the ramp's hour
-// has no room left): a scheduled send retries them every 30 seconds for up to 15 minutes past its time, then is rejected
-// like any other refusal.
-const RELEASE_WAITS = new Set(['PENDING_EMAIL_LIMIT_EXCEEDED', 'TENANT_NOT_READY', 'RAMP_LIMIT_REACHED']);
+// Refusals that pass on their own within minutes (the dispatch queue is full, Hosted setup is finishing): a scheduled
+// send retries them every 30 seconds for up to 15 minutes past its time, then is rejected like any other refusal.
+const RELEASE_WAITS = new Set(['PENDING_EMAIL_LIMIT_EXCEEDED', 'TENANT_NOT_READY']);
 const RELEASE_GRACE_MS = 15 * 60_000, RELEASE_RETRY_MS = 30_000;
+// A scheduled marketing email its ramp hour has no room for is held, never rejected: it goes when room opens, or once it
+// has been held RAMP_HOLD_MS (it fit the step's ceiling when it was scheduled), but never while the workspace is paused.
+// A paused hold looks again every HOLD_RECHECK_MS and counts its RAMP_HOLD_MS again from the last time it found a pause.
+const RAMP_HOLD_MS = 24 * 3_600_000, HOLD_RECHECK_MS = 10 * 60_000;
+// Codes of a campaign the automatic pause, the list probe or the ramp's check of a step stopped (a quarantine).
+const QUARANTINE_CODES = ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'];
 /**
  * The release job: at its time, a scheduled email is admitted by send_admission as a send made then, under its row lock:
  * standing and holds, the Hosted daily limit, the balance, the dispatch queue, and its region and binding resolved again.
  * Admitted, it moves scheduled -> queued with created_at now (so the hour it is charged and billed in is this one, as an
  * immediate send's) for the dispatcher. Refused, it is rejected with the refusal's code: a reject event and
  * email.rejected, nothing charged. Canceled or already released meanwhile: nothing to do; moved later: it waits.
+ * Marketing its ramp hour has no room for is held instead (RAMP_HOLD_MS): still scheduled, its scheduledAt the time it
+ * tries again, with a Waiting event (dispatch_deferred) when its hold starts or changes cause. Once held, it stays held
+ * while the workspace is paused (a quarantined campaign, MARKETING_HELD or HOSTED_SENDING_PAUSED) until the owner
+ * resumes or cancels; the dispatcher never leases a scheduled row.
  * One transaction: a crash before its commit leaves the email scheduled for the job's next attempt, after it leaves
  * nothing to redo, and the dispatcher's claim (queued -> attempting) sends it once. Its last attempt failing rejects
  * the email (endRelease) instead of leaving it waiting forever; the job runner's claim does the same when its last
@@ -1305,6 +1314,8 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     const webhooks = await endRelease(runtime, wid, emailId, payload.run).catch(() => { throw new JobDeferred(new Date(Date.now() + 60_000).toISOString()); });
     return wakeWebhooks(runtime, webhooks);
   }
+  // Held (committed with its event): its job waits, a fresh set of attempts each time (jobs.ts).
+  if (outcome && 'held' in outcome) throw outcome.held;
   if (outcome?.route && !outcome.heldForScreen) {
     const { route, priority, maxSendRate } = outcome;
     try { await runtime.dispatch?.(route.region, route.connection?.aws_account_id, 1, route.connection?.kind, priority, maxSendRate); }
@@ -1312,17 +1323,41 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
   } else if (outcome?.webhooks) await wakeWebhooks(runtime, outcome.webhooks);
   async function release() { return runtime.db.transaction(async tx => {
     // Its time by the database's clock, which the job runner's claim also reads.
-    const [row] = await tx.select({ status: emails.status, scheduledAt: emails.scheduledAt, actorKeyId: emails.actorKeyId, from: emails.from, snapshot: emails.snapshot,
+    const [row] = await tx.select({ status: emails.status, scheduledAt: emails.scheduledAt, actorKeyId: emails.actorKeyId, from: emails.from, snapshot: emails.snapshot, simulated: emails.simulated,
       early: sql<boolean>`${emails.scheduledAt} > clock_timestamp()`, waits: sql<boolean>`${emails.scheduledAt} + make_interval(secs => ${RELEASE_GRACE_MS / 1000}) > clock_timestamp()` })
       .from(emails).where(and(eq(emails.workspaceId, wid), eq(emails.id, emailId))).for('update');
     if (row?.status !== 'scheduled') return null;
     if (row.early) throw new JobDeferred(row.scheduledAt!);
     const s = row.snapshot, files = [...new Set(s.attachments)], marketing = s.kind === 'marketing' || !!s.bulk;
     const mail: AdmissionMail = { host: row.from.split('@')[1]!.toLowerCase(), region: s.requestedRegion, kind: s.kind, attachments: files, bodyBytes: contentBytes(s) };
+    const heldSince = typeof payload.heldSince === 'string' ? Date.parse(payload.heldSince) : null;
+    // Held: it stays scheduled, at the time it tries again, and its job keeps when its RAMP_HOLD_MS started (now for a pause).
+    const hold = async (code: string, until: number, data: Record<string, unknown> = {}) => {
+      const at = new Date(Math.max(until, Date.now() + 1000)).toISOString(), changed = payload.heldBy !== code;
+      await tx.execute(sql`WITH moved AS (UPDATE sending_emails SET scheduled_at=${at}::timestamptz,updated_at=clock_timestamp() WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' RETURNING workspace_id,id)
+        ${changed ? sql`, noted AS (INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data)
+          SELECT public.row_id('event'),workspace_id,id,'dispatch_deferred',${row.simulated},${JSON.stringify({ code, providerCalled: false, until: at, ...data })}::jsonb FROM moved RETURNING 1)` : sql``} SELECT 1`);
+      if (changed) log('info', { code: 'SCHEDULED_EMAIL_HELD', workspaceId: wid, emailId, reason: code, until: at });
+      const since = code !== 'RAMP_LIMIT_REACHED' || heldSince === null ? new Date().toISOString() : payload.heldSince;
+      return { held: new JobDeferred(at, { ...payload, heldBy: code, heldSince: since }) };
+    };
+    if (heldSince !== null) {
+      const [stopped] = (await tx.execute<{ id: string; code: string }>(sql`SELECT id,pause_reason->>'code' AS code FROM sending_campaigns WHERE workspace_id=${wid} AND state='paused'
+        AND pause_reason->>'code' IN (${sql.join(QUARANTINE_CODES.map(code => sql`${code}`), sql`,`)}) LIMIT 1`)).rows;
+      if (stopped) return hold('CAMPAIGN_AUTO_PAUSED', Date.now() + HOLD_RECHECK_MS, { campaignId: stopped.id, pauseCode: stopped.code });
+    }
     // Its sender's authority is the dispatcher's to recheck at the claim, as for any queued mail.
-    const decision = await admission(runtime, wid, actorJson({ keyId: row.actorKeyId, domains: [] }), { stage: 'send', locks: 'take', mails: [mail],
-      ...charges(runtime, [{ recipients: hostedCost(s.to, s.cc, s.bcc), marketing, snapshot: s }]) }, undefined, sql`${JSON.stringify(files)}::jsonb`);
-    const d = (await tx.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s;
+    const admit = async (ramped: boolean) => {
+      const decision = await admission(runtime, wid, actorJson({ keyId: row.actorKeyId, domains: [] }), { stage: 'send', locks: 'take', mails: [mail],
+        ...charges(runtime, [{ recipients: hostedCost(s.to, s.cc, s.bcc), marketing, ...(ramped ? { snapshot: s } : {}) }]) }, undefined, sql`${JSON.stringify(files)}::jsonb`);
+      return (await tx.execute<{ s: Admitted | Refused }>(sql`SELECT ${decision} AS s`)).rows[0]!.s;
+    };
+    let d = await admit(true);
+    // Held RAMP_HOLD_MS and still no room: it fit the step's ceiling when it was scheduled, so it goes now, past the ramp.
+    if (!d.allowed && d.code === 'RAMP_LIMIT_REACHED' && heldSince !== null && Date.now() >= heldSince + RAMP_HOLD_MS) {
+      log('warn', { code: 'SCHEDULED_EMAIL_RAMP_BOUND', workspaceId: wid, emailId, heldSince: payload.heldSince });
+      d = await admit(false);
+    }
     shadowBilling(d.billing, wid);
     if (d.allowed) {
       const route = d.mails[0]!;
@@ -1336,6 +1371,8 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
       const maxSendRate = typeof lim?.rate === 'number' && lim.rate > 0 ? lim.rate : undefined;
       return { route, priority: !marketing, maxSendRate, heldForScreen: needsVerdict };
     }
+    if (d.code === 'RAMP_LIMIT_REACHED') return hold(d.code, Date.parse(d.resetAt!));
+    if (heldSince !== null && (d.code === 'HOSTED_SENDING_PAUSED' || d.code === 'MARKETING_HELD')) return hold(d.code, Date.now() + HOLD_RECHECK_MS);
     if (RELEASE_WAITS.has(d.code) && row.waits) throw new JobDeferred(new Date(Date.now() + RELEASE_RETRY_MS).toISOString());
     const { rows: [rejected] } = await tx.execute<{ n: number }>(sql`WITH rejected AS (UPDATE sending_emails SET status='rejected',error_code=${d.code},updated_at=clock_timestamp()
         WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' RETURNING ${terminalColumns}
@@ -1597,7 +1634,7 @@ async function prepareFrontDoor(runtime: Runtime, a: Actor, out: Outgoing[], bat
     if (cfg.screen && !sim && cfg.hostedScreen) m.oversize = await screenRefusal(runtime, m.snapshot, batch ? i : undefined);
   }
   const check = await admission(runtime, a.workspaceId, actorJson(a), { stage: 'send', locks: 'none', mails: admissionMails(runtime, out),
-    ...(scheduledAt ? { cost: 0, marketing: 0, billable: 0, scheduledAt } : charges(runtime, out)) }, undefined, actorAssets(a, out.flatMap(m => m.snapshot.attachments)));
+    ...(scheduledAt ? scheduledCharges(runtime, out, scheduledAt) : charges(runtime, out)) }, undefined, actorAssets(a, out.flatMap(m => m.snapshot.attachments)));
   const { rows: [pre] } = await runtime.db.execute<{ s: Admitted | Refused; probation: ProbationReason | null }>(sql`
     SELECT ${check} AS s, ${cfg.multiTenant ? probationReason(sql`${a.workspaceId}`) : sql`NULL`} AS probation`);
   const decided = admitted(runtime, pre!.s, a.workspaceId, { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
@@ -1638,7 +1675,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     : { workspace: sql`k.workspace_id`, uploader: sql`${identity.actor.tokenId ?? identity.actor.keyId}::text`, domains: sql`k.domains`, mailboxAccess: sql`${actorMailAccess(identity.actor) !== null}::boolean` });
   // A scheduled send is charged nothing now: its release admits it as a send at its time (releaseScheduled).
   const decision = await admission(runtime, sql`k.workspace_id`, sql`jsonb_build_object('id',k.id,'domains',k.domains)`, { stage: 'send', locks: 'take', mails: admissionMails(runtime, out),
-    ...(at ? { cost: 0, marketing: 0, billable: 0, scheduledAt: at } : charges(runtime, out)), ...(key !== undefined ? { claim: { path: call.path, key, hash: hash!, receipt } } : {}), ...(options.campaign ? { campaign: options.campaign } : {}) }, undefined, assets);
+    ...(at ? scheduledCharges(runtime, out, at) : charges(runtime, out)), ...(key !== undefined ? { claim: { path: call.path, key, hash: hash!, receipt } } : {}), ...(options.campaign ? { campaign: options.campaign } : {}) }, undefined, assets);
   const { rows: [result] } = await (call.db ?? runtime.db).execute<Principal & { s: Admitted | Refused | ClaimState | null; ineligible: { ord: number; email: string; reason: string }[] | null; max_send_rate: number | null }>(sql`WITH ${'credential' in identity ? sql`${identity.credential},` : sql``} state AS MATERIALIZED (
     SELECT k.*, CASE WHEN k.used IS NULL THEN jsonb_build_object('previous',NULL,'busy',true) WHEN k.used<=k.max_requests AND k.permissions ?| ARRAY['manage','send'] THEN ${decision} END s FROM (${principal}) k
   ), raw_submitted AS MATERIALIZED (SELECT k.workspace_id,k.id AS actor_id,m.ord,m.id,m.hash,m.email,m.screened,m.count_screened,m.marketing,m.destinations,m.reply_authors,
@@ -2575,7 +2612,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/pause', operationId: 'pauseCampaign', description: 'Stop releasing new recipients. Queued mail (a few seconds of the send rate) still dispatches. Resume continues from the same position; cancel still works while paused.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, pausing(c)));
   app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/resume', operationId: 'resumeCampaign', description: 'Continue releasing recipients from where a paused campaign stopped, or where a campaign that failed after releasing some recipients stopped (it continues on the same frozen snapshot, never a new one). After an automatic pause, the next health check runs 30 minutes later.', tags: ['Campaigns'], security, request: { params: IdParams, body: json(z.object({}).strict()) }, responses: { 200: response(Campaign), ...errors } }), async c => control(c, async (db, a, campaign) => {
     if (!campaignResumable(campaign)) throw new ApiError(409, 'CAMPAIGN_NOT_PAUSED', 'Only a paused campaign, or one that failed after releasing recipients, can be resumed.');
-    if (campaign.state === 'paused' && campaign.quarantines >= 2 && ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'].includes(campaign.pauseReason?.code ?? ''))
+    if (campaign.state === 'paused' && campaign.quarantines >= 2 && QUARANTINE_CODES.includes(campaign.pauseReason?.code ?? ''))
       throw new ApiError(409, 'QUARANTINE_REVIEW_REQUIRED', 'This campaign was quarantined twice for list quality. An operator reviews it before it sends again: ask for a review from the dashboard.');
     await requiredNoticesAllowed(db, campaign.draft, a.workspaceId);
     const ref = { workspaceId: a.workspaceId, id: campaign.id }, next = runningState(campaign);
