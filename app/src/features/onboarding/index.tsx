@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Download, LogOut, Send, X } from 'lucide-react'
@@ -11,6 +11,7 @@ import { useApiMutation, useApiQuery, usePublicOrigin, useSession, useWorkspaceA
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { afterDomainStep, agentStep, finishedStep, focusStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
 import { leadFocus, useSaveFocus, type WorkspaceFocus } from '../../data/focus'
+import { clearLandingFocus, readLandingFocus } from '../../data/landing-focus'
 import { AgentInboxStep, FocusStep, MarketingStep, NewsletterStep, useWarmFocus } from './focus-steps'
 import { ConnectAwsRegional, PendingDomain, createStack, domainHint, waitingForStack } from './aws'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
@@ -199,10 +200,23 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // After a domain, the focus question (once), then the step its first pick leads to. Saving it runs in the background.
   // The picks this visit made: the step they lead to opens in the same render as the pick, never the previous focus's step
   // for a frame while the session's copy catches up.
-  const [pickedFocus, setPickedFocus] = useState<WorkspaceFocus[] | null>(null)
-  const focus = pickedFocus ?? identity?.focus ?? null
-  const next = (domainId: string) => setDomainStep(workspaceId, afterDomainStep({ focus }, domainId))
   const saveFocus = useSaveFocus(), warmFocus = useWarmFocus()
+  // A focus a landing link brought (data/landing-focus.ts) answers the question for a workspace without one: it is saved
+  // as onboarding opens, and the step after the domain is that focus's. A focus the workspace already has wins.
+  const [landing] = useState(() => identity?.focus == null ? readLandingFocus() : null)
+  const [pickedFocus, setPickedFocus] = useState<WorkspaceFocus[] | null>(() => landing && [landing.focus])
+  const landed = useRef(false)
+  useLayoutEffect(() => {
+    if (landed.current) return
+    landed.current = true
+    clearLandingFocus()
+    if (!landing) return
+    saveFocus([landing.focus], landing)
+    if (stage.step === 'focus') setDomainStep(workspaceId, agentStep(stage.domainId))
+  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+  const focus = pickedFocus ?? identity?.focus ?? null
+  // A focus already chosen goes straight to its step, which starts loading now, as the question's Continue does.
+  const next = (domainId: string) => { if (focus?.[0]) warmFocus(focus[0], receives); setDomainStep(workspaceId, afterDomainStep({ focus }, domainId)) }
   // An agent inbox goes on the built-in domain while it receives, a newsletter while it sends; else on the domain
   // onboarding verified.
   const receives = builtin?.name && builtin.sending !== 'off' ? builtin.name : null, sends = builtin?.name && (builtin.sending === 'ready' || builtin.sending === 'pending') ? builtin.name : null

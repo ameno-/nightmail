@@ -8,6 +8,7 @@ import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
+import { clearLandingFocus, noteLandingLocation } from './landing-focus'
 import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
@@ -220,7 +221,9 @@ function SignInLinkForm({ to }: { to: string | null }) {
 export const isPublicPath = (path: string) => (path !== '/' && asksOnlyIfLikely(path)) || path.startsWith('/support/continue/') || (designSheetEnabled && path === DESIGN_SHEET_PATH)
 export function ApiProvider({ children }: { children: ReactNode }) {
   // The docs, the legal pages and the price pages are public: they render signed out, and /v1/me only adds the workspace's context.
-  const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
+  const { pathname, search } = useLocation(), publicRoute = isPublicPath(pathname)
+  // A landing link's ?focus= (landing-focus.ts), noted before anything below reads it: an address the app moves to.
+  noteLandingLocation(pathname, search)
   const navigate = useNavigate()
   // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
   // with it. The server names only an account this browser has a session for; a link alone never moves the tab.
@@ -427,6 +430,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     if (publicRoute || invitation || selectedWorkspace() || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
   }, [cache, client, publicRoute, invitation])
+  // A landing link's focus with no onboarding left whose focus question it could answer: dropped.
+  useEffect(() => { if (identity.data && !identity.isError && !identityOnboardingStage(identity.data)) clearLandingFocus() }, [identity.data, identity.isError, search])
   useEffect(() => {
     if (!identity.data || identityOnboardingStage(identity.data)) return
     const path = window.location.pathname, review = reviewRoute.exec(path)
