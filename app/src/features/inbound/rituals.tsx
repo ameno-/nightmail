@@ -255,7 +255,7 @@ export function RulePage() {
   const preset = useSearchParams()[0].get('address')
   const [addressSearch, setAddressSearch] = useState('')
   const addresses = useAddressOptions({ enabled: canAdminister, search: useDebounced(addressSearch) })
-  // The Receiving page's first read, usually cached: only its endpoints are used here, to name what the rule did.
+  // The Mail routing page's first read, usually cached: only its endpoints are used here, to name what the rule did.
   const overview = useOverview(firstOverview, false, canAdminister)
   const recent = useApiQuery(['rule-recent'], (_api, signal) => request<{ data: Received[] }>('/v1/logs?direction=received&limit=24', { signal }).then(r => r.data), { enabled: canAdminister })
   const [saved, setSaved] = useState<Saved | null>(null)

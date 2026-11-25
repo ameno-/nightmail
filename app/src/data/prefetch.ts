@@ -30,7 +30,7 @@ function firstScreen(path: string, { regionId, multiTenant, canAdminister, newsl
   switch (path) {
     case '/overview': return scoped ? [queries.overview(regionId, '24h', 'all'), queries.recentCampaigns(regionId), queries.senderScore(), queries.logs(latestRequest(regionId)), ...(canAdminister ? [queries.overviewSetup()] : [])] : []
     case '/logs': { const pageSize = rememberedPageSize('logs'); return scoped && pageSize && logsVisibility ? [queries.logs({ regionId, direction: 'all', search: '', status: undefined, stream: undefined, from: keptRangeStart('30d'), page: 1, pageSize }, logsVisibility)] : [] }
-    // Receiving is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
+    // Mail routing is one read: addresses (routes), counts, rules, destinations (endpoints) and domains.
     case '/receiving': return [overviewQuery(firstOverview) as QueryDef<unknown>]
     case '/campaigns': return [queries.campaigns(campaignsRequest(newsletters))]
     case '/newsletters': return [queries.newsletters()]

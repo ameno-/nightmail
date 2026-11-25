@@ -1,4 +1,4 @@
-// The words Receiving uses, in one place. One model on every screen, in this order: an address is where mail is
+// The words Mail routing uses, in one place. One model on every screen, in this order: an address is where mail is
 // received, a rule is where it is processed, a destination is where it is delivered. The API keeps its own names
 // (routes, rules, endpoints, catchAll, store); only the dashboard's words are these. What each one means is said once,
 // in the Docs guides (docs/guides.tsx and docs/receiving.md), not on the screens.

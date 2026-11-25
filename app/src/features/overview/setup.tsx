@@ -167,13 +167,13 @@ function stepsFor(lead: Exclude<WorkspaceFocus, 'developer'>, progress: SetupPro
   if (lead === 'agents') return [
     { key: 'inbox', done: progress.inbox, title: 'Create an agent inbox', action: !progress.inbox && action('/receiving/inboxes', 'Create inbox') },
     // The prompt's setup token gets the agent a key of its own: a key is what connecting leaves behind.
-    { key: 'connect', done: keyed, title: 'Connect your agent', action: !keyed && <Button variant="primary" onClick={openConnectAgent}>Connect an agent</Button> },
+    { key: 'connect', done: keyed, title: 'Connect your agent', action: !keyed && <Button variant="primary" onClick={openConnectAgent}>Connect your agent</Button> },
     { key: 'receive', done: progress.received, title: 'Receive your first email', action: !progress.received && action('/receiving/inboxes', 'Open inboxes', false) },
   ]
-  // An inbox of their own: mail to their domain lands in Receiving's inbox, which a mail app can also open where the
+  // An inbox of their own: mail to their domain lands in an inbox in Mail routing, which a mail app can also open where the
   // installation has a mail gateway (onboarding's step says so).
   if (lead === 'personal') return [
-    { key: 'inbox', done: progress.received, title: 'Read your mail', action: !progress.received && action('/receiving', 'Open Receiving', false) },
+    { key: 'inbox', done: progress.received, title: 'Read your mail', action: !progress.received && action('/receiving', 'Open Mail routing', false) },
   ]
   if (lead === 'marketing') return [
     { key: 'contacts', done: progress.contacts, title: 'Import your contacts', action: !progress.contacts && action('/audience', 'Open Audience') },

@@ -4,7 +4,7 @@ import { useQueryClient } from '@tanstack/react-query'
 import { Check, ChevronDown, LifeBuoy, LogOut, Plus, StickyNote, UserPlus } from 'lucide-react'
 import { sectionPath, useApiMutation, useSession } from '../data/context'
 import { isAbortError } from '../data/live'
-import { accountApi, accountsKey, initials, useAccounts, type ConnectedAccount } from '../data/accounts'
+import { accountApi, accountsKey, initials, useAccounts, withOwnAccount, type ConnectedAccount } from '../data/accounts'
 import { useMembershipCache, workspaceApi } from '../data/workspaces'
 import { usePhone } from '../lib/media'
 import { PrivateAddress } from './PrivateAddress'
@@ -18,8 +18,8 @@ import { errorText } from '../data/types'
 // and workspace together. Multi-tenant only; shown in the dashboard sidebar, the phone's top bar (as a sheet) and the
 // onboarding header, which alone adds Contact support: in the dashboard (`shell`) Help is in the sidebar and More.
 type Entry = { key: string; label: ReactNode; text: string; icon?: ReactNode; checked?: boolean; disabled?: boolean; destructive?: boolean; heading?: boolean; onSelect: () => void }
-export function AccountAvatar({ name, email }: { name: string | null | undefined; email?: string | null }) {
-  return <span className="account-avatar account-avatar--md" aria-hidden="true">{initials(name, email)}</span>
+export function AccountAvatar({ name, email, size = 'md' }: { name: string | null | undefined; email?: string | null; size?: 'sm' | 'md' }) {
+  return <span className={`account-avatar account-avatar--${size}`} aria-hidden="true">{initials(name, email)}</span>
 }
 function Who({ account }: { account: Pick<ConnectedAccount, 'name' | 'email'> }) {
   return <span className="account-menu__who"><span className="account-menu__name">{account.name || account.email || 'Account'}</span>{account.email && <PrivateAddress className="account-menu__email" value={account.email} />}</span>
@@ -60,9 +60,7 @@ export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
   }
   if (!identity) return null
   const self: ConnectedAccount = { id: identity.id, name: identity.name ?? '', email: identity.email, workspaces: identity.workspaces ?? [] }
-  // The tab's own account comes with the session (GET /v1/me), so the menu opens complete even before the list arrives;
-  // its workspaces are always the session's, which a rename has already updated.
-  const accounts = list.data?.accounts.some(account => account.id === self.id) ? list.data.accounts.map(account => account.id === self.id ? { ...account, workspaces: self.workspaces } : account) : [self]
+  const accounts = withOwnAccount(self, list.data)
   const limit = list.data?.limit ?? 5
   const workspace = self.workspaces.find(item => item.id === identity.workspaceId)
   async function run(action: () => Promise<void> | void, failure: string) {
@@ -98,6 +96,7 @@ export function AccountSwitcher({ shell = false }: { shell?: boolean } = {}) {
   const named = (entry: Entry) => 'account/' + entry.key.split(':')[0]
   const trigger = <button ref={triggerRef} type="button" id="sidebar-workspace" className="ui-input ui-select-trigger account-switcher" disabled={busy} data-private data-analytics="account/switcher"
     aria-label={`${self.name || 'Account'}, ${workspace?.name ?? 'workspace'}. Switch account or workspace`} title={[workspace?.name, self.name].filter(Boolean).join(' · ')} onPointerEnter={intent} onPointerDown={intent} onFocus={intent} onClick={phone ? () => void openSheet() : undefined}>
+    <AccountAvatar name={self.name} email={self.email} size="sm" />
     <span className="account-switcher__workspace">{workspace?.name ?? 'Workspace'}</span>
     <span><ChevronDown size={14} aria-hidden="true" /></span>
   </button>

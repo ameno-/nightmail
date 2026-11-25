@@ -34,11 +34,11 @@ export function RouteSkeleton() {
   return null
 }
 
-// Receiving's header as the page draws it before its overview arrives, over the page's own loading block.
+// Mail routing's header as the page draws it before its overview arrives, over the page's own loading block.
 function ReceivingRouteSkeleton() {
   const { canAdminister } = useWorkspaceAccess()
   return <div className="stack inbound-stack receiving-page">
-    <PageHeader title="Receiving" actions={canAdminister && <Button variant="primary" disabled>New address</Button>} />
+    <PageHeader title="Mail routing" actions={canAdminister && <Button variant="primary" disabled>New address</Button>} />
     <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion>
   </div>
 }
