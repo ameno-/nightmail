@@ -41622,6 +41622,46 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('Overview metrics for a workspace created minutes ago: the dashboard\'s window, an empty window and omitted bounds answer 200; only a range the caller wrote can be refused', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      const issuer = process.env.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', ws = unique('metrics-new-ws'), userId = unique('metrics-new-user');
+      const token = createHash('sha256').update(randomUUID()).digest('base64url');
+      secrets.add(token);
+      await db.query('INSERT INTO workspaces (id, name, slug, created_at) VALUES ($1, $1, $1, clock_timestamp())', [ws]);
+      await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$1,$2,true)', [userId, `${userId}@${AUTH_DOMAIN}`]);
+      await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)', [issuer, userId, userId]);
+      await db.query("INSERT INTO nightmail_sessions(token_hash,user_id,issuer,subject,verified_email,expires_at) VALUES($1,$2,$3,$2,$4,now()+interval '1 hour')", [createHash('sha256').update(token).digest('hex'), userId, issuer, `${userId}@${AUTH_DOMAIN}`]);
+      await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')", [randomUUID(), userId, ws]);
+      const headers = { cookie: `${COOKIE_NAME}=${token}`, origin: PUBLIC_ORIGIN, 'x-nightmail-workspace': ws };
+      const metrics = (query: Record<string, string | undefined>) => request('GET', `/v1/metrics?${new URLSearchParams(Object.entries(query).filter((entry): entry is [string, string] => entry[1] !== undefined))}`, undefined, undefined, headers);
+      const empty = (body: Json, buckets: 'tenMinute' | 'hourly') => { assert.equal(body.totals.emails, 0); assert.deepEqual(body[buckets], []); assert.equal(body.previous.totals.emails, 0); };
+      const iso = (ms: number) => new Date(ms).toISOString(), day = 86_400_000;
+      // Each Overview range as the dashboard asks for it: the start only, the end is the API's now.
+      for (const [days, granularity] of [[1, '10m'], [7, 'hour'], [30, 'hour']] as const) {
+        const asked = Date.now(), body = ok(await metrics({ from: iso(asked - days * day), granularity, include: 'previous' }));
+        assert.equal(body.from, iso(asked - days * day));
+        assert.ok(Date.parse(body.to) >= asked && Date.parse(body.to) <= Date.now(), 'The window ends at the API\'s now.');
+        empty(body, granularity === '10m' ? 'tenMinute' : 'hourly');
+      }
+      // The window an older dashboard sends, and one of zero length, which is empty rather than inverted.
+      const at = Date.now();
+      empty(ok(await metrics({ from: iso(at - day), to: iso(at), granularity: '10m', include: 'previous' })), 'tenMinute');
+      const zero = ok(await metrics({ from: iso(at), to: iso(at), granularity: '10m', include: 'previous' }));
+      empty(zero, 'tenMinute'); assert.deepEqual([zero.from, zero.to, zero.previous.from], [iso(at), iso(at), iso(at)]);
+      // Omitted bounds: 10-minute metrics default to the last 24 hours (the 30-day default exceeds their 6-day limit), and a
+      // start after now with no end reads as an empty window.
+      const recent = ok(await metrics({ granularity: '10m' }));
+      assert.equal(Date.parse(recent.to) - Date.parse(recent.from), day);
+      const ahead = iso(Date.now() + 120_000), later = ok(await metrics({ from: ahead, granularity: '10m', include: 'previous' }));
+      empty(later, 'tenMinute'); assert.deepEqual([later.from, later.to], [ahead, ahead]);
+      // A range the caller wrote is still refused when it is inverted, too long or older than the 10-minute window.
+      for (const query of [{ from: iso(at), to: iso(at - 1) }, { from: iso(at - 367 * day), to: iso(at) }, { from: iso(at - 7 * day), to: iso(at - 6.5 * day), granularity: '10m' }, { from: iso(at - 7 * day), to: iso(at), granularity: '10m' }])
+        error(await metrics(query), 422, 'INVALID_DATE_RANGE');
+    });
+  });
+
   test('sending tallies: exact campaign & hourly metrics at read time, bounded fold + alert, daily recount drift detection, one-statement undo fallback and 10s high-volume cache bucket', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, request, run, db }) => {
       const { auditSendingOutcomePage, foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
