@@ -58,13 +58,15 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     return lines.join('\n')
   }
   const verified = domain.status === 'verified'
-  const to = email ?? 'an address I control (ask me which)'
+  // The built-in domain sending to members only: the first email goes to my own sign-in address, never one I'd pick.
+  const membersOnly = domain.builtIn && domain.limits?.scope === 'members'
+  const to = email ?? (membersOnly ? `the email address I sign in to ${productName} with (ask me which)` : 'an address I control (ask me which)')
   lines.push(
     `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
     `- Send a first email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. Give it a short, real subject and plain text: "test" or placeholder words in either send it to spam. 202 means queued, not delivered.`,
   )
   // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.
-  if (domain.builtIn) lines.push(`- ${domain.name} is this workspace's built-in domain. ${domain.limits?.summary ?? builtinLimitsText()} A send that uses any of them is refused once with 422 BUILTIN_DOMAIN_UNSUPPORTED, listing them in error.details[0].unsupported; GET /v1/domains/${domain.id} has the same limits. It stops sending once a domain of my own verifies: then send from that domain (a send from ${domain.name} gets 409 OWN_DOMAIN_VERIFIED with the address to use in error.details[0].suggestedFrom).`)
+  if (domain.builtIn) lines.push(`- ${domain.name} is this workspace's built-in domain. ${domain.limits?.summary ?? builtinLimitsText()} ${membersOnly ? 'Send only to the sign-in addresses of people in this workspace; anyone else is refused with 422 BUILTIN_DOMAIN_RECIPIENT, so ask me to add our own domain before emailing anyone else. ' : ''}A send that uses any of the other limits is refused once with 422 BUILTIN_DOMAIN_UNSUPPORTED, listing them in error.details[0].unsupported; GET /v1/domains/${domain.id} has the same limits. It stops sending once a domain of my own verifies: then send from that domain (a send from ${domain.name} gets 409 OWN_DOMAIN_VERIFIED with the address to use in error.details[0].suggestedFrom).`)
   const mx = receivingMx(domain)
   // Hosted suggests reply.<domain>; never tell an agent to change the root MX, which would move the domain's existing mail.
   if (mx) lines.push(multiTenant

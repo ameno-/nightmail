@@ -77,7 +77,7 @@ function NoDomainCard() {
   const identity = useSession()?.identity, workspaceId = identity?.workspaceId ?? ''
   // With a built-in domain the workspace already sends: the card asks for its own domain to send more, and says to whom it sends now.
   const builtin = identity?.connection?.builtinDomain, sends = sendsFromBuiltin(builtin)
-  const text = sends ? `You can send from ${builtin.name} now. ${builtinSending(builtin)} Your own domain lifts the limit.` : noDomainWhy
+  const text = sends ? `You can send from ${builtin.name} now. ${builtinSending(builtin)}${builtin.scope === 'members' ? '' : ' Your own domain lifts the limit.'}` : noDomainWhy
   return <section className="ov-onboarding" data-kind="no-domain" aria-labelledby="ov-onboarding-title">
     <div className="ov-onboarding__text">
       <h2 id="ov-onboarding-title">{sends ? 'Add your own domain' : 'Add your domain to start sending'}</h2>

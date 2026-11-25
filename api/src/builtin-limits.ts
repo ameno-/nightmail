@@ -17,15 +17,17 @@ const count = (n: number) => n.toLocaleString('en-US');
 /** The limits in one sentence. */
 export function builtinLimitsText(scope: BuiltinScope = 'anyone') {
   const caps = BUILTIN_CAPS[scope];
-  return `Built-in domains send plain transactional mail: no Reply-To elsewhere, custom headers, attachments, stored templates, scheduling, marketing or campaigns, ${scope === 'members'
-    ? `only to the workspace members’ verified addresses, up to ${count(caps.perDay)} a day` : `up to ${count(caps.perDay)} recipients a day`} (${count(caps.perMinute)} a minute). Add your own domain to use them.`;
+  if (scope === 'members') return `For now, built-in domains send only to your workspace members’ own sign-in addresses, up to ${count(caps.perDay)} a day (${count(caps.perMinute)} a minute), and only plain transactional mail: no Reply-To elsewhere, custom headers, attachments, stored templates, scheduling, marketing or campaigns. Add your own domain to email anyone and to use them.`;
+  return `Built-in domains send plain transactional mail: no Reply-To elsewhere, custom headers, attachments, stored templates, scheduling, marketing or campaigns, up to ${count(caps.perDay)} recipients a day (${count(caps.perMinute)} a minute). Add your own domain to use them.`;
 }
+/** Where a domain of your own starts: a refusal's next step. */
+export const ADD_OWN_DOMAIN = 'add your own domain: POST /v1/domains with {"name":"yourdomain.com"} (or Domains → Add domain in the dashboard), publish the DNS records it returns, then send from an address at it once it verifies';
 /** The Docs guide (dashboard /docs/built-in-domain) and the API's /docs.md and /llms.txt. */
 export const builtinDomainGuide = {
   id: 'built-in-domain',
   title: 'Send from the built-in domain',
-  summary: 'What the domain every Hosted workspace starts with can send, and what it refuses.',
-  text: `Every Hosted workspace starts with a domain of its own, such as acme-k7.nightmail.email: Domains lists it as Built-in, and connection.builtinDomain in GET /v1/me and limits in GET /v1/domains/{id} describe it. It needs no DNS and sends at once. ${builtinLimitsText()} `
-    + 'A send that uses any of those is refused once, with 422 BUILTIN_DOMAIN_UNSUPPORTED naming every field it used in error.details[0].unsupported (for example ["replyTo","headers","attachments"]); past a cap it is 429 BUILTIN_DOMAIN_LIMIT with resetAt. '
-    + `It receives at every address: mail to an address without an inbox or route of its own goes to its default inbox, hello@ the domain, and replies from there (POST /v1/inbound/threads/{threadId}/reply) count toward the same caps. Once a domain of the workspace’s own verifies, the built-in domain stops sending and keeps receiving: a send from it then gets 409 OWN_DOMAIN_VERIFIED with the same address at your own domain in error.details[0].suggestedFrom (every verified domain in verifiedDomains), so switch From to your own domain as soon as it verifies. ${productName} may turn one off for abuse.`,
+  summary: 'What the domain every Hosted workspace starts with can send, to whom, and what it refuses.',
+  text: `Every Hosted workspace starts with a domain of its own, such as acme-k7.nightmail.email: Domains lists it as Built-in, and connection.builtinDomain in GET /v1/me and limits in GET /v1/domains/{id} describe it. It needs no DNS and sends at once. ${builtinLimitsText('members')} (limits.scope says who yours sends to.) `
+    + 'A send to anyone else is refused with 422 BUILTIN_DOMAIN_RECIPIENT, naming those recipients in error.details[0].notMembers. A send that uses any of the rest is refused once, with 422 BUILTIN_DOMAIN_UNSUPPORTED naming every field it used in error.details[0].unsupported (for example ["replyTo","headers","attachments"]); past a cap it is 429 BUILTIN_DOMAIN_LIMIT with resetAt. '
+    + `It receives at every address: mail to an address without an inbox or route of its own goes to its default inbox, hello@ the domain, and replies from there (POST /v1/inbound/threads/{threadId}/reply) follow the same rules and caps. Once a domain of the workspace’s own verifies, the built-in domain stops sending and keeps receiving: a send from it then gets 409 OWN_DOMAIN_VERIFIED with the same address at your own domain in error.details[0].suggestedFrom (every verified domain in verifiedDomains), so switch From to your own domain as soon as it verifies. ${productName} may turn one off for abuse.`,
 };

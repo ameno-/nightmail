@@ -23,7 +23,7 @@ export const PANEL_IDS = Object.keys(PANELS) as PanelId[]
  *  contact import: features/audience/import.tsx). */
 export const FIRST_STEP: Record<WorkspaceFocus, string> = {
   agents: 'Every workspace comes with an inbox at its own nightmail.email address.',
-  developer: 'Every workspace comes with a nightmail.email domain that sends at once, with no DNS to set up.',
+  developer: 'Every workspace comes with a nightmail.email domain that sends to your own team at once, with no DNS to set up.',
   newsletter: 'Start by importing your list.',
   marketing: 'Start by importing your contacts.',
   personal: 'Every workspace comes with an inbox at its own nightmail.email address; add your own domain any time.',

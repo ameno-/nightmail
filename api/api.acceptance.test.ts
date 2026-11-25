@@ -23884,10 +23884,20 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await me()).used,100,'GET /v1/me counts what the daily cap counts, for the dashboard\'s daily limit.');
       await age('24 hours');ok(await local('POST','/v1/emails/send',{from,to:'next-day@example.net',subject:'Next day',text:'Again.'}),202);
       // The other scope: only the members' own verified addresses, 3 a minute and 10 a day.
+      // (Production's setting for now.) Anyone else is refused once, named, with the next step.
       runtime.config.builtinScope='members';await age('24 hours');
-      assert.equal(error(await local('POST','/v1/emails/send',{from,to:'stranger@example.net',subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT').field,'to');
-      error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,cc:['stranger@example.net'],subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
-      ok(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Mine',text:'Mine.'}),202);
+      const outsider=error(await local('POST','/v1/emails/send',{from,to:'stranger@example.net',subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
+      assert.deepEqual([outsider.field,outsider.details],['to',[{notMembers:['stranger@example.net']}]]);
+      assert.equal(outsider.message,`${host} only sends to your workspace members’ own sign-in addresses for now, and stranger@example.net is not one of them. To email anyone, add your own domain: POST /v1/domains with {"name":"yourdomain.com"} (or Domains → Add domain in the dashboard), publish the DNS records it returns, then send from an address at it once it verifies.`);
+      const copied=error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,cc:['stranger@example.net'],bcc:['other@example.net'],subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
+      assert.deepEqual(copied.details,[{notMembers:['stranger@example.net','other@example.net']}]);
+      assert.match(copied.message,/ for now, and stranger@example\.net and other@example\.net are not among them\. To email anyone, add your own domain: POST \/v1\/domains /);
+      const batched=error(await local('POST','/v1/emails/batch',{emails:[{from,to:AUTH_EMAIL,subject:'Mine',text:'Mine.'},{from,to:'stranger@example.net',subject:'No',text:'No.'}]}),422,'BUILTIN_DOMAIN_RECIPIENT');
+      assert.deepEqual([batched.field,batched.details],['emails.1.to',[{index:1,notMembers:['stranger@example.net']}]]);
+      // A member's own address goes out: a send to it, and onboarding's first email (the dashboard's send to yourself).
+      ok(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL.toUpperCase(),subject:'Mine',text:'Mine.'}),202);
+      ok(await local('POST',`/v1/domains/${row.id}/test-send`,{}),202);
+      assert.match(ok(await local('GET',`/v1/domains/${row.id}`)).limits.summary,/^For now, built-in domains send only to your workspace members’ own sign-in addresses, up to 10 a day \(3 a minute\)/);
       assert.deepEqual((await me()).scope,'members');
       runtime.config.builtinScope='anyone';
       // Unset, the installation's built-in domains stop sending at once (the kill switch); receiving is checked below.
@@ -23927,6 +23937,10 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await db.query("UPDATE mailboxes SET send_limits='{}' WHERE id=$1",[inbox.id]);
       assert.match(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),403,'EPHEMERAL_SEND_DISABLED').message,/^Replies are off for this inbox: it was created without send: \{"enabled": true\}/);
       await db.query("UPDATE mailboxes SET send_limits='{\"perDay\":20}' WHERE id=$1",[inbox.id]);
+      // Sending to members only, a reply to someone outside the workspace is refused the same way.
+      runtime.config.builtinScope='members';
+      assert.deepEqual(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['someone@sender.example']}]);
+      runtime.config.builtinScope='anyone';
       ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
       assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
       assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
