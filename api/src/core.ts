@@ -485,9 +485,16 @@ export function receivedMailRefusal(code: 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_R
  */
 export const unrestrictedRequired = (a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
   fullAccessRefusal('UNRESTRICTED_KEY_REQUIRED', a, area, { ...need, scope: 'workspace' }, note);
-/** A refusal, under `code`, of a credential that isn't full access, worded as unrestrictedRequired words it. */
-export const fullAccessRefusal = (code: string, a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
-  denied(code, `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, need);
+/**
+ * A refusal, under `code`, of a credential that isn't full access, worded as unrestrictedRequired words it. An API key
+ * with no sender-domain limit is one edit away from Full access: it is told that edit on its own ID (an agent with a Read
+ * only key listing receiving addresses retried six times when told to create another key, which keys can't do), and that
+ * asking again with it changes nothing.
+ */
+export const fullAccessRefusal = (code: string, a: (Pick<Actor, 'permissions' | 'domains' | 'credential'> & { keyId?: string }) | undefined, area: string, need: Required, note?: string) =>
+  denied(code, a?.credential === 'apiKey' && !a.domains.length && a.keyId
+    ? `${credentialLimits(a)} ${area} Full access: make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${a.keyId} with {"permissions":["read","send","manage"]}.${note ? ` ${note}` : ''} Until then this key gets the same answer.`
+    : `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, need);
 export class ModuleLoadError extends ApiError {
   constructor(cause?: unknown) {
     super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);
