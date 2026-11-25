@@ -1,4 +1,5 @@
-// Public client only: no database, dashboard session, provider credentials or test-mode shortcuts.
+// Exercise the public client with no dashboard session or simulated sends. Only the dev fixture
+// independently corroborates an explicit SES quota hold; it never supplies API test data.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
@@ -161,7 +162,8 @@ const successResponses = new Set<Op>();
 const errorResponses = new Set<Op>();
 const providerAccepted = new Set<string>();
 let sendBudget = 0;
-type Step = { name: string; operationIds: Op[]; status: 'pass' | 'fail'; ms: number; requestId?: string | null; error?: string };
+type Step = { name: string; operationIds: Op[]; status: 'pass' | 'fail' | 'skip'; ms: number; requestId?: string | null; error?: string; reason?: string };
+class DevSandboxQuotaSkip extends Error { constructor() { super('dev SES sandbox quota exhausted'); } }
 const steps: Step[] = [];
 const ctx = new AsyncLocalStorage<{ last?: string; requestId: string | null; ops: Set<Op> }>();
 const cleanups: { name: string; fn: () => Promise<unknown> }[] = [];
@@ -237,6 +239,11 @@ async function step<T>(name: string, work: () => Promise<T>) {
       console.log(`✓ ${name} (${Date.now() - start} ms)`);
       return result;
     } catch (error) {
+      if (error instanceof DevSandboxQuotaSkip) {
+        steps.push({ name, operationIds: [...trace.ops], status: 'skip', ms: Date.now() - start, requestId: trace.requestId, reason: error.message });
+        console.log(`↷ ${name}: ${error.message}`);
+        return;
+      }
       failures++;
       const message = error instanceof Error ? error.message : 'unexpected failure';
       steps.push({ name, operationIds: [...trace.ops], status: 'fail', ms: Date.now() - start, requestId: trace.requestId, error: `${ctx.getStore()?.last ?? 'local'}: ${message}` });
@@ -358,14 +365,6 @@ async function devBoundaries() {
   await denied('createContact',{body:{email:'not-an-email'}},422,'VALIDATION_FAILED');
 }
 
-async function regionalSend() {
-  const va = 'e2e-va.bane.mx', sendRegion = 'us-east-1', sender = `${prefix}@${va}`, to = simulator('success','-va');
-  const page = await api('listDomains',{query:{region:sendRegion,refresh:'false',limit:10}});
-  check(page.data.some(d => d.name === va && d.region === sendRegion && d.ready),'Virginia verified sending fixture not ready');
-  const receipt = await api('sendEmail',{headers:idKey('virginia'),body:{from:sender,to:[to],region:sendRegion,subject,text}});
-  await outcome(receipt.id,to,'delivered',sender,sendRegion);
-}
-
 async function mcpChallenge() {
   const trace = ctx.getStore()!;
   const get = async <T>(url: URL) => { trace.last = `GET ${url.href}`; trace.requestId = null; const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(12000) }); trace.requestId = res.headers.get('x-request-id'); check(res.ok, `${url.pathname} returned ${res.status}`); return await res.json() as T; };
@@ -408,24 +407,30 @@ async function outcome(id: string, recipient: string, status: 'delivered' | 'bou
   check(events.data.some(e => e.type === event && !e.simulated && e.emailId === id), `${id}: no live ${event} event`);
 }
 async function direct() {
-  const options = { body: message(singleSuccess), headers: idKey('send') };
+  // The dev Virginia delivery is also the single-send/replay probe, not a second successful send.
+  const sendRegion = destructive ? 'us-east-1' : region, sender = destructive ? `${prefix}@e2e-va.bane.mx` : from;
+  if (destructive) {
+    const page = await api('listDomains', { query: { region: sendRegion, refresh: 'false', limit: 10 } });
+    check(page.data.some(d => d.name === 'e2e-va.bane.mx' && d.region === sendRegion && d.ready), 'Virginia verified sending fixture not ready');
+  }
+  const options = { body: { ...message(singleSuccess), from: sender, region: sendRegion }, headers: idKey('send') };
   const a = await api('sendEmail', options);
   check(!a.simulated && a.status === 'queued', 'expected a live queued receipt');
   const b = await api('sendEmail', options);
   check(a.id === b.id, 'idempotency replay created another email');
   if (destructive) await expectDenial(() => api('sendEmail', { ...options, body: { ...options.body, subject: `${subject}-conflict` } }), 409, 'IDEMPOTENCY_CONFLICT');
-  await outcome(a.id, singleSuccess, 'delivered');
+  await outcome(a.id, singleSuccess, 'delivered', sender, sendRegion);
   const content = await api('getEmailContent', { path: { id: a.id } });
   check(content.text === text && content.subject === subject && !content.simulated, 'stored email content differs');
   const detail = await api('getEmailDetail', { path: { id: a.id } });
   check(detail.email.id === a.id && detail.content.text === text && detail.events.data.some(e => e.type === 'delivery'), 'email detail differs from the email, its content or its events');
-  const logs = await api('listEmails', { query: { search: singleSuccess, region } });
+  const logs = await api('listEmails', { query: { search: singleSuccess, region: sendRegion } });
   check(logs.nextCursor === null && logs.data.length === 1 && hasId(logs, a.id), 'email missing or duplicated in log');
 }
 // A send scheduled a day out never reaches SES here: it is found as scheduled, moved a day later and canceled.
 async function scheduledSend() {
-  const to = simulator('success', '-scheduled'), scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
-  const receipt = await api('sendEmail', { headers: idKey('scheduled'), body: { region, from, to: [to], subject, text, scheduledAt } });
+  const to = success, scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
+  const receipt = await api('sendEmail', { headers: idKey('scheduled'), body: { region, from, to: [to], kind: 'marketing', subject, text, scheduledAt } });
   defer(`cancel scheduled email ${receipt.id}`, async () => check((await api('cancelEmail', { path: { id: receipt.id } })).status === 'canceled', 'scheduled email not canceled'));
   check(receipt.status === 'queued' && receipt.scheduledAt === scheduledAt && !receipt.simulated, 'scheduled receipt differs');
   const email = await api('getEmail', { path: { id: receipt.id } });
@@ -439,6 +444,7 @@ async function scheduledSend() {
   await expectDenial(() => api('rescheduleEmail', { path: { id: receipt.id }, body: { scheduledAt: later } }), 409, 'EMAIL_NOT_SCHEDULED');
   const events = await api('listEmailEvents', { path: { id: receipt.id } });
   check(['scheduled', 'rescheduled', 'canceled'].every(type => events.data.some(e => e.type === type)), 'scheduled email events missing');
+  return receipt.id; // Its real opt-out token was created at admission, without a provider send.
 }
 async function batch() {
   // SES feedback upserts a suppressed contact. Own it before sending so cleanup never has
@@ -670,47 +676,52 @@ async function campaign(audience: Audience, templateId?: string) {
   check(saved.draft.audience?.listId === audience.listId && saved.draft.audience.segmentId === audience.segmentId && allowed.matched === 1 && allowed.eligible === 1, 'refusing campaign: not the verified one-member exact-email audience');
   const test = await api('testCampaign', { path, body: { to: success }, headers: idKey('campaign-test') });
   check(!test.simulated && test.status === 'queued', 'test email not live');
+  await step('Campaign test email reaches SES and gets delivery feedback', () => outcome(test.id, success, 'delivered'));
   const sent = await api('sendCampaign', { path, body: { revision: saved.revision }, headers: idKey('campaign') });
   check(!sent.simulated && sent.queued === 1 && sent.id === item.id, 'expected one live campaign recipient');
-  await until(`campaign ${item.id} done`, () => api('getCampaignState', { path }), c => {
-    check(!['failed', 'canceled', 'paused'].includes(c.state), `campaign ${item.id} ${c.state}`);
-    return c.state === 'done';
-  }, async c => {
-    // State polling is intentionally cheap. Read the hold before cleanup clears it.
-    const stats = await api('getCampaignStats', { path }).catch(() => null);
-    const d = stats?.delivery;
-    return d ? `${c.state}, released ${d.expanded}/${d.total}${d.waiting ? `, ${d.waiting.reason} until ${d.waiting.until}` : ''}` : c.state;
-  });
-  const stats = await api('getCampaignStats', { path });
+  let checkedUntil: string | undefined;
+  const stats = await until(`campaign ${item.id} done`, async () => {
+    const row = await api('getCampaignStats', { path }), d = row.delivery;
+    check(row.id === item.id && !['failed', 'canceled', 'paused'].includes(row.state), `campaign ${item.id} ${row.state}`);
+    if (destructive && row.state === 'sending' && row.counts.total === 0 && d?.total === 1 && d.prepared === 1 && d.expanded === 0 && d.canceled === 0 && !d.error
+      && d.waiting?.reason === 'ses_daily_quota' && Date.parse(d.waiting.until) > Date.now() && d.waiting.until !== checkedUntil) {
+      checkedUntil = d.waiting.until;
+      if (await (await import('./dev-e2e-fixture.js')).devSandboxMarketingQuotaExhausted(item.id)) {
+        const canceled = await api('cancelCampaign', { path });
+        check(canceled.state === 'canceled' && canceled.canceled === 1 && canceled.inFlight === 0, 'quota-held campaign did not cancel before dispatch');
+        throw new DevSandboxQuotaSkip();
+      }
+    }
+    return row;
+  }, c => c.state === 'done', c => c.delivery ? `${c.state}, released ${c.delivery.expanded}/${c.delivery.total}${c.delivery.waiting ? `, ${c.delivery.waiting.reason} until ${c.delivery.waiting.until}` : ''}` : c.state);
   check(stats.totals.accepted === 1 && stats.counts.total === 1 && stats.totals.simulated === 0, 'campaign done without one live acceptance');
   const logs = await api('listEmails', { query: { campaignId: item.id } });
   check(logs.data.length === 1 && logs.data[0].to[0] === success, 'wrong campaign recipient');
   await outcome(logs.data[0].id, success, 'delivered');
-  await step('Read unsubscribe confirmation without changing consent', async () => {
-    // The footer ends the text: the recipient's Unsubscribe link, then the workspace's postal address under it.
-    const { text } = await api('getEmailContent', { path: { id: logs.data[0].id } });
-    const footer = text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
-    check(footer, 'no unsubscribe capability in run-owned marketing email');
-    check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
-    const token = footer[1]!;
-    const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
-    check(page.includes('<form method="post">'), 'GET must display a confirmation form');
-    check((await api('previewCampaignAudience', { path })).eligible === 1, 'GET changed audience consent');
-    if (destructive) {
-      const page = await api('unsubscribeOneClick',{path:{token},parseAs:'text'});
-      check(page.includes('unsubscribed'),'one-click did not confirm opt-out');
-      const [row] = (await api('listContacts',{query:{email:success}})).data;
-      check(row?.email === success && row.marketingConsent === 'unsubscribed','one-click did not opt out this run’s contact');
-    }
-  });
-  await outcome(test.id, success, 'delivered');
   // Cancellation must not retroactively retract a finished, delivered campaign.
-  try { await api('cancelCampaign', { path }); }
-  catch (error) {
-    if (!(error instanceof ApiFailure && error.status === 409 && error.code === 'CAMPAIGN_ALREADY_DISPATCHED')) throw error;
-    return;
+  await expectDenial(() => api('cancelCampaign', { path }), 409, 'CAMPAIGN_ALREADY_DISPATCHED');
+  return { emailId: logs.data[0].id, path };
+}
+async function unsubscribe(emailId: string, campaignPath?: { id: string }) {
+  // The footer ends the text: the recipient's Unsubscribe link, then the workspace's postal address under it.
+  const { text } = await api('getEmailContent', { path: { id: emailId } });
+  const footer = text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
+  check(footer, 'no unsubscribe capability in run-owned marketing email');
+  check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
+  const token = footer[1]!;
+  const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
+  check(page.includes('<form method="post">'), 'GET must display a confirmation form');
+  if (campaignPath) check((await api('previewCampaignAudience', { path: campaignPath })).eligible === 1, 'GET changed audience consent');
+  else {
+    const [row] = (await api('listContacts', { query: { email: success } })).data;
+    check(row?.email === success && row.marketingConsent === 'subscribed', 'GET changed the fixture recipient’s consent');
   }
-  throw new Error('cancelCampaign accepted a completed campaign');
+  if (destructive) {
+    const page = await api('unsubscribeOneClick',{path:{token},parseAs:'text'});
+    check(page.includes('unsubscribed'),'one-click did not confirm opt-out');
+    const [row] = (await api('listContacts',{query:{email:success}})).data;
+    check(row?.email === success && row.marketingConsent === 'unsubscribed','one-click did not opt out this run’s contact');
+  }
 }
 
 async function webhook() {
@@ -1074,9 +1085,8 @@ async function run() {
     if (!ready) return;
     if (!await step('Retire interrupted E2E fixtures older than 30 minutes',sweepStaleObjects)) return;
     await Promise.all([
-      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
+      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
       step('Single send, replay, delivery and email log', direct),
-      step('Schedule, reschedule and cancel a single send before it goes', scheduledSend),
       step('Preview run-owned HTML without sending', async () => {
         const report = await api('checkEmail', { body: { from, subject:prefix, text:'Confirm your shipping address.', stream:'transactional' } });
         check(Number.isInteger(report.score) && report.findings.some((f:{ruleId:string})=>f.ruleId==='screen-bytes'),'missing sendability score or byte measurement');
@@ -1100,10 +1110,16 @@ async function run() {
           }),
         ]);
         // A template permission failure does not hide campaign dispatch regressions.
-        if (selection && guide) await Promise.all([
-          step('Preview exact audience, send campaign and observe done + delivery', () => campaign(selection, tpl)),
-          step('Schedule, pause, pace, resume and cancel without dispatch', () => scheduledCampaign(selection)),
-        ]);
+        if (selection) {
+          const [sent, fixture] = await Promise.all([
+            guide ? step('Preview exact audience, send campaign and observe done + delivery', () => campaign(selection, tpl)) : undefined,
+            step('Schedule, reschedule and cancel a single send before it goes', scheduledSend),
+            step('Schedule, pause, pace, resume and cancel without dispatch', () => scheduledCampaign(selection)),
+          ]);
+          // Opt out only after both campaigns are finished with this one subscribed contact.
+          const emailId = sent?.emailId ?? fixture;
+          if (emailId) await step('Read unsubscribe confirmation without changing consent', () => unsubscribe(emailId, sent?.path));
+        }
       })(),
     ]);
     await step('Regional metrics, sender score and plan usage for this run window', async () => {
@@ -1156,7 +1172,8 @@ function finish() {
     const failed = steps.filter(s => s.status === 'fail');
     const md = [`## ${headline}`, '', `Commit: \`${commit}\`. ${successResponses.size} operations returned a validated success; ${report.coverage.negativeOnly.length} exercised only their error contract.`,
       `SES: ${providerAccepted.size} distinct provider IDs observed; ${sendBudget}/25 recipient admissions reserved (including replays, suppressed and canceled sends).`, '',
-      ...failed.map(s => `- **${escape(s.name)}**: ${s.name === 'OpenAPI coverage' ? 'See unaccounted operations in the JSON artifact.' : escape(s.error!)} (request ID: \`${s.requestId ?? 'unavailable'}\`)`), '', '<details><summary>Every step</summary>', '', '| Step | Result | ms |', '|---|---|---:|', ...steps.map(s => `| ${escape(s.name)} | ${s.status} | ${s.ms} |`), '', '</details>', ''];
+      ...failed.map(s => `- **${escape(s.name)}**: ${s.name === 'OpenAPI coverage' ? 'See unaccounted operations in the JSON artifact.' : escape(s.error!)} (request ID: \`${s.requestId ?? 'unavailable'}\`)`),
+      ...steps.filter(s => s.status === 'skip').map(s => `- **${escape(s.name)}**: skipped — ${escape(s.reason!)}`), '', '<details><summary>Every step</summary>', '', '| Step | Result | ms |', '|---|---|---:|', ...steps.map(s => `| ${escape(s.name)} | ${s.status} | ${s.ms} |`), '', '</details>', ''];
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
   }
   if (failures) process.exitCode = 1;
