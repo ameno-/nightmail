@@ -1569,7 +1569,27 @@ pub async fn listen(
         }
         Err::<(), _>(anyhow!("listener ended"))
     };
-    tokio::select! {r=pump=>r,r=async{client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth").await?;api.invalidate(None);api.online.store(true,std::sync::atomic::Ordering::Release);ready.send_replace(true);std::future::pending::<Result<()>>().await}=>r}
+    let heartbeat = async {
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            client.batch_execute("LISTEN bane_inbox_changed; LISTEN bane_protocol_auth"),
+        )
+        .await??;
+        api.invalidate(None);
+        api.online.store(true, std::sync::atomic::Ordering::Release);
+        ready.send_replace(true);
+        // Probe the idle LISTEN connection periodically so a silent failover or NAT drop
+        // fails within ~40 s instead of hanging until the OS TCP keepalive expires (hours).
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            tokio::time::timeout(Duration::from_secs(10), client.simple_query("SELECT 1"))
+                .await??;
+        }
+    };
+    tokio::select! { r = pump => r, r = heartbeat => r }
 }
 
 #[cfg(test)]

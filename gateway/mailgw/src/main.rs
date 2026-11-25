@@ -747,15 +747,22 @@ async fn main() -> Result<()> {
         let events = gw.events.clone();
         let (ready, mut rx) = watch::channel(false);
         listeners.spawn(async move {
+            let mut backoff = Duration::from_secs(1);
             loop {
                 if remote::listen(&db, &events, &api, &ready).await.is_err() {
+                    let was_online = api.online.swap(false, std::sync::atomic::Ordering::AcqRel);
+                    if was_online {
+                        backoff = Duration::from_secs(1);
+                    }
                     ready.send_replace(false);
-                    api.online
-                        .store(false, std::sync::atomic::Ordering::Release);
-                    tracing::warn!("protocol notification connection unavailable");
+                    tracing::warn!(
+                        backoff_secs = backoff.as_secs(),
+                        "protocol notification connection unavailable"
+                    );
                     api.invalidate(None);
                     events.publish(None, true);
-                    tokio::time::sleep(Duration::from_secs(1)).await
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
                 }
             }
         });
