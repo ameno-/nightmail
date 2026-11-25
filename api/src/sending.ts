@@ -22,6 +22,7 @@ import type { CampaignScreen, ScreenResult } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { regionalSending, sendingConnections, type SendingBinding } from './domain-claims.js';
 import { lockSendScope, type SendScope } from './send-scope.js';
+import { uploadReservation } from './upload-reservation.js';
 import { assertRegionEnabled, regionPattern } from './ses-region-state.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
 import { bulkFlags, hostedCost, probationReason, type ProbationReason } from './hosted-sending.js';
@@ -1970,40 +1971,16 @@ async function saveAttachment(c: Ctx, a: Actor, metadata: AttachmentMetadataInpu
   try { return await idempotent(c.env.db,keyed(c,a),{...input,size:bytes.length,checksum},async db=>AttachmentInfo.parse(await upload.finish(db)),{prepare:upload.put}); }
   finally { await upload.refund(); }
 }
-const UPLOAD_PUT_MS=10*60_000;
 function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:ReturnType<typeof validateAttachment>,bytes:Uint8Array,checksum:string,uploadedBy?:string){
   const attachmentId=id('attachment'),storageKey=uploadKey(a.workspaceId,attachmentId);
-  let reserved=false,published=false;
-  const take=(db:DbExecutor)=>db.execute(sql`DELETE FROM sending_upload_reservations WHERE workspace_id=${a.workspaceId} AND id=${attachmentId} RETURNING 1`);
+  const upload=uploadReservation(runtime,a.workspaceId,attachmentId,storageKey,bytes,input.contentType);
   return {
-    async put(){
-      await runtime.db.transaction(async db=>{
-        await lockSendScope(db,a.workspaceId);
-        const {rows}=await db.execute<{bytes:string}>(sql`SELECT bytes FROM sending_asset_usage WHERE workspace_id=${a.workspaceId}`);
-        const kept=Number(rows[0]?.bytes??0);
-        if(kept+bytes.length>SEND_LIMITS.storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED',`This workspace keeps ${sizeText(kept)} of uploaded files and this one is ${sizeText(bytes.length)}: together they pass the ${SEND_LIMITS.storedAttachmentBytes/1024**3} GiB a workspace may keep. Delete attachments no draft or queued email uses (DELETE /v1/attachments/{id}).`);
-        await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
-      });
-      reserved=true;
-      // S3 cancels the put after ten minutes; an R2 binding put cannot be cancelled. A put that lands after
-      // its reservation and tombstone (158) are gone is deleted by the hourly storage reconciliation.
-      await runtime.storage.put(storageKey,bytes,input.contentType,AbortSignal.timeout(UPLOAD_PUT_MS));
-    },
+    put:upload.put,
     async finish(db:DbExecutor){
-      if(!(await take(db)).rowCount) throw new ApiError(503,'UPLOAD_EXPIRED','Upload reservation expired; retry the upload.',undefined,true);
-      // From here the attachment row may commit (even if the response is lost): keep the object.
-      published=true;
+      await upload.claim(db);
       const [row]=await db.insert(attachments).values({id:attachmentId,workspaceId:a.workspaceId,uploadedBy,...input,storageKey,checksum,size:bytes.length}).returning();return row!;
     },
-    async refund(){
-      if(!reserved)return;
-      // Never delete a published object: once finish took the reservation, the attachment row
-      // may have committed even if its response was lost. Any other ending deletes the object,
-      // also when the sweeper already took an expired reservation: its deletion can run before
-      // a slow put lands. If this never runs (a crash, a DB outage), the reservation's tombstone
-      // (158) queues the deletion a day later.
-      await runtime.db.transaction(async db=>{if((await take(db)).rowCount || !published) await enqueue(db,{workspaceId:a.workspaceId,type:'maintenance.deleteAttachment',payload:{key:storageKey}});}).catch(()=>log('warn',{code:'UPLOAD_RESERVATION_CLEANUP_DEFERRED'}));
-    },
+    refund:upload.refund,
   };
 }
 /** Reserve quota before uploading. No database connection is held during object storage I/O.

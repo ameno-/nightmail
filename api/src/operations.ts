@@ -1427,7 +1427,52 @@ async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertifi
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
     try { return new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
 }
+/**
+ * A budget of failed SNS signatures, checked before any verification work. SNS itself never fails verification, so its
+ * traffic never spends it. A peer gets SNS_PEER_FAILURES failures a minute in each isolate (and its share of the edge
+ * limiter across isolates); past SNS_ISOLATE_FAILURES in an isolate, only peers that verified in the last 15 minutes are
+ * verified, so SES feedback keeps flowing.
+ */
+const SNS_PEER_FAILURES = 20, SNS_ISOLATE_FAILURES = 1200, SNS_PEERS = 4096;
+export class SnsFailureBudget {
+  private minute = 0; private total = 0;
+  private readonly failures = new Map<string, number>(); private readonly verified = new Map<string, number>();
+  constructor(private readonly clock = () => Date.now()) {}
+  private tick() { const minute = Math.floor(this.clock() / 60_000); if (minute !== this.minute) { this.minute = minute; this.total = 0; this.failures.clear(); } }
+  /** Whether this peer may be verified now: a check of counts, before any cryptography. */
+  admits(peer: string) {
+    this.tick();
+    if ((this.failures.get(peer) ?? 0) >= SNS_PEER_FAILURES) return false;
+    return this.total < SNS_ISOLATE_FAILURES || (this.verified.get(peer) ?? 0) > this.clock();
+  }
+  failed(peer: string, edgeExhausted = false) {
+    this.tick(); this.total++;
+    if (!this.failures.has(peer) && this.failures.size >= SNS_PEERS) return;
+    this.failures.set(peer, edgeExhausted ? SNS_PEER_FAILURES : (this.failures.get(peer) ?? 0) + 1);
+  }
+  succeeded(peer: string) {
+    this.verified.delete(peer);
+    if (this.verified.size >= SNS_PEERS) this.verified.delete(this.verified.keys().next().value!);
+    this.verified.set(peer, this.clock() + 15 * 60_000);
+  }
+}
+const isolateSnsFailures = new SnsFailureBudget();
+const snsFailuresLimited = () => new ApiError(429, 'SNS_RATE_LIMITED', 'Too many SNS envelopes failed verification from this address. Retry after one minute.', undefined, true);
 async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
+  const failures = runtime.snsFailureBudget ?? isolateSnsFailures;
+  if (!failures.admits(peer)) throw snsFailuresLimited();
+  try {
+    const trusted = await verifySnsSignature(envelope, runtime, peer);
+    failures.succeeded(peer);
+    return trusted;
+  } catch (error) {
+    // A signature that fails spends the peer's budget (certificate misses have their own budget); the edge limiter's
+    // refusal spends the rest of it here.
+    if (error instanceof ApiError && error.code === 'SNS_INVALID_SIGNATURE') failures.failed(peer, runtime.allowSnsFailure ? !await runtime.allowSnsFailure(peer).catch(() => true) : false);
+    throw error;
+  }
+}
+async function verifySnsSignature(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
   const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
   const trusted = snsHost(envelope);
   const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);

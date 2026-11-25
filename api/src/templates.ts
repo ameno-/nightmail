@@ -12,6 +12,7 @@ import { readOwnMailObject } from './mail-object-route.js';
 import { AttachmentContentId, AttachmentFilename, AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_JSON_ATTACHMENT_BYTES, senderDisplayName, unsubscribePageUrl, validateAttachment, type AttachmentMetadataInput } from './outbound-content.js';
 import { productName } from './brand.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { uploadReservation } from './upload-reservation.js';
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, renderPreview } from './preview-images.js';
 
 // Template assets (inline images) upload as base64 JSON, so they keep the JSON file limit, also for their total.
@@ -57,11 +58,19 @@ async function findTemplate(db: DbExecutor, workspaceId: string, templateId: str
 async function assetRows(db: DbExecutor, workspaceId: string, ids: string[], lock = false) { const unique = [...new Set(ids)]; if (unique.length !== ids.length) throw new ApiError(422, 'DUPLICATE_TEMPLATE_ASSET', 'Template asset IDs must be unique.'); const query = db.select().from(templateAssets).where(and(eq(templateAssets.workspaceId, workspaceId), inArray(templateAssets.id, unique))).orderBy(templateAssets.id); const rows = unique.length ? lock ? await query.for('update') : await query : []; if (rows.length !== unique.length) throw new ApiError(422, 'TEMPLATE_ASSET_NOT_FOUND', 'A template asset was not found.'); if (rows.reduce((sum, row) => sum + row.size, 0) > MAX_ASSET_BYTES) throw new ApiError(413, 'TEMPLATE_ASSETS_TOO_LARGE', 'Template assets may total at most 8 MiB.'); return unique.map(value => rows.find(row => row.id === value)!); }
 async function replaceLinks(db: DbExecutor, workspaceId: string, templateId: string, stage: 'draft' | 'published', ids: string[]) { await assetRows(db, workspaceId, ids, true); await db.delete(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, workspaceId), eq(templateAssetLinks.templateId, templateId), eq(templateAssetLinks.stage, stage))); if (ids.length) await db.insert(templateAssetLinks).values(ids.map(assetId => ({ workspaceId, templateId, assetId, stage }))); }
 async function checksum(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), byte => byte.toString(16).padStart(2, '0')).join(''); }
+// A template asset is an uploaded file like an attachment: it counts against the workspace's stored-file cap, reserved
+// before its object is written (migration 513 counts template_assets in sending_asset_usage).
 async function saveAsset(runtime: Runtime, identity: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
   const input = validateAttachment(metadata, bytes, MAX_ASSET_BYTES), assetId = id('tasset'), storageKey = `${identity.workspaceId}/templates/assets/${assetId}`, hash = await checksum(bytes);
-  await runtime.storage.put(storageKey, bytes, input.contentType);
-  try { const [row] = await runtime.db.insert(templateAssets).values({ id: assetId, workspaceId: identity.workspaceId, ...input, contentId: input.contentId ?? null, size: bytes.length, storageKey, checksum: hash }).returning(); return Asset.parse(row); }
-  catch (error) { await runtime.storage.delete(storageKey).catch(() => undefined); throw error; }
+  const upload = uploadReservation(runtime, identity.workspaceId, assetId, storageKey, bytes, input.contentType);
+  try {
+    await upload.put();
+    return await runtime.db.transaction(async db => {
+      await upload.claim(db);
+      const [row] = await db.insert(templateAssets).values({ id: assetId, workspaceId: identity.workspaceId, ...input, contentId: input.contentId ?? null, size: bytes.length, storageKey, checksum: hash }).returning();
+      return Asset.parse(row);
+    });
+  } finally { await upload.refund(); }
 }
 // The cursor regex bounds each field on its own; a real date also fits its month (February 29 only in a leap year), or
 // Postgres refuses it with 22008 and the page request is a 500. Date.parse is no check: it rolls February 31 into March.

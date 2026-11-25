@@ -109,7 +109,9 @@ const BANNED_EXTENSIONS = new Set(['ade', 'adp', 'app', 'asp', 'bas', 'bat', 'ce
   'reg', 'scf', 'scr', 'sct', 'shb', 'shs', 'sys', 'ps1', 'ps1xml', 'ps2', 'ps2xml', 'psc1', 'psc2', 'tmp', 'url', 'vb', 'vbe', 'vbs', 'vps', 'vsmacros', 'vss', 'vst', 'vsw', 'vxd', 'ws', 'wsc', 'wsf', 'wsh', 'xnk']);
 
 export const AttachmentFilename = z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/, `Use ${ATTACHMENT_FIELD_RULES.filename}.`);
-export const AttachmentContentType = z.string().max(SEND_LIMITS.mimeFieldChars).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$/, `Use ${ATTACHMENT_FIELD_RULES.contentType}.`);
+// Parameters are name=value pairs of token characters, or a quoted value without quotes, backslashes or angle brackets
+// (RFC 2045 tokens; the type is written into MIME headers and previews).
+export const AttachmentContentType = z.string().max(SEND_LIMITS.mimeFieldChars).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+(?: *; *[a-zA-Z0-9!#$%&'*+.^_`|~-]+=(?:[a-zA-Z0-9!#$%&'*+.^_`|~-]+|"[ !#-;=?-\[\]-~]*"))* *;?$/, `Use ${ATTACHMENT_FIELD_RULES.contentType}.`);
 export const AttachmentContentId = z.string().min(1).max(SEND_LIMITS.mimeFieldChars).regex(/^[a-zA-Z0-9_.@-]+$/, `Use ${ATTACHMENT_FIELD_RULES.contentId}.`);
 export const AttachmentDisposition = z.enum(['attachment', 'inline']);
 /** A size as a person reads it, exact in bytes too once it is large: 512 bytes, 9.4 KiB (9,612 bytes), 31.2 MiB (32,712,345 bytes). */
