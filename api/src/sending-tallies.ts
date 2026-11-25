@@ -119,6 +119,8 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
     FROM (
       SELECT workspace_id FROM sending_metrics_hourly
       UNION
+      SELECT workspace_id FROM sending_metrics_ten_minute
+      UNION
       SELECT id AS workspace_id FROM workspaces
     ) w
     ORDER BY md5(w.workspace_id || current_date::text)`);

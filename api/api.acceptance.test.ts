@@ -17923,7 +17923,7 @@ describe('Sealed Logs facets', () => {
       for(const name of ['mailbox_messages','mail_messages','mailboxes','mail_threads','mailbox_domains','sending_emails','log_facet_changes',
         'log_facet_dirty_messages','log_facet_deadlines','log_facet_message_facts','log_facet_buckets','log_facet_sent_seeds','log_facet_inbound_progress',
         'log_facet_results','log_facet_rolling','log_facet_demands','log_facet_wakes','log_facet_retired_generations','log_facet_generations','log_facet_coverage',
-        'sending_metrics_hourly','jobs','ses_installation_settings','workspace_members'])
+        'sending_metrics_hourly','sending_metrics_ten_minute','jobs','ses_installation_settings','workspace_members'])
         await db.query(`DELETE FROM ${name} WHERE workspace_id=$1`,[wid]);
       await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);
     });
