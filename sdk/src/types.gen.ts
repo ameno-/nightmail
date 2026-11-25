@@ -655,7 +655,7 @@ export type ContactRead = Contact & {
  */
 export type ContactRisk = {
     /**
-     * invalid: not a deliverable address. disposable: a public temporary inbox, or a domain whose mail servers serve them. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce). no_mail_domain: the domain can't receive mail (it doesn't exist, or has no mail server).
+     * invalid: not a deliverable address. disposable: a public temporary inbox on a listed domain or subdomain. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce). no_mail_domain: the domain can't receive mail (it doesn't exist, or has no mail server).
      */
     reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
     /**
