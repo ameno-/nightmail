@@ -13,7 +13,7 @@ import { lists, mergeSuppression, segments } from './db/audience.js';
 import { literalSearch, SuppressionReason, EmailEventData, readCursor, encodeCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage, type AttachmentTypes } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restartRampWindow, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, setRamp, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -896,7 +896,7 @@ function sesAttachment(metadata: { filename?: string; contentId?: string | null;
   const problems = sesProblems(metadata), fields = Object.keys(problems) as (keyof typeof problems)[];
   if (fields.length) throw metadataInvalid(metadata, fields, false, problems);
 }
-type AttachmentProblem = { index: number; attachment?: number; id?: string; filename?: string; code: string; status: number; message: string };
+type AttachmentProblem = { index: number; attachment?: number; id?: string; filename?: string; code: string; status: number; message: string; types?: AttachmentTypes; mailApp?: boolean };
 /**
  * Every problem with the attachments of each email in a send, email by email and file by file, so a caller learns every
  * rule it broke in one try (a production agent found them one refusal at a time): a file missing or listed twice, a
@@ -926,12 +926,17 @@ function attachmentProblems(lists: string[][], byId: Map<string, AttachmentFacts
   }
   return problems;
 }
-/** One refusal naming every problem: the first one's status, code and field, and each in the message and error.details. */
+/** One refusal naming every problem: the first one's status, code, field and types, and each in the message and
+ *  error.details. A mail app's message is the SMTP reply its user reads (gateway remote.rs): plain words naming each
+ *  file once, the same in every part of a large envelope. */
 function attachmentRefusal(problems: AttachmentProblem[], batch: boolean) {
   const path = (p: AttachmentProblem) => `${batch ? `emails.${p.index}.` : ''}attachments${p.attachment === undefined ? '' : `.${p.attachment}`}`;
   const line = (p: AttachmentProblem) => `${path(p)}: ${p.message.replace(/\.$/, '')}`, first = problems[0]!;
   const limits = problems.some(p => p.code === 'ATTACHMENT_LIMIT_EXCEEDED') ? ` ${ATTACHMENT_LIMITS_TEXT}` : '';
-  const error = new ApiError(first.status, first.code, `${problems.length > 1 ? `${problems.length} attachment problems: ` : ''}${problems.map(line).join('; ')}.${limits}`, path(first));
+  const message = problems.every(p => p.mailApp) ? `Message not sent: ${[...new Set(problems.map(p => p.message))].join('; ')}.`
+    : `${problems.length > 1 ? `${problems.length} attachment problems: ` : ''}${problems.map(line).join('; ')}.${limits}`;
+  const error = new ApiError(first.status, first.code, message, path(first));
+  error.attachmentTypes = first.types;
   error.details = problems.map(p => ({ ...(batch ? { index: p.index } : {}), ...(p.attachment === undefined ? {} : { attachment: p.attachment }), ...(p.id ? { id: p.id } : {}),
     ...(p.filename ? { filename: p.filename } : {}), code: p.code, message: line(p) }));
   return error;
@@ -1594,12 +1599,9 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
           const attRow = loadedAttachments.get(attId);
           if (!attRow) continue;
           const body = await verifiedAttachment(runtime, attRow);
-          try {
-            if (rules === 'standard') delivery.shownAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
-            else delivery.screenedAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
-          } catch (error) {
+          try { delivery.hostedAttachment(attRow, body, rules === 'probation', !!m.snapshot.mailApp); } catch (error) {
             if (!(error instanceof ApiError)) throw error;
-            unsendable.push({ index: i, attachment: k, id: attId, filename: attRow.filename, code: error.code, status: error.status, message: error.message });
+            unsendable.push({ index: i, attachment: k, id: attId, filename: attRow.filename, code: error.code, status: error.status, message: error.message, types: error.attachmentTypes, mailApp: m.snapshot.mailApp });
           }
         }
       }
@@ -1891,7 +1893,7 @@ async function relayedMessage(runtime: Runtime, input: RelayedMessage) {
   const out = await directMessages(runtime, [parsed.data], false), message = out[0]!;
   if (message.invalid) throw message.invalid;
   if (mime) passThrough(message.snapshot, mime, message.marketing);
-  Object.assign(message.snapshot, { to: input.to, cc: input.cc, bcc: input.bcc });
+  Object.assign(message.snapshot, { to: input.to, cc: input.cc, bcc: input.bcc, mailApp: true });
   return { parsed: parsed.data, out };
 }
 /** Before a relayed message's attachments are uploaded: the message and its sender's admission, checked without
@@ -2049,7 +2051,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
     a.dispatchAccount = { aws_account_id: route.connection.aws_account_id, kind: route.connection.kind, ...(typeof lim?.rate === 'number' && lim.rate > 0 ? { maxSendRate: lim.rate } : {}) };
   }
   if (isBulk) snapshot.bulk = true;
-  if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;}
+  if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;snapshot.mailApp=true;}
   snapshot.headers = [...snapshot.headers, ...request.headers];
   snapshot.untrustedContent = replyAuthors !== null || snapshot.headers.some(h => h.Name.toLowerCase() === 'in-reply-to');
   if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;

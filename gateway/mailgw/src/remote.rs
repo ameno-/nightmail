@@ -391,20 +391,28 @@ const UPLOAD: Duration = Duration::from_secs(120);
 pub const COMMAND: Duration = Duration::from_secs(60);
 /// What the view reserves for each message of an open folder, besides its flags.
 const ENTRY: usize = 200;
-/// A refusal's status and the API's error code (`{"error":{"code":…}}`), from at most 8 KiB of its body.
-async fn refusal(mut r: reqwest::Response) -> (u16, String) {
+/// A refusal's status and the API's error object (`{"error":{"code":…,"message":…}}`), from at most 64 KiB of its
+/// body: an attachment refusal names every file.
+async fn refused(mut r: reqwest::Response) -> (u16, Value) {
     let status = r.status().as_u16();
     let mut body = vec![];
-    while body.len() <= 8192
+    while body.len() <= 64 << 10
         && let Ok(Some(chunk)) = r.chunk().await
     {
         body.extend_from_slice(&chunk)
     }
-    let code = serde_json::from_slice::<Value>(&body)
-        .ok()
-        .and_then(|v| v["error"]["code"].as_str().map(str::to_owned))
+    let error = serde_json::from_slice::<Value>(&body)
+        .map(|v| v["error"].clone())
         .unwrap_or_default();
-    (status, code)
+    (status, error)
+}
+/// A refusal's status and the API's error code.
+async fn refusal(r: reqwest::Response) -> (u16, String) {
+    let (status, error) = refused(r).await;
+    (
+        status,
+        error["code"].as_str().unwrap_or_default().to_owned(),
+    )
 }
 /// The IMAP answer to a refused call: the API's code where it names one, else its status.
 fn store_error(status: u16, code: &str) -> store::Error {
@@ -421,9 +429,17 @@ fn store_error(status: u16, code: &str) -> store::Error {
         },
     }
 }
-/// The SMTP answer to a refused submission.
-fn submit_error(status: u16, code: &str) -> SubmitError {
+/// The SMTP answer to a refused submission. A refused attachment's answer is the API's own words, which name the file
+/// and say why, so the mail app shows its user something to act on.
+fn submit_error(status: u16, error: &Value) -> SubmitError {
+    let code = error["code"].as_str().unwrap_or_default();
     match (status, code) {
+        (
+            422,
+            "ATTACHMENT_CONTENT_MISMATCH"
+            | "ATTACHMENT_TYPE_UNSCREENABLE"
+            | "UNSUPPORTED_ATTACHMENT_TYPE",
+        ) => SubmitError::Attachment(reply_text(error["message"].as_str().unwrap_or_default())),
         (_, "SEALED_MESSAGE_SIZE") => SubmitError::SealedTooLarge,
         (_, "SEALED_MAIL_UNAVAILABLE") => SubmitError::SealedUnavailable,
         // The API refused the request's signature: one older than this gateway, while a deploy is in progress. The
@@ -434,6 +450,29 @@ fn submit_error(status: u16, code: &str) -> SubmitError {
         (429, _) => SubmitError::Cap,
         (400..500, _) => SubmitError::Rejected,
         _ => SubmitError::Unavailable,
+    }
+}
+/// API text as one SMTP reply line (RFC 5321 4.5.3.1.5: at most 512 octets with its code): printable ASCII, other
+/// characters (a file name's accents, line breaks) as '?', cut at 400 characters.
+fn reply_text(message: &str) -> String {
+    let mut text: String = message
+        .chars()
+        .map(|c| {
+            if c == ' ' || c.is_ascii_graphic() {
+                c
+            } else {
+                '?'
+            }
+        })
+        .collect();
+    if text.len() > 400 {
+        text.truncate(397);
+        text.push_str("...");
+    }
+    if text.trim().is_empty() {
+        "Attachment refused".into()
+    } else {
+        text
     }
 }
 /// How long a sign-in waits behind others with the same name.
@@ -1494,7 +1533,7 @@ impl Submitter for Store {
         let kid = self.principal.kid.as_str();
         let _work = api
             .admit(Some(kid), true)
-            .map_err(|status| submit_error(status, ""))?;
+            .map_err(|status| submit_error(status, &Value::Null))?;
         let (body, hash, size) = match spool {
             Some(spool) if s.spooled => spool.finish().map_err(|_| SubmitError::Unavailable)?,
             _ if s.spooled => return Err(SubmitError::Unavailable),
@@ -1536,8 +1575,8 @@ impl Submitter for Store {
         tokio::runtime::Handle::current().block_on(async {
             let r = request.send().await.map_err(|_| SubmitError::Unavailable)?;
             if !r.status().is_success() {
-                let (status, code) = refusal(r).await;
-                return Err(submit_error(status, &code));
+                let (status, error) = refused(r).await;
+                return Err(submit_error(status, &error));
             }
             let v: Value = r.json().await.map_err(|_| SubmitError::Unavailable)?;
             Ok(Sent {
@@ -2447,10 +2486,38 @@ mod tests {
         assert!(submit((422, refused("SEALED_MAIL_UNAVAILABLE"))).starts_with("550 5.7.1 Signed"));
         assert!(submit((413, refused("SEALED_MESSAGE_SIZE"))).starts_with("552 5.3.4 Signed"));
         assert!(submit((413, refused("MESSAGE_SIZE"))).starts_with("552 5.3.4 Message"));
+        // A refused attachment answers in the API's words, which name the file and say why: one line of printable
+        // ASCII whatever the name holds, cut to fit a reply line.
+        let mut attachment = |code: &str, message: &str| {
+            submit((
+                422,
+                json!({"error":{"code":code,"message":message,"details":[{"attachment":0}]}}),
+            ))
+        };
+        assert_eq!(
+            attachment(
+                "ATTACHMENT_CONTENT_MISMATCH",
+                "Message not sent: attachment \"Rechnung März.pdf\" is a Windows program, whatever it is called, and programs are never sent.\r\n250 2.0.0 ok"
+            ),
+            "550 5.6.1 Message not sent: attachment \"Rechnung M?rz.pdf\" is a Windows program, whatever it is called, and programs are never sent.??250 2.0.0 ok"
+        );
+        assert_eq!(
+            attachment(
+                "ATTACHMENT_TYPE_UNSCREENABLE",
+                &format!("Message not sent: {}", "x".repeat(600))
+            )
+            .len(),
+            "550 5.6.1 ".len() + 400
+        );
+        assert_eq!(
+            attachment("UNSUPPORTED_ATTACHMENT_TYPE", ""),
+            "550 5.6.1 Attachment refused"
+        );
+        assert!(submit((422, refused("VALIDATION_FAILED"))).starts_with("550 5.7.1 Rejected"));
         let submits = script.submits.lock().unwrap().clone();
         assert_eq!(
             submits.len(),
-            7,
+            11,
             "every submission passed the signature check"
         );
         assert_eq!(
