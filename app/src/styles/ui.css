@@ -43,7 +43,7 @@ h1, h2, h3 { font-weight: var(--font-weight-regular); }
    clear of the edge and its fade; the page does the same. */
 html, .page-surface { scroll-padding-block: var(--focus-reach); }
 ::selection { background: var(--color-active-bg); color: var(--color-text); }
-.ui-button { --button-pad-x: 10px; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); height: var(--control-height); padding: 0 var(--button-pad-x); border: 0; border-radius: var(--radius-sm); background: var(--color-control); color: var(--color-text); box-shadow: var(--shadow-button); font: inherit; font-weight: var(--font-weight-medium); line-height: var(--leading-sm); white-space: nowrap; text-decoration: none; user-select: none; flex-shrink: 0; transition: background var(--motion-duration) var(--ease-standard), color var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard), opacity var(--motion-duration) var(--ease-standard), transform 160ms var(--ease-out-strong); }
+.ui-button { --button-pad-x: var(--control-pad-x); display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); height: var(--control-height); padding: 0 var(--button-pad-x); border: 0; border-radius: var(--radius-sm); background: var(--color-control); color: var(--color-text); box-shadow: var(--shadow-button); font: inherit; font-weight: var(--font-weight-medium); line-height: var(--leading-sm); white-space: nowrap; text-decoration: none; user-select: none; flex-shrink: 0; transition: background var(--motion-duration) var(--ease-standard), color var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard), opacity var(--motion-duration) var(--ease-standard), transform 160ms var(--ease-out-strong); }
 .ui-button svg { flex-shrink: 0; }
 /* The accent lives on buttons: the primary is the text colour as a solid fill (#111111 with white text on light,
    #F2F2F2 with #111111 text on dark), and link-style ghost actions take the text colour. Secondary buttons stay neutral. */
@@ -51,7 +51,7 @@ html, .page-surface { scroll-padding-block: var(--focus-reach); }
 .ui-button--ghost:not(.ui-icon-button) { color: var(--color-accent-text); }
 .ui-button--danger { color: var(--color-danger); }
 .ui-button--ghost { background: var(--color-transparent); box-shadow: none; color: var(--color-muted); }
-.ui-button--sm { --button-pad-x: 8px; height: var(--control-height-sm); padding-inline: var(--button-pad-x); border-radius: var(--radius-xs); font-size: var(--text-xs); }
+.ui-button--sm { --button-pad-x: var(--space-8); height: var(--control-height-sm); padding-inline: var(--button-pad-x); border-radius: var(--radius-xs); font-size: var(--text-xs); }
 /* Hover fills only where a pointer can hover: on a touch screen a tap would leave them stuck on the control. Keyboard
    focus shows a stronger fill on every screen. A control is its solid fill alone: hover, focus and press are solid steps
    (--color-control-*), never a hairline. */
@@ -68,7 +68,7 @@ a.ui-button:focus-visible { text-decoration: none; }
 .ui-button--primary:active:not(:disabled) { background: var(--color-accent-pressed); }
 .ui-icon-button { width: var(--control-height); padding: 0; }
 .ui-icon-button.ui-button--sm { width: var(--control-height-sm); }
-.ui-input { --input-pad-x: 10px; display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 var(--input-pad-x); appearance: none; -webkit-appearance: none; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
+.ui-input { --input-pad-x: var(--control-pad-x); display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 var(--input-pad-x); appearance: none; -webkit-appearance: none; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .ui-input:hover:not(:disabled):not([aria-invalid='true']):not(:focus) { background-color: var(--color-control-hover); } }
 .ui-input:is(:focus, :focus-visible) { background-color: var(--color-control-focus); }
 .ui-input::placeholder { color: var(--color-muted); opacity: 1; }
@@ -447,7 +447,7 @@ button.ui-card__link { display: block; max-width: 100%; overflow: hidden; text-o
 @keyframes sheet-out { to { transform: translateY(100%); } }
 
 /* Native selects on touch screens: the trigger's look, the platform's picker. */
-select.ui-native-select { display: block; appearance: none; -webkit-appearance: none; text-align: left; padding-right: var(--space-32); background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%235C5C5C' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right 10px center / 14px, var(--color-control); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+select.ui-native-select { display: block; appearance: none; -webkit-appearance: none; text-align: left; padding-right: var(--space-32); background: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%235C5C5C' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E") no-repeat right var(--control-pad-x) center / 14px, var(--color-control); text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
 :root[data-theme='dark'] select.ui-native-select { background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' fill='none' stroke='%23ABABAB' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round' viewBox='0 0 24 24'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); }
 select.ui-native-select[data-placeholder] { color: var(--color-muted); }
 select.ui-native-select:disabled { background-color: var(--color-layer-1); }
@@ -458,9 +458,9 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
   :root { --control-height: 44px; --control-height-sm: 36px; }
   .ui-input { font-size: var(--text-lg); }
   .ui-textarea { --textarea-leading: 22px; }
-  .ui-button { --button-pad-x: 14px; font-size: var(--text-heading); }
+  .ui-button { --button-pad-x: calc(var(--control-pad-x) + var(--space-4)); font-size: var(--text-heading); }
   .ui-icon-button { padding: 0; }
-  .ui-button--sm { --button-pad-x: 12px; position: relative; font-size: var(--text-sm); }
+  .ui-button--sm { --button-pad-x: var(--space-12); position: relative; font-size: var(--text-sm); }
   .ui-button--sm::after { content: ''; position: absolute; inset: -4px 0; }
   .ui-tabs { min-height: 45px; }
   .ui-tab { height: 44px; padding-inline: var(--space-8); }

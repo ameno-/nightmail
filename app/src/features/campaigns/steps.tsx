@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useRef, type ReactNode } from 'react'
 import { Check } from 'lucide-react'
 import { Link } from 'react-router'
 import { BackLink, Icon } from '../../components/ui'
@@ -11,6 +11,16 @@ export function CampaignBar({ back = '/campaigns', crumb = 'Campaigns', title, s
     <div className="studio-bar__steps">{steps}</div>
     <div className="studio-bar__end">{actions}</div>
   </header>
+}
+
+// A header row's problem, on the line under the row (never a tinted row): it folds open and closed like the rows around
+// it, keeping its words while it closes.
+export function RowProblem({ id, message }: { id: string; message: string }) {
+  const last = useRef(message)
+  if (message) last.current = message
+  return <div className="campaign-compose-preview" data-open={message ? '' : undefined} aria-hidden={!message}>
+    <div><p id={id} className="campaign-compose-problem ui-field__error" role="alert">{last.current}</p></div>
+  </div>
 }
 
 // Write, then Review: a campaign is put together first and checked and sent after, as in other mail tools.

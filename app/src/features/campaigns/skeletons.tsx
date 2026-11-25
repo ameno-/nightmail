@@ -98,7 +98,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
       <div className="campaign-compose-scroll"><div className="studio-notices"><Notices /></div><div className="campaign-compose-sheet">
         <div className="campaign-compose-metadata" aria-hidden="true">
           <div className="campaign-compose-row campaign-compose-sender"><span>From</span><ControlSkeleton /><Button variant="ghost" size="sm" className="campaign-sender-toggle" disabled>Reply-To<Icon icon={ChevronRight} size="sm" /></Button></div>
-          <div className="campaign-compose-row campaign-compose-subject"><span>Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Preview text</Button></div>
+          <div className="campaign-compose-row campaign-compose-subject"><span>Subject</span><ControlSkeleton /><Button className="campaign-preview-toggle" variant="ghost" size="sm" disabled>Preview text<Icon icon={ChevronRight} size="sm" /></Button></div>
         </div>
         <ComposerSkeleton />
       </div></div>
