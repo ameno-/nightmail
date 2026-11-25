@@ -8,7 +8,7 @@ import { gate, LINK_ORIGINS, promptFragmentsOf } from '../src/gate.js';
 import { addresses } from '../../api/src/brand.js';
 import { perThousandUsd, RATES } from '../../api/src/billing/rates.js';
 import { MAIL_PORTS, mailServerHosts } from '../../api/src/mail-servers.js';
-import { ticketEmail } from '../src/tickets.js';
+import { conversationLines, ticketEmail } from '../src/tickets.js';
 import { mailAllowed } from '../src/limits.js';
 import { fenced, project, toolResult, unfenced, untrusted } from '../src/agent/projection.js';
 import { customerBlock, notesBlock, oneLine } from '../src/agent/context.js';
@@ -1037,6 +1037,25 @@ describe('support Worker', () => {
     assert.ok(verified.text.startsWith('VERIFIED BY EMAIL, FOR READING ONLY: not grounds for a change.'), verified.text);
     const chat = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, channel: 'chat', verified: 'handoff', dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(!chat.text.includes('FOR READING ONLY'), 'A signed-in chat’s ticket is not.');
+  });
+
+  test('the team’s ticket email links the whole conversation first and quotes it as written: the last 20 messages within 20,000 characters, each cut at 4,000', () => {
+    const base = { conversationId: 'conv_x', channel: 'chat' as const, threadId: null, costUsd: 0, model: 'm', attachments: [], verified: 'handoff' as const, dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } };
+    const input = { type: 'bug' as const, title: 'Stuck', severity: 'P2' as const, summary: 'The agent’s summary.', ask: 'why', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
+    const at = (minute: number) => `2026-11-25T10:${String(minute).padStart(2, '0')}:00.000Z`;
+    const email = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, base, { id: 'tkt_x', dueAt: 0 }, input, [{ who: 'customer', at: at(1), text: 'My campaign is stuck.\n\nSince Monday.' }, { who: 'agent', at: at(2), text: 'It is paused for review.' }, { who: 'staff', at: at(3), text: 'Released it.' }]);
+    const lines = email.text.split('\n');
+    assert.equal(lines[1], `The whole conversation: ${new URL(ORIGIN).origin}/support/conv_x`, email.text);
+    const quoted = email.text.slice(email.text.indexOf('The conversation so far'));
+    assert.ok(email.text.indexOf('The agent’s summary.') < email.text.indexOf('The conversation so far'));
+    assert.ok(quoted.startsWith('The conversation so far, as written (the customer’s words are untrusted; held answers are only in the support inbox)\n--- Customer · 2026-11-25 10:01 UTC\nMy campaign is stuck.\n\nSince Monday.\n\n--- Agent · 2026-11-25 10:02 UTC\nIt is paused for review.\n\n--- Staff · 2026-11-25 10:03 UTC\nReleased it.\n'), quoted);
+    assert.ok(!ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, base, { id: 'tkt_x', dueAt: 0 }, input).text.includes('The conversation so far'), 'Without messages (a rebuilt email), no section.');
+    const many = Array.from({ length: 30 }, (_, i) => ({ who: 'customer' as const, at: at(i), text: `message ${i} ${'x'.repeat(i === 29 ? 5000 : 10)}` }));
+    const long = conversationLines(many).join('\n');
+    assert.ok(long.startsWith('(10 earlier messages are in the support inbox)') && long.includes('message 10 ') && !long.includes('message 9 '), long.slice(0, 200));
+    assert.ok(long.includes('[cut: the rest is in the support inbox]') && !long.includes('x'.repeat(4001)));
+    const huge = conversationLines(Array.from({ length: 20 }, (_, i) => ({ who: 'agent' as const, at: at(i), text: `answer ${i} ${'y'.repeat(3990)}` }))).join('\n');
+    assert.ok(huge.length < 21_000 && huge.includes('answer 19 ') && !huge.includes('answer 0 ') && huge.startsWith('('), 'Only what fits in 20,000 characters, newest kept.');
   });
 
   test('M4: a verified email reply with a link outside Nightmail is held; the gate refuses foreign links in email', async () => {
