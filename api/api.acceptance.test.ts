@@ -32246,6 +32246,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         [200, 'image/png', 'public, max-age=31536000, immutable', 'PNG', 1020, 552], 'A 340 × 184 card drawn at 3×.');
       assert.ok(Buffer.from(await (await get(first!)).arrayBuffer()).equals(png), 'Drawn again, byte for byte.');
       assert.equal((await get(first!, { 'if-none-match': served.headers.get('etag')! })).status, 304);
+      const head = await publicFetch(new Request(first!, { method: 'HEAD' }));
+      assert.deepEqual([head.status, head.headers.get('content-type'), (await head.arrayBuffer()).byteLength], [200, 'image/png', 0], 'HEAD answers without drawing.');
       for (const path of ['/i/score-card/v1/0-f-100-dark.png', '/i/score-card/v1/100-a-plus-none-light.png', '/i/score-card/v1/72-c-500-light.png']) assert.equal((await get(path)).status, 200, path);
       for (const wrong of ['/i/score-card/v1/86-a-none-light.png', '/i/score-card/v1/101-a-plus-none-light.png', '/i/score-card/v1/086-b-none-light.png', '/i/score-card/v1/86-b-300-light.png',
         '/i/score-card/v1/86-b-none-sepia.png', '/i/score-card/v2/86-b-none-light.png', '/i/score-card/v1/86-b-none-light.png/x', `/i/score-card/v1/86-b-none-light.png?w=${wid}`.replace('?', '%3F'), '/i/score-card/v1/']) {

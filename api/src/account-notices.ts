@@ -268,9 +268,10 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
     // workspace's own, the one the row was leased under, read when the email is made rather than when it was queued.
     let score: ScoreCard | null = null;
     if (row.kind === 'evaluation_finished') {
-      const { loadDisplayedStanding, scoreView } = await import('./sender-score.js');
+      const [{ loadDisplayedStanding, scoreView }, { gradeOf }] = await Promise.all([import('./sender-score.js'), import('./standing-model.js')]);
       const view = scoreView(await loadDisplayedStanding(runtime, job.workspaceId));
-      if (view.score !== null && view.grade) score = { score: Math.round(view.score), grade: view.grade, daily: view.limit?.daily ?? null, at: new Date() };
+      // The grade of the whole figure shown, as the card's picture draws it (89.6 shows as 90, an A, in the picture and the words alike).
+      if (view.score !== null && view.grade) { const shown = Math.round(view.score); score = { score: shown, grade: gradeOf(shown), daily: view.limit?.daily ?? null, at: new Date() }; }
     }
     const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''), runtime.config, score);
     if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }

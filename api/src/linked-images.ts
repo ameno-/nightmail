@@ -84,6 +84,8 @@ export function registerLinkedImages(app: App) {
       'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline', 'Cross-Origin-Resource-Policy': 'cross-origin', 'Access-Control-Allow-Origin': '*', 'X-Robots-Tag': 'noindex',
     };
     if (c.req.header('if-none-match')?.split(',').some(tag => tag.trim().replace(/^W\//, '') === etag)) return new Response(null, { status: 304, headers });
+    // HEAD skips the colo's copy (src/worker.ts keeps GETs only): answered without drawing, so it can't make the Worker draw on every request.
+    if (c.req.method === 'HEAD') return new Response(null, { headers });
     const png = await drawScoreCard(card);
     return new Response(png as Uint8Array<ArrayBuffer>, { headers: { ...headers, 'Content-Length': String(png.length) } });
   });
