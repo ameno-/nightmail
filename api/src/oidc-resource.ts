@@ -17,9 +17,14 @@ const audience = (runtime: Runtime, url?: string) => {
   return new URL('/mcp', origin && runtime.config.previousOrigins?.includes(origin) ? origin : runtime.config.publicUrl).href;
 };
 export function protectedResourceMetadata(runtime: Runtime, url?: string) {
-  // Both scope sets are published and accepted (bane:* until cleanup), the requested ones (OAUTH_SCOPE_PREFIX) first.
-  const scopes = requestedScopes(runtime.config), published = [...scopes, ...oauthScopePrefixes.filter(prefix => !scopes[0]!.startsWith(`${prefix}:`)).flatMap(prefix => permissions.map(p => `${prefix}:${p}`))];
-  return { resource: audience(runtime, url), resource_name:productName, authorization_servers: [runtime.config.accountIssuer],
+  // Only the scopes this installation asks for (OAUTH_SCOPE_PREFIX): MCP clients request every listed scope (Claude Code's
+  // `mcp login` does), and the consent screen showed each permission twice while bane:* was listed too. Tokens with either
+  // prefix still work (authorizeResource). An earlier origin keeps both sets: its grants were made with bane:*, and the
+  // account service checks a grant's scopes against this list whenever it refreshes. bane: remove after rename cleanup.
+  const resource = audience(runtime, url), scopes = requestedScopes(runtime.config);
+  const published = resource === audience(runtime) ? scopes
+    : [...scopes, ...oauthScopePrefixes.filter(prefix => !scopes[0]!.startsWith(`${prefix}:`)).flatMap(prefix => permissions.map(p => `${prefix}:${p}`))];
+  return { resource, resource_name:productName, authorization_servers: [runtime.config.accountIssuer],
     scopes_supported: published, bearer_methods_supported: ['header'],
     // Provisional extension name until the issuer publishes its metadata contract.
     scope_descriptions:Object.fromEntries(published.map(scope => [scope, descriptions[scope.split(':')[1] as Permission]])) };
