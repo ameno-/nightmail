@@ -134,6 +134,10 @@ export interface Config {
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   hostedScreen?: boolean;
+  /** NIGHTMAIL_HYGIENE_LISTS: the nightly sync of list hygiene's open lists (src/list-hygiene.ts). False: the vendored snapshot only. */
+  hygieneLists?: boolean;
+  /** NIGHTMAIL_HYGIENE_DNS: the DNS-over-HTTPS resolver list hygiene checks recipient domains with (src/mail-dns.ts). Null: no domain checks. */
+  hygieneDnsUrl?: string | null;
   /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */

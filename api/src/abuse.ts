@@ -5,7 +5,7 @@ import { ipNetwork, userAgentFamily } from './audit.js';
 import { clientIpHeader, clientNetworkHeader } from './brand.js';
 import { log, type DbExecutor, type Runtime } from './core.js';
 import { placementRoot } from './domain-registry.js';
-import { isDisposableDomain, PUBLIC_MAILBOXES } from './list-hygiene.js';
+import { isKnownDisposable, PUBLIC_MAILBOXES } from './list-hygiene.js';
 
 // Abuse and fraud monitoring for hosted installations: small facts ("signals") about users, workspaces and refused
 // sign-ins, kept so that related accounts can be recognised by a person later.
@@ -70,7 +70,7 @@ export function readAddress(address: string) {
   const plus = mailbox.indexOf('+'), tagged = !!rule && plus > 0;
   if (tagged) mailbox = mailbox.slice(0, plus);
   if (rule?.dots) mailbox = mailbox.replaceAll('.', '');
-  return { exact: `${local}@${domain}`, alias: rule ? `${mailbox}@${rule.as ?? domain}` : null, tagged, domain, disposable: isDisposableDomain(domain), publicMailbox: PUBLIC_MAILBOXES.has(domain) };
+  return { exact: `${local}@${domain}`, alias: rule ? `${mailbox}@${rule.as ?? domain}` : null, tagged, domain, disposable: isKnownDisposable(domain), publicMailbox: PUBLIC_MAILBOXES.has(domain) };
 }
 const DNS_NAME = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 /** The registrable domain of a DNS host name under a known public suffix, or null: never an IP literal, a bare label,

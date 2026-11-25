@@ -85,7 +85,7 @@ export interface SenderScore { state: 'warmup' | 'graded'; emails: { firstEmails
 export interface StandingReleaseInput { checklist: { bouncedRemoved: true; listSourceConfirmed: true } }
 export interface Overview { periodStart: ISODate; periodEnd: ISODate; sent: number; delivered: number; bounced: number; complaints: number; deferred: number; previousSent: number; points: ChartPoint[]; recentCampaigns?: Campaign[] }
 /** Why list hygiene flags an address (API ContactRisk): campaigns skip the contact unless it is allowed. */
-export type RiskReason = 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead'
+export type RiskReason = 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain'
 export interface ContactRisk { reason: RiskReason; /** For typo_domain: the address it most likely meant. */ suggestion: string | null; allowed: boolean }
 export interface RiskBreakdown { total: number; byReason: Record<RiskReason, number> }
 export interface Contact { properties?: Record<string, string | number | boolean | null>; id: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[]; createdAt: ISODate; lastOpenedAt: ISODate | null; suppressionReason?: string; risk: ContactRisk | null }

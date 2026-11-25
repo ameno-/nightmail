@@ -24,6 +24,8 @@ BANE_ROOT_SECRET=$(openssl rand -hex 36); export BANE_ROOT_SECRET
 export ENABLE_LIVE_SES=false AWS_EC2_METADATA_DISABLED=true WEBHOOK_ALLOWED_HOSTS=example.com
 export S3_ACCESS_KEY_ID=S3RVER S3_SECRET_ACCESS_KEY=S3RVER S3_BUCKET=fixture
 export SIMULATED_SES_LATENCY_MS=0 SIMULATED_SES_DELIVERY_DELAY_MS=0
+# List hygiene never fetches its lists or resolves domains here: tests mock both where they mean to.
+export NIGHTMAIL_HYGIENE_LISTS=off NIGHTMAIL_HYGIENE_DNS=off
 # Migrate once; isolate global auth fixtures, row locks, storage and prototype
 # mocks between the two processes. Never parallelize tests inside one database.
 node --import tsx src/migrate.ts

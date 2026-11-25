@@ -57,6 +57,7 @@ JS
 started=$SECONDS
 ./node_modules/.bin/wrangler dev --config wrangler.preview.jsonc --local --ip 127.0.0.1 --port "$port" --test-scheduled \
   --var "BANE_ROOT_SECRET:$secret" --var ACCOUNT_CLIENT_PRIVATE_KEY:preview --var TYPESAFE_API_KEY:preview \
+  --var NIGHTMAIL_HYGIENE_LISTS:off --var NIGHTMAIL_HYGIENE_DNS:off \
   > "$tmp/wrangler.log" 2>&1 &
 wrangler=$!
 trap 'kill "$wrangler" 2>/dev/null || :' EXIT
