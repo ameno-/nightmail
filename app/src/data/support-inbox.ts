@@ -5,12 +5,14 @@ import { request } from './live'
 // staff. Like the rest of the operator API it is left out of the public SDK, so the inbox calls it with the dashboard's
 // own request helper. Its views: Needs you (what only a person can move forward, most urgent first), Agent handling and All.
 export type InboxView = 'needs_you' | 'agent' | 'all'
-export type Channel = 'chat' | 'email'
+/** agent_feedback: a report an agent filed with sendFeedback (api/src/feedback.ts); nobody to reply to. */
+export type Channel = 'chat' | 'email' | 'agent_feedback'
+export const channelLabels: Record<Channel, string> = { chat: 'Chat', email: 'Email', agent_feedback: 'Agent feedback' }
 export type SupportAuthor = 'customer' | 'agent' | 'staff' | 'system'
 export type TriageReason = 'ticket' | 'blocked' | 'failed' | 'paused'
 export interface SupportTicket { id: string; type: string | null; severity: string | null; resolvedAt: string | null }
 export interface SupportConversation {
-  id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none'
+  id: string; channel: Channel; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none' | 'credential'
   status: 'open' | 'ticketed' | 'closed'; subject: string | null; customer: { userId: string; name: string | null; email: string | null } | null; sender: string | null
   workspace: { id: string; name: string } | null; ticket: SupportTicket | null; agentState: 'active' | 'paused'
   pausedBy: { kind: 'staff' | 'ticket'; userId: string | null; name: string | null } | null; pausedAt: string | null

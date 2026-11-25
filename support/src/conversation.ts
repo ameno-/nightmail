@@ -188,6 +188,8 @@ type Composed = {
    * `replied`: free text from the general build before the reply tool, gated when it is composed.
    */
   model?: string | null; replied?: boolean; gated?: string[];
+  /** The held entry (staff inbox) that keeps what the model wrote when the gate held it: the email sends HELD instead. */
+  gatedDraft?: string;
   ticketed?: boolean; fixed?: 'help' | 'busy' | 'decline'; text?: string | null; paused?: boolean; held?: string;
   /** The model declined to answer without calling reply (stop_reason "refusal"): the fixed decline is the answer. */
   declined?: boolean;
@@ -1825,6 +1827,8 @@ export class SupportConversation extends DurableObject<Env> {
           const plain = plainText(draft.trim());
           if (!plain) throw new ToolFailure('That reply is empty. Call reply with the whole email.');
           const checked = gate(plain, gateScope());
+          // What the gate held is the team's: a held entry in the staff inbox, never in the email.
+          if (!checked.ok) this.record({ id: progress.gatedDraft ??= newId('msg'), role: 'assistant', kind: 'held', text: plain, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'gate' });
           // Frozen: from here on this answer is this email (a general one with the Help line added after the gate, by the
           // Worker, never the model), and a crash or a retry sends exactly it without asking the model again.
           progress.model = checked.ok ? (verified ? plain : `${plain}\n\n${helpLine(origin)}`) : HELD;
@@ -1879,7 +1883,10 @@ export class SupportConversation extends DurableObject<Env> {
       // Free text the general build before the reply tool wrote (marked general; unmarked text was held at load): gated
       // now, then the Help line.
       const checked = gate(reply, gateScope());
-      if (!checked.ok || !reply) { await this.heldTicket(progress, save, checked.ok ? ['empty'] : checked.reasons, body, answer.messageId, dmarc); reply = HELD; }
+      if (!checked.ok || !reply) {
+        if (reply) { this.record({ id: progress.gatedDraft ??= newId('msg'), role: 'assistant', kind: 'held', text: reply, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'gate' }); save(); }
+        await this.heldTicket(progress, save, checked.ok ? ['empty'] : checked.reasons, body, answer.messageId, dmarc); reply = HELD;
+      }
       else reply = `${reply}\n\n${helpLine(origin)}`;
     }
     // Frozen with the answer: a retry sends exactly this text, once, under the same key.

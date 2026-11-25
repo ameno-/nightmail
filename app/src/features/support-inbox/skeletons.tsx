@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Keyboard, MoreHorizontal } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { Button, FacetRail, IconButton, LoadingRegion, PageHeader, SearchField, Select, Skeleton, SkeletonText, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
-import type { Channel, InboxView, SupportConversation } from '../../data/support-inbox'
+import { channelLabels, type Channel, type InboxView, type SupportConversation } from '../../data/support-inbox'
 import { label } from '../../lib/format'
 import { ActionsTrigger } from '../operator/skeletons'
 import './support-inbox.css'
@@ -21,7 +21,7 @@ export const inboxColumnDefs: SkeletonColumn[] = [
 ]
 export const inboxViews: { value: InboxView; label: string }[] = [{ value: 'needs_you', label: 'Needs you' }, { value: 'agent', label: 'Agent handling' }, { value: 'all', label: 'All' }]
 export const viewOf = (search: string): InboxView => { const view = new URLSearchParams(search).get('view'); return view === 'agent' || view === 'all' ? view : 'needs_you' }
-export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel === 'chat' || channel === 'email' ? channel : '' }
+export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel && Object.hasOwn(channelLabels, channel) ? channel as Channel : '' }
 
 // Why a conversation needs you, the most pressing first: a failed send, blocked work, a customer waiting, a ticket.
 export type Triage = { key: 'failed' | 'blocked' | 'waiting' | 'ticket' | 'paused' | 'status'; text: string; tone: Tone }
@@ -41,7 +41,7 @@ export function inboxFacetGroups(rows: SupportConversation[] | undefined, channe
   const count = (test: (c: SupportConversation) => boolean, list = rows) => list ? list.filter(test).length : null
   return [
     { key: 'why', title: 'Primary reason', items: whyFacets.map(([key, text, tone]) => ({ key, label: text, tone, count: count(c => triageOf(c).key === key) })) },
-    { key: 'channel', title: 'Channel', items: (['chat', 'email'] as const).map(value => ({ key: value, label: value === 'chat' ? 'Chat' : 'Email', count: count(c => c.channel === value, everyChannel),
+    { key: 'channel', title: 'Channel', items: (Object.keys(channelLabels) as Channel[]).map(value => ({ key: value, label: channelLabels[value], count: count(c => c.channel === value, everyChannel),
       ...setChannel ? { selected: channel === value, onSelect: () => setChannel(channel === value ? '' : value) } : {} })) },
     { key: 'ticket', title: 'Open tickets', items: (['P1', 'P2', 'P3'] as const).map(severity => ({ key: severity, label: severity, tone: (severity === 'P1' ? 'danger' : severity === 'P2' ? 'warning' : 'neutral') as Tone,
       count: count(c => Boolean(c.ticket && !c.ticket.resolvedAt && c.ticket.severity === severity)) })) },
@@ -52,7 +52,7 @@ export function InboxTabs({ view, counts, onChange, disabled = false }: { view: 
   return <div className="sinbox-tabs"><Tabs value={view} label="Support views" disabled={disabled} onValueChange={value => onChange?.(value as InboxView)}
     items={inboxViews.map(item => ({ ...item, count: item.value === 'all' ? undefined : counts ? counts[item.value === 'needs_you' ? 'needsYou' : 'agent'] : null }))} /></div>
 }
-const channelOptions = [{ value: 'all', label: 'All channels' }, { value: 'chat', label: 'Chat' }, { value: 'email', label: 'Email' }]
+const channelOptions = [{ value: 'all', label: 'All channels' }, ...Object.entries(channelLabels).map(([value, label]) => ({ value, label }))]
 /** Search, and the channel filter where the rail is hidden (below 1200 px), so a filter is always visible and can be cleared. */
 export function InboxToolbar({ search = '', onSearch, channel = '', onChannel, onShortcuts, disabled = false }: { search?: string; onSearch?: (value: string) => void; channel?: Channel | ''; onChannel?: (channel: Channel | '') => void; onShortcuts?: () => void; disabled?: boolean }) {
   return <div className="data-toolbar sinbox-toolbar"><div className="cluster sinbox-toolbar__filters">
