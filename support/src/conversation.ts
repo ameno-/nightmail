@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './nightmail.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
-import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
+import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext, type TicketMessage } from './tickets.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
 import { alertOnce, countToday, holdOverCap, limits, mailAllowed, registrableDomain, ticketAllowed } from './limits.js';
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type WorkState } from './work.js';
@@ -1390,6 +1390,15 @@ export class SupportConversation extends DurableObject<Env> {
     return { ok: true, global: false };
   }
 
+  /**
+   * The conversation so far as the team's ticket email quotes it (tickets.ts): every message as written, but no notice and
+   * no held answer (what the gate or a narrowed scope held stays in the staff inbox, out of email).
+   */
+  private ticketMessages(): TicketMessage[] {
+    return this.sql.exec<{ role: Transcript['role']; text: string; at: string }>("SELECT role, text, at FROM _support_transcript WHERE kind IS NOT 'notice' AND kind IS NOT 'held' ORDER BY seq").toArray()
+      .map(r => ({ who: r.role === 'user' ? 'customer' as const : r.role === 'staff' ? 'staff' as const : 'agent' as const, at: r.at, text: r.text }));
+  }
+
   private async harnessTicket(meta: Meta, input: TicketInput, dmarc: string | null = null): Promise<ReturnType<typeof fileTicket> extends Promise<infer T> ? T & { refused?: 'person' | 'global' } : never> {
     const ctx = await this.ticketCtx(meta, dmarc);
     // A new ticket counts against the person's cap and its budget (verified customers have their own reserve: R1);
@@ -1410,7 +1419,7 @@ export class SupportConversation extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; m.ticket = { id: filed.id, type: input.type, severity: input.severity, category, replyTo: filed.replyTo, expect, brief: briefOf(input) }; });
         this.work.insert({ kind: 'notify', id: `notify:${filed.id}`, payload: { ticketId: filed.id, key: `ticket-${filed.id}`,
-          input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, filed, input) } } satisfies Notify });
+          input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, filed, input, this.ticketMessages()) } } satisfies Notify });
         if (meta.channel === 'chat') this.work.insert({ kind: 'followup', id: `followup:${filed.id}`, payload: { addressId: this.env.SUPPORT_ADDRESS_ID, ctx, ticket: filed } satisfies FollowUp });
       });
       log('info', { event: 'ticket', code: 'TICKET_FILED', ticket: filed.id, type: input.type, channel: meta.channel });
