@@ -640,9 +640,9 @@ export type ContactRead = Contact & {
  */
 export type ContactRisk = {
     /**
-     * invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce).
+     * invalid: not a deliverable address. disposable: a public temporary inbox, or a domain whose mail servers serve them. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce). no_mail_domain: the domain can't receive mail (it doesn't exist, or has no mail server).
      */
-    reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead';
+    reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
     /**
      * For typo_domain, the address with the provider it most likely meant.
      */
@@ -958,7 +958,7 @@ export type AudienceImport = {
         /**
          * What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.
          */
-        risk?: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead';
+        risk?: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
     }>;
     errors: Array<{
         row: number;
@@ -990,6 +990,7 @@ export type RiskBreakdown = {
         typo_domain: number;
         role: number;
         dead: number;
+        no_mail_domain: number;
     };
 } | null;
 
@@ -2237,6 +2238,7 @@ export type CampaignAudienceCounts = {
         typo_domain: number;
         role: number;
         dead: number;
+        no_mail_domain: number;
     };
     /**
      * With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.
@@ -2485,6 +2487,7 @@ export type CampaignQueued = {
             typo_domain: number;
             role: number;
             dead: number;
+            no_mail_domain: number;
         };
     } | null;
     /**

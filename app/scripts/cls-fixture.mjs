@@ -142,7 +142,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       // Built-in domains (api/src/builtin-domain.ts): the workspaces seeded with one below show it in onboarding, Domains and Overview.
       NIGHTMAIL_BUILTIN_DOMAIN: 'nightmail.email',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
-      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',

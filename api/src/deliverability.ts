@@ -1,6 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, budgetedRead, type DbExecutor, type ReadBudget, type Runtime } from './core.js';
 import { productName } from './brand.js';
+import { hygieneLists } from './list-hygiene.js';
 
 // Deliverability aggregates over a workspace's retained mail (30 days of sending_emails and their events), shared by
 // the support grant's reads (src/support-deliverability.ts) and, later, a customer /v1/metrics?groupBy= (decision D9).
@@ -458,20 +459,23 @@ const ROLE = ['admin', 'administrator', 'billing', 'contact', 'hello', 'help', '
 export const FREE_MAIL = ['gmail.com', 'googlemail.com', 'yahoo.com', 'ymail.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com', 'aol.com', 'icloud.com', 'me.com', 'mac.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.net', 'gmx.de', 'web.de', 'mail.com', 'yandex.com', 'yandex.ru', 'zoho.com', 'qq.com', '163.com'];
 const TYPOS = ['gmial.com', 'gmai.com', 'gmal.com', 'gmaill.com', 'gnail.com', 'gmail.co', 'gmail.con', 'gmail.cm', 'gamil.com', 'hotmial.com', 'hotmal.com', 'hotmai.com', 'hotmail.co', 'hotmail.con', 'yaho.com', 'yahooo.com', 'yahoo.co', 'yahoo.con', 'outlok.com', 'outloo.com', 'outlook.co', 'outlook.con', 'iclod.com', 'icloud.co', 'aol.co'];
 const local = sql`lower(split_part(c.email, '@', 1))`, cdomain = sql`lower(split_part(c.email, '@', 2))`;
-const audienceMeasures = sql`count(*)::int AS contacts,
+// The role names and free providers counted here include list hygiene's synced lists (src/list-hygiene.ts): the soft tier
+// of role names, and the providers.
+const audienceMeasures = (roles: string[], free: string[]) => sql`count(*)::int AS contacts,
   count(*) FILTER (WHERE c.marketing_consent = 'subscribed')::int AS subscribed, count(*) FILTER (WHERE c.marketing_consent = 'unknown')::int AS unknown,
   count(*) FILTER (WHERE c.marketing_consent = 'unsubscribed')::int AS unsubscribed, count(*) FILTER (WHERE c.suppressed)::int AS suppressed,
   count(*) FILTER (WHERE c.last_click_at >= now() - interval '30 days')::int AS clicked30, count(*) FILTER (WHERE c.last_click_at >= now() - interval '90 days')::int AS clicked90,
   count(*) FILTER (WHERE c.last_click_at >= now() - interval '180 days')::int AS clicked180,
   count(*) FILTER (WHERE c.observed_since < now() - interval '180 days' AND coalesce(greatest(c.last_open_at, c.last_click_at), '-infinity') < now() - interval '180 days')::int AS stale,
   count(*) FILTER (WHERE c.observed_since IS NULL)::int AS "neverObserved",
-  count(*) FILTER (WHERE ${local} = ANY(${texts(ROLE)}))::int AS role, count(*) FILTER (WHERE ${cdomain} = ANY(${texts(FREE_MAIL)}))::int AS "freeMail",
+  count(*) FILTER (WHERE ${local} = ANY(${texts(roles)}))::int AS role, count(*) FILTER (WHERE ${cdomain} = ANY(${texts(free)}))::int AS "freeMail",
   count(*) FILTER (WHERE ${cdomain} = ANY(${texts(TYPOS)}))::int AS "typoDomains"`;
 const AUDIENCE_HEALTH_SAMPLE_LIMIT = 10_000, AUDIENCE_HEALTH_LIST_TOTAL_BUDGET = 40_000;
 type AudienceRow = { contacts: number; subscribed: number; unknown: number; unsubscribed: number; suppressed: number; clicked30: number; clicked90: number; clicked180: number; stale: number; neverObserved: number; role: number; freeMail: number; typoDomains: number };
 type AudienceViewResult = AudienceRow & { sampled: boolean; sampleSize: number | null; suppressedBy: Record<string, number>; providers: Record<string, number>; shares: { stale: Rate; role: Rate; freeMail: Rate } };
 /** Counts per list (the 20 largest, or one) and for the whole audience, imports of the last 90 days; never an address. */
 export async function audienceHealth(db: DbExecutor, wid: string, listId?: string) {
+  const hygiene = await hygieneLists(db), roles = [...new Set([...ROLE, ...hygiene.roles])], free = [...new Set([...FREE_MAIL, ...hygiene.providers])];
   // Pick up to sampleLimit + 1 contact IDs per group uniformly by hashtextextended(id, 0) via Index-Only Scan
   // (avoiding both time-ordered UUIDv7 skew and random-IO blowup inside LATERAL), fetch distinct contacts once,
   // and compute core measures + suppression reasons + providers in one pass. Scopes exceeding sampleLimit mark
@@ -498,7 +502,7 @@ export async function audienceHealth(db: DbExecutor, wid: string, listId?: strin
         SELECT g, email, marketing_consent, suppressed, suppression_reason, last_open_at, last_click_at, observed_since
         FROM fetched, unnest(gs) AS g
       ),
-      measures AS (SELECT g, ${audienceMeasures} FROM c GROUP BY g),
+      measures AS (SELECT g, ${audienceMeasures(roles, free)} FROM c GROUP BY g),
       reasons AS (
         SELECT g, jsonb_agg(jsonb_build_object('reason', reason, 'n', n) ORDER BY n DESC, reason) AS reasons
         FROM (

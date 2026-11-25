@@ -12610,7 +12610,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           FROM unnest($2::text[],$3::text[],$4::boolean[]) AS fixture(id,consent,suppressed)`,
         [wid, ids, ['subscribed', 'unsubscribed', 'unknown', 'subscribed'], [false, false, false, true]]);
         ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: ids }));
-        const audience = { listId: list.id }, counts = { matched: 4, eligible: 1, suppressed: 1, unsubscribed: 2, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } };
+        const audience = { listId: list.id }, counts = { matched: 4, eligible: 1, suppressed: 1, unsubscribed: 2, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 } };
         const create = async (fields: Json) => ok(await local('POST', '/v1/campaigns', {
           name: unique('review-display'), from: 'newsletter@shop.example.com', subject: 'Shop review', region: REGION, ...fields,
         }), 201);
@@ -15513,7 +15513,7 @@ describe('Private attachment assets and campaign revisions', () => {
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    assert.deepEqual(ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
+    assert.deepEqual(ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 } });
     const sent = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
     assert.equal(sent.state, 'preparing');
     assert.equal(sent.queued, 1);
@@ -18352,7 +18352,7 @@ describe('Campaign authorization and dispatch credentials', () => {
     const naming = (ids: { list: string; segment: string }): Json[] => [{ listId: ids.list }, { listId: list.id, segmentId: ids.segment }, { listId: list.id, excludeListIds: [ids.list] }, { listId: list.id, excludeSegmentIds: [ids.segment] }];
     const base = { name: 'Isolation', from: 'sender@example.com', subject: 'Hello', html: '<p>Hello</p>' };
     const own = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: list.id } }), 201);
-    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
+    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 } });
     return { wid, list, base, own, foreign: naming(theirs), unknown: naming(nobodys) };
   }
   test('a campaign audience may name only lists and segments of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
@@ -20399,8 +20399,8 @@ describe('Required notices', () => {
       assert.equal(notice.draft.requiredNotice, true);
       assert.equal(marketing.draft.requiredNotice, undefined);
       // The live counts: the notice is for everyone not suppressed; marketing only for subscribers.
-      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${notice.id}/audience`)), { matched: 6, eligible: 4, suppressed: 2, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
-      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${marketing.id}/audience`)), { matched: 6, eligible: 2, suppressed: 2, unsubscribed: 2, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${notice.id}/audience`)), { matched: 6, eligible: 4, suppressed: 2, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 } });
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${marketing.id}/audience`)), { matched: 6, eligible: 2, suppressed: 2, unsubscribed: 2, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 } });
       // The preview and the Checks show no unsubscribe: a notice is checked as the transactional message it is.
       const preview = ok(await local('GET', `/v1/campaigns/${notice.id}/preview`));
       assert.ok(!/unsubscribe/i.test(preview.html) && !/unsubscribe/i.test(preview.text), 'A notice has no unsubscribe link.');
@@ -20618,7 +20618,7 @@ describe('List hygiene', () => {
   test('risky addresses: flagged on create and import, listed and allowed per contact, skipped by campaigns and marketing sends, warned on transactional mail; the hourly pass flags existing contacts', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId, from = 'sender@example.com', tag = unique('hyg');
-      const NONE = { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 };
+      const NONE = { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 };
       // Another workspace hard-bounced these addresses: dead anywhere else.
       const bounced = (email: string) => db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES ($1,'ws_hygiene_elsewhere',$2,true,'hard_bounce',now())", [unique('con'), email]);
       const gone = `gone-${tag}@example.org`, gone2 = `gone2-${tag}@example.org`, gone3 = `gone3-${tag}@example.org`;
@@ -20685,16 +20685,132 @@ describe('List hygiene', () => {
       await db.query("UPDATE audience_contacts SET risk_allowed = true WHERE id = $1", [disposable.id]);
       await db.query('DELETE FROM audience_hygiene_state');
       const riskOf = async (id: string) => (await db.query('SELECT risk, risk_allowed FROM audience_contacts WHERE id = $1', [id])).rows[0];
-      const first = await classifyContacts({ db: runtime.db }, 120_000);
+      const first = await classifyContacts({ db: runtime.db, config: runtime.config }, 120_000);
       assert.ok(first && first.finished && first.read >= 7, JSON.stringify(first));
       assert.deepEqual([await riskOf(legacy), await riskOf(legacyDead), await riskOf(fine.id), await riskOf(disposable.id)], [
         { risk: 'disposable', risk_allowed: false }, { risk: 'dead', risk_allowed: false }, { risk: null, risk_allowed: false }, { risk: 'disposable', risk_allowed: true }]);
-      assert.deepEqual(await classifyContacts({ db: runtime.db }), { read: 0, changed: 0, skipped: 0, finished: true }, 'A finished pass waits a day.');
+      assert.deepEqual(await classifyContacts({ db: runtime.db, config: runtime.config }), { read: 0, changed: 0, skipped: 0, finished: true }, 'A finished pass waits a day.');
       await db.query("UPDATE audience_hygiene_state SET version = 'an older list'");
       await db.query("UPDATE audience_contacts SET risk = NULL WHERE id = $1", [legacy]);
-      const again = await classifyContacts({ db: runtime.db }, 120_000);
+      const again = await classifyContacts({ db: runtime.db, config: runtime.config }, 120_000);
       assert.ok(again && again.finished && again.changed >= 1, JSON.stringify(again));
       assert.deepEqual(await riskOf(legacy), { risk: 'disposable', risk_allowed: false });
+    });
+  });
+
+  // The nightly sync of the open lists and the domain checks, with every source and the DNS resolver mocked.
+  test('synced lists and domain checks: a poisoned, failing or shrunken source keeps its last copy; NXDOMAIN, null MX, no MX and disposable mail servers flag contacts at create, import and in the hourly pass', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const [{ SOURCES }, hygiene] = await Promise.all([import('./src/hygiene-sources.js'), import('./src/list-hygiene.js')]);
+      const wid = runtime.config.workspaceId, before = { lists: runtime.config.hygieneLists, dns: runtime.config.hygieneDnsUrl };
+      runtime.config.hygieneLists = true; runtime.config.hygieneDnsUrl = 'https://dns.test/dns-query';
+      await db.query("DELETE FROM hygiene_lists; DELETE FROM hygiene_mail_domains; DELETE FROM job_schedule WHERE workspace_id LIKE 'maintenance:hygiene-%'");
+      hygiene.forgetHygieneLists();
+      try {
+        const many = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${i}.trash${i % 9}.dev`);
+        const traps = ['trapmx1.example', 'trapmx2.example', 'trapmx3.example', 'googly1.example', 'googly2.example', 'googly3.example'];
+        const sources: Record<string, string> = {
+          'disposable-email-domains': ['# a comment', 'mailinator.com', 'fexpost.com', 'duck.com', 'gmx.de', ...many('a', 5000)].join('\n'),
+          disposable: [...many('b', 50000), ...traps].join('\n'),
+          fakefilter: ['gmail.com', ...many('c', 2000)].join('\n'),
+          mailchecker: many('d', 50000).join('\n'),
+          'role-based-email-addresses': `const OTHER = [${[...Array.from({ length: 250 }, (_, i) => `'role${i}'`), "'info'", "'sales'"].join(', ')}];`,
+          'public-email-providers-domains': JSON.stringify([{ name: 'GMX', domains: [{ domain: 'gmx.de', mxRecords: [{ priority: '10', hostname: 'mx00.gmx.net' }] }] },
+            ...Array.from({ length: 600 }, (_, i) => ({ name: `P${i}`, domains: [{ domain: `provider${i}.example` }] }))]),
+        };
+        const failing = new Set<string>();
+        const fetcher = (async (input: RequestInfo | URL) => {
+          const source = SOURCES.find(s => s.url === String(input))!;
+          return failing.has(source.name) ? new Response('unavailable', { status: 500 }) : new Response(sources[source.name], { status: 200 });
+        }) as typeof fetch;
+        const built = async () => (await db.query("SELECT version, meta FROM hygiene_lists WHERE name = 'built'")).rows[0];
+        const sourceCount = async (name: string) => (await db.query('SELECT (meta->>\'count\')::int AS n FROM hygiene_lists WHERE name = $1', [`source:${name}`])).rows[0]?.n ?? null;
+
+        // A list that carries gmail.com is refused; never fetched, the vendored snapshot stands in for it.
+        const first = await hygiene.syncHygieneLists(runtime, fetcher, true);
+        assert.deepEqual(first!.failed, [{ name: 'fakefilter', error: 'it lists gmail.com' }]);
+        assert.deepEqual([await sourceCount('fakefilter'), await sourceCount('disposable'), await sourceCount('mailchecker')], [null, 50006, 50000]);
+        hygiene.forgetHygieneLists();
+        let lists = await hygiene.hygieneLists(runtime.db);
+        assert.equal(lists.source, 'synced');
+        assert.deepEqual(['x.y.mailinator.com', 'fexpost.com', 'duck.com', 'gmx.de', 'provider7.example', 'yopmail.com', 'b17.trash8.dev', 'gmail.com'].map(d => lists.isDisposable(d)),
+          [true, true, false, false, false, true, true, false], 'Parents match; the allowlist and the providers never do; the snapshot covers the refused source.');
+        assert.ok(lists.roles.includes('info') && lists.providers.has('gmx.de'));
+        // A failing source and one that shrank by more than half keep their last copies.
+        failing.add('disposable'); sources.mailchecker = many('d', 21000).join('\n');
+        const second = await hygiene.syncHygieneLists(runtime, fetcher, true);
+        assert.deepEqual(second!.failed.map(f => f.name).sort(), ['disposable', 'fakefilter', 'mailchecker']);
+        assert.match(second!.failed.find(f => f.name === 'mailchecker')!.error, /under half the last copy's 50000/);
+        assert.deepEqual([await sourceCount('disposable'), await sourceCount('mailchecker')], [50006, 50000]);
+        failing.clear();
+
+        await t.test('domain checks with mocked DNS', async st => {
+          const calls: string[] = [];
+          const mx = (host: string) => ({ Status: 0, Answer: [{ type: 15, data: `10 ${host}.` }] });
+          st.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+            const url = new URL(input instanceof Request ? input.url : String(input));
+            assert.equal(url.origin, 'https://dns.test', 'Only the DNS resolver is asked: never the mail servers.');
+            const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!;
+            calls.push(`${name}/${type}`);
+            const answer = name === 'gone.example' || name === 'later.example' ? { Status: 3 }
+              : name === 'nullmx.example' ? { Status: 0, Answer: [{ type: 15, data: '0 .' }] }
+              : name === 'nomx.example' ? { Status: 0 }
+              : name === 'aonly.example' ? (type === 'MX' ? { Status: 0 } : { Status: 0, Answer: [{ type: 1, data: '192.0.2.1' }] })
+              : name === 'servfail.example' ? { Status: 2 }
+              : /^(trapmx\d|newtrap\d?)\.example$/.test(name) ? mx('mx.trashhost.test')
+              : /^googly\d\.example$/.test(name) ? mx('aspmx.l.google.com')
+              : mx(`mx.${name}`);
+            return Response.json(answer);
+          });
+          const create = async (email: string) => ok(await local('POST', '/v1/contacts', { email }), 201).risk?.reason ?? null;
+          assert.deepEqual([await create('x@gone.example'), await create('abuse@nullmx.example'), await create('n@nomx.example'), await create('a@aonly.example'),
+            await create('s@servfail.example'), await create('f@fine.example'), await create('g@gmail.com')],
+            ['no_mail_domain', 'no_mail_domain', 'no_mail_domain', null, null, null, null], 'A domain that can\'t receive mail outranks a role name; a failed lookup flags nobody.');
+          assert.ok(!calls.some(c => c.startsWith('gmail.com/')), 'Providers on the lists are never looked up.');
+          const verdicts = Object.fromEntries((await db.query("SELECT domain, verdict || coalesce('/' || detail, '') AS v FROM hygiene_mail_domains WHERE domain LIKE '%.example'")).rows.map(r => [r.domain, r.v]));
+          assert.deepEqual([verdicts['gone.example'], verdicts['nullmx.example'], verdicts['nomx.example'], verdicts['aonly.example'], verdicts['servfail.example']],
+            ['no_mail/nxdomain', 'no_mail/null_mx', 'no_mail/no_mx', 'ok', 'unknown']);
+          // Cached a day: a second contact at the domain asks nothing.
+          const asked = calls.length;
+          assert.equal(await create('y@gone.example'), 'no_mail_domain');
+          assert.equal(calls.length, asked);
+
+          // Mail servers that serve three listed domains serve disposable ones, unless they are a known provider's.
+          await hygiene.domainRisks(runtime, await hygiene.hygieneLists(runtime.db), traps, Date.now() + 5_000);
+          await hygiene.syncHygieneLists(runtime, fetcher, true);
+          assert.deepEqual((await built()).meta.disposableMx, ['mx.trashhost.test']);
+          hygiene.forgetHygieneLists();
+          assert.equal(await create('z@newtrap.example'), 'disposable');
+
+          // An import: the preview counts the domains' verdicts (outranking a role name), and the commit stores them.
+          const csv = ['Email', 'p@gone.example', 'abuse@nomx.example', 'q@fine.example', 'r@newtrap2.example', 'postmaster@fine.example'].join('\n');
+          const preview = ok(await local('POST', '/v1/contact-imports', { csv, mapping: { email: 'Email' } }), 201);
+          const NONE = { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 };
+          assert.deepEqual(preview.risky, { total: 4, byReason: { ...NONE, no_mail_domain: 2, disposable: 1, role: 1 } });
+          const committed = ok(await local('POST', `/v1/contact-imports/${preview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
+          assert.deepEqual(committed.risky, preview.risky);
+
+          // The hourly pass queues a domain it hasn't checked, and the resolver flags its contacts.
+          const legacy = unique('con');
+          await db.query('INSERT INTO audience_contacts (id, workspace_id, email) VALUES ($1, $2, $3)', [legacy, wid, 'l@later.example']);
+          await db.query('DELETE FROM audience_hygiene_state');
+          await hygiene.classifyContacts(runtime, 120_000);
+          assert.deepEqual((await db.query("SELECT verdict FROM hygiene_mail_domains WHERE domain = 'later.example'")).rows, [{ verdict: 'pending' }]);
+          assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE type = 'hygiene.resolveDomains' AND status = 'pending'")).rows[0].n, 1, 'One resolver run is queued.');
+          assert.equal((await db.query('SELECT risk FROM audience_contacts WHERE id = $1', [legacy])).rows[0].risk, null);
+          const resolved = await hygiene.resolvePendingDomains(runtime, 5_000);
+          assert.ok(resolved.looked >= 1 && resolved.flagged >= 1, JSON.stringify(resolved));
+          assert.equal((await db.query('SELECT risk FROM audience_contacts WHERE id = $1', [legacy])).rows[0].risk, 'no_mail_domain');
+
+          // Transactional mail asks DNS nothing.
+          const sentBefore = calls.length;
+          ok(await local('POST', '/v1/emails/send', { from: 'sender@example.com', to: 'someone@never-checked.example', subject: 'Receipt', text: 'Thanks.' }), 202);
+          assert.equal(calls.length, sentBefore);
+        });
+      } finally {
+        runtime.config.hygieneLists = before.lists; runtime.config.hygieneDnsUrl = before.dns;
+        hygiene.forgetHygieneLists();
+      }
     });
   });
 });
