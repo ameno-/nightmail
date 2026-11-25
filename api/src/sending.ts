@@ -24,7 +24,7 @@ import { regionalSending, sendingConnections, type SendingBinding } from './doma
 import { lockSendScope, type SendScope } from './send-scope.js';
 import { assertRegionEnabled, regionPattern } from './ses-region-state.js';
 import { forDelivery, type ReadyConnection } from './provider-credentials.js';
-import { bulkFlags, hostedCost, probationReason, type ProbationReason } from './hosted-sending.js';
+import { bulkFlags, CAMPAIGN_TESTS, hostedCost, probationReason, realDestination, type ProbationReason } from './hosted-sending.js';
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
@@ -2196,6 +2196,29 @@ async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: 
 }
 
 /**
+ * The front door of a Hosted campaign test (CAMPAIGN_TESTS), in one statement before the screen reads it: its address is
+ * the workspace's own (the members rule is the built-in domain's, migration 501), and this hour has room, which it takes.
+ * A domain counts only while its verification is current: one whose records went missing ('lost', still sending through
+ * its grace period) proves nothing about who receives there now.
+ */
+async function admitCampaignTest(runtime: Runtime, a: Actor, to: string) {
+  if (!runtime.config.multiTenant) return;
+  const address = to.toLowerCase(), host = address.split('@')[1]!;
+  const { rows: [gate] } = await runtime.db.execute<{ own: boolean; charged: boolean; reset_at: string }>(sql`WITH own AS (SELECT ${!realDestination(address)}
+      OR EXISTS (SELECT FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=${a.workspaceId} AND u.email_verified AND lower(u.email)=${address})
+      OR EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=${a.workspaceId} AND dc.sending_state='verified' AND (dc.name=${host} OR right(${host},length(dc.name)+1)='.'||dc.name)) AS ok),
+    charge AS (INSERT INTO api_request_budgets AS b(workspace_id,key_id,window_start,used) SELECT ${a.workspaceId},'campaign-test',date_trunc('hour',now()),1 FROM own WHERE ok
+      ON CONFLICT(workspace_id,key_id) DO UPDATE SET used=CASE WHEN b.window_start=excluded.window_start THEN b.used+1 ELSE 1 END,window_start=excluded.window_start
+      WHERE b.window_start<>excluded.window_start OR b.used<${CAMPAIGN_TESTS.perHour} RETURNING 1)
+    SELECT (SELECT ok FROM own) AS own, EXISTS (SELECT FROM charge) AS charged, date_trunc('hour',now())+interval '1 hour' AS reset_at`);
+  if (!gate!.own) throw new ApiError(422, 'TEST_RECIPIENT_NOT_OWNED', `A campaign test goes only to an address this workspace has proven is its own: a member’s verified email or an address at one of its currently verified domains, its receiving addresses and inboxes included. Send the campaign to reach ${to}.`, 'to');
+  if (!gate!.charged) {
+    const resetAt = new Date(gate!.reset_at).toISOString();
+    throw new ApiError(429, 'CAMPAIGN_TEST_LIMIT', `A workspace sends at most ${CAMPAIGN_TESTS.perHour} campaign tests an hour, and this hour’s are used. Try again after ${resetAt.slice(11, 16)} UTC.`, undefined, true, resetAt);
+  }
+}
+
+/**
  * The dashboard's test email (POST /v1/domains/{id}/test-send), to the signed-in user: fixed content from hello@<domain>,
  * or onboarding's setup email (setup-email.ts) from "<productName> Setup" <setup@domain> with the subject and text they
  * wrote. Without them, or with onboarding's own words, the content is ours. It reads as a real first email, plain text:
@@ -2678,7 +2701,7 @@ export function registerSending(app: App) {
     await c.env.db.transaction(async db => { const current = await findCampaign(db, a, campaignId, true); draftSender(c.env, a, current.draft); editable(current); await db.execute(sql`DELETE FROM sending_attachment_links l USING sending_campaign_reviews r WHERE l.owner_type = 'review' AND l.owner_id = r.id AND l.workspace_id = r.workspace_id AND r.workspace_id = ${a.workspaceId} AND r.campaign_id = ${campaignId}`); await db.delete(campaignReviews).where(and(scope(campaignReviews, a), eq(campaignReviews.campaignId, campaignId))); await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId))); await db.delete(campaigns).where(campaignWhere(a, campaignId)); });
     return c.json({ id: campaignId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: `Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test is screened on its own, with the campaign limit (${screenBytes(SCREEN.campaignBytes)} bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).`, tags: ['Campaigns'], security, request: { params: IdParams, headers: SendIdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/campaigns/{id}/test', operationId: 'testCampaign', description: `Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test goes only to an address the workspace has proven is its own: a member’s verified email, an address at one of its currently verified domains or their subdomains (its receiving addresses and inboxes there included; not a domain whose verification lapsed), or the SES mailbox simulator (422 TEST_RECIPIENT_NOT_OWNED otherwise; send the campaign to reach anyone else), a workspace sends at most ${CAMPAIGN_TESTS.perHour} tests a clock hour (429 CAMPAIGN_TEST_LIMIT, retryable at resetAt), and each test is screened on its own, with the campaign limit (${screenBytes(SCREEN.campaignBytes)} bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).`, tags: ['Campaigns'], security, request: { params: IdParams, headers: SendIdempotencyHeaders, body: json(TestCampaign) }, responses: { 202: response(Receipt), ...errors } }), async c => {
     const a = actor(c, 'send'), input = c.req.valid('json'), campaignId = c.req.valid('param').id;
     // With its key claimed, read and render the draft, then admit the test in one statement that locks the campaign
     // and requires the revision it rendered. A replay rechecks that the caller may still read the campaign.
@@ -2686,6 +2709,7 @@ export function registerSending(app: App) {
       const { row, footer } = await campaignWithFooter(c.env, a, campaignId);
       if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.');
       const message = await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null);
+      await admitCampaignTest(c.env, a, input.to);
       // The footer as recipients get it, its link the placeholder: a test is transactional, without List-Unsubscribe.
       const snapshot = { ...message, testCampaignId: campaignId };
       footerParts(snapshot, unsubscribePlaceholder(c.env), footer);
