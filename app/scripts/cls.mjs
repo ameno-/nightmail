@@ -186,6 +186,8 @@ const pages = ids => [
   ['Domain · no DNS', `/domains/${ids.noDnsDomain}`, { user: 'nia', from: '/domains' }],
   // A *.<domain> record answers its DKIM names: the banner says to add the CNAMEs exactly.
   ['Domain · wildcard', `/domains/${ids.wildcardDomain}`, { user: 'nia', from: '/domains' }],
+  // Porkbun's parking default answers its DKIM names: the banner names Porkbun's record.
+  ['Domain · parking', `/domains/${ids.parkedDomain}`, { user: 'nia', from: '/domains' }],
   ['Domain · change name dialog', `/domains/${ids.noDnsDomain}`, { user: 'nia', dialog: 'Change name' }],
   ['API keys', '/api-keys', { from: '/overview' }],
   ['Settings', '/settings', { from: '/overview' }],

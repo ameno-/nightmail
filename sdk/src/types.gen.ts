@@ -2827,6 +2827,19 @@ export type DomainReadiness = {
          */
         publicDns?: {
             /**
+             * With wildcard: the answer is a registrar’s parking or forwarding record.
+             */
+            parking?: {
+                /**
+                 * The registrar or host, e.g. Porkbun.
+                 */
+                owner: string;
+                /**
+                 * What its record points to, e.g. pixie.porkbun.com.
+                 */
+                target: string;
+            };
+            /**
              * With missing on a CNAME: a wildcard record (e.g. *.example.com) answers this name with an address instead, as it does a random name beside it. Add the CNAME exactly: the specific record wins over the wildcard.
              */
             wildcard?: string;

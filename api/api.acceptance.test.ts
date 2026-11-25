@@ -31500,6 +31500,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Public DNS on Cloudflare: wild.example has a proxied *.wild.example A record, so every name under it (the DKIM names and
       // any random one) answers with the same two addresses and no CNAME; exact.example has an A record at one DKIM name only.
       const wild = await add('wild'), exact = await add('exact'), proxied = ['104.21.9.246', '172.67.189.212'];
+      // parked.example keeps Porkbun's parking default (* CNAME pixie.porkbun.com); aliased.example has a * CNAME to a host
+      // nobody lists; typo.example has one DKIM CNAME pointing somewhere else and nothing for names beside it (a real typo).
+      const parked = await add('parked'), aliased = await add('aliased'), typo = await add('typo');
       const networkGuard = globalThis.fetch;
       t.after(() => { globalThis.fetch = networkGuard; });
       globalThis.fetch = async (input: RequestInfo | URL) => {
@@ -31507,6 +31510,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!;
         if (type === 'NS') return Response.json({ Status: 0, Answer: ['ada', 'bob'].map(ns => ({ name: `${name}.`, type: 2, data: `${ns}.ns.cloudflare.com.` })) });
         const a = (ips: string[]) => Response.json({ Status: 0, Answer: ips.map(data => ({ name: `${name}.`, type: 1, data })) });
+        const cname = (target: string) => Response.json({ Status: 0, Answer: [{ name: `${name}.`, type: 5, data: `${target}.` }] });
+        if (type === 'CNAME' && name.endsWith(`.${parked.name}`)) return cname('pixie.porkbun.com');
+        if (type === 'CNAME' && name.endsWith(`.${aliased.name}`)) return cname('lander.example.net');
+        if (type === 'CNAME' && name === `tokena._domainkey.${typo.name}`) return cname('tokena.dkim.amazonses.co');
         if (type === 'A' && name.endsWith(`.${wild.name}`)) return a(proxied);
         if (type === 'A' && name === `tokena._domainkey.${exact.name}`) return a(['192.0.2.7']);
         return Response.json({ Status: 0, Answer: [] });
@@ -31517,10 +31524,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
       // The background check stores it: each CNAME missing, with the wildcard that answers its name, which reads carry.
       runtime.config.domainSetupReminder = true;
-      for (const d of [wild, exact]) await domainSetupCheckJob(runtime, { domainId: d.id, token: d.token }, { id: `domain.setupCheck:${d.token}`, attempts: 1, workspaceId: wid });
+      for (const d of [wild, exact, parked, aliased, typo]) await domainSetupCheckJob(runtime, { domainId: d.id, token: d.token }, { id: `domain.setupCheck:${d.token}`, attempts: 1, workspaceId: wid });
       assert.deepEqual(await cnames(wild.id), tokens.map(() => ['missing', `*.${wild.name}`]));
       // An address at one exact name, which a random name beside it doesn't share, is no wildcard.
       assert.deepEqual(await cnames(exact.id), tokens.map(() => ['missing', null]));
+      // A registrar's parking CNAME and a CNAME wildcard are the record missing, not mistyped; a single different target is a typo.
+      const parkedCnames = ok(await local('GET', `/v1/domains/${parked.id}`)).dns.filter((r: Json) => r.purpose === 'sending' && r.type === 'CNAME').map((r: Json) => r.publicDns);
+      for (const seen of parkedCnames) assert.deepEqual([seen.state, seen.wildcard, seen.parking], ['missing', `*.${parked.name}`, { owner: 'Porkbun', target: 'pixie.porkbun.com' }]);
+      assert.deepEqual(await cnames(aliased.id), tokens.map(() => ['missing', `*.${aliased.name}`]));
+      assert.deepEqual((await cnames(typo.id))[0], ['wrong_value', null]);
       // Check now says the same.
       assert.deepEqual(await cnames(wild.id, true), tokens.map(() => ['missing', `*.${wild.name}`]));
 
@@ -31531,6 +31543,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(mail, 'The wildcard domain\u2019s reminder was sent.');
       assert.ok(mail.text.includes(message(wild.name)), mail.text);
       assert.ok(mail.text.includes('CNAME record\nName: tokena._domainkey'), mail.text);
+      // The parked domain's reminder (the next day: one a day per workspace) names Porkbun's record.
+      await db.query(`UPDATE account_notices SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1 AND kind='domain_setup'`, [wid]);
+      await domainSetupCheckJob(runtime, { domainId: parked.id, token: parked.token }, { id: `domain.setupCheck:${parked.token}`, attempts: 1, workspaceId: wid });
+      const next = (await db.query(`SELECT id,payload FROM jobs WHERE type='account.notify' AND status='pending' AND workspace_id=$1 AND payload->>'noticeId' IN (SELECT id FROM account_notices WHERE data->>'name'=$2)`, [wid, parked.name])).rows;
+      assert.equal(next.length, 1);
+      for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, next[0].payload, { id: next[0].id, attempts: i + 1, workspaceId: wid });
+      const [parkedMail] = (await fresh()).filter(m => m.subject === `Finish setting up ${parked.name}`);
+      assert.ok(parkedMail?.text.includes(`Your DNS still has Porkbun’s parking/wildcard record (*.${parked.name} → pixie.porkbun.com). Add these CNAME records explicitly; the specific records take priority.`), parkedMail?.text);
     });
   });
 

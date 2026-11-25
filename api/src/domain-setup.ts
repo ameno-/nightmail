@@ -53,7 +53,7 @@ export const domainSetupCheckJob: JobHandler = async (runtime, payload, job) => 
   if (!missing.length && !check.noDns) return;
   const { domainSetup } = await wrapModuleLoad(() => import('./account-notices.js'));
   const queued = await domainSetup(runtime.db, job.workspaceId, row.token, {
-    domainId: row.id, name: row.name, total: sending.length, ...(check.noDns ? { noDns: true } : {}), ...(wildcardOf(missing) ? { wildcard: wildcardOf(missing) } : {}), wrong: missing.some(r => r.publicDns?.state === 'wrong_value'),
+    domainId: row.id, name: row.name, total: sending.length, ...(check.noDns ? { noDns: true } : {}), ...wildcardOf(missing), wrong: missing.some(r => r.publicDns?.state === 'wrong_value'),
     missing: missing.map(r => ({ type: r.type, name: relative(r.name, check.host?.zone), value: r.value })),
     host: check.host && { name: check.host.name, url: check.host.url },
     // Only an unproven claim is released, and only for want of its ownership TXT.
