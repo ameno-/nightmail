@@ -1,9 +1,9 @@
-import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState, type ComponentProps } from 'react'
 import { EmailEditor, type EmailEditorRef } from '@react-email/editor'
 import type {} from '@react-email/editor/extensions'
 import { defaultSlashCommands, Inspector } from '@react-email/editor/ui'
 import { AlignCenter, AlignLeft, AlignRight, Bold, Box, Braces, ChevronDown, Columns2, Heading2, ImagePlus, Italic, List, LoaderCircle, Minus, MousePointer2, Paperclip, Plus, Redo2, Shapes, SlidersHorizontal, Type, Undo2, UserRound, X, type LucideIcon } from 'lucide-react'
-import { Button, DropdownMenu, Icon, IconButton, SkeletonText, type MenuItem } from '../../components/ui'
+import { Button, DropdownMenu, Icon, IconButton, SkeletonText, Tooltip, type MenuItem } from '../../components/ui'
 import { modKey, useMediaQuery } from '../../lib/media'
 import { useApi } from '../../data/context'
 import type { Attachment, AttachmentApi } from '../../data/types'
@@ -28,6 +28,12 @@ export type EmailComposerRef = { prepare: () => Promise<Draft> }
 type Props = { attachmentIds?: string[]; knownAttachmentIds?: string[]; attachmentApi?: AttachmentApi; initialHtml: string; disabled?: boolean; personalize?: boolean; onReady: () => void; onDirty: () => void; onAttach?: () => void; onBusy?: (busy: boolean) => void }
 const linkForms = '[data-re-link-selector-form], [data-re-link-bm-form], [data-re-btn-bm-form], [data-re-img-bm-form]'
 const variables = [['Name', 'name'], ['First name', 'firstName'], ['Email', 'email']] as const
+// Inline images this editor attaches get content IDs with this prefix (they show in a sent email's source); bane- is the
+// prefix before the rename, still in older drafts, and cleanup recognises both.
+const contentIdPrefix = 'nightmail-'
+const editorContentId = /^(?:nightmail|bane)-/
+// The rail's tooltips and menus open to its right, clear of the rail itself: its 8 px padding, then 8 px.
+const railOffset = 16
 
 // The library's slash menu reads this shared list and has no image entry, although the
 // editor supports images. Route "/image" to the mounted composer's file picker. The menu
@@ -233,10 +239,10 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       if (cached && !allIds.has(cached.id)) { metadata.push(cached); allIds.add(cached.id) }
     }
     // An inline image the body no longer uses would go out as a stray attachment. Drop the ones this editor placed
-    // (bane- content IDs) or opened in the body; leave other inline attachments, set through the API, as they are.
+    // (editorContentId) or opened in the body; leave other inline attachments, set through the API, as they are.
     const opened = cidImageSources(initialSnapshot.html)
     const used = empty ? new Set<string>() : new Set([...cidImageSources(documentToBlockHtml(document)), ...inlineSources.flatMap(source => cidBySource.current.get(source)?.slice(4) ?? [])])
-    const removed = metadata.filter(item => item.disposition === 'inline' && item.contentId && !used.has(item.contentId) && (item.contentId.startsWith('bane-') || opened.has(item.contentId)))
+    const removed = metadata.filter(item => item.disposition === 'inline' && item.contentId && !used.has(item.contentId) && (editorContentId.test(item.contentId) || opened.has(item.contentId)))
     const removedInlineIds = removed.map(item => item.id)
     if (empty) return { html: '', inlineAttachmentIds: [], removedInlineIds }
     metadata = metadata.filter(item => !removedInlineIds.includes(item.id)); removedInlineIds.forEach(id => allIds.delete(id))
@@ -251,7 +257,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         const bytes = Uint8Array.from(atob(match[2]), character => character.charCodeAt(0))
         if (allIds.size >= MAX_ATTACHMENTS || totalSize + bytes.length > MAX_ATTACHMENT_BYTES) throw new Error(attachmentLimit)
         const hash = await inlineImageHash(source)
-        const contentId = `bane-${crypto.randomUUID()}`
+        const contentId = `${contentIdPrefix}${crypto.randomUUID()}`
         const extension = match[1].split('/')[1] === 'jpeg' ? 'jpg' : match[1].split('/')[1]
         const item = await attachmentApi.upload(new File([bytes], `image-${hash.slice(0, 12)}.${extension}`, { type: match[1] }), { contentId })
         cid = `cid:${contentId}`
@@ -360,7 +366,9 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const variableItems: MenuItem[] = personalize ? variables.map(([text, key]) => ({ label: text, icon: <Icon icon={UserRound} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertContent(`{{${key}}}`).run()) })) : []
   const togglePanel = () => setPanelChoice(!panelShown)
   const fileField = <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/gif,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
-  const tool = (label: string, icon: LucideIcon, run: () => void, title = label) => <IconButton label={label} title={title} disabled={inactive} onClick={run}><Icon icon={icon} /></IconButton>
+  // Icon-only tools say what they are in the dashboard's tooltip (beside the rail, above the toolbar), with their shortcut.
+  const tip = (text: string, trigger: ComponentProps<typeof Tooltip>['children']) => <Tooltip content={text} side={railed ? 'right' : 'top'} offset={railed ? railOffset : undefined}>{trigger}</Tooltip>
+  const tool = (label: string, icon: LucideIcon, run: () => void, title = label) => tip(title, <IconButton label={label} title="" disabled={inactive} onClick={run}><Icon icon={icon} /></IconButton>)
   return <div className="email-composer" data-inactive={locked || undefined} onClickCapture={event => { if (locked) { event.preventDefault(); event.stopPropagation() } }} onKeyDownCapture={event => {
     if (event.key === 'Escape' && (event.target as Element).closest(linkForms)) {
       event.preventDefault()
@@ -375,8 +383,8 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       <div className="composer-rail__group">
         {tool('Text', Type, insertText)}
         {tool('Image', ImagePlus, chooseImage)}
-        <DropdownMenu label="Components" side="right" align="start" trigger={<IconButton label="Components" disabled={inactive}><Icon icon={Shapes} /></IconButton>} items={componentItems} />
-        {personalize && <DropdownMenu label="Variables" side="right" align="start" trigger={<IconButton label="Variables" disabled={inactive}><Icon icon={Braces} /></IconButton>} items={variableItems} />}
+        <DropdownMenu label="Components" side="right" align="start" offset={railOffset} trigger={tip('Components', <IconButton label="Components" title="" disabled={inactive}><Icon icon={Shapes} /></IconButton>)} items={componentItems} />
+        {personalize && <DropdownMenu label="Variables" side="right" align="start" offset={railOffset} trigger={tip('Variables', <IconButton label="Variables" title="" disabled={inactive}><Icon icon={Braces} /></IconButton>)} items={variableItems} />}
       </div>
       <div className="composer-rail__group">
         {tool('Bold', Bold, () => command(e => e.chain().focus().toggleBold().run()), `Bold ${modKey}B`)}
@@ -390,18 +398,18 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         {tool('Redo', Redo2, () => command(e => e.chain().focus().redo().run()), `Redo ${modKey}⇧Z`)}
       </div>
       <div className="composer-rail__group">
-        <IconButton label="Style" title={panelShown ? 'Hide style' : 'Show style'} disabled={inactive} aria-pressed={panelShown} onClick={togglePanel}><Icon icon={SlidersHorizontal} /></IconButton>
+        {tip(panelShown ? 'Hide style' : 'Show style', <IconButton label="Style" title="" disabled={inactive} aria-pressed={panelShown} onClick={togglePanel}><Icon icon={SlidersHorizontal} /></IconButton>)}
       </div>
       {busy && <span className="composer-rail__busy" role="status"><Icon icon={LoaderCircle} size="sm" className="ui-spinner" /><span className="sr-only">Preparing…</span></span>}
       {fileField}
     </nav> : <div className="composer-toolbar">
       <div className="composer-tools ui-scroll-fade" aria-label="Email formatting" onMouseDown={keepFocus}>
         <DropdownMenu label="Insert" align="start" trigger={<Button size="sm" variant="ghost" disabled={inactive}><Icon icon={Plus} />Insert<Icon icon={ChevronDown} size="sm" /></Button>} items={[...componentItems, ...variableItems]} />
-        <div className="cluster"><IconButton size="sm" label="Bold" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Icon icon={Bold} /></IconButton><IconButton size="sm" label="Italic" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Icon icon={Italic} /></IconButton></div>
-        <div className="cluster"><IconButton size="sm" label="Align left" disabled={inactive} onClick={() => align('left')}><Icon icon={AlignLeft} /></IconButton><IconButton size="sm" label="Align center" disabled={inactive} onClick={() => align('center')}><Icon icon={AlignCenter} /></IconButton><IconButton size="sm" label="Align right" disabled={inactive} onClick={() => align('right')}><Icon icon={AlignRight} /></IconButton></div>
+        <div className="cluster">{tip(`Bold ${modKey}B`, <IconButton size="sm" label="Bold" title="" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleBold().run())}><Icon icon={Bold} /></IconButton>)}{tip(`Italic ${modKey}I`, <IconButton size="sm" label="Italic" title="" disabled={inactive} onClick={() => command(e => e.chain().focus().toggleItalic().run())}><Icon icon={Italic} /></IconButton>)}</div>
+        <div className="cluster">{tip('Align left', <IconButton size="sm" label="Align left" title="" disabled={inactive} onClick={() => align('left')}><Icon icon={AlignLeft} /></IconButton>)}{tip('Align center', <IconButton size="sm" label="Align center" title="" disabled={inactive} onClick={() => align('center')}><Icon icon={AlignCenter} /></IconButton>)}{tip('Align right', <IconButton size="sm" label="Align right" title="" disabled={inactive} onClick={() => align('right')}><Icon icon={AlignRight} /></IconButton>)}</div>
         <Button size="sm" variant="ghost" disabled={inactive} aria-pressed={panelShown} onClick={togglePanel}><Icon icon={SlidersHorizontal} />Style</Button>
         {busy && <span className="muted" role="status">Preparing…</span>}
-        <div className="cluster composer-history"><IconButton size="sm" label="Undo" disabled={inactive} onClick={() => command(e => e.chain().focus().undo().run())}><Icon icon={Undo2} /></IconButton><IconButton size="sm" label="Redo" disabled={inactive} onClick={() => command(e => e.chain().focus().redo().run())}><Icon icon={Redo2} /></IconButton></div>
+        <div className="cluster composer-history">{tip(`Undo ${modKey}Z`, <IconButton size="sm" label="Undo" title="" disabled={inactive} onClick={() => command(e => e.chain().focus().undo().run())}><Icon icon={Undo2} /></IconButton>)}{tip(`Redo ${modKey}⇧Z`, <IconButton size="sm" label="Redo" title="" disabled={inactive} onClick={() => command(e => e.chain().focus().redo().run())}><Icon icon={Redo2} /></IconButton>)}</div>
         {fileField}
       </div>
     </div>}

@@ -8,7 +8,7 @@
 .campaign-presence__face[data-empty] { visibility: hidden; animation: none; }
 .campaign-presence__more { background: var(--color-layer-3); color: var(--color-text); }
 /* A phone's one face: how many others are here, in its corner. */
-.campaign-presence__count { position: absolute; right: -10px; bottom: -3px; display: grid; place-items: center; min-width: 15px; height: 15px; padding-inline: 3px; border: 2px solid var(--color-surface); border-radius: 8px; background: var(--color-text); color: var(--color-surface); font-size: 9px; line-height: 1; }
+.campaign-presence__count { position: absolute; right: -10px; bottom: -3px; display: grid; place-items: center; min-width: 15px; height: 15px; padding-inline: var(--space-4); border: 2px solid var(--color-surface); border-radius: 8px; background: var(--color-text); color: var(--color-surface); font-size: 9px; line-height: 1; }
 /* The bar's end column grows with its content below 1,100 px: the one face's place is kept from the first frame. */
 @media (max-width: 1100px) { .campaign-presence[data-reserve] { width: 26px; } }
 @keyframes presence-in { from { opacity: 0; } }

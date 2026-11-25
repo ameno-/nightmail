@@ -5,7 +5,7 @@
 .presence-block, .presence-selection, .presence-caret, .presence-tag, .presence-field { position: absolute; }
 .presence-pointer { position: absolute; left: 0; top: 0; opacity: 0; transition: opacity 150ms ease-out; will-change: transform; }
 .presence-pointer svg { display: block; }
-.presence-pointer span, .presence-tag { padding: 0 6px; border-radius: 8px; color: #fff; font-family: var(--font-ui, var(--font-body)); font-size: 11px; font-weight: var(--font-weight-bold); line-height: 16px; letter-spacing: 0; white-space: nowrap; }
+.presence-pointer span, .presence-tag { padding: 0 var(--space-6); border-radius: 8px; color: #fff; font-family: var(--font-ui, var(--font-body)); font-size: 11px; font-weight: var(--font-weight-bold); line-height: 16px; letter-spacing: 0; white-space: nowrap; }
 .presence-pointer span { position: absolute; left: 12px; top: 16px; }
 .presence-block { border-radius: 4px; }
 .presence-selection { opacity: 0.22; }
