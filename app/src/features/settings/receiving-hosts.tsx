@@ -19,12 +19,12 @@ const LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
  * A host as typed, checked the way the API checks it (receiving-hosts.ts hostName): any case, a trailing dot, @ for the
  * domain itself, a label (inbox) or a subdomain of the domain. Returns the full host name, or what to fix.
  */
-export function typedHost(typed: string, domainName: string): { host: string } | { problem: string } {
+export function typedHost(typed: string, domainName: string): { host: string } | { problem: string; code: 'empty' | 'invalid' } {
   const value = typed.trim().toLowerCase().replace(/\.$/, '')
-  if (!value) return { problem: `Enter a host: @ for ${domainName} itself, a label such as inbox, or inbox.${domainName}.` }
+  if (!value) return { problem: `Enter a host: @ for ${domainName} itself, a label such as inbox, or inbox.${domainName}.`, code: 'empty' }
   const host = value === '@' ? domainName : value === domainName || value.endsWith(`.${domainName}`) ? value : `${value}.${domainName}`
   const labels = host === domainName ? [] : host.slice(0, -(domainName.length + 1)).split('.')
-  if (host.length > 253 || labels.some(label => !LABEL.test(label))) return { problem: `Use ${domainName} or one of its subdomains, such as inbox or inbox.${domainName}: letters, digits and hyphens only.` }
+  if (host.length > 253 || labels.some(label => !LABEL.test(label))) return { problem: `Use ${domainName} or one of its subdomains, such as inbox or inbox.${domainName}: letters, digits and hyphens only.`, code: 'invalid' }
   return { host }
 }
 /** The API's reason a host's mail is elsewhere today, without the API's own instructions, and without suggesting a host the domain already receives on. */
@@ -32,6 +32,8 @@ export function moveReason(message: string, hosts: string[]) {
   return message.replace(/^Move mail for \S+\? /, '').replace(/ Send confirm: true to choose it anyway\.$/, '')
     .replace(/ Use (\S+) for receiving instead\./, (all, host: string) => hosts.includes(host) ? '' : all)
 }
+/** Which rule refused a host, for analytics (a constant, never the host): the API's RECEIVING_HOST_TAKEN is "taken". */
+const rejection = (error: unknown) => error instanceof ApiError && error.fields.name ? error.code === 'VALIDATION_FAILED' ? 'invalid' : error.code.toLowerCase().replace(/^receiving_host_/, '').slice(0, 32) : undefined
 const path = (domainId: string, hostId?: string) => `/v1/inbound/domains/${encodeURIComponent(domainId)}/hosts${hostId ? `/${encodeURIComponent(hostId)}` : ''}`
 
 /** The hosts the domain receives on, read with the page so the section arrives at its final height. */
@@ -45,6 +47,7 @@ export function ReceivingHosts({ domainId, domainName, hosts, actions, title = <
   const [name, setName] = useState('')
   const [moveMail, setMoveMail] = useState<{ name: string; message: string } | null>(null)
   const [invalid, setInvalid] = useState('')
+  const [invalidCode, setInvalidCode] = useState<string>()
   // Set once Move mail is confirmed: closing it any other way goes back to Add host with the name, to choose another.
   const moving = useRef(false)
   const [removing, setRemoving] = useState<ReceivingHost | null>(null)
@@ -55,7 +58,7 @@ export function ReceivingHosts({ domainId, domainName, hosts, actions, title = <
   async function submit(event: FormEvent) {
     event.preventDefault()
     const typed = typedHost(name, domainName)
-    if ('problem' in typed) { add.reset(); setInvalid(typed.problem); return }
+    if ('problem' in typed) { add.reset(); setInvalid(typed.problem); setInvalidCode(typed.code); return }
     setInvalid('')
     try { await add.mutateAsync({ name: typed.host, confirm: false }); setAdding(false) }
     catch (error) {
@@ -83,7 +86,7 @@ export function ReceivingHosts({ domainId, domainName, hosts, actions, title = <
     <Dialog open={adding} onOpenChange={next => { if (!add.isPending) setAdding(next) }} title="Add host" footer={<><Button disabled={add.isPending} onClick={() => setAdding(false)}>Cancel</Button><Button variant="primary" loading={add.isPending} type="submit" form="add-receiving-host">Add host</Button></>}>
       <form id="add-receiving-host" className="stack" onSubmit={submit} noValidate>
         <MutationError error={fieldError(add.error, 'name') ? null : add.error} />
-        <Field label="Host" htmlFor="receiving-host-name" error={invalid || fieldError(add.error, 'name')}><Input id="receiving-host-name" autoFocus required value={name} onChange={event => { setName(event.target.value); setInvalid('') }} disabled={add.isPending} placeholder={`inbox.${domainName}`} /></Field>
+        <Field label="Host" htmlFor="receiving-host-name" error={invalid || fieldError(add.error, 'name')} errorCode={invalid ? invalidCode : rejection(add.error)}><Input id="receiving-host-name" autoFocus required value={name} onChange={event => { setName(event.target.value); setInvalid('') }} disabled={add.isPending} placeholder={`inbox.${domainName}`} /></Field>
         {/* The domain itself is a host like any other: offered here once it isn't one, with what its MX record takes over. */}
         {(['@', domainName, `${domainName}.`] as string[]).includes(name.trim().toLowerCase()) ? <Alert tone={isSubdomainName(domainName) ? 'info' : 'warning'}>{rootMxWarning(domainName)}</Alert>
           : !hosts.some(host => host.name === domainName) && <div className="cluster"><Button size="sm" onClick={() => setName(domainName)} disabled={add.isPending}>Use {domainName} itself</Button></div>}
