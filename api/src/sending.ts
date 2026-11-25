@@ -2750,6 +2750,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
   const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
   const smallList = await audienceMod.isSmallAudienceList(db, a, draft.audience.listId);
+  let judgedRecipients: number | undefined;
   let queued: number;
   // Contacts the send skips as risky (src/list-hygiene.ts): exact for a captured audience, from list counts for a whole large list.
   let risky: { total: number; byReason: Record<string, number> } | null = null;
@@ -2773,11 +2774,14 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
     if (estimate.definitive === 'over_limit') throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
     queued = estimate.queued;
     risky = estimate.risky ?? null;
+    // Counting timed out (a large segment, launched without a fresh preview): the review judges the list's subscribers,
+    // an upper bound, rather than 0 or a stale count, so a large send can't skip a required ramp by not being counted.
+    if (estimate.approximate) judgedRecipients = Math.max(queued, await audienceMod.listSubscribedBound(db, a, draft.audience.listId));
   }
   // The send review as of now (src/standing-model.ts RAMP.readiness). A send it requires a ramp for goes with the
   // recommended plan, a daily limit no larger than its first day, or a consent source the sender confirms.
   const readiness = draft.requiredNotice ? null : await sendReadiness(runtime, db, a, { id: campaignId, draft },
-    { recipients: queued, matched: null, risky: risky?.total ?? 0, neverMailed: null, lastSent: await audienceMod.listLastSent(db, a, draft.audience.listId) });
+    { recipients: judgedRecipients ?? queued, matched: null, risky: risky?.total ?? 0, neverMailed: null, lastSent: await audienceMod.listLastSent(db, a, draft.audience.listId) });
   const plan = input.pacing?.plan === 'recommended' && readiness?.plan ? readiness.plan.batches : null;
   if (readiness?.required && !plan && !input.consent && !(input.pacing?.perDay != null && input.pacing.perDay <= readiness.required.maxPerDay))
     throw new ApiError(422, 'RAMP_REQUIRED', `${readiness.summary} Send it with the recommended plan (pacing.plan "recommended"), a daily limit of at most ${readiness.required.maxPerDay.toLocaleString('en-US')}, or confirm where this list's consent comes from (consent).`, 'pacing');
@@ -3989,6 +3993,12 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     let step = row.rampStep ?? rampStart(await rampHistory(runtime.db, a.workspaceId)), from = row.rampFrom;
     let opened = row.rampStep !== null && row.rampWindowStartedAt ? Date.parse(row.rampWindowStartedAt) : null;
     if (row.rampStep === null) log('info', { code: 'CAMPAIGN_RAMP_PLACED', campaignId: row.id, step: step + 1, steps: RAMP.steps.length });
+    // The workspace's other ramped campaigns share the step's hourly ceiling: splitting one send into many campaigns (or
+    // sending several at once) doesn't multiply it. What they released in their current hours, from their own rows.
+    const [others] = (await runtime.db.execute<{ n: number }>(sql`SELECT coalesce(sum(greatest(expanded-ramp_from,0)),0)::int AS n FROM sending_campaigns
+      WHERE workspace_id=${a.workspaceId} AND id<>${row.id} AND state='sending' AND NOT simulated AND ramp_step IS NOT NULL AND ramp_step<${RAMP.steps.length}
+        AND ramp_window_started_at>now()-make_interval(secs=>${RAMP_HOUR_MS / 1000}::int)`)).rows;
+    const shared = Number(others?.n ?? 0);
     if (step < RAMP.steps.length && opened !== null && dbNow >= opened + RAMP_HOUR_MS) {
       const batch = row.expanded > from ? await rampBatch(runtime.db, a, row, from) : null;
       if (batch?.released) {
@@ -3996,7 +4006,8 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
         if (batch.resolved < batch.accepted * RAMP_CHECK.resolved && dbNow < opened + RAMP_HOUR_MS + RAMP_CHECK.maxWaitMs) return hold('ramp', new Date(dbNow + RAMP_CHECK.retryMs).toISOString());
         const unhealthy = rampHealth(batch, step);
         if (unhealthy) return quarantine(unhealthy, step);
-        if (batch.released >= RAMP.steps[step]!.ceilingPerHour * RAMP.advance) step++;
+        // Proven by what the workspace's ramped campaigns released together, as they share the ceiling.
+        if (batch.released + shared >= RAMP.steps[step]!.ceilingPerHour * RAMP.advance) step++;
       }
       opened = null;
     }
@@ -4004,7 +4015,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     const startedAt = step < RAMP.steps.length ? new Date(opened!).toISOString() : null;
     if (step !== row.rampStep || from !== row.rampFrom || startedAt !== (row.rampWindowStartedAt && new Date(row.rampWindowStartedAt).toISOString())) await runtime.db.execute(setRamp(ref, step, startedAt, from));
     if (step < RAMP.steps.length) {
-      rampLeft = RAMP.steps[step]!.ceilingPerHour - (row.expanded - from);
+      rampLeft = RAMP.steps[step]!.ceilingPerHour - (row.expanded - from) - shared;
       if (rampLeft <= 0) return hold('ramp', new Date(opened! + RAMP_HOUR_MS).toISOString());
     }
   }

@@ -512,13 +512,20 @@ export async function isSmallAudienceList(db: DbExecutor, identity: Pick<Actor, 
  * 4. Only then 0.
  * Always validates list/segment existence before the savepoint so 404 errors remain synchronous.
  */
+/** At most how many subscribers a campaign to `listId` reaches (a segment of it or exclusions reach fewer): the list's
+ *  counts (audience_list_counts), 0 without them. Constant time: the launch's readiness bound when counting timed out. */
+export async function listSubscribedBound(db: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string) {
+  if (!(await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok) return 0;
+  const [row] = (await db.execute<{ n: number }>(sql`SELECT coalesce(sum(subscribed), 0)::int AS n FROM audience_list_counts WHERE workspace_id = ${identity.workspaceId} AND list_id = ${listId}`)).rows;
+  return Number(row?.n ?? 0);
+}
 export async function estimateCampaignAudience(
   db: DbExecutor,
   identity: Actor,
   spec: z.infer<typeof AudienceSpec>,
   requiredNotice: boolean,
   cachedEstimate: number | null,
-): Promise<{ queued: number; definitive?: 'empty' | 'over_limit'; risky?: { total: number; byReason: RiskCounts } }> {
+): Promise<{ queued: number; definitive?: 'empty' | 'over_limit'; risky?: { total: number; byReason: RiskCounts }; approximate?: true }> {
   const conditions = await audienceConditions(db, identity, spec, true);
   if (!spec.segmentId && !spec.excludeListIds?.length && !spec.excludeSegmentIds?.length) {
     const hasTally = (await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok;
@@ -548,7 +555,7 @@ export async function estimateCampaignAudience(
     return { queued: eligible };
   } catch (error) {
     if (!statementTimedOut(error)) throw error;
-    return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0 };
+    return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0, approximate: true };
   } finally {
     // Always roll back the read-only savepoint (even on success) so SET LOCAL statement_timeout=200ms and
     // enable_nestloop=off NEVER leak into the rest of the launch transaction.

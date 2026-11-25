@@ -29679,6 +29679,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('POST', `${otherPath}/send`, { revision: other.revision }), 202);
       await db.query('UPDATE sending_campaigns SET probe_cleared_at=now() WHERE id=$1', [other.id]);
       await run('campaign.run');
+      // The workspace's ramped campaigns share a step's hourly ceiling: the first one's 1,500 this hour leave none for it,
+      // so splitting a send into campaigns doesn't multiply the ramp.
+      assert.deepEqual([ok(await local('GET', otherPath)).delivery.expanded, ok(await local('GET', otherPath)).delivery.waiting?.reason], [0, 'ramp']);
+      await hourOver();
+      await run('campaign.run');
       assert.deepEqual([ok(await local('GET', otherPath)).delivery.expanded, ok(await local('GET', otherPath)).delivery.waiting?.reason], [1000, 'ramp']);
       await hourOver(other.id);
       await batch(1, 1000, `status=CASE WHEN review_ordinal<=2 THEN 'complained' ELSE 'delivered' END`, other.id);
