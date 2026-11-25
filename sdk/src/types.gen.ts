@@ -2742,9 +2742,9 @@ export type WorkspaceSettings = {
      */
     requiredNotices: boolean;
     /**
-     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
      */
-    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type UpdateWorkspaceSettings = {
@@ -2754,9 +2754,9 @@ export type UpdateWorkspaceSettings = {
      */
     postalAddress?: string | null;
     /**
-     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
      */
-    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type SesAccount = {
@@ -2967,6 +2967,11 @@ export type TestEmailQueued = {
     id: string;
     status: 'queued';
     simulated: boolean;
+};
+
+export type TestEmailContent = {
+    subject?: string;
+    text?: string;
 };
 
 export type DomainDnsSetup = {
@@ -4928,7 +4933,7 @@ export type InboundAddress = {
 
 export type CreatedInboundAddress = InboundAddress & {
     /**
-     * Present while the host doesn’t route mail here yet: hosted, an address on your own verified domain turns receiving on at its host if it was off.
+     * Present while the host doesn’t route mail here yet: hosted, an address on one of your own domains, verified or still being verified, turns receiving on at its host if it was off.
      */
     receiving?: {
         /**
@@ -4943,6 +4948,14 @@ export type CreatedInboundAddress = InboundAddress & {
          * Whether creating the address turned receiving on at this host (it didn’t receive mail before).
          */
         turnedOn: boolean;
+        /**
+         * The host’s receiving status now: waiting_for_mx until its MX record is live (poll getInboundDomain or listReceivingHosts).
+         */
+        status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
+        /**
+         * Whether the domain is verified. Until it is (its DNS records: getDomain), mail waits even with the MX record live.
+         */
+        verified: boolean;
         /**
          * The MX record to publish at the host, if it isn’t already: mail arrives once it is.
          */
@@ -5912,6 +5925,17 @@ export type InboundEvent = {
      * Receiving address ID at the time of the event; null for workspace events.
      */
     addressId: string | null;
+    /**
+     * message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone.
+     */
+    message: {
+        from: {
+            name: string | null;
+            address: string;
+        };
+        subject: string;
+        receivedAt: string;
+    } | null;
 };
 
 export type InboundWebhookSecret = InboundWebhook & {
@@ -7068,7 +7092,7 @@ export type GetCurrentIdentityResponses = {
         /**
          * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
          */
-        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
         /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
@@ -14241,7 +14265,7 @@ export type ChooseReceivingHostResponses = {
 export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
 
 export type SendDomainTestEmailData = {
-    body?: never;
+    body?: TestEmailContent;
     path: {
         id: string;
     };

@@ -477,7 +477,25 @@ export function servedOrigin(runtime: Runtime, url: string) {
  * may ask. A tab still open on an earlier origin keeps working there; neither origin's page may act through the other.
  */
 export function requireDashboardOrigin(runtime: Runtime, request: Request) {
-  if (request.headers.get('origin') !== servedOrigin(runtime, request.url)) throw new ApiError(403,'CSRF_ORIGIN_INVALID','Use the dashboard.');
+  const origin = request.headers.get('origin'), served = servedOrigin(runtime, request.url);
+  if (origin === served) return;
+  const refusal = new ApiError(403,'CSRF_ORIGIN_INVALID','Use the dashboard.');
+  // The request log says what kind of page asked (an embedded browser, an extension, another site), never which one.
+  const site = request.headers.get('sec-fetch-site');
+  refusal.origin = { originClass: originClass(origin, served), fetchSite: site && /^(?:same-origin|same-site|cross-site|none)$/.test(site) ? site : site ? 'other' : undefined };
+  throw refusal;
+}
+/** An Origin header as a class: missing, null, an extension, another scheme, the same host on another scheme or port, another host of the same site, or another host. */
+export function originClass(origin: string | null, served: string) {
+  if (origin === null) return 'missing';
+  if (origin === 'null') return 'null';
+  let url: URL;
+  try { url = new URL(origin); } catch { return 'invalid'; }
+  if (/^(?:chrome|moz|safari-web|ms-browser)-extension:$/.test(url.protocol)) return 'extension';
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return 'other-scheme';
+  const own = new URL(served), site = (host: string) => host.split('.').slice(-2).join('.');
+  if (url.hostname === own.hostname) return url.protocol !== own.protocol ? 'same-host-other-scheme' : 'same-host-other-port';
+  return site(url.hostname) === site(own.hostname) ? 'same-site-other-host' : 'other-host';
 }
 
 export async function accountBrowserRoute(c: Ctx) {

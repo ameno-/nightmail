@@ -6,7 +6,7 @@ import type { Actor, App, AppEnv, Ctx, DbExecutor, MailboxAccess, RequestOrigin,
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
 import { AuditEntry, auditContext, auditInsert, keyTrail, LastChange, lastChanges, recordAudit, type AuditVia } from './audit.js';
-import { secretPrefixes, shownPrefix } from './brand.js';
+import { productName, secretPrefixes, shownPrefix } from './brand.js';
 import { idempotencyGate, idempotent, IdempotencyHeaders, idempotentRequest, validIdempotencyKey } from './idempotency.js';
 import { approvalField, approvalTie, approvalTies, tiedNextStep } from './approval-ties.js';
 
@@ -70,10 +70,11 @@ export async function reservePolls(c: Ctx, workspaceId: string, keyId: string, p
   checkBudget(c, debit!.used, max);
 }
 /**
- * Reads, then once a second, until done, `seconds` (reserved with reservePolls) run out or the client goes away. An API
- * key is read again before each later read, since what it may do can change while it waits (updateApiKey): revoked or
- * ended, the poll fails as a new request with it would; with other addresses, mail, permissions or domains, the poll
- * ends with what it has, so a removed address is never read again and the next request polls with the new access.
+ * Reads, then once a second, until done, `seconds` (reserved with reservePolls) run out or the client goes away. The
+ * credential (an API or inbox key, an agent token, a sign-in's approval) is read again before each later read, since
+ * what it may do can change while it waits (updateApiKey, a revoke): revoked or ended, the poll fails as a new request
+ * with it would; with other addresses, mail, permissions, domains or role, the poll ends with what it has, so a removed
+ * address is never read again and the next request polls with the new access.
  * `wake`: an inbox whose stored mail is read at once (inbox-wake.ts). The poll watches it once the first read finds nothing,
  * so a poll answered at once costs nothing more, and watches again before each read after a wake, so mail stored while
  * that read runs isn't missed; a read after a wake is at least WOKEN_GAP_MS after the one before, so a busy inbox can't
@@ -102,7 +103,8 @@ export async function longPoll<T>(c: Ctx, seconds: number, read: () => Promise<T
     }
   } finally { watching?.cancel(); }
 }
-/** For a request made with an API key: whether the key still has exactly the access the request authenticated with. */
+/** For a request made with an inbox key, an API key, an agent token or a sign-in: whether it still has exactly the access the
+ *  request authenticated with. */
 function keyUnchanged(c: Ctx) {
   const box = c.get('mailboxAccess'), a = c.get('actor'), same = (x: unknown, y: unknown) => JSON.stringify(x) === JSON.stringify(y);
   if (box?.keyId.startsWith('mbk_')) return async () => {
@@ -116,6 +118,19 @@ function keyUnchanged(c: Ctx) {
       WHERE id = ${a.keyId} AND workspace_id = ${a.workspaceId} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())`);
     if (!now) throw await keyRefusal(c.env.db, sql`k.id = ${a.keyId} AND k.workspace_id = ${a.workspaceId}`);
     return same(now.permissions, a.permissions) && same(now.domains, a.domains);
+  };
+  // A sign-in (over MCP) or an agent token: its approval, read as bearerActor and the MCP call read it, the person's role
+  // in the workspace and, for a token, the token itself. Revoked or ended, the poll fails; with less access, it ends.
+  if ((a?.credential === 'mcp' || (a?.credential === 'agentToken' && a.tokenId)) && a.keyId.startsWith('mcp_')) return async () => {
+    const { getMcpGrantActor } = await wrapModuleLoad(() => import('./mcp-auth.js'));
+    const token = a.credential === 'agentToken' ? a.tokenId! : null;
+    const live = !token || (await c.env.db.execute(sql`SELECT FROM agent_tokens WHERE id = ${token} AND workspace_id = ${a.workspaceId} AND grant_id = ${a.keyId}
+      AND revoked_at IS NULL AND expires_at > now()`)).rows.length > 0;
+    const now = live ? await getMcpGrantActor(c.env, a.keyId, token ? { agentTokenId: token } : a.workspaceId) : null;
+    if (!now || now.workspaceId !== a.workspaceId) throw new ApiError(401, 'AUTH_INVALID', token
+      ? 'The temporary API token is invalid, expired, or its originating approval was revoked.'
+      : `This connection's approval in ${productName} was revoked or ended, or you no longer belong to this workspace. Reconnect the client.`);
+    return now.role === a.role && a.permissions.every(p => now.permissions.includes('manage') || now.permissions.includes(p));
   };
   return null;
 }

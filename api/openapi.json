@@ -8345,10 +8345,11 @@
                 "marketing",
                 "newsletter",
                 "developer",
-                "agents"
+                "agents",
+                "personal"
               ]
             },
-            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped."
+            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped."
           }
         },
         "required": [
@@ -8386,11 +8387,12 @@
                 "marketing",
                 "newsletter",
                 "developer",
-                "agents"
+                "agents",
+                "personal"
               ]
             },
-            "maxItems": 4,
-            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads."
+            "maxItems": 5,
+            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads."
           }
         },
         "example": {
@@ -8986,6 +8988,21 @@
           "status",
           "simulated"
         ]
+      },
+      "TestEmailContent": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
       },
       "DomainDnsSetup": {
         "type": "object",
@@ -14984,6 +15001,23 @@
                     "type": "boolean",
                     "description": "Whether creating the address turned receiving on at this host (it didn’t receive mail before)."
                   },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "off",
+                      "provisioning",
+                      "waiting_for_mx",
+                      "active",
+                      "disabling",
+                      "disabled",
+                      "failed"
+                    ],
+                    "description": "The host’s receiving status now: waiting_for_mx until its MX record is live (poll getInboundDomain or listReceivingHosts)."
+                  },
+                  "verified": {
+                    "type": "boolean",
+                    "description": "Whether the domain is verified. Until it is (its DNS records: getDomain), mail waits even with the MX record live."
+                  },
                   "dns": {
                     "type": "array",
                     "items": {
@@ -15019,9 +15053,11 @@
                   "domainId",
                   "host",
                   "turnedOn",
+                  "status",
+                  "verified",
                   "dns"
                 ],
-                "description": "Present while the host doesn’t route mail here yet: hosted, an address on your own verified domain turns receiving on at its host if it was off."
+                "description": "Present while the host doesn’t route mail here yet: hosted, an address on one of your own domains, verified or still being verified, turns receiving on at its host if it was off."
               }
             }
           }
@@ -17648,6 +17684,44 @@
               "null"
             ],
             "description": "Receiving address ID at the time of the event; null for workspace events."
+          },
+          "message": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "from": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "address": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "address"
+                ]
+              },
+              "subject": {
+                "type": "string"
+              },
+              "receivedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "subject",
+              "receivedAt"
+            ],
+            "description": "message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone."
           }
         },
         "required": [
@@ -17658,7 +17732,8 @@
           "threadId",
           "messageId",
           "data",
-          "addressId"
+          "addressId",
+          "message"
         ]
       },
       "InboundWebhookSecret": {
@@ -20990,7 +21065,8 @@
                           "marketing",
                           "newsletter",
                           "developer",
-                          "agents"
+                          "agents",
+                          "personal"
                         ]
                       },
                       "description": "A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped."
@@ -37600,7 +37676,7 @@
     "/v1/campaigns/{id}/test": {
       "post": {
         "operationId": "testCampaign",
-        "description": "Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test is screened on its own, with the campaign limit (131,072 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).",
+        "description": "Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test goes only to an address the workspace has proven is its own: a member’s verified email, an address at one of its currently verified domains or their subdomains (its receiving addresses and inboxes there included; not a domain whose verification lapsed), or the SES mailbox simulator (422 TEST_RECIPIENT_NOT_OWNED otherwise; send the campaign to reach anyone else), a workspace sends at most 20 tests a clock hour (429 CAMPAIGN_TEST_LIMIT, retryable at resetAt), and each test is screened on its own, with the campaign limit (131,072 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).",
         "tags": [
           "Campaigns"
         ],
@@ -40572,7 +40648,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.",
+        "description": "Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from \"Nightmail Setup\" <setup@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.",
         "parameters": [
           {
             "schema": {
@@ -40585,6 +40661,16 @@
             "in": "path"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestEmailContent"
+              }
+            }
+          }
+        },
         "responses": {
           "202": {
             "description": "Success",
@@ -40706,12 +40792,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendDomainTestEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendDomainTestEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/test-send' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/test-send' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }
@@ -44012,7 +44098,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. to defaults to now and from to 24 hours (granularity=10m) or 30 days before to; from equal to to is an empty window. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Metrics"
         ],
@@ -62458,7 +62544,7 @@
         "operationId": "createInboundAddress",
         "deprecated": true,
         "summary": "Create a receivable address",
-        "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Hosted, an address on one of your own verified domains (or a subdomain of one) where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving.dns names the MX record to publish; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
+        "description": "Admin only. Mail arrives once the domain is verified and its receiving MX record is active. Hosted, an address on one of your own domains (or a subdomain of one), verified or still being verified, where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving names the MX record to publish, the host’s status and whether the domain is verified yet; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
         "requestBody": {
           "required": true,
           "content": {

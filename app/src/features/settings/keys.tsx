@@ -74,7 +74,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked', false, invalidate.agents)
   const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked', false, invalidate.appPasswords)
   // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here),
-  // and /api-keys?create=smtp on an SMTP login (the Keys guide links there);
+  // /api-keys?create=smtp on an SMTP login (the Keys guide links there) and /api-keys?create=app on an app password
+  // (onboarding's inbox for myself links there);
   // the parameters then leave the URL, so Back and reload don't open it again.
   const [params, setParams] = useSearchParams()
   const mailServers = useMailServers()
@@ -82,6 +83,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     if (!params.has('create')) return undefined
     // Without a mail gateway an SMTP login could never sign in: the link opens the key types instead.
     if (params.get('create') === 'smtp') return mailServers ? { smtp: true } : {}
+    if (params.get('create') === 'app') return { app: true }
     const asked = params.get('create') === 'inbound' ? 'addresses' : params.get('create')
     return { purpose: (['send', 'read_send', 'read', 'manage', 'addresses', 'inbox', 'create'] as Purpose[]).find(value => value === asked) ?? 'send', domain: params.get('domain') || undefined }
   })
@@ -267,7 +269,7 @@ function KeyChanges({ keyId }: { keyId: string }) {
 function RevokeDialog({ row, onClose, onConfirm, pending, returnFocus }: { row: Row | null; onClose: () => void; onConfirm: (row: Row) => Promise<void>; pending: boolean; returnFocus: RefObject<HTMLElement | null> }) {
   const description: ReactNode = !row ? ''
     : row.kind === 'key' ? row.key.access.type === 'workspace' ? 'Requests using this key will stop working. Revoking a key cannot be undone.' : 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.'
-    : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. It can sign in again as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
+    : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. To connect it again, sign out of Anomaly account or sign in there again first; it then connects as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
     : row.kind === 'token' ? 'This short-lived token stops working immediately. Revoking it cannot be undone.'
     : 'Mail apps using it are signed out and can’t sign in with it again. The inbox and its mail stay.'
   const label = row ? revokeLabel(row) : 'Revoke'

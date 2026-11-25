@@ -15,6 +15,7 @@ import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf,
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { WORKSPACE_FOCUS, type WorkspaceFocus } from './workspace-focus.js';
+import { SETUP_LIMITS, SETUP_SENDER } from './setup-email.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, withoutVerdict, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
@@ -91,7 +92,7 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
     .optional().describe('Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const Focus = z.enum(WORKSPACE_FOCUS);
-const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
+const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
 const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.'),
   requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.'),
   focus: z.array(Focus).nullable().describe(FOCUS_NOTE) }).openapi('WorkspaceSettings');
@@ -1144,17 +1145,22 @@ export function registerOperations(app: App) {
     return c.json(saved,200);
   });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
-  // The guarantee is the server's, not the dashboard's: no recipient or content is accepted, only the domain.
+  // The guarantee is the server's, not the dashboard's: no recipient is accepted, only the domain, and words of the
+  // person's own are screened like any send (sending.ts platformTestVerdict).
+  const setupLine=(max:number)=>z.string().trim().min(1).max(max);
+  // Other fields are ignored, as they were before the route took any: no recipient is ever read from the body.
+  const TestEmailContent=z.object({subject:setupLine(SETUP_LIMITS.subject).refine(v=>!/[\r\n]/.test(v),'Subject cannot contain line breaks.').optional(),text:setupLine(SETUP_LIMITS.text).optional()}).openapi('TestEmailContent');
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/test-send',operationId:'sendDomainTestEmail',tags:['Domains'],security:dashboardSecurity,
-    description:'Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.',
-    request:{params:IdParams},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
-    const a=actor(c,'send');
+    description:`Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from "${SETUP_SENDER.name}" <${SETUP_SENDER.local}@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.`,
+    request:{params:IdParams,body:{...json(TestEmailContent),required:false}},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
+    const a=actor(c,'send'), content=c.req.valid('json') as z.infer<typeof TestEmailContent>|undefined;
     if (a.credential!=='dashboard' || !a.email) throw denied('DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.',{ permission: 'sendEmail', level: 'on', credential: 'dashboard' });
     const [row]=await c.env.db.select({name:domains.name}).from(domains).where(and(scoped(domains,a),eq(domains.id,c.req.valid('param').id)));
     if (!row) return notFound('Domain');
     allowedDomain(a,row.name);
     const { admitTestEmail }=await wrapModuleLoad(() => import('./sending.js'));
-    return c.json(await admitTestEmail(c,a,row.name,a.email),202);
+    const custom=content?.subject && content.text ? { subject: content.subject, text: content.text } : undefined;
+    return c.json(await admitTestEmail(c,a,row.name,a.email,custom),202);
   });
   const dnsSetup='/v1/domains/{id}/dns-setup';
   const dnsGroup=`(${groupIds.join('|')})`;
@@ -1427,7 +1433,53 @@ async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertifi
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
     try { return new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
 }
+/**
+ * A budget of failed SNS signatures, checked before any verification work. SNS itself never fails verification, so its
+ * traffic never spends it. A peer gets SNS_PEER_FAILURES failures a minute in each isolate (and its share of the edge
+ * limiter across isolates); past SNS_ISOLATE_FAILURES in an isolate, a peer that has failed this minute gets no more tries
+ * unless it verified in the last 15 minutes. A peer with no failure is always verified: SNS delivers from addresses this
+ * isolate may not have seen yet, and its feedback must keep flowing.
+ */
+const SNS_PEER_FAILURES = 20, SNS_ISOLATE_FAILURES = 1200, SNS_PEERS = 4096;
+export class SnsFailureBudget {
+  private minute = 0; private total = 0;
+  private readonly failures = new Map<string, number>(); private readonly verified = new Map<string, number>();
+  constructor(private readonly clock = () => Date.now()) {}
+  private tick() { const minute = Math.floor(this.clock() / 60_000); if (minute !== this.minute) { this.minute = minute; this.total = 0; this.failures.clear(); } }
+  /** Whether this peer may be verified now: a check of counts, before any cryptography. */
+  admits(peer: string) {
+    this.tick();
+    if ((this.failures.get(peer) ?? 0) >= SNS_PEER_FAILURES) return false;
+    return this.total < SNS_ISOLATE_FAILURES || !this.failures.has(peer) || (this.verified.get(peer) ?? 0) > this.clock();
+  }
+  failed(peer: string, edgeExhausted = false) {
+    this.tick(); this.total++;
+    if (!this.failures.has(peer) && this.failures.size >= SNS_PEERS) return;
+    this.failures.set(peer, edgeExhausted ? SNS_PEER_FAILURES : (this.failures.get(peer) ?? 0) + 1);
+  }
+  succeeded(peer: string) {
+    this.verified.delete(peer);
+    if (this.verified.size >= SNS_PEERS) this.verified.delete(this.verified.keys().next().value!);
+    this.verified.set(peer, this.clock() + 15 * 60_000);
+  }
+}
+const isolateSnsFailures = new SnsFailureBudget();
+const snsFailuresLimited = () => new ApiError(429, 'SNS_RATE_LIMITED', 'Too many SNS envelopes failed verification from this address. Retry after one minute.', undefined, true);
 async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
+  const failures = runtime.snsFailureBudget ?? isolateSnsFailures;
+  if (!failures.admits(peer)) throw snsFailuresLimited();
+  try {
+    const trusted = await verifySnsSignature(envelope, runtime, peer);
+    failures.succeeded(peer);
+    return trusted;
+  } catch (error) {
+    // A signature that fails spends the peer's budget (certificate misses have their own budget); the edge limiter's
+    // refusal spends the rest of it here.
+    if (error instanceof ApiError && error.code === 'SNS_INVALID_SIGNATURE') failures.failed(peer, runtime.allowSnsFailure ? !await runtime.allowSnsFailure(peer).catch(() => true) : false);
+    throw error;
+  }
+}
+async function verifySnsSignature(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
   const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
   const trusted = snsHost(envelope);
   const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
@@ -1684,11 +1736,16 @@ function registerMetrics(app: App) {
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
   const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
   const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), tenMinute: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
-    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString();
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. to defaults to now and from to 24 hours (granularity=10m) or 30 days before to; from equal to to is an empty window. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+    // Only a range the caller wrote can be refused: an omitted end is now (or the given start, if that is later, which
+    // reads as an empty window), and an omitted start is a window that fits the granularity (24 hours for 10m, else 30 days).
+    // A zero-length window is empty, not inverted.
+    const a = workspaceActor(c), q = c.req.valid('query'), nowMs = Date.now();
+    const end = q.to ?? (q.from && Date.parse(q.from) > nowMs ? q.from : new Date(nowMs).toISOString());
+    const start = q.from ?? new Date(Date.parse(end) - (q.granularity === '10m' ? 1 : 30) * 86400000).toISOString();
     const qStartMs = Date.parse(start), qEndMs = Date.parse(end);
-    if (qStartMs >= qEndMs || qEndMs - qStartMs > (q.granularity === '10m' ? 6 : 366) * 86400000 || (q.granularity === '10m' && qStartMs < Date.now() - 6 * 86400000)) {
-      throw new ApiError(422, 'INVALID_DATE_RANGE', q.granularity === '10m' ? '10-minute metrics require an increasing range within the last 6 days.' : 'Metrics require an increasing range of at most 366 days.');
+    if (qStartMs > qEndMs || qEndMs - qStartMs > (q.granularity === '10m' ? 6 : 366) * 86400000 || (q.granularity === '10m' && qStartMs < nowMs - 6 * 86400000)) {
+      throw new ApiError(422, 'INVALID_DATE_RANGE', q.granularity === '10m' ? '10-minute metrics require a range within the last 6 days with from no later than to.' : 'Metrics require a range of at most 366 days with from no later than to.');
     }
     const compute = async () => {
     if (q.region) region(await withRegionSettings(c.env,a.workspaceId),q.region);
@@ -1890,7 +1947,7 @@ function registerMetrics(app: App) {
     // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
     // 60-second cache per workspace/filters/window; API keys, MCP and agent tokens stay exact.
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
-    const startMs = Date.parse(start), endMs = Date.parse(end), nowMs = Date.now();
+    const startMs = Date.parse(start), endMs = Date.parse(end);
     // "Last N days/hours as of now" windows move every request; bucket them by minute and window length.
     // The Overview's "previous period" ends one window-length ago, so it is relative too: key it by how far back it
     // ends as well, or it never hits the cache.

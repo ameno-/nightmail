@@ -96,6 +96,8 @@ export async function sweepPreviews(runtime: Pick<Runtime, 'storage'>, budgetMs 
 // ---------- rendering ----------
 
 type InlineImage = { contentId: string | null; contentType: string; size: number };
+/** The data: URI's media type: the image's bare type/subtype, without the parameters stored with it. Anything else is octet-stream. */
+export const dataUriType = (contentType: string) => { const bare = contentType.split(';')[0]!.trim().toLowerCase(); return /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(bare) ? bare : 'application/octet-stream'; };
 /**
  * Renders a preview page with its inline images embedded, stores `{ data, mimeType, ...fields }` as JSON and returns a
  * link to it. Work that does not fit this isolate's budget is refused before any image is read; the budget is released
@@ -113,7 +115,7 @@ export async function renderPreview<T extends InlineImage>(runtime: Pick<Runtime
   let encoded = 0, largest = 0;
   for (const [reference, count] of counts) {
     const item = byReference.get(reference)!;
-    encoded += count * (`data:${item.contentType};base64,`.length + 4 * Math.ceil(item.size / 3)); largest = Math.max(largest, item.size);
+    encoded += count * (`data:${dataUriType(item.contentType)};base64,`.length + 4 * Math.ceil(item.size / 3)); largest = Math.max(largest, item.size);
   }
   // A page with any character beyond Latin-1 is a two-byte string in V8, data URIs included.
   const page = largest + 3 * (/[^\x00-\xff]/.test(html) ? 2 : 1) * (html.length + encoded);
@@ -126,7 +128,7 @@ export async function renderPreview<T extends InlineImage>(runtime: Pick<Runtime
       const uris = new Map<string, string>();
       for (const reference of counts.keys()) {
         const item = byReference.get(reference)!, body = await read(item);
-        uris.set(reference, `data:${item.contentType};base64,${Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('base64')}`);
+        uris.set(reference, `data:${dataUriType(item.contentType)};base64,${Buffer.from(body.buffer, body.byteOffset, body.byteLength).toString('base64')}`);
       }
       html = html.replace(pattern, reference => uris.get(reference)!);
     }

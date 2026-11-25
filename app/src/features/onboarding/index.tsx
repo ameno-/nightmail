@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
 import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
-import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Download, LogOut, Send, X } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, Download, KeyRound, LogOut, Send, X } from 'lucide-react'
 import { Alert, Button, ErrorState, ErrorText, Field, Input, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
@@ -9,10 +9,13 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
 import { useApiMutation, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
-import { afterDomainStep, agentStep, finishedStep, focusStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
+import { afterDomainStep, agentStep, finishedStep, focusStep, readDomainStep, readRegionalDomain, setDomainStep, setRegionalDomain, storedStage, useDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { leadFocus, useSaveFocus, type WorkspaceFocus } from '../../data/focus'
 import { clearLandingFocus, readLandingFocus } from '../../data/landing-focus'
-import { AgentInboxStep, FocusStep, MarketingStep, NewsletterStep, useWarmFocus } from './focus-steps'
+import { AgentInboxStep, Finish, FocusStep, MarketingStep, NewsletterStep, PersonalStep, useNextScreen, useWarmFocus } from './focus-steps'
+import { Link } from 'react-router'
+import { FirstEmailStep, ProvisioningBar, firstEmail } from './email-step'
+import { analytics } from '../../lib/analytics'
 import { ConnectAwsRegional, PendingDomain, createStack, domainHint, waitingForStack } from './aws'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
 import { AgentSetupStatus, agentPrompt, agentPromptFile, downloadText, useAgentSetup } from '../docs/agent-setup'
@@ -20,8 +23,7 @@ import { TestSend } from '../docs/first-send'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries, usePrefetchRoute } from '../../data/prefetch'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
-import { ApiError, errorText, type BuiltinDomain, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
-import { BuiltinBadge, builtinSending } from '../settings/builtin-domain'
+import { ApiError, errorText, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
 import './onboarding.css'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { productName } from '../../../../api/src/brand'
@@ -42,9 +44,11 @@ const code = (error: unknown) => error instanceof ApiError ? error.code : undefi
 
 // The connection cache keeps only a short summary on the identity; a fresh /v1/me brings back the rest (the daily
 // limit, standing, domain counts) that Overview reads.
+// A poll leaves a read in flight to finish: cancelling it each tick starved the session whenever /v1/me took longer than
+// the tick (it never answered, so a new workspace stayed "starting").
 function useRefreshIdentity() {
   const client = useQueryClient()
-  return () => { void client.invalidateQueries({ queryKey: ['identity'], exact: true }).catch(() => {}) }
+  return (poll = false) => { void client.invalidateQueries({ queryKey: ['identity'], exact: true }, { cancelRefetch: !poll }).catch(() => {}) }
 }
 
 // A ready connection opens the add-domain step, then lifts the gate.
@@ -57,7 +61,8 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
     gcTime: 0,
     mutationFn: write,
     onSuccess: connection => {
-      if (connection?.state === 'ready' && workspaceId) setDomainStep(workspaceId, '')
+      // Hosted's steps already ran while it was provisioned: they keep the one this browser is on.
+      if (connection?.state === 'ready' && workspaceId && !(connection.kind === 'shared' && readDomainStep(workspaceId) !== null)) setDomainStep(workspaceId, '')
       sync(connection)
       if (connection?.state !== 'ready') return
       refreshIdentity()
@@ -89,7 +94,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
 }
 
 // Each step stands on its own heading: no step indicator. A step with somewhere to go back to has a Back link at its top.
-type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'focus' | 'agent' | 'error'
+type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'email' | 'focus' | 'agent' | 'error'
 const rise = (index: number) => ({ '--i': index }) as CSSProperties
 // Older APIs return no count; a list is accepted too.
 function importedCount(connection: ProviderConnection | null | undefined) {
@@ -142,7 +147,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // Ready from a poll (auto-verify), another tab or an admin: continue to Add domain.
   useEffect(() => {
     if (!sending || current?.state !== 'ready' || (picked === 'shared' && current.kind === 'byo')) return
-    setDomainStep(workspaceId, '')
+    if (!(current.kind === 'shared' && readDomainStep(workspaceId) !== null)) setDomainStep(workspaceId, '')
     sync(current)
     refreshIdentity()
   }, [current?.state, current?.id]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -173,7 +178,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const starting = identity?.hostedSetup === 'starting'
   useEffect(() => {
     if (!starting) return
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') refreshIdentity() }, 250)
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') refreshIdentity(true) }, 250)
     return () => clearInterval(timer)
   }, [starting]) // eslint-disable-line react-hooks/exhaustive-deps
   // Without a choice to make, a workspace with no connection starts Hosted mail at once, as choosing it would.
@@ -195,8 +200,29 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // until the session is read again (useConnectionCache), so the step waits for that read rather than showing the form first.
   const builtin = identity?.connection?.builtinDomain
   const readingIdentity = useIsFetching({ queryKey: ['identity'], exact: true }) > 0
+  // Hosted with nothing to choose runs onboarding's own steps from the first frame, while its account is provisioned (the
+  // bar along the top): its connection, then the built-in domain the first email goes out on, which Send waits for. They
+  // follow what this browser stored, as they will once the gate lets them (data/onboarding.ts).
+  const hosted = flow === 'shared'
+  const stored = useDomainStep(workspaceId)
+  const step = sending && hosted ? stored === null ? { step: 'domain' as const, domainId: '' } : storedStage(stored) : stage
+  const builtinReady = Boolean(builtin?.id) && builtin?.sending === 'ready'
+  // No built-in domain to send from (an installation without them, or one that stopped sending): Add domain instead.
+  const noBuiltin = !sending && !starting && !readingIdentity && (builtin == null || builtin.sending === 'off' || builtin.sending === 'closed')
+  const provisioning = hosted && !noBuiltin && !builtinReady && !shared.error
+  // A built-in domain still being set up reports pending: the session is read again until it sends.
+  useEffect(() => {
+    if (!hosted || sending || builtin?.sending !== 'pending') return
+    const timer = setInterval(() => { if (document.visibilityState === 'visible') refreshIdentity(true) }, 1500)
+    return () => clearInterval(timer)
+  }, [hosted, sending, builtin?.sending]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The developer's next screen reads the built-in domain: read it now, so it opens at once.
+  const prefetch = usePrefetchQueries()
+  useEffect(() => { if (builtinReady && builtin?.id) void prefetch([queries.domain(builtin.id)]) }, [builtinReady, builtin?.id]) // eslint-disable-line react-hooks/exhaustive-deps
+  // The first email's draft, its send and the reply: kept for this visit, so Back from the question finds it as it was.
+  const [email, setEmail] = useState(firstEmail)
   // Overview opens next: bring the identity's daily limit and counts up to date first.
-  const finish = () => { setDomainStep(workspaceId, finishedStep); refreshIdentity() }
+  const finish = () => { analytics().track('onboarding', 'finished'); setDomainStep(workspaceId, finishedStep); refreshIdentity() }
   // After a domain, the focus question (once), then the step its first pick leads to. Saving it runs in the background.
   // The picks this visit made: the step they lead to opens in the same render as the pick, never the previous focus's step
   // for a frame while the session's copy catches up.
@@ -220,49 +246,53 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // An agent inbox goes on the built-in domain while it receives, a newsletter while it sends; else on the domain
   // onboarding verified.
   const receives = builtin?.name && builtin.sending !== 'off' ? builtin.name : null, sends = builtin?.name && (builtin.sending === 'ready' || builtin.sending === 'pending') ? builtin.name : null
-  // Reached from "Your domain is ready" or imported domains, the form goes back there.
+  // Reached from imported domains, the form goes back there.
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
     ready={stage.step === 'domain'} onBack={addAnother ? () => setAddAnother(false) : undefined}
     onAdded={id => setDomainStep(workspaceId, id)} onFinish={finish} />
   let view: View, content: ReactNode
-  // Back from the focus question with the built-in domain: to its step. An own domain's records move on by themselves once
-  // it verifies, so the question has no Back then; the step after it goes back to it.
-  if (stage.step === 'focus') {
-    const domainId = stage.domainId
+  // Back from the question with the built-in domain: to the first email. An own domain's records move on by themselves once
+  // it verifies, so the question has no Back then; the screen after it goes back to it.
+  if (step === null) { view = 'loading'; content = <BootLoader inline /> } // Finished while still provisioning: the dashboard opens once it's ready.
+  else if (step.step === 'focus') {
+    const domainId = step.domainId || builtin?.id || ''
     view = 'focus'
-    content = <FocusStep initial={focus ?? []} onBack={domainId === builtin?.id ? () => setDomainStep(workspaceId, '') : undefined}
-      onContinue={focus => { if (focus[0]) warmFocus(focus[0], receives); setPickedFocus(focus); saveFocus(focus); setDomainStep(workspaceId, agentStep(domainId)) }} />
+    content = <FocusStep current={focus?.[0] ?? null} onBack={!step.domainId || domainId === builtin?.id ? () => setDomainStep(workspaceId, '') : undefined}
+      onPick={pick => { warmFocus(pick, receives); setPickedFocus([pick]); saveFocus([pick]); setDomainStep(workspaceId, agentStep(domainId)) }}
+      onSkip={() => { setPickedFocus([]); saveFocus([]); finish() }} />
   }
-  else if (stage.step === 'agent') {
-    const domainId = stage.domainId, lead = leadFocus({ focus }), back = () => setDomainStep(workspaceId, focusStep(domainId))
+  else if (step.step === 'agent' && !(step.domainId || builtin?.id)) { view = 'loading'; content = <BootLoader inline /> } // Its domain is still being provisioned.
+  else if (step.step === 'agent') {
+    const domainId = step.domainId || builtin!.id!, lead = leadFocus({ focus }), back = () => setDomainStep(workspaceId, focusStep(domainId))
     view = 'agent'
     // Overview, next, is warmed while a focus's step is up, as the agent setup warms it.
     content = lead === 'agents' ? <><FocusDomain domainId={domainId} builtin={receives}>{domain => <AgentInboxStep domain={domain} onBack={back} onFinish={finish} />}</FocusDomain><WarmOverview /></>
       : lead === 'newsletter' ? <><FocusDomain domainId={domainId} builtin={sends}>{domain => <NewsletterStep domain={domain} onBack={back} onFinish={finish} />}</FocusDomain><WarmOverview /></>
       : lead === 'marketing' ? <><MarketingStep domain={sends} onBack={back} onFinish={finish} /><WarmOverview /></>
+      : lead === 'personal' ? <><PersonalStep domain={receives} onBack={back} onFinish={finish} /><WarmOverview /></>
       : <AgentSetup domainId={domainId} onFinish={finish} onBack={back} />
   }
-  else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => next(stage.domainId)} onMissing={() => setDomainStep(workspaceId, '')} /> }
+  else if (step.step === 'domain' && step.domainId) { const domainId = step.domainId; view = 'records'; content = <DomainSetup domainId={domainId} onContinue={() => next(domainId)} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
     content = current?.templateVersion === 'v5'
       ? <ConnectAwsRegional connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} onChosen={chooseRegional} />
       : <ConnectAwsStep state={connectionState} connection={current} onBack={() => leaveAws(offerByo ? null : 'shared')} onHosted={() => leaveAws('shared')} />
   }
-  else if (starting && !picked && (sending || (choosingDomain && !builtin?.id))) { view = 'loading'; content = <BootLoader inline /> }
   else if (autoHosted && shared.error) { view = 'error'; content = <HostedError error={shared.error} onRetry={() => shared.reset()} /> }
   else if (sending && !picked && connection.error) { view = 'error'; content = <ErrorState error={connection.error} onRetry={() => void connection.refetch()} /> }
+  else if (hosted && !noBuiltin) {
+    view = 'email'
+    const toFocus = () => next(builtin?.id ?? '')
+    content = <FirstEmailStep email={identity?.email ?? null} domain={builtinReady ? builtin!.name : null} domainId={builtinReady ? builtin!.id : null} ready={builtinReady}
+      state={email} onChange={setEmail} onContinue={toFocus} onSkip={toFocus} />
+  }
+  else if (starting && !picked && (sending || (choosingDomain && !builtin?.id))) { view = 'loading'; content = <BootLoader inline /> }
   else if ((sending && !picked && connection.isPending) || (choosingDomain && flow === 'byo' && connection.isPending)) { view = 'loading'; content = <BootLoader inline /> }
   else if (sending && !flow) { view = 'choose'; content = <ChooseSending onChoose={choose} error={shared.error ?? byo.error} /> }
   else if (choosingDomain && flow === 'byo' && regionalDomain) {
     view = 'loading'
     content = <PendingDomain name={regionalDomain} onFound={id => { chooseRegional(null); setDomainStep(workspaceId, id ?? '') }} />
-  }
-  else if (choosingDomain && flow === 'shared' && builtin === undefined && readingIdentity) { view = 'loading'; content = <BootLoader inline /> }
-  else if (choosingDomain && flow === 'shared' && builtin?.id && builtin.sending !== 'off' && !addAnother) {
-    const builtinId = builtin.id
-    view = 'imported'
-    content = <BuiltinReady builtin={builtin} onContinue={() => next(builtinId)} onAddOwn={() => setAddAnother(true)} />
   }
   else if (choosingDomain && flow === 'byo' && imported > 0 && !addAnother) {
     view = 'imported'
@@ -275,7 +305,9 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const previous = frame.view === view ? frame.previous : frame.view
   const motion = previous === null || view === 'loading' ? undefined : 'fade'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
-  return <div key={view} className="onboarding-step" data-motion={motion}>{content}</div>
+  // The first email is the first step: stored, so the gate keeps it open after the send (data/onboarding.ts).
+  useEffect(() => { if (view === 'email' && stored === null) setDomainStep(workspaceId, '') }, [view, stored]) // eslint-disable-line react-hooks/exhaustive-deps
+  return <>{hosted && <ProvisioningBar active={provisioning} />}<div key={view} className="onboarding-step" data-motion={motion}>{content}</div></>
 }
 
 /** The domain an agent inbox or a newsletter goes on: the built-in one, else the domain onboarding verified (read). */
@@ -416,41 +448,6 @@ function VerifyAccount({ connection }: { connection: ProviderConnection | null }
   </form>
 }
 
-// Hosted: the workspace's built-in domain sends and receives already, with no DNS. Continue with it to the first email, or
-// add a domain of your own now (it can also be added any time later, in Domains). The request that made the workspace
-// usually set it up already (startHostedMail); while it is still being set up the step says so and reads /v1/me again
-// every 1.5 s, and both wordings sit in one cell, so turning ready moves nothing.
-function BuiltinReady({ builtin, onContinue, onAddOwn }: { builtin: BuiltinDomain; onContinue: () => void; onAddOwn: () => void }) {
-  const pending = builtin.sending === 'pending'
-  const refreshIdentity = useRefreshIdentity()
-  // The first-email step reads the domain: read now, so Continue opens it at once.
-  const prefetch = usePrefetchQueries()
-  useEffect(() => { if (builtin.id) void prefetch([queries.domain(builtin.id)]) }, [builtin.id]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => {
-    if (!pending) return
-    const timer = setInterval(() => { if (document.visibilityState === 'visible') refreshIdentity() }, 1500)
-    return () => clearInterval(timer)
-  }, [pending]) // eslint-disable-line react-hooks/exhaustive-deps
-  const state = (ready: boolean) => ({ 'data-active': ready !== pending || undefined, 'aria-hidden': ready === pending || undefined })
-  return <div className="onboarding onboarding--narrow">
-    <div className="onboarding-intro onb-rise" style={rise(0)}>
-      <h1 className="onboarding-title onboarding-slot"><span {...state(true)}>Your domain is ready</span><span {...state(false)}>Getting your domain ready…</span></h1>
-      <p className="muted onboarding-builtin-copy onboarding-slot">
-        <span {...state(true)}>Send and receive at any address on it now, with no DNS to set up. {builtinSending(builtin)}</span>
-        <span {...state(false)}>Usually under a minute. Then send and receive at any address on it, with no DNS to set up. {builtinSending(builtin)}</span>
-      </p>
-      <span className="sr-only" role="status">{pending ? '' : `${builtin.name} is ready.`}</span>
-    </div>
-    <ul className="onboarding-imported onb-rise" style={rise(1)}>
-      <li><span className="onboarding-builtin-name"><code>{builtin.name}</code><BuiltinBadge /></span><LiveStatus state={pending ? 'pending' : 'verified'} labels={{ pending: 'Setting up', verified: 'Ready' }} plain /></li>
-    </ul>
-    <div className="onboarding-connect-actions onb-rise" style={rise(2)}>
-      <Button variant="primary" data-analytics="onboarding/builtin/continue" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
-      <Button variant="ghost" data-analytics="onboarding/builtin/add-own" onClick={onAddOwn}>Add your own domain</Button>
-    </div>
-  </div>
-}
-
 // BYO with verified domains already in SES: they're done; continue, or add another.
 function ImportedDomains({ count, onContinue, onAddAnother, fallback }: { count: number; onContinue: (id: string) => void; onAddAnother: () => void; fallback: ReactNode }) {
   const domains = useApiQuery(['domains', 'onboarding-imported'], (api, signal) => api.domains.list({ page: 1, pageSize: 10, refresh: false }, signal))
@@ -563,6 +560,7 @@ function AgentSetup({ domainId, onFinish, onBack }: { domainId: string; onFinish
   const { canAdminister } = useWorkspaceAccess()
   const setup = useAgentSetup(Boolean(identity) && canAdminister)
   const rewarm = useWarmOverview()
+  useNextScreen('developer', onFinish)
   // A removed domain still leaves a useful prompt without domain details.
   const missing = domain.error instanceof ApiError && domain.error.status === 404
   const current = domain.data ?? null
@@ -573,10 +571,13 @@ function AgentSetup({ domainId, onFinish, onBack }: { domainId: string; onFinish
   const builtin = identity?.connection?.builtinDomain
   const ready = current?.builtIn && builtin?.id === current.id ? builtin.sending === 'ready' : undefined
   const line = 'Paste it into your coding agent; it gets its own key.'
+  // After onboarding's first email (the built-in domain), the next thing is sending from code; an own domain just verified
+  // gets its test email here instead.
+  const tested = current?.builtIn === true
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       {onBack && <Back onBack={onBack} />}
-      <h1 className="onboarding-title">Send your first email</h1>
+      <h1 className="onboarding-title">{tested ? 'Send from your app' : 'Send your first email'}</h1>
     </div>
     <section className="onboarding-agent onb-rise" style={rise(1)} aria-label="Agent prompt">
       <div className="onboarding-connect-actions" data-pending={!origin || undefined} inert={!origin}>
@@ -587,9 +588,12 @@ function AgentSetup({ domainId, onFinish, onBack }: { domainId: string; onFinish
       </div>
       {setup ? <AgentSetupStatus setup={setup} idle={line} /> : <p className="muted onboarding-agent-line">{line}</p>}
     </section>
-    {current && <section className="onboarding-test onb-rise" style={rise(2)} aria-label="Test email"><TestSend domain={current} ready={ready} onLeave={onFinish} onSent={rewarm} onSettled={rewarm} /></section>}
-    <div className="onboarding-actions">
-      <Button onClick={onFinish}>Go to dashboard<ArrowRight size={16} aria-hidden /></Button>
-    </div>
+    {current && !tested && <section className="onboarding-test onb-rise" style={rise(2)} aria-label="Test email"><TestSend domain={current} ready={ready} onLeave={onFinish} onSent={rewarm} onSettled={rewarm} /></section>}
+    {tested && <ul className="focus-tasks onb-rise" style={rise(2)}><li className="focus-task">
+      <span className="focus-task__icon" aria-hidden="true"><KeyRound size={16} /></span>
+      <span className="focus-task__text"><span className="focus-task__title">Create an API key</span><span className="focus-task__line">For your own code: the key sends from your server, never the browser.</span></span>
+      <span className="focus-task__action"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/api-keys?create=send&domain=${encodeURIComponent(current!.name)}`} onClick={onFinish} data-analytics="onboarding/developer/key">Create key</Link></span>
+    </li></ul>}
+    <Finish onFinish={onFinish} />
   </div>
 }

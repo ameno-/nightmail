@@ -2015,7 +2015,7 @@ export const setCampaignArchived = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test is screened on its own, with the campaign limit (131,072 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).
+ * Send the current draft, personalized with data, to one address as a transactional test. It shows the footer as recipients get it (the Unsubscribe link, a placeholder here, and the workspace’s postal address, if set) without List-Unsubscribe headers, and needs no postal address. On Hosted sending a test goes only to an address the workspace has proven is its own: a member’s verified email, an address at one of its currently verified domains or their subdomains (its receiving addresses and inboxes there included; not a domain whose verification lapsed), or the SES mailbox simulator (422 TEST_RECIPIENT_NOT_OWNED otherwise; send the campaign to reach anyone else), a workspace sends at most 20 tests a clock hour (429 CAMPAIGN_TEST_LIMIT, retryable at resetAt), and each test is screened on its own, with the campaign limit (131,072 bytes of screened text by default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } over it).
  */
 export const testCampaign = <ThrowOnError extends boolean = false>(options: Options<TestCampaignData, ThrowOnError>): RequestResult<TestCampaignResponses, TestCampaignErrors, ThrowOnError> => (options.client ?? client).post<TestCampaignResponses, TestCampaignErrors, ThrowOnError>({
     security: [
@@ -2411,7 +2411,7 @@ export const chooseReceivingHost = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.
+ * Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from "Nightmail Setup" <setup@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.
  */
 export const sendDomainTestEmail = <ThrowOnError extends boolean = false>(options: Options<SendDomainTestEmailData, ThrowOnError>): RequestResult<SendDomainTestEmailResponses, SendDomainTestEmailErrors, ThrowOnError> => (options.client ?? client).post<SendDomainTestEmailResponses, SendDomainTestEmailErrors, ThrowOnError>({
     security: [{
@@ -2424,7 +2424,11 @@ export const sendDomainTestEmail = <ThrowOnError extends boolean = false>(option
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/test-send',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**
@@ -2765,7 +2769,7 @@ export const unsubscribeByLink = <ThrowOnError extends boolean = false>(options:
 export const unsubscribeOneClick = <ThrowOnError extends boolean = false>(options: Options<UnsubscribeOneClickData, ThrowOnError>): RequestResult<UnsubscribeOneClickResponses, UnsubscribeOneClickErrors, ThrowOnError> => (options.client ?? client).post<UnsubscribeOneClickResponses, UnsubscribeOneClickErrors, ThrowOnError>({ url: '/unsubscribe/{token}', ...options });
 
 /**
- * Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. to defaults to now and from to 24 hours (granularity=10m) or 30 days before to; from equal to to is an empty window. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const getMetrics = <ThrowOnError extends boolean = false>(options?: Options<GetMetricsData, ThrowOnError>): RequestResult<GetMetricsResponses, GetMetricsErrors, ThrowOnError> => (options?.client ?? client).get<GetMetricsResponses, GetMetricsErrors, ThrowOnError>({
     security: [
@@ -4861,7 +4865,7 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
 /**
  * Create a receivable address
  *
- * Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Hosted, an address on one of your own verified domains (or a subdomain of one) where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving.dns names the MX record to publish; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ * Admin only. Mail arrives once the domain is verified and its receiving MX record is active. Hosted, an address on one of your own domains (or a subdomain of one), verified or still being verified, where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving names the MX record to publish, the host’s status and whether the domain is verified yet; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
  *
  * @deprecated
  */
