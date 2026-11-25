@@ -14,6 +14,8 @@ import type { Config } from './core.js';
 
 /** What the entrypoint passes to the app as `Runtime.platformCaller`. HTTP requests can never set it. */
 export const SUPPORT_PLATFORM_CALLER = 'bane-support';
+/** The audience of a staff link to one screenshot the support platform holds (src/support-inbox.ts, verifyFile). */
+export const FILE_AUDIENCE = 'nightmail-support-file';
 /** The support Worker's conversation IDs (conv_ and 26 base32 characters). */
 export const CONVERSATION_ID = /^conv_[a-z2-7]{26}$/;
 /** The runtime fields a binding call runs with: the caller, and for request() its conversation. */
@@ -68,9 +70,10 @@ export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mo
 
 /** A transcript entry the support platform mirrors into the inbox (src/support-inbox.ts). Staff replies come from the inbox. */
 export type MirroredMessage = { id: string; author: 'customer' | 'agent' | 'system'; kind?: string | null; text: string; tools?: { label: string; ok: boolean }[]; attachments?: string[];
-  delivery?: 'sent' | 'failed' | 'held'; at?: string };
+  files?: { id: string; name: string; type: string; size: number }[]; source?: string; delivery?: 'sent' | 'failed' | 'held'; reason?: 'paused' | 'gate' | 'access' | 'closed' | 'earlier'; at?: string };
 /** What the support platform mirrors about a conversation; each field is optional. */
-export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3' }; turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
+export type MirroredState = { subject?: string; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; brief?: { title: string; summary: string; ask: string; recommendation: string } };
+  turns?: number; costUsd?: number; blockedWork?: number; pauseForTicket?: true };
 /** A conversation's inbox state as the support platform needs it: check agentState before every turn and every send. */
 export type InboxState = { id: string; status: 'open' | 'ticketed' | 'closed'; agentState: 'active' | 'paused'; pausedBy: 'staff' | 'ticket' | null; pausedAt: string | null;
   ticket: { id: string; type: string | null; severity: string | null; resolvedAt: string | null } | null; queuedReplies: number };
@@ -155,6 +158,14 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
       const claims = await signedClaims(support.signingKey, token), now = Math.floor(Date.now()/1000);
       return !!claims && claims.aud === 'nightmail-support-wake' && claims.iss === publicUrl &&
         claims.conversationId === conversationId && typeof claims.exp === 'number' && claims.exp > now && claims.exp <= now + 65;
+    },
+    /** A staff link to one screenshot of this conversation (GET /v1/operator/support-inbox/{id}/files/{attachmentId}), issued by this installation in the last five minutes. */
+    async verifyFile(token: string, conversationId: string, attachmentId: string) {
+      const { support, publicUrl } = config();
+      if (!support?.signingKey || !CONVERSATION_ID.test(conversationId) || !/^att_[a-z2-7]{16}$/.test(attachmentId)) return false;
+      const claims = await signedClaims(support.signingKey, token), now = Math.floor(Date.now() / 1000);
+      return !!claims && claims.aud === FILE_AUDIENCE && claims.iss === publicUrl && claims.conversationId === conversationId && claims.attachmentId === attachmentId
+        && typeof claims.exp === 'number' && claims.exp > now && claims.exp <= now + 305;
     },
     /** A handoff JWS from the dashboard: its signed claims plus the stored row (used or not, the person's message). */
     async verifyHandoff(token: string): Promise<HandoffCheck> {

@@ -229,6 +229,7 @@ export class SupportPlatform extends WorkerEntrypoint {
     return answer ? ok(answer) : refuse(404, 'NOT_FOUND');
   }
   async verifyWake(token, id) { return token === 'fixture-wake-' + id; }
+  async verifyFile(token, id, attachmentId) { calls.push(['verifyFile', id, attachmentId]); return token === 'fixture-file-' + id + '.' + attachmentId; }
   async verifyHandoff(token) { calls.push(['verifyHandoff', token]); const h = handoff(token); if (h?.shareContent) shared.add(h.id); return h ? { ok: true, handoff: h } : { ok: false, code: 'HANDOFF_INVALID' }; }
   async mirrorMessages(id, messages) {
     calls.push(['mirrorMessages', id, messages.map(m => m.id)]);
@@ -372,7 +373,7 @@ const RECEIVED_AT = '2026-11-20T09:15:00.000Z';
 const MESSAGES = {
   msg_mail_1: ['thr_mail_1'], msg_mail_2: ['thr_mail_1'], msg_nodmarc_1: ['thr_nodmarc', null, 'FAIL'], msg_nodmarc_lost: ['thr_nodmarc_lost', null, 'FAIL'], msg_auto_1: ['thr_auto'], msg_image_1: ['thr_image'],
   msg_nodmarc_spoof: ['thr_mail_1', null, 'FAIL', null, 'Refund', 'refund my top-up please'], msg_stranger_1: ['thr_mail_1', 'stranger@else.test'],
-  msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
+  msg_phish_1: ['thr_phish', null, 'PASS', null, 'Reset', 'Please send me the reset link'], msg_phish_inbox_1: ['thr_phish_inbox', null, 'PASS', null, 'Reset', 'Please send me the reset link'],
   msg_stranger_cap_1: ['thr_cap_1', 'stranger@else.test'], msg_stranger_cap_2: ['thr_cap_2', 'stranger@else.test'], msg_stranger_cap_3: ['thr_cap_3', 'stranger@else.test'],
   msg_nodmarc_c1: ['thr_c1', null, 'FAIL'], msg_nodmarc_c2: ['thr_c2', null, 'FAIL'],
   msg_abuse_1: ['thr_abuse', 'reporter@isp.test', 'PASS', 'abuse@dev.bane.mx', 'Spam from your customer', 'Your customer sends us spam. Headers attached.'],

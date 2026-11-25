@@ -340,9 +340,10 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     // with it the sender address it kept; a Message-ID's binding once its Date is too old to bind anyway.
     expired('support_email_signins', 'support_email_signins', at('created_at'), sql`signed_in_at IS NULL AND created_at < now() - interval '7 days'`),
     expired('support_email_bindings', 'support_email_bindings', at('created_at'), sql`created_at < now() - interval '7 days'`),
-    // Support transcripts (src/support-inbox.ts) and their subjects go 90 days after the conversation closed (agent
-    // feedback's, after its ticket was resolved).
-    expired('support_messages', 'support_messages', at('created_at'), sql`conversation_id IN (${closedLongAgo})`, unordered),
+    // Support transcripts (src/support-inbox.ts), their events and their subjects go 90 days after the conversation closed
+    // (agent feedback's, after its ticket was resolved).
+    expiredTogether('support_messages', [{ table: 'support_messages', by: at('created_at'), where: sql`conversation_id IN (${closedLongAgo})` },
+      { table: 'support_events', by: at('created_at'), where: sql`conversation_id IN (${closedLongAgo})` }]),
     { name: 'support_subjects', statement: () => sql`WITH gone AS (UPDATE support_conversations SET subject = NULL
         WHERE id IN (${closedLongAgo} AND subject IS NOT NULL LIMIT ${RETENTION_BATCH}) RETURNING 1) SELECT count(*)::int AS n FROM gone` },
     expired('audience_operation_plans', 'audience_operation_plans', at('expires_at'), sql`expires_at < now() - interval '1 day'`),

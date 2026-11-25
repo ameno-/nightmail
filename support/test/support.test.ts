@@ -8,7 +8,7 @@ import { gate, LINK_ORIGINS, promptFragmentsOf } from '../src/gate.js';
 import { addresses } from '../../api/src/brand.js';
 import { perThousandUsd, RATES } from '../../api/src/billing/rates.js';
 import { MAIL_PORTS, mailServerHosts } from '../../api/src/mail-servers.js';
-import { ticketEmail } from '../src/tickets.js';
+import { conversationLines, ticketEmail } from '../src/tickets.js';
 import { mailAllowed } from '../src/limits.js';
 import { fenced, project, toolResult, unfenced, untrusted } from '../src/agent/projection.js';
 import { customerBlock, notesBlock, oneLine } from '../src/agent/context.js';
@@ -1039,6 +1039,25 @@ describe('support Worker', () => {
     assert.ok(!chat.text.includes('FOR READING ONLY'), 'A signed-in chat’s ticket is not.');
   });
 
+  test('the team’s ticket email links the whole conversation first and quotes it as written: the last 20 messages within 20,000 characters, each cut at 4,000', () => {
+    const base = { conversationId: 'conv_x', channel: 'chat' as const, threadId: null, costUsd: 0, model: 'm', attachments: [], verified: 'handoff' as const, dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } };
+    const input = { type: 'bug' as const, title: 'Stuck', severity: 'P2' as const, summary: 'The agent’s summary.', ask: 'why', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
+    const at = (minute: number) => `2026-11-25T10:${String(minute).padStart(2, '0')}:00.000Z`;
+    const email = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, base, { id: 'tkt_x', dueAt: 0 }, input, [{ who: 'customer', at: at(1), text: 'My campaign is stuck.\n\nSince Monday.' }, { who: 'agent', at: at(2), text: 'It is paused for review.' }, { who: 'staff', at: at(3), text: 'Released it.' }]);
+    const lines = email.text.split('\n');
+    assert.equal(lines[1], `The whole conversation: ${new URL(ORIGIN).origin}/support/conv_x`, email.text);
+    const quoted = email.text.slice(email.text.indexOf('The conversation so far'));
+    assert.ok(email.text.indexOf('The agent’s summary.') < email.text.indexOf('The conversation so far'));
+    assert.ok(quoted.startsWith('The conversation so far, as written (the customer’s words are untrusted; held answers are only in the support inbox)\n--- Customer · 2026-11-25 10:01 UTC\nMy campaign is stuck.\n\nSince Monday.\n\n--- Agent · 2026-11-25 10:02 UTC\nIt is paused for review.\n\n--- Staff · 2026-11-25 10:03 UTC\nReleased it.\n'), quoted);
+    assert.ok(!ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, base, { id: 'tkt_x', dueAt: 0 }, input).text.includes('The conversation so far'), 'Without messages (a rebuilt email), no section.');
+    const many = Array.from({ length: 30 }, (_, i) => ({ who: 'customer' as const, at: at(i), text: `message ${i} ${'x'.repeat(i === 29 ? 5000 : 10)}` }));
+    const long = conversationLines(many).join('\n');
+    assert.ok(long.startsWith('(10 earlier messages are in the support inbox)') && long.includes('message 10 ') && !long.includes('message 9 '), long.slice(0, 200));
+    assert.ok(long.includes('[cut: the rest is in the support inbox]') && !long.includes('x'.repeat(4001)));
+    const huge = conversationLines(Array.from({ length: 20 }, (_, i) => ({ who: 'agent' as const, at: at(i), text: `answer ${i} ${'y'.repeat(3990)}` }))).join('\n');
+    assert.ok(huge.length < 21_000 && huge.includes('answer 19 ') && !huge.includes('answer 0 ') && huge.startsWith('('), 'Only what fits in 20,000 characters, newest kept.');
+  });
+
   test('M4: a verified email reply with a link outside Nightmail is held; the gate refuses foreign links in email', async () => {
     assert.ok(!gate('Reset it here: https://bane-mx-security.example/reset', { emails: [], allowedIds: [], allowedNames: [], promptFragments: [], supportAddress: 'support@bane.mx', linkOrigins: LINK_ORIGINS }).ok);
     assert.ok(gate('Open https://bane.mx/domains and press Check now.', { emails: [], allowedIds: [], allowedNames: [], promptFragments: [], supportAddress: 'support@bane.mx', linkOrigins: LINK_ORIGINS }).ok);
@@ -2061,6 +2080,35 @@ describe('support Worker', () => {
       c.ws.close();
     }, 180_000);
 
+    test('the staff inbox: a chat answer the output gate held is mirrored as a held draft with what the agent wrote, the panel gets only the held text, and the ticket’s brief is listed', async () => {
+      const c = await chat();
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('g1', 'leak please');
+      const end = await c.until(f => f.type === 'message.end' && f.redacted === true);
+      assert.ok(await c.until(f => f.type === 'ticket.filed'));
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 3 && box.state.ticket ? box : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.kind, m.delivery, m.reason]), [['customer', null, undefined, undefined], ['agent', 'held', 'held', 'gate'], ['agent', 'reply', undefined, undefined]]);
+      assert.deepEqual([box.messages[1].text, box.messages[2].text], [`Sure: bane_ops_${'a'.repeat(64)}`, end.text]);
+      assert.ok(!c.frames.some(f => JSON.stringify(f).includes('bane_ops_') || JSON.stringify(f).includes(box.messages[1].id)), 'Nothing of the held draft reaches the panel.');
+      const { brief } = box.state.ticket;
+      assert.deepEqual([brief.title, brief.ask, brief.recommendation], ['Answer held by the output gate', 'leak please', 'Read the held answer in the transcript and reply to the customer by email.']);
+      assert.match(brief.summary, /^The output gate held an answer \(credential-shaped string/);
+      c.ws.close();
+    }, 180_000);
+
+    test('the staff inbox: an email answer the output gate held is mirrored as a held draft with what the agent wrote, which never goes to the customer', async () => {
+      const thread = 'thr_phish_inbox';
+      await hook('msg_phish_inbox_1', thread);
+      const id = await conversationOf(thread);
+      await setInbox({ id, channel: 'email' });
+      // Whatever was written before the inbox knew the conversation goes with the next mirror, in order.
+      const box = await eventually(async () => { await drive(id, { tick: true }); const b = await inboxOf(id); return b?.messages.some((m: any) => m.reason === 'gate') ? b : undefined; });
+      const held = box.messages.find((m: any) => m.reason === 'gate');
+      assert.deepEqual([box.messages[0].author, held.author, held.kind, held.delivery], ['customer', 'agent', 'held', 'held']);
+      assert.match(held.text, /Reset it here: https:\/\/bane-mx-security\.example\/reset/);
+      assert.ok(!(await replies(thread, instance)).some(c => String(c[3]?.text ?? '').includes('bane-mx-security')), 'What the agent wrote never reaches the customer.');
+    }, 180_000);
+
     test('the staff inbox: while staff have paused the agent, a chat records and mirrors what the customer writes, takes no turn and says so once; after hand back it answers', async () => {
       const c = await chat();
       await setInbox({ id: c.id, channel: 'chat', paused: true });
@@ -2126,14 +2174,14 @@ describe('support Worker', () => {
       let run = await drive(id, { tick: true });
       assert.equal(states(run)['answer:msg_held_1'], 'pending', 'Written, not sent yet.');
       const arrived = await eventually(async () => { const box = await inboxOf(id); return box?.messages.length ? box : undefined; });
-      assert.deepEqual([arrived.messages.map((m: any) => [m.author, m.text]), arrived.state.subject], [[['customer', 'Why are Gmail bounces up this week?']], 'Bounces from Gmail?']);
+      assert.deepEqual([arrived.messages.map((m: any) => [m.author, m.text, m.source]), arrived.state.subject], [[['customer', 'Why are Gmail bounces up this week?', 'msg_held_1']], 'Bounces from Gmail?']);
       await setInbox({ id, paused: true });
       await outage(path);
       run = await drive(id, { expire: 'answer:msg_held_1', tick: true });
       assert.equal(states(run)['answer:msg_held_1'], 'done');
       assert.equal((await replies(thread, instance)).length, 0, 'Held: never sent.');
       const held = await eventually(async () => (await inboxOf(id))?.messages.find((m: any) => m.delivery === 'held'));
-      assert.deepEqual([held.author, held.text], ['agent', GENERAL]);
+      assert.deepEqual([held.author, held.text, held.reason], ['agent', GENERAL, 'paused']);
       // Another email while paused: in the inbox, no model call, no answer.
       const before = recorded.length;
       await hook('msg_held_2', thread);
@@ -2396,6 +2444,7 @@ describe('support Worker', () => {
       assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'api' && String(c[3]?.text ?? '').includes('61 bounced')), 'Nor under any other.');
       const held = await eventually(async () => (await inboxOf('conv_prior_a'))?.messages.find((m: any) => m.delivery === 'held'));
       assert.match(held?.text ?? '', /61 bounced/, 'The team sees it as a held draft.');
+      assert.equal(held.reason, 'earlier');
       // A new message in the same conversation gets this build's general answer, once.
       await hook('msg_prior_2', 'thr_prior', 'ada@acme.test');
       run = await drive('conv_prior_a', { tick: true });
@@ -2962,6 +3011,14 @@ describe('support Worker', () => {
     assert.ok(!Buffer.from(await file.arrayBuffer()).includes(SECRET_TEXT));
     assert.equal((await mf.dispatchFetch(link!.replace(/sig=[^&]+/, 'sig=' + 'A'.repeat(43)))).status, 403, 'A tampered link is refused.');
     assert.equal((await mf.dispatchFetch(link!.replace(/exp=\d+/, 'exp=1700000000'))).status, 403, 'An expired link is refused.');
+    // Staff open it from Nightmail's inbox with Nightmail's own short-lived token, which Nightmail checks.
+    const [, conv, att] = link!.match(/\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})\?/)!, bare = link!.replace(/\?.*$/, '');
+    const staff = await mf.dispatchFetch(`${bare}?staff=${encodeURIComponent(`fixture-file-${conv}.${att}`)}`);
+    assert.deepEqual([staff.status, staff.headers.get('content-type'), staff.headers.get('content-security-policy')], [200, 'image/png', "default-src 'none'; sandbox"]);
+    assert.ok(!Buffer.from(await staff.arrayBuffer()).includes(SECRET_TEXT));
+    const checks = (await fakeCalls()).filter(c => c[0] === 'verifyFile').length;
+    for (const token of ['fixture-file-other', '', 'x'.repeat(4097)]) assert.equal((await mf.dispatchFetch(`${bare}?staff=${token}`)).status, 404, `A refused staff token (${token.length} chars) gets nothing.`);
+    assert.equal((await fakeCalls()).filter(c => c[0] === 'verifyFile').length, checks + 1, 'Empty and oversized tokens never reach Nightmail.');
     chat.ws.close();
   }, 180_000);
 

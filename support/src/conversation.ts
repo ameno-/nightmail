@@ -2,7 +2,7 @@ import { DurableObject } from 'cloudflare:workers';
 import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './nightmail.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
-import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
+import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext, type TicketMessage } from './tickets.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
 import { alertOnce, countToday, holdOverCap, limits, mailAllowed, registrableDomain, ticketAllowed } from './limits.js';
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type WorkState } from './work.js';
@@ -118,7 +118,7 @@ type Meta = {
   // The staff inbox: the subject and ticket it lists, the transcript seq mirrored so far and the state last mirrored, the
   // mirror's retry, the last customer email (a staff reply answers it), the sender whose mail passed DMARC, and whether
   // chat already said the agent is paused.
-  subject?: string | null; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; category?: string; replyTo?: string | null; expect?: string } | null; mirrored?: number; mirroredState?: string | null;
+  subject?: string | null; ticket?: { id: string; type: string; severity: 'P1' | 'P2' | 'P3'; category?: string; replyTo?: string | null; expect?: string; brief?: Brief | null } | null; mirrored?: number; mirroredState?: string | null;
   mirrorDueAt?: number | null; mirrorAttempts?: number; lastInbound?: { messageId: string; threadId: string; addressIds?: string[] } | null; dmarcSender?: string | null; pauseNotice?: boolean;
   /** Registered with Nightmail: a chat's account reads are stamped with this conversation. Absent: opened before the stamp. */
   registered?: boolean;
@@ -141,7 +141,14 @@ type Meta = {
   successor?: string | null; retired?: boolean;
 };
 type Transcript = { id: string; role: 'user' | 'assistant' | 'staff'; kind: 'first' | 'reply' | 'notice' | 'held' | 'staff' | null; text: string; at: string; tools: { id: string; label: string; ok: boolean }[];
-  attachments?: { id: string; type: string; width: number | null; height: number | null; name: string }[]; author?: string | null; channel?: 'email' };
+  attachments?: { id: string; type: string; width: number | null; height: number | null; name: string }[]; author?: string | null; channel?: 'email';
+  /** A customer email's: the Nightmail message it came from. A held answer's: why it was held. */
+  source?: string; reason?: HeldReason };
+type HeldReason = NonNullable<MirroredMessage['reason']>;
+/** What the staff inbox shows of a ticket: the brief the agent filed (null: an earlier ticket whose row has none). */
+type Brief = NonNullable<NonNullable<MirroredState['ticket']>['brief']>;
+const briefOf = (t: { title: string; summary: string; ask: string; recommendation: string }): Brief =>
+  ({ title: t.title.slice(0, 200), summary: t.summary.slice(0, 1200), ask: t.ask.slice(0, 600), recommendation: t.recommendation.slice(0, 800) });
 type Outgoing = Record<string, unknown> & { type: string };
 /** The access a turn runs with, compared turn to turn. */
 type Effective = { workspaces: { id: string; role: string }[]; content: string | null; bound: string | null };
@@ -181,6 +188,8 @@ type Composed = {
    * `replied`: free text from the general build before the reply tool, gated when it is composed.
    */
   model?: string | null; replied?: boolean; gated?: string[];
+  /** The held entry (staff inbox) that keeps what the model wrote when the gate held it: the email sends HELD instead. */
+  gatedDraft?: string;
   ticketed?: boolean; fixed?: 'help' | 'busy' | 'decline'; text?: string | null; paused?: boolean; held?: string;
   /** The model declined to answer without calling reply (stop_reason "refusal"): the fixed decline is the answer. */
   declined?: boolean;
@@ -273,7 +282,7 @@ export class SupportConversation extends DurableObject<Env> {
       const progress = JSON.parse(row.result) as Composed;
       progress.held ??= newId('msg');
       this.sql.exec("UPDATE _support_work SET state = 'held', result = ?, updated_at = ? WHERE id = ?", JSON.stringify(progress), now, row.id);
-      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: typeof progress.text === 'string' ? progress.text : progress.model ?? '', at, tools: [], channel: 'email' }, false);
+      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: typeof progress.text === 'string' ? progress.text : progress.model ?? '', at, tools: [], channel: 'email', reason: 'earlier' }, false);
     }
     const settled = this.sql.exec("UPDATE _support_work SET state = 'held', updated_at = ? WHERE (kind = 'answer' AND state = 'parked' AND json_extract(payload, '$.signin') IS NULL) OR (kind = 'confirm' AND state IN ('pending', 'blocked'))", now).rowsWritten;
     if (written.length) log('warn', { event: 'email', code: 'EARLIER_ANSWERS_HELD', held: written.length });
@@ -337,10 +346,10 @@ export class SupportConversation extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS _support_attachments (id TEXT PRIMARY KEY, key TEXT NOT NULL, type TEXT NOT NULL, size INTEGER NOT NULL, width INTEGER, height INTEGER, source TEXT NOT NULL, name TEXT NOT NULL, message_id TEXT, created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_consent (id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL, workspace_name TEXT NOT NULL, why TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending', created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS _support_actions (id TEXT PRIMARY KEY, kind TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open', created_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_check_at INTEGER NOT NULL DEFAULT 0);`);
-    // A staff reply's author, and an entry that arrived by email (the inbox marks a delivered agent answer sent).
+    // A staff reply's author, an entry that arrived by email (the inbox marks a delivered agent answer sent), a customer
+    // email's Nightmail message, and why an answer was held.
     const columns = new Set(this.sql.exec<{ name: string }>('PRAGMA table_info(_support_transcript)').toArray().map(c => c.name));
-    if (!columns.has('author')) this.sql.exec('ALTER TABLE _support_transcript ADD COLUMN author TEXT');
-    if (!columns.has('channel')) this.sql.exec('ALTER TABLE _support_transcript ADD COLUMN channel TEXT');
+    for (const column of ['author', 'channel', 'source', 'reason']) if (!columns.has(column)) this.sql.exec(`ALTER TABLE _support_transcript ADD COLUMN ${column} TEXT`);
   }
 
   // ---------- state ----------
@@ -721,8 +730,8 @@ export class SupportConversation extends DurableObject<Env> {
   /** `mirror`: send it to the staff inbox now (false while the object loads: the alarm's mirror takes it). */
   private record(t: Transcript, mirror = true) {
     // An entry is written once (a retried work item records the same ID again).
-    const written = this.sql.exec('INSERT INTO _support_transcript (id, role, kind, text, at, tools, author, channel) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING', t.id, t.role, t.kind, t.text, t.at,
-      JSON.stringify(t.attachments?.length ? { tools: t.tools, attachments: t.attachments } : t.tools), t.author ?? null, t.channel ?? null).rowsWritten;
+    const written = this.sql.exec('INSERT INTO _support_transcript (id, role, kind, text, at, tools, author, channel, source, reason) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING', t.id, t.role, t.kind, t.text, t.at,
+      JSON.stringify(t.attachments?.length ? { tools: t.tools, attachments: t.attachments } : t.tools), t.author ?? null, t.channel ?? null, t.source ?? null, t.reason ?? null).rowsWritten;
     if (written && mirror) this.mirrorSoon();
   }
 
@@ -735,7 +744,7 @@ export class SupportConversation extends DurableObject<Env> {
   /** What the inbox lists about this conversation: its subject, ticket, counters, blocked work and an emailed ticket's pause. */
   private inboxSnapshot(meta: Meta): MirroredState {
     const blocked = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _support_work WHERE state = 'blocked'").one().n;
-    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: { id: meta.ticket.id, type: meta.ticket.type, severity: meta.ticket.severity } } : {}, turns: meta.turns, costUsd: Math.round(meta.costUsd * 10_000) / 10_000, blockedWork: blocked,
+    return { ...meta.subject ? { subject: meta.subject.slice(0, 200) } : {}, ...meta.ticket ? { ticket: { id: meta.ticket.id, type: meta.ticket.type, severity: meta.ticket.severity, ...meta.ticket.brief ? { brief: meta.ticket.brief } : {} } } : {}, turns: meta.turns, costUsd: Math.round(meta.costUsd * 10_000) / 10_000, blockedWork: blocked,
       // After an emailed ticket the team owns the thread: the agent answers no later mail (compose), so the inbox shows it paused.
       ...meta.channel === 'email' && meta.status === 'ticketed' ? { pauseForTicket: true as const } : {} };
   }
@@ -744,13 +753,20 @@ export class SupportConversation extends DurableObject<Env> {
     if (!meta) return;
     try {
       for (let round = 0; round < 10; round++) {
-        const rows = this.sql.exec<{ seq: number; id: string; role: Transcript['role']; kind: Transcript['kind']; text: string; at: string; tools: string; channel: string | null }>(
-          'SELECT seq, id, role, kind, text, at, tools, channel FROM _support_transcript WHERE seq > ? ORDER BY seq LIMIT 50', meta.mirrored ?? 0).toArray();
+        const rows = this.sql.exec<MirrorRow & { seq: number }>(
+          'SELECT seq, id, role, kind, text, at, tools, channel, source, reason FROM _support_transcript WHERE seq > ? ORDER BY seq LIMIT 50', meta.mirrored ?? 0).toArray();
         if (!rows.length) break;
         // Staff replies are the inbox's own: they are never mirrored back.
-        const messages = rows.filter(r => r.role !== 'staff').map(mirrored);
+        const files = new Map(this.attachments().map(a => [a.id, a])), messages = rows.filter(r => r.role !== 'staff').map(r => mirrored(r, files));
         if (messages.length && !this.reachable(await this.env.BANE.mirrorMessages(meta.conversationId, messages))) return;
         meta = this.update(m => { m.mirrored = rows.at(-1)!.seq; });
+      }
+      // A ticket filed by an earlier build has no brief: read once from its row (none there: never asked again; a failed
+      // read waits for the next mirror).
+      if (meta.ticket && meta.ticket.brief === undefined) {
+        const row = await this.env.DB.prepare('SELECT title, summary, ask, recommendation FROM tickets WHERE id = ?').bind(meta.ticket.id).first<{ title: string; summary: string; ask: string; recommendation: string }>()
+          .catch(error => { logError(error, { event: 'inbox', code: 'TICKET_BRIEF_UNREAD' }, 'warn'); return undefined; });
+        if (row !== undefined) meta = this.update(m => { if (m.ticket) m.ticket.brief = row ? briefOf(row) : null; });
       }
       const state = this.inboxSnapshot(meta), wanted = JSON.stringify(state);
       if (wanted !== meta.mirroredState) {
@@ -1156,6 +1172,8 @@ export class SupportConversation extends DurableObject<Env> {
       if (!final && result.error) final = 'Something went wrong on my side. Try again in a moment.';
       const checked = gate(final, this.gateScope(meta));
       if (!checked.ok) {
+        // What the agent wrote is the team's: a held entry for the staff inbox only (never in the panel's history).
+        this.record({ id: newId('msg'), role: 'assistant', kind: 'held', text: final, at: new Date().toISOString(), tools: [], reason: 'gate' });
         redacted = true; final = REDACTED;
         log('warn', { event: 'chat', code: 'OUTPUT_GATE_TRIPPED', conversation: meta.conversationId, reasons: checked.reasons });
         await this.harnessTicket(meta, internal('Answer held by the output gate', `The output gate held an answer (${checked.reasons.join(', ')}).`, input.text ?? '', 'Read the held answer in the transcript and reply to the customer by email.', 'guardrail'));
@@ -1371,6 +1389,15 @@ export class SupportConversation extends DurableObject<Env> {
     return { ok: true, global: false };
   }
 
+  /**
+   * The conversation so far as the team's ticket email quotes it (tickets.ts): every message as written, but no notice and
+   * no held answer (what the gate or a narrowed scope held stays in the staff inbox, out of email).
+   */
+  private ticketMessages(): TicketMessage[] {
+    return this.sql.exec<{ role: Transcript['role']; text: string; at: string }>("SELECT role, text, at FROM _support_transcript WHERE kind IS NOT 'notice' AND kind IS NOT 'held' ORDER BY seq").toArray()
+      .map(r => ({ who: r.role === 'user' ? 'customer' as const : r.role === 'staff' ? 'staff' as const : 'agent' as const, at: r.at, text: r.text }));
+  }
+
   private async harnessTicket(meta: Meta, input: TicketInput, dmarc: string | null = null): Promise<ReturnType<typeof fileTicket> extends Promise<infer T> ? T & { refused?: 'person' | 'global' } : never> {
     const ctx = await this.ticketCtx(meta, dmarc);
     // A new ticket counts against the person's cap and its budget (verified customers have their own reserve: R1);
@@ -1389,9 +1416,9 @@ export class SupportConversation extends DurableObject<Env> {
       // sent. Each is the request built now (its screenshot links signed once), from the address configured now.
       const category = input.details.topic ?? input.type, expect = expectation(input);
       this.ctx.storage.transactionSync(() => {
-        this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; m.ticket = { id: filed.id, type: input.type, severity: input.severity, category, replyTo: filed.replyTo, expect }; });
+        this.update(m => { m.ticketId = filed.id; m.status = 'ticketed'; m.ticket = { id: filed.id, type: input.type, severity: input.severity, category, replyTo: filed.replyTo, expect, brief: briefOf(input) }; });
         this.work.insert({ kind: 'notify', id: `notify:${filed.id}`, payload: { ticketId: filed.id, key: `ticket-${filed.id}`,
-          input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, filed, input) } } satisfies Notify });
+          input: { addressId: this.env.SUPPORT_ADDRESS_ID, to: [this.env.TICKET_TO], ...ticketEmail(this.env, ctx, filed, input, this.ticketMessages()) } } satisfies Notify });
         if (meta.channel === 'chat') this.work.insert({ kind: 'followup', id: `followup:${filed.id}`, payload: { addressId: this.env.SUPPORT_ADDRESS_ID, ctx, ticket: filed } satisfies FollowUp });
       });
       log('info', { event: 'ticket', code: 'TICKET_FILED', ticket: filed.id, type: input.type, channel: meta.channel });
@@ -1572,7 +1599,7 @@ export class SupportConversation extends DurableObject<Env> {
       if (dmarcPass) m.dmarcSender = sender;
     });
     if (!progress.recorded) { progress.recorded = newId('msg'); save(); }
-    this.record({ id: progress.recorded, role: 'user', kind: null, text: bodyOf(message), at: new Date().toISOString(), tools: [], channel: 'email' });
+    this.record({ id: progress.recorded, role: 'user', kind: null, text: bodyOf(message), at: new Date().toISOString(), tools: [], channel: 'email', source: next.messageId });
   }
 
   /**
@@ -1626,14 +1653,14 @@ export class SupportConversation extends DurableObject<Env> {
     // Text from an earlier build may hold account data: a held draft, never sent, on this try or any retry.
     if (progress.mode !== 'general' && progress.mode !== 'verified') {
       if (!progress.held) { progress.held = newId('msg'); save(); }
-      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: progress.text, at: new Date().toISOString(), tools: [], channel: 'email' });
+      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: progress.text, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'earlier' });
       log('warn', { event: 'email', code: 'EARLIER_ANSWER_HELD', conversation: meta.conversationId });
       return { state: 'held', result: progress };
     }
     // Staff took over after this answer was written: it stays a held draft in the inbox and is never sent.
     if (!progress.fixed && await this.paused(this.meta()!, true)) {
       if (!progress.held) { progress.held = newId('msg'); save(); }
-      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: progress.text, at: new Date().toISOString(), tools: [], channel: 'email' });
+      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: progress.text, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'paused' });
       return { result: progress };
     }
     // Written from the account: it goes only while it still may, asked again before every try (releasable).
@@ -1683,7 +1710,7 @@ export class SupportConversation extends DurableObject<Env> {
     const meta = this.meta()!, draft = typeof progress.text === 'string' ? progress.text : typeof progress.model === 'string' ? progress.model : null;
     if (draft) {
       if (!progress.held) { progress.held = newId('msg'); save(); }
-      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: draft, at: new Date().toISOString(), tools: [], channel: 'email' });
+      this.record({ id: progress.held, role: 'assistant', kind: 'held', text: draft, at: new Date().toISOString(), tools: [], channel: 'email', reason: progress.withheld === 'closed' ? 'closed' : 'access' });
     }
     if (progress.noticed === false) {
       const origin = new URL(this.env.NIGHTMAIL_ORIGIN).origin;
@@ -1800,6 +1827,8 @@ export class SupportConversation extends DurableObject<Env> {
           const plain = plainText(draft.trim());
           if (!plain) throw new ToolFailure('That reply is empty. Call reply with the whole email.');
           const checked = gate(plain, gateScope());
+          // What the gate held is the team's: a held entry in the staff inbox, never in the email.
+          if (!checked.ok) this.record({ id: progress.gatedDraft ??= newId('msg'), role: 'assistant', kind: 'held', text: plain, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'gate' });
           // Frozen: from here on this answer is this email (a general one with the Help line added after the gate, by the
           // Worker, never the model), and a crash or a retry sends exactly it without asking the model again.
           progress.model = checked.ok ? (verified ? plain : `${plain}\n\n${helpLine(origin)}`) : HELD;
@@ -1854,7 +1883,10 @@ export class SupportConversation extends DurableObject<Env> {
       // Free text the general build before the reply tool wrote (marked general; unmarked text was held at load): gated
       // now, then the Help line.
       const checked = gate(reply, gateScope());
-      if (!checked.ok || !reply) { await this.heldTicket(progress, save, checked.ok ? ['empty'] : checked.reasons, body, answer.messageId, dmarc); reply = HELD; }
+      if (!checked.ok || !reply) {
+        if (reply) { this.record({ id: progress.gatedDraft ??= newId('msg'), role: 'assistant', kind: 'held', text: reply, at: new Date().toISOString(), tools: [], channel: 'email', reason: 'gate' }); save(); }
+        await this.heldTicket(progress, save, checked.ok ? ['empty'] : checked.reasons, body, answer.messageId, dmarc); reply = HELD;
+      }
       else reply = `${reply}\n\n${helpLine(origin)}`;
     }
     // Frozen with the answer: a retry sends exactly this text, once, under the same key.
@@ -2048,13 +2080,19 @@ function labels(tool: string, args: Record<string, unknown>) {
   return SPECS.get(tool)?.label(args) ?? { running: 'Working on it…', done: 'Done' };
 }
 
-/** A transcript row as the staff inbox stores it: who wrote it, its tools by label and outcome, its screenshots by ID. */
-function mirrored(row: { id: string; role: Transcript['role']; kind: Transcript['kind']; text: string; at: string; tools: string; channel: string | null }): MirroredMessage {
-  const stored = JSON.parse(row.tools) as Transcript['tools'] | { tools: Transcript['tools']; attachments: NonNullable<Transcript['attachments']> };
-  const tools = (Array.isArray(stored) ? stored : stored.tools).map(t => ({ label: t.label.slice(0, 80) || 'Done', ok: t.ok })).slice(0, 50);
-  const attachments = (Array.isArray(stored) ? [] : stored.attachments).map(a => a.id).filter(id => /^att_[a-z2-7]{16}$/.test(id)).slice(0, 20);
+type MirrorRow = { id: string; role: Transcript['role']; kind: Transcript['kind']; text: string; at: string; tools: string; channel: string | null; source: string | null; reason: HeldReason | null };
+/**
+ * A transcript row as the staff inbox stores it: who wrote it, its tools by label and outcome, its screenshots by ID and
+ * as files (from the stored attachments), a customer email's source message, and why a held answer was held.
+ */
+function mirrored(row: MirrorRow, stored: Map<string, Attachment>): MirroredMessage {
+  const saved = JSON.parse(row.tools) as Transcript['tools'] | { tools: Transcript['tools']; attachments: NonNullable<Transcript['attachments']> };
+  const tools = (Array.isArray(saved) ? saved : saved.tools).map(t => ({ label: t.label.slice(0, 80) || 'Done', ok: t.ok })).slice(0, 50);
+  const attachments = (Array.isArray(saved) ? [] : saved.attachments).map(a => a.id).filter(id => /^att_[a-z2-7]{16}$/.test(id)).slice(0, 20);
+  const files = attachments.flatMap(id => { const a = stored.get(id); return a ? [{ id, name: a.name.slice(0, 80), type: a.type, size: a.size }] : []; });
   const author = row.role === 'user' ? 'customer' : row.kind === 'notice' ? 'system' : 'agent';
-  return { id: row.id, author, kind: row.kind, text: row.text.slice(0, 16_000), tools: author === 'agent' ? tools : [], attachments,
+  return { id: row.id, author, kind: row.kind, text: row.text.slice(0, 16_000), tools: author === 'agent' ? tools : [], attachments, ...files.length ? { files } : {},
+    ...author === 'customer' && row.source ? { source: row.source } : {}, ...author === 'agent' && row.kind === 'held' && row.reason ? { reason: row.reason } : {},
     ...author === 'agent' && row.kind === 'held' ? { delivery: 'held' as const } : author === 'agent' && row.channel === 'email' ? { delivery: 'sent' as const } : {}, at: row.at };
 }
 
