@@ -1,5 +1,6 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { log, logError, ModuleLoadError, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
+import { LINK_RETENTION_DAYS } from './link-hosts.js';
 
 // The domain setup check. Someone adds a domain, sees its records and leaves, and nothing tells them the records never
 // went live. Every five minutes (elected, from the minute cron and the Node runner) domainSetupTick queues one
@@ -93,10 +94,12 @@ export const domainLinkCheckJob: JobHandler = async (runtime, payload, job) => {
   if (row) await (await wrapModuleLoad(() => import('./link-domains.js'))).checkLinkHost(runtime, job.workspaceId, row.name);
 };
 
-/** Link hosts whose domain is gone from its workspace: no operation_domains row of that name (deleting, releasing or
- *  detaching a claim and deleting a workspace all remove it). */
-const staleLinkHosts = (select: SQL) => sql`SELECT ${select} FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)`;
-/** Deletes gone domains' link hosts and their custom hostnames (src/link-domains.ts cleanUpLinkHosts). */
+/** Link hosts whose domain is gone from its workspace (no operation_domains row of that name: deleting, releasing or
+ *  detaching a claim and deleting a workspace all remove it), still to retire or remove: an active one retires, and a retired
+ *  one goes once LINK_RETENTION_DAYS have passed. */
+const staleLinkHosts = (select: SQL) => sql`SELECT ${select} FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)
+  AND (h.status<>'retired' OR h.retired_at <= now() - make_interval(days => ${LINK_RETENTION_DAYS}))`;
+/** Retires gone domains' link hosts, and removes them and their custom hostnames once retained long enough (src/link-domains.ts cleanUpLinkHosts). */
 export const domainLinkCleanupJob: JobHandler = async runtime => {
   const count = await (await wrapModuleLoad(() => import('./link-domains.js'))).cleanUpLinkHosts(runtime);
   if (count) log('info', { code: 'LINK_HOSTS_CLEANED', count });

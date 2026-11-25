@@ -1,7 +1,7 @@
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, log, type Config, type DbExecutor, type Runtime } from './core.js';
 import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
-import { LINK_LABEL } from './link-hosts.js';
+import { LINK_LABEL, LINK_RETENTION_DAYS } from './link-hosts.js';
 import { cname, fqdn } from './public-dns.js';
 import { GOOD_STANDING, RAMP } from './standing-model.js';
 
@@ -24,6 +24,9 @@ import { GOOD_STANDING, RAMP } from './standing-model.js';
  * domain) instead of being refused, within guardrails (linkChoice), and moves to its own host as soon as it is active.
  */
 export const linkHostName = (domain: string) => `${LINK_LABEL}.${domain}`;
+/** A link host retired with its domain (forgetLinkHost, cleanUpLinkHosts) that still answers its links: mail it already
+ *  sent keeps working for LINK_RETENTION_DAYS. `h` is the link_hosts alias. */
+const retained = (h: SQL) => sql`(${h}.status='retired' AND ${h}.retired_at > now() - make_interval(days => ${LINK_RETENTION_DAYS}))`;
 export const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
 
 /** What the link is for: a campaign (and its test), a `kind: marketing` send, or a forward. */
@@ -63,15 +66,20 @@ const fallbackEligible = (workspaceId: string) => sql`(coalesce((SELECT s.phase=
  *  the workspace may link there today (`left`, reserved with reserveFallback by whoever sends them). */
 export type LinkChoice = { origin: string; fallback?: { host: string; left: number } };
 /**
- * Counts `recipients` against today's fallback allowance, all or none: false when they don't fit. Each use is a row of
+ * Counts `recipients` against the workspace's fallback allowance today, all or none: false when they don't fit. Each use is a row of
  * the workspace's (zero recipients for a forward's stop link), which is what lets the shared host serve its links
  * afterwards (servesWorkspace), even once the fallback is off. Logged for Glass's activity feed (src/glass.ts).
  */
 export async function reserveFallback(db: DbExecutor, workspaceId: string, host: string, recipients: number) {
-  const { rows: [row] } = await db.execute<{ recipients: number }>(sql`INSERT INTO link_fallback_days AS f(workspace_id, host, day, recipients)
-    SELECT ${workspaceId}, ${host}, ${fallbackDay}, ${recipients}::int WHERE ${recipients}::int <= ${LINK_FALLBACK.dailyRecipients}
-    ON CONFLICT (workspace_id, host, day) DO UPDATE SET recipients=f.recipients+excluded.recipients WHERE f.recipients+excluded.recipients <= ${LINK_FALLBACK.dailyRecipients}
-    RETURNING f.recipients`);
+  // One statement: the workspace's day total (link_fallback_totals, whatever the host, so changing the host mid-day starts no
+  // new allowance) takes them only if they fit, its row lock serializing concurrent reservations; then the host's row.
+  const { rows: [row] } = await db.execute<{ recipients: number }>(sql`WITH total AS (
+      INSERT INTO link_fallback_totals AS t(workspace_id, day, recipients) SELECT ${workspaceId}, ${fallbackDay}, ${recipients}::int WHERE ${recipients}::int <= ${LINK_FALLBACK.dailyRecipients}
+      ON CONFLICT (workspace_id, day) DO UPDATE SET recipients=t.recipients+excluded.recipients WHERE t.recipients+excluded.recipients <= ${LINK_FALLBACK.dailyRecipients}
+      RETURNING t.recipients),
+    used AS (INSERT INTO link_fallback_days AS f(workspace_id, host, day, recipients) SELECT ${workspaceId}, ${host}, ${fallbackDay}, ${recipients}::int FROM total
+      ON CONFLICT (workspace_id, host, day) DO UPDATE SET recipients=f.recipients+excluded.recipients RETURNING 1)
+    SELECT recipients FROM total`);
   if (row) log('info', { code: 'LINK_FALLBACK_USED', workspaceId, recipients, today: row.recipients });
   else log('warn', { code: 'LINK_FALLBACK_SPENT', workspaceId, recipients });
   return !!row;
@@ -83,7 +91,7 @@ async function fallbackChoice(runtime: Runtime, db: DbExecutor, workspaceId: str
   const { rows: [state] } = await db.execute<{ dns: string | null; full: boolean; eligible: boolean; used: number }>(sql`SELECT h.public_dns->>'state' AS dns,
       h.custom_hostname_id IS NULL AND (h.quota_full_at IS NOT NULL OR EXISTS (SELECT 1 FROM link_hosts q WHERE q.quota_full_at > now() - ${QUOTA_BACKOFF}::interval)) AS full,
       ${fallbackEligible(workspaceId)} AS eligible,
-      coalesce((SELECT sum(f.recipients) FROM link_fallback_days f WHERE f.workspace_id=${workspaceId} AND f.day=${fallbackDay}),0)::int AS used
+      coalesce((SELECT t.recipients FROM link_fallback_totals t WHERE t.workspace_id=${workspaceId} AND t.day=${fallbackDay}),0)::int AS used
     FROM (SELECT 1) one LEFT JOIN link_hosts h ON h.workspace_id=${workspaceId} AND h.domain=${domain}`);
   if (state?.dns !== 'found') throw linkRecordRequired(saas.target, domain);
   if (!host || !state.eligible) throw linkHostWaiting(domain, state.full);
@@ -103,7 +111,7 @@ export async function linkChoice(runtime: Runtime, db: DbExecutor, workspaceId: 
   if (isBuiltinHost(config, sender)) throw builtinLinkRefusal(config, sender, purpose);
   // The workspace's domains the sender is, or is under (its link hosts', and its domains' that have none yet), longest first.
   const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname
-    FROM (SELECT domain AS name FROM link_hosts WHERE workspace_id=${workspaceId} UNION SELECT name FROM operation_domains WHERE workspace_id=${workspaceId}) d
+    FROM (SELECT domain AS name FROM link_hosts WHERE workspace_id=${workspaceId} AND status<>'retired' UNION SELECT name FROM operation_domains WHERE workspace_id=${workspaceId}) d
     LEFT JOIN link_hosts h ON h.workspace_id=${workspaceId} AND h.domain=d.name AND h.status='active'
     WHERE d.name=${sender} OR right(${sender},length(d.name)+1)='.'||d.name ORDER BY length(d.name) DESC`);
   const active = rows.find(row => row.hostname);
@@ -137,14 +145,16 @@ export function foundLinkOrigin(config: Config, from: string, found: string | nu
 
 /**
  * Whether a link page (unsubscribe, forwarding) may answer on the request's host for a link of `workspaceId`: this
- * installation's own origin (links sent before link hosts), that workspace's own active link host, or the shared fallback
- * host if the workspace linked on it. So links.a.com never serves workspace B's links.
+ * installation's own origin (links sent before link hosts), that workspace's own active link host (or retired one, for
+ * LINK_RETENTION_DAYS after its domain was deleted), or the shared fallback host if the workspace linked on it. So
+ * links.a.com never serves workspace B's links.
  */
 export async function servesWorkspace(runtime: Pick<Runtime, 'config' | 'db'>, requestUrl: string, workspaceId: string) {
   const host = new URL(requestUrl).hostname.toLowerCase().replace(/\.$/, ''), config = runtime.config;
   if (!config.linkHosts || [config.publicUrl, ...config.previousOrigins ?? []].some(origin => new URL(origin).hostname === host)) return true;
-  // The shared fallback host serves the links of the workspaces that used it, even once it is off for new mail.
-  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts WHERE workspace_id=${workspaceId} AND hostname=${host} AND status='active'
+  // A retired host (its domain deleted) keeps serving the links it carried for LINK_RETENTION_DAYS; the shared fallback host
+  // serves the links of the workspaces that used it, even once it is off for new mail.
+  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts h WHERE h.workspace_id=${workspaceId} AND h.hostname=${host} AND (h.status='active' OR ${retained(sql`h`)})
     UNION ALL SELECT 1 FROM link_fallback_days WHERE workspace_id=${workspaceId} AND host=${host} LIMIT 1`)).rowCount;
 }
 
@@ -213,8 +223,9 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
   const saas = runtime.config.linkHosts;
   if (!saas || isBuiltinHost(runtime.config, domain)) return;
   const hostname = linkHostName(domain), checkedAt = new Date().toISOString();
-  const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active'; public_dns: Seen | null }>(sql`SELECT custom_hostname_id, status, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
-  let id = row?.custom_hostname_id ?? null, status = row?.status ?? 'pending', detail: string | null = null, seen: Seen | null = row?.public_dns ?? null;
+  const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active' | 'retired'; public_dns: Seen | null }>(sql`SELECT custom_hostname_id, status, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
+  // A retired host (its domain deleted, now added again) is checked afresh: active once Cloudflare serves it, pending until then.
+  let id = row?.custom_hostname_id ?? null, status: 'pending' | 'active' = row?.status === 'active' ? 'active' : 'pending', detail: string | null = null, seen: Seen | null = row?.public_dns ?? null;
   // 'hit': Cloudflare just answered 1405 (the backoff starts now); 'waiting': within the backoff, nothing was asked.
   let quota: 'hit' | 'waiting' | null = null;
   // Hosted: only a domain this workspace has proven it controls gets a custom hostname (self-hosted: the operator's own): a pending claim (anyone can add one, and a
@@ -254,7 +265,7 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
     VALUES(${workspaceId}, ${domain}, ${hostname}, ${id}, ${status}, ${detail}, ${seen ? JSON.stringify(seen) : null}::jsonb, CASE WHEN ${status}='active' THEN now() END, CASE WHEN ${quota}='hit' THEN now() END)
     ON CONFLICT (workspace_id, domain) DO UPDATE SET custom_hostname_id=excluded.custom_hostname_id, status=excluded.status, detail=excluded.detail,
       public_dns=excluded.public_dns, checked_at=now(), verified_at=CASE WHEN excluded.status='active' THEN coalesce(link_hosts.verified_at, now()) END,
-      quota_full_at=CASE WHEN ${quota}='hit' THEN now() WHEN ${quota}='waiting' THEN link_hosts.quota_full_at END`);
+      quota_full_at=CASE WHEN ${quota}='hit' THEN now() WHEN ${quota}='waiting' THEN link_hosts.quota_full_at END, retired_at=NULL`);
   if (woke) await wakeLinkRecordHolds(runtime, workspaceId);
 }
 /** A link host just became active: the workspace's campaigns waiting for a link record (releaseStep, 'link_record') look
@@ -295,12 +306,17 @@ export async function withLinkRecords<T extends Readable>(runtime: Runtime, work
 
 /**
  * Link hosts of domains gone from their workspace (no operation_domains row of that name: a deleted, released or detached
- * claim, or a deleted workspace), in pages of 1,000, at most 20 a run: each custom hostname no live row still uses is
- * deleted at Cloudflare, then the rows. A row whose hostname Cloudflare didn't delete stays for the next run.
+ * claim, or a deleted workspace). An active one retires first: it goes on answering the links in mail its domain already
+ * sent for LINK_RETENTION_DAYS. The rest (never active, or retired that long ago) go in pages of 1,000, at most 20 a run:
+ * each custom hostname no live or retained row still uses is deleted at Cloudflare, then the rows. A row whose hostname
+ * Cloudflare didn't delete stays for the next run.
  */
 export async function cleanUpLinkHosts(runtime: Runtime) {
   const saas = runtime.config.linkHosts;
   if (!saas) return 0;
+  const { rowCount: retiring } = await runtime.db.execute(sql`UPDATE link_hosts h SET status='retired', retired_at=now(), detail=NULL
+    WHERE h.status='active' AND NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)`);
+  if (retiring) log('info', { code: 'LINK_HOSTS_RETIRED', count: retiring });
   let total = 0;
   for (let page = 0; page < 20; page++) {
     const { selected, deleted } = await cleanUpLinkHostPage(runtime, saas);
@@ -310,10 +326,10 @@ export async function cleanUpLinkHosts(runtime: Runtime) {
   return total;
 }
 async function cleanUpLinkHostPage(runtime: Runtime, saas: Saas) {
-  const live = sql`EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=o.workspace_id AND d.name=o.domain)`;
+  const live = sql`(EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=o.workspace_id AND d.name=o.domain) OR ${retained(sql`o`)})`;
   const { rows } = await runtime.db.execute<{ workspace_id: string; domain: string; custom_hostname_id: string | null; shared: boolean }>(sql`SELECT h.workspace_id, h.domain, h.custom_hostname_id,
       EXISTS (SELECT 1 FROM link_hosts o WHERE o.custom_hostname_id=h.custom_hostname_id AND ${live}) AS shared
-    FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain) LIMIT 1000`);
+    FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain) AND NOT ${retained(sql`h`)} LIMIT 1000`);
   const kept = new Set<string>();
   for (const id of new Set(rows.flatMap(row => row.custom_hostname_id && !row.shared ? [row.custom_hostname_id] : []))) {
     if (!await deleteOwnHostname(saas, id)) kept.add(id);
@@ -321,12 +337,18 @@ async function cleanUpLinkHostPage(runtime: Runtime, saas: Saas) {
   if (kept.size) log('warn', { code: 'LINK_HOST_DELETE_FAILED', count: kept.size });
   const gone = rows.filter(row => !row.custom_hostname_id || !kept.has(row.custom_hostname_id));
   if (gone.length) await runtime.db.execute(sql`DELETE FROM link_hosts h USING jsonb_to_recordset(${JSON.stringify(gone.map(row => ({ w: row.workspace_id, d: row.domain })))}::jsonb) x(w text, d text)
-    WHERE h.workspace_id=x.w AND h.domain=x.d AND NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)`);
+    WHERE h.workspace_id=x.w AND h.domain=x.d AND NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain) AND NOT ${retained(sql`h`)}`);
   return { selected: rows.length, deleted: gone.length };
 }
-/** A deleted domain's link host: its row, and its custom hostname unless another workspace's row still uses it. Best effort. */
+/**
+ * A deleted domain's link host. An active one retires: it goes on answering the links in mail the domain already sent for
+ * LINK_RETENTION_DAYS, and cleanUpLinkHosts removes it after. One that never became active (no mail linked on it) goes
+ * now: its row, and its custom hostname unless another row still uses it. Best effort.
+ */
 export async function forgetLinkHost(runtime: Runtime, workspaceId: string, domain: string) {
-  const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; shared: boolean }>(sql`DELETE FROM link_hosts h WHERE workspace_id=${workspaceId} AND domain=${domain}
+  const { rowCount: retired } = await runtime.db.execute(sql`UPDATE link_hosts SET status='retired', retired_at=now(), detail=NULL WHERE workspace_id=${workspaceId} AND domain=${domain} AND status='active'`);
+  if (retired) return;
+  const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; shared: boolean }>(sql`DELETE FROM link_hosts h WHERE workspace_id=${workspaceId} AND domain=${domain} AND status<>'retired'
     RETURNING custom_hostname_id, EXISTS (SELECT 1 FROM link_hosts o WHERE o.custom_hostname_id=h.custom_hostname_id AND NOT (o.workspace_id=h.workspace_id AND o.domain=h.domain)) AS shared`);
   const saas = runtime.config.linkHosts;
   if (!saas || !row?.custom_hostname_id || row.shared) return;

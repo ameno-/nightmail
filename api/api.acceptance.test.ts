@@ -40957,8 +40957,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('link hosts: a campaign launched before link hosts waits for its link record and resumes once it verifies; gone domains lose their link hosts',async t=>{
-    await simulatedSesFixture(t,async({runtime,db,local,run})=>{
+  test('link hosts: a campaign launched before link hosts waits for its link record and resumes once it verifies; gone domains\' hosts answer their links for 30 days, then go',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run,fetch:page})=>{
       const wid=runtime.config.workspaceId,pool='111122223333',domain='legacy-links.example',from=`news@${domain}`,zone='0'.repeat(32);
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'},linkHosts:{zoneId:zone,token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'}});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
@@ -41009,16 +41009,36 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await run('campaign.run');
         const resumed=await view();
         assert.deepEqual([resumed.delivery.expanded,resumed.delivery.waiting],[3,null]);
-        // Gone domains (deleted, released, detached, or their workspace deleted): no operation_domains row. Their link hosts go,
-        // with their custom hostnames, unless another row still uses the hostname; a live domain's stays.
+        // Gone domains (deleted, released, detached, or their workspace deleted): no operation_domains row. A host that served
+        // mail retires: for LINK_RETENTION_DAYS it keeps its row and custom hostname and still answers its workspace's links, so
+        // opt-outs from mail already sent keep working. One that never became active goes at once. After the retention the
+        // retired ones go, with their custom hostnames, unless another live or retained row still uses the hostname.
         await db.query(`INSERT INTO link_hosts(workspace_id,domain,hostname,custom_hostname_id,status) VALUES ($1,'gone.example','links.gone.example','ch_gone','active'),
+          ($1,'never.example','links.never.example','ch_never','pending'),
           ('ws_link_gone_a','shared.example','links.shared.example','ch_shared','active'),('ws_link_gone_b','shared.example','links.shared.example','ch_shared','active')`,[wid]);
         await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,'ws_link_gone_b','shared.example',$2)",[unique('dom'),REGION]);
-        const {domainLinkCleanupJob}=await import('./src/domain-setup.js');
-        await domainLinkCleanupJob(runtime,{},{id:'domain.linkCleanup',attempts:1,workspaceId:wid});
-        const left=(await db.query("SELECT workspace_id,domain FROM link_hosts WHERE domain IN ($1,'gone.example','shared.example') ORDER BY workspace_id",[domain])).rows.map(r=>`${r.workspace_id}/${r.domain}`);
-        assert.deepEqual(left,['ws_link_gone_b/shared.example',`${wid}/${domain}`].sort());
-        assert.deepEqual(deleted,['ch_gone'],'A hostname another row still uses stays.');
+        const {domainLinkCleanupJob}=await import('./src/domain-setup.js'),{servesWorkspace,forgetLinkHost}=await import('./src/link-domains.js');
+        const cleanup=()=>domainLinkCleanupJob(runtime,{},{id:'domain.linkCleanup',attempts:1,workspaceId:wid});
+        const hosts=async()=>(await db.query("SELECT workspace_id,domain,status FROM link_hosts WHERE domain IN ($1,'gone.example','never.example','deleted.example','shared.example') ORDER BY workspace_id,domain",[domain])).rows.map(r=>`${r.workspace_id}/${r.domain}/${r.status}`);
+        await cleanup();
+        assert.deepEqual(await hosts(),[`${wid}/${domain}/active`,`${wid}/gone.example/retired`,'ws_link_gone_a/shared.example/retired','ws_link_gone_b/shared.example/active'].sort());
+        assert.deepEqual(deleted,['ch_never'],'Only the host that never served mail goes now.');
+        // A domain deleted through the API (forgetLinkHost) retires its active host the same way, its custom hostname kept.
+        await db.query("INSERT INTO link_hosts(workspace_id,domain,hostname,custom_hostname_id,status) VALUES ($1,'deleted.example','links.deleted.example','ch_deleted','active')",[wid]);
+        await forgetLinkHost(runtime,wid,'deleted.example');
+        assert.deepEqual(deleted,['ch_never']);
+        // A retired host still answers its workspace's unsubscribe links (forwarding's pages ask the same), never another's.
+        const kept=`u_${'d'.repeat(64)}`;
+        await db.query("INSERT INTO operation_unsubscribe_tokens(token_hash,workspace_id,email) VALUES (encode(sha256(convert_to($1,'UTF8')),'hex'),$2,'kept@example.net')",[kept,wid]);
+        for(const host of ['links.gone.example','links.deleted.example'])assert.equal((await page(new Request(`https://${host}/unsubscribe/${kept}`,{headers:{accept:'text/html'}}))).status,200,host);
+        assert.equal(await servesWorkspace(runtime,'https://links.gone.example/v1/forwarding/stop/x','ws_link_other'),false);
+        // The retention over: the retired hosts go with their custom hostnames, but ch_shared, which ws_link_gone_b's live row
+        // uses, stays; their links answer 404.
+        await db.query("UPDATE link_hosts SET retired_at=now()-make_interval(days=>31) WHERE status='retired'");
+        await cleanup();
+        assert.deepEqual(await hosts(),[`${wid}/${domain}/active`,'ws_link_gone_b/shared.example/active'].sort());
+        assert.deepEqual([...deleted].sort(),['ch_deleted','ch_gone','ch_never']);
+        assert.equal((await page(new Request(`https://links.gone.example/unsubscribe/${kept}`,{headers:{accept:'text/html'}}))).status,404);
         const domainOf=async(name:string)=>{
           await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[name,wid]);
           await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)",[unique('dom'),wid,name,REGION]);
@@ -41102,12 +41122,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Glass's activity feed shows the workspace on the shared host today.
       assert.ok((await readActivity(runtime)).events.some(e=>e.kind==='link_fallback'&&e.workspace?.id===wid&&e.subject===shared&&e.detail==='4'));
       // Today's allowance used up: marketing mail is refused, saying so, and a campaign waits for the next UTC day, releasing no one.
-      await db.query('UPDATE link_fallback_days SET recipients=$3 WHERE workspace_id=$1 AND host=$2',[wid,shared,LINK_FALLBACK.dailyRecipients]);
-      assert.match(error(await local('POST','/v1/emails/send',{from,to:'fallback-2@example.net',subject:'Shared',html:'<p>Hello</p>',text:'Hello',kind:'marketing'}),409,'LINK_RECORD_REQUIRED').message,/allowance there \(10,000 recipients\) is used up/);
+      assert.equal((await db.query('SELECT recipients FROM link_fallback_totals WHERE workspace_id=$1',[wid])).rows[0].recipients,4);
+      await db.query('UPDATE link_fallback_totals SET recipients=$2 WHERE workspace_id=$1',[wid,LINK_FALLBACK.dailyRecipients]);
+      const spent=/allowance there \(10,000 recipients\) is used up/,marketingTo=(to:string)=>local('POST','/v1/emails/send',{from,to,subject:'Shared',html:'<p>Hello</p>',text:'Hello',kind:'marketing'});
+      assert.match(error(await marketingTo('fallback-2@example.net'),409,'LINK_RECORD_REQUIRED').message,spent);
+      // The allowance is the workspace's for the day whatever the host: another shared host mid-day starts none.
+      runtime.config.linkHosts={...saas,fallbackHost:'links2.fallback-fixture.example'};
+      assert.match(error(await marketingTo('fallback-2@example.net'),409,'LINK_RECORD_REQUIRED').message,spent);
+      assert.equal((await linkChoice(runtime,runtime.db,wid,from)).fallback?.left,0);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM link_fallback_days WHERE workspace_id=$1 AND host='links2.fallback-fixture.example'",[wid])).rows[0].n,0);
+      runtime.config.linkHosts={...saas,fallbackHost:shared};
       const second=await launch();await run('campaign.run');
       const held=ok(await local('GET',`/v1/campaigns/${second.id}`));
       assert.deepEqual([held.delivery.expanded,held.delivery.waiting.reason,new Date(held.delivery.waiting.until).toISOString().slice(11)],[0,'link_record','00:00:00.000Z']);
-      await db.query('UPDATE link_fallback_days SET recipients=4 WHERE workspace_id=$1 AND host=$2',[wid,shared]);
+      await db.query('UPDATE link_fallback_totals SET recipients=4 WHERE workspace_id=$1',[wid]);
       // Off the guardrails, it waits for its own host, saying why: below good standing, a paused connection (an operator's
       // pause or the abuse path), or the fallback turned off.
       const waits=/links\.fallback-links\.example, which isn’t set up yet: link hosts are at capacity right now/;
