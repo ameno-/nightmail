@@ -52,6 +52,9 @@
     "DOMAIN_SETUP_REMINDER": "on",
     // The email to a new workspace with no domain an hour after sign-up (src/domain-setup.ts). On since 2026-11-24 (A89).
     "NO_DOMAIN_REMINDER": "on",
+    // Built-in <name>-xx.nightmail.email domain for every workspace (src/builtin-domain.ts). On since 2026-11-25 (Ryan approved, Statusglass A112).
+    // Unset it to stop built-in sending and receiving at once (kill switch).
+    "NIGHTMAIL_BUILTIN_DOMAIN": "nightmail.email",
     // Abuse monitoring (src/abuse.ts) records from this instant on, monitor-only (NIGHTMAIL_ABUSE_ENFORCE stays unset).
     "NIGHTMAIL_ABUSE_MONITORING": "2026-11-21T15:30:00Z",
     "ACCOUNT_CLIENT_ID": "bane-production",
