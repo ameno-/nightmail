@@ -414,7 +414,10 @@ export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]
  * addresses need a full-access key: create one in the dashboard under API keys → Create key → Full access, …".
  */
 export const unrestrictedRequired = (a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
-  denied('UNRESTRICTED_KEY_REQUIRED', `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, { ...need, scope: 'workspace' });
+  fullAccessRefusal('UNRESTRICTED_KEY_REQUIRED', a, area, { ...need, scope: 'workspace' }, note);
+/** A refusal, under `code`, of a credential that isn't full access, worded as unrestrictedRequired words it. */
+export const fullAccessRefusal = (code: string, a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
+  denied(code, `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, need);
 export class ModuleLoadError extends ApiError {
   constructor(cause?: unknown) {
     super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);
@@ -519,8 +522,18 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
   // Dashboard roles include content editing. A scoped machine grant is still bounded by its
   // original permission contract: send alone does not delegate contact or template management.
   const permission = action === 'editContent' ? (c.env.config.multiTenant && value?.credential === 'dashboard' ? 'send' : 'manage') : action;
-  if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, requiredOf(c, action));
+  if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw value?.credential === 'apiKey'
+    ? missingPermission(value, permission, requiredOf(c, action)) : denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, requiredOf(c, action));
   return value;
+}
+/**
+ * PERMISSION_DENIED for an API key that lacks a permission (onboarding's Send only key reading back what it sent, most
+ * often): what the key can do, then how to get one that can: the same key with the permission added (API keys → Edit
+ * keeps its secret, so nothing is redeployed), or a full-access key. denied() adds what the endpoint needs.
+ */
+export function missingPermission(a: Pick<Actor, 'permissions' | 'domains' | 'credential'>, permission: Permission, need: Required) {
+  const add = permission === 'manage' ? 'Make it Full access' : `Add ${permission === 'read' ? 'Read' : 'Send'} to it`;
+  return denied('PERMISSION_DENIED', `${credentialLimits(a)} ${add} in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${FULL_ACCESS_KEY}.`, need);
 }
 /**
  * The one rule for changes that outlive the credential making them: API keys, sending and receiving webhooks, endpoints,
@@ -551,7 +564,8 @@ export function receivingAdmin(c: Ctx, change?: string): Actor {
 /** Why receivingAdmin refuses this actor, or null. The MCP listing asks the same of receivingAdminRoute's operations. */
 export function receivingAdminRefusal(a: Actor | undefined, change?: string): ApiError | null {
   const permission = !change && a?.receivingConsent ? 'read' : 'manage', need: Required = { permission: 'receivingRules', level: change ? 'write' : 'read' };
-  if (!a || (!a.permissions.includes('manage') && !a.permissions.includes(permission))) return denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, need);
+  if (!a || (!a.permissions.includes('manage') && !a.permissions.includes(permission))) return a?.credential === 'apiKey' ? missingPermission(a, permission, need) : denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, need);
+  if (a.domains.length && a.credential === 'apiKey') return fullAccessRefusal('ADMIN_REQUIRED', a, 'Receiving configuration covers every address in the workspace, so it needs', { ...need, scope: 'workspace' });
   if (a.domains.length || a.role === 'member')
     return denied('ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', a.role === 'member' ? { ...need, person: 'admin' } : { ...need, scope: 'workspace' });
   if (!change) return null;

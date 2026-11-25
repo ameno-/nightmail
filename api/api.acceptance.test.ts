@@ -4718,12 +4718,14 @@ test('permission refusals: every refusal helper names the permission, scope, cre
   const refused = (run: () => unknown) => { try { const value = run(); if (value instanceof ApiError) return value; } catch (error) { if (error instanceof ApiError) return error; throw error; } return assert.fail('not refused'); };
   // [helper call, code, message before the added sentence, required, header]
   const rows: [string, () => unknown, string, string, Json, string][] = [
-    ['actor: editContent', () => core.actor(ctx(key(['read']), 'POST', '/v1/lists'), 'editContent'), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'audience', level: 'write' }, 'audience=write'],
-    ['actor: send', () => core.actor(ctx(key(['read']), 'POST', '/v1/emails/send'), 'send'), 'PERMISSION_DENIED', 'This operation requires send permission.', { permission: 'sendEmail', level: 'on' }, 'send_email=on'],
-    ['actor: read', () => core.actor(ctx(key(['send']), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', 'This operation requires read permission.', { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
+    ['actor: editContent', () => core.actor(ctx(key(['read']), 'POST', '/v1/lists'), 'editContent'), 'PERMISSION_DENIED', `This key can only read. Make it Full access in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'audience', level: 'write' }, 'audience=write'],
+    ['actor: send', () => core.actor(ctx(key(['read']), 'POST', '/v1/emails/send'), 'send'), 'PERMISSION_DENIED', `This key can only read. Add Send to it in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'sendEmail', level: 'on' }, 'send_email=on'],
+    ['actor: read', () => core.actor(ctx(key(['send'], { domains: ['acme.example'] }), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', `This key can only send from acme.example. Add Read to it in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
     ['lasting', () => core.lasting(ctx(agentToken, 'POST', '/v1/webhooks'), core.WEBHOOK_CHANGE), 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${core.WEBHOOK_CHANGE}. Use the dashboard, an API key or the MCP approval itself.`, { permission: 'configuration', level: 'write', credential: 'lasting' }, 'configuration=write; credential=lasting'],
-    ['receivingAdminRefusal: read key', () => core.receivingAdminRefusal(key(['read'])), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'receivingRules', level: 'read' }, 'receiving_rules=read'],
-    ['receivingAdminRefusal: sender domains', () => core.receivingAdminRefusal(key(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
+    ['actor: read sign-in', () => core.actor(ctx(signIn(['send']), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', 'This operation requires read permission.', { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
+    ['receivingAdminRefusal: read key', () => core.receivingAdminRefusal(key(['read'])), 'PERMISSION_DENIED', `This key can only read. Make it Full access in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'receivingRules', level: 'read' }, 'receiving_rules=read'],
+    ['receivingAdminRefusal: sender domains', () => core.receivingAdminRefusal(key(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', `This key is limited to the sender domain example.com. Receiving configuration covers every address in the workspace, so it needs a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
+    ['receivingAdminRefusal: sign-in on sender domains', () => core.receivingAdminRefusal(signIn(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
     ['receivingAdminRefusal: member', () => core.receivingAdminRefusal(session('member')), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'read', person: 'admin' }, 'receiving_rules=read; person=admin'],
     ['receivingAdminRefusal: approval', () => core.receivingAdminRefusal(signIn(['manage'], { grantId: 'g' }), 'change routes'), 'ADMIN_REQUIRED', 'Changing receiving configuration requires an owner or admin of this workspace.', { permission: 'receivingRules', level: 'write', person: 'admin' }, 'receiving_rules=write; person=admin'],
     ['receivingAdminRefusal: agent token', () => core.receivingAdminRefusal(agentToken, 'change routes'), 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot change routes. Use the dashboard, an API key or the MCP approval itself.', { permission: 'receivingRules', level: 'write', credential: 'lasting' }, 'receiving_rules=write; credential=lasting'],
@@ -5225,10 +5227,12 @@ describe('Hosted MCP OAuth and tools', () => {
           const response = credential.actor ? await dispatchAsActor(app, req, runtime, credential.actor, { requestId: 'req_' + '0'.repeat(32), clientIp: null, userAgent: null }) : await app.fetch(req, runtime);
           const text = await response.text(); let error: Json | undefined; try { error = JSON.parse(text).error; } catch { /* a redirect or a page */ }
           const refused = response.status === 401 || (response.status === 403 && (entry.row.access === 'staff' || !!error?.required));
-          return { refused, hidden: response.status === 404, text, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
+          return { refused, hidden: response.status === 404, text, error: error as Json | undefined, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
         } finally { await db.query('ROLLBACK TO SAVEPOINT permission_table'); }
       };
       const mismatches: string[] = [];
+      // Workspace API keys that aren't full access: limited permissions, or limited to sender domains.
+      const limitedKeys = new Set(['readKey', 'sendKey', 'readSendKey', 'domainKey']), unhelpful: string[] = [];
       // Some admitted writes reach for the network (an upload to object storage); here such a fetch fails like any other.
       // The fixture's own network guard stays underneath, for the issuer, and is back once every operation was called.
       const guarded = globalThis.fetch;
@@ -5245,7 +5249,11 @@ describe('Hosted MCP OAuth and tools', () => {
           const body = bodies[id] ? { ...example(entry.operation), ...bodies[id] } : example(entry.operation);
           const outcomes = new Set<boolean>();
           for (const label of Object.keys(credentials)) {
-            const expected = admits(credentials[label]!, row), { refused, answer } = await call(label, entry, path, body);
+            const expected = admits(credentials[label]!, row), { refused, answer, error: refusal } = await call(label, entry, path, body);
+            // A key that isn't full access, refused for what it can't do, says what it can do and how to get a key that can
+            // (core.ts credentialLimits, missingPermission, unrestrictedRequired), on every operation that refuses it so.
+            if (refused && limitedKeys.has(label) && admits(credentials.manageKey!, row) && ['PERMISSION_DENIED', 'UNRESTRICTED_KEY_REQUIRED', 'ADMIN_REQUIRED'].includes(refusal?.code) && !/^This key (?:can only|is limited to)\b.*\bfull-access key\b/s.test(refusal?.message ?? ''))
+              unhelpful.push(`${id} ${label}: ${refusal?.code} "${refusal?.message}"`);
             outcomes.add(expected);
             if (expected === refused) mismatches.push(`${id} ${label}: the table ${expected ? 'admits' : 'refuses'} it, REST answered ${answer}`);
           }
@@ -5303,6 +5311,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(checked >= 55, `${checked} scoped rows called on real resources`);
       } finally { globalThis.fetch = guarded; }
       assert.deepEqual(mismatches, []);
+      assert.deepEqual(unhelpful, [], 'Every refusal of a key that is not full access says what it can do and how to get a key that can.');
       assert.deepEqual(Object.keys(OPERATION_PERMISSIONS).filter(id => !entries.some(e => e.id === id)), [], 'Rows for operations that no longer exist.');
       assert.ok(entries.length >= 270, String(entries.length));
     });
@@ -12978,7 +12987,14 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('POST', '/v1/emails/send', sender.secret, mail({ from: 'sender@allowed.example.com', subject: 'Header\r\nBcc: victim@example.com' })), 422);
     const allowed = ok(await http('POST', '/v1/emails/send', sender.secret, mail({ from: 'sender@allowed.example.com' })), 202);
     assert.equal(allowed.simulated, true);
-    error(await http('GET', `/v1/emails/${allowed.id}`, sender.secret), 403, 'PERMISSION_DENIED');
+    // A send-only key doesn't read back what it sent (a third production workspace tried): send stays send, and the refusal
+    // says how to get Read on the same key (API keys → Edit keeps its secret) or a full-access key. The list says the same.
+    const editKey = 'in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys.';
+    for (const path of [`/v1/emails/${allowed.id}`, '/v1/emails', `/v1/emails/${allowed.id}/events`]) {
+      const refused = error(await http('GET', path, sender.secret), 403, 'PERMISSION_DENIED');
+      assert.equal(refused.message, `This key can only send from allowed.example.com. Add Read to it ${editKey} Needs Sent mail: read.`, path);
+      assert.deepEqual(refused.required, { permission: 'sentMail', level: 'read' }, path);
+    }
     // Onboarding's Send only key used beyond sending (two production workspaces did): each refusal keeps its code, says
     // which key this is and where a full-access key comes from.
     const fullAccess = 'a full-access key: create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys.';
@@ -13001,6 +13017,10 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     // N9: workspace-wide totals would count other domains' mail, so a restricted key gets none.
     for (const query of ['', '?include=previous,streams', '?granularity=hour']) error(await http('GET', `/v1/metrics${query}`, domainReader.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     assert.match(error(await http('GET', '/v1/inbound/addresses', domainReader.secret), 403, 'UNRESTRICTED_KEY_REQUIRED').message, /^This key can only read mail sent from allowed\.example\.com\. Inbound addresses need a full-access key/);
+    assert.equal(error(await http('POST', '/v1/emails/send', domainReader.secret, mail({ from: 'sender@allowed.example.com' })), 403, 'PERMISSION_DENIED').message,
+      `This key can only read mail sent from allowed.example.com. Add Send to it ${editKey} Needs Send email.`);
+    // A key without manage on all domains, unrestricted otherwise, on received mail: the same style, with the address-key option.
+    assert.match(error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound addresses need a full-access key: .* For mail at some addresses only, a key limited to those addresses also works\./);
     const visible = await allPages('/v1/emails', domainReader.secret);
     assert.ok(visible.some(row => row.id === allowed.id));
     assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));
