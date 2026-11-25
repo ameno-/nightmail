@@ -2129,13 +2129,13 @@ describe('support Worker', () => {
       assert.ok(!(await inboxOf(c.id)).messages.some((m: any) => m.id === one), 'A staff reply is never mirrored back.');
       c.ws.close();
       // No panel open: by email to the account address.
-      await setInbox({ id: c.id, reply: { id: two, text: 'One more thing: verification finished.', staffName: 'Dana Rivera' } });
+      await setInbox({ id: c.id, reply: { id: two, text: 'One more thing: **verification** finished.', staffName: 'Dana Rivera' } });
       await wake(c.id);
       await queued(c.id, two);
       await drive(c.id, { tick: true });
       const emailed = await sends(`staff-${two}`);
       assert.deepEqual([emailed.length, emailed[0][2], emailed[0][3].to, emailed[0][3].subject], [1, '/v1/inbound/threads', ['ada@acme.test'], 'Re: your Nightmail support chat']);
-      assert.equal(emailed[0][3].text, 'Hi Ada,\n\nOne more thing: verification finished.\n\nDana Rivera, Nightmail', 'Named from the scope read when the panel joined.');
+      assert.equal(emailed[0][3].text, 'Hi Ada,\n\nOne more thing: verification finished.\n\nDana Rivera, Nightmail', 'Named from the scope read when the panel joined; its Markdown as plain text, as the agent’s email answers are.');
       assert.deepEqual(await marked(two), ['sent']);
       // A signed unknown ID is acknowledged, malformed and unsigned requests are refused.
       const pulls = (await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length;

@@ -31,7 +31,7 @@ export interface SupportMessage {
   id: string; seq: number; author: SupportAuthor; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[]
   staff: { userId: string; name: string | null } | null; delivery: 'queued' | 'sent' | 'failed' | 'held' | null; heldReason: HeldReason | null
   files: { id: string; name: string | null; type: string | null; size: number | null }[]; email: SupportEmail | null; deliveredAt: string | null; at: string
-  draft: { outcome: 'sent' | 'edited' | 'discarded'; by: { userId: string; name: string | null }; at: string; replyId: string | null } | null
+  draft: { outcome: 'sent' | 'edited' | 'replaced' | 'discarded'; by: { userId: string; name: string | null }; at: string; replyId: string | null } | null
 }
 export type SupportEventKind = 'opened' | 'ticket' | 'priority' | 'paused' | 'resumed' | 'resolved' | 'done' | 'undone' | 'closed'
 export interface SupportEvent { id: string; kind: SupportEventKind; by: { userId: string; name: string | null } | null; details: Record<string, unknown>; at: string }
@@ -178,8 +178,8 @@ export const subscribeInboxDrafts = (listener: () => void) => { draftListeners.a
 export function updateInboxDraft(user: string, conversationId: string, change: (draft: InboxDraft) => Partial<InboxDraft> | null) {
   const map = { ...draftsOf(user) }, current = map[conversationId] ?? { text: '', key: crypto.randomUUID(), failed: null, sending: null }
   const patch = change(current), next = patch && { ...current, ...patch }
-  // A note chosen with nothing typed yet is kept too, so the box stays a note.
-  if (next && (next.text || next.failed || next.sending || next.mode === 'note')) map[conversationId] = next
+  // A note chosen, or a held answer's reply started, with nothing typed yet is kept too, so the box stays what it is.
+  if (next && (next.text || next.failed || next.sending || next.mode === 'note' || next.draftOf)) map[conversationId] = next
   else delete map[conversationId]
   drafts = { user, map }
   try { if (Object.keys(map).length) sessionStorage.setItem(`${DRAFTS}:${user}`, JSON.stringify(map)); else sessionStorage.removeItem(`${DRAFTS}:${user}`) } catch { /* Kept for this page only. */ }

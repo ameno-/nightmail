@@ -895,7 +895,8 @@ export class SupportConversation extends DurableObject<Env> {
         if (!open && !progress.emailed) {
           if (!recipient) { progress.failed = 'no account address'; save(); return settle('failed'); }
           const first = meta.name?.split(/\s+/)[0] ?? 'there';
-          await external(nightmailApi(this.env).startThread({ to: [recipient], subject: `Re: your ${productName} support chat`, text: [`Hi ${first},`, '', reply.text, '', `${author}, ${productName}`].join('\n') }, `staff-${reply.id}`));
+          // The panel shows a reply as Markdown; by email it is plain text, as the agent's email answers are.
+          await external(nightmailApi(this.env).startThread({ to: [recipient], subject: `Re: your ${productName} support chat`, text: [`Hi ${first},`, '', plainText(reply.text), '', `${author}, ${productName}`].join('\n') }, `staff-${reply.id}`));
           progress.emailed = true; save();
         }
       }
