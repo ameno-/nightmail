@@ -14,14 +14,15 @@ import './settings.css'
 import './domain-records.css'
 import { expectAccount } from '../../data/accounts'
 import { productName } from '../../../../api/src/brand'
-import { checkKey, type DnsChecks } from './domain-setup-alert'
+import { checkKey, RECORDS_CORRECT, type DnsChecks } from './domain-setup-alert'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
-export function useDomain(id: string, recheckUntil = 0) {
+// `enabled` false: the domain was just deleted, so nothing may read it again (forgetDomain in data/invalidation.ts).
+export function useDomain(id: string, recheckUntil = 0, enabled = true) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
-    queryKey: ['nightmail', ...queries.domain(id).key],
+    queryKey: ['nightmail', ...queries.domain(id).key], enabled,
     queryFn: ({ signal }) => queries.domain(id).read(api, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
@@ -106,7 +107,7 @@ const required = (record: DnsRecord) => record.status !== 'verified' && (purpose
 function checkedStatus(record: DnsRecord, check: PublicDns | null | undefined): RecordRow['status'] | undefined {
   if (!required(record) || check === undefined) return undefined
   if (check === null) return { label: 'Pending', tone: 'warning', detail: 'Public DNS didn’t answer. Check again in a minute.' }
-  if (check.state === 'found') return { label: 'Found', tone: 'info', detail: 'Public DNS has this record. Verification usually follows within a few minutes.' }
+  if (check.state === 'found') return { label: 'Found', tone: 'info', detail: `Public DNS has this record. ${RECORDS_CORRECT}` }
   if (check.state === 'missing') return { label: 'Missing', tone: 'danger', detail: `Public DNS has no ${record.type} record at ${record.name}.` }
   return { label: 'Wrong value', tone: 'danger', detail: `Expected ${record.value}. Public DNS has ${check.values.join(', ')}.` }
 }
@@ -143,7 +144,7 @@ export function checkSummary(domain: Domain, checks: DnsChecks): { text: string;
     wrong.length && `${plural(wrong.length, 'record')} with another value: ${list(wrong.map(name))}.`,
   ].filter(Boolean).join(' ') }
   if (unknown.length) return { tone: 'warning', text: `Public DNS didn’t answer for ${plural(unknown.length, 'record')}. Check again in a minute.` }
-  return { tone: 'info', text: checked.length === pending.length ? 'Public DNS has every record. Verification usually follows within a few minutes.' : 'Public DNS has these records. Verification usually follows within a few minutes.' }
+  return { tone: 'info', text: checked.length === pending.length ? 'Public DNS has every record.' : 'Public DNS has these records.' }
 }
 
 // Every record in one table: what it is for, its type, name and value (each with Copy), its status when not done, and the row's

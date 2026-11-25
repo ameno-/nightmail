@@ -30,6 +30,22 @@ export function setupGap(domain: Domain, checks?: DnsChecks): SetupGap | null {
 
 export const gapTitle = ({ missing, total, wrong, host }: SetupGap) => `${missing} of ${total} ${total === 1 ? 'record' : 'records'} ${wrong ? 'missing or wrong' : 'missing'}${host ? ` at ${host.name}` : ''}`
 
+/**
+ * Every record verification waits for is in public DNS, yet the domain is still pending: Amazon SES checks DNS on its own
+ * schedule (it last looked before the records were there), and nothing can make it look sooner. Said so, the page doesn't
+ * look stuck. From Check now's answers, or the background check's.
+ */
+export function recordsCorrect(domain: Domain, checks?: DnsChecks) {
+  if (domain.status === 'verified' || domain.sending === 'verified') return false
+  const waiting = domain.records.filter(record => record.purpose === 'sending' && record.status !== 'verified')
+  const state = (record: DnsRecord) => (checks?.has(checkKey(record)) ? checks.get(checkKey(record)) : record.publicDns)?.state
+  return waiting.length > 0 && waiting.every(record => state(record) === 'found')
+}
+export const RECORDS_CORRECT = 'Amazon is finishing verification, which usually takes under an hour.'
+export function RecordsCorrectAlert() {
+  return <Alert tone="info" title="Your records are correct" data-records-correct="">{RECORDS_CORRECT}</Alert>
+}
+
 /** `page`: on the domain's own page, which lists the records; elsewhere it links there. */
 export function DomainSetupAlert({ domain, gap, page = false }: { domain: Domain; gap: SetupGap; page?: boolean }) {
   const one = gap.missing === 1, where = gap.host ? `at ${gap.host.name}` : 'where your DNS is hosted'

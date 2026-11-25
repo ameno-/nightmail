@@ -65,6 +65,29 @@ export function invalidateResources(client: QueryClient, resources: readonly str
   return active
 }
 
+/**
+ * After a domain is deleted: its own queries (its page, its records check, receiving and its hosts: ['domain', id, …]
+ * and ['mailbox-domain', id, …]) are cancelled and removed, never refetched, since every read of it now answers 404.
+ * The cached lists that showed it (Domains, Receiving's domains, Overview's setup read) drop its row at once, so nothing
+ * links to it or prefetches it, and are then read again. Call it once the page that read the domain has stopped reading
+ * it (its queries disabled), so removing them can't start a fetch.
+ */
+export function forgetDomain(client: QueryClient, id: string) {
+  const own = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === 'nightmail' && (resourceOf(query.queryKey) === 'domain' || resourceOf(query.queryKey) === 'mailbox-domain') && query.queryKey[2] === id
+  void client.cancelQueries({ predicate: own }).catch(() => {})
+  client.removeQueries({ predicate: own })
+  const without = (rows: unknown) => Array.isArray(rows) ? rows.filter(row => (row as { id?: unknown } | null)?.id !== id) : rows
+  client.setQueriesData<unknown>({ predicate: query => query.queryKey[0] === 'nightmail' && ['domains', 'mailbox-domains', 'overview-setup'].includes(resourceOf(query.queryKey)) }, (data: unknown) => {
+    if (Array.isArray(data)) return without(data)
+    if (!data || typeof data !== 'object') return data
+    const page = data as { items?: unknown[]; total?: number; domains?: unknown }
+    if (Array.isArray(page.items)) { const items = without(page.items) as unknown[]; return { ...page, items, ...typeof page.total === 'number' ? { total: page.total - (page.items.length - items.length) } : {} } }
+    if (Array.isArray(page.domains)) return { ...page, domains: without(page.domains) }
+    return data
+  })
+  return invalidateResources(client, invalidate.domains.filter(resource => resource !== 'domain' && resource !== 'mailbox-domain'))
+}
+
 // A polled detail page learns of a status change (domain verified, campaign done) before any cached list of the same
 // resource does; when the observed value changes, mark those lists stale so the next visit refetches them.
 export function useRefreshListsOnChange(resource: string, value: string | undefined) {

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftRight } from 'lucide-react'
@@ -15,9 +16,9 @@ import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-tit
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, checkSummary, dnsChecks, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines, type DnsChecks } from './domain-records'
-import { invalidate, invalidateResources, resourceOf } from '../../data/invalidation'
+import { forgetDomain, invalidate } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
-import { DomainSetupAlert, setupGap } from './domain-setup-alert'
+import { DomainSetupAlert, RecordsCorrectAlert, recordsCorrect, setupGap } from './domain-setup-alert'
 import { BuiltinBadge, builtinFirst, builtinStatus } from './builtin-domain'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
@@ -157,10 +158,13 @@ function DomainDetail() {
   const { multiTenant } = useWorkspaceAccess()
   const hosted = useSession()?.identity?.connection?.kind === 'shared'
   const [recheckUntil, setRecheckUntil] = useState(0)
-  const domain = useDomain(id, recheckUntil)
+  // Set the moment the domain is deleted: every read of it below stops (no poll, no focus refetch), so dropping its cache
+  // entries on the way back to Domains starts nothing that would answer 404.
+  const [deleted, setDeleted] = useState(false)
+  const domain = useDomain(id, recheckUntil, !deleted)
   // Receiving set up through the API checks the domain in the background: follow it until it settles.
-  const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: multiTenant, interval: state => state?.status === 'provisioning' ? 5_000 : false })
-  const hosts = useReceivingHosts(id, multiTenant, receiving.data?.status === 'provisioning' ? 5_000 : false)
+  const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: multiTenant && !deleted, interval: state => state?.status === 'provisioning' ? 5_000 : false })
+  const hosts = useReceivingHosts(id, multiTenant && !deleted, receiving.data?.status === 'provisioning' ? 5_000 : false)
   const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true, invalidate.domains)
   // The same records check without its own notice, for Check MX now (whose notice says what it found).
   const recheck = useApiMutation((api, domainId: string) => api.domains.verify(domainId), undefined, true, invalidate.domains)
@@ -241,7 +245,7 @@ function DomainDetail() {
     </>} />
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
-    {gap && <DomainSetupAlert domain={current} gap={gap} page />}
+    {gap ? <DomainSetupAlert domain={current} gap={gap} page /> : recordsCorrect(current, pressed) && <RecordsCorrectAlert />}
     <div className="domain-sections">
       <DomainRecords domain={current} setup={dns.setup} checks={pressed ?? dnsChecks(current)} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
@@ -251,7 +255,7 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domain' && query.queryKey[2] === id }); void invalidateResources(client, invalidate.domains.filter(r => r !== 'domain')) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); flushSync(() => setDeleted(true)); navigate('/domains', { replace: true }); void forgetDomain(client, id).catch(() => {}) }} />
     <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
       description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>

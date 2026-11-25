@@ -4,7 +4,8 @@ import { log, logError, ModuleLoadError, wrapModuleLoad, type JobHandler, type R
 // The domain setup check. Someone adds a domain, sees its records and leaves, and nothing tells them the records never
 // went live. Every five minutes (elected, from the minute cron and the Node runner) domainSetupTick queues one
 // domain.setupCheck job for each hosted domain still pending an hour after it was added, unless it was checked lately:
-// every 15 minutes for its first six hours, then hourly until its 72 hours are up. The job asks public DNS for each
+// every 15 minutes for its first six hours, then hourly until its 72 hours are up. That includes a domain whose ownership
+// TXT is proven but whose DKIM CNAMEs are not (the common case: one CNAME mistyped or left out). The job asks public DNS for each
 // pending record and for the zone's NS records (record-check.ts) and stores what it saw on the claim (setup_check, migration
 // 477). Domain reads show that: each record's status and the banner on the domain page and Overview ("2 of 4 records
 // missing at Cloudflare"). With DOMAIN_SETUP_REMINDER=on, a check that finds a sending record missing or different also
@@ -18,7 +19,7 @@ export async function domainSetupTick(runtime: Runtime) {
     ON CONFLICT (workspace_id) DO UPDATE SET next_wake_at=excluded.next_wake_at WHERE job_schedule.next_wake_at<=now() RETURNING 1`);
   if (!elected.rows.length) return;
   const { rows } = await runtime.db.execute<{ id: string }>(sql`WITH due AS (SELECT d.id,dc.workspace_id,dc.token FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name
-      WHERE NOT dc.ever_proven AND dc.sending_state='pending' AND dc.created_at<=now()-interval '1 hour'
+      WHERE dc.sending_state='pending' AND dc.created_at<=now()-interval '1 hour' AND dc.created_at>now()-interval '72 hours'
         AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ?| array['adopted','builtin'],false)
         AND coalesce((dc.setup_check->>'checkedAt')::timestamptz,'-infinity')<=now()-CASE WHEN dc.created_at>now()-interval '6 hours' THEN interval '14 minutes' ELSE interval '59 minutes' END
       ORDER BY dc.setup_check->>'checkedAt' NULLS FIRST,dc.created_at LIMIT 100)
@@ -41,8 +42,8 @@ export const domainSetupCheckJob: JobHandler = async (runtime, payload, job) => 
   if (!runtime.config.multiTenant || typeof payload.domainId !== 'string' || typeof payload.token !== 'string') return;
   const [{ derivedReadiness, hostedDomain }, { checkSetup }] = await wrapModuleLoad(() => Promise.all([import('./operations.js'), import('./record-check.js')]));
   const row = await hostedDomain(runtime.db, job.workspaceId, payload.domainId);
-  // Removed, added again, verified, released or adopted since it was queued: nothing to check.
-  if (!row || row.token !== payload.token || row.expired || row.ever_proven || row.sending_state !== 'pending' || row.identity?.adopted) return;
+  // Removed, added again, verified, released, adopted or built in since it was queued: nothing to check.
+  if (!row || row.token !== payload.token || row.expired || row.sending_state !== 'pending' || row.identity?.adopted || row.identity?.builtin || Date.parse(row.created_at) <= Date.now() - 72 * 3600_000) return;
   const report = derivedReadiness(row), check = await checkSetup(report);
   await runtime.db.execute(sql`UPDATE domain_claims SET setup_check=${JSON.stringify(check)}::jsonb WHERE workspace_id=${job.workspaceId} AND token=${row.token}::uuid AND sending_state='pending'`);
   if (!runtime.config.domainSetupReminder) return;

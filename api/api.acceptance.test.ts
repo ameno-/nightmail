@@ -29846,6 +29846,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(ok(await local('GET', `/v1/domains/${recent.id}`)).dnsHost, undefined, 'A domain added within the hour is not checked, so its reads carry nothing.');
         assert.ok(ok(await local('GET', '/v1/domains')).data.find((d: Json) => d.id === stuck.id).dnsHost, 'The list carries it too (Overview reads it).');
         assert.deepEqual(await notices(), []);
+        // A domain whose ownership TXT is proven but whose third DKIM CNAME is missing is checked too: still pending.
+        const proven = await add('proven', '2 hours');
+        await db.query(`UPDATE domain_claims SET ever_proven=true,identity=jsonb_set(identity,'{proven}','true') WHERE workspace_id=$1 AND name=$2`, [wid, proven.name]);
+        await check(proven);
+        assert.deepEqual(ok(await local('GET', `/v1/domains/${proven.id}`)).dns.filter((r: Json) => r.purpose === 'sending').map((r: Json) => [r.name.split('.')[0], r.status, r.publicDns?.state ?? null]),
+          [['tokena', 'pending', 'found'], ['tokenb', 'pending', 'found'], ['tokenc', 'pending', 'missing'], ['_nightmail', 'verified', null]]);
+        await db.query('DELETE FROM domain_claims WHERE workspace_id=$1 AND name=$2', [wid, proven.name]);
 
         // On: the next check queues the one email, and checks after it queue nothing more.
         runtime.config.domainSetupReminder = true;
