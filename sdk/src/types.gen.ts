@@ -193,6 +193,10 @@ export type ConnectionSummary = {
      */
     sent?: boolean;
     /**
+     * Whether this workspace has received any email (kept as long as its received mail is).
+     */
+    received?: boolean;
+    /**
      * Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.
      */
     builtinDomain?: {
@@ -2704,6 +2708,10 @@ export type WorkspaceSettings = {
      * Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.
      */
     requiredNotices: boolean;
+    /**
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
+     */
+    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
 };
 
 export type UpdateWorkspaceSettings = {
@@ -2712,6 +2720,10 @@ export type UpdateWorkspaceSettings = {
      * The workspace's postal address, as plain text: at most 300 characters on up to 6 lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it.
      */
     postalAddress?: string | null;
+    /**
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
+     */
+    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
 };
 
 export type SesAccount = {
@@ -6339,6 +6351,43 @@ export type OverviewSetup = {
          */
         pending: number;
     } | null;
+    /**
+     * The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace.
+     */
+    progress?: {
+        /**
+         * An agent inbox exists.
+         */
+        inbox: boolean;
+        /**
+         * Any email was received.
+         */
+        received: boolean;
+        /**
+         * The audience has a contact.
+         */
+        contacts: boolean;
+        /**
+         * A campaign exists, draft or not.
+         */
+        campaign: boolean;
+        /**
+         * A campaign was launched (preparing, scheduled, sending, paused or done).
+         */
+        campaignSent: boolean;
+        /**
+         * A newsletter exists.
+         */
+        newsletter: boolean;
+        /**
+         * A newsletter has a reader (a member of its list).
+         */
+        readers: boolean;
+        /**
+         * A campaign to a newsletter was launched.
+         */
+        issueSent: boolean;
+    } | null;
 };
 
 export type SupportHandoff = {
@@ -6867,6 +6916,10 @@ export type GetCurrentIdentityResponses = {
          */
         mcpScopes: Array<string>;
         connection: ConnectionSummary;
+        /**
+         * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
+         */
+        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
         /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */

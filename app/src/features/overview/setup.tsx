@@ -5,10 +5,13 @@ import { ArrowUpRight, Check, Info } from 'lucide-react'
 import { useApiDef, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { request } from '../../data/live'
-import type { Identity, SenderScore, SendingLimit } from '../../data/types'
+import type { Identity, SenderScore, SendingLimit, SetupProgress } from '../../data/types'
+import { leadFocus, type WorkspaceFocus } from '../../data/focus'
+import { openConnectAgent } from '../../lib/connect-agent'
+import { newIssuePath, readersPath } from '../newsletters/shared'
 import { date, number } from '../../lib/format'
 import { TestSend } from '../docs/first-send'
-import { Dialog } from '../../components/ui'
+import { Button, Dialog } from '../../components/ui'
 import { limitNotes } from '../score'
 import { SendingLimitsGuide } from '../score/limits'
 import './setup.css'
@@ -96,9 +99,10 @@ export type SetupStep = { key: string; done: boolean; title: string; action?: Re
 // A failed read is `error` (with `retry`): the steps' place says so, rather than looking like finished setup.
 // `stuck`: the newest domain whose records public DNS still lacks an hour after it was added, for the banner above the steps
 // (shown also once the steps are done, while another domain waits).
-export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[]; error?: unknown; retry?: () => void; stuck?: { domain: Domain; gap: SetupGap } | null; hasDomain?: boolean; sent?: boolean; verifiedDomain?: Domain } {
+export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[]; error?: unknown; retry?: () => void; stuck?: { domain: Domain; gap: SetupGap } | null; hasDomain?: boolean; sent?: boolean; verifiedDomain?: Domain; progress?: SetupProgress | null } {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
+  const newsletter = identity?.newsletters?.[0] ?? null
   const client = useQueryClient()
   const enabled = multiTenant && canAdminister && identity?.connection?.state === 'ready'
   const setup = useApiDef(queries.overviewSetup(), { enabled })
@@ -125,12 +129,23 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   const domainDone = !!ownVerified || (identity?.connection?.domains?.verified ?? 0) > 0 || all.some(domain => domain.builtIn && domain.status === 'verified')
   const pending = items.find(domain => domain.status !== 'verified')
   const sent = setup.data.emails.any || !!testId
-  // What Overview's onboarding card reads (onboarding-card.tsx): whether any email exists, and the domain to send from.
-  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: ownVerified ? verified : all.find(domain => domain.builtIn) }
+  // What Overview's onboarding card reads (onboarding-card.tsx): whether any email exists, the domain to send from, and
+  // each focus's first steps.
+  const progress = setup.data.progress ?? null
+  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: ownVerified ? verified : all.find(domain => domain.builtIn), progress }
+  const domainStep: SetupStep = { key: 'domain', done: domainDone, title: 'Verify a domain',
+    action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> }
+  // Another focus than developer emails (onboarding's question, Settings) has its own first steps after the domain.
+  const lead = leadFocus(identity)
+  if (lead !== 'developer' && progress) {
+    const focusSteps = [domainStep, ...stepsFor(lead, progress, keyed, newsletter)]
+    if (focusSteps.every(step => step.done)) return { loading: false, steps: null, ...known }
+    const current = focusSteps.find(step => !step.done)
+    return { loading: false, steps: focusSteps, current, open: current ? [current] : [], ...known }
+  }
   if (domainDone && keyed && sent && !testId) return { loading: false, steps: null, ...known }
   const steps: SetupStep[] = [
-    { key: 'domain', done: domainDone, title: 'Verify a domain',
-      action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> },
+    domainStep,
     { key: 'key', done: keyed, title: 'Create an API key',
       action: !keyed && <Link className={`ui-button ui-button--${domainDone ? 'primary' : 'secondary'} ui-button--md`} to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
     // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.
@@ -143,6 +158,27 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   // The first email's step stays open once sent, so its confirmation and the link to Logs are seen.
   const open = steps.filter(step => step === current || (step.key === 'send' && (!!testId || (!step.done && domainDone))))
   return { loading: false, steps, current, open, ...known }
+}
+
+const action = (to: string, label: string, primary = true) => <Link className={`ui-button ui-button--${primary ? 'primary' : 'secondary'} ui-button--md`} to={to}>{label}</Link>
+/** The steps after the domain for each focus but developer emails, done as GET /v1/overview/setup's progress says. */
+function stepsFor(lead: Exclude<WorkspaceFocus, 'developer'>, progress: SetupProgress, keyed: boolean, newsletter: { id: string } | null): SetupStep[] {
+  if (lead === 'agents') return [
+    { key: 'inbox', done: progress.inbox, title: 'Create an agent inbox', action: !progress.inbox && action('/receiving/inboxes', 'Create inbox') },
+    // The prompt's setup token gets the agent a key of its own: a key is what connecting leaves behind.
+    { key: 'connect', done: keyed, title: 'Connect your agent', action: !keyed && <Button variant="primary" onClick={openConnectAgent}>Connect an agent</Button> },
+    { key: 'receive', done: progress.received, title: 'Receive your first email', action: !progress.received && action('/receiving/inboxes', 'Open inboxes', false) },
+  ]
+  if (lead === 'marketing') return [
+    { key: 'contacts', done: progress.contacts, title: 'Import your contacts', action: !progress.contacts && action('/audience', 'Open Audience') },
+    { key: 'campaign', done: progress.campaign, title: 'Draft a campaign', action: !progress.campaign && action('/campaigns/templates', 'Pick a template') },
+    { key: 'send', done: progress.campaignSent, title: 'Send your first campaign', action: !progress.campaignSent && action('/campaigns', 'Open Campaigns', false) },
+  ]
+  return [
+    { key: 'newsletter', done: progress.newsletter, title: 'Create your newsletter', action: !progress.newsletter && action('/newsletters/new', 'Create newsletter') },
+    { key: 'readers', done: progress.readers, title: 'Get your first readers', action: !progress.readers && newsletter && action(readersPath(newsletter.id), 'Add readers') },
+    { key: 'issue', done: progress.issueSent, title: 'Send the first issue', action: !progress.issueSent && newsletter && action(newIssuePath(newsletter.id), 'Write an issue', false) },
+  ]
 }
 
 // Numbered steps in Overview's detail column; only the current step is open, with its action. A finished step's number

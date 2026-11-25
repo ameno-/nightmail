@@ -3617,9 +3617,10 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.equal(pending.state, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
-        const {sendingLimit,domains:claimed,sent,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
+        const {sendingLimit,domains:claimed,sent,received,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
         assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null,standing:{step:'ok',marketingHeld:false}}); assert.deepEqual(claimed,{total:0,verified:0});
         assert.equal(sent,false,'Nothing sent yet: Overview\'s onboarding card reads this.');
+        assert.equal(received,false,'Nothing received yet: an agent inbox workspace\'s card reads this.');
         assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:500,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         // GET /v1/me reads the allowance without row locks: a pending operator pause or cap change (a row lock on the
@@ -4635,11 +4636,13 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           await pool.query('DELETE FROM api_keys WHERE id = ANY($1)', [[kept.id, revoked.id]]);
           await pool.query('DELETE FROM workspace_invitations WHERE id=$1', [pending.id]);
         });
-        const owner = ok(await local('GET', '/v1/overview/setup', undefined, a.cookie));
+        const { progress, ...owner } = ok(await local('GET', '/v1/overview/setup', undefined, a.cookie));
         assert.deepEqual(owner, await own());
+        assert.deepEqual(Object.keys(progress).sort(), ['campaign', 'campaignSent', 'contacts', 'inbox', 'issueSent', 'newsletter', 'readers', 'received']);
+        assert.ok(Object.values(progress).every(value => typeof value === 'boolean'), 'Each focus step is yes or no.');
         assert.ok(owner.apiKeys.active >= 1 && owner.invitations.pending === 1 && owner.emails.any, 'The new key and invitation count; the revoked key does not.');
         // A member reads mail but none of the owner/admin lists: those parts are null, exactly where their endpoints refuse.
-        assert.deepEqual(ok(await local('GET', '/v1/overview/setup', undefined, guest)), { domains: null, apiKeys: null, emails: { any: true }, webhooks: null, invitations: null });
+        assert.deepEqual(ok(await local('GET', '/v1/overview/setup', undefined, guest)), { domains: null, apiKeys: null, emails: { any: true }, webhooks: null, invitations: null, progress: null });
         // Hosted budget: the domain page and one statement of counts, so one more than a single-row read with the same session.
         const statements = async (path: string) => {
           const spy = setupTest.mock.method(pool, 'query');
@@ -20222,7 +20225,7 @@ describe('Campaign postal address', () => {
         error(await local('PATCH', '/v1/settings/workspace', { postalAddress: invalid }), 422, 'VALIDATION_FAILED');
       error(await local('PATCH', '/v1/settings/workspace', {}), 422, 'VALIDATION_FAILED');
       const settings = ok(await local('GET', '/v1/settings/workspace'));
-      assert.deepEqual(settings, { name: settings.name, postalAddress: address, requiredNotices: false });
+      assert.deepEqual(settings, { name: settings.name, postalAddress: address, requiredNotices: false, focus: null });
       // The test, the preview and the sent email show the same footer.
       const test = await content(ok(await local('POST', `/v1/campaigns/${sent.id}/test`, { to: 'tester@example.net' }), 202).id);
       const preview = ok(await local('GET', `/v1/campaigns/${sent.id}/preview`));
@@ -20305,12 +20308,69 @@ describe('Campaign postal address', () => {
       }
       assert.equal((await db.query('SELECT postal_address FROM workspaces WHERE id = $1', [wid])).rows[0].postal_address, FIXTURE_POSTAL_ADDRESS);
       assert.equal(ok(await as({ cookie: admin.cookie })('PATCH', { postalAddress: 'Admin Fixture Co.\n2 Admin Road' })).postalAddress, 'Admin Fixture Co.\n2 Admin Road');
-      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: null })), { name: wid, postalAddress: null, requiredNotices: false });
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: null })), { name: wid, postalAddress: null, requiredNotices: false, focus: null });
       const audits = (await db.query("SELECT summary FROM audit_events WHERE workspace_id = $1 AND action = 'settings.update' ORDER BY id", [wid])).rows.map(r => r.summary);
       assert.deepEqual(audits.map(a => [a.before?.postalAddress, a.after?.postalAddress, a.fields]), [[FIXTURE_POSTAL_ADDRESS, 'Admin Fixture Co.\n2 Admin Road', ['postalAddress']], ['Admin Fixture Co.\n2 Admin Road', '', ['postalAddress']]]);
       // Renaming alone leaves the address as it is.
       ok(await local('PATCH', '/v1/settings/workspace', { postalAddress: 'Kept Fixture Co.' }));
-      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Postal renamed' })), { name: 'Postal renamed', postalAddress: 'Kept Fixture Co.', requiredNotices: false });
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Postal renamed' })), { name: 'Postal renamed', postalAddress: 'Kept Fixture Co.', requiredNotices: false, focus: null });
+    });
+  });
+});
+
+describe('Workspace focus', () => {
+  test('workspace focus: owners and admins set it, in order (the first leads); /v1/me and the settings read it; skipped is empty; members and keys without manage cannot; every change is audited; Overview setup says how far each focus got', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      runtime.config.multiTenant = true;
+      cleanup(t, async () => { runtime.config.multiTenant = false; });
+      const member = await sessionFixture(t), admin = await sessionFixture(t);
+      await db.query("UPDATE workspace_members SET workspace_id = $1, role = 'member' WHERE user_id = $2", [wid, member.userId]);
+      await db.query("UPDATE workspace_members SET workspace_id = $1, role = 'admin' WHERE user_id = $2", [wid, admin.userId]);
+      const key = async (permissions: string[]) => { const made = ok(await local('POST', '/v1/api-keys', { name: unique('focus-key'), permissions }), 201); secrets.add(made.secret); return { authorization: `Bearer ${made.secret}` }; };
+      const [reader, sender] = [await key(['read']), await key(['read', 'send'])];
+      const settings = (headers: Record<string, string>) => (method: string, body?: Json) => local(method, '/v1/settings/workspace', body, 'live', headers);
+      const me = async () => ok(await local('GET', '/v1/me', undefined, 'live', { cookie: admin.cookie })).focus;
+      // Not asked yet: null everywhere.
+      assert.equal(ok(await local('GET', '/v1/settings/workspace')).focus, null);
+      assert.equal(await me(), null);
+      // An admin picks agent inboxes first, then developer emails: the order is kept, the rest of the settings stay, and
+      // the next /v1/me carries it, so the dashboard has it on its first frame.
+      const before = ok(await local('GET', '/v1/settings/workspace'));
+      assert.deepEqual(ok(await settings({ cookie: admin.cookie })('PATCH', { focus: ['agents', 'developer'] })), { ...before, focus: ['agents', 'developer'] });
+      assert.deepEqual(await me(), ['agents', 'developer']);
+      assert.deepEqual((await db.query('SELECT focus FROM workspaces WHERE id = $1', [wid])).rows[0].focus, ['agents', 'developer']);
+      // Changing the name leaves it; skipping is an empty list (asked, none picked); null clears it.
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Focus renamed' })).focus, ['agents', 'developer']);
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { focus: ['newsletter', 'marketing', 'agents', 'developer'] })).focus, ['newsletter', 'marketing', 'agents', 'developer']);
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { focus: [] })).focus, []);
+      assert.deepEqual(await me(), []);
+      assert.equal(ok(await local('PATCH', '/v1/settings/workspace', { focus: null })).focus, null);
+      // Only the four, each once, as a list.
+      for (const invalid of [['sales'], ['agents', 'agents'], 'agents', ['marketing', 'newsletter', 'developer', 'agents', 'marketing']])
+        error(await local('PATCH', '/v1/settings/workspace', { focus: invalid }), 422, 'VALIDATION_FAILED');
+      assert.equal(ok(await local('GET', '/v1/settings/workspace')).focus, null);
+      // Everyone reads it; a member and keys without manage can't change it.
+      ok(await local('PATCH', '/v1/settings/workspace', { focus: ['marketing'] }));
+      for (const who of [{ cookie: member.cookie }, reader, sender]) {
+        assert.deepEqual(ok(await settings(who)('GET')).focus, ['marketing']);
+        error(await settings(who)('PATCH', { focus: ['agents'] }), 403, 'PERMISSION_DENIED');
+      }
+      assert.deepEqual((await db.query('SELECT focus FROM workspaces WHERE id = $1', [wid])).rows[0].focus, ['marketing']);
+      const audits = (await db.query("SELECT summary FROM audit_events WHERE workspace_id = $1 AND action = 'settings.update' AND summary->'fields' ? 'focus' ORDER BY id", [wid])).rows.map(r => r.summary);
+      assert.deepEqual(audits.map(a => [a.before?.focus ?? null, a.after?.focus ?? null]), [[null, ['agents', 'developer']], [['agents', 'developer'], ['newsletter', 'marketing', 'agents', 'developer']], [['newsletter', 'marketing', 'agents', 'developer'], []], [[], null], [null, ['marketing']]]);
+      // Overview setup: each focus's first steps, for whoever can set the focus; a member gets none.
+      const progress = async (headers?: Record<string, string>) => ok(await local('GET', '/v1/overview/setup', undefined, 'live', headers)).progress;
+      const none = { inbox: false, received: false, contacts: false, campaign: false, campaignSent: false, newsletter: false, readers: false, issueSent: false };
+      assert.deepEqual(await progress(), none, 'A new workspace has done none of them.');
+      assert.equal(await progress({ cookie: member.cookie }), null);
+      const contact = ok(await local('POST', '/v1/contacts', { email: `${unique('focus-reader')}@example.net` }), 201);
+      const newsletter = ok(await local('POST', '/v1/newsletters', { name: 'Focus letter', from: 'news@example.com' }), 201);
+      ok(await local('POST', `/v1/lists/${newsletter.id}/members`, { contactIds: [contact.id] }));
+      const issue = ok(await local('POST', '/v1/campaigns', { name: 'First issue', from: 'news@example.com', subject: 'Issue one', html: '<p>One.</p>', audience: { listId: newsletter.id } }), 201);
+      assert.deepEqual(await progress(), { ...none, contacts: true, newsletter: true, readers: true, campaign: true });
+      await db.query("UPDATE sending_campaigns SET state = 'done' WHERE id = $1", [issue.id]);
+      assert.deepEqual(await progress(), { ...none, contacts: true, newsletter: true, readers: true, campaign: true, campaignSent: true, issueSent: true });
     });
   });
 });

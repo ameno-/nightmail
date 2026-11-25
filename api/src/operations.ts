@@ -14,6 +14,7 @@ import { isIP } from 'node:net';
 import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf, restrictedArea, unrestrictedRequired, assertSharedAccount, isSimulatedSes, digest, errors, getSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, preloadSesTransport, randomSecret, redactCapabilityData, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, wrapModuleLoad, type App, type Actor, type Ctx, type Config, type Database, type DbExecutor, type JobHandler, type Permission, type Runtime } from './core.js';
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
+import { WORKSPACE_FOCUS, type WorkspaceFocus } from './workspace-focus.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, withoutVerdict, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
@@ -82,8 +83,11 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.'),
   builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`) }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
+const Focus = z.enum(WORKSPACE_FOCUS);
+const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
 const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.'),
-  requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.') }).openapi('WorkspaceSettings');
+  requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.'),
+  focus: z.array(Focus).nullable().describe(FOCUS_NOTE) }).openapi('WorkspaceSettings');
 const requiredNoticesOf = (workspaceId: string) => sql<boolean>`coalesce((SELECT required_notices FROM workspaces WHERE id=${workspaceId}),false)`;
 const queuedSchema = z.object({ id: z.string(), status: z.literal('pending') }).openapi('QueuedWebhookDelivery');
 const deletedSchema = z.object({ deleted: z.boolean() }).openapi('WebhookDeleted');
@@ -940,29 +944,34 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
 
 export function registerOperations(app: App) {
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
-    const a = workspaceActor(c); const { rows: [row] } = await c.env.db.execute<{ name: string | null; postal_address: string | null; required_notices: boolean }>(c.env.config.multiTenant
-      ? sql`SELECT name,postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM workspaces WHERE id=${a.workspaceId}`
-      : sql`SELECT s.name,s.postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM (SELECT) one LEFT JOIN operation_settings s ON s.workspace_id=${a.workspaceId}`);
-    return c.json({ name: row?.name ?? productName, postalAddress: row?.postal_address ?? null, requiredNotices: row?.required_notices ?? false }, 200);
+    const a = workspaceActor(c); const { rows: [row] } = await c.env.db.execute<{ name: string | null; postal_address: string | null; required_notices: boolean; focus: WorkspaceFocus[] | null }>(c.env.config.multiTenant
+      ? sql`SELECT name,postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices,focus FROM workspaces WHERE id=${a.workspaceId}`
+      : sql`SELECT s.name,s.postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices,s.focus FROM (SELECT) one LEFT JOIN operation_settings s ON s.workspace_id=${a.workspaceId}`);
+    return c.json({ name: row?.name ?? productName, postalAddress: row?.postal_address ?? null, requiredNotices: row?.required_notices ?? false, focus: row?.focus ?? null }, 200);
   });
-  app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', description: 'Change the workspace\'s name, its postal address, or both; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can\'t be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.', tags: ['Settings'], security,
-    request: { body: json(z.object({ name: z.string().trim().min(1).max(120).optional(), postalAddress: PostalAddress.nullable().optional() }).refine(body => body.name !== undefined || body.postalAddress !== undefined, 'Send name, postalAddress or both.')
+  app.openapi(createRoute({ method: 'patch', path: '/v1/settings/workspace', operationId: 'updateWorkspaceSettings', description: 'Change the workspace\'s name, its postal address, its focus, or any of them; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can\'t be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.', tags: ['Settings'], security,
+    request: { body: json(z.object({ name: z.string().trim().min(1).max(120).optional(), postalAddress: PostalAddress.nullable().optional(),
+      focus: z.array(Focus).max(WORKSPACE_FOCUS.length).refine(focus => new Set(focus).size === focus.length, 'List each focus once.').nullable().optional().describe(FOCUS_NOTE + ' Order matters: the first leads.') })
+      .refine(body => body.name !== undefined || body.postalAddress !== undefined || body.focus !== undefined, 'Send name, postalAddress, focus or any of them.')
       .openapi('UpdateWorkspaceSettings', { example: { postalAddress: 'Example Inc.\n1 Main Street\nSpringfield, IL 62701' } })) }, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c, 'manage'), input = c.req.valid('json');
     // Each line trimmed, empty ones dropped, so the footer shows exactly what was meant.
     const name = input.name ?? null, address = input.postalAddress === undefined ? undefined : input.postalAddress === null ? null : postalAddressText(input.postalAddress);
-    const fields = [...input.name !== undefined ? ['name'] : [], ...address !== undefined ? ['postalAddress'] : []];
-    const setAddress = address !== undefined;
+    const fields = [...input.name !== undefined ? ['name'] : [], ...address !== undefined ? ['postalAddress'] : [], ...input.focus !== undefined ? ['focus'] : []];
+    const setAddress = address !== undefined, setFocus = input.focus !== undefined;
+    const focus = sql`CASE WHEN ${input.focus ? JSON.stringify(input.focus) : null}::jsonb IS NULL THEN NULL::text[] ELSE ARRAY(SELECT jsonb_array_elements_text(${input.focus ? JSON.stringify(input.focus) : null}::jsonb)) END`;
     const audit = auditInsert(auditContext(c), { action: 'settings.update', workspaceId: a.workspaceId, target: { type: 'workspace', id: a.workspaceId },
-      before: sql`(SELECT jsonb_strip_nulls(jsonb_build_object('name',CASE WHEN ${name}::text IS NOT NULL THEN name END,'postalAddress',CASE WHEN ${setAddress}::boolean THEN coalesce(postal_address,'') END)) FROM old)`,
-      after: { ...input.name !== undefined ? { name: input.name } : {}, ...setAddress ? { postalAddress: address ?? '' } : {} }, details: { fields } }, { from: sql`changed` });
-    const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null; required_notices: boolean }>(c.env.config.multiTenant
-      ? sql`WITH old AS (SELECT name,postal_address FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=coalesce(${name}::text,name),
-        postal_address=CASE WHEN ${setAddress}::boolean THEN ${address ?? null}::text ELSE postal_address END WHERE id=${a.workspaceId} RETURNING name,postal_address,required_notices), audit AS (${audit}) SELECT * FROM changed`
-      : sql`WITH old AS (SELECT name,postal_address FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name,postal_address)
-        VALUES (${a.workspaceId},coalesce(${name}::text,${productName}),${address ?? null}::text) ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=coalesce(${name}::text,operation_settings.name),
-        postal_address=CASE WHEN ${setAddress}::boolean THEN excluded.postal_address ELSE operation_settings.postal_address END,updated_at=now() RETURNING name,postal_address), audit AS (${audit}) SELECT *,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM changed`);
-    return c.json({ name: row?.name ?? input.name ?? productName, postalAddress: row?.postal_address ?? null, requiredNotices: row?.required_notices ?? false }, 200);
+      before: sql`(SELECT jsonb_strip_nulls(jsonb_build_object('name',CASE WHEN ${name}::text IS NOT NULL THEN name END,'postalAddress',CASE WHEN ${setAddress}::boolean THEN coalesce(postal_address,'') END,'focus',CASE WHEN ${setFocus}::boolean THEN to_jsonb(focus) END)) FROM old)`,
+      after: { ...input.name !== undefined ? { name: input.name } : {}, ...setAddress ? { postalAddress: address ?? '' } : {}, ...setFocus ? { focus: input.focus } : {} }, details: { fields } }, { from: sql`changed` });
+    const { rows: [row] } = await c.env.db.execute<{ name: string; postal_address: string | null; required_notices: boolean; focus: WorkspaceFocus[] | null }>(c.env.config.multiTenant
+      ? sql`WITH old AS (SELECT name,postal_address,focus FROM workspaces WHERE id=${a.workspaceId}), changed AS (UPDATE workspaces SET name=coalesce(${name}::text,name),
+        postal_address=CASE WHEN ${setAddress}::boolean THEN ${address ?? null}::text ELSE postal_address END, focus=CASE WHEN ${setFocus}::boolean THEN ${focus} ELSE focus END
+        WHERE id=${a.workspaceId} RETURNING name,postal_address,required_notices,focus), audit AS (${audit}) SELECT * FROM changed`
+      : sql`WITH old AS (SELECT name,postal_address,focus FROM operation_settings WHERE workspace_id=${a.workspaceId}), changed AS (INSERT INTO operation_settings(workspace_id,name,postal_address,focus)
+        VALUES (${a.workspaceId},coalesce(${name}::text,${productName}),${address ?? null}::text,${focus}) ON CONFLICT ON CONSTRAINT operation_settings_pkey DO UPDATE SET name=coalesce(${name}::text,operation_settings.name),
+        postal_address=CASE WHEN ${setAddress}::boolean THEN excluded.postal_address ELSE operation_settings.postal_address END,
+        focus=CASE WHEN ${setFocus}::boolean THEN excluded.focus ELSE operation_settings.focus END,updated_at=now() RETURNING name,postal_address,focus), audit AS (${audit}) SELECT *,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM changed`);
+    return c.json({ name: row?.name ?? input.name ?? productName, postalAddress: row?.postal_address ?? null, requiredNotices: row?.required_notices ?? false, focus: row?.focus ?? null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/ses', operationId: 'getSesSettings', tags: ['Settings'], security, request: { query: regionQuery }, responses: { 200: response(accountSchema), ...errors } }), async c => { const a = workspaceActor(c); return c.json(await account(c.env,a.workspaceId,c.req.valid('query').region), 200); });
   app.openapi(createRoute({ method: 'get', path: '/v1/domains', operationId: 'listDomains', description: 'MX returns persisted DNS records and background verification status without AWS calls. Self-hosted installations refresh up to ten identities unless refresh=false.', tags: ['Domains'], security, request: { query: PageQuery.extend({ limit: z.coerce.number().int().min(1).max(10).default(5), region: z.string().optional(), refresh: z.enum(['true', 'false']).default('true') }).openapi('ListDomainsQuery') }, responses: { 200: response(DomainPage), ...errors } }), async c => {

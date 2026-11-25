@@ -2,7 +2,9 @@ import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } fro
 import { Link, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, Dialog, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { FocusPicker } from '../../components/FocusPicker'
+import { focusLabels, useSaveFocus, type WorkspaceFocus } from '../../data/focus'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
@@ -100,6 +102,7 @@ function WorkspaceRows() {
   return <div className="settings-rows">
     <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <span className="muted">—</span>}</Row>
     <PostalAddressRow canEdit={canAdminister} />
+    <FocusRow canEdit={canAdminister} />
     <Row title="Workspace ID"><span className="cluster settings-inline"><code>{id}</code>{id && <CopyButton value={id} label="Copy workspace ID" />}</span></Row>
   </div>
 }
@@ -117,6 +120,27 @@ function PostalAddressRow({ canEdit }: { canEdit: boolean }) {
     </span>
     {open && <PostalAddressDialog open onOpenChange={setOpen} initial={address} title="Postal address" submitLabel="Save" />}
   </Row>
+}
+// What the workspace is here for (onboarding's question), from the session, so it is there on the first frame; owners and
+// admins change it in a dialog with the same cards. The first pick leads Overview's first card and its Get started steps.
+function FocusRow({ canEdit }: { canEdit: boolean }) {
+  const focus = useSession()?.identity?.focus ?? null
+  const [open, setOpen] = useState(false)
+  return <Row title="Focus">
+    <span className="cluster settings-inline settings-address">{focus?.length ? <span className="settings-address__value">{focus.map(item => focusLabels[item]).join(', ')}</span> : <span className="muted">{focus ? 'Skipped' : 'Not chosen'}</span>}
+      {canEdit ? <Button onClick={() => setOpen(true)} data-analytics="settings/focus/edit">Edit</Button> : <Lock size={12} aria-label="Owners and admins only" />}
+    </span>
+    {open && <FocusDialog initial={focus ?? []} onClose={() => setOpen(false)} />}
+  </Row>
+}
+function FocusDialog({ initial, onClose }: { initial: WorkspaceFocus[]; onClose: () => void }) {
+  const [value, setValue] = useState(initial)
+  const save = useSaveFocus()
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Focus" size="lg"
+    description="Pick any. The first leads Overview’s first card and its Get started steps."
+    footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" data-analytics="settings/focus/save" onClick={() => { save(value); onClose() }}>Save</Button></>}>
+    <FocusPicker value={value} onChange={setValue} />
+  </Dialog>
 }
 function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
   // Members read the name as text with the rail's lock: an input that ignores typing looks broken.
