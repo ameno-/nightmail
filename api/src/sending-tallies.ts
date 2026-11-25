@@ -188,6 +188,35 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
       logError(error, { code: 'METRICS_HOURLY_RECOUNT_FAILED' }, 'warn');
     }
 
+    // Reconcile the 6-day 10-minute rollup alongside hourly so any deploy-window or runtime drift heals promptly.
+    try {
+      const { rows: tenMinRows } = await runtime.db.transaction(async tx => {
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${RECOUNT_STATEMENT_SECONDS}s'`));
+        return tx.execute<{ workspace_id: string; region: string; kind: string; bucket: string; emails: string; accepted: string; delivered: string; bounced: string; complained: string; opened: string; clicked: string; failed: string; delivery_delayed: string; simulated: string }>(
+          sql`SELECT w.workspace_id, r.*
+            FROM unnest(${sql.param(batch.map(x => x.workspace_id))}::text[]) w(workspace_id),
+                 reconcile_sending_metrics_ten_minute(w.workspace_id) r`
+        );
+      });
+      if (tenMinRows.length) {
+        const seen = new Set<string>();
+        for (const row of tenMinRows) {
+          seen.add(row.workspace_id);
+          log('error', {
+            code: 'METRICS_TEN_MINUTE_DRIFT', workspace: row.workspace_id, region: row.region, kind: row.kind, bucket: row.bucket,
+            emails: Number(row.emails), accepted: Number(row.accepted), delivered: Number(row.delivered),
+            bounced: Number(row.bounced), complained: Number(row.complained), opened: Number(row.opened),
+            clicked: Number(row.clicked), failed: Number(row.failed), deliveryDelayed: Number(row.delivery_delayed),
+            simulated: Number(row.simulated),
+          });
+        }
+        workspacesCorrected += seen.size;
+      }
+    } catch (error) {
+      workspacesFailed += batch.length;
+      logError(error, { code: 'METRICS_TEN_MINUTE_RECOUNT_FAILED' }, 'warn');
+    }
+
     // Verify stamped sending_emails.event_outcomes bits against raw sending_email_events so a mis-stamped bit can
     // never stay hidden behind agreeing tallies. Isolated per workspace under its own 30 s timeout.
     for (const target of batch) {

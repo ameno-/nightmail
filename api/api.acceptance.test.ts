@@ -40472,7 +40472,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const detailViaTallies = ok(await request('GET', `/v1/campaigns/${cid}`, key));
       const statsViaTallies = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
       assert.ok(Array.isArray(tenMinTallies.tenMinute) && tenMinTallies.tenMinute.length >= 2, '10m granularity returns 10-minute buckets.');
-      error(await request('GET', `/v1/metrics?from=${encodeURIComponent(at(-8 * 86_400_000))}&to=${encodeURIComponent(qTo)}&granularity=10m`, key), 422, 'INVALID_DATE_RANGE');
+      error(await request('GET', `/v1/metrics?from=${encodeURIComponent(at(-6 * 86_400_000 - 600_000))}&to=${encodeURIComponent(qTo)}&granularity=10m`, key), 422, 'INVALID_DATE_RANGE');
 
       // 2. Emergency one-statement undo: disabling triggers immediately falls back to live queries, producing exact same answers!
       await db.query('ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete');
@@ -40529,6 +40529,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // 5. Daily exact recount detects injected drift, fixes it in one snapshot, and logs *_DRIFT at error level.
       await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count) VALUES ($1,$2,'delivered',false,7)`, [wid, cid]);
       await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),5)`, [wid, REGION]);
+      await db.query(`INSERT INTO sending_metrics_ten_minute(workspace_id,region,kind,bucket,emails) VALUES ($1,$2,'marketing',date_bin('10 minutes',now(),timestamptz '2000-01-01 00:00:00+00'),4)`, [wid, REGION]);
       const errors: string[] = [];
       const errSpy = t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(String(args[0])); });
       try {
@@ -40539,8 +40540,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       } finally { errSpy.mock.restore(); }
       assert.ok(errors.some(line => line.includes('CAMPAIGN_TALLIES_DRIFT')), 'Logs CAMPAIGN_TALLIES_DRIFT at error level.');
       assert.ok(errors.some(line => line.includes('METRICS_HOURLY_DRIFT')), 'Logs METRICS_HOURLY_DRIFT at error level.');
+      assert.ok(errors.some(line => line.includes('METRICS_TEN_MINUTE_DRIFT')), 'Logs METRICS_TEN_MINUTE_DRIFT at error level.');
       // Re-running reconcile produces zero diffs now; raw event_outcomes bit check also finds 0 mismatches.
       assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0);
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_ten_minute($1)', [wid])).rowCount, 0);
       assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
       assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
       // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!
