@@ -39,7 +39,7 @@ Dev: AWS `905840579680`, Worker `bane-dev`, `dev.bane.mx`. Production follows th
 **The switch is `bane:mailGatewayEnabled` in `infra/pulumi/Pulumi.<stage>.yaml`.** Pulumi and the Worker deploy (`.github/scripts/deploy-worker.sh`) both read the committed value, so there is no third state:
 
 - **True:** the deploy reads `bane/<stage>/MAILGW_API_TOKEN` inside its "Deploy the Worker" step and binds it to the Worker. If the token is missing, pending deletion, unreadable or malformed, the deploy stops.
-- **False (default):** the deploy removes the Worker's `MAILGW_API_TOKEN` binding if one exists, before deploying, and checks that it's gone. `/internal/v1/mail` then answers 403 `PROTOCOL_DENIED`.
+- **False (default):** the new version receives an empty token. After it has 100% traffic the deploy deletes the obsolete binding and verifies it is gone. `/internal/v1/mail` then answers 403 `PROTOCOL_DENIED`.
 
 Every deploy ends by checking that the Worker's binding matches the flag. Pulumi refuses a positive `bane:mailGatewayDesired` while the flag is false.
 
@@ -148,9 +148,7 @@ Record the numbers in this file next to the SQL budgets, then revoke the test ap
 1. **Disable in one PR.** In `Pulumi.dev.yaml`, set `bane:mailGatewayEnabled: "false"` and `bane:mailGatewayDesired: "0"` (keep the image line), then merge. Pulumi scales the service to zero. "Deploy the Worker" then deletes the Worker's `MAILGW_API_TOKEN`, checks that it's gone and ends with `bane:mailGatewayEnabled=false; Worker MAILGW_API_TOKEN bound=false`. The Worker is back to 403 `PROTOCOL_DENIED`, and later deploys keep it that way. The NLB, the secrets, the image and the rest of dev stay unchanged. The CI copy of the token can stay, because it isn't read while the flag is false.
 2. **If it can't wait for the pipeline** (urgent, or a failing service blocks the dev deploy), act directly as a dev administrator and still land step 1 right after:
    - Run `aws ecs update-service --region us-east-2 --cluster bane-mail-gateway --service bane-mail-gateway --desired-count 0`.
-   - From `api/`, run `bunx wrangler secret delete MAILGW_API_TOKEN --config wrangler.dev.jsonc`.
-
-   Until step 1 merges, a deploy with the flag still true binds the CI copy again. If you deleted the CI copy, that deploy stops instead.
+   - Leave the serving Worker's credential in place. Step 1 disables it on the incoming version and removes the binding after cutover.
 3. **Close the database role.** Run `ALTER ROLE bane_mailgw_listen NOLOGIN;`, then `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'bane_mailgw_listen';`.
 4. **Revoke test app passwords** with `DELETE /v1/inboxes/{id}/app-passwords/{passwordId}`. DNS never changed, so there's nothing to restore.
 

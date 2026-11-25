@@ -4,8 +4,8 @@ run-name: Deploy ${{ github.ref_name }} ${{ github.sha }}
 # One workflow per stage. The branch picks the stage (dev or production), and
 # the stage picks the environment, the AWS role, the Pulumi stack and the
 # Worker config. Infra is applied first, then the Worker migrates and deploys,
-# then health and the live dev E2E run — in one run, so a Pulumi Worker-secret
-# write can never race the E2E as it could when pulumi.yml was separate.
+# then Pulumi may rotate live runtime credentials, then health and live dev E2E.
+# No credential still needed by the serving version is retired before cutover.
 #
 # A dev deploy starts on the push itself. Production deploys only a pushed
 # commit with passing dev merge-group (or direct dev push) CI and a passing
@@ -169,6 +169,8 @@ jobs:
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     environment: ${{ github.ref_name }}
+    outputs:
+      runtime_credentials: ${{ steps.guard.outputs.skip == 'false' && !inputs.preview }}
     permissions:
       contents: read
       id-token: write
@@ -178,8 +180,11 @@ jobs:
       # dev.nightmail.dev (and dev.bane.mx) and everything behind them live in anomaly-dev; production stays
       # in anomaly-production. Both the token issuer and every API call use this.
       CF_ACCOUNT_ID: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}
-      CF_R2_ENDPOINT: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}.r2.cloudflarestorage.com
-      STATE_BUCKET: ${{ needs.authorize.outputs.stage == 'dev' && 'nightmail-dev-pulumi' || 'bane-production-pulumi' }}
+      CF_R2_ENDPOINT: &pulumi-r2-endpoint ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}.r2.cloudflarestorage.com
+      RUNTIME_CREDENTIAL_TARGETS: &runtime-credential-targets |
+        urn:pulumi:*::bane::cloudflare:index/workersSecret:WorkersSecret::*
+        urn:pulumi:*::bane::aws:iam/accessKey:AccessKey::*
+      STATE_BUCKET: &pulumi-state-bucket ${{ needs.authorize.outputs.stage == 'dev' && 'nightmail-dev-pulumi' || 'bane-production-pulumi' }}
     steps:
       - &unfrozen
         name: Require production deploys to be unfrozen
@@ -229,10 +234,10 @@ jobs:
 
       - name: Configure R2 credentials
         if: steps.guard.outputs.skip != 'true'
-        env:
+        env: &pulumi-r2-creds
           R2_ACCESS_KEY_ID: ${{ steps.cloudflare.outputs.id }}
           R2_SECRET_ACCESS_KEY: ${{ steps.cloudflare.outputs.secret }}
-        run: |
+        run: &configure-pulumi-r2 |
           set -euo pipefail
           set +x
 
@@ -307,9 +312,13 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
         with:
           command: ${{ inputs.preview && 'preview' || 'up' }}
+          # Include everything in a preview. An apply leaves Worker secrets AND their IAM keys
+          # untouched until the new app is serving, including old keys removed by a rotation.
+          exclude: ${{ !inputs.preview && env.RUNTIME_CREDENTIAL_TARGETS || '' }}
+          exclude-dependents: ${{ !inputs.preview }}
           stack-name: ${{ env.STAGE }}
           work-dir: infra/pulumi
-          cloud-url: s3://${{ env.STATE_BUCKET }}?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
+          cloud-url: &pulumi-backend s3://${{ env.STATE_BUCKET }}?endpoint=${{ env.CF_R2_ENDPOINT }}&region=auto&s3ForcePathStyle=true&awssdk=v2&profile=r2
           pulumi-version: 3.274.1
           suppress-progress: true
 
@@ -340,6 +349,9 @@ jobs:
       # Must match the stage's cloudflare account: the token is minted there and
       # verified against this id before Wrangler sees it.
       CF_ACCOUNT_ID: ${{ needs.authorize.outputs.stage == 'dev' && 'd8e944f537ceef3f06a5bd3aec1d7a53' || '15d29c8639fd3733b1b5486a2acfd968' }}
+      CF_R2_ENDPOINT: *pulumi-r2-endpoint
+      STATE_BUCKET: *pulumi-state-bucket
+      RUNTIME_CREDENTIAL_TARGETS: *runtime-credential-targets
     steps:
       - *unfrozen
       - *stage-tip
@@ -475,6 +487,33 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
           DEPLOY_SHA: ${{ needs.authorize.outputs.sha }}
         run: bash ../.github/scripts/deploy-worker.sh "$WRANGLER_CONFIG"
+
+      # The pre-deploy Pulumi apply excluded these resources. Rotate only after deploy-worker.sh
+      # verifies this upload at 100%; a failed rebind fails this job before its health/E2E proof.
+      - name: Configure R2 credentials for the runtime-key handoff
+        if: needs.pulumi.outputs.runtime_credentials == 'true'
+        env: *pulumi-r2-creds
+        run: *configure-pulumi-r2
+
+      - name: Install runtime-key program
+        if: needs.pulumi.outputs.runtime_credentials == 'true'
+        working-directory: infra/pulumi
+        run: bun install --frozen-lockfile
+
+      - *stage-tip
+      - name: Apply runtime credentials to the deployed Worker
+        if: needs.pulumi.outputs.runtime_credentials == 'true'
+        uses: pulumi/actions@96c7761824268174e0d2a4e8c7d75671eebd24a7 # v7.1.0
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ steps.cloudflare.outputs.token }}
+        with:
+          command: up
+          target: ${{ env.RUNTIME_CREDENTIAL_TARGETS }}
+          stack-name: ${{ env.STAGE }}
+          work-dir: infra/pulumi
+          cloud-url: *pulumi-backend
+          pulumi-version: 3.274.1
+          suppress-progress: true
 
       # Best effort: stream the Worker's logs while the E2E runs, so a failure's report can quote the lines for its
       # request IDs. Needs Workers Tail Read on the dev token (anomalyco/secrets); without it the report says so.
