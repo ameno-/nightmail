@@ -19451,7 +19451,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.ok(!/\/unsubscribe\/u_[A-Za-z0-9_-]+/.test(JSON.stringify(redacted)), 'Read-only HTML/text must not contain a usable owned unsubscribe capability.');
     assert.equal(redacted.subject, content.subject, 'Redaction must preserve ordinary readable message content.');
     const head = await http('HEAD', path);
-    assert.equal(head.status, 405, diagnostic(head));
+    assert.equal(head.status, 200, diagnostic(head));
     assert.equal(head.body, '', 'HEAD responses must have no body.');
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'subscribed', 'A HEAD probe must not unsubscribe a contact.');
     assert.equal(page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret)).length, 1, 'A HEAD probe must not append consent audit history.');
@@ -19459,6 +19459,9 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // Link scanners fetch every footer link, so GET only asks for confirmation and changes nothing.
     const first = await http('GET', path);
     const prompt = ok(first);
+    for (const name of ['content-type', 'cache-control', 'referrer-policy', 'content-security-policy', 'x-robots-tag']) {
+      assert.equal(head.headers.get(name), first.headers.get(name), name);
+    }
     assert.match(first.headers.get('content-type') ?? '', /text\/html/);
     assert.match(first.headers.get('cache-control') ?? '', /no-store/);
     assert.equal(first.headers.get('referrer-policy'), 'no-referrer');
@@ -19467,6 +19470,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.ok(!prompt.includes(email), 'Hosted confirmation must not disclose the recipient address.');
     assert.equal(ok(await http('GET', path)), prompt);
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'subscribed', 'A footer GET (or a link scanner) must not unsubscribe.');
+    assert.equal(page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret)).length, 1, 'GET visits did not append consent history either.');
     const confirmed = ok(await http('POST', path, undefined, 'confirm=footer', { 'content-type': 'application/x-www-form-urlencoded' }));
     assert.ok(/unsubscribed/i.test(confirmed) && !/<form\b/i.test(confirmed));
     assert.ok(!confirmed.includes(email));
@@ -19490,6 +19494,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
       assert.match(page.headers.get('content-type') ?? '', /^text\/html/);
       assert.match(String(page.body), /unsubscribe link isn’t valid/);
       assert.ok(!String(page.body).includes(email) && !/<form\b/i.test(String(page.body)));
+      const probe = await http('HEAD', bad, undefined, undefined, { accept: 'text/html,application/xhtml+xml' });
+      assert.deepEqual([probe.status, probe.headers.get('content-type'), probe.body], [page.status, page.headers.get('content-type'), '']);
     }
     error(await http('GET', path.slice(0, -9)), 422, 'VALIDATION_FAILED');
     await authDb!.query('UPDATE sending_campaigns SET scheduled_at=now() WHERE id=$1',[campaign.id]);
@@ -36746,6 +36752,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.doesNotMatch(sent.stored,/fwd_[0-9a-f]{64}/);assert.match(sent.stored,/link withheld/);assert.doesNotMatch(JSON.stringify(await call('GET',`/v1/emails/${sent.id}/content`)),/fwd_[0-9a-f]{64}/);
         const token=/forwarding\/confirm\/(fwd_[0-9a-f]{64})/.exec(sent.sent)![1];const page=(method:string,path:string,body?:string,headers:Record<string,string>={})=>rawFetch(new Request(`${PUBLIC_ORIGIN}${path}`,{method,headers:{...(body?{'content-type':'application/x-www-form-urlencoded'}:{}),...headers},...(body?{body}:{})}));
         const view=await page('GET',`/v1/forwarding/confirm/${token}`);assert.equal(view.status,200);assert.match(await view.text(),new RegExp(`forward the email it receives to <strong>${address}`));assert.equal((await call('GET',`${dest}/team`)).status,'pending');
+        const confirmHead=await page('HEAD',`/v1/forwarding/confirm/${token}`);
+        assert.deepEqual([confirmHead.status,confirmHead.headers.get('content-type'),await confirmHead.text()], [200,view.headers.get('content-type'),'']);
+        assert.equal((await call('GET',`${dest}/team`)).status,'pending','Probing the confirmation link did not answer it.');
         assert.equal((await page('POST',`/v1/forwarding/confirm/${token}`,'choice=allow',{origin:'https://attacker.example'})).status,403);
         const allowed=await page('POST',`/v1/forwarding/confirm/${token}`,'choice=allow',{origin:PUBLIC_ORIGIN});assert.equal(allowed.status,200);assert.match(await allowed.text(),/Forwarding allowed/);assert.equal((await page('POST',`/v1/forwarding/confirm/${token}`,'choice=decline')).status,410);assert.equal((await call('GET',`${dest}/team`)).status,'ready');
         const hookId=(await db.query("SELECT id AS hook_id FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2 AND type='forward' AND verified",[wid,'team'])).rows[0].hook_id;await call('PUT',root,config);
@@ -36763,7 +36772,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[over.id])).rowCount,0);
         await db.query("DELETE FROM api_request_budgets WHERE workspace_id=$1 AND key_id IN ('forward-daily',$2)",[wid,'forward-hourly:'+hookId]);
         // Every forward carries a signed stop link; a forged one is refused and stopping blocks new requests for 30 days.
-        const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;assert.equal((await page('GET',stop.replace(/\.[^.]+$/,'.forged'))).status,404);assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mailbox_webhooks SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND key='team' AND type='forward'",[wid]);
+        const stop=new URL(/Stop these forwards: (\S+)/.exec(rows[0].text)![1]).pathname;
+        for (const [link,status] of [[stop,200],[stop.replace(/\.[^.]+$/,'.forged'),404]] as const) {
+          const get=await page('GET',link), head=await page('HEAD',link);
+          assert.equal(get.status,status);
+          assert.deepEqual([head.status,head.headers.get('content-type'),await head.text()], [status,get.headers.get('content-type'),'']);
+        }
+        assert.equal((await call('GET',`${dest}/team`)).status,'ready','Probing the stop link did not stop forwarding.');
+        assert.equal((await page('POST',stop,'choice=decline',{origin:PUBLIC_ORIGIN})).status,200);assert.equal((await call('GET',`${dest}/team`)).status,'declined');error(await local('POST',`${dest}/team/verification`,{}),409,'FORWARD_DECLINED');await db.query('DELETE FROM mail_forward_declines WHERE workspace_id=$1',[wid]);await db.query("UPDATE mailbox_webhooks SET verified=true,declined_at=NULL WHERE workspace_id=$1 AND key='team' AND type='forward'",[wid]);
         const mid='forward-loop';raw.set(mid,Buffer.from(`From: Agent <a@example.org>\r\nX-Bane-Loop: synthetic\r\nSubject: Loop\r\n\r\nHello`));await submit(mid,[box.address]);await run('mailbox.ingest',{sesMessageId:mid});await expandFixtureOutbox(runtime,wid);const loop=(await db.query('SELECT id FROM mail_messages WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];await assert.rejects(send(loop.id));assert.equal((await db.query('SELECT FROM mail_forward_once WHERE message_id=$1',[loop.id])).rowCount,0);await call('PUT',root,{});
       });
       await t.test('rituals: a forward queued by a reopened receipt sends mail first stored before any ritual ran',async()=>{
