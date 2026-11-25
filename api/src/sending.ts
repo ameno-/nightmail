@@ -1804,7 +1804,7 @@ async function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft
   if (!draft.html?.trim()) return { html: undefined, text: undefined };
   await assertBlockContent(draft.html, complete);
   const { renderBlockHtml, renderBlockText } = await loadCampaignBlocks();
-  return { html: renderBlockHtml(draft.html, { fontBase: `${runtime.config.publicUrl}/fonts/`, title: draft.subject }), text: renderBlockText(draft.html) || undefined };
+  return { html: renderBlockHtml(draft.html, { title: draft.subject }), text: renderBlockText(draft.html) || undefined };
 }
 /** A campaign, in one read with the footer its copies show: the postal address its launch froze, or the workspace's
  *  while it is still editable (campaignEditable). */
@@ -2990,6 +2990,11 @@ export async function verifyCampaignContentHash(customer: EmailSnapshot, storedH
   }
   throw unsupportedHashFormat();
 }
+// Reviews frozen before campaign mail stopped linking web fonts hold a font block (v1: data-opensend-fonts) whose URLs
+// name this installation. A copy goes out, and reads back, without it; its hash and screen key still cover the review
+// as frozen. Block HTML has no <style> of its own, so the renderer's block is the only one this can match.
+const LEGACY_FONTS = /<style data-(?:bane|opensend)-fonts>[^<]*<\/style>/;
+const withoutLegacyFonts = (snapshot: EmailSnapshot): EmailSnapshot => snapshot.html && LEGACY_FONTS.test(snapshot.html) ? { ...snapshot, html: snapshot.html.replace(LEGACY_FONTS, '') } : snapshot;
 export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail: typeof emails.$inferSelect, review: { version: number; draft: CampaignDraft; rendered: { html?: string; text?: string }; contentHash: string | null; recipient: ReviewedRecipient } | null, prefetched?: (typeof attachments.$inferSelect)[]) {
   // Review/recipient data and attachment metadata are immutable; retained email
   // links prevent attachment deletion. No transaction is needed to render them.
@@ -3005,7 +3010,7 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
   // A required notice has no unsubscribe link: it goes out exactly as it is keyed, and no token is made for it.
   if (review.draft.requiredNotice) {
     sizeCheck(keyed, rows);
-    return { mail: { ...mail, snapshot: { ...keyed, headers: [...keyed.headers] } }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
+    return { mail: { ...mail, snapshot: withoutLegacyFonts({ ...keyed, headers: [...keyed.headers] }) }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
   }
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl;
@@ -3013,7 +3018,7 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
     : await (await loadOpsUnsub()).createUnsubscribeLink(runtime, a.workspaceId, customer.to[0]!);
   const page = review.draft.unsubscribePageUrl;
-  const snapshot = withUnsubscribe(runtime, customer, unsubscribe.url, review.draft);
+  const snapshot = withoutLegacyFonts(withUnsubscribe(runtime, customer, unsubscribe.url, review.draft));
   sizeCheck(snapshot, rows);
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
@@ -3044,7 +3049,7 @@ export async function rebuildCampaignEmail(runtime: Runtime, a: Actor, stub: Ema
   const snapshot = await campaignMessage(runtime, review.draft, review.recipient, false, rows, review.rendered, true, !review.rendered.html?.includes('{{'), review.renderer_version);
   if (!(await verifyCampaignContentHash(snapshot, review.content_hash))) throw new ApiError(409, 'CAMPAIGN_CONTENT_UNREPRODUCIBLE', 'The renderer no longer reproduces the message that was sent.');
   marketingFooter(snapshot, stub.unsubscribeUrl ?? '', review.draft);
-  return snapshot;
+  return withoutLegacyFonts(snapshot);
 }
 // Accepted means provider acceptance evidence; bounce and complaint rates are over accepted mail. Suppressed mail
 // (ineligible at claim time, or dropped by SES Auto Validation before sending) is neither accepted nor bounced.
