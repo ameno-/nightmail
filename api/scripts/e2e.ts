@@ -1,9 +1,9 @@
-// Exercise the public client with no dashboard session or simulated sends. Only the dev fixture
-// independently corroborates an explicit SES quota hold; it never supplies API test data.
+// Exercise the public client with no dashboard session. The dev fixture reads SES quota; a
+// quota-limited run uses an explicitly simulated inbox message for storage checks, never as proof of delivery.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
-import { appendFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { assertResponse, contract } from './e2e-contract.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -164,6 +164,15 @@ const providerAccepted = new Set<string>();
 let sendBudget = 0;
 type Step = { name: string; operationIds: Op[]; status: 'pass' | 'fail' | 'skip'; ms: number; requestId?: string | null; error?: string; reason?: string };
 class DevSandboxQuotaSkip extends Error { constructor() { super('dev SES sandbox quota exhausted'); } }
+let quota: Awaited<ReturnType<typeof import('./dev-e2e-fixture.js').devSandboxSendPreflight>> = [];
+const quotaExhausted = () => quota.some(q => q.exhausted);
+// Only operations that belong to a deliberately skipped live step may be missing from coverage.
+const quotaSkippedOps = new Set<Op>();
+function requireSendCapacity(...ops: Op[]) {
+  if (!quotaExhausted()) return;
+  for (const op of ops) quotaSkippedOps.add(op);
+  throw new DevSandboxQuotaSkip();
+}
 const steps: Step[] = [];
 const ctx = new AsyncLocalStorage<{ last?: string; requestId: string | null; ops: Set<Op> }>();
 const cleanups: { name: string; fn: () => Promise<unknown> }[] = [];
@@ -406,32 +415,26 @@ async function outcome(id: string, recipient: string, status: 'delivered' | 'bou
   const events = await api('listEmailEvents', { path: { id } });
   check(events.data.some(e => e.type === event && !e.simulated && e.emailId === id), `${id}: no live ${event} event`);
 }
-async function direct() {
-  // The dev Virginia delivery is also the single-send/replay probe, not a second successful send.
-  const sendRegion = destructive ? 'us-east-1' : region, sender = destructive ? `${prefix}@e2e-va.bane.mx` : from;
-  if (destructive) {
-    const page = await api('listDomains', { query: { region: sendRegion, refresh: 'false', limit: 10 } });
-    check(page.data.some(d => d.name === 'e2e-va.bane.mx' && d.region === sendRegion && d.ready), 'Virginia verified sending fixture not ready');
-  }
-  const options = { body: { ...message(singleSuccess), from: sender, region: sendRegion }, headers: idKey('send') };
-  const a = await api('sendEmail', options);
-  check(!a.simulated && a.status === 'queued', 'expected a live queued receipt');
-  const b = await api('sendEmail', options);
-  check(a.id === b.id, 'idempotency replay created another email');
-  if (destructive) await expectDenial(() => api('sendEmail', { ...options, body: { ...options.body, subject: `${subject}-conflict` } }), 409, 'IDEMPOTENCY_CONFLICT');
+async function campaignTest(path: { id: string }, sender: string, sendRegion: string) {
+  requireSendCapacity('testCampaign');
+  const a = await api('testCampaign', { path, body: { to: singleSuccess }, headers: idKey('campaign-test') });
+  check(!a.simulated && a.status === 'queued', 'test email not live');
   await outcome(a.id, singleSuccess, 'delivered', sender, sendRegion);
   const content = await api('getEmailContent', { path: { id: a.id } });
-  check(content.text === text && content.subject === subject && !content.simulated, 'stored email content differs');
+  check(content.text?.includes(text) && content.subject === subject && !content.simulated, 'stored campaign test content differs');
   const detail = await api('getEmailDetail', { path: { id: a.id } });
-  check(detail.email.id === a.id && detail.content.text === text && detail.events.data.some(e => e.type === 'delivery'), 'email detail differs from the email, its content or its events');
+  check(detail.email.id === a.id && detail.content.text === content.text && detail.events.data.some(e => e.type === 'delivery'), 'email detail differs from the email, its content or its events');
   const logs = await api('listEmails', { query: { search: singleSuccess, region: sendRegion } });
   check(logs.nextCursor === null && logs.data.length === 1 && hasId(logs, a.id), 'email missing or duplicated in log');
 }
 // A send scheduled a day out never reaches SES here: it is found as scheduled, moved a day later and canceled.
 async function scheduledSend() {
   const to = success, scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
-  const receipt = await api('sendEmail', { headers: idKey('scheduled'), body: { region, from, to: [to], kind: 'marketing', subject, text, scheduledAt } });
+  const options = { headers: idKey('scheduled'), body: { region, from, to: [to], kind: 'marketing' as const, subject, text, scheduledAt } };
+  const receipt = await api('sendEmail', options);
   defer(`cancel scheduled email ${receipt.id}`, async () => check((await api('cancelEmail', { path: { id: receipt.id } })).status === 'canceled', 'scheduled email not canceled'));
+  check((await api('sendEmail', options)).id === receipt.id, 'idempotency replay created another email');
+  if (destructive) await expectDenial(() => api('sendEmail', { ...options, body: { ...options.body, subject: `${subject}-conflict` } }), 409, 'IDEMPOTENCY_CONFLICT');
   check(receipt.status === 'queued' && receipt.scheduledAt === scheduledAt && !receipt.simulated, 'scheduled receipt differs');
   const email = await api('getEmail', { path: { id: receipt.id } });
   check(email.scheduled && email.status === 'queued' && email.scheduledAt !== null && Date.parse(email.scheduledAt) === Date.parse(scheduledAt) && !email.providerId, 'scheduled email is not waiting for its time');
@@ -444,9 +447,16 @@ async function scheduledSend() {
   await expectDenial(() => api('rescheduleEmail', { path: { id: receipt.id }, body: { scheduledAt: later } }), 409, 'EMAIL_NOT_SCHEDULED');
   const events = await api('listEmailEvents', { path: { id: receipt.id } });
   check(['scheduled', 'rescheduled', 'canceled'].every(type => events.data.some(e => e.type === type)), 'scheduled email events missing');
+  const detail = await api('getEmailDetail', { path: { id: receipt.id } });
+  check(detail.email.id === receipt.id && detail.content.text?.includes(text) && detail.events.data.some(e => e.type === 'canceled'), 'stored fixture detail differs');
   return receipt.id; // Its real opt-out token was created at admission, without a provider send.
 }
 async function batch() {
+  if (quotaExhausted()) {
+    await step('SES bounce feedback', async () => requireSendCapacity());
+    await step('SES complaint feedback', async () => requireSendCapacity());
+    requireSendCapacity('sendEmailBatch');
+  }
   // SES feedback upserts a suppressed contact. Own it before sending so cleanup never has
   // to sweep by name or race late feedback; deleting the profile keeps its suppression tombstone.
   for (const email of [bounce, complaint]) {
@@ -628,8 +638,14 @@ async function cleanCampaign(id: string) {
 }
 type Audience = { listId: string; segmentId: string };
 async function scheduledCampaign(audience: Audience) {
-  const item = await api('createCampaign', { body: { name: `${prefix}-schedule`, audience, from, region, subject, html, tracking: false } });
+  const sendRegion = destructive ? 'us-east-1' : region, sender = destructive ? `${prefix}@e2e-va.bane.mx` : from;
+  if (destructive) {
+    const page = await api('listDomains', { query: { region: sendRegion, refresh: 'false', limit: 10 } });
+    check(page.data.some(d => d.name === 'e2e-va.bane.mx' && d.region === sendRegion && d.ready), 'Virginia verified sending fixture not ready');
+  }
+  const item = await api('createCampaign', { body: { name: `${prefix}-schedule`, audience, from: sender, region: sendRegion, subject, html, tracking: false } });
   const path = retireCampaign(item.id);
+  await step('Campaign test email: regional SES delivery, stored content and email log', () => campaignTest(path, sender, sendRegion));
   const eligible = await api('previewCampaignAudience', { path });
   check(item.draft.audience?.listId === audience.listId && item.draft.audience.segmentId === audience.segmentId && eligible.matched === 1 && eligible.eligible === 1, 'refusing unexpected scheduled audience');
   const scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
@@ -674,9 +690,7 @@ async function campaign(audience: Audience, templateId?: string) {
   await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { client: previews, path })));
   const allowed = await api('previewCampaignAudience', { path });
   check(saved.draft.audience?.listId === audience.listId && saved.draft.audience.segmentId === audience.segmentId && allowed.matched === 1 && allowed.eligible === 1, 'refusing campaign: not the verified one-member exact-email audience');
-  const test = await api('testCampaign', { path, body: { to: success }, headers: idKey('campaign-test') });
-  check(!test.simulated && test.status === 'queued', 'test email not live');
-  await step('Campaign test email reaches SES and gets delivery feedback', () => outcome(test.id, success, 'delivered'));
+  requireSendCapacity('sendCampaign');
   const sent = await api('sendCampaign', { path, body: { revision: saved.revision }, headers: idKey('campaign') });
   check(!sent.simulated && sent.queued === 1 && sent.id === item.id, 'expected one live campaign recipient');
   let checkedUntil: string | undefined;
@@ -704,8 +718,8 @@ async function campaign(audience: Audience, templateId?: string) {
 }
 async function unsubscribe(emailId: string, campaignPath?: { id: string }) {
   // The footer ends the text: the recipient's Unsubscribe link, then the workspace's postal address under it.
-  const { text } = await api('getEmailContent', { path: { id: emailId } });
-  const footer = text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
+  const content = await api('getEmailContent', { path: { id: emailId } });
+  const footer = content.text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
   check(footer, 'no unsubscribe capability in run-owned marketing email');
   check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
   const token = footer[1]!;
@@ -721,6 +735,12 @@ async function unsubscribe(emailId: string, campaignPath?: { id: string }) {
     check(page.includes('unsubscribed'),'one-click did not confirm opt-out');
     const [row] = (await api('listContacts',{query:{email:success}})).data;
     check(row?.email === success && row.marketingConsent === 'unsubscribed','one-click did not opt out this run’s contact');
+    if (quotaExhausted()) await step('Stored opt-out rejects sends without queueing a sibling', async () => {
+      const deniedSubject = `${subject}-optout`, refused = { region, from, to: [success], kind: 'marketing' as const, subject: deniedSubject, text };
+      await expectDenial(() => api('sendEmail', { body: { ...refused, scheduledAt: new Date(Date.now()+86_400_000).toISOString() }, headers: idKey('optout-single') }), 422, 'RECIPIENT_INELIGIBLE');
+      await expectDenial(() => api('sendEmailBatch', { body: { emails: [{ ...message(singleSuccess), subject: deniedSubject }, refused] }, headers: idKey('optout-batch') }), 422, 'RECIPIENT_INELIGIBLE');
+      check(!(await api('listEmails', { query: { search: deniedSubject, region } })).data.length, 'an ineligible send queued mail');
+    });
   }
 }
 
@@ -858,6 +878,12 @@ async function inboundWebhook(addressId: string, threadId: string) {
   }
 }
 
+async function importFixturePng(url: string, bytes: Uint8Array) {
+  const imported=await api('importTemplateImage',{body:{url,contentId:prefix,filename:`${prefix}.png`}});
+  const path={id:imported.asset.id}; defer(`delete imported PNG ${path.id}`,()=>api('deleteTemplateAsset',{path}));
+  check(imported.src===`cid:${prefix}` && hash(Buffer.from((await api('getTemplateAssetContent',{path})).content,'base64'))===hash(bytes),'import changed image bytes or CID');
+}
+
 async function inbound() {
   const d = { id: domainId };
   check(hasId(await api('listInboundDomains', {}), domainId), 'inbound domain not listed');
@@ -875,7 +901,7 @@ async function inbound() {
     return row;
   }
   const sender = await address(from), receiver = await address(inbox);
-  const addressId = receiver.id;
+  let addressId = receiver.id;
   const hosts = await api('listReceivingHosts', { path: d });
   check(hosts.data.some(h => h.name === domain && h.domainId === domainId && h.status !== 'removed'), 'receiving host list misses the domain itself');
   const children = await api('listInboundSubdomains', { path: d, query: { limit: 1 } });
@@ -895,37 +921,58 @@ async function inbound() {
     const b = await api('listInboundAddresses',{query:{...query,cursor:a.nextCursor}});
     check(b.data.length===1 && !b.nextCursor && [a.data[0].id,b.data[0].id].sort().join() === [sender.id,receiver.id].sort().join(),'cursor duplicated, skipped or leaked an address');
   }
-  const events = await api('listInboundEvents', { query: { addressId, types: 'message.received' } });
-  const sent = await api('createInboundThread', {
-    headers: idKey('self-loop'), body: { addressId: sender.id, from, to: [inbox], subject, text,
-      attachments: [{ filename: `${prefix}.png`, contentType:'image/png', content: pixelPng().toString('base64') }] },
-  });
-  check(sent.direction === 'outbound' && sent.from.address === from && sent.to.length === 1 && sent.to[0].address === inbox, 'wrong self-loop envelope');
-  // SES is delivering the run-owned message. The key probes only need the two verified addresses.
-  await step('Verify inbound read key is restricted to one address', () => inboundKey(addressId, sender.id));
-  const arrival = await until('new inbound message event', () => api('listInboundEvents', { query: { addressId, types: 'message.received', after: events.cursor } }), e => e.data.some(v => v.addressId === addressId && v.type === 'message.received'), e => `${e.data.length} matching events`);
-  const event = arrival.data.find(v => v.addressId === addressId && v.type === 'message.received')!;
-  check(event.threadId && event.messageId, 'receipt missing thread/message IDs');
-  const path = { threadId: event.threadId };
-  const msg = await api('getInboundMessage', { path: { messageId: event.messageId }, query: { addressId } });
-  check(msg.direction === 'inbound' && msg.from.address === from && msg.subject === subject && msg.text.includes(text) && msg.to.some(a => a.address === inbox), 'inbound message differs from sent content');
-  check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.png`, 'inbound attachment missing');
-  const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
-  check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
-  // The webhook payload's downloadUrl answers the same reader with a redirect to the same file.
-  const followed = await api('downloadInboundAttachment', { client: unfollowed, path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } }) as unknown as Output<'getInboundAttachment'>;
-  check(new URL(followed.url).protocol === 'https:' && Date.parse(followed.expiresAt) > Date.now(), 'expected the webhook attachment link to redirect to a temporary HTTPS URL');
-  if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
-    // S3 presigned while mail stays in S3; a Bane-signed /v1/objects link on this origin once it is in R2.
-    const url = new URL(link.url), own = url.origin === base.origin && /^\/v1\/objects\/[A-Za-z0-9_.-]+$/.test(url.pathname);
-    check((own || /(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port) && !url.username && !url.password,'refusing an attachment URL that is neither S3 nor this deployment’s object link');
-    const res=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(12000)});
-    const trace=ctx.getStore()!; trace.last=own?'GET /v1/objects':'S3 GetObject'; trace.requestId=res.headers.get(own?'x-request-id':'x-amz-request-id');
-    check(res.ok && hash(new Uint8Array(await res.arrayBuffer()))===hash(pixelPng()),'inbound attachment SHA-256 mismatch');
-    const imported=await api('importTemplateImage',{body:{url:link.url,contentId:prefix,filename:`${prefix}.png`}});
-    const path={id:imported.asset.id}; defer(`delete imported PNG ${path.id}`,()=>api('deleteTemplateAsset',{path}));
-    check(imported.src===`cid:${prefix}` && hash(Buffer.from((await api('getTemplateAssetContent',{path})).content,'base64'))===hash(pixelPng()),'import changed image bytes or CID');
-  });
+  await step('Verify inbound read key is restricted to one address', () => inboundKey(receiver.id, sender.id));
+  let messageId: string, eventThread: string | undefined, recipient = inbox, sent: Output<'createInboundThread'> | undefined;
+  if (quotaExhausted()) {
+    await step('SES inbound self-loop and threaded reply', async () => requireSendCapacity('createInboundThread', 'replyToInboundThread'));
+    const box = await api('createInbox', { body: { type: 'sandbox', name: prefix, ttlSeconds: 600, graceHours: 0 } });
+    defer(`delete sandbox inbox ${box.id}`, () => api('deleteInbox', { path: { id: box.id } }));
+    addressId = box.id; recipient = box.address;
+    const stored = await api('simulateInboxMessage', { path: { id: box.id }, body: { from, subject, text } });
+    check(stored.simulated, 'expected a stored sandbox message, not an SES delivery');
+    messageId = stored.messageId;
+  } else {
+    const events = await api('listInboundEvents', { query: { addressId, types: 'message.received' } });
+    sent = await api('createInboundThread', {
+      headers: idKey('self-loop'), body: { addressId: sender.id, from, to: [inbox], subject, text,
+        attachments: [{ filename: `${prefix}.png`, contentType:'image/png', content: pixelPng().toString('base64') }] },
+    });
+    check(sent.direction === 'outbound' && sent.from.address === from && sent.to.length === 1 && sent.to[0].address === inbox, 'wrong self-loop envelope');
+    const arrival = await until('new inbound message event', () => api('listInboundEvents', { query: { addressId, types: 'message.received', after: events.cursor } }), e => e.data.some(v => v.addressId === addressId && v.type === 'message.received'), e => `${e.data.length} matching events`);
+    const event = arrival.data.find(v => v.addressId === addressId && v.type === 'message.received')!;
+    check(event.threadId && event.messageId, 'receipt missing thread/message IDs');
+    messageId = event.messageId; eventThread = event.threadId;
+  }
+  const msg = await api('getInboundMessage', { path: { messageId }, query: { addressId } }), path = { threadId: msg.threadId };
+  if (eventThread) check(msg.threadId === eventThread, 'receipt and message thread differ');
+  check(msg.direction === 'inbound' && msg.from.address === from && msg.subject === subject && msg.text.includes(text) && msg.to.some(a => a.address === recipient), 'inbound message differs from fixture content');
+  if (!sent) {
+    check(msg.simulated === true, 'sandbox message lost its simulated marker');
+    await step('Download the inbound SES attachment and follow its webhook link', async () => requireSendCapacity('getInboundAttachment', 'downloadInboundAttachment'));
+    const absent = { path: { messageId, attachmentId: prefix }, query: { addressId } };
+    await expectDenial(() => api('getInboundAttachment', absent), 404, 'NOT_FOUND');
+    await expectDenial(() => api('downloadInboundAttachment', { ...absent, client: unfollowed }), 404, 'NOT_FOUND');
+    // The sandbox API stores text, not MIME attachments. Still exercise the image import with the PNG at this revision.
+    const sha = execFileSync('git', ['rev-parse','HEAD'], { encoding: 'utf8' }).trim();
+    check(/^[a-f0-9]{40}$/.test(sha), 'invalid checkout SHA for fixture PNG');
+    await step('Import stored fixture PNG', () => importFixturePng(`https://raw.githubusercontent.com/anomalyco/nightmail/${sha}/app/public/icon-192.png`, readFileSync(new URL('../../app/public/icon-192.png', import.meta.url))));
+  } else {
+    check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.png`, 'inbound attachment missing');
+    const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
+    check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
+    // The webhook payload's downloadUrl answers the same reader with a redirect to the same file.
+    const followed = await api('downloadInboundAttachment', { client: unfollowed, path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } }) as unknown as Output<'getInboundAttachment'>;
+    check(new URL(followed.url).protocol === 'https:' && Date.parse(followed.expiresAt) > Date.now(), 'expected the webhook attachment link to redirect to a temporary HTTPS URL');
+    if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
+      // S3 presigned while mail stays in S3; a Bane-signed /v1/objects link on this origin once it is in R2.
+      const url = new URL(link.url), own = url.origin === base.origin && /^\/v1\/objects\/[A-Za-z0-9_.-]+$/.test(url.pathname);
+      check((own || /(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port) && !url.username && !url.password,'refusing an attachment URL that is neither S3 nor this deployment’s object link');
+      const res=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(12000)});
+      const trace=ctx.getStore()!; trace.last=own?'GET /v1/objects':'S3 GetObject'; trace.requestId=res.headers.get(own?'x-request-id':'x-amz-request-id');
+      check(res.ok && hash(new Uint8Array(await res.arrayBuffer()))===hash(pixelPng()),'inbound attachment SHA-256 mismatch');
+      await importFixturePng(link.url,pixelPng());
+    });
+  }
   check(hasId(await api('listInboundThreads', { query: { addressId, q: prefix } }), path.threadId), 'arrived thread not listed');
   check(hasId(await api('listInboundMessages', { query: { addressId, direction: 'inbound', q: prefix } }), msg.id), 'arrived message not listed');
   // The unified logs list received mail next to sent mail for the same credential.
@@ -933,28 +980,28 @@ async function inbound() {
   check(unified.received && unified.data.some(row => row.id === msg.id && row.direction === 'received' && row.threadId === msg.threadId), 'arrived message missing from the unified logs');
   check((await api('getInboundThread', { path, query: { addressId } })).messages.some(m => m.id === msg.id), 'message absent from thread');
   check((await api('updateInboundThread', { path, body: { addressId, starred: true } })).starred, 'thread edit failed');
-  const reply = await api('replyToInboundThread', { path, headers: idKey('reply'), body: {
+  const reply = sent ? await api('replyToInboundThread', { path, headers: idKey('reply'), body: {
     addressId, replyToMessageId: msg.id, text, expectedRecipients: { to: [from], cc: [], bcc: [] },
-  } });
-  check(reply.threadId === msg.threadId && reply.direction === 'outbound' && reply.to[0]?.address === from && reply.emailId, 'reply not bound to original conversation');
-  // The reply is on its way back to the sender. Exercise the receiver's scoped hook (including its own new
-  // label event and HTTP delivery) in the meantime; still verify the actual reply, its bytes and In-Reply-To.
+  } }) : undefined;
   await step('Scoped inbound webhook, rotation and thread metadata delivery', () => inboundWebhook(addressId, path.threadId));
-  const replies = await until('reply received by original test sender', () => api('listInboundMessages', { query: { addressId: sender.id, direction: 'inbound', q: prefix } }), page => page.data.some(m => m.from.address === inbox && m.threadId === sent.threadId), page => `${page.data.length} messages`);
-  const received = replies.data.find(m => m.from.address === inbox && m.threadId === sent.threadId)!;
-  const delivered = await api('getInboundMessage', { path: { messageId: received.id }, query: { addressId: sender.id } });
-  check(delivered.text.includes(text) && msg.messageId && delivered.inReplyTo === msg.messageId, 'reply body or In-Reply-To differs');
-  for (const emailId of [sent.emailId,reply.emailId]) {
-    check(emailId,'inbound send missing email ID');
-    const email = await api('getEmail',{path:{id:emailId}});
-    check(!email.simulated && email.providerId,'inbound loop missing provider acceptance'); providerAccepted.add(email.providerId);
+  if (sent && reply) {
+    check(reply.threadId === msg.threadId && reply.direction === 'outbound' && reply.to[0]?.address === from && reply.emailId, 'reply not bound to original conversation');
+    const replies = await until('reply received by original test sender', () => api('listInboundMessages', { query: { addressId: sender.id, direction: 'inbound', q: prefix } }), page => page.data.some(m => m.from.address === inbox && m.threadId === sent.threadId), page => `${page.data.length} messages`);
+    const received = replies.data.find(m => m.from.address === inbox && m.threadId === sent.threadId)!;
+    const delivered = await api('getInboundMessage', { path: { messageId: received.id }, query: { addressId: sender.id } });
+    check(delivered.text.includes(text) && msg.messageId && delivered.inReplyTo === msg.messageId, 'reply body or In-Reply-To differs');
+    for (const emailId of [sent.emailId,reply.emailId]) {
+      check(emailId,'inbound send missing email ID');
+      const email = await api('getEmail',{path:{id:emailId}});
+      check(!email.simulated && email.providerId,'inbound loop missing provider acceptance'); providerAccepted.add(email.providerId);
+    }
   }
-  if (destructive) await step('A temporary address is an inbox: its mail and folders through the inbox routes', () => addressInbox(receiver.id, sender.id, msg.id, sent.id));
+  if (destructive) await step('Read and change the run-owned inbox and verify scoped access', () => addressInbox(addressId, sender.id, msg.id, sent?.id));
 }
 
 // Every address is an inbox: its received and sent mail is filed in folders, and the inbox routes read and change it by
 // the address ID. Run-owned temporary addresses and their own messages only; deleting the addresses ends it.
-async function addressInbox(id: string, otherId: string, messageId: string, sentId: string) {
+async function addressInbox(id: string, otherId: string, messageId: string, sentId?: string) {
   const folders = async () => Object.fromEntries((await api('listInboxFolders', { path: { id } })).data.map(f => [f.role, f]));
   const state = (await api('listInboxFolders', { path: { id } })).state, before = await folders();
   const listed = (await api('listInboxMessages', { path: { id }, query: { folder: 'inbox', limit: 100 } })).data.find(m => m.id === messageId);
@@ -976,7 +1023,8 @@ async function addressInbox(id: string, otherId: string, messageId: string, sent
   const key = await api('createApiKey', { body: { name: `${prefix}-other`, access: { type: 'addresses', addressIds: [otherId], mail: ['read'] } } });
   defer(`revoke limited key ${key.id}`, async () => check((await api('revokeApiKey', { path: { id: key.id } })).revoked, 'limited key not revoked'));
   const other = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${key.secret}` } });
-  check((await api('listInboxMessages', { client: other, path: { id: otherId }, query: { folder: 'sent', limit: 100 } })).data.some(m => m.id === sentId), 'sent mail not filed in Sent');
+  const sentFolder = await api('listInboxMessages', { client: other, path: { id: otherId }, query: { folder: 'sent', limit: 100 } });
+  check(sentId ? sentFolder.data.some(m => m.id === sentId) : sentFolder.data.length === 0, 'unexpected contents of the run-owned Sent folder');
   await expectDenial(() => api('listInboxMessages', { client: other, path: { id } }), 404, 'NOT_FOUND');
   await expectDenial(() => api('getInboxMessage', { client: other, path }), 404, 'NOT_FOUND');
   await expectDenial(() => api('listInboxFolders', { client: other, path: { id } }), 404, 'NOT_FOUND');
@@ -1055,7 +1103,8 @@ async function sweepStaleObjects() {
   // dispatch history is immutable; listCampaigns defaults to unarchived rows only.
   for (const c of await pages(cursor=>api('listCampaigns',{query:{...q,cursor}}))) {
     const run=staleRun(c.draft.name,c.createdAt);
-    if (run && c.draft.from===`${run}@${domain}` && c.draft.region===region) await cleanCampaign(c.id);
+    if (run && ((c.draft.from===`${run}@${domain}` && c.draft.region===region) ||
+      (destructive && c.draft.name===`${run}-schedule` && c.draft.from===`${run}@e2e-va.bane.mx` && c.draft.region==='us-east-1'))) await cleanCampaign(c.id);
   }
   for (const archived of ['true','false'] as const) {
     for (const t of await pages(cursor=>api('listCampaignTemplates',{query:{...q,cursor,archived}}))) {
@@ -1083,10 +1132,16 @@ async function run() {
   try {
     const ready = await step('Live identity and verified domain', prepare);
     if (!ready) return;
+    if (destructive) {
+      const samples = await step('Read dev SES sandbox quotas', async () => (await import('./dev-e2e-fixture.js')).devSandboxSendPreflight());
+      if (!samples) return; // A denied or broken quota read is a failure, never permission to skip.
+      quota = samples;
+      console.log('Dev SES quota:', samples.map(q => `${q.region} ${q.used}/${q.max}, ${q.needed} needed`).join('; '));
+      if (quotaExhausted()) { delete SKIP.createInbox; delete SKIP.simulateInboxMessage; delete SKIP.deleteInbox; }
+    }
     if (!await step('Retire interrupted E2E fixtures older than 30 minutes',sweepStaleObjects)) return;
     await Promise.all([
       ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
-      step('Single send, replay, delivery and email log', direct),
       step('Preview run-owned HTML without sending', async () => {
         const report = await api('checkEmail', { body: { from, subject:prefix, text:'Confirm your shipping address.', stream:'transactional' } });
         check(Number.isInteger(report.score) && report.findings.some((f:{ruleId:string})=>f.ruleId==='screen-bytes'),'missing sendability score or byte measurement');
@@ -1128,7 +1183,7 @@ async function run() {
       // Plan & usage: the price, this run's sends are in the month, a manage key sees the received count (members and
       // read-only keys get null), and the daily limit names its one step, the evaluation.
       const usage = await api('getUsage', {});
-      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 1 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
+      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= (quotaExhausted() ? 0 : 3) && typeof usage.month.received === 'number' && usage.steps.length === 1 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
       // Billing as a manage key reads it: the balance and state, the sent and received allowances, today's metered usage,
       // and the ledger and payments pages.
       const bill = await api('getBilling', {});
@@ -1137,7 +1192,11 @@ async function run() {
       check(Array.isArray(metered.data) && metered.data.every(p => /^\d+$/.test(p.quantity)), 'billing usage is not a list of integer quantities');
       for (const list of [await api('listBillingLedger', { query: { limit: 5 } }), await api('listBillingPayments', { query: { limit: 5 } })]) check(Array.isArray(list.data) && list.data.length <= 5, 'billing page over its limit');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
-      check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
+      check(m.basis === 'created-cohort' && m.region === region, 'wrong regional metrics');
+      await step('Regional metrics include this run’s delivery, bounce and complaint', async () => {
+        requireSendCapacity();
+        check(m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
+      });
     });
   } finally {
     deadline = Date.now() + 35_000;
@@ -1147,6 +1206,7 @@ async function run() {
 
 function finish() {
   const ended = Date.now();
+  for (const op of quotaSkippedOps) if (!attempted.has(op)) SKIP[op] = new DevSandboxQuotaSkip().message;
   const missing = [...contract].filter(op => !attempted.has(op as Op) && !Object.hasOwn(SKIP, op));
   const stale = Object.keys(SKIP).filter(op => !contract.has(op));
   if (missing.length || stale.length) {
@@ -1161,7 +1221,7 @@ function finish() {
   console.log(headline);
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const report = { commit, targetUrl: base.origin, run: prefix, start: new Date(started).toISOString(), end: new Date(ended).toISOString(), ms: ended - started,
-    status: failures ? 'fail' : 'pass', destructive, ses: { observedProviderAcceptances:providerAccepted.size, reservedRecipientBudget:sendBudget }, steps,
+    status: failures ? 'fail' : 'pass', destructive, ses: { quota, observedProviderAcceptances:providerAccepted.size, reservedRecipientBudget:sendBudget }, steps,
     coverage: { total: contract.size, passed: [...covered].sort(), attempted: [...attempted].sort(), successResponses:[...successResponses].sort(), negativeOnly:[...errorResponses].filter(op=>!successResponses.has(op)).sort(), notReached: missing.sort(), skipped: SKIP, staleSkips: stale } };
   // Atomic replacement also makes a shared working directory safe for concurrent invocations.
   const tmp = `.${prefix}-report.tmp`;
