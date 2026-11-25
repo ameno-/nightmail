@@ -13668,8 +13668,13 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.match(error(await http('GET', '/v1/inbound/addresses', domainReader.secret), 403, 'UNRESTRICTED_KEY_REQUIRED').message, /^This key can only read mail sent from allowed\.example\.com\. Inbound addresses need a full-access key/);
     assert.equal(error(await http('POST', '/v1/emails/send', domainReader.secret, mail({ from: 'sender@allowed.example.com' })), 403, 'PERMISSION_DENIED').message,
       `This key can only read mail sent from allowed.example.com. Add Send to it ${editKey} Needs Send email.`);
-    // A key without manage on all domains, unrestricted otherwise, on received mail: the same style, with the address-key option.
-    assert.match(error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound addresses need a full-access key: .* For mail at some addresses only, a key limited to those addresses also works\./);
+    // A key without manage, unrestricted otherwise, on receiving addresses (an agent with a Read only key retried this six
+    // times when told to create another key): the edit that makes this key Full access, on its own ID, the address-key
+    // option, and that asking again changes nothing. Not retryable.
+    const addresses = error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED');
+    assert.ok(addresses.message.startsWith(`This key can only read. Inbound addresses need Full access: make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${reader.id} with {"permissions":["read","send","manage"]}. For mail at some addresses only, a key limited to those addresses also works. Until then this key gets the same answer.`), addresses.message);
+    assert.equal(addresses.retryable, false);
+    assert.match(error(await http('GET', '/v1/inbound/domains', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound domains need Full access: make this key Full access .*PATCH \/v1\/api-keys\//);
     // Reading replies with a key limited to its sender domain (a production agent tried, then guessed at POST /v1/api-keys):
     // with Read it reads the mail addressed to that domain (none here); a send-only key is told to add Read, on its own ID,
     // or to make a Read and Send key for the domain, with the request that makes one. A key without the domain limit is
@@ -36687,12 +36692,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         error(await create({localPart:'role'}),403,'PERMISSION_DENIED');error(await local('POST',root,{localPart:'postmaster'}),409,'ADDRESS_RESERVED');
         const team=ok(await local('POST','/v1/inbound/addresses',{address:'team@'+host,rules:['lease*@'+host]}),201);
         const pick=await db.query('SELECT create_ephemeral_inbox($1) AS r',[{wid,admin:false,manageAddress:false,actor:'synthetic',hosted:false,input:{type:'ephemeral',ttlSeconds:60,graceHours:1},locals:['leased']}]);assert.equal(pick.rows[0].r.error,'ADDRESS_TAKEN');
-        const named=ok(await local('POST',root,{localPart:'leased'}),201);ok(await local('DELETE',`${root}/${named.id}`),202);
+        // A name already taken: the refusal says what holds it and the call that frees it (an agent turning a receiving
+        // address into an inbox created the inbox a second after its delete was refused, and was told only "already in use").
+        assert.equal(error(await local('POST',root,{localPart:'team'}),409,'ADDRESS_TAKEN').message,`team@${host} is already the receiving address ${team.id}. To make it an inbox, delete that address first (DELETE /v1/inbound/addresses/${team.id}?detach=true also takes it out of the routes that deliver to it), then create the inbox. Or omit localPart for a random address.`);
+        const named=ok(await local('POST',root,{localPart:'leased'}),201);
+        assert.equal(error(await local('POST',root,{localPart:'leased'}),409,'ADDRESS_TAKEN').message,`leased@${host} is already the agent inbox ${named.id}: use it (GET /v1/inboxes/${named.id}). Or omit localPart for a random address.`);
+        ok(await local('DELETE',`${root}/${named.id}`),202);
         const after=await deliver('fallback-wildcard',[named.address]);assert.deepEqual((await db.query('SELECT mailbox_id FROM mailbox_messages WHERE message_id=$1',[after.id])).rows,[{mailbox_id:team.id}]);
         for(const at of [named.createdAt,named.expiresAt,named.deleteAfter])assert.equal(at,new Date(at).toISOString());
         await db.query("UPDATE mailboxes SET rules='[]' WHERE id=$1",[team.id]);await db.query("UPDATE mailbox_domains SET catch_all='create_mailbox' WHERE id=$1",[domain]);error(await create({}),403,'ADMIN_REQUIRED');await db.query("UPDATE mailbox_domains SET catch_all='store' WHERE id=$1",[domain]);
         await db.query("INSERT INTO mail_retired_addresses VALUES($1,$2,now()+interval '1 day')",[wid,'reserved@'+host]);const release='/v1/inbound/retired/reserved@'+host;
         error(await request('DELETE',release,provision),403);error(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}),409,'ADDRESS_RETIRED');ok(await local('DELETE',release));ok(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}));
+        assert.equal(error(await local('POST',root,{localPart:'reserved'}),409,'ADDRESS_TAKEN').message,`reserved@${host} belongs to team@${host} (${team.id}). Remove it there first (PATCH /v1/inbound/addresses/${team.id}), then create the inbox. Or omit localPart for a random address.`);
       });
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
