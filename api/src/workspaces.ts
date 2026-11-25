@@ -105,16 +105,12 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 }
 const maxOwnedWorkspaces = 10;
 
-/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Nightmail operator role (if any). */
-export async function sessionMemberships(db: DbExecutor, userId: string, current?: string) {
-  // One row even with no memberships, so an operator who belongs to no workspace still gets the role. `current` adds that
-  // workspace's focus (workspace-focus.ts) and age in seconds to the same statement.
-  const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null; focus: WorkspaceFocus[] | null; age: number | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
-    coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces,
-    ${current ? sql`(SELECT focus FROM workspaces WHERE id=${current})` : sql`NULL::text[]`} AS focus,
-    ${current ? sql`(SELECT extract(epoch FROM now()-created_at)::float8 FROM workspaces WHERE id=${current})` : sql`NULL::float8`} AS age`);
-  return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null, focus: row!.focus ?? null, ageSeconds: row!.age ?? null };
-}
+export type SessionMembershipRow = { workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null; focus: WorkspaceFocus[] | null; ageSeconds: number | null; byo: boolean };
+/** One row even with no memberships: the person's roles and the selected workspace's onboarding flags. */
+export const sessionMembershipsQuery = (userId: string, current: string) => sql`SELECT ${operatorRoleOf(userId)} AS operator,
+  coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces,
+  cw.focus, extract(epoch FROM now()-cw.created_at)::float8 AS "ageSeconds", coalesce(cw.byo_v2_enabled,false) AS byo
+  FROM (SELECT 1) one LEFT JOIN workspaces cw ON cw.id=${current}`;
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:
 // concurrent demotions cannot authorize each other on an old snapshot or remove both owners.
