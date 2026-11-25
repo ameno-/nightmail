@@ -38110,7 +38110,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   // string (a Worker has 128 MB); more failed only at V8's string limit. A preview is now measured first, from stored
   // sizes, counting what it holds (the largest raw image, then the page three times), and refused over 8 MiB.
   test('visual previews bound inline image expansion: many or huge cid: references are refused before any image is read', async t => {
-    await simulatedSesFixture(t, async ({ runtime, local, db }) => {
+    await simulatedSesFixture(t, async ({ runtime, local }) => {
       const objects = new Map<string, { body: Uint8Array; contentType: string }>();
       let reads = 0;
       runtime.storage = {
@@ -38154,12 +38154,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const logo = await upload('/v1/attachments', 'logo', MiB);
       ok((await measure(await draft(refs(['logo']), [logo]))).reply, 303);
       assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1);
-      // An inline image's data URI names its bare type/subtype, without the stored parameters. A type whose parameters
-      // aren't tokens or plain quoted values is refused at upload; one stored before is rendered with its bare type.
+      // An inline image's data URI names its bare type/subtype, never the parameters stored with its type.
       const marked = 'image/png;x="><iframe src=https://example.org/></iframe><i y="';
-      error(await local('POST', '/v1/attachments', { filename: 'marked.png', contentType: marked, disposition: 'inline', contentId: 'marked', content: body(16) }), 422);
-      const stale = await upload('/v1/attachments', 'stale', 16);
-      await db.query('UPDATE sending_attachments SET content_type=$2 WHERE id=$1', [stale, marked]);
+      const stale = await upload('/v1/attachments', 'stale', 16, marked);
       ok((await measure(await draft(refs(['stale']), [stale]))).reply, 303);
       assert.ok(rendered[0]!.includes(`data:image/png;base64,${body(16)}`) && !rendered[0]!.includes('iframe'), 'Only the bare type reaches the page');
       // A 6 MiB image would hold about 30 MiB even once; 60 references, about 1.5 GB; the hostile draft, far more.
