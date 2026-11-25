@@ -33002,7 +33002,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       });
       try{
         const idle=ok(await local('GET',`/v1/inboxes/${sb.id}/messages?wait=2&subjectContains=never`));
-        assert.deepEqual(idle,{data:[],cursor:'0',hasMore:false});
+        const {servedAt,...page}=idle;
+        assert.deepEqual(page,{data:[],cursor:'0',hasMore:false});
+        assert.ok(Number.isFinite(Date.parse(servedAt)),'servedAt: when the page was read');
         assert.equal(msgScans,1,'idle wait=2 scans mailbox_messages only on tick 0, not on ticks 1..2');
         assert.ok(gateReads>=1,'subsequent idle ticks use the O(1) inbox_state.modseq gate');
       }finally{qSpy.mock.restore();}
