@@ -10,6 +10,8 @@ export const FILE_CACHE: Record<string, string> = {
   assets: 'public, max-age=31536000, immutable',
   fonts: 'public, max-age=86400, stale-while-revalidate=604800',
 }
+/** More headers by directory, in the same rule: fonts load in mail clients and webmail too (src/notices.ts), cross-origin. */
+export const FILE_EXTRA: Record<string, string[]> = { fonts: ['Access-Control-Allow-Origin: *'] }
 /** Workers Assets reads this many rules and skips the rest of the file. */
 export const MAX_RULES = 100
 
@@ -26,6 +28,6 @@ export function withFileRules(source: string, files: string[]): { headers: strin
   const room = Math.max(0, MAX_RULES - source.split('\n').filter(isRule).length)
   const known = [...new Set(files)].filter(file => Object.hasOwn(FILE_CACHE, file.slice(0, Math.max(0, file.indexOf('/')))))
   const ruled = known.filter(file => PLAIN_FILE.test(file)).slice(0, room)
-  const rules = ruled.map(file => `/${file}\n  Cache-Control: ${FILE_CACHE[PLAIN_FILE.exec(file)![1]!]}`)
+  const rules = ruled.map(file => { const dir = PLAIN_FILE.exec(file)![1]!; return [`/${file}`, `Cache-Control: ${FILE_CACHE[dir]}`, ...FILE_EXTRA[dir] ?? []].join('\n  ') })
   return { headers: [source.trimEnd(), ...rules].join('\n') + '\n', uncached: known.filter(file => !ruled.includes(file)) }
 }

@@ -73,7 +73,16 @@ const owes = (workspace: string, owed: string, since: Date | null) => since ? `$
 // table), the dark pair together in one media query. A client that applies the dark query on a light pane of its own
 // (Outlook on the web asks the browser, not its own theme; webmail drops the color-scheme meta) once showed #ededed
 // on white, because the page left its background to the client.
-const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif", MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+const FONT = "Inter,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif", MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
+// Inter, where a mail client loads web fonts (Apple Mail on a Mac and an iPhone; Gmail and Outlook ignore them and keep
+// the system fonts after it): the dashboard's own basic-Latin cut (app/public/fonts/inter-basic.woff2, every weight in
+// one 50 KB file, served CORS-open by app/asset-headers.ts and src/server.ts) from this installation's own origin. One URL
+// for every email, so loading it says nothing about who opened which; with remote content blocked the system fonts
+// stand in, at the same layout. The range is the file's (app/price-pages.ts BASIC): other letters come from the fallbacks.
+// Inside @media screen, which Outlook on Windows skips (a face it sees makes it drop the fallbacks for Times New Roman),
+// in a <style> of its own: Outlook on the web drops a style sheet with a rule nested in @media, and with it the dark colours.
+const fontFace = (origin: string) => /^https?:\/\/[^\s'"()]+$/.test(origin)
+  ? `<style>@media screen{@font-face{font-family:'Inter';font-style:normal;font-weight:100 900;font-display:swap;src:url('${origin}/fonts/inter-basic.woff2') format('woff2');unicode-range:U+0020-007E,U+00A0,U+00A9,U+00AB,U+00AE,U+00B7,U+00BB,U+00D7,U+2010-2027,U+2030,U+2039-203A,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+FEFF,U+FFFD}}</style>` : '';
 const PAPER = '#ffffff', INK = '#171717', MUTED = '#5d5d5d';
 const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important;border-top-color:#2e2e2e!important}.nm-action{background:#314770!important;border-color:#556f9d!important;color:#ffffff!important}';
 
@@ -98,7 +107,7 @@ const cardText = (c: ScoreCard) => `Sender score: ${c.score} (grade ${c.grade}),
 /** The card: a flat tile in the score's colour (one table cell, no image), its label, the score with its grade, what it means for sending now and when. */
 function cardHtml(c: ScoreCard) {
   const t = tones(c.score, 'light'), p = (cls: 'ink' | 'soft', style: string, body: string) => `<p class="nm-card-${cls}" style="margin:0;${style};color:${t[cls]}">${body}</p>`;
-  const figure = `<span class="nm-card-ink" style="font-family:${MONO};font-size:40px;line-height:44px;font-weight:400;letter-spacing:-0.02em;color:${t.ink}">${c.score}</span>`
+  const figure = `<span class="nm-card-ink" style="font-family:${MONO};font-size:40px;line-height:44px;font-weight:400;letter-spacing:-0.02em;font-variant-numeric:tabular-nums;color:${t.ink}">${c.score}</span>`
     + `<span class="nm-card-ink" style="padding-left:8px;font-family:${MONO};font-size:18px;line-height:22px;font-weight:700;color:${t.ink}">${escapeHtml(c.grade)}</span>`;
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;border-collapse:separate"><tr><td class="nm-card" bgcolor="${t.tile}" style="padding:14px 16px 13px;border-radius:8px;background-color:${t.tile};color:${t.ink}">`
     + p('soft', 'font-size:13px;line-height:18px', 'Sender score') + p('ink', 'padding-top:4px;line-height:44px', figure)
@@ -107,15 +116,15 @@ function cardHtml(c: ScoreCard) {
 const cardDark = (c: ScoreCard) => { const t = tones(c.score, 'dark'); return `.nm-card{background-color:${t.tile}!important;color:${t.ink}!important}.nm-card-ink{color:${t.ink}!important}.nm-card-soft{color:${t.soft}!important}`; };
 const page = `class="nm-page" bgcolor="${PAPER}"`, ink = (style = '') => `class="nm-text" style="margin:0 0 14px;color:${INK}${style}"`;
 
-/** One notice as an email: the same words as text and as HTML. */
-export function notice(p: Parts): Notice {
+/** One notice as an email: the same words as text and as HTML. `origin` (the dashboard's) serves its font. */
+function renderNotice(p: Parts, origin: string): Notice {
   const records = p.records ?? [];
   const text = [...p.card ? [cardText(p.card)] : [], p.lines.join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
   const field = (label: string, value: string) => `<tr><td class="nm-why" style="width:40px;padding:2px 12px 2px 0;vertical-align:top;font-size:13px;color:${MUTED};white-space:nowrap">${label}</td><td class="nm-text" style="padding:2px 0;font:14px/1.5 ${MONO};color:${INK};word-break:break-all">${escapeHtml(value)}</td></tr>`;
   const paragraphs = p.lines.map(line => `<p ${ink()}>${escapeHtml(line)}</p>`).join('')
     + records.map(r => `<p ${ink(';margin-bottom:4px;font-weight:600')}>${escapeHtml(r.type)} record</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px">${field('Name', r.name)}${field('Value', r.value)}</table>`).join('')
     + (p.link ? `<p ${ink()}><a class="nm-text" href="${escapeHtml(p.link.url)}" style="color:${INK};text-decoration:underline">${escapeHtml(p.link.label)}</a></p>` : '');
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(p.subject)}</title><style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${DARK}${p.card ? cardDark(p.card) : ''}}</style></head>`
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(p.subject)}</title>${fontFace(origin)}<style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${DARK}${p.card ? cardDark(p.card) : ''}}</style></head>`
     + `<body ${page} style="margin:0;padding:0;background-color:${PAPER};color:${INK}"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ${page} style="background-color:${PAPER}"><tr><td ${page} style="padding:20px 16px 28px;background-color:${PAPER};color:${INK}">`
     + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px"><tr><td class="nm-text" style="font:15px/1.6 ${FONT};color:${INK}">`
     + `${p.card ? cardHtml(p.card) : ''}${paragraphs}<p style="margin:22px 0 0"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:8px 16px;border:1px solid #223459;border-radius:6px;background:#223459;color:#ffffff;font-weight:500;text-decoration:none">${escapeHtml(p.action.label)}</a></p>`
@@ -155,7 +164,7 @@ export type NoticeKind = NoticeInput['kind'];
  * whatever paused the workspace: the ladder, a review or the provider.
  */
 export function customerNotice(origin: string, n: NoticeInput): Notice {
-  const base = origin.replace(/\/$/, ''), w = 'workspace' in n ? shownName(n.workspace) || 'your workspace' : '';
+  const base = origin.replace(/\/$/, ''), notice = (p: Parts) => renderNotice(p, base), w = 'workspace' in n ? shownName(n.workspace) || 'your workspace' : '';
   const members = `${productName} sent this to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`;
   const dashboard = { label: 'Open the dashboard', url: `${base}/overview` }, billing = (label: string) => ({ label, url: `${base}/settings#billing` });
   switch (n.kind) {

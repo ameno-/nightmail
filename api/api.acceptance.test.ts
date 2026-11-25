@@ -228,7 +228,7 @@ test('Cloudflare static files: only files the deployed build has get a cache lif
   const {headers,uncached}=withFileRules(source,[...built,'index.html','constructor/index.js','theme.js',...fonts]);
   assert.deepEqual(uncached,[]);assert.equal(sent(headers,'/constructor/index.js').get('cache-control'),undefined,'Only the directories with a lifetime get rules.');
   for(const file of built)assert.equal(sent(headers,'/'+file).get('cache-control'),'public, max-age=31536000, immutable',file);
-  for(const file of fonts)assert.equal(sent(headers,'/'+file).get('cache-control'),FILE_CACHE.fonts,file);
+  for(const file of fonts)assert.deepEqual([sent(headers,'/'+file).get('cache-control'),sent(headers,'/'+file).get('access-control-allow-origin')],[FILE_CACHE.fonts,'*'],file);
   assert.match(FILE_CACHE.fonts!,/^public, max-age=86400\b/);
   // Another build's file, a longer and a shorter name, the directories, another case, a nested copy, a font no build has yet, dashboard routes.
   for(const path of ['/assets/index-N3xtBu1d.js','/assets/index-CxQdVBrk.js.map','/assets/index-CxQdVBrk.j','/assets/','/assets','/ASSETS/index-CxQdVBrk.js','/assets/x/index-CxQdVBrk.js','/fonts/next.woff2','/fonts/','/index.html','/','/logs']){
@@ -32286,7 +32286,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
         assert.match(mail.text, new RegExp(`^${literal(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n\nThe invitation is for this address only and expires on `)}[A-Z][a-z]{2} \\d{1,2}${literal(`.\n\nTo accept, sign in with this address.\n\nAccept the invitation: ${made.acceptUrl}\n\nNightmail sent this because ${AUTH_EMAIL} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.\n`)}$`));
         // The HTML part says the same words and has one link.
-        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
+        const words = mail.html.replace(/<style>.*?<\/style>/gs, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
         assert.deepEqual(words, ['You are invited to a Nightmail workspace', ...mail.text.trim().split(/\n+/).map((line: string) => line.replace(`Accept the invitation: ${made.acceptUrl}`, 'Accept the invitation'))]);
         assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
       }
