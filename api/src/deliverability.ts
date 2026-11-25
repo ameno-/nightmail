@@ -21,7 +21,7 @@ export const SCREEN_CODES = ['CONTENT_REJECTED_SPAM', 'CONTENT_IMAGE_ONLY', 'CON
 /** A screen refusal in words, for a reader that may repeat them to the sender: what the content check objected to, and
  *  nothing of how close the message was or what judged it. */
 const SCREEN_VERDICTS: Record<string, string> = {
-  CONTENT_REJECTED_SPAM: 'The content check judged the message to be unsolicited advertising.',
+  CONTENT_REJECTED_SPAM: 'The outbound content check refused the message.',
   CONTENT_IMAGE_ONLY: 'The message is images with too little text beside them for the content check to read.',
   CONTENT_TOO_LARGE_TO_SCREEN: 'The message is too long for the content check.',
   CONTENT_SCREEN_BUDGET_EXCEEDED: 'The campaign has more differing copies than its audience allows the content check to read; the unread ones were not sent.',

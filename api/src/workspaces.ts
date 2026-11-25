@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
-import { ApiError, dashboardSession, denied, digest, errors, id, IdParams, json, memberAdminRefusal, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, digest, errors, id, IdParams, json, logError, memberAdminRefusal, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
 import { INVITATION_EMAILS, inviteByEmail } from './account-notices.js';
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
@@ -62,10 +62,19 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null, config?: BuiltinConfig) {
+// Returns the new workspace's ID, true for an account that joins by its invitation instead, or false.
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null, config?: BuiltinConfig): Promise<string | boolean> {
   if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || productName).slice(0, 105)}'s workspace`, region, undefined, undefined, config);
-  return true;
+  const row = await insertOwnedWorkspace(db, user.id, `${ownerName(user.name, user.email).slice(0, 105)}'s workspace`, region, undefined, undefined, config);
+  return row?.id ?? true;
+}
+/** Whose workspace it is, for its first name: the person's name, or their address's local part without a +tag when the
+ * name is only an address or its local part ("ryan+test@acme.com" names "ryan's workspace"). */
+export function ownerName(name: string, email: string | null) {
+  const given = name.trim(), local = email?.split('@')[0] ?? '';
+  const address = !given || given.includes('@') || given.toLowerCase() === local.toLowerCase();
+  if (!address) return given;
+  return (given ? given.split('@')[0]! : local).replace(/\+.*$/, '') || productName;
 }
 
 // One statement: the workspace, its regional settings and the owner membership. With `ownedBelow`,
@@ -191,6 +200,10 @@ export function registerWorkspaces(app: App) {
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
+    // With a built-in domain, its Hosted mail starts in this request, as a sign-up's does (startHostedMail); onboarding
+    // starts it if it couldn't.
+    if (c.env.config.multiTenant && c.env.config.builtinDomain) try { await (await wrapModuleLoad(() => import('./provider-connections.js'))).startHostedMail(c.env, created.id, auditContext(c), undefined, true); }
+      catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'HOSTED_MAIL_START_FAILED', workspaceId: created.id }); }
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
   });
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {

@@ -1131,8 +1131,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
   await holder.query('ROLLBACK');
   assert.deepEqual((await observedBy(subject))!.map(s=>s.kind).sort(),['email','email_domain','net','provider'],'The admitted sign-in replaced what the refused ones observed.');
-  // A staff sign-up starts its own workspace, named after the person (#92's naming).
-  assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved}'s workspace`);
+  // A staff sign-up starts its own workspace, named after the person (#92's naming); a sign-in that names no one but its
+  // address names it after the address's local part, never the whole address.
+  assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved.split('@')[0]}'s workspace`);
   const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
   assert.deepEqual(members.data.map(m=>[m.userId,m.email]),[[me.id,approved]]);
   assert.equal((await db.query('SELECT FROM auth_user WHERE id=$1',[me.id])).rowCount,0);
@@ -10040,7 +10041,7 @@ describe('Hosted MCP OAuth and tools', () => {
         // this and writes to the sender, so it has none of the verdict (score, model, threshold), though these refusals
         // hold it in the stored event's data. Nor do the reads of an email's events.
         const screen = await get('/v1/support/screen');
-        assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].verdict, screen.rejections[0].subject.length], [50, 2, 2, 'The content check judged the message to be unsolicited advertising.', 120]);
+        assert.deepEqual([screen.totals.screened, screen.totals.rejected, screen.rejections.length, screen.rejections[0].verdict, screen.rejections[0].subject.length], [50, 2, 2, 'The outbound content check refused the message.', 120]);
         assert.doesNotMatch(JSON.stringify(screen), /"spamScore"|"spam"|"model"|"threshold"|jev-fixture/);
         for (const read of [await get(`/v1/support/events?emailId=${rejected[0]!.id}`), await get(`/v1/support/emails/${rejected[0]!.id}`)]) {
           const detail = (read.data ?? read.events).find((event: Json) => event.type === 'reject').detail;
@@ -21970,7 +21971,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
       const wid = runtime.config.workspaceId, acct = '112223330005', origin = 'https://screen.synthetic.invalid', topic = `arn:aws:sns:${REGION}:${acct}:fixture`;
       const key = ok(await local('POST', '/v1/api-keys', { name: 'frontdoor', permissions: ['send', 'read'] }), 201);
-      Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
+      Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } } });
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`, [REGION, acct, topic]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`, [wid]);
@@ -21983,7 +21984,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         await new Promise(r => setTimeout(r, 25));
         inFlight--;
         const spam = /buy cheap crypto/i.test(String(init?.body ?? '')) ? 0.99 : 0.01;
-        return Response.json({ answers: { spam: { noul: spam } } });
+        return Response.json({ answers: { harm: { noul: spam } } });
       });
 
       // 1. Long email: all windows screened in parallel at accept time (peak > 1), stored as screened=true, and DispatcherShard makes 0 classifier calls even if a wake lands mid-alarm.
@@ -22023,7 +22024,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wid = runtime.config.workspaceId, acct = '112223330006', origin = 'https://screen.synthetic.invalid', topic = `arn:aws:sns:${REGION}:${acct}:fixture`;
       const key = ok(await local('POST', '/v1/api-keys', { name: 'held-sweep', permissions: ['send', 'read'] }), 201);
       const hook = ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/hooks/held-reject', eventTypes: ['email.rejected'] }), 201);
-      Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
+      Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } } });
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`, [REGION, acct, topic]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('held-sweep.invalid',$1,$1,'verified')`, [wid]);
@@ -22039,7 +22040,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         jevCalls++;
         if (outage) return new Response(null, { status: 503 });
         const spam = /buy cheap crypto/i.test(String(init?.body ?? '')) ? 0.99 : 0.01;
-        return Response.json({ model: 'fixture', answers: { spam: { noul: spam } } });
+        return Response.json({ model: 'fixture', answers: { harm: { noul: spam } } });
       });
 
       // Insert two pre-deploy rows (screened=true from column default, NO screenVerdict in snapshot): one clean, one spam.
@@ -23117,9 +23118,9 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // With the hosted screen on, probation mail (Ohio) is delivered as the copy the screen read; trusted mail (Virginia) as
       // submitted. A subtest holds the classifier mock so it is restored before the fixture's own fetch mock.
       const marked='<html><head><style>.x{display:none}</style></head><body><p>Regional fixture</p><!--[if mso]><p>Outlook only</p><![endif]--><p class="x" style="display:none;color:#fff">Hidden line</p></body></html>';
-      Object.assign(runtime.config,{hostedScreen:true,screen:{endpoint:'https://screen.regional.invalid',apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      Object.assign(runtime.config,{hostedScreen:true,screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: 'https://screen.regional.invalid', apiKey: 'fixture', model: 'fixture', threshold: 0.7 } }});
       await t.test('screened tiers',async t=>{
-        t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),'https://screen.regional.invalid');return Response.json({answers:{spam:{noul:0.01}}});});
+        t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),'https://screen.regional.invalid');return Response.json({answers:{harm:{noul:0.01}}});});
         ok(await batch({...parent,html:marked},{...child,html:marked}),202);
         await drain(oh);await drain(va);
       });
@@ -23183,7 +23184,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   // they are counted. A pause stops its sending, a revoke stops everything, and its label is never given out again.
   test('built-in domain: given on creation and by the backfill, unique and never a reserved name, sends within its caps and scope, receives into a catch-all inbox, refused when paused or revoked',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
-      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser},{acceptInboundNotification},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
+      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser,ownerName},{acceptInboundNotification},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
         import('./src/dispatcher.js'),import('@aws-sdk/client-sesv2'),import('./src/builtin-domain.js'),import('./src/workspaces.js'),import('./src/mailbox-ingest.js'),import('./src/mailbox-ingest-store.js'),
         import('./src/mailbox-ingest-input.js'),import('./src/routing-match.js'),import('drizzle-orm'),import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href)]);
       const wid=runtime.config.workspaceId,acct='111122225555',oh='us-east-2',parent='nightmail-fixture.email',topic=`arn:aws:sns:${oh}:${acct}:bane-feedback`;
@@ -23225,8 +23226,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
       // 2. On creation: a new account's workspace has its label in the same transaction.
       const user=unique('user');await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,'Acme Corp',`${user}@example.net`]);
-      assert.equal(await onboardNewUser(runtime.db,{id:user,name:'Acme Corp',email:`${user}@example.net`},true,oh,null,runtime.config),true);
+      assert.match(String(await onboardNewUser(runtime.db,{id:user,name:'Acme Corp',email:`${user}@example.net`},true,oh,null,runtime.config)),/^ws_/);
       assert.match((await db.query('SELECT b.name FROM builtin_domains b JOIN workspace_members m ON m.workspace_id=b.workspace_id WHERE m.user_id=$1',[user])).rows[0].name,/^acme-corps-[a-z0-9]{2}\.nightmail-fixture\.email$/);
+      // A name that is only the address (an emailed sign-in names no one) is its local part without a +tag.
+      assert.deepEqual([['ryan+onboarding-1125','ryan+onboarding-1125@example.net'],['ryan+x@example.net','ryan+x@example.net'],['','ana+news@example.net'],['Ana Lima','ana+news@example.net'],['C++ Guild',null]].map(([name,email])=>ownerName(name!,email)),
+        ['ryan','ryan','ana','Ana Lima','C++ Guild']);
 
       // 3. The backfill: this workspace predates built-in domains. The sweep gives it a label and queues its domain.
       assert.equal((await db.query('SELECT FROM builtin_domains WHERE workspace_id=$1',[wid])).rowCount,0);
@@ -23243,7 +23247,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // A parent still verifying (a new parent's MAIL FROM, at launch) is looked at again in 5 minutes, not an hour.
       assert.deepEqual((await db.query("SELECT payload->>'parentWaits' AS waits,available_at BETWEEN clock_timestamp()+interval '4 minutes' AND clock_timestamp()+interval '6 minutes' AS soon FROM jobs WHERE id=$1",['domain.builtin:'+wid])).rows,[{waits:'1',soon:true}]);
       const me=async()=>ok(await local('GET','/v1/me')).connection.builtinDomain;
-      assert.deepEqual(await me(),{id:(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id,name:host,sending:'pending',scope:'anyone',perDay:100,perMinute:10});
+      assert.deepEqual(await me(),{id:(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id,name:host,sending:'pending',scope:'anyone',perDay:100,perMinute:10,used:0});
       error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Too early',text:'Pending.'}),403,'SENDER_DOMAIN_NOT_VERIFIED');
       parentIdentity=verifiedParent;await db.query('UPDATE builtin_parent SET checked_at=now()-interval \'2 hours\' WHERE name=$1',[parent]);
       await builtin.builtinDomainTick(runtime);await pace();await run('domain.builtin');
@@ -23259,12 +23263,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(ok(await local('GET','/v1/me')).connection.domains.total,0,'Own domains only.');
 
       // 4. Sending: anyone, 10 a minute, transactional only, screened as a new sender, from its own tenant.
-      Object.assign(runtime.config,{hostedScreen:true,screen:{endpoint:screenOrigin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      const { screen } = (await import('./src/config.js')).loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN,
+        TYPESAFE_API_KEY: 'fixture', JEVF_API_KEY: 'fast-fixture', JEVF_ENDPOINT: screenOrigin, JEV_SCREEN_MODE: 'flag' });
+      Object.assign(runtime.config, { hostedScreen: true, screen });
       await t.test('screened sends',async t=>{
-        t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),screenOrigin);return Response.json({answers:{spam:{noul:/buy cheap crypto/i.test(String(init?.body??''))?0.99:0.01}}});});
+        t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),screenOrigin);return Response.json({answers:{harm:{noul:/synthetic harm marker/i.test(String(init?.body??''))?0.51:0.49}}});});
         const mail=(n:number,extra:Json={})=>({from,to:`friend-${n}@example.net`,subject:`Hello ${n}`,text:`It works, ${n}.`,...extra});
         const first=ok(await local('POST','/v1/emails/send',mail(0,{fromName:'Acme',replyTo:[`support@${host}`]})),202);
-        error(await local('POST','/v1/emails/send',mail(1,{text:'Buy cheap crypto now'})),422,'CONTENT_REJECTED_SPAM');
+        error(await local('POST','/v1/emails/send',mail(1,{text:'Synthetic harm marker',screen:false})),422,'CONTENT_REJECTED_SPAM');
         for (const [extra,field] of [[{kind:'marketing'},'kind'],[{scheduledAt:new Date(Date.now()+3600_000).toISOString()},'scheduledAt'],[{headers:[{name:'X-Entity-Ref-ID',value:'1'}]},'headers'],[{replyTo:['me@elsewhere.example']},'replyTo'],[{from:`x@deep.${host}`},'from']] as const)
           assert.equal(error(await local('POST','/v1/emails/send',mail(2,extra)),422,'BUILTIN_DOMAIN_UNSUPPORTED').field,field,field);
         assert.equal(error(await local('POST','/v1/emails/batch',{emails:[mail(3),mail(4,{replyTo:['me@elsewhere.example']})]}),422,'BUILTIN_DOMAIN_UNSUPPORTED').field,'emails.1.replyTo');
@@ -23281,6 +23287,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (let round=1;round<10;round++){await age('2 minutes');ok(await local('POST','/v1/emails/batch',{emails:[0,1,2,3,4,5,6,7,8,9].map(n=>({from,to:`r${round}-${n}@example.net`,subject:`Round ${round} ${n}`,text:'Daily.'}))}),202);}
       await age('2 minutes');
       assert.match(error(await local('POST','/v1/emails/send',{from,to:'over@example.net',subject:'Over',text:'Over.'}),429,'BUILTIN_DOMAIN_LIMIT').message,/100 in 24 hours/);
+      assert.equal((await me()).used,100,'GET /v1/me counts what the daily cap counts, for the dashboard\'s daily limit.');
       await age('24 hours');ok(await local('POST','/v1/emails/send',{from,to:'next-day@example.net',subject:'Next day',text:'Again.'}),202);
       // The other scope: only the members' own verified addresses, 3 a minute and 10 a day.
       runtime.config.builtinScope='members';await age('24 hours');
@@ -23361,6 +23368,72 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh}),false,action+' untagged');
       }
       assert.equal(iamAllows(statements,'ses:DeleteEmailIdentity',arn,{'aws:RequestedRegion':oh,'aws:ResourceTag/bane:purpose':'builtin-domains'}),false);
+    }));
+  });
+
+  test('built-in domain: the request that creates a workspace starts its tenant and built-in domain without waiting; meanwhile the domain counts as ready and a send waits for it; the jobs are the fallback',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('synthetic transports',async t=>{
+      const [{SESv2Client,CreateTenantCommand,UpdateReputationEntityPolicyCommand,CreateTenantResourceAssociationCommand},{STSClient},builtin,{onboardNewUser},{startHostedMail},{JobDeferred}]=await Promise.all([
+        import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sts'),import('./src/builtin-domain.js'),import('./src/workspaces.js'),import('./src/provider-connections.js'),import('./src/jobs.js')]);
+      const acct='111122226666',oh='us-east-2',parent='nightmail-fixture.email';
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'fixture-hosted-start',secretAccessKey:'fixture-only'},builtinDomain:parent,builtinScope:'anyone',platformAccount:undefined});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket,inbound_topic_arn,receiving_state) VALUES($1,$2,$3,'ready',$4,$5,'ready')`,
+        [oh,acct,`arn:aws:sns:${oh}:${acct}:bane-feedback`,'hosted-start-mail',`arn:aws:sns:${oh}:${acct}:bane-inbound`]);
+      await db.query('INSERT INTO builtin_parent(name,ok,ses,checked_at) VALUES($1,true,$2,now())',[parent,JSON.stringify({VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningAttributesOrigin:'AWS_SES',SigningEnabled:true,Status:'SUCCESS'}})]);
+      // SES: the tenant's calls and the associations, each recorded by what it touches. One mock for the whole test.
+      const calls:string[]=[];let failTenant=false;
+      t.mock.method(STSClient.prototype,'send',async()=>({Account:acct,Arn:`arn:aws:iam::${acct}:user/fixture`}));
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        const name=cmd.constructor.name,i=cmd.input;
+        calls.push(cmd instanceof CreateTenantResourceAssociationCommand?`${name}:${String(i.ResourceArn).split(':').slice(5).join(':')}`:name);
+        if(cmd instanceof CreateTenantCommand){if(failTenant)throw Object.assign(new Error('Synthetic denial'),{name:'AccessDeniedException',$metadata:{httpStatusCode:403}});return {TenantName:i.TenantName,TenantArn:`arn:aws:ses:${oh}:${acct}:tenant/${i.TenantName}/fixture`};}
+        if(cmd instanceof UpdateReputationEntityPolicyCommand||cmd instanceof CreateTenantResourceAssociationCommand)return {};
+        throw new Error('Unexpected SES call '+name);
+      });
+      const signUp=async()=>{const user=unique('user'),email=`ryan+${user}@example.net`;
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,email.split('@')[0],email]);
+        const wid=await onboardNewUser(runtime.db,{id:user,name:email.split('@')[0]!,email},true,oh,null,runtime.config) as string;
+        return {wid,context:{actor:{type:'member' as const,id:user,userId:user,via:'dashboard' as const},requestId:null,ipNetwork:null,userAgent:null}};};
+      const claim=async(wid:string)=>(await db.query('SELECT dc.sending_state FROM domain_claims dc JOIN builtin_domains b ON b.workspace_id=dc.workspace_id AND b.name=dc.name WHERE dc.workspace_id=$1',[wid])).rows[0]?.sending_state;
+      // Due: its time has come by the clock (the fixture's now() is its transaction's start).
+      const jobs=async(wid:string,conn:string)=>(await db.query("SELECT id,available_at<=clock_timestamp() AS due FROM jobs WHERE id IN ('tenant.provision:'||$2::text,'domain.builtin:'||$1::text) ORDER BY id",[wid,conn])).rows;
+
+      // 1. A sign-up: the request makes its connection and domain, starts its tenant (strict, its configuration sets) and the
+      //    parent's association with it, and answers without waiting. The +tag of the address that signed up is no part of
+      //    its name or label.
+      const a=await signUp();
+      assert.equal((await db.query('SELECT name FROM workspaces WHERE id=$1',[a.wid])).rows[0].name,"ryan's workspace");
+      assert.match((await db.query('SELECT name FROM builtin_domains WHERE workspace_id=$1',[a.wid])).rows[0].name,/^ryans-[a-z0-9]{2,4}\.nightmail-fixture\.email$/);
+      const t0=Date.now(),ra=await startHostedMail(runtime,a.wid,a.context,{kind:'shared'},true),answered=Date.now()-t0;
+      assert.equal(ra.connection.tenant_state,'pending');
+      await ra.started;
+      t.diagnostic(`A new workspace's request answered in ${answered} ms; its tenant and built-in domain were set up ${Date.now()-t0} ms after it started`);
+      assert.equal(await claim(a.wid),'verified');
+      assert.equal((await db.query('SELECT tenant_state FROM provider_connections WHERE id=$1',[ra.connection.id])).rows[0].tenant_state,'ready');
+      assert.deepEqual([calls.length,calls[0],calls[1],calls.at(-1)],[5,'CreateTenantCommand','UpdateReputationEntityPolicyCommand',`CreateTenantResourceAssociationCommand:identity/${parent}`]);
+      assert.deepEqual(await jobs(a.wid,ra.connection.id),[{id:`domain.builtin:${a.wid}`,due:false},{id:`tenant.provision:${ra.connection.id}`,due:false}],'The jobs only stand by, a minute on.');
+      await builtin.setUpBuiltinDomain(runtime,a.wid);assert.equal(calls.length,5,'The job, when it comes, finds nothing left to do.');
+
+      // 2. SES refuses: the jobs take it from now, and the domain no longer counts as ready meanwhile.
+      failTenant=true;calls.length=0;
+      const b=await signUp(),rb=await startHostedMail(runtime,b.wid,b.context,{kind:'shared'},true);await rb.started;
+      assert.deepEqual([await claim(b.wid),calls],['pending',['CreateTenantCommand']]);
+      assert.deepEqual(await jobs(b.wid,rb.connection.id),[{id:`domain.builtin:${b.wid}`,due:true},{id:`tenant.provision:${rb.connection.id}`,due:true}],'A failure brings the jobs forward.');
+      assert.equal((await db.query("SELECT payload ? 'inline' AS inline FROM jobs WHERE id=$1",['domain.builtin:'+b.wid])).rows[0].inline,false);
+      // The domain's job waits seconds, not minutes, for a new connection's tenant; an old connection's, minutes.
+      await assert.rejects(builtin.setUpBuiltinDomain(runtime,b.wid),(e:unknown)=>e instanceof JobDeferred&&Date.parse(e.availableAt)-Date.now()<=6000);
+      await db.query("UPDATE provider_connections SET created_at=now()-interval '1 hour' WHERE id=$1",[rb.connection.id]);
+      await assert.rejects(builtin.setUpBuiltinDomain(runtime,b.wid),(e:unknown)=>e instanceof JobDeferred&&Date.parse(e.availableAt)-Date.now()>200_000);
+
+      // 3. While the work runs the domain counts as ready (onboarding's first paint), and a send from it waits for it instead
+      //    of being refused (the fixture's own workspace, so its dashboard session can send).
+      failTenant=false;calls.length=0;
+      const own=runtime.config.workspaceId,host=(await builtin.allocateBuiltinDomain(runtime.db,runtime.config,own,'Acme'))!;
+      const rc=await startHostedMail(runtime,own,a.context,{kind:'shared'},true);
+      assert.equal(ok(await local('GET','/v1/me')).connection.builtinDomain.sending,'ready');
+      const t1=Date.now(),early=ok(await local('POST','/v1/emails/send',{from:`hello@${host}`,to:AUTH_EMAIL,subject:'Early',text:'Sent while its domain was set up.'}),202);
+      t.diagnostic(`A send in the domain's first seconds waited ${Date.now()-t1} ms for its setup`);
+      assert.ok(early.id);assert.equal(await claim(own),'verified');await rc.started;
     }));
   });
 
@@ -25453,8 +25526,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const f = await hostedHoldFixture(runtime, db);
       await db.query('UPDATE workspaces SET send_cap_override=200000 WHERE id=$1', [f.wid]); // No limit or burst cap in the way (an exempt workspace is never paused).
       const origin = 'https://screen.synthetic.invalid'; let spam = 0.01;
-      Object.assign(runtime.config, { hostedScreen: true, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
-      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL) => { assert.equal(String(url), origin); return Response.json({ answers: { spam: { noul: spam } } }); });
+      Object.assign(runtime.config, { hostedScreen: true, screen: { primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } } });
+      t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL) => { assert.equal(String(url), origin); return Response.json({ answers: { harm: { noul: spam } } }); });
       t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => cmd instanceof GetAccountCommand ? { SendingEnabled: true, SendQuota: { MaxSendRate: 1000, Max24HourSend: 100000, SentLast24Hours: 0 } } : { MessageId: randomUUID() });
       const batch = (to: (n: number) => string, n: number, subject: string) => local('POST', '/v1/emails/batch', { emails: Array.from({ length: n }, (_, i) => ({ from: f.from, to: to(i), subject, text: `Fixture ${subject}` })) });
       const drain = () => runDispatcher(runtime, { region: REGION, accountId: f.pool, lanes: 1 });
@@ -26757,14 +26830,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const wid=runtime.config.workspaceId,acct='112223330001',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
       runtime.config.hostedSendCaps.firstWeek=10000;
       const key=ok(await local('POST','/v1/api-keys',{name:'bench',permissions:['send','read']}),201);
-      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } }});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
       runtime.storage={put:async()=>{},get:async()=>({body:Buffer.from('x'),contentType:'text/plain'}),delete:async()=>{}};
       const asset=ok(await local('POST','/v1/attachments',{filename:'one.txt',content:'eA=='}),201);
       let screens=0,outage=false,active=0,peak=0,score=.01;
-      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),origin);screens++;peak=Math.max(peak,++active);await new Promise(r=>setTimeout(r,20));active--;return outage?new Response(null,{status:503}):Response.json({answers:{spam:{noul:score}}});});
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL)=>{assert.equal(String(url),origin);screens++;peak=Math.max(peak,++active);await new Promise(r=>setTimeout(r,20));active--;return outage?new Response(null,{status:503}):Response.json({answers:{harm:{noul:score}}});});
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
       const gate=initialGate(),run=()=>runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
       for(const [name,n] of [['attachment',24],['burst',48],['outage',12]] as const){
@@ -26835,7 +26908,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
       const wid=runtime.config.workspaceId,acct='112223330002',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
       const key=ok(await local('POST','/v1/api-keys',{name:'records',permissions:['send','read']}),201);
-      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'classifier-fixture-key',model:'fixture',mode:'reject',threshold:0.7}});
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'classifier-fixture-key', model: 'fixture', threshold: 0.7 } }});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
@@ -26845,7 +26918,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(answer==='stall')return new Promise<never>((_,reject)=>init.signal!.addEventListener('abort',()=>reject(init.signal!.reason)));
         if(answer==='stall-body')return new Response(new ReadableStream({start:c=>{init.signal!.addEventListener('abort',()=>c.error(init.signal!.reason));}}),{headers:{'x-typesafe-request-id':'req_fixture_body'}});
         if(answer==='503')return new Response(null,{status:503,headers:{'x-typesafe-request-id':'req_fixture_503','retry-after':'2'}});
-        return Response.json({answers:{spam:{noul:.01}}},{headers:{'x-typesafe-request-id':'req_fixture_ok','server-timing':'model;dur=120'}});
+        return Response.json({answers:{harm:{noul:.01}}},{headers:{'x-typesafe-request-id':'req_fixture_ok','server-timing':'model;dur=120'}});
       });
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
       const logs:Json[]=[];for(const level of ['error','warn','info'] as const)t.mock.method(console,level,(line:string)=>{try{logs.push(JSON.parse(line));}catch{}});
@@ -26877,7 +26950,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
       const wid=runtime.config.workspaceId,acct='112223330004',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
       const key=ok(await local('POST','/v1/api-keys',{name:'calls',permissions:['send','read']}),201);
-      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'classifier-fixture-key',model:'fixture',mode:'reject',threshold:0.7}});
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'classifier-fixture-key', model: 'fixture', threshold: 0.7 } }});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,topic]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('bench.invalid',$1,$1,'verified')`,[wid]);
@@ -26887,7 +26960,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if(answer==='stall-body')return new Response(new ReadableStream({start:c=>{init.signal!.addEventListener('abort',()=>c.error(init.signal!.reason));}}));
         if(answer==='network')throw new TypeError('Network connection lost.');
         if(answer==='503')return new Response(null,{status:503,headers:{'x-typesafe-request-id':'req_fixture_503'}});
-        return Response.json(answer==='invalid'?{answers:{}}:{answers:{spam:{noul:.01}}},{headers:{'x-typesafe-request-id':'req_fixture_ok'}});
+        return Response.json(answer==='invalid'?{answers:{}}:{answers:{harm:{noul:.01}}},{headers:{'x-typesafe-request-id':'req_fixture_ok'}});
       });
       const sent:string[]=[];
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};sent.push(cmd.input.EmailTags.find((t:Json)=>t.Name==='bane_email_id').Value);return {MessageId:randomUUID()};});
@@ -26953,8 +27026,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // A subtest, so its classifier mock is lifted before the fixture's own network guard is.
     await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
       const {screenSnapshot}=await import('./src/screen.js');
-      runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
-      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>Response.json({answers:{spam:{noul:JSON.parse(String(init.body)).state.email.body.toLowerCase().includes('samplemarker')?0.99:0.1}}}));
+      runtime.config.screen={ primary: 'jev', mode: 'reject', jev: { apiKey: 'fixture', endpoint: 'https://screen.fixture.invalid', model: 'test', threshold: .7 } };
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>Response.json({answers:{harm:{noul:JSON.parse(String(init.body)).state.email.body.toLowerCase().includes('samplemarker')?0.99:0.1}}}));
       const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,text:'Hello',raw:'Hello'};
       // Its text, with or without markup, and where its links go.
       for(const html of ['<p>Hello</p><!--[if mso]><p>SampleMarker</p><![endif]-->','<p>Hello</p><!-- [if gte mso 9]>SampleMarker<![endif] -->','<!--[if (gte mso 9)|(IE)]><table><tr><td>SampleMarker</td></tr></table><![endif]--><p>Hello</p>',
@@ -27094,9 +27167,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   test('hosted screen covers independent parts, hidden copy and link targets with a bounded request and a full-content cache key',async t=>{
     await simulatedSesFixture(t,async({runtime})=>t.test('classifier input',async t=>{
       const {screenSnapshot}=await import('./src/screen.js');
-      runtime.config.screen={apiKey:'fixture',endpoint:'https://screen.fixture.invalid',model:'test',threshold:.7,mode:'reject'};
+      runtime.config.screen={ primary: 'jev', mode: 'reject', jev: { apiKey: 'fixture', endpoint: 'https://screen.fixture.invalid', model: 'test', threshold: .7 } };
       const bodies:string[]=[];
-      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{const body=JSON.parse(String(init.body)).state.email.body;bodies.push(body);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker') ? 0.99 : 0.01}}});});
+      t.mock.method(globalThis,'fetch',async(_url:unknown,init:RequestInit)=>{const body=JSON.parse(String(init.body)).state.email.body;bodies.push(body);return Response.json({answers:{harm:{noul:body.toLowerCase().includes('samplemarker') ? 0.99 : 0.01}}});});
       const s={from:'a@example.invalid',subject:'fixture',to:['b@example.invalid'],cc:[],bcc:[],kind:'transactional' as const,attachments:[],region:REGION,headers:[],replyTo:[],tracking:false,
         text:'plain signal',raw:'rendered MIME signal',html:`<div hidden>${'x'.repeat(16000)} hidden signal</div><p>HTML signal</p><a href="https://link.example.invalid/path">read</a><img src="https://image.example.invalid/tracker">`};
       await screenSnapshot(runtime,s);await screenSnapshot(runtime,s);
@@ -27255,7 +27328,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const wid=runtime.config.workspaceId,acct='112223330003',origin='https://screen.synthetic.invalid';
       runtime.config.hostedSendCaps.firstWeek=10000;
       const key=ok(await local('POST','/v1/api-keys',{name:'screened copy',permissions:['send','read']}),201);
-      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } }});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('screened.invalid',$1,$1,'verified')`,[wid]);
@@ -27266,7 +27339,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const svg=await upload('logo.svg','image/svg+xml',svgBytes,'logo'), svgAsPng=await upload('logo.png','image/png',svgBytes,'logo2'), png=await upload('logo.png','image/png',new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,0,0,0,13]),'logo3');
       const pdf=await upload('in\u202Evoice.pdf','application/pdf','%PDF-1.4\n%fixture\n'), fakePdf=await upload('invoice.pdf','application/pdf','not a pdf');
       const screened=new Map<string,string[]>(), delivered=new Map<string,{html?:string;text?:string;files?:string[]}>();
-      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),origin);const {subject,body}=JSON.parse(String(init?.body)).state.email;screened.set(subject,[...screened.get(subject)??[],body]);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker')?0.99:0.01}}});});
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),origin);const {subject,body}=JSON.parse(String(init?.body)).state.email;screened.set(subject,[...screened.get(subject)??[],body]);return Response.json({answers:{harm:{noul:body.toLowerCase().includes('samplemarker')?0.99:0.01}}});});
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};const c=cmd.input.Content.Simple;delivered.set(c.Subject.Data,{html:c.Body.Html?.Data,text:c.Body.Text?.Data,files:c.Attachments?.map((a:any)=>a.FileName)});return {MessageId:randomUUID()};});
       const salted=`<p>Hello</p><p>${[...'SampleMarker'].map((c,i)=>`${c}<span style="display:none">z${i}</span>`).join('')}</p>`;
       const copy='Your appointment is confirmed for Tuesday at ten. Reply to this message if you need to change the time or the place.';
@@ -27334,7 +27407,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2'),{screenedHtml}=await import('./src/screened-html.js');
       const wid=runtime.config.workspaceId,acct='112223330021',origin='https://screen.synthetic.invalid';
       const key=ok(await local('POST','/v1/api-keys',{name:'standing copy',permissions:['send','read']}),201), auth={authorization:`Bearer ${key.secret}`};
-      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{endpoint:origin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } }});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('standing.invalid',$1,$1,'verified')`,[wid]);
@@ -27343,7 +27416,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const svg=ok(await local('POST','/v1/attachments',{filename:'logo.svg',contentType:'image/svg+xml',content:Buffer.from('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>').toString('base64'),disposition:'inline',contentId:'logo'}),201).id as string;
       const fakePdf=ok(await local('POST','/v1/attachments',{filename:'invoice.pdf',contentType:'application/pdf',content:Buffer.from('not a pdf').toString('base64')}),201).id as string;
       const screened=new Map<string,string>(), delivered=new Map<string,{html?:string;files?:string[]}>();
-      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),origin);const {subject,body}=JSON.parse(String(init?.body)).state.email;screened.set(subject,(screened.get(subject)??'')+body);return Response.json({answers:{spam:{noul:body.toLowerCase().includes('samplemarker')?0.99:0.01}}});});
+      t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),origin);const {subject,body}=JSON.parse(String(init?.body)).state.email;screened.set(subject,(screened.get(subject)??'')+body);return Response.json({answers:{harm:{noul:body.toLowerCase().includes('samplemarker')?0.99:0.01}}});});
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}};const c=cmd.input.Content.Simple;delivered.set(c.Subject.Data,{html:c.Body.Html?.Data,files:c.Attachments?.map((a:any)=>a.FileName)});return {MessageId:randomUUID()};});
       // Each stage as the standing job records it (src/standing.ts): graded, no daily limit, at ok and past the growth pace is good standing.
       const stage=async(set:string)=>{
@@ -27451,7 +27524,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   async function hostedScreenFixture(t: TestContext, runtime: import('./src/core.js').Runtime, db: pg.Client, acct: string, domain: string, flag = /samplemarker/) {
     const { SESv2Client, GetAccountCommand } = await import('@aws-sdk/client-sesv2');
     const wid = runtime.config.workspaceId, origin = 'https://screen.synthetic.invalid';
-    Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { endpoint: origin, apiKey: 'fixture', model: 'fixture', mode: 'reject', threshold: 0.7 } });
+    Object.assign(runtime.config, { multiTenant: true, hostedScreen: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' }, screen: { primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } } });
     await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`, [REGION, acct, `arn:aws:sns:${REGION}:${acct}:fixture`]);
     await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`, [wid, REGION, acct]);
     await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES($1,$2,$2,'verified')`, [domain, wid]);
@@ -27459,7 +27532,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const screened: string[] = [], delivered = new Map<string, { html?: string; text?: string }>();
     t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init?: RequestInit) => {
       assert.equal(String(url), origin); const { subject, body } = JSON.parse(String(init?.body)).state.email as { subject: string; body: string }; screened.push(body);
-      return Response.json({ answers: { spam: { noul: flag.test(`${subject}\n${body}`.toLowerCase()) ? 0.99 : 0.01 } } });
+      return Response.json({ answers: { harm: { noul: flag.test(`${subject}\n${body}`.toLowerCase()) ? 0.99 : 0.01 } } });
     });
     t.mock.method(SESv2Client.prototype, 'send', async (cmd: any) => {
       if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
@@ -27591,7 +27664,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       let calls = 0;
       t.mock.method(globalThis, 'fetch', async (_url: unknown, init?: RequestInit) => {
         calls++; if (calls % 3 === 0) return new Response(null, { status: 503 });
-        const { body: text } = JSON.parse(String(init?.body)).state.email; screened.push(text); return Response.json({ answers: { spam: { noul: 0.01 } } });
+        const { body: text } = JSON.parse(String(init?.body)).state.email; screened.push(text); return Response.json({ answers: { harm: { noul: 0.01 } } });
       });
       ok(await local('POST', `/v1/campaigns/${flaky.id}/send`, { revision: flaky.revision }), 202);
       assert.equal((await settle(flaky)).delivery.expanded, 3);
@@ -27612,10 +27685,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await dispatch()).sent, 3);
       // Rows already screened before entering sending_emails are never re-screened at dispatch even if the model setting changes.
       const remodelled = await campaign('Remodelled', body, names(3));
-      await send(remodelled); const model = runtime.config.screen!.model;
-      runtime.config.screen = { ...runtime.config.screen!, model: 'fixture-next' };
+      await send(remodelled); const model = runtime.config.screen!.jev.model;
+      runtime.config.screen!.jev = { ...runtime.config.screen!.jev, model: 'fixture-next' };
       start = screened.length; assert.equal((await dispatch()).sent, 3); assert.equal(screened.length - start, 0, 'Mail room never re-screens already-screened rows.');
-      runtime.config.screen = { ...runtime.config.screen!, model };
+      runtime.config.screen!.jev = { ...runtime.config.screen!.jev, model };
       // An edit after screening is screened again: the campaign's own copy and every copy, since their bytes changed.
       const changed = await campaign('Changed', body, names(3));
       ok(await local('POST', `/v1/campaigns/${changed.id}/schedule`, { revision: changed.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202);
@@ -27674,12 +27747,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(String(url), 'https://screen.synthetic.invalid'); sent.jev.push(body);
       const down = jevDown(); if (down) return new Response(null, { status: down === true ? 503 : down });
       const { subject, body: text } = JSON.parse(body).state.email as { subject: string; body: string };
-      return Response.json({ model: 'jev-fixture', answers: { spam: { noul: /samplemarker/.test(`${subject}\n${text}`.toLowerCase()) ? 0.99 : 0.01 } }, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } });
+      return Response.json({ model: 'jev-fixture', answers: { harm: { noul: /samplemarker/.test(`${subject}\n${text}`.toLowerCase()) ? 0.99 : 0.01 } }, usage: { input_tokens: Math.ceil(body.length / 4), output_tokens: 1 } });
     });
     return sent;
   }
-  const jevfAnswers = (noul: number) => Response.json({ model: 'jevf', answers: { spam: { type: 'noul', noul } }, usage: { input_tokens: 239, output_tokens: 1 } }, { headers: { 'x-request-id': `req_jevf_${randomUUID()}`, 'x-jevf-preview': 'team-4096' } });
-  const shadowSettings = (deadlineMs = 5000, model = 'jevf') => ({ apiKey: 'jevf-fixture-key', endpoint: JEVF_URL, model, deadlineMs, maxConcurrency: 8 });
+  const jevfAnswers = (noul: number) => Response.json({ model: 'jevf', answers: { harm: { type: 'noul', noul } }, usage: { input_tokens: 239, output_tokens: 1 } }, { headers: { 'x-request-id': `req_jevf_${randomUUID()}`, 'x-jevf-preview': 'team-4096' } });
+  const shadowSettings = (deadlineMs = 5000, model = 'jevf') => ({ apiKey: 'jevf-fixture-key', endpoint: JEVF_URL, model, threshold: 0.50, deadlineMs, maxConcurrency: 8 });
   // The second classifier's queue as Cloudflare runs it under the wrangler config: messages wait, a consumer invocation
   // takes at most four, two invocations run at once, and a batch that is not acknowledged is delivered again, twice at most.
   function jevfQueue(consume: (messages: { body: unknown; attempts: number }[]) => Promise<boolean>, size = 4, concurrency = 2, retries = 2) {
@@ -27700,12 +27773,113 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       queue: { sendBatch: async (messages: { body: string; contentType: 'text' }[]) => { sends.push(messages); for (const message of messages) waiting.push({ body: message.body, attempts: 1 }); pump(); } } };
   }
 
-  test('hosted screen failover: JevF gates on billing and auth errors, leaves SES capacity, and returns to the primary after cool-off', async t => {
+  test('outbound harm gate: JevF at 0.50, bounded fallback to Jev at 0.70, exact wire question and mixed-model campaign windows', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('decisions at send time', async t => {
+      const { loadConfig } = await import('./src/config.js');
+      const acct = '112223330030', { wid } = await hostedScreenFixture(t, runtime, db, acct, 'harm.invalid');
+      const env = { BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, TYPESAFE_API_KEY: 'jev-fixture-key', JEVF_API_KEY: 'jevf-fixture-key', JEV_ENDPOINT: runtime.config.screen!.jev.endpoint };
+      const configure = (overrides: Record<string, string> = {}) => {
+        const { screen, shadow } = loadConfig({ ...env, ...overrides }); Object.assign(runtime.config, { screen, shadow });
+      };
+      configure();
+      const expectedQuestions = { harm: {
+        type: 'noul',
+        instructions: "You screen outgoing email for a sending platform. Flag only mail that would deceive or harm the person receiving it. Cold sales emails and promotions are allowed. Sign-in links, verification codes and account notices from the service the recipient uses are allowed. A notification that merely quotes someone else's message is allowed.",
+        criteria: {
+          true: 'The sender pretends to be a company, bank, courier, government body or news outlet that it is not; asks for passwords, card details, fees or payments under false pretences; promises money, prizes, investment returns or miracle cures that are not real; or sells something illegal such as stolen personal data',
+          false: 'The sender is honest about who it is and what it wants, including unsolicited sales pitches, marketing, receipts, codes and notifications',
+        },
+      } };
+      const calls: { classifier: string; state: Json }[] = [], logs: Json[] = [], shadows: unknown[] = [];
+      runtime.shadow = items => shadows.push(...items);
+      for (const level of ['info', 'warn'] as const) t.mock.method(console, level, (line: string) => { logs.push(JSON.parse(line)); });
+      let outage = '', mixed = false, jevf = 0.49, jev = 0.69;
+      (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init: RequestInit) => {
+        const primary = String(url) === 'https://jevf-inference.opencode.ai/v1/systemone', classifier = primary ? 'jevf' : 'jev';
+        if (!primary) assert.equal(String(url), env.JEV_ENDPOINT);
+        const { model, state, questions } = JSON.parse(String(init.body));
+        assert.deepEqual([init.method, model, questions, new Headers(init.headers).get('authorization')],
+          ['POST', primary ? 'jevf' : 'jev-latest', expectedQuestions, `Bearer ${classifier}-fixture-key`]);
+        calls.push({ classifier, state });
+        if (primary) {
+          const failure = mixed && state.email.body.includes('FallbackWindow') ? 'http_429' : outage;
+          if (failure === 'timeout') return new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason), { once: true }));
+          if (failure === 'network') throw new TypeError('Network connection lost.');
+          if (failure) return new Response(null, { status: Number(failure.slice(5)) });
+        }
+        const score = primary ? state.email.body.includes('FlagThisCopy') ? 0.51 : jevf : jev;
+        // The reported revision is not the routing key. The obsolete answer would produce the opposite decision.
+        const revision = state.email.subject === 'Bad model label' ? state.email.body : primary ? 'fast-r8' : 'stable-r11';
+        return Response.json({ model: revision, answers: { harm: { noul: score }, spam: { noul: 1 - score } } });
+      });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'harm gate', permissions: ['send', 'read'] }), 201);
+      const send = (subject: string, text = 'Private fixture body') => local('POST', '/v1/emails/send',
+        { from: 'news@harm.invalid', to: 'r@example.invalid', subject, text }, 'live', { authorization: `Bearer ${key.secret}` });
+      for (const score of [0.49, 0.50, 0.51]) {
+        jevf = score;
+        const reply = await send(`Private fixture ${score}`);
+        if (score < 0.50) assert.equal(ok(reply, 202).screen.status, 'passed'); else error(reply, 422, 'CONTENT_REJECTED_SPAM');
+        assert.deepEqual(calls.splice(0).map(c => c.classifier), ['jevf']);
+      }
+      assert.equal(shadows.length, 0, 'A JevF decision is not repeated on either endpoint.');
+      error(await send('Bad model label'), 422, 'CONTENT_REJECTED_SPAM');
+      const primaryLine = logs.filter(l => l.code === 'CONTENT_SCREEN_CALL').at(-1)!;
+      assert.deepEqual([primaryLine.classifier, primaryLine.model, primaryLine.score, primaryLine.threshold, primaryLine.failoverReason], ['jevf', 'jevf', 0.51, 0.50, undefined]);
+      const directMs: number[] = [], timeoutMs: number[] = [];
+      for (const reason of ['http_429', 'http_503', 'timeout', 'network']) {
+        // A successful primary between pairs resets the consecutive-failure breaker.
+        outage = ''; jevf = 0.49;
+        const at = performance.now(); ok(await send(`Healthy ${reason}`), 202); directMs.push(Math.round(performance.now() - at)); calls.length = 0;
+        outage = reason;
+        for (const score of [0.69, 0.70]) {
+          jev = score; const began = performance.now(), reply = await send(`Private fixture ${reason} ${score}`);
+          if (reason === 'timeout') timeoutMs.push(Math.round(performance.now() - began));
+          if (score < 0.70) assert.equal(ok(reply, 202).screen.status, 'passed'); else error(reply, 422, 'CONTENT_REJECTED_SPAM');
+          const [first, fallback] = calls.splice(0);
+          assert.deepEqual([first?.classifier, fallback?.classifier, first?.state], ['jevf', 'jev', fallback?.state]);
+          const line = logs.filter(l => l.code === 'CONTENT_SCREEN_CALL').at(-1)!;
+          assert.deepEqual([line.classifier, line.model, line.score, line.threshold, line.failoverReason], ['jev', 'stable-r11', score, 0.70, reason]);
+          if (reason === 'timeout') assert.ok(logs.filter(l => l.code === 'CONTENT_SCREEN_CALL').at(-2)!.ms < 1500, 'Overload cannot consume the 5-second shadow deadline.');
+        }
+      }
+      t.diagnostic(`Synthetic accept path on this runner (ms): healthy JevF ${directMs}; JevF timeout then Jev ${timeoutMs}.`);
+      assert.ok(!/Private fixture|news@harm|r@example|fixture-key/.test(JSON.stringify(logs.filter(l => l.code === 'CONTENT_SCREEN_CALL'))));
+
+      // A clean 0.69 from Jev must not displace a flagged 0.51 from JevF in a later or earlier window.
+      outage = ''; ok(await send('Recovered primary'), 202);
+      mixed = true; jevf = 0.51; jev = 0.69;
+      const filler = 'Synthetic receipt line. '.repeat(400);
+      error(await send('Flagged first', filler + 'FallbackWindow'), 422, 'CONTENT_REJECTED_SPAM');
+      error(await send('Flagged last', 'FallbackWindow ' + filler), 422, 'CONTENT_REJECTED_SPAM');
+      const campaigns = await campaignHarness(runtime, db, local, run, jobs, wid, acct, 'news@harm.invalid');
+      const c = await campaigns.campaign('Mixed windows', '<p>' + filler + 'FallbackWindow</p>', [{ first_name: 'Ada' }]);
+      const stopped = await campaigns.send(c);
+      assert.deepEqual([stopped.state, stopped.delivery.error.code], ['failed', 'CONTENT_REJECTED_SPAM']);
+      assert.deepEqual((await db.query('SELECT model,spam,threshold FROM sending_campaign_screens WHERE campaign_id=$1 AND windows=requests AND windows>1', [c.id])).rows,
+        [{ model: 'fast-r8', spam: 0.51, threshold: 0.50 }]);
+      jevf = 0.49;
+      const personalized = await campaigns.campaign('Personalized', '<p>Hello {{first_name}}</p>', [{ first_name: 'FlagThisCopy' }, { first_name: 'FallbackWindow' }]);
+      assert.equal((await campaigns.send(personalized)).delivery.expanded, 2);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1', [personalized.id])).rows[0].n, 1);
+      assert.deepEqual((await db.query('SELECT spam,threshold FROM sending_campaign_screens WHERE campaign_id=$1 ORDER BY spam', [personalized.id])).rows,
+        [{ spam: 0.49, threshold: 0.50 }, { spam: 0.51, threshold: 0.50 }, { spam: 0.69, threshold: 0.70 }]);
+
+      // Identical bytes under rollback use Jev, not a cached JevF refusal. Either cutoff can be changed independently.
+      configure({ JEV_SCREEN_PRIMARY: 'jev' }); calls.length = 0;
+      assert.equal(ok(await send('Private fixture 0.51'), 202).screen.status, 'passed');
+      assert.deepEqual(calls.splice(0).map(c => c.classifier), ['jev']);
+      configure({ JEV_SCREEN_THRESHOLD: '0.68', JEVF_SCREEN_THRESHOLD: '0.52' }); jevf = 0.51;
+      assert.equal(ok(await send('Private fixture 0.51'), 202).screen.status, 'passed');
+      outage = 'http_503'; error(await send('Overridden fallback cutoff'), 422, 'CONTENT_REJECTED_SPAM');
+    }));
+  });
+
+  test('hosted screen rollback to Jev: JevF gates on billing and auth errors, leaves SES capacity, and returns to the primary after cool-off', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('classifiers', async t => {
       const { loadConfig } = await import('./src/config.js'), { screenWindow } = await import('./src/screen.js');
       const acct = '112223330023', { wid, delivered } = await hostedScreenFixture(t, runtime, db, acct, 'failover.invalid');
       const config = loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, TYPESAFE_API_KEY: 'fixture',
-        JEV_ENDPOINT: runtime.config.screen!.endpoint, JEV_MODEL: 'billing-fixture', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL });
+        JEV_ENDPOINT: runtime.config.screen!.jev.endpoint, JEV_MODEL: 'billing-fixture', JEV_SCREEN_PRIMARY: 'jev', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL });
       runtime.config.screen = config.screen; runtime.config.shadow = config.shadow;
       const comparisons: unknown[] = []; runtime.shadow = items => comparisons.push(...items);
       const key = ok(await local('POST', '/v1/api-keys', { name: 'failover', permissions: ['send', 'read'] }), 201);
@@ -27772,46 +27946,46 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { runDispatcher, initialGate } = await import('./src/dispatcher.js');
       const acct = '112223330029', { wid, delivered } = await hostedScreenFixture(t, runtime, db, acct, 'outage-hold.invalid');
       const config = loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, TYPESAFE_API_KEY: 'fixture',
-        JEV_ENDPOINT: runtime.config.screen!.endpoint, JEV_MODEL: 'outage-hold-fixture', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL });
+        JEV_ENDPOINT: runtime.config.screen!.jev.endpoint, JEV_MODEL: 'outage-hold-fixture', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL });
       runtime.config.screen = config.screen; runtime.config.shadow = config.shadow;
       const key = ok(await local('POST', '/v1/api-keys', { name: 'outage-hold', permissions: ['send', 'read'] }), 201);
       const hook = ok(await local('POST', '/v1/webhooks', { url: 'https://example.com/hooks/outage-reject', eventTypes: ['email.rejected'] }), 201);
       const auth = { authorization: `Bearer ${key.secret}` };
       const logs: Json[] = []; for (const level of ['warn', 'info'] as const) t.mock.method(console, level, (line: string) => { try { logs.push(JSON.parse(line)); } catch {} });
-      let jevMode: 'ok' | '451' | '503' | 'timeout' = '451', jevfMode: 'ok' | '503' = 'ok';
+      let primaryMode: 'ok' | '451' | '503' | 'timeout' = '451', backupMode: 'ok' | '503' = 'ok';
       let jevCalls = 0, jevfCalls = 0;
       (globalThis.fetch as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (url: RequestInfo | URL, init?: RequestInit) => {
         const body = String(init?.body ?? '');
         const isSpam = /buy cheap crypto/i.test(body), poison = /poison row/i.test(body);
         if (String(url) === JEVF_URL) {
           jevfCalls++;
-          if (jevfMode === '503' || poison) return new Response(null, { status: 503 });
+          if (primaryMode === '451') return new Response(null, { status: 451 });
+          if (primaryMode === '503' || poison) return new Response(null, { status: 503 });
+          if (primaryMode === 'timeout') return new Promise<never>((_, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
           return jevfAnswers(isSpam ? 0.99 : 0.05);
         }
         jevCalls++;
-        if (jevMode === '451') return new Response(null, { status: 451 });
-        if (jevMode === '503' || poison) return new Response(null, { status: 503 });
-        if (jevMode === 'timeout') return new Promise<never>((_, reject) => init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)));
-        return Response.json({ model: 'jev-fixture', answers: { spam: { noul: isSpam ? 0.99 : 0.05 } } });
+        if (backupMode === '503' || poison) return new Response(null, { status: 503 });
+        return Response.json({ model: 'jev-fixture', answers: { harm: { noul: isSpam ? 0.99 : 0.05 } } });
       });
       const dispatch = () => runDispatcher(runtime, { region: REGION, accountId: acct, gate: initialGate(), lanes: 1 });
       const send = (subject: string, text = 'Hello there', to = 'user@example.invalid') =>
         local('POST', '/v1/emails/send', { from: 'a@outage-hold.invalid', to, subject, text }, 'live', auth);
 
-      // 1. Jev 451 fails over to JevF without tripping the primary breaker: 4 consecutive 451s still try Jev every time.
+      // 1. JevF 451 fails over to Jev without tripping the primary breaker: 4 consecutive 451s still try JevF every time.
       for (let i = 0; i < 4; i++) {
         const r = ok(await send(`Edge451-${i}`), 202);
         assert.equal(r.screen?.status, 'passed');
       }
-      assert.deepEqual([jevCalls, jevfCalls], [4, 4], 'Every 451 fails over to JevF without tripping the global primary breaker');
+      assert.deepEqual([jevCalls, jevfCalls], [4, 4], 'Every 451 fails over to Jev without tripping the global primary breaker');
       assert.equal((await dispatch()).sent, 4);
 
-      // 2. Spam during Jev 451 failover (JevF answers spam) still rejects synchronously with 422 CONTENT_REJECTED_SPAM.
+      // 2. Spam during JevF 451 failover (Jev answers spam) still rejects synchronously with 422 CONTENT_REJECTED_SPAM.
       error(await send('Spam over 451', 'Buy cheap crypto now!'), 422, 'CONTENT_REJECTED_SPAM');
       assert.deepEqual([jevCalls, jevfCalls], [5, 5]);
 
-      // 3. Dual outage: Jev 451 + JevF 503 accepts (202, same shape, screen omitted) and holds unscreened.
-      jevfMode = '503';
+      // 3. Dual outage: JevF 451 + Jev 503 accepts (202, same shape, screen omitted) and holds unscreened.
+      backupMode = '503';
       const heldClean = ok(await send('Held clean 451+503', 'Your login link is ready', 'clean451@example.invalid'), 202);
       const heldSpam = ok(await send('Held spam 451+503', 'Buy cheap crypto right now!', 'spam451@example.invalid'), 202);
       assert.equal(heldClean.screen, undefined);
@@ -27820,16 +27994,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(delivered.has('clean451@example.invalid'), false);
       assert.equal(delivered.has('spam451@example.invalid'), false);
 
-      // 4. Jev 503 + JevF 503 and Jev timeout + JevF 503: accept & hold AND 3 consecutive 5xx/timeouts trip the primary breaker.
-      const jevBefore5xx = jevCalls;
-      jevMode = '503';
+      // 4. JevF 503 + Jev 503 and JevF timeout + Jev 503: accept & hold AND 3 consecutive 5xx/timeouts trip the primary breaker.
+      const before5xx = jevfCalls;
+      primaryMode = '503';
       const held503a = ok(await send('Held 503-a', 'Body A', 'h503a@example.invalid'), 202);
       const held503b = ok(await send('Held 503-b', 'Body B', 'h503b@example.invalid'), 202);
-      jevMode = 'timeout';
+      primaryMode = 'timeout';
       const heldTimeout = ok(await send('Held timeout', 'Body C', 'htimeout@example.invalid'), 202);
-      // 4th request while breaker is open skips Jev completely (goes straight to JevF, which is 503 -> held).
+      // 4th request while breaker is open skips JevF completely (goes straight to Jev, which is 503 -> held).
       const heldBreakerOpen = ok(await send('Held breaker open', 'Body D', 'hbreaker@example.invalid'), 202);
-      assert.equal(jevCalls - jevBefore5xx, 3, 'Three consecutive 5xx/timeouts trip the primary breaker; 4th skips Jev');
+      assert.equal(jevfCalls - before5xx, 3, 'Three consecutive 5xx/timeouts trip the primary breaker; 4th skips JevF');
       assert.equal((await dispatch()).sent, 0);
 
       // 5. Ongoing dual outage during screenHeldMail: aborts early after 4 consecutive failures, releases unattempted rows,
@@ -27843,10 +28017,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const unattempted = (await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE id=ANY($1) AND lease_until IS NULL', [[heldClean.id, heldSpam.id, held503a.id, held503b.id, heldTimeout.id, heldBreakerOpen.id]])).rows[0].n;
       assert.equal(unattempted, 2, 'Unattempted rows from an outage-aborted chunk have their lease cleared immediately');
 
-      // 6. JevF recovers (while Jev breaker is still open): screenHeldMail screens all 6 held rows, passes 5 clean rows,
+      // 6. Jev recovers (while JevF breaker is still open): screenHeldMail screens all 6 held rows, passes 5 clean rows,
       //    rejects the 1 spam row with email.rejected webhook, logs remaining=0, and mail room delivers all 5 clean rows.
       await db.query('UPDATE sending_emails SET lease_until = NULL WHERE workspace_id = $1 AND NOT screened', [wid]);
-      jevfMode = 'ok';
+      backupMode = 'ok';
       logs.length = 0;
       const recovered = await screenHeldMail(runtime);
       assert.deepEqual(recovered, { leased: 6, passed: 5, rejected: 1, deferred: 0, remaining: 0 });
@@ -27901,7 +28075,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const acct = '112223330021', started = new Date(Date.now() - 1000).toISOString(), { wid } = await hostedScreenFixture(t, runtime, db, acct, 'shadow.invalid');
       // The second classifier flags a copy that greets Ben, which the screen passes, and passes SampleMarker, which the screen flags.
       let jevDown = false;
-      const sent = twoClassifiers((_init, body) => jevfAnswers(/hello ben/i.test(body) ? 0.91 : 0.1037), () => jevDown);
+      const sent = twoClassifiers((_init, body) => jevfAnswers(/hello ben/i.test(body) ? 0.61 : 0.1037), () => jevDown);
       let throttle = 0;
       (SESv2Client.prototype.send as unknown as { mock: { mockImplementation(fn: unknown): void } }).mock.mockImplementation(async (cmd: unknown) => {
         if (cmd instanceof GetAccountCommand) return { SendingEnabled: true, SendQuota: { MaxSendRate: 10000, Max24HourSend: 1000000, SentLast24Hours: 0 } };
@@ -28008,7 +28182,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(report.agreement.threshold, { min: 0.7, max: 0.7 });
       assert.deepEqual(report.disagreements.map((d: Json) => [d.pairId, d.kind, d.emailId, d.campaignId, d.digest, d.window, d.jevScore, d.jevfScore, d.threshold]).sort(),
         all.filter(x => both(x) && x.jev_flagged !== x.jevf_flagged).map(x => [x.pair_id, x.kind, x.email_id, x.campaign_id, x.digest, x.window_index, x.jev_score, x.jevf_score, 0.7]).sort());
-      assert.deepEqual(report.disagreements.map((d: Json) => [d.kind, d.emailId ?? d.campaignId, d.jevScore, d.jevfScore]).filter((d: unknown[], i: number, list: unknown[][]) => list.findIndex(o => String(o) === String(d)) === i).sort(), [['campaign_copy', long.id, 0.01, 0.91], ['email', spam, 0.99, 0.1037]]);
+      assert.deepEqual(report.disagreements.map((d: Json) => [d.kind, d.emailId ?? d.campaignId, d.jevScore, d.jevfScore]).filter((d: unknown[], i: number, list: unknown[][]) => list.findIndex(o => String(o) === String(d)) === i).sort(), [['campaign_copy', long.id, 0.01, 0.61], ['email', spam, 0.99, 0.1037]]);
       assert.equal(report.scoreDifference.histogram.reduce((sum: number, step: Json) => sum + step.count, 0), all.length - 1);
       assert.ok(report.scoreDifference.meanAbsolute > 0 && report.scoreDifference.p99Absolute >= report.scoreDifference.p50Absolute);
       assert.deepEqual([report.latencyMs.jev.requests, report.latencyMs.jevf.requests], [all.length, all.length]);
@@ -28168,7 +28342,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const runner = new ShadowRunner({ ...shadowSettings(300), maxConcurrency: 1 }, async batch => { rows.push(...batch); }, { failuresToOpen: 3, openMs: 400 });
     let made = 0;
     const item = (request = true) => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
-      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.2, model: 'jev' }, ...(request ? { request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } } : {}) });
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.2, model: 'jev' }, ...(request ? { request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { harm: {} } } } : {}) });
     const feed = async (count: number, request = true) => { const from = rows.length; runner.accept(Array.from({ length: count }, () => item(request))); await runner.settled(); return rows.slice(from).map(row => row.jevf_outcome); };
     const failing = () => new Response(null, { status: 500 });
 
@@ -28194,7 +28368,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     answer = () => new Response(null, { status: 413 }); assert.deepEqual(await feed(1), ['refused_too_large']);
     // Another 400, an answer without a score, a request that hangs to the deadline, and one kept without its text.
     answer = () => new Response('{"error":"unknown model"}', { status: 400 }); assert.deepEqual(await feed(1), ['http_400']);
-    answer = () => Response.json({ answers: { spam: { noul: 7 } } }); assert.deepEqual(await feed(1), ['invalid']);
+    answer = () => Response.json({ answers: { harm: { noul: 7 } } }); assert.deepEqual(await feed(1), ['invalid']);
     answer = fine; assert.deepEqual(await feed(1), ['ok']);
     answer = init => new Promise<never>((_, reject) => init.signal!.addEventListener('abort', () => reject(init.signal!.reason)));
     const hung = Date.now(); assert.deepEqual(await feed(1), ['timeout']); assert.ok(Date.now() - hung >= 250 && rows.at(-1)!.jevf_ms >= 250);
@@ -28214,7 +28388,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     let calls = 0, active = 0, peak = 0, made = 0;
     t.mock.method(globalThis, 'fetch', async () => { calls++; peak = Math.max(peak, ++active); await new Promise(resolve => setTimeout(resolve, 20)); active--; return jevfAnswers(0.2); });
     const items = (count: number, body = 'Private body') => Array.from({ length: count }, () => ({ id: `pair-${++made}`, at: Date.now(), workspaceId: 'ws_fixture', kind: 'email' as const, emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
-      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body } }, questions: { spam: {} } } }));
+      jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body } }, questions: { harm: {} } } }));
     // Where rows go: a pair is kept once, as the table keeps it; `fail` makes the next writes fail.
     const rows = new Map<string, Json>(); let fail = 0, lookups = 0;
     const store = { write: async (batch: Json[]) => { if (fail-- > 0) throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }); for (const row of batch) if (!rows.has(row.pair_id)) rows.set(row.pair_id, row); },
@@ -28286,7 +28460,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     let calls = 0; const asked: string[] = [];
     t.mock.method(globalThis, 'fetch', async (url: RequestInfo | URL, init: RequestInit) => { calls++; assert.equal(String(url), JEVF_URL); asked.push(String(init.body)); return jevfAnswers(0.2); });
     const env = (key?: string) => ({ PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
-      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', ...(key ? { JEVF_API_KEY: key, JEVF_ENDPOINT: JEVF_URL } : {}),
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', JEV_SCREEN_PRIMARY: 'jev', TYPESAFE_API_KEY: 'jev-fixture-key', ...(key ? { JEVF_API_KEY: key, JEVF_ENDPOINT: JEVF_URL } : {}),
       HYPERDRIVE: { connectionString: FIXTURE_DATABASE_URL }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
       FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, JEVF_QUEUE: { async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } } });
     let made = 0;
@@ -28294,7 +28468,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const state = { acked: 0, retried: 0 };
       return { state, queue: 'fixture-jevf', ackAll() { state.acked++; }, retryAll() { state.retried++; }, messages: Array.from({ length: count }, () => ({ attempts, timestamp: new Date(), ack() {}, retry() {},
         body: JSON.stringify({ id: `${wid}-${++made}`, at: Date.now(), workspaceId: wid, kind: 'email', emailId: `email-${made}`, digest: 'd'.repeat(64), window: 0, windows: 1, threshold: 0.7,
-          jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } } }) })) };
+          jev: { outcome: 'ok', httpStatus: 200, ms: 5, score: 0.9, model: 'jev' }, request: { state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { harm: {} } } }) })) };
     };
     const stored = async () => (await db.query('SELECT pair_id,jev_score,jev_flagged,jevf_outcome,jevf_score,jevf_flagged,jevf_model FROM screen_comparisons WHERE workspace_id=$1 ORDER BY created_at,id', [wid])).rows;
     // Without the key: acknowledged, so the queue empties, with no request and no row.
@@ -28303,7 +28477,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // With it: each message's request goes to the second classifier under its key's model, and its row is written.
     const first = batch(3); await worker.queue(first, env('jevf-fixture-key'));
     assert.deepEqual([first.state, calls], [{ acked: 1, retried: 0 }, 3]);
-    assert.deepEqual(asked.map(body => JSON.parse(body)), Array(3).fill({ model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { spam: {} } }));
+    assert.deepEqual(asked.map(body => JSON.parse(body)), Array(3).fill({ model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { harm: {} } }));
     assert.deepEqual((await stored()).map(row => [row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged, row.jevf_model]), Array(3).fill([0.9, true, 'ok', 0.2, false, 'jevf']));
     // The same messages delivered again: no request, no second row. A message delivered again that never had a row: lost.
     await worker.queue({ ...first, messages: first.messages.map(message => ({ ...message, attempts: 2 })) }, env('jevf-fixture-key'));
@@ -28332,13 +28506,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const state = { email: { from: 'news@example.invalid', kind: 'marketing', subject: 'Private subject', body: 'Private body' }, signals: { recipients: 1 } };
     let screened = 0;
     jobHandlers[type] = async runtime => { await screenWindow(runtime, { requests: [state] }, 0, { workspaceId: wid, campaignId: 'cmp_fixture', kind: 'marketing', required: true }, 'c'.repeat(64)); screened++; };
-    t.mock.method(globalThis, 'fetch', async () => Response.json({ model: 'jev-fixture', answers: { spam: { noul: 0.01 } } }));
+    t.mock.method(globalThis, 'fetch', async () => Response.json({ model: 'jev-fixture', answers: { harm: { noul: 0.01 } } }));
     // The second classifier's queue takes the send and does not answer until released.
     const sends: { body: string }[][] = [], waited: Promise<unknown>[] = [];
     let release!: () => void, settled = false;
     const pending = new Promise<void>(resolve => { release = resolve; });
     const env = { PUBLIC_URL: 'https://dev.bane.mx', BANE_ROOT_SECRET: 's'.repeat(32), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', DEFAULT_SES_REGION: 'us-east-2', ENABLE_LIVE_SES: 'false',
-      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', TYPESAFE_API_KEY: 'jev-fixture-key', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL,
+      WORK_QUEUE_NAME: 'bane-dev-work', FEEDBACK_QUEUE_NAME: 'bane-dev-feedback', JEVF_QUEUE_NAME: 'fixture-jevf', JEV_SCREEN_PRIMARY: 'jev', TYPESAFE_API_KEY: 'jev-fixture-key', JEVF_API_KEY: 'jevf-fixture-key', JEVF_ENDPOINT: JEVF_URL,
       HYPERDRIVE: { connectionString: scoped.href }, ATTACHMENTS: { async put() {}, async get() { return null; }, async delete() {} }, WAKE_QUEUE: { async send() {} },
       FEEDBACK_QUEUE: { async send() {}, async sendBatch() {} }, ADMISSION: { async limit() { return { success: true }; } },
       JEVF_QUEUE: { sendBatch: (messages: { body: string }[]) => { sends.push(messages); return pending; } } };
@@ -28396,7 +28570,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (const bad of [`https://evil.invalid/unsubscribe/u_${token}`, `${origin}.evil.invalid/unsubscribe/u_${token}`, `${origin}/unsubscribe/u_${token.slice(1)}`, `${origin}/unsubscribe/u_${token.toUpperCase()}`,
         `${origin}/unsubscribe/u_${token.slice(1)}g`, `${origin}/unsubscribe/u_${token}/x`, `${origin}/unsubscribe/u_${token}?next=x`, `${origin}/x/unsubscribe/u_${token}`, 'not-a-generated-url', ''])
         assert.throws(() => withUnsubscribe(runtime, customer(), bad), (e: { code?: string }) => e.code === 'UNSUBSCRIBE_LINK_INVALID', bad);
-      runtime.config.screen = { ...runtime.config.screen!, model: 'fixture-next' };
+      runtime.config.screen!.jev = { ...runtime.config.screen!.jev, model: 'fixture-next' };
       assert.notEqual(await key(), base, 'Another model: another key.');
     }));
   });
@@ -35588,7 +35762,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const source = (fn: string) => `export default function route(email,ctx){\n  const r = ${fn}(email, { refund: "Is the sender asking for a refund?", urgent: { prompt: "Does this need a reply today?", type: "boolean", threshold: 0.8 } })\n  if (r.refund >= 0.7) label("refund")\n  if (r.urgent) endpoints["support-hook"]({ subject: "urgent" })\n}`;
         const { compileRitual } = await import('./src/ritual-engine.js');
         assert.deepEqual(compileRitual(source('omens')), compileRitual(source('decisions')), 'one compiled plan');
-        runtime.config.screen = { apiKey: 'synthetic', endpoint: 'https://jev.invalid/fixture', model: 'synthetic', mode: 'reject', threshold: 0.7 };
+        runtime.config.screen = { primary: 'jev', mode: 'reject', jev: { apiKey: 'synthetic', endpoint: 'https://jev.invalid/fixture', model: 'synthetic', threshold: 0.7 } };
         // The AI answers e0 and e1 in the order of the sorted questions: the reply-today one, then the refund one.
         const stub = it.mock.method(globalThis, 'fetch', async () => Response.json({ answers: { e0: { noul: 0.95 }, e1: { noul: 0.9 } } }));
         try {
@@ -35673,7 +35847,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The tests below write the config with the keys from before the rename (rituals, ritual, omens(…)), which the rule
       // operations still accept.
       await t.test('rituals: opt-in unions Jev questions, replays recorded scores and lets scripts choose the action',async it=>{
-        const path='/v1/rules',prior=runtime.config.screen;runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};let calls=0;
+        const path='/v1/rules',prior=runtime.config.screen;runtime.config.screen={ primary: 'jev', mode: 'reject', jev: { apiKey: 'synthetic', endpoint: 'https://jev.invalid/fixture', model: 'synthetic', threshold: 0.7 } };let calls=0;
         const questions=(start:number,count:number)=>Array.from({length:count},(_,i)=>`q${start+i}:"question ${start+i}?"`).join(',');
         const opt={attachments:[{ritual:'one',target:box.address},{ritual:'two',target:box.id}],evaluateDomains:['receive.example']};
         error(await local('PUT',path,{...opt,rituals:['one','two'].map((key,i)=>({key,source:`export default function route(email){const r=omens(email,{${questions(i*6,i?5:6)}});}` }))}),422,'RULE_INVALID');
@@ -35681,7 +35855,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await assert.rejects(ingest('defer-deadline',[box.address]),(await import('./src/jobs.js')).JobDeferred);
         await db.query("UPDATE mail_receipts SET created_at=now()-interval '31 minutes' WHERE workspace_id=$1 AND ses_message_id='defer-deadline'",[wid]);
         await run('mailbox.ingest',{sesMessageId:'defer-deadline'});assert.ok((await db.query("SELECT l.labels FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id WHERE m.workspace_id=$1 AND m.ses_message_id='defer-deadline'",[wid])).rows[0].labels.includes('ritual-error'));
-        runtime.config.screen={apiKey:'synthetic',endpoint:'https://jev.invalid/fixture',model:'synthetic',mode:'reject',threshold:0.7};
+        runtime.config.screen={ primary: 'jev', mode: 'reject', jev: { apiKey: 'synthetic', endpoint: 'https://jev.invalid/fixture', model: 'synthetic', threshold: 0.7 } };
         const stub=it.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(input),'https://jev.invalid/fixture');const req=JSON.parse(String(init?.body));calls++;assert.match(req.state.notice,/untrusted/i);assert.equal(Object.keys(req.questions).length,2);return Response.json({answers:{e0:{noul:0.97},e1:{noul:0.98}}})});
         try{const config={rituals:[{key:'refund',source:'export default function route(email,ctx){const r=omens(email,{refund:"Requests a refund?"});if(r.refund>0.8)label("refund")}'},{key:'review',source:'export default function route(email,ctx){const r=omens(email,{urgent:{prompt:"Needs a reply today?",type:"boolean",threshold:0.9}});if(r.urgent)label("urgent") }'}],attachments:[{target:box.id,ritual:'refund',continue:true},{target:box.address,ritual:'review'}]};await call('PUT',path,config);await ingest('eval-off',[box.address]);assert.equal(calls,0);await call('PUT',path,{...config,evaluateDomains:['receive.example']});const held=await ingest('eval-on',[box.address]);assert.equal(calls,1);assert.ok((await db.query('SELECT labels FROM mailbox_messages WHERE message_id=$1 AND mailbox_id=$2',[held.id,box.id])).rows[0].labels.includes('urgent'));const test=await call('POST',path+'/test',{messageId:held.id});assert.equal(test.trace.at(-1).scores.urgent,true);assert.equal(calls,1);
         }finally{stub.mock.restore();runtime.config.screen=prior;await call('PUT',path,{})}
@@ -41253,15 +41427,15 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(loadConfig({ ...base, MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', [flag]: 'true', BANE_PLATFORM_AWS_ACCOUNT: '000011112222' }).platformAccount, '000011112222');
       }
       assert.equal(loadConfig({ ...base, BANE_REGIONAL_SENDING: 'true' }).platformAccount, undefined, 'Single-tenant installs need no platform account.');
-      assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', mode: 'reject', threshold: 0.7 });
-      assert.equal(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-console-key', JEV_ENDPOINT: 'https://opencode.ai/inference/systemone/v1/systemone', JEV_MODEL: 'jev-1.13-free' }).screen?.endpoint, 'https://opencode.ai/inference/systemone/v1/systemone');
+      assert.deepEqual(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-typesafe-key' }).screen, { primary: 'jev', mode: 'reject', jev: { apiKey: 'synthetic-typesafe-key', endpoint: 'https://api.typesafe.ai/v1/systemone', model: 'jev-latest', threshold: 0.7 }, jevf: undefined });
+      assert.equal(loadConfig({ ...base, TYPESAFE_API_KEY: 'synthetic-console-key', JEV_ENDPOINT: 'https://opencode.ai/inference/systemone/v1/systemone', JEV_MODEL: 'jev-1.13-free' }).screen?.jev.endpoint, 'https://opencode.ai/inference/systemone/v1/systemone');
       // Screened-text limits: 24 KiB per message, 48 KiB per campaign (screened once), both configurable.
       assert.deepEqual(loadConfig(base).screenLimits, { messageBytes: 65536, campaignBytes: 131072 });
       assert.deepEqual(loadConfig({ ...base, JEV_MESSAGE_LIMIT_BYTES: '16384', JEV_CAMPAIGN_LIMIT_BYTES: '65536' }).screenLimits, { messageBytes: 16384, campaignBytes: 65536 });
       // Synthetic live provider: the SDK prototype is intercepted, so no credential or AWS endpoint is used.
       runtime.config.liveEnabled = true;
       runtime.config.aws = { accessKeyId: 'SYNTHETIC_ACCESS_KEY', secretAccessKey: 'synthetic-secret-not-an-aws-credential' };
-      runtime.config.screen = { apiKey: 'synthetic-typesafe-key', endpoint: 'https://jev.synthetic.invalid/v1/systemone', model: 'jev-test', mode: 'reject', threshold: 0.7 };
+      runtime.config.screen = { primary: 'jev', mode: 'reject', jev: { apiKey: 'synthetic-typesafe-key', endpoint: 'https://jev.synthetic.invalid/v1/systemone', model: 'jev-test', threshold: 0.7 } };
       const topic = `arn:aws:sns:${REGION}:111122223333:synthetic-feedback`;
       await db.query(`INSERT INTO ses_region_discovery(workspace_id, region, report, credentials_fingerprint, public_url, trusted_account_id, trusted_topic_arn)
         VALUES ($1, $2, $3, $4, $5, '111122223333', $6)`, [runtime.config.workspaceId, REGION,
@@ -41287,7 +41461,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(new Headers(init?.headers).get('authorization'), 'Bearer synthetic-typesafe-key');
         const request = JSON.parse(String(init?.body));
         assert.equal(request.model, 'jev-test');
-        assert.equal(request.questions.spam.type, 'noul');
+        assert.equal(request.questions.harm.type, 'noul');
         assert.equal(request.state.signals.recipients, 1);
         classified.push(request.state.email.subject);
         if (classifierDown && request.state.email.subject === 'Unresponsive classifier') {
@@ -41297,7 +41471,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           }, { once: true }));
         }
         if (classifierDown) return new Response(null, { status: 429 });
-        return Response.json({ model: 'jev-test', answers: { spam: { noul: request.state.email.subject.includes(marker) ? 0.97 : 0.02 } } });
+        return Response.json({ model: 'jev-test', answers: { harm: { noul: request.state.email.subject.includes(marker) ? 0.97 : 0.02 } } });
       });
       const send = async (extra: Json) => ok(await local('POST', '/v1/emails/send', mail(extra), 'live'), 202).id as string;
       const get = async (emailId: string) => ok(await local('GET', `/v1/emails/${emailId}`, undefined, 'live'));

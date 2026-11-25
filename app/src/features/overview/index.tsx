@@ -64,8 +64,9 @@ export function OverviewPage() {
   const client = useQueryClient()
   // A test from the first-send card shows in Latest emails and the figures; the card keeps its confirmation for this visit.
   const sentFromCard = () => void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
-  // The card leads with its own actions, so the setup steps don't offer them again beside it.
-  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : ['key', 'send']) : setup
+  // The card leads with its own actions, so the setup steps don't offer them again beside it (the key stays there: the
+  // first-send card copies the agent prompt instead).
+  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : ['send']) : setup
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
   const count = useLatestRowCount(card ? ONBOARDING_CARD_SPACE[card] : 0)
@@ -339,9 +340,8 @@ function Line({ xs, ys, minY, maxY, tone, keep = () => true }: { xs: number[]; y
 }
 // The activity chart: spans the exact [periodStart, periodEnd] window end to end (left edge to right edge "Now"), with
 // missing buckets zero-filled so there are no gaps or cutoffs. Emails draw as a smooth monotone line with a subtle wash
-// scaled strictly to visible data; bounces and complaints share a dedicated secondary scale in the lower 58% of the plot
-// so small counts never vanish. Their latest values label the right edge (switching to the secondary scale on hover), and
-// a crosshair + readout inspect any bucket.
+// scaled strictly to visible data; bounces and complaints appear as count-scaled baseline markers only in buckets where
+// they are > 0, and a hover crosshair + readout inspect exact raw bucket counts. New counts over the same buckets morph.
 function ActivityChart({ data }: { data: Overview }) {
   const target = data.points
   const washId = useId()

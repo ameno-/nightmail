@@ -35,6 +35,8 @@
 /* In Overview's explainer dialog: wide enough for the table. */
 .ui-dialog.limits-dialog:not(.ui-dialog--sheet) { width: min(640px, calc(100vw - 32px)); }
 .limits-dialog__docs { display: inline-block; margin-top: var(--space-16); font-size: var(--text-sm); }
+/* Sending from the built-in domain: its cap, above the table of the limits that follow it. */
+.limits-dialog__builtin { margin: 0 0 var(--space-16); font-size: var(--text-sm); line-height: var(--leading-sm); }
 /* Phone: four columns must fit without sideways scrolling, so cells wrap and the first column gives way. */
 @media (max-width: 640px) {
   .limits-table :is(th, td) { height: auto; padding: var(--space-6) var(--space-8) var(--space-6) 0; white-space: normal; vertical-align: top; }

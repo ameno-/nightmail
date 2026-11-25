@@ -202,7 +202,7 @@ export type ConnectionSummary = {
         id: string | null;
         name: string;
         /**
-         * ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).
+         * ready: it sends now (in a new workspace's first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).
          */
         sending: 'ready' | 'pending' | 'closed' | 'off';
         /**
@@ -215,6 +215,10 @@ export type ConnectionSummary = {
         scope: 'anyone' | 'members';
         perDay: number;
         perMinute: number;
+        /**
+         * Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.
+         */
+        used: number;
     } | null;
     /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
@@ -1398,7 +1402,7 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
+     * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
     /**
@@ -1482,7 +1486,7 @@ export type BatchSendEmailItem = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
+     * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
 };

@@ -18,7 +18,7 @@ import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restartRampWindow, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, setRamp, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
 import { ADMISSION_MS, roomName } from './campaign-room-protocol.js';
-import type { CampaignScreen } from './screen.js';
+import type { CampaignScreen, ScreenResult } from './screen.js';
 export { simulatedTopic, taggedEmailId, terminalColumns, terminalEvents };
 import { regionalSending, sendingConnections, type SendingBinding } from './domain-claims.js';
 import { lockSendScope, type SendScope } from './send-scope.js';
@@ -42,7 +42,7 @@ import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
-import { assertBuiltinInput, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { assertBuiltinInput, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
 import { estimateFinish, judgeReadiness, RAMP, RAMP_HOUR_MS, rampPlan, rampStart, READINESS_REASONS, type RampAt, type ReadinessReason } from './standing-model.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -123,7 +123,7 @@ const SendInput = z.object({
   region: Region.optional().describe(`Usually omitted: hosted ${productName} sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.`), kind: z.enum(['transactional', 'marketing']).default('transactional').describe(`marketing adds ${productName}'s footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers.`), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
-  screen: z.boolean().optional().describe('Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.'),
+  screen: z.boolean().optional().describe('Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.'),
 }).strict().superRefine((v, ctx) => {
   if (v.template ? (v.subject !== undefined || v.html !== undefined || v.text !== undefined) : (!v.subject || (!v.html && !v.text))) ctx.addIssue({ code: 'custom', message: 'Provide subject and html/text, or template, but not both.' });
   if ((Array.isArray(v.to) ? v.to.length : 1) + v.cc.length + v.bcc.length > 50) ctx.addIssue({ code: 'custom', message: 'At most 50 recipients across to/cc/bcc.' });
@@ -133,7 +133,7 @@ const SendInput = z.object({
 // The screen's limits (src/screen.ts), as the API reference states them; the defaults of JEV_MESSAGE_LIMIT_BYTES and JEV_CAMPAIGN_LIMIT_BYTES.
 const screenBytes = (n: number) => n.toLocaleString('en-US'), SCREEN = SEND_LIMITS.screen;
 const RAMP_NOTE = `Marketing ramp: on Hosted sending, a workspace still ramping up (a new sender, exempt and first-party ones included) sends kind: marketing at most its ramp step's hourly ceiling (${RAMP.steps.map(x => x.ceilingPerHour.toLocaleString('en-US')).join(', ')} recipients an hour), shared with its campaigns. A send that would cross it is refused with nothing queued (a batch as a whole): retryable 429 RAMP_LIMIT_REACHED, with Retry-After (seconds until more room opens) and error.details[0] holding { step, steps, ceilingPerHour, usedThisHour, fitsNow, requested, stepOpensAt }. A scheduled marketing send is refused the same way when it is scheduled if it is larger than the step's whole ceiling, or if with the marketing already scheduled within 24 hours either side of its time it is more than the step sends in 24 hours (error.details[0] adds { scheduledBacklog, dailyBudget }); one that fits is held at its time until its hour has room (it stays scheduled, scheduledAt moving to when it tries again, with a dispatch_deferred event), never rejected for the ramp. While the workspace ramps and a campaign of it is stopped by the automatic pause, the list probe or the ramp's check (LIST_QUALITY, BOUNCE_RATE_HIGH, COMPLAINT_RATE_HIGH) and not resumed or canceled, marketing sends and schedules are refused with 409 RAMP_PAUSED (not retryable; error.details[0] holds { campaignId, pauseCode }): review and resume that campaign first. For a large list, send a campaign instead: campaigns are paced automatically. Transactional mail is never ramped or paused by it.`;
-const SCREEN_LIMIT_NOTE = `Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).`;
+const SCREEN_LIMIT_NOTE = `Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the outbound harm screen synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most ${screenBytes(SCREEN.messageBytes)} UTF-8 bytes per message (installation default) and ${SCREEN.linkHosts} distinct link hosts (${screenBytes(SCREEN.linkHostBytes)} bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).`;
 const CAMPAIGN_SCREEN_NOTE = `Hosted campaigns screen every distinct copy during launch and prepare before any row enters the sending queue, each distinct copy only once: recipients whose personalized copies read the same share one verdict. The campaign\u2019s own copy, placeholders unresolved, is screened first and may hold ${screenBytes(SCREEN.campaignBytes)} bytes of screened text (installation default; 422 CONTENT_TOO_LARGE_TO_SCREEN with error.details[0] { screenedBytes, limitBytes } otherwise); so may each copy. A failing copy never enters the sending queue (CONTENT_REJECTED_SPAM); when refused copies pass 5% and 10 recipients the campaign pauses once for review, and a positive verdict on the campaign\u2019s own copy fails it before anyone is sent to.`;
 // The audience is frozen inside the launch request (sending.ts launch): a large one takes seconds, and one statement of it
 // may run out of the database's time.
@@ -1545,7 +1545,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
   }
   const screen = await loadScreen();
   const scopedRuntime: Runtime = { ...runtime, config: { ...runtime.config, workspaceId: a.workspaceId } };
-  type JudgedVerdict = { kind: 'judged'; task: ScreenTask; result: { spam: number; model: string; digest?: string }; rejected: boolean };
+  type JudgedVerdict = { kind: 'judged'; task: ScreenTask; result: ScreenResult; rejected: boolean };
   type UnavailableVerdict = { kind: 'unavailable'; task: ScreenTask; message: string };
   type Verdict = JudgedVerdict | UnavailableVerdict;
   const verdicts: Verdict[] = new Array(tasks.length);
@@ -1571,7 +1571,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
             continue;
           }
           failing = 0;
-          const rejected = result.spam >= settings.threshold && (task.required || settings.mode === 'reject');
+          const rejected = result.spam >= result.threshold && (task.required || settings.mode === 'reject');
           verdicts[pos] = { kind: 'judged', task, result, rejected };
         } catch (error) {
           if (error instanceof ApiError && error.code === 'CONTENT_SCREEN_UNAVAILABLE') {
@@ -1601,11 +1601,11 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
         WHERE hosted_real_cost(x.recipients) > 0`)).catch(() => {});
     }
     for (const r of rejected) {
-      log('warn', { code: 'CONTENT_REJECTED_SPAM', workspaceId: a.workspaceId, emailId: r.task.message.emailId, spam: r.result.spam, model: r.result.model, threshold: settings.threshold });
+      log('warn', { code: 'CONTENT_REJECTED_SPAM', workspaceId: a.workspaceId, emailId: r.task.message.emailId, spam: r.result.spam, model: r.result.model, threshold: r.result.threshold });
     }
     await flushScreenObservability(runtime).catch(() => {});
     const first = rejected[0]!;
-    const err = new ApiError(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this message to be unsolicited advertising.', batch ? `emails.${first.task.index}` : undefined);
+    const err = new ApiError(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this message to be deceptive or harmful.', batch ? `emails.${first.task.index}` : undefined);
     if (batch) err.details = rejected.map(r => ({ index: r.task.index, code: 'CONTENT_REJECTED_SPAM' }));
     throw err;
   }
@@ -1617,7 +1617,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
       log('warn', { code: 'CONTENT_SCREEN_HELD', workspaceId: a.workspaceId, emailId: v.task.message.emailId, region: v.task.region, kind: v.task.copy.kind, required: v.task.required, message: v.message });
       continue;
     }
-    if (v.result.spam >= settings.threshold) {
+    if (v.result.spam >= v.result.threshold) {
       log('warn', { code: 'CONTENT_SPAM_SUSPECTED', workspaceId: a.workspaceId, emailId: v.task.message.emailId, spam: v.result.spam, model: v.result.model });
     }
     if (v.task.rules === 'probation') v.task.message.snapshot = v.task.copy;
@@ -1758,9 +1758,10 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
   }
 }
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
-async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false) {
+async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false, screen = true) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   for (const [i, m] of mails.entries()) assertBuiltinInput(call.runtime.config, m, batch ? i : undefined);
+  if (mails.some(m => isBuiltinHost(call.runtime.config, m.from.split('@')[1]!))) await awaitBuiltinSetup(call.runtime, a.workspaceId);
   // Marketing mail's footer carries the workspace's postal address when it has one. Unlike a campaign, a marketing send
   // without one is not refused: its caller writes the whole message and may include the address itself.
   const address = mails.some(m => m.kind === 'marketing') ? await workspacePostalAddress(call.runtime, call.db ?? call.runtime.db, a.workspaceId) : null;
@@ -1768,11 +1769,11 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   // A reply by header joins the conversation it answers only when its sender can read that message.
   await joinReplies(call.db ?? call.runtime.db, actorMailAccess(a), out.map(m => m.snapshot));
-  const needsPrep = out.some(m => m.template) || mayScreenAtAccept(call.runtime, out);
+  const screened = screen && mayScreenAtAccept(call.runtime, out), needsPrep = out.some(m => m.template) || screened;
   if (!needsPrep) return admitSends(call, input, out, { actor: a }, { batch, scheduledAt });
   return claimedSend(call, a, input, async () => {
     if (out.some(m => m.template)) await renderTemplates(call.runtime, a, out, batch);
-    if (mayScreenAtAccept(call.runtime, out)) await prepareFrontDoor(call.runtime, a, out, batch, scheduledAt);
+    if (screened) await prepareFrontDoor(call.runtime, a, out, batch, scheduledAt);
     return { out };
   }, { batch, scheduledAt });
 }
@@ -2111,10 +2112,12 @@ async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: 
   }
 }
 
-/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only. */
+/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only.
+ * Its words are the platform's, never the workspace's, so the spam screen (a classifier call, most of the send's time) has
+ * nothing to judge and is skipped; every other check of a send applies. */
 export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
   const from = `hello@${domain}`;
-  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` })));
+  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` }), undefined, false, false));
 }
 
 export function registerSending(app: App) {
@@ -3433,7 +3436,7 @@ export async function campaignCopy(runtime: Runtime, draft: CampaignDraft, rende
   return copy;
 }
 export type CampaignScreenRef = { workspaceId: string; campaignId: string; reviewId: string };
-export type CopyVerdict = { key: string; spam: number; model: string } | { refused: ApiError } | null;
+export type CopyVerdict = (ScreenResult & { key: string }) | { refused: ApiError } | null;
 /**
  * Verdicts for campaign copies, each keyed by the copy as it is delivered (src/screen.ts copyKey), with its own
  * unsubscribe link set back to the placeholder (screenedAs). Each distinct copy is screened as a single message is
@@ -3448,8 +3451,9 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
   // A plain loop: no closure here may hold the copies, which are as large as a message, past this call.
   const distinct = new Map<string, EmailSnapshot>();
   for (let i = 0; i < copies.length; i++) if (!distinct.has(keys[i]!)) distinct.set(keys[i]!, copies[i]!);
-  type Row = { copy_hash: string; windows: number; spam: number; model: string | null; judged: boolean };
-  const select = async (hashes: string[]) => new Map((hashes.length ? (await runtime.db.execute<Row>(sql`SELECT copy_hash,windows,spam,model,judged_at IS NOT NULL AS judged FROM sending_campaign_screens
+  type Row = { copy_hash: string; windows: number; spam: number; model: string | null; threshold: number | null; judged: boolean };
+  const fields = sql`copy_hash,windows,spam,model,threshold,judged_at IS NOT NULL AS judged`;
+  const select = async (hashes: string[]) => new Map((hashes.length ? (await runtime.db.execute<Row>(sql`SELECT ${fields} FROM sending_campaign_screens
     WHERE workspace_id=${ref.workspaceId} AND campaign_id=${ref.campaignId} AND copy_hash IN (SELECT jsonb_array_elements_text(${JSON.stringify(hashes)}::jsonb))`)).rows : []).map(row => [row.copy_hash, row]));
   let rows = await select([...distinct.keys()]);
   // Only a copy without a verdict is read: measured (one over the campaign limit is refused), and its requests built.
@@ -3479,12 +3483,12 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
       let row = rows.get(key)!;
       while (!row.judged) {
         const result = await screen.screenWindow(runtime, input, row.windows, call, key, charge);
-        const [moved] = (await runtime.db.execute<Row>(sql`UPDATE sending_campaign_screens SET windows=windows+1,spam=greatest(spam,${result.spam}),
-          model=CASE WHEN model IS NULL OR ${result.spam}>spam THEN ${result.model} ELSE model END,
+        const winner = row.threshold === null || row.model === null ? result : screen.decisiveVerdict({ spam: row.spam, model: row.model, threshold: row.threshold }, result);
+        const [moved] = (await runtime.db.execute<Row>(sql`UPDATE sending_campaign_screens SET windows=windows+1,spam=${winner.spam},model=${winner.model},threshold=${winner.threshold},
           judged_at=CASE WHEN windows+1>=requests THEN clock_timestamp() END
           WHERE campaign_id=${ref.campaignId} AND copy_hash=${key} AND windows=${row.windows}
-          RETURNING copy_hash,windows,spam,model,judged_at IS NOT NULL AS judged`)).rows;
-        row = moved ?? (await runtime.db.execute<Row>(sql`SELECT copy_hash,windows,spam,model,judged_at IS NOT NULL AS judged FROM sending_campaign_screens WHERE campaign_id=${ref.campaignId} AND copy_hash=${key}`)).rows[0]!;
+          RETURNING ${fields}`)).rows;
+        row = moved ?? (await runtime.db.execute<Row>(sql`SELECT ${fields} FROM sending_campaign_screens WHERE campaign_id=${ref.campaignId} AND copy_hash=${key}`)).rows[0]!;
       }
       rows.set(key, row);
     }
@@ -3493,7 +3497,7 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
     const refused = refusals.get(key);
     if (refused) return { refused };
     const row = rows.get(key);
-    return row?.judged ? { key, spam: Number(row.spam), model: row.model ?? '' } : null;
+    return row?.judged && row.threshold !== null && row.model !== null ? { key, spam: row.spam, model: row.model, threshold: row.threshold } : null;
   });
 }
 /** The unsubscribe link Nightmail generates for one recipient (src/operations.ts createUnsubscribeLink): this
@@ -3549,8 +3553,8 @@ async function screenCampaignStep(runtime: Runtime, a: Actor, row: RunRow) {
   if (!verdict) return;
   if ('refused' in verdict) throw verdict.refused;
   const done = await saveScreen(runtime, a, row, { ...state, template: verdict, failures: 0 });
-  log('info', { code: 'CAMPAIGN_TEMPLATE_SCREENED', campaignId: row.id, spam: verdict.spam });
-  if (verdict.spam >= runtime.config.screen!.threshold) await campaignRejected(runtime, a, row, done);
+  log('info', { code: 'CAMPAIGN_TEMPLATE_SCREENED', campaignId: row.id, spam: verdict.spam, model: verdict.model, threshold: verdict.threshold });
+  if (verdict.spam >= verdict.threshold) await campaignRejected(runtime, a, row, done);
 }
 // sending, before a release: the next recipients' copies are rendered as delivered and screened, each distinct one
 // once, and the release never goes past the last recipient whose copy has a verdict (dispatch refuses a copy the screen
@@ -3559,7 +3563,7 @@ async function screenCampaignStep(runtime: Runtime, a: Actor, row: RunRow) {
 // a digest of each is kept. The completed prefix is checkpointed about every second; the time budget is checked after
 // each group, so a pass always gets at least one copy through however long it takes.
 async function screenAhead(runtime: Runtime, a: Actor, row: RunRow, state: CampaignScreen, through: number): Promise<CampaignScreen> {
-  const draft = row.reviewDraft!, rendered = row.reviewRendered!, threshold = runtime.config.screen!.threshold, started = Date.now(), ref = screenRef(a, row), screen = await loadScreen();
+  const draft = row.reviewDraft!, rendered = row.reviewRendered!, started = Date.now(), ref = screenRef(a, row), screen = await loadScreen();
   const assets = await attachmentRows(runtime.db, a, draft.attachments);
   const probationCopy = contentRules(row) === 'probation' ? (await import('./screened-html.js')).probationCopy : undefined;
   // Copies that are the same up to their recipient share one screen: by a digest of the copy, never the copy itself.
@@ -3603,7 +3607,7 @@ async function screenAhead(runtime: Runtime, a: Actor, row: RunRow, state: Campa
         for (const [i, { verdict, size }] of results.entries()) {
           largest = Math.max(largest, size);
           if (!verdict) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'A copy was left without a verdict.', undefined, true);
-          const spamRefused = 'spam' in verdict && verdict.spam >= threshold;
+          const spamRefused = 'spam' in verdict && verdict.spam >= verdict.threshold;
           const refused = spamRefused || 'refused' in verdict;
           if (refused) {
             rejectedOrdinals.push(group[i]!.ordinal);
@@ -3627,7 +3631,7 @@ async function campaignRejected(runtime: Runtime, a: Actor, row: RunRow, state: 
   await runtime.db.execute(countScreened(sql`SELECT v.workspace_id,1 AS rejected FROM sending_campaign_reviews v JOIN sending_review_recipients r ON r.review_id=v.id
     WHERE v.workspace_id=${a.workspaceId} AND v.id=${row.reviewId} AND hosted_real_cost(jsonb_build_array(r.recipient->>'email'))>0`));
   log('warn', { code: 'CONTENT_REJECTED_SPAM', campaignId: row.id, spam: state.template?.spam, model: state.template?.model });
-  throw new ApiError(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this campaign to be unsolicited advertising. No recipient was sent to.');
+  throw new ApiError(422, 'CONTENT_REJECTED_SPAM', 'The content classifier judged this campaign to be deceptive or harmful. No recipient was sent to.');
 }
 const STATIC_PREPARE_SLICE_ROWS = 200_000;
 
@@ -3713,8 +3717,8 @@ async function finalizeCapture(runtime: Runtime, a: Actor, row: RunRow, jobId: s
  */
 async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: string) {
   const screenState = campaignScreened(runtime, row.account?.kind === 'shared') ? row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen : null : undefined;
-  if (screenState !== undefined && !screenState?.template) return screenCampaignStep(runtime, a, row);
-  if (screenState?.template && screenState.template.spam >= runtime.config.screen!.threshold) return campaignRejected(runtime, a, row, screenState);
+  if (screenState !== undefined && screenState?.template?.threshold === undefined) return screenCampaignStep(runtime, a, row);
+  if (screenState?.template && screenState.template.spam >= screenState.template.threshold!) return campaignRejected(runtime, a, row, screenState);
 
   const review = { draft: row.reviewDraft!, rendered: row.reviewRendered! };
   const draft = review.draft;
@@ -3803,8 +3807,8 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
 // message's digest; when the whole list is validated the campaign moves to its schedule or straight to sending.
 async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: string) {
   const state = campaignScreened(runtime, row.account?.kind === 'shared') ? row.reviewScreen?.contentHash === row.reviewHash ? row.reviewScreen : null : undefined;
-  if (state !== undefined && !state?.template) return screenCampaignStep(runtime, a, row);
-  if (state?.template && state.template.spam >= runtime.config.screen!.threshold) return campaignRejected(runtime, a, row, state);
+  if (state !== undefined && state?.template?.threshold === undefined) return screenCampaignStep(runtime, a, row);
+  if (state?.template && state.template.spam >= state.template.threshold!) return campaignRejected(runtime, a, row, state);
   const ref = campaignRef(a, row.id), review = { draft: row.reviewDraft!, rendered: row.reviewRendered! };
   await runtime.db.transaction(async db => {
     const campaign = await findCampaign(db, a, row.id, true);
@@ -4259,7 +4263,7 @@ const HELD_OUTAGE_ABORT = 4;
 
 /** Background screen sweep outside the mail room (minute cron & Node runner): leases queued/scheduled rows held with
  *  `screened = false` (outage-held accepts, pre-deploy rows, rollout-window rows, or pre-deploy scheduled releases) in
- *  bounded chunks up to `limit` within `budgetMs`, screens them with the same Jev + JevF failover screen used at accept
+ *  bounded chunks up to `limit` within `budgetMs`, screens them with the same outbound harm screen used at accept
  *  time, and either marks them `screened = true` (waking the mail room) or rejects them with the same status, error code
  *  and `email.rejected` webhook/event. Outages back off and abort the sweep early; logs one held-backlog summary line. */
 export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT, budgetMs = HELD_SCREEN_BUDGET_MS): Promise<{ leased: number; passed: number; rejected: number; deferred: number; remaining: number }> {
@@ -4370,8 +4374,8 @@ export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT
         if (!verdict) { await releaseHeld(); return; }
         if ('refused' in verdict) { await rejectHeld(verdict.refused.code); return; }
         const alreadyCounted = Boolean(r.review_screen?.template && r.review_screen.contentHash === r.review_hash);
-        if (verdict.spam >= settings.threshold) {
-          await rejectHeld('CONTENT_REJECTED_SPAM', { spam: verdict.spam, model: verdict.model, threshold: settings.threshold }, !alreadyCounted && hosted);
+        if (verdict.spam >= verdict.threshold) {
+          await rejectHeld('CONTENT_REJECTED_SPAM', { spam: verdict.spam, model: verdict.model, threshold: verdict.threshold }, !alreadyCounted && hosted);
           return;
         }
         await passHeld({ ...snapshot, screenVerdict: { status: 'passed', spam: verdict.spam, model: verdict.model, digest: verdict.key, rules } }, !alreadyCounted && hosted);
@@ -4399,11 +4403,11 @@ export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT
       screen ??= await loadScreen();
       const result = await screen.screenSnapshot(scopedRt, copy, required, { emailId: id, workspaceId: wid, region: r.region, kind: copy.kind, required });
       if (!result) { await releaseHeld(); return; }
-      if (result.spam >= settings.threshold && (required || settings.mode === 'reject')) {
-        await rejectHeld('CONTENT_REJECTED_SPAM', { spam: result.spam, model: result.model, threshold: settings.threshold }, hosted);
+      if (result.spam >= result.threshold && (required || settings.mode === 'reject')) {
+        await rejectHeld('CONTENT_REJECTED_SPAM', { spam: result.spam, model: result.model, threshold: result.threshold }, hosted);
         return;
       }
-      if (result.spam >= settings.threshold) log('warn', { code: 'CONTENT_SPAM_SUSPECTED', workspaceId: wid, emailId: id, spam: result.spam, model: result.model });
+      if (result.spam >= result.threshold) log('warn', { code: 'CONTENT_SPAM_SUSPECTED', workspaceId: wid, emailId: id, spam: result.spam, model: result.model });
       const nextSnap: EmailSnapshot = { ...(rules === 'probation' ? copy : snapshot), screenVerdict: { status: 'passed', spam: result.spam, model: result.model, digest: result.digest, rules } };
       await passHeld(nextSnap, hosted);
     } catch (error) {

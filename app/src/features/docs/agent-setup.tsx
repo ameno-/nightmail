@@ -84,7 +84,7 @@ export function MaskedText({ text }: { text: string }) {
 }
 
 // A data URL needs no object URL to revoke, so the download can't race the cleanup.
-function downloadText(name: string, text: string) {
+export function downloadText(name: string, text: string) {
   Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
 }
 
@@ -126,12 +126,13 @@ const setupLines: Record<AgentSetupState, (keyName: string) => ReactNode> = {
   replaced: () => 'A newer copy replaced this setup token. Use the prompt you copied last.',
   failed: () => 'Couldn’t add a setup token, so the copied prompt connects with a device code instead.',
 }
-export function AgentSetupStatus({ setup }: { setup: AgentSetup }) {
+// `idle`: the line before the first copy, where a page words it its own way (onboarding).
+export function AgentSetupStatus({ setup, idle }: { setup: AgentSetup; idle?: ReactNode }) {
   const { state } = setup, keyName = setup.keyName ?? sampleKey
   return <div className="agent-setup-status" data-state={state}>
     {(Object.keys(setupLines) as AgentSetupState[]).map(key => <p key={key} data-state={key} data-active={key === state || undefined} aria-hidden={key !== state || undefined}>
       {(key === 'connected' || key === 'waiting') && <span className="agent-setup-status__mark" aria-hidden="true">{key === 'connected' ? <Check size={14} strokeWidth={2.5} /> : <span className="connect-agent__pulse" />}</span>}
-      <span>{setupLines[key](key === state ? keyName : sampleKey)}</span>
+      <span>{key === 'idle' && idle ? idle : setupLines[key](key === state ? keyName : sampleKey)}</span>
     </p>)}
     <span className="sr-only" role="status">{state === 'idle' ? '' : state === 'connected' ? `Your agent connected. Its key is ${keyName}.` : state === 'failed' ? `Couldn’t add a setup token: ${errorText(setup.error)}` : String(setupLines[state](keyName))}</span>
   </div>
@@ -141,11 +142,12 @@ export function AgentSetupStatus({ setup }: { setup: AgentSetup }) {
 // prompt and its actions without the docs' paragraph on how to use it. With `setup` (an owner or admin), copying puts a
 // fresh setup token in the prompt (`copy` makes it), and the line above it says when the agent used it. A download never
 // has one, so no live credential lands in a file: it is `download`, the prompt with the device flow instead.
+export const agentPromptFile = `${productSlug}-agent-prompt.txt`
 export function AgentPrompt({ prompt, compact = false, setup, copy, download }: { prompt: string | null; compact?: boolean; setup?: AgentSetup | null; copy?: () => Promise<string>; download?: string }) {
   const value = setup && copy ? copy : prompt ?? ''
   return <section id="agent-prompt" className="section stack developer-section" aria-label="Agent prompt" aria-busy={prompt === null || undefined}>
     <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions" data-pending={prompt === null || undefined} inert={prompt === null}>
-      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(`${productSlug}-agent-prompt.txt`, download ?? prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
+      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(agentPromptFile, download ?? prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
       <CopyAction value={value} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
     {!compact && <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>}

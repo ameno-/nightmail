@@ -4,7 +4,7 @@ import { auditContext, auditInsert, recordAudit, type AuditContext } from './aud
 import { ApiError, assertSesConfigured, denied, isSimulatedSes, errors, id, json, log, logError, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
-import { builtinClaim, importByoClaims } from './domain-claims.js';
+import { builtinClaim, builtinSettingUp, importByoClaims } from './domain-claims.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
@@ -38,9 +38,10 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.'),
   sent: z.boolean().optional().describe('Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).'),
   builtinDomain: z.object({ id: z.string().nullable().describe('Its ID in listDomains, once it is set up on this connection.'), name: z.string(),
-    sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now. pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).'),
+    sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now (in a new workspace\'s first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).'),
     paused: z.literal(true).optional().describe('Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.'),
-    scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\'s members.'), perDay: z.number().int(), perMinute: z.number().int() })
+    scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\'s members.'), perDay: z.number().int(), perMinute: z.number().int(),
+    used: z.number().int().describe('Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.') })
     .nullable().optional().describe('Hosted only: the subdomain of the installation\'s own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.'),
   attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
 }).openapi('ConnectionSummary');
@@ -97,12 +98,18 @@ async function get(runtime: Runtime, wid: string) {
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
   const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true } | null}>(sql`
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null}>(sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
       EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
-      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR tripped.at IS NOT NULL THEN 'off' WHEN dc.sending_state='verified' THEN 'ready' ELSE 'pending' END)||CASE WHEN b.revoked_at IS NULL AND tripped.at IS NOT NULL THEN '{"paused":true}'::jsonb ELSE '{}'::jsonb END
+      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR tripped.at IS NOT NULL THEN 'off'
+            WHEN dc.sending_state='verified' OR ${builtinSettingUp(sql`dc`, runtime.config.builtinDomain!)} THEN 'ready' ELSE 'pending' END,
+          -- Its recipients in the rolling 24 hours, as send_admission counts them against its daily cap; read only while it can
+          -- send (no verified domain of the workspace's own), so a busy workspace's own mail is never scanned for it.
+          'used',CASE WHEN b.revoked_at IS NULL AND NOT EXISTS (SELECT FROM domain_claims o WHERE o.workspace_id=b.workspace_id AND o.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`o`)})
+            THEN (SELECT coalesce(sum(jsonb_array_length(e.to_addresses)+jsonb_array_length(e.cc_addresses)+jsonb_array_length(e.bcc_addresses)),0)::int FROM sending_emails e
+              WHERE e.workspace_id=b.workspace_id AND e.created_at>now()-interval '24 hours' AND lower(split_part(e.from_address,'@',2))=b.name) ELSE 0 END)||CASE WHEN b.revoked_at IS NULL AND tripped.at IS NOT NULL THEN '{"paused":true}'::jsonb ELSE '{}'::jsonb END
         FROM builtin_domains b LEFT JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
         LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL
         LEFT JOIN LATERAL (SELECT p.tripped_at AS at FROM builtin_parent p WHERE p.name=${runtime.config.builtinDomain} AND p.tripped_at IS NOT NULL) tripped ON true WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
@@ -404,7 +411,7 @@ export async function reconcileSharedConnections(runtime: Runtime) {
     } catch (e) { if (e instanceof ModuleLoadError) throw e; const error=awsError(e); log('warn', { operation: 'shared-pool-setup', region, code: error.code }); }
   }
 }
-async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>, context: AuditContext) {
+async function create(runtime: Runtime, wid: string, input: z.infer<typeof Create>, context: AuditContext, tenantJobAfterSeconds = 0) {
   const { kind } = input, region = input.region ?? (kind === 'shared' ? sharedRegions(runtime)[0]! : platformRegion);
   if (kind === 'byo') template(runtime);
   // Offered regions come from SHARED_SENDING_REGIONS (Ohio at launch; Ireland is inside the IAM boundary).
@@ -415,15 +422,16 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   assertSesConfigured(runtime);
   const audit = (from: SQL, where?: SQL) => auditInsert(context, { action: 'connection.create', workspaceId: wid, target: { type: 'connection', id: sql`${from}.id` }, after: { kind, region } }, { from, where });
   if (kind==='shared') {
-    // Hosted is instant: `ready` on creation with zero AWS calls. The tenant job owns CreateTenant and flips
-    // tenant_state; until then domains and sends answer TENANT_NOT_READY. Simulation has no tenant, so it is ready.
+    // Hosted is instant: `ready` on creation with zero AWS calls. ensureTenant makes the tenant (startHostedMail, at once,
+    // or the tenant job) and flips tenant_state; until then domains and sends answer TENANT_NOT_READY. Simulation has no
+    // tenant, so it is ready.
     // The statement's snapshot predates its insert, so only a new connection is audited, not a repeated choice.
     const row = (await runtime.db.execute<Row & { queued: boolean }>(sql`WITH pool AS (SELECT aws_account_id FROM provider_pool_regions p WHERE region=${region} AND ${poolSends()}), connection AS (
       INSERT INTO provider_connections(id,workspace_id,kind,region,state,tenant_state,aws_account_id,managed_tenant,pool_tenant_name) VALUES (${id('conn')},${wid},'shared',${region},'ready',${isSimulatedSes(runtime) ? 'ready' : 'pending'},(SELECT aws_account_id FROM pool),${!!runtime.config.regionalSending},${runtime.config.trustedPool?poolTenantName(wid,'probation'):null})
       ON CONFLICT(workspace_id) DO UPDATE SET aws_account_id=coalesce(provider_connections.aws_account_id,excluded.aws_account_id) WHERE provider_connections.kind='shared' AND provider_connections.region=excluded.region RETURNING *),
       settings AS (UPDATE ses_installation_settings s SET default_region=c.region,enabled_regions=CASE WHEN EXISTS(SELECT FROM provider_connection_regions r WHERE r.connection_id=c.id AND NOT r.legacy AND r.sending_state='ready') THEN s.enabled_regions ELSE jsonb_build_array(c.region) END FROM connection c WHERE c.workspace_id=s.workspace_id),
       stale AS (UPDATE ses_region_discovery d SET credentials_fingerprint=NULL,report=NULL FROM connection c WHERE c.workspace_id=d.workspace_id AND d.report IS NOT NULL),
-      queued AS (${queueTenantJob(sql`SELECT c.id,c.workspace_id FROM connection c JOIN pool USING (aws_account_id) WHERE c.tenant_state<>'ready'`)} RETURNING 1),
+      queued AS (${queueTenantJob(sql`SELECT c.id,c.workspace_id FROM connection c JOIN pool USING (aws_account_id) WHERE c.tenant_state<>'ready'`, tenantJobAfterSeconds)} RETURNING 1),
       audit AS (${audit(sql`connection`, sql`NOT EXISTS (SELECT FROM provider_connections p WHERE p.workspace_id=${wid})`)})
       SELECT c.*, EXISTS (SELECT 1 FROM queued) AS queued FROM connection c`)).rows[0];
     if (!row) throw new ApiError(409,'CONNECTION_EXISTS','Disconnect the existing connection before choosing another.');
@@ -438,6 +446,57 @@ async function create(runtime: Runtime, wid: string, input: z.infer<typeof Creat
   const row = result.rows[0] ?? await get(runtime, wid);
   if (!row || row.kind !== kind || row.region !== region) throw new ApiError(409, 'CONNECTION_EXISTS', 'Disconnect the existing connection before choosing another.');
   return row;
+}
+
+/** While the request that creates a workspace sets up its sending itself, the fallback jobs wait this long: past the
+ * lifetime of that work (a Worker keeps it at most 30 s after its answer). */
+const FALLBACK_AFTER_SECONDS = 60;
+/**
+ * Hosted mail for a workspace: its shared connection and its built-in domain's claim, in this request (database only).
+ * With `start` (the request that creates the workspace: sign-up in account-login.ts, createWorkspace), it then starts at
+ * once, without waiting for it, its own SES tenant (ensureTenant, the one tenant path) and the built-in domain associated
+ * with that tenant (setUpBuiltinDomain, the domain.builtin job's own code). That runs on a database connection of its own
+ * (runtime.detach, the Worker's waitUntil): SES takes one control-plane call a second, so it takes about 5 s, and until
+ * it ends the domain counts as ready (builtinSettingUp) and a send from it waits for it (awaitBuiltinSetup). What fails is
+ * left to the jobs queued here (tenant.provision, domain.builtin), brought forward then, and otherwise due a minute later,
+ * when they find the work done. Without `start` (choosing Hosted mail, createConnection) the jobs do it, due now: `wake`.
+ * `started` settles when that work has ended (tests wait for it; callers don't).
+ */
+export async function startHostedMail(runtime: Runtime, wid: string, context: AuditContext, input: z.infer<typeof Create> = { kind: 'shared' }, start = false) {
+  const inline = start && !isSimulatedSes(runtime), after = inline ? FALLBACK_AFTER_SECONDS : 0;
+  const row = await create(runtime, wid, input, context, after);
+  let wake = 'queued' in row && !!row.queued;
+  if (row.kind !== 'shared' || row.state !== 'ready') return { connection: row, wake };
+  const builtin = runtime.config.builtinDomain ? await wrapModuleLoad(() => import('./builtin-domain.js')) : null;
+  // If this fails the sweep creates it (builtin-domain.ts builtinDomainTick).
+  if (builtin) try { if (await builtin.ensureBuiltinDomain(runtime, wid, after)) wake = true; }
+    catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'BUILTIN_DOMAIN_SETUP_FAILED', workspaceId: wid }); }
+  if (!inline || (row.tenant_state === 'ready' && !builtin)) return { connection: row, wake: wake && !inline };
+  const work = async (rt: Runtime) => {
+    const started = Date.now(), sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+    try {
+      // SES takes one control-plane call a second: the association waits a second after the tenant's last call.
+      if (row.tenant_state !== 'ready') { await ensureTenant(rt, wid, row.id); if (builtin) await sleep(1000); }
+      // A short wait (the platform-wide pace of one call a second) is waited out here, twice at most; a longer one is the job's.
+      if (builtin) for (let tries = 1; ; tries++) {
+        try { await builtin.setUpBuiltinDomain(rt, wid); break; }
+        catch (e) { const ms = e instanceof JobDeferred ? Date.parse(e.availableAt) - Date.now() : Infinity; if (tries > 2 || ms > 3000) throw e; await sleep(Math.max(0, ms)); }
+      }
+      log('info', { code: 'HOSTED_MAIL_STARTED', workspaceId: wid, ms: Date.now() - started });
+    } catch (e) {
+      // The jobs take it from here: now, or when a wait (the pace, the parent identity) ends. Without the inline mark, the
+      // domain no longer counts as ready meanwhile: onboarding says it is still being set up.
+      const at = e instanceof JobDeferred ? e.availableAt : new Date().toISOString();
+      try {
+        await rt.db.execute(sql`UPDATE jobs SET available_at=least(available_at,${at}::timestamptz),payload=payload-'inline' WHERE id IN ('tenant.provision:'||${row.id}::text,'domain.builtin:'||${wid}::text) AND status='pending'`);
+        await rt.wake?.(1);
+      } catch { /* They are due a minute later anyway. */ }
+      log(e instanceof JobDeferred ? 'info' : 'warn', { code: 'HOSTED_MAIL_DEFERRED', workspaceId: wid, ms: Date.now() - started, availableAt: at, error: e instanceof JobDeferred ? undefined : e instanceof ApiError ? e.code : awsError(e).code });
+    }
+  };
+  // Never awaited here: the request answers now, and the work goes on (on Node, on the server's own pool).
+  const started = runtime.detach ? runtime.detach(work) : work(runtime);
+  return { connection: row, wake: false, started };
 }
 export function registerProviderConnections(app: App) {
   const path = '/v1/connection';
@@ -463,14 +522,10 @@ export function registerProviderConnections(app: App) {
         if (input.awsAccountId) throw new ApiError(409,'CONNECTION_EXISTS','A different connection already exists.');
       }
       if (input.awsAccountId!==undefined) throw new ApiError(422,'VALIDATION_ERROR','Account ID is only accepted for regional BYO enrollment.');
-      const row = await create(c.env, wid, input, auditContext(c));
-      if ('queued' in row && row.queued) c.get('actor').wakeJobs=1;
-      // Hosted: the workspace's built-in domain is ready with the connection, so onboarding can skip DNS. If this fails
-      // the sweep creates it (builtin-domain.ts builtinDomainTick).
-      if (row.kind === 'shared' && row.state === 'ready' && c.env.config.builtinDomain) {
-        try { if (await (await wrapModuleLoad(() => import('./builtin-domain.js'))).ensureBuiltinDomain(c.env, wid)) c.get('actor').wakeJobs=1; }
-        catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'BUILTIN_DOMAIN_SETUP_FAILED', workspaceId: wid }); }
-      }
+      // Hosted is instant: `ready` with no AWS call in this request. The jobs make its tenant and its built-in domain, which
+      // lets onboarding skip DNS (startHostedMail). A new workspace's request does both itself.
+      const { connection: row, wake } = input.kind === 'shared' ? await startHostedMail(c.env, wid, auditContext(c), input) : { connection: await create(c.env, wid, input, auditContext(c)), wake: false };
+      if (wake) c.get('actor').wakeJobs=1;
       return c.json(view(c.env, row), 201);
     } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   });

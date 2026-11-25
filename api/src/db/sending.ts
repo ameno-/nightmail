@@ -28,7 +28,7 @@ export type EmailSnapshot = {
   replyAuthors?: string[];
   /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */
   untrustedContent?: boolean;
-  /** Live transactional only: ask the content classifier (Jev) before accepting into the queue. */
+  /** Live transactional only: ask the outbound content classifier before accepting into the queue. */
   screen?: boolean;
   /** Content-screen verdict recorded at accept time so the dispatcher never re-screens queued mail. */
   screenVerdict?: { status: 'passed' | 'skipped'; spam?: number; model?: string; digest?: string; rules?: 'probation' | 'standard' | null };
@@ -149,7 +149,7 @@ export const campaignReviews = pgTable('sending_campaign_reviews', {
 // One verdict per campaign and copy as delivered (src/screen.ts copyKey), shared by every recipient whose copy is the same.
 export const campaignScreens = pgTable('sending_campaign_screens', {
   campaignId: text('campaign_id').notNull(), ...scope(), copyHash: text('copy_hash').notNull(), requests: integer('requests').notNull(), windows: integer('windows').notNull().default(0),
-  spam: doublePrecision('spam').notNull().default(0), model: text('model'), createdAt: time('created_at').notNull().defaultNow(), judgedAt: time('judged_at'),
+  spam: doublePrecision('spam').notNull().default(0), model: text('model'), threshold: doublePrecision('threshold'), createdAt: time('created_at').notNull().defaultNow(), judgedAt: time('judged_at'),
 }, t => [primaryKey({ columns: [t.campaignId, t.copyHash] })]);
 // Recipient values are copied once from one database snapshot; no live contact joins during preparation or expansion.
 export const reviewRecipients = pgTable('sending_review_recipients', {
