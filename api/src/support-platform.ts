@@ -148,6 +148,14 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     return send<T>(method, url, body);
   }
   return {
+    /** A wake for this conversation, issued by this installation in the last minute. */
+    async verifyWake(token: string, conversationId: string) {
+      const {support, publicUrl} = config();
+      if (!support?.signingKey || !CONVERSATION_ID.test(conversationId)) return false;
+      const claims = await signedClaims(support.signingKey, token), now = Math.floor(Date.now()/1000);
+      return !!claims && claims.aud === 'nightmail-support-wake' && claims.iss === publicUrl &&
+        claims.conversationId === conversationId && typeof claims.exp === 'number' && claims.exp > now && claims.exp <= now + 65;
+    },
     /** A handoff JWS from the dashboard: its signed claims plus the stored row (used or not, the person's message). */
     async verifyHandoff(token: string): Promise<HandoffCheck> {
       const checked = await verifyHandoffToken(config(), token);

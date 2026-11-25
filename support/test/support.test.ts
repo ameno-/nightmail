@@ -305,7 +305,7 @@ const registeredIn = async (message: string, instance: Miniflare = mf) => (await
 /** The sign-in reply a message got, from the conversation it was registered in. */
 const SIGNIN = async (message: string, instance: Miniflare = mf) => signinReply(await registeredIn(message, instance), message);
 /** Nightmail's wake for one conversation (after a staff reply or a sign-in): its ID only. */
-const wakeHook = (conversationId: string, instance: Miniflare = mf) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', body: JSON.stringify({ conversationId }) });
+const wakeHook = (conversationId: string, instance: Miniflare = mf) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { authorization: `Bearer fixture-wake-${conversationId}` }, body: JSON.stringify({ conversationId }) });
 /** The person confirms one message signed in, as the claim does in Nightmail (the fake's hook). */
 const claim = async (conversationId: string, messageId: string, userId: string, instance: Miniflare = mf) => (await fakeHook('/__claim', { conversationId, messageId, userId }, instance)).status;
 /** A verified answer that couldn't go: the fixed notice, under a key of its own. */
@@ -2005,7 +2005,7 @@ describe('support Worker', () => {
     const fakeBane = async (path: string, init?: RequestInit) => (await instance.getWorker('fake-bane')).fetch(`http://fake-bane${path}`, init);
     const inboxOf = async (id: string) => await (await fakeBane(`/__inbox?id=${id}`)).json() as any;
     const setInbox = async (body: object) => assert.equal((await fakeBane('/__inbox', { method: 'POST', body: JSON.stringify(body) })).status, 204);
-    const wake = (conversationId: unknown) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ conversationId }) });
+    const wake = (conversationId: unknown) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer fixture-wake-${conversationId}` }, body: JSON.stringify({ conversationId }) });
     const marked = async (messageId: string) => (await fakeCalls(instance)).filter(c => c[0] === 'markDelivery' && c[2] === messageId).map(c => c[3]);
     /** The wake has queued this staff reply (its pull runs after the 202). */
     const queued = (id: string, reply: string) => eventually(async () => (await drive(id)).rows.some(r => r.id === `staff:${reply}`) || undefined);
@@ -2108,9 +2108,11 @@ describe('support Worker', () => {
       assert.deepEqual([emailed.length, emailed[0][2], emailed[0][3].to, emailed[0][3].subject], [1, '/v1/inbound/threads', ['ada@acme.test'], 'Re: your Nightmail support chat']);
       assert.equal(emailed[0][3].text, 'Hi Ada,\n\nOne more thing: verification finished.\n\nDana Rivera, Nightmail', 'Named from the scope read when the panel joined.');
       assert.deepEqual(await marked(two), ['sent']);
-      // Unknown or malformed: 202, and nothing is pulled.
+      // A signed unknown ID is acknowledged, malformed and unsigned requests are refused.
       const pulls = (await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length;
-      for (const id of [`conv_${'z'.repeat(26)}`, 'nope', 42]) assert.equal((await wake(id)).status, 202);
+      assert.equal((await wake(`conv_${'z'.repeat(26)}`)).status, 202);
+      for (const id of ['nope', 42]) assert.equal((await wake(id)).status, 401);
+      assert.equal((await instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', body: JSON.stringify({ conversationId: c.id }) })).status, 401);
       await new Promise(r => setTimeout(r, 300));
       assert.equal((await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length, pulls);
     }, 180_000);
