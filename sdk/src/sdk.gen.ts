@@ -2411,7 +2411,7 @@ export const chooseReceivingHost = <ThrowOnError extends boolean = false>(option
 });
 
 /**
- * Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.
+ * Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from "Nightmail Setup" <setup@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.
  */
 export const sendDomainTestEmail = <ThrowOnError extends boolean = false>(options: Options<SendDomainTestEmailData, ThrowOnError>): RequestResult<SendDomainTestEmailResponses, SendDomainTestEmailErrors, ThrowOnError> => (options.client ?? client).post<SendDomainTestEmailResponses, SendDomainTestEmailErrors, ThrowOnError>({
     security: [{
@@ -2424,7 +2424,11 @@ export const sendDomainTestEmail = <ThrowOnError extends boolean = false>(option
             type: 'apiKey'
         }],
     url: '/v1/domains/{id}/test-send',
-    ...options
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
 });
 
 /**

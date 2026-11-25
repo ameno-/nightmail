@@ -39,6 +39,7 @@ import { canonical, idempotencyGate, idempotencyKey, idempotent, IdempotencyHead
 import { PREVIEW_ROUTE_NOTE, previewResponses, refuseHead, registerPreviewImages, renderPreview } from './preview-images.js';
 import { actorJson, admission, admitted, charges, duplicateAttachment, QUARANTINE_CODES, RAMP_POLICY, refusal, scheduledCharges, shadowBilling, type AdmissionMail, type Admitted, type Refused, type Released } from './admission.js';
 import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js';
+import { SETUP_EMAIL, SETUP_SENDER } from './setup-email.js';
 import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
@@ -2194,27 +2195,35 @@ async function admitCampaignTest(runtime: Runtime, a: Actor, to: string) {
   }
 }
 
-/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain>, to the signed-in user. It
- *  reads as a real first email, plain text: "test" and placeholder wording in a subject or body send mail to spam. */
-export const platformTestEmail = (domain: string) => {
+/**
+ * The dashboard's test email (POST /v1/domains/{id}/test-send), to the signed-in user: fixed content from hello@<domain>,
+ * or onboarding's setup email (setup-email.ts) from "<productName> Setup" <setup@domain> with the subject and text they
+ * wrote. Without them, or with onboarding's own words, the content is ours. It reads as a real first email, plain text:
+ * "test" and placeholder wording in a subject or body send mail to spam.
+ */
+export const platformTestEmail = (domain: string, custom?: { subject: string; text: string }) => {
+  if (custom) return { from: `${SETUP_SENDER.local}@${domain}`, fromName: SETUP_SENDER.name, subject: custom.subject, text: custom.text };
   const from = `hello@${domain}`;
-  return { from, subject: `Your first email from ${productName}`, text: `Hi,\n\n${domain} is set up, and this is the first email sent from ${from}.\n\nThanks,\n${productName}\n` };
+  return { from, fromName: undefined, subject: `Your first email from ${productName}`, text: `Hi,\n\n${domain} is set up, and this is the first email sent from ${from}.\n\nThanks,\n${productName}\n` };
 };
 /**
- * The content screen's verdict for the dashboard's test email: its words are ours and it goes only to the person who
- * asked for it, so there is nothing for the classifier to judge, and Hosted dispatch (which sends nothing without a
- * verdict) takes this one, recorded as such. Anything else, a changed word, another or a further recipient, a header, an
- * attachment or HTML, gets no verdict here and is screened as usual.
+ * The content screen's verdict for the dashboard's test email: its words are ours (the fixed test, or onboarding's setup
+ * email as the dashboard wrote it) and it goes only to the person who asked for it, so there is nothing for the
+ * classifier to judge, and Hosted dispatch (which sends nothing without a verdict) takes this one, recorded as such.
+ * Anything else, a changed word, another or a further recipient, a header, an attachment or HTML, gets no verdict here
+ * and is screened as usual.
  */
 export function platformTestVerdict(s: EmailSnapshot, to: string, rules: 'probation' | 'standard' | null): EmailSnapshot['screenVerdict'] {
-  const fixed = platformTestEmail(s.from.split('@')[1] ?? '');
-  const exact = s.from === fixed.from && s.subject === fixed.subject && s.text === fixed.text && s.html === undefined && s.kind === 'transactional'
+  const domain = s.from.split('@')[1] ?? '';
+  const ours = [platformTestEmail(domain), platformTestEmail(domain, SETUP_EMAIL)].some(fixed => s.from === fixed.from && (s.fromName ?? undefined) === fixed.fromName && s.subject === fixed.subject && s.text === fixed.text);
+  const exact = ours && s.html === undefined && s.kind === 'transactional'
     && s.to.length === 1 && s.to[0]!.toLowerCase() === to.toLowerCase() && !s.cc.length && !s.bcc.length && !s.replyTo.length && !s.attachments.length
-    && !s.headers.length && !s.template && !s.raw && !s.mime && !s.fromName;
+    && !s.headers.length && !s.template && !s.raw && !s.mime;
   return exact ? { status: 'platform', reason: 'platform test email', rules } : undefined;
 }
-export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
-  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ ...platformTestEmail(domain), to: [to] }), undefined, false, to));
+export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string, custom?: { subject: string; text: string }) {
+  const { fromName, ...mail } = platformTestEmail(domain, custom);
+  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ ...mail, ...fromName ? { fromName } : {}, to: [to] }), undefined, false, to));
 }
 
 export function registerSending(app: App) {

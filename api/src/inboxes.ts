@@ -17,7 +17,7 @@ import { displayText, visibleMail } from './inbox-content.js';
 import {registerInboxFolders,LegacyRole,isLegacyRole,Role,Location,flagNames,flagsOf,inboxVisible as visible,locations} from './inbox-folders.js';
 import {registerInboxPasswords} from './inbox-passwords.js';
 import { replyText } from './mailbox-store.js';
-import { secretPrefixes, shownPrefix } from './brand.js';
+import { productName, secretPrefixes, shownPrefix } from './brand.js';
 
 // Agent inboxes: `mailboxes` rows with kind='inbox'. One SQL function creates them; ingest and the
 // hourly sweep share the store and retention functions in migration 107.
@@ -80,7 +80,10 @@ const Message = z.object({
   id: z.string(), threadId: z.string(),
   cursor: z.string().describe('Pass as after to continue after this message.'),
   from: address.describe('The claimed sender. Check auth before trusting it.'), to: z.array(address).describe('Addresses in the To header (at most 20 on list pages, up to 100 on getInboxMessage).'), toCount: z.number().int().describe('Total addresses in the To header (may exceed to.length when shortened).'),
-  subject: z.string(), snippet: z.string(), receivedAt: z.string(), read: z.boolean(),
+  subject: z.string(), snippet: z.string(), receivedAt: z.string().describe('When the sending server handed it over (SES received it).'),
+  storedAt: z.string().describe(`When ${productName} stored it (the start of the write that stored it), on the clock servedAt uses.`),
+  processingMs: z.number().int().nullable().describe(`Milliseconds from the receipt reaching ${productName} to storedAt: fetching, parsing and routing the message. Null for mail that came another way (simulated, sent, copied).`),
+  read: z.boolean(),
   flags:z.array(z.enum(flagNames)), labels:z.array(z.string()), folders:z.array(Location.extend({folder:LegacyRole})), additionalFolders:z.array(Location), modseq:z.string(),
   uid:z.number().nullable(), uidValidity:z.number().nullable(),
   junk: z.boolean().describe('SES judged this message spam.'),
@@ -111,6 +114,8 @@ const meta = { tags: ['Agent inboxes'], security };
 const take = z.coerce.number().int().min(1).max(100).default(25);
 const extract = z.enum(['codes', 'links', 'codes,links', 'links,codes']).optional().describe('Extract one-time codes, links or both into each message’s extract field.');
 const absent = () => new ApiError(404, 'NOT_FOUND', 'No such inbox or message for this credential.');
+/** storedAt and processingMs (Message): when the message was stored, and how long after its receipt reached us. */
+const stored = sql`m.created_at AS stored_at, CASE WHEN m.direction='inbound' AND m.ses_message_id IS NOT NULL THEN (SELECT greatest(0,round(extract(epoch FROM m.created_at-r.created_at)*1000))::int FROM mail_receipts r WHERE r.workspace_id=m.workspace_id AND r.ses_message_id=m.ses_message_id) END AS processing_ms`;
 const randomLocal = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
 
 type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: string; replay: boolean; inbox: Box };
@@ -154,7 +159,7 @@ type Box = z.infer<typeof Inbox>;
 const agentInbox = (v: MailboxAccess) => sql`${visible(v)} AND b.kind='inbox'`;
 type FileRow = { id: string; filename: string; content_type: string; size_bytes: number; bucket: string; storage_key: string };
 type Row = {
-  id: string; thread_id: string; inbox_seq: string; from_name: string | null; from_address: string; to: MailAddress[]; to_count: number; subject: string; received_at: string;
+  id: string; thread_id: string; inbox_seq: string; from_name: string | null; from_address: string; to: MailAddress[]; to_count: number; subject: string; received_at: string; stored_at: string; processing_ms: number | null;
   direction:'inbound'|'outbound'; flags:number; labels:string[]; folders:z.infer<typeof Location>[]; modseq:string; uid:number|null; uid_validity:number|null; read: boolean; spam: boolean; held_reason: 'expired' | 'quota' | null; attachment_count: number; verdicts: Verdicts; html: string | null; text: string | null;
   region: string; binding: ReadyConnection | null; files: FileRow[]; candidate_count?: number;
 };
@@ -166,7 +171,7 @@ function project(row: Row, extract?: string) {
     message: {
       id: row.id, threadId: row.thread_id, cursor: String(row.inbox_seq ?? 0), from: { name, address: row.from_address }, to, toCount: Math.max(to.length, row.to_count ?? 0),
       uid:row.uid??null, uidValidity:row.uid_validity??null, folders:row.folders.flatMap(f=>isLegacyRole(f.folder)?[{...f,folder:f.folder}]:[]), additionalFolders:row.folders.filter(f=>!isLegacyRole(f.folder)), modseq:row.modseq, flags:flagsOf(row.flags), labels:row.labels,
-      subject, snippet: p.text.slice(0, 240), receivedAt: new Date(row.received_at).toISOString(), read: row.read, junk: row.spam, held: row.held_reason,
+      subject, snippet: p.text.slice(0, 240), receivedAt: new Date(row.received_at).toISOString(), storedAt: new Date(row.stored_at).toISOString(), processingMs: row.processing_ms, read: row.read, junk: row.spam, held: row.held_reason,
       attachmentCount: row.attachment_count, auth: { spf: row.verdicts.spf, dkim: row.verdicts.dkim, dmarc: row.verdicts.dmarc }, simulated: row.verdicts.simulated === true,
       hiddenContent: p.hiddenContent, extract: p.extract,
     },
@@ -310,7 +315,8 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     ...meta, method: 'get', path: messages, operationId: 'listInboxMessages', summary: 'List or wait for inbox messages',
     description: 'Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: ' + readLimitNote(INBOX_MESSAGES_READ),
     request: { params, query },
-    responses: { 200: response(z.object({ data: z.array(Message), cursor: z.string().describe('Pass as after on the next call; unchanged when data is empty.'), hasMore: z.boolean() }).openapi('InboxMessagePage')), ...errors },
+    responses: { 200: response(z.object({ data: z.array(Message), cursor: z.string().describe('Pass as after on the next call; unchanged when data is empty.'), hasMore: z.boolean(),
+      servedAt: z.string().describe('When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored.') }).openapi('InboxMessagePage')), ...errors },
   }), async c => {
     const v = access(c, 'read'), q = c.req.valid('query'), { id } = c.req.valid('param');
     if (q.wait) await reservePolls(c, v.workspaceId, v.keyId, q.wait);
@@ -323,13 +329,13 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     const fromFilter = fromAddr ? sql`AND m.search @@ plainto_tsquery('simple', ${fromAddr}) AND m.from_address=${fromAddr}` : sql``;
     const run = <T>(work: (db: DbExecutor) => Promise<T>) => filtered ? budgetedRead(c.env.db, work, readLimit(INBOX_MESSAGES_READ)) : work(c.env.db);
     // Capture inbox_state.modseq in the same MVCC snapshot as the scan and acquire a FairPool read slot per tick (never across sleep).
-    type PollRow = Row & { state_modseq: string };
+    type PollRow = Row & { state_modseq: string; read_at: string };
     const scan = (sinceModseq: string | null) => withReadLease(c, () => run(async db => (await db.execute<PollRow>(sql`
-      SELECT s.modseq::text AS state_modseq, page.* FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id LEFT JOIN LATERAL(
+      SELECT s.modseq::text AS state_modseq, to_char(clock_timestamp() AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') AS read_at, page.* FROM mailboxes b JOIN inbox_state s ON s.inbox_id=b.id LEFT JOIN LATERAL(
         WITH candidate AS (
           SELECT m.id, m.thread_id, m.from_name, m.from_address,
             ${sliceJsonbArray(sql`m."to"`, addrCap)} AS "to", ${messageFieldCount(sql`m."to"`, sql`m.verdicts`, 'toCount')} AS to_count,
-            m.subject, m.received_at, ((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam, m.attachment_count,
+            m.subject, m.received_at, ${stored}, ((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam, m.attachment_count,
             jsonb_strip_nulls(jsonb_build_object('spf', m.verdicts->'spf', 'dkim', m.verdicts->'dkim', 'dmarc', m.verdicts->'dmarc', 'simulated', m.verdicts->'simulated')) AS verdicts,
             left(m.text, 32768) AS text, left(m.html, 32768) AS html,
             ${seqCol} AS sort_seq, ${seqCol}::text AS inbox_seq, l.read, l.held_reason, l.modseq::text, l.flags, l.labels, ${locations} AS folders,
@@ -345,7 +351,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
               OVER (ORDER BY sort_seq ROWS UNBOUNDED PRECEDING) AS cum_bytes
           FROM candidate
         )
-        SELECT id, thread_id, from_name, from_address, "to", to_count, subject, received_at, spam, attachment_count, verdicts, text, html, inbox_seq, read, held_reason, modseq, flags, labels, folders, uid, uid_validity,
+        SELECT id, thread_id, from_name, from_address, "to", to_count, subject, received_at, stored_at, processing_ms, spam, attachment_count, verdicts, text, html, inbox_seq, read, held_reason, modseq, flags, labels, folders, uid, uid_validity,
           (SELECT count(*)::int FROM candidate) AS candidate_count
         FROM sized WHERE rn = 1 OR cum_bytes <= ${PAGE_MAX_BYTES}
         ORDER BY rn
@@ -372,7 +378,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
     const candidateCount = present[0]?.candidate_count ?? present.length;
     const projected = present.slice(0, q.limit).map(r => project(r, q.extract).message);
     const fitted = fitPageByBytes(projected, candidateCount > projected.length, PAGE_MAX_BYTES, 256);
-    return c.json({ data: fitted.items, cursor: fitted.items.at(-1)?.cursor ?? q.after, hasMore: fitted.hasMore }, 200);
+    return c.json({ data: fitted.items, cursor: fitted.items.at(-1)?.cursor ?? q.after, hasMore: fitted.hasMore, servedAt: present[0]?.read_at ?? new Date().toISOString() }, 200);
   });
   app.openapi(createRoute({
     ...meta, method: 'get', path: detail, operationId: 'getInboxMessage', summary: 'Read an inbox message',
@@ -385,7 +391,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
       const r = (await c.env.db.execute<Row>(sql`
         SELECT m.id, m.thread_id, m.direction, m.from_name, m.from_address,
           ${sliceJsonbArray(sql`m."to"`, storeCap)} AS "to", ${messageFieldCount(sql`m."to"`, sql`m.verdicts`, 'toCount')} AS to_count,
-          m.subject, m.received_at, m.attachment_count, m.text, m.html, m.region,
+          m.subject, m.received_at, ${stored}, m.attachment_count, m.text, m.html, m.region,
           jsonb_strip_nulls(jsonb_build_object('spf', m.verdicts->'spf', 'dkim', m.verdicts->'dkim', 'dmarc', m.verdicts->'dmarc', 'virus', m.verdicts->'virus', 'simulated', m.verdicts->'simulated')) AS verdicts,
           ((m.spam AND NOT 'guard-allowed'=ANY(l.labels)) OR 'spam'=ANY(l.labels)) AS spam, l.read, l.inbox_seq::text, l.held_reason, l.modseq::text, l.flags, l.labels, ${locations} AS folders,
           ${c.env.config.multiTenant ? storageBinding(v.workspaceId, sql`m.region`, sql`m.raw_bucket`) : sql`NULL`} AS binding,

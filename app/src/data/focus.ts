@@ -6,10 +6,10 @@ import { request } from './live'
 import type { LandingFocus } from './landing-focus'
 import { ApiError, type Identity, type WorkspaceSettings } from './types'
 
-// What the workspace is here for (api/src/workspace-focus.ts): onboarding asks after "Your domain is ready", Settings
+// What the workspace is here for (api/src/workspace-focus.ts): onboarding asks after its first email, Settings
 // changes it, and the first pick leads onboarding's next step, Overview's first card and its Get started steps.
 export { WORKSPACE_FOCUS, type WorkspaceFocus }
-export const focusLabels: Record<WorkspaceFocus, string> = { marketing: 'Marketing emails', newsletter: 'Newsletter', developer: 'Developer emails', agents: 'Agent inboxes' }
+export const focusLabels: Record<WorkspaceFocus, string> = { marketing: 'Marketing emails', newsletter: 'Newsletter', developer: 'Developer emails', agents: 'Agent inboxes', personal: 'An inbox for myself' }
 /** The leading focus; developer (the agent prompt and a test send) when none was chosen or it was skipped. */
 export const leadFocus = (identity: Pick<Identity, 'focus'> | null | undefined): WorkspaceFocus => identity?.focus?.[0] ?? 'developer'
 

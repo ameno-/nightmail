@@ -8345,10 +8345,11 @@
                 "marketing",
                 "newsletter",
                 "developer",
-                "agents"
+                "agents",
+                "personal"
               ]
             },
-            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped."
+            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped."
           }
         },
         "required": [
@@ -8386,11 +8387,12 @@
                 "marketing",
                 "newsletter",
                 "developer",
-                "agents"
+                "agents",
+                "personal"
               ]
             },
-            "maxItems": 4,
-            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads."
+            "maxItems": 5,
+            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads."
           }
         },
         "example": {
@@ -8986,6 +8988,21 @@
           "status",
           "simulated"
         ]
+      },
+      "TestEmailContent": {
+        "type": "object",
+        "properties": {
+          "subject": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000
+          }
+        }
       },
       "DomainDnsSetup": {
         "type": "object",
@@ -13628,12 +13645,17 @@
           },
           "hasMore": {
             "type": "boolean"
+          },
+          "servedAt": {
+            "type": "string",
+            "description": "When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored."
           }
         },
         "required": [
           "data",
           "cursor",
-          "hasMore"
+          "hasMore",
+          "servedAt"
         ]
       },
       "InboxMessage": {
@@ -13701,7 +13723,19 @@
             "type": "string"
           },
           "receivedAt": {
-            "type": "string"
+            "type": "string",
+            "description": "When the sending server handed it over (SES received it)."
+          },
+          "storedAt": {
+            "type": "string",
+            "description": "When Nightmail stored it (the start of the write that stored it), on the clock servedAt uses."
+          },
+          "processingMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing and routing the message. Null for mail that came another way (simulated, sent, copied)."
           },
           "read": {
             "type": "boolean"
@@ -13928,6 +13962,8 @@
           "subject",
           "snippet",
           "receivedAt",
+          "storedAt",
+          "processingMs",
           "read",
           "flags",
           "labels",
@@ -21029,7 +21065,8 @@
                           "marketing",
                           "newsletter",
                           "developer",
-                          "agents"
+                          "agents",
+                          "personal"
                         ]
                       },
                       "description": "A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped."
@@ -40611,7 +40648,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.",
+        "description": "Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from \"Nightmail Setup\" <setup@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.",
         "parameters": [
           {
             "schema": {
@@ -40624,6 +40661,16 @@
             "in": "path"
           }
         ],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestEmailContent"
+              }
+            }
+          }
+        },
         "responses": {
           "202": {
             "description": "Success",
@@ -40745,12 +40792,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendDomainTestEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendDomainTestEmail } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendDomainTestEmail({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/test-send' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/domains/resource_123/test-send' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }

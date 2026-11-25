@@ -15,6 +15,7 @@ import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf,
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { WORKSPACE_FOCUS, type WorkspaceFocus } from './workspace-focus.js';
+import { SETUP_LIMITS, SETUP_SENDER } from './setup-email.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, withoutVerdict, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
@@ -91,7 +92,7 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
     .optional().describe('Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const Focus = z.enum(WORKSPACE_FOCUS);
-const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
+const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
 const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.'),
   requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.'),
   focus: z.array(Focus).nullable().describe(FOCUS_NOTE) }).openapi('WorkspaceSettings');
@@ -1144,17 +1145,22 @@ export function registerOperations(app: App) {
     return c.json(saved,200);
   });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
-  // The guarantee is the server's, not the dashboard's: no recipient or content is accepted, only the domain.
+  // The guarantee is the server's, not the dashboard's: no recipient is accepted, only the domain, and words of the
+  // person's own are screened like any send (sending.ts platformTestVerdict).
+  const setupLine=(max:number)=>z.string().trim().min(1).max(max);
+  // Other fields are ignored, as they were before the route took any: no recipient is ever read from the body.
+  const TestEmailContent=z.object({subject:setupLine(SETUP_LIMITS.subject).refine(v=>!/[\r\n]/.test(v),'Subject cannot contain line breaks.').optional(),text:setupLine(SETUP_LIMITS.text).optional()}).openapi('TestEmailContent');
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/test-send',operationId:'sendDomainTestEmail',tags:['Domains'],security:dashboardSecurity,
-    description:'Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.',
-    request:{params:IdParams},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
-    const a=actor(c,'send');
+    description:`Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from "${SETUP_SENDER.name}" <${SETUP_SENDER.local}@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.`,
+    request:{params:IdParams,body:{...json(TestEmailContent),required:false}},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
+    const a=actor(c,'send'), content=c.req.valid('json') as z.infer<typeof TestEmailContent>|undefined;
     if (a.credential!=='dashboard' || !a.email) throw denied('DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.',{ permission: 'sendEmail', level: 'on', credential: 'dashboard' });
     const [row]=await c.env.db.select({name:domains.name}).from(domains).where(and(scoped(domains,a),eq(domains.id,c.req.valid('param').id)));
     if (!row) return notFound('Domain');
     allowedDomain(a,row.name);
     const { admitTestEmail }=await wrapModuleLoad(() => import('./sending.js'));
-    return c.json(await admitTestEmail(c,a,row.name,a.email),202);
+    const custom=content?.subject && content.text ? { subject: content.subject, text: content.text } : undefined;
+    return c.json(await admitTestEmail(c,a,row.name,a.email,custom),202);
   });
   const dnsSetup='/v1/domains/{id}/dns-setup';
   const dnsGroup=`(${groupIds.join('|')})`;

@@ -20651,10 +20651,13 @@ describe('Workspace focus', () => {
       // Changing the name leaves it; skipping is an empty list (asked, none picked); null clears it.
       assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { name: 'Focus renamed' })).focus, ['agents', 'developer']);
       assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { focus: ['newsletter', 'marketing', 'agents', 'developer'] })).focus, ['newsletter', 'marketing', 'agents', 'developer']);
+      // All five, an inbox of their own (personal) leading: the API and the database's check both take it (migration 513).
+      assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { focus: ['personal', 'newsletter', 'marketing', 'agents', 'developer'] })).focus, ['personal', 'newsletter', 'marketing', 'agents', 'developer']);
+      assert.deepEqual((await db.query('SELECT focus FROM workspaces WHERE id = $1', [wid])).rows[0].focus, ['personal', 'newsletter', 'marketing', 'agents', 'developer']);
       assert.deepEqual(ok(await local('PATCH', '/v1/settings/workspace', { focus: [] })).focus, []);
       assert.deepEqual(await me(), []);
       assert.equal(ok(await local('PATCH', '/v1/settings/workspace', { focus: null })).focus, null);
-      // Only the four, each once, as a list.
+      // Only the five, each once, as a list.
       for (const invalid of [['sales'], ['agents', 'agents'], 'agents', ['marketing', 'newsletter', 'developer', 'agents', 'marketing']])
         error(await local('PATCH', '/v1/settings/workspace', { focus: invalid }), 422, 'VALIDATION_FAILED');
       assert.equal(ok(await local('GET', '/v1/settings/workspace')).focus, null);
@@ -20666,7 +20669,7 @@ describe('Workspace focus', () => {
       }
       assert.deepEqual((await db.query('SELECT focus FROM workspaces WHERE id = $1', [wid])).rows[0].focus, ['marketing']);
       const audits = (await db.query("SELECT summary FROM audit_events WHERE workspace_id = $1 AND action = 'settings.update' AND summary->'fields' ? 'focus' ORDER BY id", [wid])).rows.map(r => r.summary);
-      assert.deepEqual(audits.map(a => [a.before?.focus ?? null, a.after?.focus ?? null]), [[null, ['agents', 'developer']], [['agents', 'developer'], ['newsletter', 'marketing', 'agents', 'developer']], [['newsletter', 'marketing', 'agents', 'developer'], []], [[], null], [null, ['marketing']]]);
+      assert.deepEqual(audits.map(a => [a.before?.focus ?? null, a.after?.focus ?? null]), [[null, ['agents', 'developer']], [['agents', 'developer'], ['newsletter', 'marketing', 'agents', 'developer']], [['newsletter', 'marketing', 'agents', 'developer'], ['personal', 'newsletter', 'marketing', 'agents', 'developer']], [['personal', 'newsletter', 'marketing', 'agents', 'developer'], []], [[], null], [null, ['marketing']]]);
       // Overview setup: each focus's first steps, for whoever can set the focus; a member gets none.
       const progress = async (headers?: Record<string, string>) => ok(await local('GET', '/v1/overview/setup', undefined, 'live', headers)).progress;
       const none = { inbox: false, received: false, contacts: false, campaign: false, campaignSent: false, newsletter: false, readers: false, issueSent: false };
@@ -28712,6 +28715,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const copied = ok(await local('POST', '/v1/emails/send', { from: fixed.from, to: me, subject: fixed.subject, text: fixed.text }, 'live', { authorization: `Bearer ${key}` }), 202);
       assert.equal(screened.length, 1);
       assert.equal((await db.query(`SELECT snapshot->'screenVerdict'->>'status' AS status FROM sending_emails WHERE id=$1`, [copied.id])).rows[0].status, 'passed');
+      // Onboarding's first email: the same route with a subject and text comes from "<productName> Setup" <setup@domain>. Its own
+      // words get the platform verdict; words the person wrote are screened like any send.
+      const { SETUP_EMAIL, SETUP_SENDER } = await import('./src/setup-email.js'), setup = { ...exact, ...platformTestEmail('platform.invalid', SETUP_EMAIL) };
+      assert.deepEqual([setup.from, setup.fromName], [`setup@platform.invalid`, SETUP_SENDER.name]);
+      assert.deepEqual(platformTestVerdict(setup, me, 'probation'), { status: 'platform', reason: 'platform test email', rules: 'probation' });
+      for (const [what, changed] of [['subject', { subject: 'Wire the money today' }], ['body', { text: 'Pay here: https://example.invalid' }], ['display name', { fromName: 'Your bank' }], ['no display name', { fromName: undefined }]] as [string, Partial<typeof setup>][])
+        assert.equal(platformTestVerdict({ ...setup, ...changed }, me, 'standard'), undefined, what);
+      const own = ok(await local('POST', `/v1/domains/${domain}/test-send`, { ...SETUP_EMAIL }, 'live', { 'idempotency-key': unique('test-send') }), 202);
+      assert.equal(screened.length, 1, 'Onboarding’s own words are not screened.');
+      assert.deepEqual((await db.query(`SELECT from_address, snapshot->>'fromName' AS name, snapshot->>'subject' AS subject, snapshot->'screenVerdict'->>'status' AS status FROM sending_emails WHERE id=$1`, [own.id])).rows[0],
+        { from_address: 'setup@platform.invalid', name: SETUP_SENDER.name, subject: SETUP_EMAIL.subject, status: 'platform' });
+      ok(await local('POST', `/v1/domains/${domain}/test-send`, { subject: 'My own words', text: 'Written by me.' }, 'live', { 'idempotency-key': unique('test-send') }), 202);
+      assert.equal(screened.length, 2, 'Words of their own go to the classifier.');
+      error(await local('POST', `/v1/domains/${domain}/test-send`, { subject: 'Two\nlines', text: 'x' }, 'live', { 'idempotency-key': unique('test-send') }), 422, 'VALIDATION_FAILED');
     }));
   });
 
@@ -33232,7 +33249,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       });
       try{
         const idle=ok(await local('GET',`/v1/inboxes/${sb.id}/messages?wait=2&subjectContains=never`));
-        assert.deepEqual(idle,{data:[],cursor:'0',hasMore:false});
+        const {servedAt,...page}=idle;
+        assert.deepEqual(page,{data:[],cursor:'0',hasMore:false});
+        assert.ok(Number.isFinite(Date.parse(servedAt)),'servedAt: when the page was read');
         assert.equal(msgScans,1,'idle wait=2 scans mailbox_messages only on tick 0, not on ticks 1..2');
         assert.ok(gateReads>=1,'subsequent idle ticks use the O(1) inbox_state.modseq gate');
       }finally{qSpy.mock.restore();}
@@ -33527,7 +33546,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('SES receipt wake: coalesced ingest stores agent inbox mail without a shared queue turn; feedback never starts it', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, fetch }) => {
+    await simulatedSesFixture(t, async ({ runtime, db, fetch, local }) => {
       const { S3Client } = await import('@aws-sdk/client-s3'), { setupResources } = await import('./src/ses-setup.js');
       const { feedbackSink } = await import('./src/adapters/feedback-queue.js');
       const wid=runtime.config.workspaceId, host=unique('receipt')+'.invalid', addr='agent@'+host, dom=unique('domain'), box=unique('mbx');
@@ -33582,6 +33601,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const stored=await db.query(`SELECT m.ses_message_id FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id
         WHERE l.mailbox_id=$1 AND m.ses_message_id=ANY($2)`,[box,receipts]);
       assert.deepEqual(stored.rows.map(r=>r.ses_message_id).sort(),[...receipts].sort());
+      // Each message says when it was stored and how long after its receipt, and the page when it was read, on one clock.
+      const page=ok(await local('GET',`/v1/inboxes/${box}/messages?limit=50`));
+      assert.equal(page.data.length,receipts.length);
+      for(const m of page.data){assert.ok(Number.isInteger(m.processingMs)&&m.processingMs>=0,JSON.stringify(m.processingMs));assert.ok(Date.parse(page.servedAt)>=Date.parse(m.storedAt));}
       assert.ok(starts.length>0);
       assert.equal((await db.query('SELECT status FROM jobs WHERE id=$1',[sentinel])).rows[0].status,'pending');
       t.diagnostic(`${priority} signed feedback notifications: zero ingest wakes; ${receipts.length} receipts stored, ${starts.length} elected wake(s).`);

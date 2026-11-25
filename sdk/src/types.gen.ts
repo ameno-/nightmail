@@ -2742,9 +2742,9 @@ export type WorkspaceSettings = {
      */
     requiredNotices: boolean;
     /**
-     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
      */
-    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type UpdateWorkspaceSettings = {
@@ -2754,9 +2754,9 @@ export type UpdateWorkspaceSettings = {
      */
     postalAddress?: string | null;
     /**
-     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
      */
-    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type SesAccount = {
@@ -2967,6 +2967,11 @@ export type TestEmailQueued = {
     id: string;
     status: 'queued';
     simulated: boolean;
+};
+
+export type TestEmailContent = {
+    subject?: string;
+    text?: string;
 };
 
 export type DomainDnsSetup = {
@@ -4459,6 +4464,10 @@ export type InboxMessagePage = {
      */
     cursor: string;
     hasMore: boolean;
+    /**
+     * When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored.
+     */
+    servedAt: string;
 };
 
 export type InboxMessage = {
@@ -4488,7 +4497,18 @@ export type InboxMessage = {
     toCount: number;
     subject: string;
     snippet: string;
+    /**
+     * When the sending server handed it over (SES received it).
+     */
     receivedAt: string;
+    /**
+     * When Nightmail stored it (the start of the write that stored it), on the clock servedAt uses.
+     */
+    storedAt: string;
+    /**
+     * Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing and routing the message. Null for mail that came another way (simulated, sent, copied).
+     */
+    processingMs: number | null;
     read: boolean;
     flags: Array<'flagged' | 'answered' | 'draft' | 'forwarded' | 'junk' | 'notJunk' | 'mdnSent'>;
     labels: Array<string>;
@@ -7072,7 +7092,7 @@ export type GetCurrentIdentityResponses = {
         /**
          * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
          */
-        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
         /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
@@ -14245,7 +14265,7 @@ export type ChooseReceivingHostResponses = {
 export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
 
 export type SendDomainTestEmailData = {
-    body?: never;
+    body?: TestEmailContent;
     path: {
         id: string;
     };

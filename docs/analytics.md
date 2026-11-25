@@ -66,7 +66,7 @@ One JSON object per line. Human rows have the batch's envelope and one event. A 
 | `dialog_open` / `dialog_close` | A dialog or sheet opens or closes |
 | `form_submit` / `form_invalid` | A form is submitted / a field fails the browser's validation |
 | `api_error` | An API request the dashboard made failed |
-| `track` | A funnel step: `signed_up`, `domain_added`, `domain_verified`, `first_send`, `key_created`, `inbox_created`, `campaign_sent`, `byo_connected`, or `focus_chosen` with the onboarding picks in `name`, the lead first (`focus/agents/developer`, or `focus/skip`), or a focus a landing link's `?focus=` brought, which skips the question (`landing/agents`, plus the comparison page's slug when it came from one: `landing/agents/agentmail`) (see below) |
+| `track` | A funnel step: `signed_up`, `domain_added`, `domain_verified`, `first_send`, `key_created`, `inbox_created`, `campaign_sent`, `byo_connected`, or `focus_chosen` with the onboarding picks in `name`, the lead first (`focus/agents/developer`, or `focus/skip`), or a focus a landing link's `?focus=` brought, which skips the question (`landing/agents`, plus the comparison page's slug when it came from one: `landing/agents/agentmail`) (see below), or `onboarding` with a step and what happened on it in `name`: `email/shown`, `email/sent`, `email/replied`, `email/skip`, `focus/shown`, `focus/skip`, `next/<focus>/shown` and `finished` (no words, addresses or timings) |
 | `sign_in` | Written by the API at the sign-in callback: the signed-out session (`sid`) and the account that signed in from it (`uid`) |
 
 Funnel steps come from the API's answers to the dashboard (`apiResult` in `app/src/lib/analytics.ts`), so each is something the server confirmed. `domain_added`, `key_created`, `inbox_created` and `campaign_sent` fire on the create, send or schedule response. The others are states the dashboard reads, reported once per page and workspace, so take the earliest: `signed_up` (a hosted workspace with no sending connection yet), `byo_connected` (its own AWS connection is ready), `domain_verified` (a verify or domain read says ready) and `first_send` (Overview's setup says the workspace has sent mail). These are first *seen* times, at most a page load after the fact.
@@ -103,7 +103,7 @@ FROM analytics_hourly WHERE metric = 'page_view' ORDER BY hour DESC;
 {"v":1,"from":"2026-11-20T00:00:00.000Z","to":"2026-11-21T00:00:00.000Z","grain":"day","rows":[{"bucket":"2026-11-20T00:00:00.000Z","metric":"visit","dimensions":{},"events":12,"visitors":9}]}
 ```
 
-`page_view` dimensions: path × referrer × source × medium × campaign × country × device × viewport class. `cta`: path × target (public links and named dashboard controls). `focus`: the onboarding picks (`focus_chosen`'s name), with visitors. `bot_view`: path only. Milestones: counts of workspaces, no identifier. Bot and milestone rows have null visitors. Don't sum distincts across groups; the `visit` row is the site-wide distinct.
+`page_view` dimensions: path × referrer × source × medium × campaign × country × device × viewport class. `cta`: path × target (public links and named dashboard controls). `focus`: the onboarding picks (`focus_chosen`'s name), with visitors. `onboarding`: each step's events (`onboarding`'s name), with visitors. `bot_view`: path only. Milestones: counts of workspaces, no identifier. Bot and milestone rows have null visitors. Don't sum distincts across groups; the `visit` row is the site-wide distinct.
 
 ## Optional hourly push
 

@@ -26,4 +26,5 @@ export const FIRST_STEP: Record<WorkspaceFocus, string> = {
   developer: 'Every workspace comes with a nightmail.email domain that sends at once, with no DNS to set up.',
   newsletter: 'Start by importing your list.',
   marketing: 'Start by importing your contacts.',
+  personal: 'Every workspace comes with an inbox at its own nightmail.email address; add your own domain any time.',
 }
