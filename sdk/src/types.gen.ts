@@ -603,6 +603,24 @@ export type ContactRead = Contact & {
     listIds: Array<string>;
 };
 
+/**
+ * Why campaigns and marketing sends skip this contact, or null when nothing is wrong with the address. Flagged when the contact is created or imported, and again hourly for every contact. Transactional mail is never refused.
+ */
+export type ContactRisk = {
+    /**
+     * invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: hard-bounced in another workspace in the last year.
+     */
+    reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead';
+    /**
+     * For typo_domain, the address with the provider it most likely meant.
+     */
+    suggestion: string | null;
+    /**
+     * Its owner allowed it: campaigns and marketing sends reach it anyway.
+     */
+    allowed: boolean;
+} | null;
+
 export type Contact = {
     id: string;
     workspaceId: string;
@@ -614,6 +632,7 @@ export type Contact = {
     marketingConsent: 'unknown' | 'subscribed' | 'unsubscribed';
     suppressed: boolean;
     suppressionReason: string | null;
+    risk: ContactRisk;
     lastOpenAt: string | null;
     lastClickAt: string | null;
     observedSince: string | null;
@@ -904,6 +923,10 @@ export type AudienceImport = {
         properties: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.
+         */
+        risk?: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead';
     }>;
     errors: Array<{
         row: number;
@@ -915,6 +938,7 @@ export type AudienceImport = {
      * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
      */
     rowsRetained: boolean;
+    risky: RiskBreakdown;
     /**
      * false once per-row error details are no longer kept after the retention window (errors is then []).
      */
@@ -922,6 +946,20 @@ export type AudienceImport = {
     createdAt: string;
     updatedAt: string;
 };
+
+/**
+ * Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene.
+ */
+export type RiskBreakdown = {
+    total: number;
+    byReason: {
+        invalid: number;
+        disposable: number;
+        typo_domain: number;
+        role: number;
+        dead: number;
+    };
+} | null;
 
 export type CommittedContactImport = AudienceImport & {
     /**
@@ -1263,6 +1301,10 @@ export type SingleEmailQueued = {
     simulated: boolean;
     screen?: EmailScreenSummary;
     /**
+     * Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.
+     */
+    warnings?: Array<RecipientWarning>;
+    /**
      * A scheduled send: when it goes (UTC).
      */
     scheduledAt?: string;
@@ -1281,6 +1323,12 @@ export type SingleEmailQueued = {
  */
 export type EmailScreenSummary = {
     status: 'passed' | 'skipped';
+};
+
+export type RecipientWarning = {
+    email: string;
+    risk: 'invalid' | 'disposable' | 'typo_domain' | 'role';
+    suggestion: string | null;
 };
 
 export type SendEmailInput = {
@@ -1351,6 +1399,10 @@ export type EmailQueued = {
     status: 'queued';
     simulated: boolean;
     screen?: EmailScreenSummary;
+    /**
+     * Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.
+     */
+    warnings?: Array<RecipientWarning>;
 };
 
 export type SendEmailBatchInput = {
@@ -2065,13 +2117,24 @@ export type CampaignPreview = {
 };
 
 /**
- * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
+ * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
  */
 export type CampaignAudienceCounts = {
     matched: number;
     eligible: number;
     suppressed: number;
     unsubscribed: number;
+    /**
+     * Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address that bounced elsewhere): the send skips them. Not in eligible.
+     */
+    risky: number;
+    riskyByReason: {
+        invalid: number;
+        disposable: number;
+        typo_domain: number;
+        role: number;
+        dead: number;
+    };
 };
 
 export type CampaignPreviewImage = {
@@ -2176,6 +2239,19 @@ export type CampaignQueued = {
     queued: number;
     scheduledAt: string | null;
     simulated: boolean;
+    /**
+     * Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch.
+     */
+    risky?: {
+        total: number;
+        byReason: {
+            invalid: number;
+            disposable: number;
+            typo_domain: number;
+            role: number;
+            dead: number;
+        };
+    } | null;
 };
 
 export type CampaignSendInput = {
@@ -7556,6 +7632,10 @@ export type ListContactsData = {
         email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
+        /**
+         * true: only contacts campaigns skip as risky (risk set and not allowed).
+         */
+        risky?: 'true';
         listId?: string;
     };
     url: '/v1/contacts';
@@ -7826,6 +7906,10 @@ export type UpdateContactData = {
         properties?: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).
+         */
+        riskAllowed?: boolean;
     };
     path: {
         id: string;
@@ -8389,6 +8473,10 @@ export type ListListMembersData = {
         email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
+        /**
+         * true: only contacts campaigns skip as risky (risk set and not allowed).
+         */
+        risky?: 'true';
     };
     url: '/v1/lists/{id}/members';
 };
@@ -8976,6 +9064,10 @@ export type PreviewSegmentResponses = {
         eligible: number;
         suppressed: number;
         unsubscribed: number;
+        /**
+         * Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible.
+         */
+        risky: number;
     };
 };
 
@@ -9051,6 +9143,7 @@ export type ListContactImportsResponses = {
              * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
              */
             rowsRetained: boolean;
+            risky: RiskBreakdown;
             /**
              * false once per-row error details are no longer kept after the retention window (errors is then []).
              */

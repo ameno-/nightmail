@@ -10966,13 +10966,13 @@ describe('Lists, compound segments, imports and exports', () => {
       { operator: 'or', rules: [{ field: 'plan', operator: 'eq', value: 'pro' }, { field: 'country', operator: 'eq', value: 'CA' }] },
       { field: 'country', operator: 'neq', value: 'GB' },
     ] } });
-    assert.deepEqual(ok(await http('POST', `/v1/segments/${segment.id}/preview`, key.secret, { listId: list.id })), { matched: 2, eligible: 1, suppressed: 0, unsubscribed: 1 });
+    assert.deepEqual(ok(await http('POST', `/v1/segments/${segment.id}/preview`, key.secret, { listId: list.id })), { matched: 2, eligible: 1, suppressed: 0, unsubscribed: 1, risky: 0 });
     ok(await http('PATCH', `/v1/segments/${segment.id}`, key.secret, { rule: { field: 'email', operator: 'eq', value: a.email.toUpperCase() } }));
-    assert.deepEqual(ok(await http('POST', `/v1/segments/${segment.id}/preview`, key.secret, { listId: list.id })), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 }, 'Email equality must normalize uppercase input against the stored address.');
+    assert.deepEqual(ok(await http('POST', `/v1/segments/${segment.id}/preview`, key.secret, { listId: list.id })), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0 }, 'Email equality must normalize uppercase input against the stored address.');
     ok(await http('PATCH', `/v1/segments/${segment.id}`, key.secret, { rule: { field: 'email', operator: 'neq', value: a.email.toUpperCase() } }));
-    assert.deepEqual(ok(await http('POST', `/v1/segments/${segment.id}/preview`, key.secret, { listId: list.id })), { matched: 2, eligible: 1, suppressed: 0, unsubscribed: 1 }, 'Email inequality must exclude the same address regardless of input case.');
+    assert.deepEqual(ok(await http('POST', `/v1/segments/${segment.id}/preview`, key.secret, { listId: list.id })), { matched: 2, eligible: 1, suppressed: 0, unsubscribed: 1, risky: 0 }, 'Email inequality must exclude the same address regardless of input case.');
     const inactive = await resource(t, key.secret, '/v1/segments', { name: unique('inactive'), rule: { field: 'lastOpenAt', operator: 'inactive', days: 90 } });
-    assert.deepEqual(ok(await http('POST', `/v1/segments/${inactive.id}/preview`, key.secret, { listId: list.id })), { matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0 });
+    assert.deepEqual(ok(await http('POST', `/v1/segments/${inactive.id}/preview`, key.secret, { listId: list.id })), { matched: 0, eligible: 0, suppressed: 0, unsubscribed: 0, risky: 0 });
     error(await http('POST', '/v1/segments', key.secret, { name: unique('bad-rule'), rule: { operator: 'and', rules: [] } }), 422);
     ok(await http('DELETE', `/v1/lists/${list.id}/members/${a.id}`, key.secret));
     const remaining = page(await http('GET', `/v1/lists/${list.id}/members`, key.secret));
@@ -11003,7 +11003,7 @@ describe('Lists, compound segments, imports and exports', () => {
       return rows.map((row: Json) => index.get(row.id)!).sort((a: number, b: number) => a - b);
     };
     const waitingCompanies = await resource(t, key.secret, '/v1/segments', { name: unique('waiting'), rule: { operator: 'and', rules: [p('status', 'string', 'eq', 'waiting'), p('joined_at', 'date', 'before', '2026-11-20'), p('mailbox', 'string', 'eq', 'company')] } });
-    assert.deepEqual(ok(await http('POST', `/v1/segments/${waitingCompanies.id}/preview`, key.secret, { listId: list.id })), { matched: 1, eligible: 0, suppressed: 0, unsubscribed: 1 });
+    assert.deepEqual(ok(await http('POST', `/v1/segments/${waitingCompanies.id}/preview`, key.secret, { listId: list.id })), { matched: 1, eligible: 0, suppressed: 0, unsubscribed: 1, risky: 0 });
     assert.deepEqual(ok(await http('GET', `/v1/segments/${waitingCompanies.id}`, key.secret)).rule.rules[1], p('joined_at', 'date', 'before', '2026-11-20'));
     // Date-only and Z timestamps use their UTC day; non-dates never match.
     assert.deepEqual([await matching(p('joined_at', 'date', 'before', '2026-11-20')), await matching(p('joined_at', 'date', 'on', '2026-11-20')), await matching(p('joined_at', 'date', 'after', '2026-11-20'))], [[0, 3], [1], [2]]);
@@ -12150,7 +12150,7 @@ describe('Import property boundaries', () => {
       assert.equal(plan.matched, 80);
       assert.equal(ok(await apiCall('POST', '/v1/audience-query/apply', { planId: plan.id })).affected, 80);
       const seg = ok(await apiCall('POST', '/v1/segments', { name: 'All Bounded', rule: { field: 'email', operator: 'contains', value: 'bound-' } }), 201);
-      assert.deepEqual(ok(await apiCall('POST', `/v1/segments/${seg.id}/preview`, { listId: list.id })), { matched: 80, eligible: 80, suppressed: 0, unsubscribed: 0 });
+      assert.deepEqual(ok(await apiCall('POST', `/v1/segments/${seg.id}/preview`, { listId: list.id })), { matched: 80, eligible: 80, suppressed: 0, unsubscribed: 0, risky: 0 });
       const impMatch = ok(await apiCall('POST', '/v1/contact-imports', {
         csv: 'Email\n' + Array.from({ length: 80 }, (_, i) => `bound-${i + 1}@example.net`).join('\n') + '\n',
         mapping: { email: 'Email' },
@@ -12536,8 +12536,8 @@ describe('Import property boundaries', () => {
       // 3. A1-6: previewSegment fast small-list path + bounded >1,000 rejection on large list.
       const proSeg = ok(await local('POST', '/v1/segments', { name: 'Pro Seg', rule: { field: 'plan', operator: 'eq', value: 'pro' } }), 201);
       const freeSeg = ok(await local('POST', '/v1/segments', { name: 'Free Seg', rule: { field: 'plan', operator: 'eq', value: 'free' } }), 201);
-      assert.deepEqual(ok(await local('POST', `/v1/segments/${proSeg.id}/preview`, { listId: smallList.id })), { matched: 2, eligible: 2, suppressed: 0, unsubscribed: 0 });
-      assert.deepEqual(ok(await local('POST', `/v1/segments/${proSeg.id}/preview`, { listId: bigList.id })), { matched: 300, eligible: 300, suppressed: 0, unsubscribed: 0 });
+      assert.deepEqual(ok(await local('POST', `/v1/segments/${proSeg.id}/preview`, { listId: smallList.id })), { matched: 2, eligible: 2, suppressed: 0, unsubscribed: 0, risky: 0 });
+      assert.deepEqual(ok(await local('POST', `/v1/segments/${proSeg.id}/preview`, { listId: bigList.id })), { matched: 300, eligible: 300, suppressed: 0, unsubscribed: 0, risky: 0 });
       error(await local('POST', `/v1/segments/${freeSeg.id}/preview`, { listId: bigList.id }), 422, 'AUDIENCE_LIMIT_EXCEEDED');
 
       // 4. A1-8: AudienceQL SELECT LIMIT 1 skips full-table count(*), UPDATE LIMIT batches cleanly, and open plans cap at 25.
@@ -12604,7 +12604,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           FROM unnest($2::text[],$3::text[],$4::boolean[]) AS fixture(id,consent,suppressed)`,
         [wid, ids, ['subscribed', 'unsubscribed', 'unknown', 'subscribed'], [false, false, false, true]]);
         ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: ids }));
-        const audience = { listId: list.id }, counts = { matched: 4, eligible: 1, suppressed: 1, unsubscribed: 2 };
+        const audience = { listId: list.id }, counts = { matched: 4, eligible: 1, suppressed: 1, unsubscribed: 2, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } };
         const create = async (fields: Json) => ok(await local('POST', '/v1/campaigns', {
           name: unique('review-display'), from: 'newsletter@shop.example.com', subject: 'Shop review', region: REGION, ...fields,
         }), 201);
@@ -15507,7 +15507,7 @@ describe('Private attachment assets and campaign revisions', () => {
     ok(await consent(key.secret, contact.id, 'subscribed'));
     ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [contact.id] }));
     const campaign = await campaignFixture(t, key.secret, { listId: list.id });
-    assert.deepEqual(ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+    assert.deepEqual(ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
     const sent = ok(await http('POST', `/v1/campaigns/${campaign.id}/send`, key.secret, { revision: campaign.revision }), 202);
     assert.equal(sent.state, 'preparing');
     assert.equal(sent.queued, 1);
@@ -18301,7 +18301,7 @@ describe('Campaign authorization and dispatch credentials', () => {
     const naming = (ids: { list: string; segment: string }): Json[] => [{ listId: ids.list }, { listId: list.id, segmentId: ids.segment }, { listId: list.id, excludeListIds: [ids.list] }, { listId: list.id, excludeSegmentIds: [ids.segment] }];
     const base = { name: 'Isolation', from: 'sender@example.com', subject: 'Hello', html: '<p>Hello</p>' };
     const own = ok(await local('POST', '/v1/campaigns', { ...base, audience: { listId: list.id } }), 201);
-    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0 });
+    assert.deepEqual(ok(await local('GET', `/v1/campaigns/${own.id}/audience`)), { matched: 1, eligible: 1, suppressed: 0, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
     return { wid, list, base, own, foreign: naming(theirs), unknown: naming(nobodys) };
   }
   test('a campaign audience may name only lists and segments of its own workspace: an ID of another workspace is refused like one nobody has', async t => {
@@ -20291,8 +20291,8 @@ describe('Required notices', () => {
       assert.equal(notice.draft.requiredNotice, true);
       assert.equal(marketing.draft.requiredNotice, undefined);
       // The live counts: the notice is for everyone not suppressed; marketing only for subscribers.
-      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${notice.id}/audience`)), { matched: 6, eligible: 4, suppressed: 2, unsubscribed: 0 });
-      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${marketing.id}/audience`)), { matched: 6, eligible: 2, suppressed: 2, unsubscribed: 2 });
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${notice.id}/audience`)), { matched: 6, eligible: 4, suppressed: 2, unsubscribed: 0, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${marketing.id}/audience`)), { matched: 6, eligible: 2, suppressed: 2, unsubscribed: 2, risky: 0, riskyByReason: { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 } });
       // The preview and the Checks show no unsubscribe: a notice is checked as the transactional message it is.
       const preview = ok(await local('GET', `/v1/campaigns/${notice.id}/preview`));
       assert.ok(!/unsubscribe/i.test(preview.html) && !/unsubscribe/i.test(preview.text), 'A notice has no unsubscribe link.');
@@ -20498,6 +20498,95 @@ describe('Required notices', () => {
       };
       assert.deepEqual(await quarantinedAndResumed({ name: 'Sales tax notice', requiredNotice: true }, { confirmRequiredNotice: true }), { deliveredOnly: false, expanded: 150, canceled: 0, rest: 50 });
       assert.deepEqual(await quarantinedAndResumed({ name: 'Newsletter' }, {}), { deliveredOnly: true, expanded: 150, canceled: 40, rest: 10 });
+    });
+  });
+});
+
+describe('List hygiene', () => {
+  // The OpenCode newsletter carried tens of thousands of disposable, dead and mistyped addresses: the kind spam traps are
+  // made of. Every check happens at the front door: a contact is classified when it is created or imported (and by the
+  // hourly pass for those from before), campaigns and marketing sends skip it unless its owner allows it, and
+  // transactional mail goes with a warning.
+  test('risky addresses: flagged on create and import, listed and allowed per contact, skipped by campaigns and marketing sends, warned on transactional mail; the hourly pass flags existing contacts', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, from = 'sender@example.com', tag = unique('hyg');
+      const NONE = { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0 };
+      // Another workspace hard-bounced these addresses: dead anywhere else.
+      const bounced = (email: string) => db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES ($1,'ws_hygiene_elsewhere',$2,true,'hard_bounce',now())", [unique('con'), email]);
+      const gone = `gone-${tag}@example.org`, gone2 = `gone2-${tag}@example.org`, gone3 = `gone3-${tag}@example.org`;
+      for (const email of [gone, gone2, gone3]) await bounced(email);
+      const create = async (email: string) => ok(await local('POST', '/v1/contacts', { email }), 201);
+      const disposable = await create(`temp-${tag}@fexpost.com`), typo = await create(`jane-${tag}@gmial.com`), role = await create(`abuse@${tag}.example.com`), dead = await create(gone), fine = await create(`fine-${tag}@example.net`);
+      assert.deepEqual([disposable.risk, typo.risk, role.risk, dead.risk, fine.risk], [
+        { reason: 'disposable', suggestion: null, allowed: false }, { reason: 'typo_domain', suggestion: `jane-${tag}@gmail.com`, allowed: false },
+        { reason: 'role', suggestion: null, allowed: false }, { reason: 'dead', suggestion: null, allowed: false }, null]);
+      // The filter lists the contacts campaigns skip; allowing one is reversible, and only for a risky contact.
+      const mine = new Set([disposable.id, typo.id, role.id, dead.id, fine.id]);
+      const risky = async () => ok(await local('GET', '/v1/contacts?risky=true&limit=100')).data.map((c: Json) => c.id).filter((id: string) => mine.has(id)).sort();
+      assert.deepEqual(await risky(), [disposable.id, typo.id, role.id, dead.id].sort());
+      assert.deepEqual(ok(await local('PATCH', `/v1/contacts/${role.id}`, { riskAllowed: true })).risk, { reason: 'role', suggestion: null, allowed: true });
+      assert.deepEqual(await risky(), [disposable.id, typo.id, dead.id].sort());
+      assert.deepEqual(ok(await local('GET', `/v1/contacts/${role.id}`)).risk, { reason: 'role', suggestion: null, allowed: true });
+      assert.equal(ok(await local('PATCH', `/v1/contacts/${role.id}`, { riskAllowed: false })).risk.allowed, false);
+      error(await local('PATCH', `/v1/contacts/${fine.id}`, { riskAllowed: true }), 409, 'CONTACT_NOT_RISKY');
+
+      // An import: the preview says what the addresses say; the commit, what its contacts are (bounced elsewhere included).
+      const list = ok(await local('POST', '/v1/lists', { name: unique('hygiene') }), 201);
+      const rows = [`temp2-${tag}@mailinator.com`, `bob-${tag}@hotmial.com`, `postmaster@${tag}.example.com`, gone2, `ok-${tag}@example.net`];
+      const preview = ok(await local('POST', '/v1/contact-imports', { csv: ['Email', ...rows].join('\n'), listId: list.id, mapping: { email: 'Email' } }), 201);
+      assert.deepEqual(preview.risky, { total: 3, byReason: { ...NONE, disposable: 1, typo_domain: 1, role: 1 } });
+      assert.deepEqual(preview.rows.map((row: Json) => row.risk ?? null), ['disposable', 'typo_domain', 'role', null, null]);
+      const committed = ok(await local('POST', `/v1/contact-imports/${preview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
+      const afterCommit = { total: 4, byReason: { ...NONE, disposable: 1, typo_domain: 1, role: 1, dead: 1 } };
+      assert.deepEqual(committed.risky, afterCommit);
+      assert.deepEqual(ok(await local('GET', `/v1/contact-imports/${preview.id}`)).risky, afterCommit);
+      assert.deepEqual(ok(await local('GET', '/v1/contact-imports')).data.find((i: Json) => i.id === preview.id).risky, afterCommit);
+
+      // A campaign to the list skips the risky contacts, except the one its owner allowed; the review and the launch say so.
+      const members = Object.fromEntries(ok(await local('GET', `/v1/lists/${list.id}/members?limit=100`)).data.map((m: Json) => [m.email, m]));
+      ok(await local('PATCH', `/v1/contacts/${members[rows[1]!].id}`, { riskAllowed: true }));
+      assert.deepEqual(ok(await local('GET', `/v1/lists/${list.id}/members?risky=true`)).data.map((m: Json) => m.email).sort(), [rows[0], rows[2], gone2].sort());
+      const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Hygiene', from, subject: 'News', html: '<p>Hello there.</p>', audience: { listId: list.id } }), 201);
+      const skipped = { ...NONE, disposable: 1, role: 1, dead: 1 };
+      assert.deepEqual(ok(await local('GET', `/v1/campaigns/${campaign.id}/audience`)), { matched: 5, eligible: 2, suppressed: 0, unsubscribed: 0, risky: 3, riskyByReason: skipped });
+      const segment = ok(await local('POST', '/v1/segments', { name: unique('everyone'), rule: { field: 'email', operator: 'contains', value: '@' } }), 201);
+      assert.deepEqual(ok(await local('POST', `/v1/segments/${segment.id}/preview`, { listId: list.id })), { matched: 5, eligible: 2, suppressed: 0, unsubscribed: 0, risky: 3 });
+      const launched = ok(await local('POST', `/v1/campaigns/${campaign.id}/send`, { revision: campaign.revision }), 202);
+      assert.deepEqual([launched.queued, launched.risky], [2, { total: 3, byReason: skipped }]);
+      const captured = (await db.query("SELECT r.recipient->>'email' AS email FROM sending_review_recipients r JOIN sending_campaigns c ON c.review_id = r.review_id WHERE c.id = $1 ORDER BY 1", [campaign.id])).rows.map((r: Json) => r.email);
+      assert.deepEqual(captured, [rows[1], rows[4]].sort());
+      // A list of nothing but risky contacts is empty, and says why.
+      const trapList = ok(await local('POST', '/v1/lists', { name: unique('traps') }), 201);
+      ok(await local('POST', `/v1/lists/${trapList.id}/members`, { contactIds: [members[rows[0]!].id] }));
+      const traps = ok(await local('POST', '/v1/campaigns', { name: 'Traps', from, subject: 'News', html: '<p>Hello there.</p>', audience: { listId: trapList.id } }), 201);
+      assert.match(error(await local('POST', `/v1/campaigns/${traps.id}/send`, { revision: traps.revision }), 422, 'EMPTY_AUDIENCE').message, /1 risky address is skipped/);
+
+      // A marketing send to a risky subscriber is refused; transactional mail goes, with a warning.
+      const refused = error(await local('POST', '/v1/emails/send', { from, to: rows[0], subject: 'Hi', text: 'Hello there.', kind: 'marketing' }), 422, 'RECIPIENT_INELIGIBLE');
+      assert.deepEqual(refused.details, [{ email: rows[0], reason: 'risky_disposable' }]);
+      const sent = ok(await local('POST', '/v1/emails/send', { from, to: [`x-${tag}@gmial.com`, `fine2-${tag}@example.net`], subject: 'Receipt', text: 'Thanks.' }), 202);
+      assert.deepEqual(sent.warnings, [{ email: `x-${tag}@gmial.com`, risk: 'typo_domain', suggestion: `x-${tag}@gmail.com` }]);
+      assert.equal(ok(await local('POST', '/v1/emails/send', { from, to: `fine3-${tag}@example.net`, subject: 'Receipt', text: 'Thanks.' }), 202).warnings, undefined);
+
+      // The hourly pass: a contact from before list hygiene is flagged, a stale risk cleared with its allowance, an address
+      // bounced elsewhere since becomes dead. A finished pass waits a day, unless the list or the rules change.
+      const { classifyContacts } = await import('./src/list-hygiene.js');
+      const legacy = unique('con'), legacyDead = unique('con');
+      await db.query('INSERT INTO audience_contacts(id,workspace_id,email) VALUES ($1,$3,$4), ($2,$3,$5)', [legacy, legacyDead, wid, `legacy-${tag}@yopmail.com`, gone3]);
+      await db.query("UPDATE audience_contacts SET risk = 'role', risk_allowed = true WHERE id = $1", [fine.id]);
+      await db.query("UPDATE audience_contacts SET risk_allowed = true WHERE id = $1", [disposable.id]);
+      await db.query('DELETE FROM audience_hygiene_state');
+      const riskOf = async (id: string) => (await db.query('SELECT risk, risk_allowed FROM audience_contacts WHERE id = $1', [id])).rows[0];
+      const first = await classifyContacts({ db: runtime.db }, 120_000);
+      assert.ok(first && first.finished && first.read >= 7, JSON.stringify(first));
+      assert.deepEqual([await riskOf(legacy), await riskOf(legacyDead), await riskOf(fine.id), await riskOf(disposable.id)], [
+        { risk: 'disposable', risk_allowed: false }, { risk: 'dead', risk_allowed: false }, { risk: null, risk_allowed: false }, { risk: 'disposable', risk_allowed: true }]);
+      assert.deepEqual(await classifyContacts({ db: runtime.db }), { read: 0, changed: 0, skipped: 0, finished: true }, 'A finished pass waits a day.');
+      await db.query("UPDATE audience_hygiene_state SET version = 'an older list'");
+      await db.query("UPDATE audience_contacts SET risk = NULL WHERE id = $1", [legacy]);
+      const again = await classifyContacts({ db: runtime.db }, 120_000);
+      assert.ok(again && again.finished && again.changed >= 1, JSON.stringify(again));
+      assert.deepEqual(await riskOf(legacy), { risk: 'disposable', risk_allowed: false });
     });
   });
 });

@@ -41,6 +41,7 @@ import { contentBytes, estimatedMimeBytes, SEND_LIMITS } from './send-limits.js'
 import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
+import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -167,9 +168,11 @@ const Receipt = z.object({
   status: z.literal('queued'),
   simulated: z.boolean(),
   screen: ScreenSummary.optional().describe('Content-screen outcome recorded at accept time when screening applies.'),
+  warnings: z.array(RecipientWarning).optional().describe('Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.'),
 }).openapi('EmailQueued');
 const SingleReceipt = z.object({ ...Receipt.shape, scheduledAt: z.string().optional().describe('A scheduled send: when it goes (UTC).'), inboundMessageId: z.string().optional(), mailboxMessageId: z.string().optional().openapi({ deprecated: true, description: 'Legacy alias for inboundMessageId.' }), threadId: z.string().optional() }).describe('For tracked sends, id is the transactional receipt, inboundMessageId identifies the stored message, and threadId identifies its conversation.').openapi('SingleEmailQueued');
 const BatchReceipt = z.object({ data: z.array(Receipt) }).openapi('EmailBatchQueued');
+const sendRecipients = (m: { to: string | string[]; cc: string[]; bcc: string[] }) => [...(Array.isArray(m.to) ? m.to : [m.to]), ...m.cc, ...m.bcc];
 const Event = z.object({ id: z.string(), emailId: z.string(), type: z.string(), providerId: z.string().nullable(), simulated: z.boolean(), createdAt: z.string(), data: EmailEventData }).openapi('EmailEvent');
 const EmailContent = z.object({ untrustedContent: UntrustedContent, subject: z.string(), html: z.string().nullable(), text: z.string().nullable(), raw: z.string().nullable(), attachments: z.array(z.string()), render: z.enum(['direct', 'ses', 'simulated']), templateName: z.string().nullable(), simulated: z.boolean() }).openapi('EmailContent');
 const PreviewClient = z.enum(clients).openapi('EmailPreviewClient');
@@ -462,7 +465,9 @@ const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional()
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional(),
   listId: z.string().min(1).max(120).optional().describe('Only campaigns whose audience list is this one: a newsletter\u2019s issues.'),
   newsletter: z.enum(['true', 'false']).optional().describe('true: only campaigns whose audience list is a newsletter. false: only the others, with no list or a list that is not a newsletter.') }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
-const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
+const AudienceCounts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int(),
+  risky: z.number().int().describe('Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address that bounced elsewhere): the send skips them. Not in eligible.'),
+  riskyByReason: RiskBreakdown.shape.byReason }).describe('Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.').openapi('CampaignAudienceCounts');
 
 const CampaignUpdate = z.object({ revision: z.number().int().positive(), draft: z.object({ ...CampaignInput.shape, region: Region.optional().describe('Omit to keep the current region selection. An unpinned regional MX draft follows its From domain.') }).strict() }).strict().openapi('CampaignUpdateInput');
 const CampaignArchive = z.object({ archived: z.boolean() }).strict().openapi('CampaignArchiveInput');
@@ -474,7 +479,8 @@ const Pacing = z.object({ perDay: z.number().int().min(100).max(10000000).nullab
 const CampaignSend = z.object({ revision: z.number().int().positive(), pacing: Pacing.optional(),
   confirmRequiredNotice: z.literal(true).optional().describe('Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.') }).strict().openapi('CampaignSendInput');
 const CampaignSchedule = z.object({ ...CampaignSend.shape, scheduledAt: z.string().datetime({ offset: true }) }).strict().openapi('CampaignScheduleInput');
-const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int().describe('Recipients expected (exact for lists up to 5,000 members and unsegmented lists once list counts are enabled; may be 0 if an uncounted large list exceeds the 200 ms launch budget without a prior preview); delivery.total is authoritative once the audience is frozen.'), scheduledAt: z.string().nullable(), simulated: z.boolean() }).openapi('CampaignQueued');
+const CampaignQueued = z.object({ id: z.string(), state: z.literal('preparing'), queued: z.number().int().describe('Recipients expected (exact for lists up to 5,000 members and unsegmented lists once list counts are enabled; may be 0 if an uncounted large list exceeds the 200 ms launch budget without a prior preview); delivery.total is authoritative once the audience is frozen.'), scheduledAt: z.string().nullable(), simulated: z.boolean(),
+  risky: RiskBreakdown.nullable().default(null).describe('Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch.') }).openapi('CampaignQueued');
 const CampaignCanceled = z.object({ id: z.string(), state: z.literal('canceled'), canceled: z.number().int(), inFlight: z.number().int() }).openapi('CampaignCanceled');
 const TestCampaign = z.object({ to: Address, data: Data }).strict().openapi('CampaignTestInput');
 export type SendRequest = z.infer<typeof SendInput>;
@@ -1278,6 +1284,7 @@ async function checkRecipientsEligible(db: DbExecutor, workspaceId: string, out:
         AND c.marketing_consent <> 'unsubscribed' AND x.reply_authors ? d.email, false) THEN coalesce(c.suppression_reason, 'suppressed')
       WHEN x.marketing AND c.deleted_at IS NOT NULL THEN 'contact_deleted'
       WHEN x.marketing AND c.marketing_consent IS DISTINCT FROM 'subscribed' THEN 'consent_missing'
+      WHEN x.marketing AND c.risk IS NOT NULL AND NOT c.risk_allowed THEN 'risky_' || c.risk
     END AS reason) cause
     WHERE cause.reason IS NOT NULL
     ORDER BY x.ord, d.n`);
@@ -1489,6 +1496,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
         AND c.marketing_consent <> 'unsubscribed' AND r.reply_authors ? d.email, false) THEN coalesce(c.suppression_reason, 'suppressed')
       WHEN r.marketing AND c.deleted_at IS NOT NULL THEN 'contact_deleted'
       WHEN r.marketing AND c.marketing_consent IS DISTINCT FROM 'subscribed' THEN 'consent_missing'
+      WHEN r.marketing AND c.risk IS NOT NULL AND NOT c.risk_allowed THEN 'risky_' || c.risk
     END AS reason) cause
     WHERE cause.reason IS NOT NULL
     ORDER BY r.ord, d.n`}
@@ -1936,13 +1944,14 @@ export function registerSending(app: App) {
       return c.json(SingleReceipt.parse({ ...result, inboundMessageId: result.mailboxMessageId }), 202);
     }
     const result = await admitEmails(sendCall(c), a, input, input.scheduledAt && new Date(Date.parse(input.scheduledAt)).toISOString());
-    return c.json(SingleReceipt.parse(result), 202);
+    return c.json(SingleReceipt.parse({ ...result, ...recipientWarnings(sendRecipients(input)) }), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: SCREEN_LIMIT_NOTE, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (batchContent(input.emails) > SEND_LIMITS.batchContentChars) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Combined batch body content may not exceed ${SEND_LIMITS.batchContentChars / 1024 / 1024} MiB.`);
     const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input), { workspaceId: a.workspaceId, signal: c.req.raw.signal });
-    return c.json(BatchReceipt.parse(result), 202);
+    const receipts = (result as { data: SendReceipt[] }).data;
+    return c.json(BatchReceipt.parse({ data: receipts.map((receipt, i) => ({ ...receipt, ...recipientWarnings(sendRecipients(input.emails[i]!)) })) }), 202);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/emails/preview', operationId: 'previewEmail', tags: ['Emails'], security,
     summary: 'Preview HTML in selected email clients',
@@ -2567,6 +2576,8 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
   const smallList = await audienceMod.isSmallAudienceList(db, a, draft.audience.listId);
   let queued: number;
+  // Contacts the send skips as risky (src/list-hygiene.ts): exact for a captured audience, from list counts for a whole large list.
+  let risky: { total: number; byReason: Record<string, number> } | null = null;
   let capturedAt: string | null = null;
   let capturedCount: number | null = null;
   if (smallList) {
@@ -2576,13 +2587,15 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
       throw error;
     });
     queued = counts.eligible;
+    risky = counts.risky;
     capturedAt = now();
     // Sync launch finalizes sending_campaigns in this same transaction, so capturedCount stays NULL (no pending finalizeCapture).
   } else {
     const estimate = await audienceMod.estimateCampaignAudience(db, a, draft.audience, draft.requiredNotice === true, row.audienceEstimate ?? null);
-    if (estimate.definitive === 'empty') throw new ApiError(422, 'EMPTY_AUDIENCE', draft.requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
+    if (estimate.definitive === 'empty') throw audienceMod.emptyAudience(draft.requiredNotice === true);
     if (estimate.definitive === 'over_limit') throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
     queued = estimate.queued;
+    risky = estimate.risky ?? null;
   }
   // The send locks. The campaign is still the revision that was captured, or the launch fails and its capture rolls back.
   const held = await lockSendScope(db, a.workspaceId, { campaignId });
@@ -2602,7 +2615,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   if (!moved.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being sent; fetch it and try again.');
   await db.execute(queueCampaignRun(ref, requestId ? { requestId } : {}));
   await db.execute(queueCampaignStats(ref, input.scheduledAt ?? null));
-  return { id: campaignId, state: 'preparing' as const, queued, scheduledAt: input.scheduledAt ?? null, simulated: isSimulatedSes(runtime) };
+  return { id: campaignId, state: 'preparing' as const, queued, scheduledAt: input.scheduledAt ?? null, simulated: isSimulatedSes(runtime), risky };
 }
 async function bytesDigest(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), n => n.toString(16).padStart(2, '0')).join(''); }
 // Reuse fully verified bytes across invocations sharing the same bucket binding.
