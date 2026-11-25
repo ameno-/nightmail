@@ -190,6 +190,38 @@ export async function withLinkRecords<T extends Readable>(runtime: Runtime, work
   return reports;
 }
 
+/**
+ * Link hosts of domains gone from their workspace (no operation_domains row of that name: a deleted, released or detached
+ * claim, or a deleted workspace), in pages of 1,000, at most 20 a run: each custom hostname no live row still uses is
+ * deleted at Cloudflare, then the rows. A row whose hostname Cloudflare didn't delete stays for the next run.
+ */
+export async function cleanUpLinkHosts(runtime: Runtime) {
+  const saas = runtime.config.linkHosts;
+  if (!saas) return 0;
+  let total = 0;
+  for (let page = 0; page < 20; page++) {
+    const { selected, deleted } = await cleanUpLinkHostPage(runtime, saas);
+    total += deleted;
+    if (selected < 1000) break;
+  }
+  return total;
+}
+async function cleanUpLinkHostPage(runtime: Runtime, saas: Saas) {
+  const live = sql`EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=o.workspace_id AND d.name=o.domain)`;
+  const { rows } = await runtime.db.execute<{ workspace_id: string; domain: string; custom_hostname_id: string | null; shared: boolean }>(sql`SELECT h.workspace_id, h.domain, h.custom_hostname_id,
+      EXISTS (SELECT 1 FROM link_hosts o WHERE o.custom_hostname_id=h.custom_hostname_id AND ${live}) AS shared
+    FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain) LIMIT 1000`);
+  const kept = new Set<string>();
+  for (const id of new Set(rows.flatMap(row => row.custom_hostname_id && !row.shared ? [row.custom_hostname_id] : []))) {
+    try { const done = await customHostnames(saas, 'DELETE', `/${encodeURIComponent(id)}`); if (!done.success && done.status !== 404) kept.add(id); }
+    catch { kept.add(id); }
+  }
+  if (kept.size) log('warn', { code: 'LINK_HOST_DELETE_FAILED', count: kept.size });
+  const gone = rows.filter(row => !row.custom_hostname_id || !kept.has(row.custom_hostname_id));
+  if (gone.length) await runtime.db.execute(sql`DELETE FROM link_hosts h USING jsonb_to_recordset(${JSON.stringify(gone.map(row => ({ w: row.workspace_id, d: row.domain })))}::jsonb) x(w text, d text)
+    WHERE h.workspace_id=x.w AND h.domain=x.d AND NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)`);
+  return { selected: rows.length, deleted: gone.length };
+}
 /** A deleted domain's link host: its row, and its custom hostname unless another workspace's row still uses it. Best effort. */
 export async function forgetLinkHost(runtime: Runtime, workspaceId: string, domain: string) {
   const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; shared: boolean }>(sql`DELETE FROM link_hosts h WHERE workspace_id=${workspaceId} AND domain=${domain}

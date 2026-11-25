@@ -93,11 +93,8 @@ export const domainLinkCheckJob: JobHandler = async (runtime, payload, job) => {
 /** Link hosts whose domain is gone from its workspace: no operation_domains row of that name (deleting, releasing or
  *  detaching a claim and deleting a workspace all remove it). */
 const staleLinkHosts = (select: SQL) => sql`SELECT ${select} FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)`;
-/** Deletes up to 200 gone domains' link hosts a run: each row, and its custom hostname unless another row still uses it. */
+/** Deletes gone domains' link hosts and their custom hostnames (src/link-domains.ts cleanUpLinkHosts). */
 export const domainLinkCleanupJob: JobHandler = async runtime => {
-  if (!runtime.config.linkHosts) return;
-  const { rows } = await runtime.db.execute<{ workspace_id: string; domain: string }>(sql`${staleLinkHosts(sql`h.workspace_id, h.domain`)} ORDER BY h.checked_at LIMIT 200`);
-  const { forgetLinkHost } = await wrapModuleLoad(() => import('./link-domains.js'));
-  for (const row of rows) await forgetLinkHost(runtime, row.workspace_id, row.domain);
-  if (rows.length) log('info', { code: 'LINK_HOSTS_CLEANED', count: rows.length });
+  const count = await (await wrapModuleLoad(() => import('./link-domains.js'))).cleanUpLinkHosts(runtime);
+  if (count) log('info', { code: 'LINK_HOSTS_CLEANED', count });
 };
