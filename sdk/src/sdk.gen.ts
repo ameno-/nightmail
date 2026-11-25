@@ -2251,7 +2251,7 @@ export const getWorkspaceSettings = <ThrowOnError extends boolean = false>(optio
 });
 
 /**
- * Change the workspace's name, its postal address, or both; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can't be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.
+ * Change the workspace's name, its postal address, its focus, or any of them; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can't be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.
  */
 export const updateWorkspaceSettings = <ThrowOnError extends boolean = false>(options: Options<UpdateWorkspaceSettingsData, ThrowOnError>): RequestResult<UpdateWorkspaceSettingsResponses, UpdateWorkspaceSettingsErrors, ThrowOnError> => (options.client ?? client).patch<UpdateWorkspaceSettingsResponses, UpdateWorkspaceSettingsErrors, ThrowOnError>({
     security: [
@@ -5900,7 +5900,7 @@ export const getPublicStats = <ThrowOnError extends boolean = false>(options?: O
 /**
  * What this workspace has set up, in one read
  *
- * The newest domains, the number of active API keys, outbound webhooks and pending invitations, and whether any email exists. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.
+ * The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, and each focus's first steps. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.
  */
 export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?: Options<GetOverviewSetupData, ThrowOnError>): RequestResult<GetOverviewSetupResponses, GetOverviewSetupErrors, ThrowOnError> => (options?.client ?? client).get<GetOverviewSetupResponses, GetOverviewSetupErrors, ThrowOnError>({
     security: [

@@ -37,6 +37,7 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
     .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.'),
   sent: z.boolean().optional().describe('Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).'),
+  received: z.boolean().optional().describe('Whether this workspace has received any email (kept as long as its received mail is).'),
   builtinDomain: z.object({ id: z.string().nullable().describe('Its ID in listDomains, once it is set up on this connection.'), name: z.string(),
     sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now (in a new workspace\'s first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).'),
     paused: z.literal(true).optional().describe('Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.'),
@@ -98,11 +99,12 @@ async function get(runtime: Runtime, wid: string) {
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
   const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null}>(sql`
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; received: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null}>(sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
       EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
+      EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=c.workspace_id AND m.direction='inbound') AS received,
       ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR tripped.at IS NOT NULL THEN 'off'
             WHEN dc.sending_state='verified' OR ${builtinSettingUp(sql`dc`, runtime.config.builtinDomain!)} THEN 'ready' ELSE 'pending' END,
           -- Its recipients in the rolling 24 hours, as send_admission counts them against its daily cap; read only while it can
@@ -121,7 +123,7 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
     sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
     standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
-    domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, ...(row.attention ? { attention: row.attention } : {}),
+    domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, received: row.received, ...(row.attention ? { attention: row.attention } : {}),
     // Sending from the built-in domain closes once a domain of the workspace's own verifies (send_admission).
     ...(builtin ? { builtinDomain: row.builtin ? { ...row.builtin, sending: row.builtin.sending !== 'off' && row.verified_domains > 0 ? 'closed' : row.builtin.sending, scope: builtin, ...SEND_LIMITS.builtin[builtin] } : null } : {}) };
 }
