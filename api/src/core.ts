@@ -170,6 +170,8 @@ export interface Config {
   sharedRegions?: string[];
   hostedSendCaps: { firstWeek: number };
   publicUrl: string;
+  /** CAMPAIGN_IMAGES: campaign mail links its inline pictures from publicUrl/i/… instead of carrying them (src/linked-images.ts). */
+  linkedImages: boolean;
   /** Hosted: the link domain the links in campaign and marketing mail go on (NIGHTMAIL_LINK_HOST, src/link-domains.ts). */
   linkHost?: string;
   /** Own link hosts (src/link-domains.ts), off unless set: the Cloudflare for SaaS zone customers' links.<domain> CNAMEs

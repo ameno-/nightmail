@@ -18,11 +18,12 @@ import { SLOW_REQUEST_MS } from './log.js';
 import { authenticatedCreates } from './idempotency.js';
 import { addresses, clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
-type RouteGroup = 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'agent-setup' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
+type RouteGroup = 'linked-images' | 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'agent-setup' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
 function routeGroupFor(pathname: string): RouteGroup | null {
+  if (pathname.startsWith('/i/')) return 'linked-images';
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/internal/v1/analytics' || pathname === '/internal/v1/analytics/export') return 'analytics';
   if (pathname === '/internal/v1/database-disk') return 'disk-alert';
@@ -71,6 +72,7 @@ const groupRegistrars: Partial<Record<RouteGroup, Promise<(app: App) => void>>> 
 function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: App) => void> {
   return groupRegistrars[group] ??= wrapModuleLoad(async () => {
     switch (group) {
+      case 'linked-images': return (await import('./linked-images.js')).registerLinkedImages;
       case 'analytics': return (await import('./analytics.js')).registerAnalytics;
       case 'disk-alert': return (await import('./disk-alert.js')).registerDiskAlert;
       case 'auth': return registerAuth;
@@ -234,9 +236,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
-    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set, and whether sign-ups are open
-    // (public-stats.ts) its minute; everything else is no-store.
-    const publicDoc = c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/|v1\/public\/signups$)/.test(c.req.path) && c.res.headers.get('cache-control')?.startsWith('public, ');
+    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set, whether sign-ups are open
+    // (public-stats.ts) its minute, and a linked campaign image (src/linked-images.ts) its year; everything else is no-store.
+    const publicDoc = c.res.headers.get('cache-control')?.startsWith('public, ') && (c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/|v1\/public\/signups$)/.test(c.req.path)
+      || ['GET', 'HEAD'].includes(c.req.method) && [200, 304].includes(c.res.status) && c.req.path.startsWith('/i/'));
     c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
     const timings = c.get('serverTimings');
@@ -452,8 +455,8 @@ export async function createOpenApiApp(): Promise<App> {
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerGlass }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./glass.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerGlass(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerGlass }, { registerLinkedImages }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./glass.js'), import('./linked-images.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerGlass(full); registerLinkedImages(full);
   return full;
 }
 
