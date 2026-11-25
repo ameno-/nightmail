@@ -40676,7 +40676,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // so is a launch's link (a launch asks once the sender's own checks pass: this fixture's sender isn't verified on Hosted).
       const refused=ok(await draft(),201),message=`Campaign and marketing mail from example.com needs the domain's link record, which carries its unsubscribe link: add a CNAME at links.example.com pointing to ${target}, then check the domain.`;
       runtime.config.multiTenant=true;
-      for(const reply of [await local('POST',`/v1/campaigns/${refused.id}/test`,{to:'tester@example.net'}),await local('POST','/v1/emails/send',marketing)])
+      for(const reply of [await local('POST',`/v1/campaigns/${refused.id}/test`,{to:'success@simulator.amazonses.com'}),await local('POST','/v1/emails/send',marketing)])
         assert.equal(error(reply,409,'LINK_RECORD_REQUIRED').message,message);
       await assert.rejects(linkOrigin(runtime,runtime.db,wid,'news@example.com'),{code:'LINK_RECORD_REQUIRED',message});
       assert.equal(delivered.length,0);
