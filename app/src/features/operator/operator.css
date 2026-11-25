@@ -125,12 +125,12 @@ a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-deco
 /* Tiles: four to a row, five from 1100 px of column, two on a phone. 120px: the head, a 28px figure, its hint and a 24px foot. */
 .glass-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-8); }
 @container (min-width: 1100px) { .glass-tiles { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-@container (max-width: 559px) { .glass-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@container (max-width: 559px) { .glass-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .glass-tile__head { letter-spacing: 0; } .glass-tile__figure { font-size: 22px; } }
 .glass-tile { display: flex; flex-direction: column; min-width: 0; height: 120px; padding: var(--space-12) var(--space-12) 10px; border-radius: var(--radius-sm); background: var(--color-well); }
 .glass-tile__head { display: flex; align-items: center; gap: var(--space-8); height: 14px; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 14px; letter-spacing: var(--tracking-label); text-transform: uppercase; white-space: nowrap; }
 .glass-tile__label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* The change is laid out from the head's right edge and pulled back by its own width (a transform), so it never moves a box. */
-.glass-delta { position: relative; flex: 1 0 48px; align-self: stretch; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
+.glass-delta { position: relative; flex: 1 0 40px; align-self: stretch; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
 .glass-delta > span { position: absolute; top: 0; left: 100%; transform: translateX(-100%); color: var(--color-faint); }
 .glass-delta > span[class*='ui-tone--']:not(.ui-tone--neutral) { color: var(--tone-ink); }
 .glass-tile__figure { height: 32px; margin-top: var(--space-8); overflow: hidden; color: var(--color-text); font-family: var(--font-mono); font-size: 26px; line-height: 32px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }

@@ -282,9 +282,9 @@ export const glassTiles = [
   ['sent', 'Sent · 24 h'], ['minute', 'Per minute'], ['delivered', 'Delivered'], ['bounced', 'Bounced'], ['complained', 'Complained'],
   ['signups', 'Sign-ups · 24 h'], ['places', 'Open places'], ['received', 'Received · 24 h'], ['queued', 'Queued'], ['ramp', 'On the ramp'],
   ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support open'], ['screened', 'Screened · 24 h'],
-  ['classifiers', 'Jev and JevF agree'], ['api', 'API · 24 h'], ['errors', 'API errors'], ['latency', 'API latency'], ['health', 'Health'],
+  ['classifiers', 'Classifiers agree'], ['api', 'API · 24 h'], ['errors', 'API errors'], ['latency', 'API latency'], ['health', 'Health'],
 ] as const
-export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in domain ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
+export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
 /** Region rows are kept for at least this many regions, so a page with fewer draws the same height. */
 export const GLASS_REGION_SLOTS = 2
 const STEP_SLOTS = ['OK', 'Notice', 'Warn', 'Restrict', 'Pause']

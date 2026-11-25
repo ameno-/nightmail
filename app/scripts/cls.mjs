@@ -211,8 +211,9 @@ const pages = ids => [
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
-  // Glass: every group's rows are fixed, so the figures (and their 30-second refresh) land in place. Anyone but an
-  // operator gets the app's "Page not found".
+  // Glass: the board's tiles, funnel, region rows (two at least), metric rows and feed column have fixed sizes, and feed
+  // rows move by transforms, so the figures (and their 5-second refresh) land in place. Anyone but an operator gets the
+  // app's "Page not found".
   ['Glass', '/glass', { from: '/operator' }],
   ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The support inbox (staff): Needs you and its counts, Agent handling, a conversation beside its customer panel, and
