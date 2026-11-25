@@ -1,5 +1,5 @@
 /* Campaigns and Templates: the header, toolbar, table and pager in one column that fills the page (the pager keeps to
-   its bottom) and stops widening on a wide window (.measure-list). */
+   its bottom). */
 .campaigns-page { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .campaign-row-name { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 40px; padding: 0; line-height: 18px; }
 /* A name over its subject: each stays on one line, so every row is the two-line 52 px; the full text is in the cell's title. */

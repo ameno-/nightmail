@@ -1,11 +1,6 @@
 /* Receiving: Addresses, Rules and Destinations, and an address's page. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
-/* On a wide window Receiving stops widening, left-aligned: its lists at the list width, so an address, where it goes and
-   its last mail read as one group; the addresses list beside its docked flow panel at the wide one. The page itself
-   holds the wide width in every state, so the header never moves as the list and its panel arrive. */
-.page-surface > .receiving-page { width: 100%; max-width: var(--measure-list-wide); }
-.receiving-page .rcv-tab:not(:has(> .rcv-browse[data-docked])) { width: 100%; max-width: var(--measure-list); }
 /* Counts hold their width ("0" to "99"), so the tabs after them stay put while a search changes them. */
 .rcv-page > .ui-tabs .ui-tab__count { display: inline-block; min-width: 2ch; }
 .rcv-tab { gap: var(--space-12); }

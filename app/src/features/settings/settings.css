@@ -180,9 +180,6 @@
 
 .page-surface > .settings-page.stack { gap: var(--space-16); }
 .page-surface > .settings-page.stack > .ui-page-header { margin-bottom: calc(var(--page-gap) - var(--space-16)); }
-/* A webhook's page is fields and label/value rows: it keeps a readable width on a wide window. The self-hosted Sending
-   page (settings-ses) keeps the full width for its region tables. */
-.page-surface > .settings-page.stack:not(.settings-ses) { width: 100%; max-width: var(--measure); }
 /* Sections part by space alone. */
 .settings-rule { padding-top: var(--space-16); }
 .settings-ses .settings-discovery-section { gap: var(--space-12); }
