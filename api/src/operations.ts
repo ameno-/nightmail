@@ -39,6 +39,7 @@ import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 import { PostalAddress, postalAddressText, unsubscribePageLink } from './outbound-content.js';
+import { checkLinkHost, forgetLinkHost, withLinkRecords } from './link-domains.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -68,7 +69,7 @@ const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusC
 const dnsState = z.enum(['pending','verified']);
 const publicDns = z.object({ state:z.enum(['found','missing','wrong_value']).describe('found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.'), values:z.array(z.string()).describe('wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise.'), checkedAt:z.string() })
   .nullable().optional().describe('For pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1) shows for this record. verifyDomain looks it up now (answers cached up to 30 seconds). Other reads show the last background check, which runs every 15 to 60 minutes for a Hosted domain still pending an hour after it was added. Null when DNS did not answer in time; absent before any check and on other records.');
-const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc']), status:dnsState, note:z.string().optional(), publicDns });
+const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc','links']).describe(`links: optional, the domain's own link host (links.<domain>) for the unsubscribe and other links ${productName} adds to campaign and marketing mail; shown when the installation has a link domain with Cloudflare for SaaS.`), status:dnsState, note:z.string().optional(), publicDns });
 const dmarcSchema=z.object({status:z.enum(['missing','invalid','none','quarantine','reject']),record:z.string().nullable(),source:z.string().nullable().describe('Domain publishing the effective TXT record; may be the organizational domain.'),adkim:z.enum(['r','s']),aspf:z.enum(['r','s']),alignment:z.object({dkim:z.boolean(),spf:z.boolean()})}).nullable().describe('Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.');
 export const receivingIssueSchema = z.object({
   code: z.enum(['cname','foreign_mx','split','wildcard','bane_record','host_taken','claimed','delegated','mx_missing','wrong_region','null_mx','proof_stale','identity_stale']).describe(`cname: the host is a CNAME, so it cannot have an MX (RFC 1034). foreign_mx: another provider receives its mail. split: other MX records share its mail. wildcard: a *.domain CNAME or MX answers for it. bane_record: it is one of ${productName}\u2019s own names (custom MAIL FROM, ownership TXT, DKIM). host_taken: another claim, possibly in another workspace, receives on it. claimed: another workspace claimed it, or a name between it and this domain, in any scope. delegated: it is a delegated zone with its own NS records. claimed and delegated hosts never receive here. mx_missing: its MX disappeared after setup. wrong_region and null_mx: its MX points elsewhere in SES or refuses mail. proof_stale / identity_stale: the ownership TXT proof or the SES verification is out of date.`),
@@ -281,14 +282,10 @@ export async function publishEvent(runtime: Runtime, event: PublishedEvent, wake
   if (wake && readyJobs > 0) try { await runtime.wake?.(readyJobs,'webhook'); } catch { log('warn', { eventId: event.id, code: 'QUEUE_WAKE_FAILED', message: 'The event is committed; the scheduler will recover pending deliveries.' }); }
 }
 
-export async function createUnsubscribeLink(runtime: Runtime, workspaceId: string, email: string) {
+/** A new unsubscribe link on `origin`, the mail's link host (src/link-domains.ts), and the token record that makes it work. */
+export async function createUnsubscribeLink(origin: string, workspaceId: string, email: string) {
   const token = randomSecret('u_');
-  return { url: `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, email: email.trim().toLowerCase() } };
-}
-export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, email: string, db: DbExecutor = runtime.db): Promise<string> {
-  const link = await createUnsubscribeLink(runtime, workspaceId, email);
-  await db.insert(unsubscribeTokens).values(link.record);
-  return link.url;
+  return { url: `${origin.replace(/\/$/, '')}/unsubscribe/${token}`, record: { tokenHash: await digest(token), workspaceId, email: email.trim().toLowerCase() } };
 }
 const claimTag = tagKey('domain-claim');
 type Readiness = z.infer<typeof domainSchema>;
@@ -930,7 +927,22 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
   return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
 }
 
+/** Every domain a domain route returns, with its link host record last (src/link-domains.ts): one read per response.
+ *  Only while customers' link hosts are on (Cloudflare for SaaS); the record is optional, so no route's own logic needs it. */
+const domainLinkRecords = async (c: Ctx, next: () => Promise<void>) => {
+  await next();
+  const workspaceId = c.get('actor')?.workspaceId;
+  if (!c.env.config?.links?.saas || !workspaceId || c.res.status >= 300 || !c.res.headers.get('content-type')?.startsWith('application/json')) return;
+  const body = await c.res.clone().json().catch(() => null) as { name?: unknown; dns?: unknown; data?: unknown } | null;
+  const domainLike = (value: unknown): value is { name: string; dns: Parameters<typeof withLinkRecords>[2][number]['dns'] } => typeof (value as { name?: unknown })?.name === 'string' && Array.isArray((value as { dns?: unknown }).dns);
+  const reports = domainLike(body) ? [body] : Array.isArray(body?.data) ? body.data.filter(domainLike) : [];
+  if (!reports.length) return;
+  await withLinkRecords(c.env, workspaceId, reports);
+  const headers = new Headers(c.res.headers); headers.delete('content-length');
+  c.res = new Response(JSON.stringify(body), { status: c.res.status, headers });
+};
 export function registerOperations(app: App) {
+  app.use('/v1/domains', domainLinkRecords); app.use('/v1/domains/*', domainLinkRecords);
   app.openapi(createRoute({ method: 'get', path: '/v1/settings/workspace', operationId: 'getWorkspaceSettings', tags: ['Settings'], security, responses: { 200: response(settingsSchema), ...errors } }), async c => {
     const a = workspaceActor(c); const { rows: [row] } = await c.env.db.execute<{ name: string | null; postal_address: string | null; required_notices: boolean }>(c.env.config.multiTenant
       ? sql`SELECT name,postal_address,${requiredNoticesOf(a.workspaceId)} AS required_notices FROM workspaces WHERE id=${a.workspaceId}`
@@ -1162,6 +1174,8 @@ export function registerOperations(app: App) {
     // Check now: what public DNS shows now for each pending record, and where the zone is hosted. A Hosted domain the
     // background check already follows (a stored check, domain-setup.ts) keeps this answer, so its banner moves with it.
     const checked = async (report: Readiness) => {
+      // The domain's link host is checked with it (src/link-domains.ts); domainLinkRecords adds its record to the answer.
+      await checkLinkHost(c.env, a.workspaceId, report.name, report.ready);
       const stored = c.env.config.multiTenant && report.sending === 'pending' && report.dnsHost !== undefined;
       const check = await (await wrapModuleLoad(() => import('./record-check.js'))).checkSetup(report);
       if (check.records.length) report.dnsHost = check.host;
@@ -1182,14 +1196,15 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({method:'delete',path:'/v1/domains/{id}',operationId:'deleteDomain',tags:['Domains'],security,description:'MX only. Delete this claim’s tagged SES identity and release the domain. Does not remove DNS records.',request:{params:IdParams},responses:{200:response(z.object({deleted:z.literal(true)})),...errors}}),async c=>{
     const a=actor(c,'manage'); if (!c.env.config.multiTenant) return notFound('Endpoint');
-    await c.env.db.transaction(async db=>{
+    const name=await c.env.db.transaction(async db=>{
       const row=await hostedDomain(db,a.workspaceId,c.req.valid('param').id,true);
       if (!row) {
         // A claim whose connection is gone has no SES identity to own; releasing it only frees the name.
         const detached=(await db.execute<{id:string;name:string;token:string}>(sql`SELECT d.id,d.name,dc.token FROM operation_domains d JOIN domain_claims dc ON dc.name=d.name AND dc.workspace_id=d.workspace_id
           WHERE d.workspace_id=${a.workspaceId} AND d.id=${c.req.valid('param').id} AND dc.connection_id IS NULL FOR UPDATE OF dc`)).rows[0] ?? notFound('Domain');
         allowedDomain(a,detached.name); await releaseClaim(db,a.workspaceId,detached);
-        return recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:detached.id},before:{name:detached.name}});
+        await recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:detached.id},before:{name:detached.name}});
+        return detached.name;
       }
       allowedDomain(a,row.name);
       if (!row.identity?.imported) {
@@ -1201,7 +1216,10 @@ export function registerOperations(app: App) {
       await releaseClaim(db,a.workspaceId,row);
       if (row.connection.kind==='byo' && row.receiving_host) await (await wrapModuleLoad(() => import('./mailbox-setup.js'))).queueReconcile(db,a.workspaceId,row.region);
       await recordAudit(db,c,{action:'domain.delete',workspaceId:a.workspaceId,target:{type:'domain',id:row.id},before:{name:row.name,region:row.region,receivingHost:row.receiving_host}});
-    }); return c.json({deleted:true as const},200);
+      return row.name;
+    });
+    await forgetLinkHost(c.env,a.workspaceId,name);
+    return c.json({deleted:true as const},200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/webhooks', operationId: 'listWebhooks', tags: ['Webhooks'], security, request: { query: PageQuery }, responses: { 200: response(listSchema(webhookSchema, 'WebhookPage')), ...errors } }), async c => {
     const a = workspaceActor(c), q = c.req.valid('query'); const rows = await c.env.db.select().from(webhooks).where(and(scoped(webhooks, a), q.cursor ? lt(webhooks.id, q.cursor) : undefined)).orderBy(desc(webhooks.id)).limit(q.limit + 1);

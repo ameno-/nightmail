@@ -30,6 +30,7 @@ import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
+import { linkDomainRequired, linkOrigin, linkOrigins, sharedLinkOrigin } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -998,7 +999,8 @@ async function requiredNoticesAllowed(db: DbExecutor, draft: Pick<CampaignDraft,
 // `postalAddress`: the workspace's (CAN-SPAM), under the link in the same quiet style, one line per line.
 // `requiredNotice`: a required notice has no unsubscribe, so its footer is the postal address alone and it gets no
 // List-Unsubscribe headers; `url` is then unused.
-export type Footer = { unsubscribePageUrl?: string; postalAddress?: string | null; requiredNotice?: boolean };
+/** `linkOrigin`: where the footer's link and List-Unsubscribe point (src/link-domains.ts), as a launch froze it. */
+export type Footer = { unsubscribePageUrl?: string; postalAddress?: string | null; requiredNotice?: boolean; linkOrigin?: string };
 function marketingFooter(snapshot: EmailSnapshot, url: string, footer: Footer = {}) {
   footerParts(snapshot, url, footer);
   if (footer.requiredNotice) return;
@@ -1201,9 +1203,10 @@ async function endRelease(runtime: Runtime, wid: string, emailId: string, run: u
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
 type ScreenSummaryValue = { status: 'passed' | 'skipped' };
 type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError; emailId?: string; screenSummary?: ScreenSummaryValue; countScreened?: boolean; heldForScreen?: boolean };
+const linkHostMissing = (): never => { throw new Error('A marketing message is built with its link origin (admitEmails).'); };
 /** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size.
  *  `postalAddress`: the workspace's, for the footer of its marketing mail (admitEmails reads it). */
-async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean, postalAddress?: string | null): Promise<Outgoing[]> {
+async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean, postalAddress?: string | null, origins: (string | undefined)[] = []): Promise<Outgoing[]> {
   const bulk = bulkFlags(mails), out: Outgoing[] = [];
   for (const [i, m] of mails.entries()) {
     const snapshot = structuredSnapshot({ ...m, region: m.region ?? '' });
@@ -1218,7 +1221,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
       sesHeaders(snapshot.headers.length + (m.kind === 'marketing' ? 2 : 0));
       if (m.kind === 'marketing') {
         // Only the token's hash and destination come from local preparation; the statement gives it the workspace.
-        const link = await (await loadOpsUnsub()).createUnsubscribeLink(runtime, '', snapshot.to[0]!);
+        const link = await (await loadOpsUnsub()).createUnsubscribeLink(origins[i] ?? linkHostMissing(), '', snapshot.to[0]!);
         marketingFooter(snapshot, link.url, { postalAddress }); message.token = { hash: link.record.tokenHash, email: link.record.email };
       }
     } catch (e) { if (e instanceof ModuleLoadError) throw e; message.invalid = atItem(e, batch ? i : undefined); }
@@ -1557,8 +1560,12 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   // Marketing mail's footer carries the workspace's postal address when it has one. Unlike a campaign, a marketing send
   // without one is not refused: its caller writes the whole message and may include the address itself.
-  const address = mails.some(m => m.kind === 'marketing') ? await workspacePostalAddress(call.runtime, call.db ?? call.runtime.db, a.workspaceId) : null;
-  const out = await directMessages(call.runtime, mails, batch, address);
+  const marketing = mails.some(m => m.kind === 'marketing'), db = call.db ?? call.runtime.db;
+  const address = marketing ? await workspacePostalAddress(call.runtime, db, a.workspaceId) : null;
+  // Its unsubscribe link goes on the sender's link host (src/link-domains.ts): with none, the send is refused.
+  const origin = marketing ? linkOrigins(call.runtime, db, a.workspaceId) : undefined;
+  const origins = origin ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? origin(m.from, batch ? `emails.${i}.from` : 'from') : undefined)) : [];
+  const out = await directMessages(call.runtime, mails, batch, address, origins);
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   // A reply by header joins the conversation it answers only when its sender can read that message.
   await joinReplies(call.db ?? call.runtime.db, actorMailAccess(a), out.map(m => m.snapshot));
@@ -1861,10 +1868,14 @@ async function reviewPart<T>(c: Ctx, read: Promise<T>) {
   }
 }
 
-/** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder. */
-async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
+/** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder on the link host
+ *  its launch would use. A draft that couldn't launch for want of one shows this installation's own: it is never sent. */
+async function previewParts(runtime: Runtime, workspaceId: string, draft: CampaignDraft, footer: Footer) {
   const rendered = await renderCampaignContent(runtime, draft, false);
-  if (rendered.html || rendered.text) footerParts(rendered, unsubscribePlaceholder(runtime), footer);
+  if (!rendered.html && !rendered.text) return rendered;
+  const origin = footer.requiredNotice ? runtime.config.publicUrl : await linkOrigin(runtime, runtime.db, workspaceId, draft.from)
+    .catch(error => { if (error instanceof ApiError && error.code === 'LINK_DOMAIN_REQUIRED') return runtime.config.publicUrl; throw error; });
+  footerParts(rendered, unsubscribePlaceholder(origin), footer);
   return rendered;
 }
 const RECIPIENT_CONTENT_ERRORS = new Set(['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE']);
@@ -2261,8 +2272,8 @@ export function registerSending(app: App) {
     return c.json({ format: 'markdown' as const, markdown: CAMPAIGN_CONTENT_GUIDE }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, with the footer every email gets (the Unsubscribe link, a placeholder here, and the workspace’s postal address) and without personalization. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
-    const { row, footer } = await campaignWithFooter(c.env, actor(c), c.req.valid('param').id);
-    const rendered = await previewParts(c.env, row.draft, footer);
+    const a = actor(c), { row, footer } = await campaignWithFooter(c.env, a, c.req.valid('param').id);
+    const rendered = await previewParts(c.env, a.workspaceId, row.draft, footer);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/audience', operationId: 'previewCampaignAudience', description: 'Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(AudienceCounts), ...errors } }), async c => {
@@ -2293,7 +2304,7 @@ export function registerSending(app: App) {
     await chargeRenderBudget(c, a.workspaceId);
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
     // The page is passed on, not kept here: renderPreview drops it once it is rendered.
-    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, row.draft, footer)).html ?? '', inline, async item => {
+    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, a.workspaceId, row.draft, footer)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
@@ -2355,9 +2366,10 @@ export function registerSending(app: App) {
       const { row, footer } = await campaignWithFooter(c.env, a, campaignId);
       if (row.archivedAt) throw new ApiError(409, 'CAMPAIGN_ARCHIVED', 'Restore this campaign before sending a test.');
       const message = await campaignMessage(c.env, row.draft, { id: 'test-recipient', email: input.to, properties: input.data }, true, null);
-      // The footer as recipients get it, its link the placeholder: a test is transactional, without List-Unsubscribe.
+      // The footer as recipients get it, its link the placeholder on the link host they get: a test is transactional,
+      // without List-Unsubscribe, and refused as the launch would be when there is no link host.
       const snapshot = { ...message, testCampaignId: campaignId };
-      footerParts(snapshot, unsubscribePlaceholder(c.env), footer);
+      footerParts(snapshot, unsubscribePlaceholder(footer.requiredNotice ? c.env.config.publicUrl : await linkOrigin(c.env, c.env.db, a.workspaceId, row.draft.from)), footer);
       const out: Outgoing[] = [{ snapshot, recipients: hostedCost(input.to), marketing: false }];
       if (mayScreenAtAccept(c.env, out)) await prepareFrontDoor(c.env, a, out, false);
       return { out, campaign: { id: campaignId, revision: row.revision } };
@@ -2537,7 +2549,10 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // The footer's postal address (CAN-SPAM), read once and frozen in the review: every copy and rebuild of this launch
   // shows the same one. Without it the launch is refused after the admission check below, before anything is captured.
   const postalAddress = await workspacePostalAddress(runtime, db, a.workspaceId);
-  const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {} };
+  // The host of the links Nightmail adds (src/link-domains.ts), frozen in the review too, so every copy of this launch
+  // links the same one. Refused here when there is none. A required notice has no unsubscribe link.
+  const links = row.draft.requiredNotice ? undefined : await linkOrigin(runtime, db, a.workspaceId, row.draft.from);
+  const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {}, ...links ? { linkOrigin: links } : {} };
   // A required notice: still allowed for this workspace, and confirmed by the sender as having no promotion.
   await requiredNoticesAllowed(db, draft, a.workspaceId);
   if (draft.requiredNotice && !input.confirmRequiredNotice) throw new ApiError(422, 'REQUIRED_NOTICE_UNCONFIRMED', 'Confirm that this is a required notice with no promotion (confirmRequiredNotice: true).', 'confirmRequiredNotice');
@@ -2588,7 +2603,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   const held = await lockSendScope(db, a.workspaceId, { campaignId });
   editable(await findCampaign(db, a, campaignId, true), input.revision);
   const route = admitted(runtime, await decide(held), a.workspaceId, local).mails[0]!;
-  const reviewed={...row.draft,...route.binding ? {region:route.region,binding:route.binding} : {},postalAddress};
+  const reviewed={...row.draft,...route.binding ? {region:route.region,binding:route.binding} : {},postalAddress,...links ? {linkOrigin:links} : {}};
   const contentHash = await digest(canonical({ version: 2, draft: reviewed, rendered }));
   await db.insert(campaignReviews).values({ id: reviewId, rendererVersion: CAMPAIGN_RENDERER_VERSION, workspaceId: a.workspaceId, campaignId, revision: row.revision, draft: reviewed, contentHash, rendered, capturedAt, capturedCount, staticPrepared: false });
   await reserveCampaign(runtime, db, held, a, a.keyId, queued);
@@ -3012,13 +3027,17 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     sizeCheck(keyed, rows);
     return { mail: { ...mail, snapshot: withoutLegacyFonts({ ...keyed, headers: [...keyed.headers] }) }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
   }
+  // The link host the launch froze. A review frozen before link hosts has none: its links go on the shared link host,
+  // or are refused on Hosted without one, never on this installation's own domain.
+  const origin = review.draft.linkOrigin ?? sharedLinkOrigin(runtime.config);
+  if (!origin) throw linkDomainRequired(runtime.config, review.draft.from.slice(review.draft.from.lastIndexOf('@') + 1));
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
-  const reused = mail.snapshot.unsubscribeUrl;
+  const reused = mail.snapshot.unsubscribeUrl?.startsWith(`${origin}/unsubscribe/`) ? mail.snapshot.unsubscribeUrl : undefined;
   const unsubscribe = reused
     ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
-    : await (await loadOpsUnsub()).createUnsubscribeLink(runtime, a.workspaceId, customer.to[0]!);
+    : await (await loadOpsUnsub()).createUnsubscribeLink(origin, a.workspaceId, customer.to[0]!);
   const page = review.draft.unsubscribePageUrl;
-  const snapshot = withoutLegacyFonts(withUnsubscribe(runtime, customer, unsubscribe.url, review.draft));
+  const snapshot = withoutLegacyFonts(withUnsubscribe(runtime, customer, unsubscribe.url, { ...review.draft, linkOrigin: origin }));
   sizeCheck(snapshot, rows);
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
@@ -3145,14 +3164,17 @@ const placeholderKeys = (draft: Pick<CampaignDraft, 'subject'>, rendered: { html
 /** Whether the dispatcher screens a campaign's mail (dispatcher.ts prepareMail): Hosted shared sending, live, with a classifier. */
 const campaignScreened = screenedAtDispatch;
 /** The unsubscribe link a campaign copy is screened with: the one part of a copy Nightmail generates per recipient. */
-export const unsubscribePlaceholder = (runtime: Runtime) => `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/u_${'0'.repeat(64)}`;
+export const unsubscribePlaceholder = (origin: string) => `${origin.replace(/\/$/, '')}/unsubscribe/u_${'0'.repeat(64)}`;
+/** The link host of a campaign's copies as its launch froze it; this installation's own origin for a review frozen before
+ *  link hosts, which its screen keys were made with. Only keys and checks use that origin: delivery never does. */
+const keyedOrigin = (runtime: Runtime, footer: Footer) => footer.linkOrigin ?? runtime.config.publicUrl;
 /** A campaign's own copy as each recipient gets it, placeholders unresolved: preheader, and footer with a placeholder link. */
 export async function campaignCopy(runtime: Runtime, draft: CampaignDraft, rendered: { html?: string; text?: string }, version = CAMPAIGN_RENDERER_VERSION): Promise<EmailSnapshot> {
   const parse = rendered.html && draft.previewText ? await loadParse5() : undefined;
   const copy: EmailSnapshot = { testCampaignId: null, from: draft.from, ...(draft.fromName ? { fromName: draft.fromName } : {}), ...(draft.previewText !== undefined ? { previewText: draft.previewText } : {}),
     to: [], cc: [], bcc: [], replyTo: draft.replyTo ?? [], region: draft.region, kind: 'marketing', subject: draft.subject, html: withPreheader(rendered.html, draft.previewText, parse, version), text: rendered.text,
     attachments: draft.attachments, tracking: draft.tracking, headers: [] };
-  marketingFooter(copy, unsubscribePlaceholder(runtime), draft);
+  marketingFooter(copy, unsubscribePlaceholder(keyedOrigin(runtime, draft)), draft);
   return copy;
 }
 export type CampaignScreenRef = { workspaceId: string; campaignId: string; reviewId: string };
@@ -3219,10 +3241,10 @@ export async function campaignVerdicts(runtime: Runtime, ref: CampaignScreenRef,
     return row?.judged ? { key, spam: Number(row.spam), model: row.model ?? '' } : null;
   });
 }
-/** The unsubscribe link Nightmail generates for one recipient (src/operations.ts createUnsubscribeLink): this
- *  installation's origin, `/unsubscribe/u_` and 64 lowercase hex digits, and nothing else. */
-export function generatedUnsubscribeUrl(runtime: Runtime, value: string): string {
-  const prefix = `${runtime.config.publicUrl.replace(/\/$/, '')}/unsubscribe/u_`;
+/** The unsubscribe link Nightmail generates for one recipient (src/operations.ts createUnsubscribeLink): the copy's link
+ *  host (`origin`), `/unsubscribe/u_` and 64 lowercase hex digits, and nothing else. */
+export function generatedUnsubscribeUrl(origin: string, value: string): string {
+  const prefix = `${origin.replace(/\/$/, '')}/unsubscribe/u_`;
   if (!value.startsWith(prefix) || !/^[0-9a-f]{64}$/.test(value.slice(prefix.length))) throw new ApiError(409, 'UNSUBSCRIBE_LINK_INVALID', 'The unsubscribe link of this message is not one this installation generated. No provider attempt was made.');
   return value;
 }
@@ -3235,13 +3257,13 @@ export function generatedUnsubscribeUrl(runtime: Runtime, value: string): string
  */
 export function screenedAs(runtime: Runtime, customer: EmailSnapshot, footer: Footer = {}): EmailSnapshot {
   const copy = { ...customer, headers: [...customer.headers] };
-  marketingFooter(copy, unsubscribePlaceholder(runtime), footer);
+  marketingFooter(copy, unsubscribePlaceholder(keyedOrigin(runtime, footer)), footer);
   return copy;
 }
 /** A campaign copy as delivered: the customer's copy with the footer and headers generated for the recipient's link. */
 export function withUnsubscribe(runtime: Runtime, customer: EmailSnapshot, url: string, footer: Footer = {}): EmailSnapshot {
   const copy = { ...customer, headers: [...customer.headers] };
-  marketingFooter(copy, generatedUnsubscribeUrl(runtime, url), footer);
+  marketingFooter(copy, generatedUnsubscribeUrl(keyedOrigin(runtime, footer), url), footer);
   return copy;
 }
 const SCREEN_AHEAD = 2000, SCREEN_PAGE = 500, SCREEN_BUDGET_MS = 8000, SCREEN_CONCURRENCY = 4, SCREEN_BYTES_IN_FLIGHT = 8 * 1024 * 1024;
@@ -3372,7 +3394,7 @@ async function prepareStaticStamp(
   const staticSnapshot = await campaignMessage(runtime, draft, { id: 'static', email: longestValid, properties: {} }, false, lockedAttachments, rendered, true, true, reviewVersion);
   const baseHash = await digest(canonical({ ...staticSnapshot, to: [] }));
   const withFooter = { ...staticSnapshot, headers: [...staticSnapshot.headers] };
-  marketingFooter(withFooter, unsubscribePlaceholder(runtime), draft);
+  marketingFooter(withFooter, unsubscribePlaceholder(keyedOrigin(runtime, draft)), draft);
   sizeCheck(withFooter, lockedAttachments);
   const baseBytes = Buffer.byteLength(JSON.stringify({ ...withFooter, to: [] }), 'utf8');
   return {
@@ -3593,7 +3615,7 @@ async function prepareStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
       const rowHtmlValidated = htmlUrlsOnce && (!htmlInfo.hasAttrPlaceholder || templateHtmlBytes + htmlInfo.attrPlaceholderCount * (recipient.recipient_bytes ?? 0) <= 512 * 1024);
       const snapshot = await campaignMessage(runtime, review.draft, recipient.recipient, false, lockedAttachments, review.rendered, true, rowHtmlValidated, row.reviewVersion!);
       const contentHash = await digest(canonical(snapshot));
-      marketingFooter(snapshot, unsubscribePlaceholder(runtime), review.draft);
+      marketingFooter(snapshot, unsubscribePlaceholder(keyedOrigin(runtime, review.draft)), review.draft);
       sizeCheck(snapshot, lockedAttachments);
       const size = Buffer.byteLength(JSON.stringify(snapshot), 'utf8');
       const entryBytes = 160 + Buffer.byteLength(snapshot.subject, 'utf8');

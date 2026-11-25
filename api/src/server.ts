@@ -11,6 +11,7 @@ import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
 import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { linkHostRequest } from './link-hosts.js';
 import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -80,6 +81,8 @@ try {
   const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
     if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
+    // A link host's own files are its fonts; it never serves the dashboard (src/link-hosts.ts).
+    if (linkHostRequest(runtime.config.links, new URL(c.req.url).hostname, c.req.path) !== 'other' && !c.req.path.startsWith('/fonts/')) return next();
     if (homepage && c.req.path === '/') { const response = await homepage(c, next); if (response) return response; }
     return assets(c, async () => {
       const response = await pages(c, async () => {

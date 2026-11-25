@@ -124,6 +124,12 @@ const values = z.object({
   NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Links in customer mail (unsubscribe, forwarding) go on a link host, never on PUBLIC_URL (src/link-domains.ts): this
+  // shared domain, unless the sender's own links.<domain> is verified. With the Cloudflare for SaaS zone of this domain
+  // and a token that edits its custom hostnames, each domain may publish links.<domain> as a CNAME to edge.<this domain>.
+  NIGHTMAIL_LINK_DOMAIN: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  NIGHTMAIL_LINK_SAAS_ZONE_ID: optional(z.string().trim().regex(/^[0-9a-f]{32}$/)),
+  NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().min(20).max(500)),
   NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   // The origin a connected account's SNS topics deliver to (https://events.nightmail.dev): its role template allows
@@ -192,6 +198,20 @@ export function requirePlatformAccount(account: Config['platformAccount']): stri
   return account;
 }
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
+/** NIGHTMAIL_LINK_DOMAIN and its Cloudflare for SaaS zone: undefined while the domain is unset. Hosted refuses a link
+ *  domain on or under its own domains (PUBLIC_URL's and the earlier ones), which customer mail must never carry. */
+function linkSettings(v: z.infer<typeof values>, url: URL, previousOrigins: string[]): Config['links'] {
+  const domain = v.NIGHTMAIL_LINK_DOMAIN, zoneId = v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token = v.NIGHTMAIL_LINK_SAAS_TOKEN;
+  if (!domain) {
+    if (zoneId || token) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_DOMAIN with NIGHTMAIL_LINK_SAAS_ZONE_ID and NIGHTMAIL_LINK_SAAS_TOKEN: customers\u2019 link hosts are CNAMEs to edge.<link domain>.');
+    return undefined;
+  }
+  if (!zoneId !== !token) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_ZONE_ID and NIGHTMAIL_LINK_SAAS_TOKEN together, or neither.');
+  const own = [url.hostname, ...previousOrigins.map(origin => new URL(origin).hostname)];
+  if (v.MULTI_TENANT === 'true' && own.some(host => domain === host || domain.endsWith(`.${host}`) || host.endsWith(`.${domain}`)))
+    throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_LINK_DOMAIN must be a domain of its own, not PUBLIC_URL\u2019s or an earlier one\u2019s.');
+  return { domain, ...zoneId && token ? { saas: { zoneId, token, target: `edge.${domain}` } } : {} };
+}
 let signingSecretIgnored = false;
 /**
  * PlanetScale's signing secret, or undefined for one that cannot be it (under 32 or over 200 characters): the disk
@@ -277,6 +297,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
+  const links = linkSettings(v, url, previousOrigins);
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
@@ -311,7 +332,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
-    publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
+    publicUrl: url.origin, links, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: v.DISPATCH_TX_RESERVE_PERCENT, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
     aws,

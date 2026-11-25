@@ -2324,7 +2324,10 @@ export type DomainReadiness = {
         type: 'CNAME' | 'TXT' | 'MX';
         value: string;
         priority?: number;
-        purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc';
+        /**
+         * links: optional, the domain's own link host (links.<domain>) for the unsubscribe and other links Nightmail adds to campaign and marketing mail; shown when the installation has a link domain with Cloudflare for SaaS.
+         */
+        purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc' | 'links';
         status: 'pending' | 'verified';
         note?: string;
         /**

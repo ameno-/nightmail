@@ -50,6 +50,9 @@ export type CampaignDraft = {
   /** Only stored in the launch review: the workspace's postal address its footer shows. A review from before postal
    *  addresses has none until the campaign starts sending (src/sending.ts frozenPostalAddress). */
   postalAddress?: string;
+  /** Only stored in the launch review: the origin of the links Nightmail adds to its copies (src/link-domains.ts). A
+   *  review from before link hosts has none: its copies get the shared link host. */
+  linkOrigin?: string;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
   attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
   /** A required notice (src/sending.ts): to everyone in the audience but the suppressed, without an unsubscribe link. */

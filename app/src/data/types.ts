@@ -163,7 +163,7 @@ export interface CampaignTemplateDraft { name: string; description: string; subj
 export interface CampaignTemplate { id: string; url: string; revision: number; draft: CampaignTemplateDraft; published: CampaignTemplateDraft | null; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
 export interface CampaignTemplateSummary { id: string; url: string; revision: number; name: string; description: string; subject: string; published: boolean; publishedRevision: number | null; archivedAt: ISODate | null; createdAt: ISODate; updatedAt: ISODate }
 export interface AttachmentApi { upload(file: File, inline?: {contentId: string}): Promise<Attachment>; get(id: string, signal?: AbortSignal): Promise<Attachment>; content(id: string, signal?: AbortSignal): Promise<{id: string; filename: string; contentType: string; content: string}>; remove(id: string): Promise<void> }
-export type DnsRecordPurpose = 'sending' | 'receiving' | 'mail_from' | 'dmarc'
+export type DnsRecordPurpose = 'sending' | 'receiving' | 'mail_from' | 'dmarc' | 'links'
 type Dmarc = { status: 'missing' | 'invalid' | 'none' | 'quarantine' | 'reject'; record: string | null; source: string | null; adkim: 'r' | 's'; aspf: 'r' | 's'; alignment: { dkim: boolean; spf: boolean } }
 // What a connected AWS account's disconnect keeps in the account and couldn't remove (DELETE /v1/connection).
 export interface DisconnectSummary {

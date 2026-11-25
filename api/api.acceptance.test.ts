@@ -27840,7 +27840,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await hostedScreenFixture(t, runtime, db, '112223330015', 'keyed.invalid');
       const { copyKey } = await import('./src/screen.js'), { screenedAs, withUnsubscribe, generatedUnsubscribeUrl } = await import('./src/sending.js');
       const { createUnsubscribeLink } = await import('./src/operations.js');
-      const generated = async () => (await createUnsubscribeLink(runtime, runtime.config.workspaceId, 'a@example.net')).url;
+      const generated = async () => (await createUnsubscribeLink(runtime.config.publicUrl, runtime.config.workspaceId, 'a@example.net')).url;
       const customer = (change: Record<string, unknown> = {}) => ({ testCampaignId: null, from: 'news@keyed.invalid', fromName: 'News', to: ['a@example.net'], cc: [], bcc: [], replyTo: ['help@keyed.invalid'],
         region: REGION, kind: 'marketing' as const, subject: 'Hello Ana', html: '<p>Hello Ana</p>', text: 'Hello Ana', attachments: [], tracking: true, headers: [] as { Name: string; Value: string }[], ...change });
       const key = (change: Record<string, unknown> = {}) => copyKey(runtime, screenedAs(runtime, customer(change)));
@@ -27864,7 +27864,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The recipient's link is only ever this installation's generated one: its origin, /unsubscribe/u_ and 64 lowercase
       // hex digits. A foreign or look-alike origin, a malformed token, a suffix or another path is refused.
       const token = one.slice(one.lastIndexOf('/u_') + 3), origin = runtime.config.publicUrl.replace(/\/$/, '');
-      assert.equal(generatedUnsubscribeUrl(runtime, one), one);
+      assert.equal(generatedUnsubscribeUrl(origin, one), one);
       for (const bad of [`https://evil.invalid/unsubscribe/u_${token}`, `${origin}.evil.invalid/unsubscribe/u_${token}`, `${origin}/unsubscribe/u_${token.slice(1)}`, `${origin}/unsubscribe/u_${token.toUpperCase()}`,
         `${origin}/unsubscribe/u_${token.slice(1)}g`, `${origin}/unsubscribe/u_${token}/x`, `${origin}/unsubscribe/u_${token}?next=x`, `${origin}/x/unsubscribe/u_${token}`, 'not-a-generated-url', ''])
         assert.throws(() => withUnsubscribe(runtime, customer(), bad), (e: { code?: string }) => e.code === 'UNSUBSCRIBE_LINK_INVALID', bad);
@@ -34971,7 +34971,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // Confirmed and routed, then stopped by its recipient: the route keeps it, so other changes still save, and nothing reaches them.
         const hookId=await confirmedForward('stopped','stopped@example.net');
         await route('stopped@receive.example',['forward:stopped'],'stopped');
-        assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,hookId),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
+        assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,hookId,PUBLIC_ORIGIN),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
         assert.equal((await call('GET','/v1/endpoints/stopped')).status,'declined');
         assert.equal((await call('PATCH','/v1/routing/routes/stopped',{note:'kept'})).note,'kept');
         error(await local('POST','/v1/routing/routes',{match:'stopped-again@receive.example',to:['forward:stopped']}),422,'FORWARD_NOT_CONFIRMED');
@@ -38264,6 +38264,97 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(rejected.attemptStartedAt, null);
       }
       assert.equal((await jobs('operation.simulatedFeedback')).length, 0, 'Ineligible recipients must never get provider acceptance or feedback.');
+    });
+  });
+
+  test('link hosts: campaign, test and marketing mail link on the sender\'s verified link host, else the shared link domain, else refuse on Hosted, never on this installation\'s domain',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run,fetch:page})=>{
+      const {SESv2Client,SendEmailCommand,GetEmailIdentityCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:Json[]=[];
+      // The domain's SES identity, verified and signing, for its check; every send is captured as SES gets it, then simulated.
+      t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){
+        if(cmd instanceof GetEmailIdentityCommand)return Promise.resolve({VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true,SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:['t1','t2','t3']}});
+        if(cmd instanceof SendEmailCommand)delivered.push(cmd.input);
+        return (send as any).call(this,cmd,...rest);
+      });
+      // Public DNS has links.example.com as a CNAME to the edge; Cloudflare's custom hostnames API serves it once `served`.
+      const prior=globalThis.fetch,cloudflare:{method:string;path:string;body?:Json;auth:string|null}[]=[];let served=false;
+      t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
+        const url=new URL(input instanceof Request?input.url:String(input));
+        if(url.hostname==='cloudflare-dns.com'){
+          const answer=url.searchParams.get('name')==='links.example.com'&&url.searchParams.get('type')==='CNAME'?[{name:'links.example.com.',type:5,data:'edge.sharedlinks.example.'}]:[];
+          return Response.json({Status:answer.length?0:3,Answer:answer});
+        }
+        if(url.hostname==='api.cloudflare.com'){
+          cloudflare.push({method:init?.method??'GET',path:url.pathname+url.search,...init?.body?{body:JSON.parse(String(init.body))}:{},auth:new Headers(init?.headers).get('authorization')});
+          return Response.json({success:true,errors:[],result:{id:'ch_fixture',hostname:'links.example.com',status:served?'active':'pending',ssl:{status:served?'active':'pending_validation'}}});
+        }
+        return prior(input,init);
+      });
+      const list=ok(await local('POST','/v1/lists',{name:unique('link-hosts')}),201),contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
+      ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Synthetic fixture.',occurredAt:new Date().toISOString()}));
+      ok(await local('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]}));
+      const draft=()=>local('POST','/v1/campaigns',{name:unique('link-hosts'),from:'news@example.com',subject:'Links',html:'<p>Read <a href="https://example.com/read">this</a>.</p>',audience:{listId:list.id}});
+      const marketing={from:'news@example.com',to:'reader@example.net',subject:'Links',html:'<p>Hello</p>',text:'Hello',kind:'marketing'};
+      const own=new URL(PUBLIC_ORIGIN).host;
+      // Each kind of mail as SES got it: the host of its unsubscribe link, from the header (campaign and marketing) or the
+      // footer (a test, which is transactional), and nothing in its content, headers included, naming this installation.
+      const hosts=async()=>{
+        const before=delivered.length,c=ok(await draft(),201);
+        ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);await run('campaign.run');
+        ok(await local('POST',`/v1/campaigns/${c.id}/test`,{to:'tester@example.net'}),202);
+        ok(await local('POST','/v1/emails/send',marketing),202);
+        await run('email.dispatch');
+        const mail=delivered.slice(before);assert.equal(mail.length,3);
+        return mail.map(input=>{
+          const content=input.Content.Simple,all=JSON.stringify(input.Content);
+          assert.ok(!all.includes(own)&&!all.includes('nightmail.dev'),`No link on this installation's domain: ${all}`);
+          const header=content.Headers?.find((h:Json)=>h.Name==='List-Unsubscribe')?.Value as string|undefined;
+          const footer=/https:\/\/([^/\s"]+)\/unsubscribe\/u_[0-9a-f]{64}/.exec(content.Body.Text.Data)!;
+          assert.ok(footer&&content.Body.Html.Data.includes(footer[0]),'The footer links the same host in both parts.');
+          if(header){assert.equal(header,`<${footer[0]}>`);assert.ok(content.Headers.some((h:Json)=>h.Name==='List-Unsubscribe-Post'));}
+          return footer[1];
+        });
+      };
+      // Hosted with no link domain: campaign, test and marketing mail are refused, and nothing is sent.
+      const refused=ok(await draft(),201);
+      Object.assign(runtime.config,{multiTenant:true,links:undefined});
+      for(const reply of [await local('POST',`/v1/campaigns/${refused.id}/send`,{revision:refused.revision}),await local('POST',`/v1/campaigns/${refused.id}/test`,{to:'tester@example.net'}),await local('POST','/v1/emails/send',marketing)])
+        assert.match(error(reply,409,'LINK_DOMAIN_REQUIRED').message,/link domain/);
+      assert.equal(delivered.length,0);
+      // Self-hosted with none: the installation's own origin is the operator's domain.
+      runtime.config.multiTenant=false;
+      const before=delivered.length,c=ok(await draft(),201);ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);await run('campaign.run');await run('email.dispatch');
+      assert.match(delivered.slice(before)[0].Content.Simple.Headers.find((h:Json)=>h.Name==='List-Unsubscribe').Value,new RegExp(`^<${PUBLIC_ORIGIN}/unsubscribe/u_`));
+      // The shared link domain.
+      runtime.config.links={domain:'sharedlinks.example'};
+      assert.deepEqual(await hosts(),['sharedlinks.example','sharedlinks.example','sharedlinks.example']);
+      // Customers' link hosts on: the domain shows its Link domain record, checked with the domain.
+      runtime.config.links={domain:'sharedlinks.example',saas:{zoneId:'0'.repeat(32),token:'fixture-cloudflare-token',target:'edge.sharedlinks.example'}};
+      const domainId=unique('dom');await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[domainId,runtime.config.workspaceId,'example.com',REGION]);
+      // Self-hosted domain reads ask SES (mocked above); mail stays simulated.
+      const live=async(method:string,path:string)=>{Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'synthetic-fixture',secretAccessKey:'synthetic-fixture'}});
+        try{return ok(await local(method,path));}finally{runtime.config.liveEnabled=false;}};
+      const verify=async()=>(await live('POST',`/v1/domains/${domainId}/verify`)).dns.find((r:Json)=>r.purpose==='links');
+      const pending=await verify();
+      assert.deepEqual({...pending,note:undefined},{name:'links.example.com',type:'CNAME',value:'edge.sharedlinks.example',purpose:'links',status:'pending',note:undefined});
+      assert.match(pending.note,/certificate is being issued/);
+      assert.deepEqual(cloudflare,[{method:'POST',path:`/client/v4/zones/${'0'.repeat(32)}/custom_hostnames`,body:{hostname:'links.example.com',ssl:{method:'http',type:'dv',settings:{min_tls_version:'1.2'}}},auth:'Bearer fixture-cloudflare-token'}]);
+      // Not yet served: the shared link domain still carries the links.
+      assert.deepEqual(await hosts(),['sharedlinks.example','sharedlinks.example','sharedlinks.example']);
+      served=true;
+      const verified=await verify();
+      assert.equal(verified.status,'verified');assert.match(verified.note,/use links\.example\.com/);
+      assert.deepEqual(cloudflare.slice(1).map(call=>[call.method,call.path]),[['GET',`/client/v4/zones/${'0'.repeat(32)}/custom_hostnames/ch_fixture`]]);
+      assert.equal((await live('GET',`/v1/domains/${domainId}`)).dns.find((r:Json)=>r.purpose==='links').status,'verified');
+      assert.equal((await live('GET','/v1/domains?refresh=false')).data.find((d:Json)=>d.id===domainId).dns.at(-1).status,'verified');
+      // The sender's own link host, for the campaign, its test and marketing mail.
+      const links=await hosts();assert.deepEqual(links,['links.example.com','links.example.com','links.example.com']);
+      // A link host answers the links, and its own page, and nothing else; the links work there.
+      const unsubscribe=delivered.slice(-3).flatMap(input=>input.Content.Simple.Headers?.filter((h:Json)=>h.Name==='List-Unsubscribe')??[])[0].Value.slice(1,-1);
+      assert.match(await (await page(new Request(unsubscribe,{headers:{accept:'text/html'}}))).text(),/Unsubscribe from marketing emails\?/);
+      assert.equal((await page(new Request(unsubscribe,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'List-Unsubscribe=One-Click'}))).status,200);
+      assert.match(await (await page(new Request('https://sharedlinks.example/'))).text(),/Email links/);
+      for(const path of ['/v1/campaigns','/overview','/mcp'])assert.equal((await page(new Request(`https://sharedlinks.example${path}`))).status,404,path);
     });
   });
 

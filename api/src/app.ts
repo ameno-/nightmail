@@ -16,6 +16,7 @@ import { countRequest } from './health-counters.js';
 import { SLOW_REQUEST_MS } from './log.js';
 import { authenticatedCreates } from './idempotency.js';
 import { addresses, clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
+import { linkHostPage, linkHostRequest } from './link-hosts.js';
 
 type RouteGroup = 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'agent-setup' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
@@ -208,6 +209,14 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
       }
     };
     if (c.env.deferNudge) c.env.deferNudge(nudge); else await nudge(c.env);
+  });
+  // A link host (src/link-hosts.ts) answers the links in customer mail and its own page, nothing else. The Worker has
+  // already turned away what came through a customer's custom hostname; this matches the link domain's own names.
+  app.use('*', async (c, next) => {
+    const answer = linkHostRequest(c.env?.config?.links, new URL(c.req.url).hostname, c.req.path);
+    if (answer === 'root' && c.req.method === 'GET') { c.header('cache-control', 'public, max-age=3600'); return c.html(linkHostPage()); }
+    if (answer === 'root' || answer === 'missing') throw new ApiError(404, 'NOT_FOUND', 'This host carries email links only.');
+    await next();
   });
   // After the request line's middleware, so a refused request is logged like any other.
   app.use('*', (c, next) => {
