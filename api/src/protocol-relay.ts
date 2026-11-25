@@ -82,7 +82,7 @@ export async function relaySubmit(c: Ctx, p: Submitted) {
   checkBudget(c, key.used, key.max_requests);
   if (!sender || !senders || !key.owned || senders.some(a => !senderDomainAllowed(key.domains, a.split('@')[1]!)))
     throw new ApiError(403, 'SENDER_NOT_OWNED', 'Send from an address this key may use.');
-  const mime = sealedMime(raw) ? await sealedPassthrough(rt, key.workspace_id, raw) : undefined, files = mime ? [] : parsed.files;
+  const mime = sealedMime(raw) ? await sealedPassthrough(rt, key.workspace_id, raw, sender, m.sender?.address) : undefined, files = mime ? [] : parsed.files;
   if (files.length > SEND_LIMITS.attachments) throw new ApiError(422, 'VALIDATION_FAILED', `At most ${SEND_LIMITS.attachments} attachments.`, 'attachments');
   const messages = (attachments: string[]) => envelopeParts({ to, cc, bcc }).map(part => ({
     from: sender, ...m.from?.name ? { fromName: m.from.name } : {}, ...part, replyTo: (m.replyTo ?? []).flatMap(a => a.address ? [a.address] : []),
