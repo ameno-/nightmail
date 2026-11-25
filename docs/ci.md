@@ -135,6 +135,14 @@ The public price pages (`/pricing` and `/compare/*`, `app/src/features/pricing`)
 
 **Fix:** take prices from `rates.ts` and `prices.ts`, never as literals in the page; give a new figure its `source`. A price that changed is re-read on the vendor's page and updated in `prices.ts` with the new day; one that can't be re-read is removed, not left stale. The pages stay out of the site's links and search engines until `PRICE_PAGES_LIVE` in `app/src/features/pricing/live.ts` is true.
 
+### Design rules (report only)
+
+`app/scripts/design-lint` checks the dashboard against its design rules: no borders or outlines, no focus rings, one surface step, colours, spacing, radii and font sizes from tokens, Inter and OpenTUI Mono only, Lucide icons only, full-width pages and whole labels. Stylesheets go through Stylelint (`nightmail/<rule>`), components through the TypeScript AST. Each violation gives its place, the rule, why the rule exists and what to use instead. The homepage, price and legal pages are outside the console and not checked.
+
+**Reports, never fails,** while every rule in `app/design-lint.config.ts` is at level `report`. A rule set to `error` fails here on any violation.
+
+**Fix:** do what the violation's `use` line says. In `app/`, `bun run design-lint <files>` checks only the files you changed, `--rule <id>` one rule, `--json` gives the list to an agent. A sanctioned exception goes in the rule's `allow` list in the config with its reason, or on the CSS line as `/* stylelint-disable-next-line nightmail/<rule> -- <reason> */`.
+
 ## Deadlock guard (`acceptance`)
 
 Dev's E2E runs its steps concurrently, and every 40P01 it has hit so far was two endpoints locking the same rows (the workspace's settings row, a domain claim, a receipt or its window) in opposite orders. Each request then failed with a 500 after `deadlock_timeout`. The acceptance job now:

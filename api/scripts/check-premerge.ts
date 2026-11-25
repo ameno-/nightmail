@@ -359,6 +359,21 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   }
 }
 
+// 10. Design rules (app/design-lint.config.ts): borderless, no focus rings, one surface step, tokens for colour, spacing,
+// radius and type, Inter and OpenTUI Mono, Lucide icons, full-width pages, whole labels. app/scripts/design-lint prints
+// the counts by rule and the first violations, each with why and what to use instead. Rules at level 'report' never
+// fail; one set to 'error' fails here on its first violation.
+{
+  try {
+    console.log(execFileSync('node', ['--import', import.meta.resolve('tsx'), 'app/scripts/design-lint/index.ts', '--limit', '10'], { cwd: root, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd());
+  } catch (error) {
+    const { status, stdout, stderr } = error as { status?: number; stdout?: string; stderr?: string };
+    if (/Cannot find (module|package) '(stylelint|@typescript\/typescript6)/.test(String(stderr))) warn('Design rules', 'Skipped: run bun install in app/ to check the design rules.');
+    else if (status === 1 && stdout) { console.log(stdout.trimEnd()); fail('Design rules', 'A design rule at level error has violations (above). Fix them as each one says, or allowlist a sanctioned exception with its reason in app/design-lint.config.ts.', 'app/design-lint.config.ts'); }
+    else fail('Design rules', `app/scripts/design-lint failed: ${String(stderr ?? error).slice(0, 600)}`, 'app/scripts/design-lint/index.ts');
+  }
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;
