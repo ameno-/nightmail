@@ -14,7 +14,6 @@ const REFRESH_MS = 60_000
 const providers: MailProvider[] = ['gmail', 'microsoft', 'yahoo', 'apple', 'proton', 'gmx', 'other']
 const providerNames: Record<MailProvider | 'all', string> = { all: 'All ISPs', gmail: 'Gmail', microsoft: 'Microsoft', yahoo: 'Yahoo · AOL', apple: 'Apple iCloud', proton: 'Proton', gmx: 'GMX · Web.de', other: 'Other' }
 const grades = ['A+', 'A', 'B', 'C', 'D', 'F'] as const
-const reputations: Record<string, [string, Tone]> = { HIGH: ['High', 'success'], MEDIUM: ['Medium', 'neutral'], LOW: ['Low', 'warning'], BAD: ['Bad', 'danger'] }
 // The lines deliverability.ts THRESHOLDS publishes: hard bounces 2% and 5%, complaints 0.1% (Gmail) and 0.3% (enforced).
 const HARD = [0.02, 0.05] as const, COMPLAINT = [0.001, 0.003] as const
 const zero = (): DeliverabilityCounts => ({ accepted: 0, delivered: 0, hardBounced: 0, softBounced: 0, deferred: 0, complained: 0, opened: 0, humanOpened: 0, clicked: 0 })
@@ -95,9 +94,10 @@ function fill(d: Deliverability, stream: DeliverabilityStream, region: string): 
         const p = d.postmaster[i], key = `postmaster:${i}`
         if (!p) return [key, empty(false, '')]
         const open = <a className="glass-link" href={p.url} target="_blank" rel="noreferrer">Open <ArrowUpRight size={14} aria-hidden="true" /></a>
-        const [words, tone] = reputations[p.latest?.reputation ?? ''] ?? []
-        if (p.latest) return [key, { label: p.domain, hint: `Gmail spam ${pct(p.spamRatio.current ?? p.latest.spamRatio)} · ${date(p.latest.day, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`,
-          value: words ? <StatusBadge status={words} tone={tone} /> : open }]
+        // Postmaster v2 has no reputation: Gmail's spam rate for the period is the figure, DMARC's pass rate beside it.
+        if (p.latest) { const spam = p.spamRatio.current ?? p.latest.spamRatio
+          return [key, { label: p.domain, hint: `Gmail spam rate${p.latest.dmarc === null ? '' : ` · DMARC ${pct(p.latest.dmarc)}`} · ${date(p.latest.day, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`,
+            value: pct(spam), tone: zone(spam, COMPLAINT) }] }
         return [key, { label: p.domain, hint: p.status === 'error' ? `Gmail Postmaster · ${p.error}` : p.status === 'ok' ? 'Gmail Postmaster · no day with enough mail yet' : 'Gmail Postmaster · not connected', value: open }]
       })),
     },
