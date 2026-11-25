@@ -24660,6 +24660,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual([movedNow.name, movedNow.status, movedNow.hosts], [sub2.name, 'waiting_for_mx', [sub2.name]]);
       assert.deepEqual([ok(await local('GET', `/v1/inbound/domains/${sub2.id}`)).name, ok(await local('GET', `/v1/inbound/domains/${sub2.id}`)).status], [sub2.name, 'waiting_for_mx']);
       assert.match(error(await create(`late@reply.${sub2.name}`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, new RegExp(escape(`Add it back with POST ${hostsPath} and {"name":"reply.${sub2.name}"}`)));
+
+      // Add host takes a name as people type it: an empty one is refused with what to enter, @ is the domain itself, and
+      // case and a trailing dot don't matter.
+      const typed = await claim('rx-typed', true), typedPath = `/v1/inbound/domains/${typed.id}/hosts`;
+      assert.match(error(await local('POST', typedPath, { name: '  ' }), 422, 'VALIDATION_FAILED').message, /Enter a host: @ for the domain itself/);
+      assert.equal(ok(await local('POST', typedPath, { name: '@' }), 201).name, typed.name);
+      assert.equal(ok(await local('POST', typedPath, { name: 'Team2.' }), 201).name, `team2.${typed.name}`);
+      assert.match(error(await local('POST', typedPath, { name: 'my_team' }), 422, 'RECEIVING_HOST_INVALID').message, new RegExp(escape(`Use ${typed.name} or one of its subdomains`)));
     });
   });
 

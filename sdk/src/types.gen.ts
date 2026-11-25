@@ -4734,7 +4734,7 @@ export type AddReceivingHost = {
         [key: string]: unknown;
     };
     /**
-     * The host: the domain itself, a label (acme) or a subdomain (acme.example.com).
+     * The host: the domain itself (or @), a label (acme) or a subdomain (acme.example.com).
      */
     name: string;
     confirm?: boolean;
