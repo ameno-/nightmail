@@ -22,10 +22,15 @@ export const contactColumns: SkeletonColumn[] = [
   { key: 'lists', label: 'Lists', width: 176, card: 'hide' },
   { key: 'created', label: 'Added', width: 124, skeleton: <SkeletonText width={86} />, card: 'inline' },
 ]
+// Risky contacts, filtered: why each was flagged in place of the status the filter names, and a row menu to send anyway.
+const actionsColumn: SkeletonColumn = { key: 'actions', label: '', width: 56, align: 'right', skeleton: <span />, card: 'end' }
+const reasonColumn: SkeletonColumn = { key: 'reason', label: 'Reason', width: 184, skeleton: <SkeletonText width={120} />, card: 'line' }
+export const contactColumnsFor = (status: string): SkeletonColumn[] => status === 'risky' ? [contactColumns[0], reasonColumn, ...contactColumns.slice(2), actionsColumn] : contactColumns
 const memberColumns: SkeletonColumn[] = [contactColumns[0], contactColumns[1], { key: 'suppression', label: 'Suppression reason', width: 184, card: 'line' }, contactColumns[4]]
-// A consent tab already names the status, and only Suppressed has reasons to show; a card keeps the reason column's
-// line, which shows the name when there is no reason.
-export const memberColumnsFor = (status: string): SkeletonColumn[] => memberColumns.filter(column => !(status && column.key === 'status')).map(column => column.key === 'suppression' && status !== 'suppressed' ? { ...column, table: false } : column)
+// A status tab already names the status, and only Suppressed and Risky have reasons to show; a card keeps the reason
+// column's line, which shows the name when there is no reason.
+export const memberColumnsFor = (status: string): SkeletonColumn[] => [...memberColumns, ...(status === 'risky' ? [actionsColumn] : [])].filter(column => !(status && column.key === 'status'))
+  .map(column => column.key !== 'suppression' || status === 'suppressed' ? column : status === 'risky' ? { ...column, label: 'Reason' } : { ...column, table: false })
 // The name takes the slack; the counts and the date keep to their content (the table scrolls sideways before a name
 // gets too narrow, audience.css).
 export const listColumns: SkeletonColumn[] = [
@@ -80,12 +85,14 @@ export function SegmentEditorBodySkeleton() {
     <section className="section stack"><SectionHeader title="Matching contacts" actions={<ControlSkeleton width={220} />} /><AudienceSummarySkeleton /></section></div>
 }
 export function AudienceRouteSkeleton({ kind, isNew = false }: { kind: 'contacts' | 'contact' | 'lists' | 'list' | 'segments' | 'segment'; isNew?: boolean }) {
+  const [params] = useSearchParams()
+  const status = statusOptions.some(option => option.value === params.get('status')) ? params.get('status')! : ''
   if (kind === 'contact') return <LoadingRegion className="audience-page audience-page--measure" label="Loading contact"><PageHeader title={<SkeletonText width={64} lineHeight={24} />} backTo="/audience" actions={<><ControlSkeleton width={109} /><ControlSkeleton width={111} /></>} /><ContactDetailBodySkeleton /></LoadingRegion>
   if (kind === 'list') return <LoadingRegion className="audience-page measure-list measure-list--narrow" label="Loading list"><PageHeader title={<SkeletonText width={96} lineHeight={24} />} backTo="/audience/lists" actions={<><ControlSkeleton width={85} /><ControlSkeleton width={120} /></>} /><AudienceMembersSkeleton /></LoadingRegion>
   if (kind === 'segment') return <LoadingRegion className="audience-page audience-page--measure" label="Loading segment"><PageHeader title={isNew ? 'Create segment' : 'Edit segment'} backTo="/audience/segments" actions={<ControlSkeleton width={121} />} /><SegmentEditorBodySkeleton /></LoadingRegion>
   const contacts = kind === 'contacts'
   return <LoadingRegion className={contacts ? 'audience-page measure-list measure-list--narrow' : 'audience-page measure-list'} label={`Loading ${kind}`}><AudienceHeader actions={<>{contacts && <ControlSkeleton width={120} />}<ControlSkeleton width={contacts ? 98 : kind === "lists" ? 85 : 121} /></>} />
-    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by consent" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><div className="audience-list-filter"><ControlSkeleton /></div></> : <ControlSkeleton width={320} />}</div></div>
-    <TableSkeleton className={contacts ? 'audience-contacts' : kind === 'lists' ? 'audience-lists' : undefined} columns={contacts ? contactColumns : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? rememberedPageSize('contacts') || 8 : 5} pagination />
+    <div className="data-toolbar"><div className="cluster">{contacts ? <><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" disabled /><Select className="audience-status-filter" aria-label="Filter by status" value="" onValueChange={() => {}} options={[{ value: '', label: 'All contacts' }]} disabled /><div className="audience-list-filter"><ControlSkeleton /></div></> : <ControlSkeleton width={320} />}</div></div>
+    <TableSkeleton className={contacts ? 'audience-contacts' : kind === 'lists' ? 'audience-lists' : undefined} columns={contacts ? contactColumnsFor(status) : kind === 'lists' ? listColumns : segmentColumns} rows={contacts ? rememberedPageSize('contacts') || 8 : 5} pagination />
   </LoadingRegion>
 }

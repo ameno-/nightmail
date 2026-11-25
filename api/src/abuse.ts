@@ -5,6 +5,7 @@ import { ipNetwork, userAgentFamily } from './audit.js';
 import { clientIpHeader, clientNetworkHeader } from './brand.js';
 import { log, type DbExecutor, type Runtime } from './core.js';
 import { placementRoot } from './domain-registry.js';
+import { isDisposableDomain, PUBLIC_MAILBOXES } from './list-hygiene.js';
 
 // Abuse and fraud monitoring for hosted installations: small facts ("signals") about users, workspaces and refused
 // sign-ins, kept so that related accounts can be recognised by a person later.
@@ -56,21 +57,6 @@ export function signalHash(config: Pick<Runtime['config'], 'authSecret'>, kind: 
 // too. Anywhere else only the exact address is compared. `as`: the provider's other name for the same mailboxes.
 const ALIASES: Record<string, { dots?: true; as?: string }> = { 'gmail.com': { dots: true }, 'googlemail.com': { dots: true, as: 'gmail.com' },
   'outlook.com': {}, 'hotmail.com': {}, 'live.com': {}, 'icloud.com': {}, 'proton.me': {}, 'protonmail.com': {}, 'fastmail.com': {} };
-// Mailbox providers anyone can sign up with: sharing one of these domains says nothing about two accounts.
-const PUBLIC_MAILBOXES = new Set(`gmail.com googlemail.com outlook.com hotmail.com live.com msn.com yahoo.com ymail.com rocketmail.com icloud.com me.com mac.com
-  aol.com proton.me protonmail.com pm.me gmx.com gmx.net gmx.de web.de mail.com zoho.com zohomail.com yandex.com yandex.ru mail.ru qq.com 163.com 126.com sina.com
-  fastmail.com fastmail.fm hey.com tutanota.com tuta.io tuta.com tutamail.com duck.com hotmail.co.uk hotmail.fr hotmail.de hotmail.it hotmail.es outlook.fr outlook.de
-  outlook.es outlook.it live.co.uk live.fr yahoo.co.uk yahoo.fr yahoo.de yahoo.es yahoo.it yahoo.co.jp yahoo.co.in yahoo.com.br yahoo.ca comcast.net verizon.net
-  att.net sbcglobal.net cox.net orange.fr free.fr laposte.net t-online.de libero.it naver.com daum.net seznam.cz wp.pl o2.pl btinternet.com sky.com`.split(/\s+/));
-// A starting list of disposable-address services.
-const DISPOSABLE = new Set(`mailinator.com guerrillamail.com guerrillamail.net guerrillamail.org guerrillamail.biz guerrillamailblock.com sharklasers.com grr.la
-  pokemail.net spam4.me 10minutemail.com 10minutemail.net 10minemail.com tempmail.com temp-mail.org temp-mail.io tempmail.net tempmail.dev tempmailo.com tempail.com
-  tempr.email tmpmail.org tmpmail.net tmpeml.com yopmail.com yopmail.fr yopmail.net trashmail.com trashmail.net trashmail.de trash-mail.com getnada.com nada.email
-  dispostable.com maildrop.cc throwawaymail.com fakeinbox.com fakemail.net mohmal.com emailondeck.com mintemail.com mytemp.email burnermail.io spamgourmet.com
-  mailnesia.com mailcatch.com inboxkitten.com moakt.com 1secmail.com 1secmail.org 1secmail.net discard.email discardmail.com mailsac.com harakirimail.com
-  getairmail.com mailpoof.com emailfake.com email-fake.com generator.email luxusmail.org minuteinbox.com tempinbox.com temp-inbox.com inboxbear.com mail.tm mail.gw
-  dropmail.me mailnull.com spambox.us jetable.org mailexpire.com byom.de anonbox.net`.split(/\s+/));
-
 /**
  * An address as it is compared. `exact`: the address with its domain lowercased, nothing else changed. `alias`: the
  * mailbox it names at a provider that documents its equivalences (ALIASES), or null anywhere else. `tagged`: such a
@@ -84,7 +70,7 @@ export function readAddress(address: string) {
   const plus = mailbox.indexOf('+'), tagged = !!rule && plus > 0;
   if (tagged) mailbox = mailbox.slice(0, plus);
   if (rule?.dots) mailbox = mailbox.replaceAll('.', '');
-  return { exact: `${local}@${domain}`, alias: rule ? `${mailbox}@${rule.as ?? domain}` : null, tagged, domain, disposable: DISPOSABLE.has(domain), publicMailbox: PUBLIC_MAILBOXES.has(domain) };
+  return { exact: `${local}@${domain}`, alias: rule ? `${mailbox}@${rule.as ?? domain}` : null, tagged, domain, disposable: isDisposableDomain(domain), publicMailbox: PUBLIC_MAILBOXES.has(domain) };
 }
 const DNS_NAME = /^(?=.{4,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{0,61}[a-z0-9]$/;
 /** The registrable domain of a DNS host name under a known public suffix, or null: never an IP literal, a bare label,

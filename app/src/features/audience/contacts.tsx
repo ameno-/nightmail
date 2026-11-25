@@ -6,7 +6,7 @@ import { queries } from '../../data/queries'
 import type { Contact, ContactInput, ConsentInput } from '../../data/types'
 import { SearchField, Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, LoadingRegion, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, fieldError, MutationError, useToast } from '../../components/ui'
 import { activityColumns, AudienceRouteSkeleton, consentColumns } from './skeletons'
-import { consentTitle, ContactTable, date, ListPicker, nameTitle, noUnknown, statusOptions, suppressionText, useAudienceLists } from './shared'
+import { ContactStatus, ContactTable, date, ListPicker, nameTitle, noUnknown, riskLabels, riskSkipped, statusOptions, suppressionText, useAllowRisk, useAudienceLists } from './shared'
 import { ImportContactsDialog } from './import'
 import { BulkSubscribeDialog } from './bulk'
 import { AudienceHeader } from './header'
@@ -30,15 +30,16 @@ export function ContactsPage() {
   const fitted = useRef(pageSize)
   useEffect(() => { if (fitted.current !== pageSize) { fitted.current = pageSize; update({ page: 1 }) } }, [pageSize])
   const lists = useAudienceLists()
-  const query = useApiDef(queries.contacts({ page, pageSize, search, status, listId }), { keepPrevious: true })
+  // Risky contacts have columns of their own: switching to or from them shows the table's skeleton, not the other rows.
+  const query = useApiDef(queries.contacts({ page, pageSize, search, status, listId }), { keepPrevious: previous => ((previous[1] as { status?: string } | undefined)?.status === 'risky') === (status === 'risky') })
   // Pages are cursor-based: a page this session never reached (a reload on page 3) opens on the page the API returned.
   const served = query.isPlaceholderData ? undefined : query.data?.page
   useEffect(() => { if (served !== undefined && served !== page) update({ page: served }) }, [served, page])
   const filtered = Boolean(search || status || listId)
   return <div className="audience-page measure-list measure-list--narrow">
     <AudienceHeader actions={<><Button onClick={() => setImporting(true)}>Import contacts</Button><Button variant="primary" onClick={() => setAdd(true)}>Add contact</Button></>} />
-    <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" value={draft} onChange={event => type(event.target.value)} /><Select className="audience-status-filter" aria-label="Filter by consent" value={status} onValueChange={value => update({ status: value, page: 1 })} options={[{ value: '', label: 'All contacts' }, ...statusOptions]} /><ListPicker className="audience-list-filter" label="Filter by list" emptyLabel="All lists" value={listId} onChange={value => update({ list: value, page: 1 })} /></div>{status === 'unknown' && <Button onClick={() => setBulk(true)}>Mark as subscribed…</Button>}</div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} lists={lists.data} listsLoading={lists.isPending} loading={query.isPending} minRows={pageSize} empty={filtered ? <EmptyState title={status === 'unknown' && !search ? noUnknown : 'No matching contacts'} action={<Button onClick={() => update({ q: '', status: '', list: '', page: 1 })}>Clear filters</Button>} /> : <EmptyState title="No contacts yet" action={<Button onClick={() => setImporting(true)}>Import contacts</Button>} />} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={next => update({ page: next })} />}</>}
+    <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search contacts" placeholder="Search email or name" value={draft} onChange={event => type(event.target.value)} /><Select className="audience-status-filter" aria-label="Filter by status" value={status} onValueChange={value => update({ status: value, page: 1 })} options={[{ value: '', label: 'All contacts' }, ...statusOptions]} /><ListPicker className="audience-list-filter" label="Filter by list" emptyLabel="All lists" value={listId} onChange={value => update({ list: value, page: 1 })} /></div>{status === 'unknown' && <Button onClick={() => setBulk(true)}>Mark as subscribed…</Button>}</div>
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><ContactTable tableRef={tableRef} contacts={query.data?.items || []} status={status} lists={lists.data} listsLoading={lists.isPending} loading={query.isPending} minRows={pageSize} empty={filtered ? <EmptyState title={status === 'unknown' && !search ? noUnknown : status === 'risky' && !search && !listId ? 'No risky contacts' : 'No matching contacts'} action={<Button onClick={() => update({ q: '', status: '', list: '', page: 1 })}>Clear filters</Button>} /> : <EmptyState title="No contacts yet" action={<Button onClick={() => setImporting(true)}>Import contacts</Button>} />} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={next => update({ page: next })} />}</>}
     {add && <ContactEditor onClose={() => setAdd(false)} />}
     {importing && <ImportContactsDialog listId={listId} onClose={() => setImporting(false)} />}
     {bulk && <BulkSubscribeDialog listId={listId || undefined} searchIgnored={Boolean(search)} onClose={() => setBulk(false)} />}
@@ -89,6 +90,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
   const [consentInput, setConsentInput] = useState<ConsentInput>(initialConsent)
   const status = useApiMutation((api, input: ConsentInput) => api.consent(contact.id, { ...input, evidence: input.evidence?.trim() || undefined }), undefined, false, invalidate.contactConsent, contact.id)
   const toast = useToast()
+  const allow = useAllowRisk(), { canAdminister } = useWorkspaceAccess()
   // Matching emails waits for the first page of consent history, so the history's height is known before anything sits below it.
   const history = useApiQuery(['consent-history', contact.id, undefined], api => api.consentHistory(contact.id))
   useApiQuery(['emails', 'contact-activity', { search: contact.email, page: 1, pageSize: 5, regionId }], (api, signal) => api.emails.list({ search: contact.email, page: 1, pageSize: 5, regionId }, signal))
@@ -98,9 +100,9 @@ function ContactDetails({ contact }: { contact: Contact }) {
   const subscribing = consentInput.status === 'subscribed'
   const verb = !subscribing ? 'Unsubscribe' : contact.status === 'unsubscribed' ? 'Resubscribe' : 'Subscribe'
   return <div className="audience-page audience-page--measure">
-    <PageHeader title={contact.name ? <AddressText text={contact.name} /> : <PrivateAddress value={contact.email} />} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} title={contact.status === 'suppressed' ? 'Consent can’t change while the address is suppressed.' : undefined} onClick={() => { status.reset(); setConsentInput(initialConsent()); setConfirm(true) }}>{consentAction(contact.status)}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
+    <PageHeader title={contact.name ? <AddressText text={contact.name} /> : <PrivateAddress value={contact.email} />} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} title={contact.status === 'suppressed' ? 'Consent can’t change while the address is suppressed.' : undefined} onClick={() => { status.reset(); setConsentInput(initialConsent()); setConfirm(true) }}>{consentAction(contact.status)}</Button>{canAdminister && contact.risk && <Button loading={allow.pending} title={contact.risk.allowed ? 'Campaigns skip this address again.' : 'Campaigns and marketing sends reach this address.'} onClick={() => void allow.run(contact.id, !contact.risk!.allowed)}>{contact.risk.allowed ? 'Skip again' : 'Send anyway'}</Button>}<Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
     {/* Consent is the badge here (and the suppression reason when there is one), not a second Status row below. */}
-    <div className="audience-summary cluster">{contact.name && <PrivateAddress value={contact.email} />}<span title={consentTitle(contact.status)}><StatusBadge status={contact.status} /></span>{contact.suppressionReason && <span>{suppressionText(contact.suppressionReason)}</span>}</div>
+    <div className="audience-summary cluster">{contact.name && <PrivateAddress value={contact.email} />}<ContactStatus contact={contact} />{contact.suppressionReason && <span>{suppressionText(contact.suppressionReason)}</span>}{contact.risk && <RiskNote risk={contact.risk} skipped={riskSkipped(contact)} />}</div>
     <div className="section audience-properties"><section><SectionHeader title="Properties" /><dl className="ui-facts">{contact.country && <><dt>Country</dt><dd>{contact.country}</dd></>}<dt>Added</dt><dd>{date(contact.createdAt)}</dd><dt>Last opened</dt><dd>{date(contact.lastOpenedAt)}</dd>{customProperties(contact).map(([key, value]) => <Fragment key={key}><dt>{key === 'plan' ? 'Plan' : <AddressText text={key} />}</dt><dd><AddressText text={value} /></dd></Fragment>)}</dl></section></div>
     <section className="section"><SectionHeader title="Lists" />{lists.isPending ? <LoadingRegion label="Loading list memberships"><SkeletonText width={170} /></LoadingRegion> : lists.isError ? <ErrorState error={lists.error} onRetry={() => lists.refetch()} /> : <div className="cluster audience-links">{contact.listIds.length ? contact.listIds.map(id => <Link key={id} to={`/audience/lists/${id}`}>{lists.data.find(list => list.id === id)?.name || 'Unnamed list'}</Link>) : <span className="muted">Not on any lists.</span>}</div>}</section>
     <ConsentHistory id={contact.id} />
@@ -113,6 +115,10 @@ function ContactDetails({ contact }: { contact: Contact }) {
       <MutationError error={status.error} />
     </form></Dialog>
   </div>
+}
+// Why the address was flagged, and for a mistyped provider the address it most likely meant. Allowed, it is a quiet note.
+function RiskNote({ risk, skipped }: { risk: NonNullable<Contact['risk']>; skipped: boolean }) {
+  return <span className={skipped ? undefined : 'muted'}>{riskLabels[risk.reason]}{risk.suggestion && <> · Did you mean <PrivateAddress value={risk.suggestion} />?</>}{!skipped && ' · sent anyway'}</span>
 }
 function ContactActivity({ email }: { email: string }) {
   const { regionId } = useRegion()
