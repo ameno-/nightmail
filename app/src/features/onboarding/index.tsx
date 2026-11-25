@@ -539,7 +539,7 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
 }
 
 // Overview opens after the last step: its code and first reads load while the step is up, after the step's own. A test
-// sent here changes them, so they are read again then (returned: call it after the send).
+// sent here changes them, so they are read again then (returned: call it after the send, and again once it is delivered).
 function useWarmOverview() {
   const prefetch = usePrefetchRoute('active'), client = useQueryClient(), refreshIdentity = useRefreshIdentity()
   useEffect(() => { const timer = setTimeout(() => void prefetch('/overview'), 500); return () => clearTimeout(timer) }, []) // eslint-disable-line react-hooks/exhaustive-deps
@@ -587,7 +587,7 @@ function AgentSetup({ domainId, onFinish, onBack }: { domainId: string; onFinish
       </div>
       {setup ? <AgentSetupStatus setup={setup} idle={line} /> : <p className="muted onboarding-agent-line">{line}</p>}
     </section>
-    {current && <section className="onboarding-test onb-rise" style={rise(2)} aria-label="Test email"><TestSend domain={current} ready={ready} onLeave={onFinish} onSent={rewarm} /></section>}
+    {current && <section className="onboarding-test onb-rise" style={rise(2)} aria-label="Test email"><TestSend domain={current} ready={ready} onLeave={onFinish} onSent={rewarm} onSettled={rewarm} /></section>}
     <div className="onboarding-actions">
       <Button onClick={onFinish}>Go to dashboard<ArrowRight size={16} aria-hidden /></Button>
     </div>

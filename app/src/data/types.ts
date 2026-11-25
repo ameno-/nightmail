@@ -7,6 +7,8 @@ export type ISODate = string
 export type Stream = 'transactional' | 'marketing'
 export type AutoValidationMode = 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown'
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'complaint' | 'deferred' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated'
+// Statuses a sent email can still leave without anyone acting on it: a page showing one reads it again until it settles.
+export const pendingEmailStatuses: readonly string[] = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed'] satisfies EmailStatus[]
 export type ContactStatus = 'unknown' | 'subscribed' | 'unsubscribed' | 'suppressed'
 // The API's campaign states.
 export type CampaignStatus = 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled'

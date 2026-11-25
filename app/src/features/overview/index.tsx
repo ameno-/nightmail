@@ -5,7 +5,7 @@ import { useApiDef, useRegion, useWorkspaceAccess , useSession } from '../../dat
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
-import { campaignEditable, type Campaign, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
+import { campaignEditable, pendingEmailStatuses, type Campaign, type ChartPoint, type LogEntry, type Overview, type SesDiscovery, type TimeRange } from '../../data/types'
 import { DataTable, EmptyState, ErrorState, Icon, PageHeader, SectionHeader, Select, StatusBadge, Tabs } from '../../components/ui'
 import { Crossfade, useMorph, useTween } from '../../components/motion'
 import { date, label, number, percent } from '../../lib/format'
@@ -24,6 +24,7 @@ import { ONBOARDING_CARD_SPACE, OnboardingCard, cardActions, useOnboardingCard }
 import { leadFocus } from '../../data/focus'
 import { useQueryClient } from '@tanstack/react-query'
 import { resourceOf } from '../../data/invalidation'
+import { useSettlingEmail } from '../docs/first-send'
 
 // Overview: is sending healthy? An edge-to-edge console: a 44px control strip (the title, then the range, stream and
 // panel toggle), one hairline-divided strip of four figures across the page, each a link to that mail in Logs; then
@@ -80,6 +81,10 @@ export function OverviewPage() {
   const refetch = query.refetch
   const metricsFailed = query.isError
   useEffect(() => { if (head === undefined) return; if (seen.current !== undefined && seen.current !== head && !metricsFailed) void refetch(); seen.current = head }, [head, refetch, metricsFailed])
+  // An email sent moments ago and still on its way (onboarding's test, say) is read alone until it settles, so Delivered
+  // shows in seconds, not at the next minute's read; the list (and with it the figures) then reads again.
+  const settling = latest.data?.items.find(row => row.direction === 'sent' && pendingEmailStatuses.includes(row.status) && Date.now() - Date.parse(row.at) < 120_000)
+  useSettlingEmail(settling?.id, () => void latest.refetch())
   const latestEmails = <LatestEmails params={latestParams} count={count} reserve={!stacked} held={held} range={range} figures={data} figuresFailed={query.isError} />
   const failed = query.isError && !data
   return <div className="ov-page">
