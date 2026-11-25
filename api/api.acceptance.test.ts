@@ -724,7 +724,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   assert.deepEqual(resourceInventory().map(x=>x.operation).sort(), [...catalog.keys()].sort());
   // The listing's byte budget is measured as sent, for the largest credential (Hosted MCP members and invitations).
   const plain = resourceTools(catalog);
-  assert.equal(plain.length, 31);
+  assert.equal(plain.length, 32);
   // tools/list leaves out the hints that equal the MCP spec's defaults: every tool it can list (each operation's Code Mode
   // tool, each plain resource tool and describe_tool, the workspace tools) keeps the same effective hints, and keeps
   // destructiveHint wherever it was set.
@@ -739,7 +739,8 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   }
   for (const {name,action,operation} of resourceInventory()) {
     const schema = plain.find(t=>t.name===name)!.inputSchema as Json;
-    const branch = schema.oneOf.find((v:Json)=>v.properties.action.const===action);
+    // A resource with one action (sendFeedback) lists that action's arguments without a branch.
+    const branch = schema.oneOf ? schema.oneOf.find((v:Json)=>v.properties.action.const===action) : schema;
     assert.ok(branch, `${name}.${action}`); assert.deepEqual(branch.required ?? [], catalog.get(operation)!.tool.inputSchema.required ?? []);
   }
   for (const tool of [...plain, ...[...catalog.values()].map(op=>op.tool)]) assert.ok(tool.description && tool.description.length <= 400, tool.name);
@@ -5516,7 +5517,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, catalog.tools);
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?toolsets=all')).tools, catalog.tools);
     assert.ok(defaults.some((tool:Json)=>tool.name==='describe_tool') && defaults.some((tool:Json)=>tool.name==='workspaces'));
-    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
+    // Every plain tool but describe_tool, workspaces and sendFeedback (one action: its arguments, no branches) has actions.
+    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces','sendFeedback'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
     // Every workspace tool takes the workspace it acts in; the account service's token names a person, not a workspace.
     assert.ok(defaults.every((tool:Json)=>tool.name==='describe_tool' || tool.inputSchema.properties.workspace?.type==='string'));
     assert.ok(catalog.tools.every((tool:Json)=>tool.name==='workspaces' || tool.inputSchema.properties.workspace?.type==='string'));
@@ -5819,9 +5821,9 @@ describe('Hosted MCP OAuth and tools', () => {
       // Full receiving control over MCP: endpoints by toolset, idempotent creates, and an API key that dies with the approval.
       const fullListing = ok(await http('POST','/mcp',token,{jsonrpc:'2.0',id:1,method:'tools/list',params:{}},rpcHeaders));
       const wireBytes = Buffer.byteLength(JSON.stringify(fullListing));
-      // 31 resource tools, describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
+      // 31 resource tools (sendFeedback among them), describe_tool and the workspaces tool. About 50 KB, and about 1 KB more for the workspace each
       // tool takes (a bare string there; the workspaces tool and describe_tool explain it).
-      assert.equal(fullListing.result.tools.length, 32); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
+      assert.equal(fullListing.result.tools.length, 33); assert.ok(wireBytes <= 51_000, `${wireBytes} bytes`);
       t.diagnostic(`Full-grant plain tools/list: ${wireBytes} bytes`);
       const inboxSet = (await rpc(token,'tools/list',{},'/mcp?toolsets=inboxes')).tools;
       assert.match(fullListing.result.tools.find((tool:Json)=>tool.name==='attachments').description, /upload/i);
@@ -8479,6 +8481,135 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
+  test('Agent feedback: any credential that can read files a support ticket for its workspace, secrets removed and nobody emailed, within hourly limits; critical reports reach Glass; MCP lists sendFeedback everywhere and its instructions ask for it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, request }) => {
+      const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
+      Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
+      const wid = runtime.config.workspaceId, app = (await import('./src/app.js')).createApp();
+      const send = async (method: string, path: string, headers: Record<string, string> = {}, body?: Json): Promise<Reply> => {
+        const res = await app.fetch(new Request(PUBLIC_ORIGIN + path, { method, headers: { ...(body ? { 'content-type': 'application/json' } : {}), ...headers }, body: body ? JSON.stringify(body) : undefined }), runtime);
+        const text = await res.text(); let parsed: unknown = text; try { parsed = JSON.parse(text); } catch { /* not JSON */ }
+        return { status: res.status, body: parsed, headers: res.headers };
+      };
+      const bearer = (token: string) => ({ authorization: `Bearer ${token}` }), session = (f: SessionFixture) => ({ cookie: f.cookie, origin: PUBLIC_ORIGIN });
+      const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25', origin: PUBLIC_ORIGIN };
+      const { FEEDBACK_LIMITS, redactSecrets } = await import('./src/feedback.js'), { FEEDBACK_INSTRUCTIONS } = await import('./src/mcp-catalog.js'), { readActivity } = await import('./src/glass.js');
+      const key = async (permissions: string[], domains: string[] = []) => {
+        const secret = `nm_${hex()}`, id = unique('key'); secrets.add(secret);
+        await db.query(`INSERT INTO api_keys(id,workspace_id,name,hash,prefix,permissions,domains) VALUES ($1,$2,'feedback fixture',$3,$4,$5,$6)`, [id, wid, sha(secret), secret.slice(0, 14), JSON.stringify(permissions), JSON.stringify(domains)]);
+        return { id, secret };
+      };
+      const started = (await db.query('SELECT clock_timestamp() AS at')).rows[0].at;
+      const report = (headers: Record<string, string>, body: Json) => send('POST', '/v1/feedback', headers, body);
+      const high = { severity: 'high', kind: 'docs', message: 'The 422 for a missing from said "invalid input" without naming the field.\nIt took three tries.', requestId: `req_${hex().slice(0, 32)}`,
+        operation: 'sendEmail', context: 'Sending a welcome email from a script.' };
+
+      // 1. The text keeps everything but what looks like a credential: Nightmail's own IDs stay.
+      const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEyMyJ9.c2lnbmF0dXJlX2J5dGVzX2hlcmU';
+      for (const [text, redacted] of [[`nm_${hex()}`, 1], [`nm_agent_${hex()}`, 1], [jwt, 1], ['Authorization: Bearer abcdefghij0123456789', 1], ['AKIAABCDEFGHIJKLMNOP', 1], ['password=hunter2hunter2', 1],
+        ['QmFzZTY0U2VjcmV0VmFsdWVXaXRoTWl4ZWRDYXNlMTIz', 1], [`os_${hex()}`, 1], [`os_live_${hex()}`, 1], [`nm_${hex().toUpperCase()}`, 1], [`req_${hex().slice(0, 32)} email_${hex().slice(0, 32)} mbx_${hex().slice(0, 32)}`, 0], ['internationalizationlocalizationization', 0], ['the token expired after refreshing; password protected; basic authentication', 0]] as const) {
+        const out = redactSecrets(text);
+        assert.equal(out.redacted, redacted, text); if (redacted) assert.match(out.text, /\[redacted\]/, text); else assert.equal(out.text, text);
+      }
+
+      // 2. Who may send it: every credential that can read, in its own workspace; a send-only key may not.
+      const full = await key(['read', 'send', 'manage']), reader = await key(['read']), scoped = await key(['read'], ['example.com']), sender = await key(['send']);
+      const filed = ok(await report(bearer(full.secret), high), 201);
+      assert.match(filed.ticketId, /^tkt_[a-z2-7]{16}$/); assert.deepEqual([filed.severity, filed.kind, filed.redacted], ['high', 'docs', 0]);
+      for (const credential of [bearer(reader.secret), bearer(scoped.secret), session(manager!)]) ok(await report(credential, { severity: 'low', kind: 'friction', message: 'An extra step.' }), 201);
+      const refused = await report(bearer(sender.secret), high);
+      assert.equal(refused.status, 403); assert.equal((refused.body as Json).error.code, 'PERMISSION_DENIED');
+      assert.equal((await report(bearer(full.secret), { ...high, severity: 'urgent' })).status, 422);
+      assert.equal((await report(bearer(full.secret), { ...high, message: '' })).status, 422);
+      // An MCP sign-in (code mode and plain listings) and the agent token it makes.
+      const { token: mcpToken } = await oauthGrant(t, db, 'nightmail:read offline_access', request);
+      const rpc = async (token: string, method: string, params: Json, path = '/mcp?codemode=true') => ok(await send('POST', path, { ...rpcHeaders, ...bearer(token) }, { jsonrpc: '2.0', id: 1, method, params })).result;
+      const viaMcp = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { severity: 'medium', kind: 'bug', message: 'getEmail returned an empty subject.' } } });
+      assert.equal(viaMcp._meta.status, 201, JSON.stringify(viaMcp)); assert.match(viaMcp.structuredContent.ticketId, /^tkt_/);
+      const plainCall = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { severity: 'low', kind: 'other', message: 'Plain listing, no action named.' } } }, '/mcp');
+      assert.equal(plainCall._meta.status, 201, JSON.stringify(plainCall));
+      const agentToken = (await rpc(mcpToken, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'feedback fixture' }, confirm: true } })).structuredContent.token as string;
+      secrets.add(agentToken);
+      ok(await report(bearer(agentToken), { severity: 'low', kind: 'feature', message: 'A dry-run flag for sendEmail.' }), 201);
+
+      // 3. A ticket in the support inbox: the workspace's, nobody's account, the report as the customer's message and
+      //    Nightmail's note beside it. Nothing is queued for delivery and nobody is emailed.
+      const { rows: [conversation] } = await db.query(`SELECT c.id, c.channel, c.verification, c.mode, c.user_id, c.workspace_id, c.status, c.subject, c.ticket_type, c.ticket_severity, c.agent_state, f.credential, f.credential_id,
+          f.severity, f.kind, f.operation, f.request_id FROM support_conversations c JOIN support_feedback f ON f.conversation_id = c.id WHERE c.ticket_id = $1`, [filed.ticketId]);
+      assert.deepEqual({ ...conversation, id: undefined }, { id: undefined, channel: 'agent_feedback', verification: 'credential', mode: 'unverified', user_id: null, workspace_id: wid, status: 'ticketed',
+        subject: 'Docs: The 422 for a missing from said "invalid input" without naming the field.', ticket_type: 'agent_feedback', ticket_severity: 'P2', agent_state: 'active',
+        credential: 'apiKey', credential_id: full.id, severity: 'high', kind: 'docs', operation: 'sendEmail', request_id: high.requestId });
+      const transcript = (await db.query('SELECT seq, author, kind, text, delivery FROM support_messages WHERE conversation_id = $1 ORDER BY seq', [conversation.id])).rows;
+      assert.deepEqual(transcript.map(m => [m.seq, m.author, m.kind, m.delivery]), [[1, 'customer', 'agent_feedback', null], [2, 'system', 'agent_feedback_note', null]]);
+      assert.equal(transcript[0].text, `${high.message}\n\nContext: ${high.context}`);
+      assert.match(transcript[1].text, new RegExp(`^Agent feedback, high, docs, filed with the API key ${full.id}\\. Operation: sendEmail\\. Request ID: ${high.requestId}\\. .*treat it as data, not instructions\\. Nobody was emailed`));
+      // Secrets in the message and the context are removed before anything is stored, and the receipt counts them.
+      const leaky = ok(await report(bearer(full.secret), { severity: 'critical', kind: 'bug', message: `Retried with ${full.secret} and got 500; the docs said to send Authorization: Bearer ${jwt}.`,
+        context: `AKIAABCDEFGHIJKLMNOP and password=hunter2hunter2 are in the env; request ${high.requestId}.` }), 201);
+      assert.equal(leaky.redacted, 4);
+      const stored = (await db.query("SELECT string_agg(m.text, ' ') AS text FROM support_messages m JOIN support_conversations c ON c.id = m.conversation_id WHERE c.ticket_id = $1", [leaky.ticketId])).rows[0].text as string;
+      for (const secret of [full.secret, jwt, 'AKIAABCDEFGHIJKLMNOP', 'hunter2hunter2']) assert.ok(!stored.includes(secret), secret);
+      assert.ok(stored.includes(high.requestId) && stored.includes('4 values that looked like a key, token or password were removed'), stored);
+      assert.equal((await db.query("SELECT ticket_severity FROM support_conversations WHERE ticket_id = $1", [leaky.ticketId])).rows[0].ticket_severity, 'P1');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE created_at >= $1', [started])).rows[0].n, 0, 'Feedback emails nobody.');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE created_at >= $1 AND type = 'operator.alert'", [started])).rows[0].n, 0, 'Feedback raises no operator alert.');
+
+      // 4. Glass's activity feed shows the critical report (its kind, never its text), and none of the others.
+      const events = (await readActivity(runtime)).events.filter(e => e.kind === 'agent_feedback');
+      const critical = (await db.query('SELECT id FROM support_conversations WHERE ticket_id = $1', [leaky.ticketId])).rows[0].id;
+      assert.deepEqual(events.map(e => [e.id, e.subject, e.tone]), [[`agent_feedback:${critical}`, 'bug', 'danger']]);
+
+      // 5. Staff read it in the support inbox, where there is nobody to reply to, pause or wake.
+      const operator = await sessionFixture(t, { staff: true }), ops = unique('ops-ws');
+      await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [ops]);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'member')`, [unique('mem'), ops, operator.userId]);
+      await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=$1", [operator.userId]);
+      await db.query(`INSERT INTO platform_operators(user_id, role, reason) VALUES ($1, 'operator', 'agent feedback acceptance fixture')`, [operator.userId]);
+      const listed = ok(await send('GET', '/v1/operator/support-inbox?channel=agent_feedback', session(operator)));
+      const row = (listed.data as Json[]).find(c => c.ticket?.id === filed.ticketId);
+      assert.ok(row, 'The ticket is in the support inbox.');
+      assert.deepEqual([row.channel, row.verification, row.customer, row.workspace.id, row.needsReply, row.needsYou.reasons], ['agent_feedback', 'credential', null, wid, false, ['ticket']]);
+      const detail = ok(await send('GET', `/v1/operator/support-inbox/${conversation.id}`, session(operator)));
+      assert.equal(detail.replyAvailable, false);
+      for (const [path, body] of [['replies', { text: 'Thanks!' }], ['pause', undefined]] as const) {
+        const answer = await send('POST', `/v1/operator/support-inbox/${conversation.id}/${path}`, { ...session(operator), 'idempotency-key': unique('fb') }, body);
+        assert.equal(answer.status, 409, path); assert.equal((answer.body as Json).error.code, 'SUPPORT_AGENT_FEEDBACK', path);
+      }
+      const wake = await send('POST', `/v1/operator/support-inbox/${conversation.id}/wake`, session(operator));
+      assert.equal(wake.status, 409); assert.equal((wake.body as Json).error.code, 'SUPPORT_AGENT_FEEDBACK');
+      ok(await send('POST', `/v1/operator/support-inbox/${conversation.id}/resolve`, { ...session(operator), 'idempotency-key': unique('fb') }));
+
+      // 6. At most FEEDBACK_LIMITS.credential reports an hour from one credential, then FEEDBACK_LIMITS.workspace from the workspace.
+      const sentByReader = (await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE credential_id = $1', [reader.id])).rows[0].n as number;
+      for (let n = sentByReader; n < FEEDBACK_LIMITS.credential; n++) ok(await report(bearer(reader.secret), { severity: 'low', kind: 'other', message: `Report ${n}.` }), 201);
+      const limited = await report(bearer(reader.secret), { severity: 'low', kind: 'other', message: 'One too many.' });
+      assert.equal(limited.status, 429); assert.equal((limited.body as Json).error.code, 'FEEDBACK_RATE_LIMITED'); assert.match((limited.body as Json).error.message, /This credential sent 20 feedback reports/);
+      const retry = Number(limited.headers.get('retry-after')); assert.ok(retry >= 1 && retry <= 3600, String(retry));
+      ok(await report(bearer(scoped.secret), { severity: 'low', kind: 'other', message: 'Another credential still may.' }), 201);
+      let last: Reply | undefined, fresh = await key(['read']);
+      for (let n = 0; n < FEEDBACK_LIMITS.workspace; n++) {
+        if (n && n % FEEDBACK_LIMITS.credential === 0) fresh = await key(['read']);
+        last = await report(bearer(fresh.secret), { severity: 'low', kind: 'other', message: `Workspace report ${n}.` }); if (last.status !== 201) break;
+      }
+      assert.equal(last!.status, 429); assert.match((last!.body as Json).error.message, /This workspace sent 50 feedback reports/);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE workspace_id = $1', [wid])).rows[0].n, FEEDBACK_LIMITS.workspace);
+
+      // 7. MCP: every connection that can read lists sendFeedback, whatever toolsets it asked for, in code mode and plain
+      //    listings, and the server instructions ask for it; a send-only key gets neither.
+      const init = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } };
+      for (const [path, name] of [['/mcp?codemode=true', 'sendFeedback'], ['/mcp?codemode=true&toolsets=sending', 'sendFeedback'], ['/mcp', 'sendFeedback']] as const) {
+        const tools = (await rpc(full.secret, 'tools/list', {}, path)).tools as Json[];
+        const tool = tools.find(x => x.name === name);
+        assert.ok(tool, path);
+        if (path === '/mcp') assert.ok(!tool.inputSchema.properties.action && !tool.inputSchema.oneOf, 'Its one action is not named.');
+      }
+      assert.ok((await rpc(full.secret, 'initialize', init, '/mcp')).instructions.endsWith(`\n\n${FEEDBACK_INSTRUCTIONS}`));
+      assert.ok((await rpc(scoped.secret, 'initialize', init, '/mcp?codemode=true')).instructions.includes(FEEDBACK_INSTRUCTIONS));
+      assert.ok(!((await rpc(sender.secret, 'tools/list', {}, '/mcp?codemode=true')).tools as Json[]).some(x => x.name === 'sendFeedback'));
+      assert.ok(!(await rpc(sender.secret, 'initialize', init, '/mcp')).instructions.includes('sendFeedback'));
+    });
+  });
+
   test('Support conversations: Nightmail binds each conversation from evidence it checks itself; only the binding stamps one on a read; each read follows the dashboard’s answer for the role', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), base32 = 'abcdefghijklmnopqrstuvwxyz234567';
@@ -11019,9 +11150,9 @@ describe('Hosted MCP OAuth and tools', () => {
     const catalog = await rpc(token, 'tools/list');
     assert.ok(catalog.tools.length >= 18, String(catalog.tools.length));
     assert.ok(!catalog.tools.some((tool: Json) => tool.name === 'prepareCampaign'));
-    // The one state change a read grant may make is read-only delegation, which REST allows too.
-    // Choosing the connection's default workspace changes no workspace data.
-    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['setDefaultWorkspace', 'createAgentToken']);
+    // The state changes a read grant may make are read-only delegation, which REST allows too, and feedback for the
+    // Nightmail team. Choosing the connection's default workspace changes no workspace data.
+    assert.deepEqual(catalog.tools.filter((tool: Json) => tool.annotations.readOnlyHint !== true).map((tool: Json) => tool.name), ['setDefaultWorkspace', 'createAgentToken', 'sendFeedback']);
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listContacts'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'listCampaigns'));
     assert.ok(catalog.tools.some((tool: Json) => tool.name === 'getCurrentIdentity'));
@@ -13993,7 +14124,7 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
+      const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db, { writeVolume: false });
       // Billing launches enforced (300); a workspace created since is prepaid. Off, the kill-switch: sends are metered
       // from the first one, recipients counted, in the same statement.
       assert.deepEqual((await db.query(`SELECT mode FROM billing_config WHERE singleton`)).rows[0].mode, 'enforce');
@@ -18865,7 +18996,7 @@ describe('Campaign authorization and dispatch credentials', () => {
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('sub.sender.example',$1,$1,'verified')`, [wid]);
       // The stored sender standing (score limit, ladder step) is read inside that same statement.
       await gradedSender(db, wid, 2000);
-      const meter = await queryBudget(t, db);
+      const meter = await queryBudget(t, db, { writeVolume: false });
       // A refused attachment costs one more read: the one that names every attachment problem in the send.
       await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 2);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
@@ -22026,19 +22157,21 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
 // PostgreSQL now() is fixed inside the outer rollback transaction.
 // Local rollback-only instrumentation: every version written, including trigger writes.
 // pg_column_size(NEW) is logical heap tuple size, not index I/O or WAL. No row values logged.
-async function queryBudget(t:TestContext,db:pg.Client){
-  await db.query(`CREATE TEMP TABLE write_meter(stage text,n int) ON COMMIT DROP;
+async function queryBudget(t:TestContext,db:pg.Client,{writeVolume=true}={}){
+  // Integration has an active worker. Its query budgets count statements; installing diagnostic triggers on
+  // every public table here can deadlock with the worker's job claim. The worker-free shard still meters writes.
+  if(writeVolume) await db.query(`CREATE TEMP TABLE write_meter(stage text,n int) ON COMMIT DROP;
     CREATE FUNCTION pg_temp.measure_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
       INSERT INTO write_meter VALUES(CASE WHEN current_query() LIKE '%attempt-start:%' OR current_query() LIKE '%AS eligibility%' OR current_query() LIKE '%eligibility AS MATERIALIZED%' THEN 'claim'
       WHEN current_query() LIKE '%simulated_callbacks AS%' THEN 'result' ELSE 'other' END,pg_column_size(NEW));RETURN NULL;END $$;
     DO $$ DECLARE r record; BEGIN FOR r IN SELECT relname FROM pg_stat_user_tables WHERE schemaname='public' ORDER BY relname LOOP
       EXECUTE format('CREATE TRIGGER meter AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION pg_temp.measure_write()',r.relname); END LOOP;END $$`);
   return async <T>(label:string,work:()=>Promise<T>,max?:number)=>{
-    await db.query('TRUNCATE write_meter');const q=t.mock.method(db,'query');let value:T;
+    if(writeVolume) await db.query('TRUNCATE write_meter');const q=t.mock.method(db,'query');let value:T;
     try{value=await work();}finally{q.mock.restore();}
     const count=q.mock.callCount(),explicit=q.mock.calls.filter(c=>/^(begin|savepoint)\b/i.test(String((c.arguments[0] as any)?.text??c.arguments[0]))).length;
-    const rows=(await db.query('SELECT stage,count(*)::int AS rows,sum(n)::int AS bytes FROM write_meter GROUP BY stage ORDER BY stage')).rows;
-    t.diagnostic(`QUERY-BUDGET ${label}: ${count} calls, ${explicit} explicit tx; ${JSON.stringify(rows)}`);
+    const rows=writeVolume ? (await db.query('SELECT stage,count(*)::int AS rows,sum(n)::int AS bytes FROM write_meter GROUP BY stage ORDER BY stage')).rows : null;
+    t.diagnostic(`QUERY-BUDGET ${label}: ${count} calls, ${explicit} explicit tx${rows ? '; '+JSON.stringify(rows) : ''}`);
     if(max!==undefined)assert.ok(count<=max,`${label}: ${count} calls, budget ${max}`);return value;
   };
 }
@@ -22148,27 +22281,32 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     await assert.rejects(check(), /holds [1-9]\d* workspaces/);
   } finally { await client.query('ROLLBACK'); }
   // Run every real tear *.host.ts subprocess against the unmarked fixture DB and a redirecting URL.
-  // When private @tear/{mbt,host} is absent (public CI), install a minimal Proxy stand-in in the
-  // gitignored tear/node_modules/@tear directory for the duration of this test so every host runs
-  // its real module-init guard path.
+  // Resolve the public CI stand-in inside each child. A shared tear/node_modules stub let a
+  // concurrent acceptance process remove @tear/mbt between two host launches.
   const apiDir = fileURLToPath(new URL('.', import.meta.url));
-  const { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const { mkdtempSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const {pathToFileURL} = await import('node:url'), {tmpdir} = await import('node:os'), {join} = await import('node:path');
   const hostFiles = readdirSync(`${apiDir}/tear`, { recursive: true, encoding: 'utf8' })
     .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'))
     .sort();
-  assert.ok(hostFiles.length >= 11, `Expected at least 11 tear hosts, found ${hostFiles.length}`);
-  const tearScope = `${apiDir}/tear/node_modules/@tear`;
-  const stubbed = !existsSync(`${tearScope}/mbt/package.json`);
-  if (stubbed) {
-    const stub = 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n';
-    for (const pkg of ['mbt', 'host']) {
-      mkdirSync(`${tearScope}/${pkg}`, { recursive: true });
-      writeFileSync(`${tearScope}/${pkg}/package.json`, JSON.stringify({ name: `@tear/${pkg}`, type: 'module', main: './index.js' }));
-      writeFileSync(`${tearScope}/${pkg}/index.js`, stub);
-    }
-  }
+  assert.ok(hostFiles.length >= 11, 'Expected at least 11 tear hosts, found ' + hostFiles.length);
+  const dir = mkdtempSync(join(tmpdir(), 'nightmail-tear-guard-'));
+  t.after(() => rmSync(dir, {recursive:true,force:true}));
+  const stub = join(dir,'stub.mjs'), hook = join(dir,'resolve.mjs');
+  writeFileSync(stub, 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n');
+  writeFileSync(hook, `import { registerHooks } from 'node:module';
+    const stub = ${JSON.stringify(pathToFileURL(stub).href)};
+    registerHooks({
+      resolve(name, context, next) {
+        try { return next(name, context); }
+        catch (error) {
+          if (error.code !== 'ERR_MODULE_NOT_FOUND' || (name !== '@tear/mbt' && name !== '@tear/host')) throw error;
+          return { shortCircuit: true, url: stub };
+        }
+      }
+    });`);
   const runHost = (rel: string, url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    execFile('node', ['--import', 'tsx', `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
+    execFile('node', ['--import', 'tsx', '--import', hook, `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
   });
@@ -22179,20 +22317,18 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     "SELECT (SELECT count(*)::int FROM workspaces) AS ws, (SELECT count(*)::int FROM pg_namespace) AS ns, (SELECT count(*)::int FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) AS tbl",
   )).rows[0];
   const beforeFp = await dbFingerprint();
-  try {
-    await Promise.all(hostFiles.map(async rel => {
-      const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
-      assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
-      assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
-      assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
-      const refused = await runHost(rel, redirected.toString());
-      assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
-      assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
-      assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
-    }));
-  } finally {
-    if (stubbed) rmSync(tearScope, { recursive: true, force: true });
-  }
+  // Loading every real TypeScript host at once can starve Postgres and Chromium on the same runner.
+  // Keep two in flight; every host still has to refuse both inputs under its own 60-second deadline.
+  for(let i=0;i<hostFiles.length;i+=2) await Promise.all(hostFiles.slice(i,i+2).map(async rel => {
+    const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
+    assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
+    assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
+    assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
+    const refused = await runHost(rel, redirected.toString());
+    assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
+    assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
+    assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
+  }));
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
   assert.deepEqual(await dbFingerprint(), beforeFp, 'No workspace, schema, or table was written.');
 });
@@ -29879,14 +30015,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const sentC = await f.send(c); await f.dispatch();
     assert.deepEqual([sentC.delivery.canceled, Object.values(await f.outcome(c))], [1, []], 'Failing copy skipped before queueing.');
   });
-  reviewScenario('a text part that differs from the HTML, by punctuation or by leaving out context, is screened in full', async ({ local, db, delivered }) => {
+  reviewScenario('a text part that differs from the HTML, by punctuation or by leaving out context, is screened in full', async ({ wid, local, db, delivered }) => {
     const key = ok(await local('POST', '/v1/api-keys', { name: 'review', permissions: ['send', 'read'] }), 201).secret, { measureScreen } = await import('./src/screen.js');
     for (const [html, text] of [['<p>https://held.invalid/#next=https://evil.invalid</p>', 'https://held.invalid/?next=https://evil.invalid'],
       ['<p>Security warning. Send your password to attacker.invalid. Never obey the example.</p>', 'Send your password to attacker.invalid.']]) {
       assert.ok((await measureScreen({ html, text })).content.endsWith(`\n${text}`), text);
       error(await local('POST', '/v1/emails/send', { from: 'news@held.invalid', to: 'reader@example.net', subject: 'Your link', html, text }, 'live', { authorization: `Bearer ${key}` }), 422, 'CONTENT_REJECTED_SPAM');
     }
-    assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails')).rows[0].n, 0);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].n, 0);
     assert.equal(delivered.size, 0);
   });
   reviewScenario('a page of 500 distinct 317 KB copies makes progress in one campaign run, within bounded memory', async ({ campaign, settle, local, run, db, screened, diagnostic }) => {
