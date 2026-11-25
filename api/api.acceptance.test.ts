@@ -4315,6 +4315,20 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               ok(await local('DELETE',`/v1/domains/${reclaimed.id}`,undefined,a.cookie));
               ok(await local('DELETE',`/v1/domains/${recent.id}`,undefined,b.cookie));
             });
+            await it.test('Hourly expiry keeps a proven name whose ownership TXT is gone while SES still verifies its tagged identity, and frees it once that fails too',async()=>{
+              const {expireDomainClaims}=await import('./src/operations.js'),{sql}=await import('drizzle-orm');
+              const identity=identities.get(`${platform}:${domain}`)!,links=[...associations];
+              const lapse=()=>pool.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '62 days',receiving_proof_missed_at=now()-interval '31 days' WHERE name=$1",[domain]);
+              const restarted=async()=>(await pool.query("SELECT receiving_proof_missed_at>now()-interval '1 hour' AS restarted FROM domain_claims WHERE name=$1",[domain])).rows;
+              answer='';await lapse();await expireDomainClaims(runtime,Date.now()+5000);
+              assert.deepEqual(await restarted(),[{restarted:true}]);assert.ok(identities.has(`${platform}:${domain}`));
+              identity.VerificationStatus='TEMPORARY_FAILURE';await lapse();await expireDomainClaims(runtime,Date.now()+5000);
+              assert.deepEqual(await restarted(),[{restarted:false}],'An SES status that could not read DNS is no answer either way.');
+              identity.VerificationStatus='FAILED';const abort=new Error('rollback the release');
+              await assert.rejects(runtime.db.transaction(async tx=>{await expireDomainClaims({...runtime,db:tx},Date.now()+5000);
+                assert.equal((await tx.execute(sql`SELECT 1 FROM domain_claims WHERE name=${domain}`)).rowCount,0);throw abort;}),e=>e===abort);
+              identity.VerificationStatus='SUCCESS';identities.set(`${platform}:${domain}`,identity);associations.clear();for(const link of links)associations.add(link);
+            });
             assert.equal(await probe(custom),0);await mxCheck();assert.equal(await probe(custom),0,'Hourly MX alone cannot re-authorize lost ownership.');
             answer=proof.value;await pace();await check();assert.deepEqual(await claimState(),steady);
             activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');

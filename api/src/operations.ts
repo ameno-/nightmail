@@ -652,46 +652,60 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
   const due = sql`dc.ever_proven AND dc.claim_scope <> 'account' AND NOT coalesce(dc.identity ?| array['adopted','builtin'], false)
     AND (dc.connection_id IS NULL OR pc.id IS NOT NULL)
     AND coalesce(dc.receiving_proof_missed_at, dc.receiving_proved_at, dc.created_at) <= now() - interval '30 days'`;
-  let cursor:{created:string;token:string}|undefined, released=0;
-  while (Date.now()<deadline) {
-    const after=cursor ? sql`AND (dc.created_at,dc.token)>(${cursor.created}::timestamptz,${cursor.token}::uuid)` : sql``;
-    let selected=false;
-    try {
-      const found=await runtime.db.transaction(async db=>{
-        const row=(await db.execute<{workspace_id:string;name:string;token:string;created:string;expired:boolean;missed:boolean;imported:boolean;connection:(HostedDomain['connection'] & {region:string})|null}>(sql`
-          SELECT dc.workspace_id,dc.name,dc.token,dc.created_at::text AS created,domain_claim_expired(dc) AS expired,dc.receiving_proof_missed_at IS NOT NULL AS missed,
-            coalesce(dc.identity ? 'imported',false) AS imported,to_jsonb(pc) AS connection FROM domain_claims dc
-          LEFT JOIN domain_sending_bindings b ON b.workspace_id=dc.workspace_id AND b.name=dc.name AND b.connection_id=dc.connection_id
-          LEFT JOIN regional_connections pc ON pc.id=b.connection_id AND pc.region=b.region
-          WHERE (domain_claim_expired(dc) OR (${due})) ${after} ORDER BY dc.created_at,dc.token LIMIT 1 FOR UPDATE OF dc SKIP LOCKED`)).rows[0];
-        if (!row) return false;
-        cursor=row; selected=true;
-        if (!row.expired) {
-          let proven: boolean;
-          if (row.connection?.kind === 'byo') {
-            const connection = row.connection, scoped = {...runtime, config: {...runtime.config, workspaceId: row.workspace_id, regions: [connection.region]}};
-            const client = await getSes(scoped, connection.region, {...connection, identitySession: {name: row.name, purpose: row.imported ? 'read' : 'verify'}});
-            try {
-              const identity = await sesCall(({GetEmailIdentityCommand}) => client.send(new GetEmailIdentityCommand({EmailIdentity: row.name})));
-              proven = identity.VerificationStatus === 'SUCCESS' && (row.imported || ownsIdentity(identity, row.token));
-            } catch (e) {
-              if (!(e instanceof ApiError) || e.code !== 'SES_IDENTITY_NOT_FOUND') throw e;
-              proven = false;
+  let released=0;
+  // Expired claims first: a due claim whose authority keeps failing must never hold back their cleanup.
+  for (const pending of [sql`domain_claim_expired(dc)`, sql`(${due})`]) {
+    let cursor:{created:string;token:string}|undefined;
+    while (Date.now()<deadline) {
+      const after=cursor ? sql`AND (dc.created_at,dc.token)>(${cursor.created}::timestamptz,${cursor.token}::uuid)` : sql``;
+      let selected=false;
+      try {
+        const found=await runtime.db.transaction(async db=>{
+          const row=(await db.execute<{workspace_id:string;name:string;token:string;created:string;expired:boolean;missed:boolean;imported:boolean;connection:(HostedDomain['connection'] & {region:string})|null}>(sql`
+            SELECT dc.workspace_id,dc.name,dc.token,dc.created_at::text AS created,domain_claim_expired(dc) AS expired,dc.receiving_proof_missed_at IS NOT NULL AS missed,
+              coalesce(dc.identity ? 'imported',false) AS imported,to_jsonb(pc) AS connection FROM domain_claims dc
+            LEFT JOIN domain_sending_bindings b ON b.workspace_id=dc.workspace_id AND b.name=dc.name AND b.connection_id=dc.connection_id
+            LEFT JOIN regional_connections pc ON pc.id=b.connection_id AND pc.region=b.region
+            WHERE ${pending} ${after} ORDER BY dc.created_at,dc.token LIMIT 1 FOR UPDATE OF dc SKIP LOCKED`)).rows[0];
+          if (!row) return false;
+          cursor=row; selected=true;
+          if (!row.expired) {
+            const connection = row.connection;
+            const identityHeld = async () => {
+              if (!connection) return false;
+              const scoped = {...runtime, config: {...runtime.config, workspaceId: row.workspace_id, regions: [connection.region]}};
+              const client = await getSes(scoped, connection.region, {...connection, identitySession: {name: row.name, purpose: row.imported ? 'read' : 'verify'}});
+              try {
+                const identity = await sesCall(({GetEmailIdentityCommand}) => client.send(new GetEmailIdentityCommand({EmailIdentity: row.name})));
+                if (identity.VerificationStatus === 'TEMPORARY_FAILURE') throw dnsUnavailable(); // SES could not read DNS: no answer either way.
+                return identity.VerificationStatus === 'SUCCESS' && (row.imported || ownsIdentity(identity, row.token));
+              } catch (e) {
+                if (!(e instanceof ApiError) || e.code !== 'SES_IDENTITY_NOT_FOUND') throw e;
+                return false;
+              }
+            };
+            const proven = connection?.kind === 'byo' ? await identityHeld() : await ownershipTxt(row.name, row.token);
+            if (proven || !row.missed) {
+              await db.execute(sql`UPDATE domain_claims SET ${observeProof(proven)} WHERE token=${row.token}`);
+              return 'observed';
             }
-          } else proven = await ownershipTxt(row.name, row.token);
-          if (proven || !row.missed) {
-            await db.execute(sql`UPDATE domain_claims SET ${observeProof(proven)} WHERE token=${row.token}`);
-            return 'observed';
+            // A shared claim's TXT is only needed to verify; sending afterwards rests on its DKIM records. While SES still
+            // verifies the claim's tagged identity the name is in use: keep it and look again after another grace period.
+            // receiving_proved_at stays as old as the last TXT seen, so this never lets the domain receive.
+            if (connection?.kind === 'shared' && await identityHeld()) {
+              await db.execute(sql`UPDATE domain_claims SET receiving_proof_missed_at=now() WHERE token=${row.token}`);
+              return 'observed';
+            }
           }
-        }
-        if (row.connection?.kind==='shared') await deleteClaimIdentity(runtime,row.workspace_id,{...row,region:row.connection.region,connection:row.connection});
-        await releaseClaim(db,row.workspace_id,row); return true;
-      });
-      if (!found) break;
-      if (found === true) released++;
-    } catch (e) {
-      if (e instanceof ModuleLoadError || !selected || !(e instanceof ApiError)) throw e;
-      log('warn',{code:'DOMAIN_EXPIRY_RETRY',reason:e.code});
+          if (row.connection?.kind==='shared') await deleteClaimIdentity(runtime,row.workspace_id,{...row,region:row.connection.region,connection:row.connection});
+          await releaseClaim(db,row.workspace_id,row); return true;
+        });
+        if (!found) break;
+        if (found === true) released++;
+      } catch (e) {
+        if (e instanceof ModuleLoadError || !selected || !(e instanceof ApiError)) throw e;
+        log('warn',{code:'DOMAIN_EXPIRY_RETRY',reason:e.code});
+      }
     }
   }
   return released;
