@@ -567,7 +567,7 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const { conversation: c, customer } = detail, user = customer.user, evidence = c.evidence
   const others = customer.conversations
   const facts: [string, ReactNode][] = [
-    ...c.workspace ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
+    ...c.workspace && c.channel !== 'agent_feedback' ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
     ...c.page ? [['Opened from', c.page] as [string, ReactNode]] : [],
     ...evidence.dmarc ? [['DMARC', `${evidence.dmarc}${evidence.dkimAligned === null ? '' : evidence.dkimAligned ? ' · DKIM aligned' : ' · DKIM not aligned'}`] as [string, ReactNode]] : [],
     ['Ticket', c.ticket ? <span className="sinbox-ticket"><span>{ticketText(c)}</span><span className="sinbox-faint">{c.ticket.id}</span></span> : 'None'],
@@ -575,13 +575,18 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
     ['Started', when(c.createdAt)],
   ]
   return <div className="sinbox-panel__body">
-    <section><Label>Account</Label>
+    {c.channel === 'agent_feedback' ? <section><Label>Filed by</Label>
+      <KeyValues className="sinbox-kv" items={[
+        ['Workspace', c.workspace ? <span className="sinbox-ticket"><Link to={`/operator/workspaces/${encodeURIComponent(c.workspace.id)}`}>{c.workspace.name}</Link><span className="sinbox-faint">{c.workspace.id}</span></span> : '—'],
+        ['Credential', evidence.filedBy ? <span className="sinbox-ticket"><span>{evidence.filedBy}</span>{evidence.credentialId && <span className="sinbox-faint">{evidence.credentialId}</span>}</span> : '—'],
+      ]} />
+    </section> : <section><Label>Account</Label>
       <KeyValues className="sinbox-kv" items={user ? [
         ['Name', user.name ?? '—'],
         ['Email', user.email ? <span className="sinbox-address"><PrivateAddress value={user.email} />{user.emailVerified ? <StatusBadge status="Verified" tone="success" /> : <StatusBadge status="Unverified" tone="warning" />}</span> : '—'],
         ['Proof', verification[c.verification]], ['Access', mode[c.mode]], ['Signed up', when(user.createdAt)],
       ] : [['Sender', c.sender ? <span className="sinbox-address"><PrivateAddress value={c.sender} /></span> : '—'], ['Proof', verification[c.verification]], ['Access', 'No account linked']]} />
-    </section>
+    </section>}
     <section><Label>Conversation</Label><KeyValues className="sinbox-kv" items={facts} /></section>
     {user && <section><Label>Workspaces</Label>
       {customer.workspaces.length ? <ul className="sinbox-list">{customer.workspaces.map(w => <li key={w.id}>

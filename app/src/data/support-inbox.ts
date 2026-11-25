@@ -38,7 +38,9 @@ export interface SupportBrief { title: string; summary: string; ask: string; rec
 export interface SupportWorkspace { id: string; name: string; role: string; joinedAt: string; createdAt: string; members: number; inScope: boolean; contentShared: boolean; sending: { kind: string; region: string | null; paused: boolean } | null; standing: string | null }
 export interface SupportDetail {
   conversation: SupportConversation & { threadId: string | null; page: string | null; contentWorkspaceId: string | null
-    evidence: { handoff: string | null; message: string | null; dmarc: string | null; dkimAligned: boolean | null; claimedAt: string | null } }
+    evidence: { handoff: string | null; message: string | null; dmarc: string | null; dkimAligned: boolean | null; claimedAt: string | null
+      /** Agent feedback: the key, sign-in or token that filed it (api/src/feedback.ts), and its ID. */
+      filedBy?: string | null; credentialId?: string | null } }
   messages: SupportMessage[]; earlierMessages: number; events: SupportEvent[]; brief: SupportBrief | null; replyTarget: { address: string | null; verified: boolean }
   customer: {
     user: { id: string; name: string | null; email: string | null; emailVerified: boolean; createdAt: string } | null

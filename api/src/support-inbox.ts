@@ -118,7 +118,8 @@ const Item = z.object({
 const Detail = z.object({
   conversation: Item.extend({
     threadId: z.string().nullable(), page: z.string().nullable().describe('The dashboard page a chat was opened from.'), contentWorkspaceId: z.string().nullable(),
-    evidence: z.object({ handoff: z.string().nullable(), message: z.string().nullable(), dmarc: z.string().nullable(), dkimAligned: z.boolean().nullable(), claimedAt: z.string().nullable() })
+    evidence: z.object({ handoff: z.string().nullable(), message: z.string().nullable(), dmarc: z.string().nullable(), dkimAligned: z.boolean().nullable(), claimedAt: z.string().nullable(),
+      filedBy: z.string().nullable().describe('Agent feedback: the key, sign-in or token that filed it, and the agent behind it (src/feedback.ts).'), credentialId: z.string().nullable().describe('Agent feedback: that credential\u2019s ID.') })
       .describe('What Nightmail checked to bind it: the handoff, or the support email and its DMARC verdict, and when the person claimed it signed in.'),
   }),
   messages: z.array(Message).describe(`The transcript, oldest first: its last ${TRANSCRIPT_LIMIT} entries.`), earlierMessages: z.number().int(),
@@ -525,11 +526,12 @@ export function registerSupportInbox(app: App) {
         ${replyAvailable} AS available
       FROM conv`);
     if (!row?.item) notFound('Support conversation');
-    const r = row!, evidence = r.evidence as { handoff?: string; message?: string; dmarc?: string | null; dkimAligned?: boolean; claimedAt?: string };
+    const r = row!, evidence = r.evidence as { handoff?: string; message?: string; dmarc?: string | null; dkimAligned?: boolean; claimedAt?: string; filedBy?: string; credentialId?: string };
     const at = (value: unknown) => isoTime(value as string | null);
     return c.json({
       conversation: { ...item(r.item), threadId: r.thread_id, page: r.page, contentWorkspaceId: r.content_workspace_id,
-        evidence: { handoff: evidence.handoff ?? null, message: evidence.message ?? null, dmarc: evidence.dmarc ?? null, dkimAligned: evidence.dkimAligned ?? null, claimedAt: at(evidence.claimedAt) } },
+        evidence: { handoff: evidence.handoff ?? null, message: evidence.message ?? null, dmarc: evidence.dmarc ?? null, dkimAligned: evidence.dkimAligned ?? null, claimedAt: at(evidence.claimedAt),
+          filedBy: r.item.channel === 'agent_feedback' ? evidence.filedBy ?? null : null, credentialId: r.item.channel === 'agent_feedback' ? evidence.credentialId ?? null : null } },
       messages: r.messages.map(message), earlierMessages: Math.max(0, r.item.messages - r.messages.length),
       events: r.events.map(e => ({ id: e.id, kind: e.kind, by: e.user_id ? { userId: e.user_id, name: e.name } : null, details: e.details, at: at(e.at)! })),
       brief: r.brief, replyTarget: { address: r.reply_address, verified: r.reply_verified },

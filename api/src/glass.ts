@@ -290,16 +290,16 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
 //  - breaker: the built-in domains' breaker tripping (builtin_parent); alert: the open health alerts;
 //  - link_fallback: a workspace's first use of the link domain on a UTC day (link_fallback_days), with its
 //    campaign and marketing recipients there that day so far;
-//  - agent_feedback: a critical report an agent filed (support_feedback, src/feedback.ts): its kind and operation, never
-//    its text (the report is in the support inbox).
+//  - agent_feedback: a report an agent filed (support_feedback, src/feedback.ts): its workspace and the operation it
+//    names, never its text (the report is in the support inbox).
 // No message content: a campaign is its name and size, a domain its name. A sign-up's address is there for the page
 // to blur with the dashboard's privacy toggle. Cached GLASS_TTL_SECONDS per installation; `after` only filters that.
 const ACTIVITY_KINDS = ['signup', 'first_send', 'domain_verified', 'builtin_ready', 'campaign_launched', 'campaign_paused', 'standing', 'breaker', 'alert', 'link_fallback', 'agent_feedback'] as const;
 const ActivityEvent = z.object({
   id: z.string().describe('Stable across reads: the page adds an event once.'), at: z.string(), kind: z.enum(ACTIVITY_KINDS),
   workspace: z.object({ id: z.string(), name: z.string() }).nullable(),
-  subject: z.string().nullable().describe('What it is about: a domain, a campaign\u2019s name, the built-in parent, an alert\u2019s label or agent feedback\u2019s kind.'),
-  detail: z.string().nullable().describe('A sign-up\u2019s method (google, github, email, password), a campaign\u2019s recipients, a pause reason\u2019s code, a step change (from>to), an alert\u2019s words, the recipients linked on the link domain that day or the operation agent feedback names.'),
+  subject: z.string().nullable().describe('What it is about: a domain, a campaign\u2019s name, the built-in parent, an alert\u2019s label or the operation agent feedback names.'),
+  detail: z.string().nullable().describe('A sign-up\u2019s method (google, github, email, password), a campaign\u2019s recipients, a pause reason\u2019s code, a step change (from>to), an alert\u2019s words, the recipients linked on the link domain that day.'),
   place: z.enum(['open', 'waitlist']).nullable().describe('A sign-up\u2019s place.'),
   email: z.string().nullable().describe('A sign-up\u2019s address.'),
   tone: z.enum(['neutral', 'success', 'warning', 'danger']),
@@ -337,13 +337,13 @@ export async function readActivity(runtime: Pick<Runtime, 'db'>): Promise<GlassA
       FROM builtin_parent p WHERE p.tripped_at IS NOT NULL)
     UNION ALL (SELECT 'link_fallback:'||f.workspace_id||':'||f.host||':'||f.day,${at(sql`f.first_at`)},'link_fallback',w.id,w.name,f.host,f.recipients::text,NULL,NULL,NULL,NULL,f.first_at
       FROM link_fallback_days f JOIN workspaces w ON w.id=f.workspace_id ORDER BY f.first_at DESC LIMIT ${n})
-    UNION ALL (SELECT 'agent_feedback:'||f.conversation_id,${at(sql`f.created_at`)},'agent_feedback',w.id,w.name,f.kind,f.operation,NULL,NULL,NULL,NULL,f.created_at
-      FROM support_feedback f JOIN workspaces w ON w.id=f.workspace_id WHERE f.severity='critical' ORDER BY f.created_at DESC LIMIT ${n})
+    UNION ALL (SELECT 'agent_feedback:'||f.conversation_id,${at(sql`f.created_at`)},'agent_feedback',w.id,w.name,f.operation,NULL,NULL,NULL,NULL,NULL,f.created_at
+      FROM support_feedback f JOIN workspaces w ON w.id=f.workspace_id ORDER BY f.created_at DESC LIMIT ${n})
     UNION ALL (SELECT 'alert:'||a.key||':'||extract(epoch FROM a.since)::bigint,${at(sql`a.since`)},'alert',NULL,NULL,NULL,a.words,NULL,NULL,a.severity,a.kind,a.since
       FROM health_alerts a ORDER BY a.since DESC LIMIT ${n})
   ) x ORDER BY t DESC,id DESC LIMIT ${n}`);
   const tone = (row: ActivityRow): z.infer<typeof ActivityEvent>['tone'] => row.kind === 'alert' ? (row.severity === 'critical' ? 'danger' : 'warning')
-    : row.kind === 'standing' ? (row.severity as 'success' | 'warning' | 'danger') : row.kind === 'breaker' || row.kind === 'agent_feedback' ? 'danger' : row.kind === 'campaign_paused' ? 'warning'
+    : row.kind === 'standing' ? (row.severity as 'success' | 'warning' | 'danger') : row.kind === 'breaker' ? 'danger' : row.kind === 'agent_feedback' ? 'warning' : row.kind === 'campaign_paused' ? 'warning'
     : row.kind === 'signup' || row.kind === 'link_fallback' ? 'neutral' : 'success';
   const events = rows.flatMap(row => {
     const label = row.kind === 'alert' ? alertLabel(row.alert_kind ?? '') : null;
@@ -367,7 +367,7 @@ export function registerGlass(app: App) {
     return c.json(value, 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/glass/activity', operationId: 'operatorGetGlassActivity',
-    description: `What just happened across the installation, for operators: sign-ups, first sends, verified and built-in domains, campaigns launched and paused, standing changes, the built-in breaker, health alerts and critical agent feedback. The newest ${GLASS_ACTIVITY}, cached ${GLASS_TTL_SECONDS} seconds.`,
+    description: `What just happened across the installation, for operators: sign-ups, first sends, verified and built-in domains, campaigns launched and paused, standing changes, the built-in breaker, health alerts and agent feedback. The newest ${GLASS_ACTIVITY}, cached ${GLASS_TTL_SECONDS} seconds.`,
     request: { query: z.object({ after: z.string().datetime().optional().describe('Only events at or after this time: the newest `at` the page has.') }) },
     responses: { 200: response(Activity), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
