@@ -77,7 +77,8 @@ const Glass = z.object({
   receiving: z.object({ today: int, spam: int, atLeast: z.boolean(), hourly: z.array(int).describe('The last 24 hours, oldest first.'), day: Day }),
   builtin: z.object({ active: int, ready: int.describe('Built-in domains that send.'), revoked: int,
     parent: z.object({ name: z.string(), ok: z.boolean(), problem: z.string().nullable(), trippedAt: z.string().nullable(), resetAt: z.string().nullable(), checkedAt: z.string() }).nullable() }),
-  support: z.object({ open: int, ticketed: int, hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day }),
+  support: z.object({ open: int, ticketed: int, hourly: z.array(int).describe('Conversations started per hour, the last 24.'), day: Day,
+    configured: z.object({ chat: z.boolean().describe('NIGHTMAIL_SUPPORT_SIGNING_KEY and NIGHTMAIL_SUPPORT_URL are set.'), email: z.boolean().describe('NIGHTMAIL_SUPPORT_ADDRESS_IDS is set.') }) }),
   screening: z.object({ compared: Count.describe('Content screened by both classifiers in the last 24 hours (the newest at most).'),
     agree: z.number().nullable().describe('Share of those where both gave the same verdict.'), jevFlagged: int, jevfFlagged: int,
     jevFailed: int.describe('Jev answered with an error or not at all (the second classifier answered instead).'), jevfFailed: int,
@@ -239,7 +240,7 @@ function apiFigures(r: Pick<Raw, 'api' | 'api_recent'>): Glass['api'] {
   return { hourly, previous, p50Ms: any ? quantile(hist, 0.5, slowest) : null, p95Ms: any ? quantile(hist, 0.95, slowest) : null };
 }
 
-function shape(r: Raw, config: Pick<Runtime['config'], 'deploy'>): Glass {
+function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): Glass {
   const num = (value: unknown) => Number(value ?? 0);
   // The send routes' latency: their minutes' histograms added up, read as the Health page reads a route's.
   const rows = r.send_api.filter(row => row.n > 0), requests = rows.reduce((sum, row) => sum + row.n, 0);
@@ -271,7 +272,8 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy'>): Glass {
       steps: { ok: num(r.steps.ok), notice: num(r.steps.notice), warn: num(r.steps.warn), restrict: num(r.steps.restrict), pause: num(r.steps.pause) }, ramping: num(r.ramp.ramping), rampWaiting: num(r.ramp.waiting) },
     receiving: { today: num(r.received.today), spam: num(r.received.spam), atLeast: r.received.capped, hourly: r.received_hourly.map(num), day: { last: num(r.received_day.last), previous: num(r.received_day.previous) } },
     builtin: { active: num(r.builtin.active), ready: num(r.builtin.ready), revoked: num(r.builtin.revoked), parent: r.parent },
-    support: { open: num(r.support.open), ticketed: num(r.support.ticketed), hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) } },
+    support: { open: num(r.support.open), ticketed: num(r.support.ticketed), hourly: r.support_hourly.map(num), day: { last: num(r.support.last), previous: num(r.support.previous) },
+      configured: { chat: Boolean(config.support?.signingKey && config.support.url), email: Boolean(config.support?.addressIds?.length) } },
     screening: { compared: { n: Math.min(num(r.screen.n), GLASS_CAP), atLeast: num(r.screen.n) > GLASS_CAP }, agree: num(r.screen.both) ? num(r.screen.agree) / num(r.screen.both) : null,
       jevFlagged: num(r.screen.jev_flagged), jevfFlagged: num(r.screen.jevf_flagged), jevFailed: num(r.screen.jev_failed), jevfFailed: num(r.screen.jevf_failed),
       screened: num(r.screened.screened), rejected: num(r.screened.rejected), hourly: r.screened_hourly.map(num) },
