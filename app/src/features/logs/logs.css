@@ -138,7 +138,7 @@
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
 /* Logs' body (facets.tsx): the filters beside the stream from 1440 px, where the subject still has room; narrower, the
    toolbar's pickers filter instead. The stream column needs a wider window still: Transactional reads in full or not at all. */
-.ui-split.logs-split { --facet-width: 196px; flex: 1; min-height: 0; }
+.ui-split.logs-split { --facet-width: 228px; flex: 1; min-height: 0; }
 .logs-split > .ui-split__main > :not(.logs-table) { flex-shrink: 0; }
 .logs-split .ui-facets { padding-top: 2px; }
 @media (max-width: 1439px) {
@@ -273,9 +273,10 @@
    light), 16px inside, 8px from the stream, no rule; its rows' hover and selection take the frame's solid steps. The
    stream: 32px rows on their quiet band under a sticky 28px head bar, its text 12px inside the bar. */
 .ui-split.logs-split { column-gap: var(--space-24); padding: var(--space-4) var(--space-16) var(--space-16); }
-.ui-split.logs-split > .ui-split__rail { padding: var(--space-4) 0; background: none; }
+.ui-split.logs-split > .ui-split__rail { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-4) 0; background: none; }
 .ui-split.logs-split > .ui-split__main { padding-left: 0; }
-.logs-split .ui-facets { gap: var(--space-16); padding-top: 0; }
+.logs-split .ui-facets { gap: var(--space-12); padding-top: 0; }
+.logs-split .ui-facet { height: 26px; }
 .logs-page .logs-table .ui-table thead th { position: sticky; top: 0; z-index: 2; }
 .logs-page .logs-table .ui-table :is(th, td):first-child, .ov-table .ui-table :is(th, td):first-child { padding-left: var(--space-12); }
 .logs-page .logs-table + .ui-pagination, .logs-page .ui-pagination { min-height: 40px; padding: var(--space-4) 0 0 var(--space-12); }
