@@ -3616,8 +3616,9 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.equal(pending.state, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
-        const {sendingLimit,domains:claimed,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
+        const {sendingLimit,domains:claimed,sent,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
         assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null,standing:{step:'ok',marketingHeld:false}}); assert.deepEqual(claimed,{total:0,verified:0});
+        assert.equal(sent,false,'Nothing sent yet: Overview\'s onboarding card reads this.');
         assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:500,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         // GET /v1/me reads the allowance without row locks: a pending operator pause or cap change (a row lock on the
@@ -16207,6 +16208,31 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?${query}`, key.secret)).map(row => row.id), [ids[2], ids[0]], 'Search must treat percent, underscore and backslash literally.');
     query.set('to', from);
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422);
+    // from and to are times, not addresses: integrations read them as sender and recipient (a production key sent an
+    // address in from 13 times in 3 minutes). The refusal names the field, says what it is, and points to search.
+    for (const [field, value, said] of [
+      ['from', contact.email, /^Request fields are invalid: from: `from` is an ISO 8601 date-time \(the start of the time range\), such as [^,]+, not an email address, and this looks like one\. To filter by sender address, use `search`\.$/],
+      ['to', contact.email, /`to` is an ISO 8601 date-time \(the end of the time range\).*looks like one\. To filter by recipient address, use `search`\.$/],
+      ['since', 'yesterday', /`since` is an ISO 8601 date-time \(the start of the time range\), such as [^,]+\. To filter by sender address, use `search`\.$/],
+      ['until', '2026-11-01', /`until` is an ISO 8601 date-time \(the end of the time range\)/],
+    ] as const) {
+      const refused = error(await http('GET', `/v1/emails?${new URLSearchParams({ [field]: value })}`, key.secret), 422, 'VALIDATION_FAILED');
+      assert.equal(refused.field, field); assert.match(refused.message, said);
+    }
+    // since and until are from and to by clearer names: the same rows and the same pages, a cursor serving either.
+    const bounds = (start: string, end: string, names: ['from', 'to'] | ['since', 'until']) => new URLSearchParams({ search: marker, kind: 'transactional', region: REGION, [names[0]]: start, [names[1]]: end, limit: '2' });
+    const byFrom = await http('GET', `/v1/emails?${bounds(from, to, ['from', 'to'])}`, key.secret), bySince = await http('GET', `/v1/emails?${bounds(from, to, ['since', 'until'])}`, key.secret);
+    assert.deepEqual(page(bySince).map(row => row.id), [ids[2], ids[1]]);
+    assert.deepEqual(bySince.body, byFrom.body);
+    const next = bounds(from, to, ['since', 'until']); next.set('cursor', byFrom.body.nextCursor);
+    assert.deepEqual(page(await http('GET', `/v1/emails?${next}`, key.secret)).map(row => row.id), [ids[0]]);
+    // They filter: nothing created at or after the end, or before the start.
+    assert.deepEqual(page(await http('GET', `/v1/emails?${bounds(to, new Date(Date.parse(to) + 60_000).toISOString(), ['since', 'until'])}`, key.secret)), []);
+    assert.deepEqual(page(await http('GET', `/v1/emails?${bounds(new Date(Date.parse(from) - 60_000).toISOString(), from, ['since', 'until'])}`, key.secret)), []);
+    // One name per bound, and the start before the end, whichever names are used.
+    assert.match(error(await http('GET', `/v1/emails?${new URLSearchParams({ from, since: from })}`, key.secret), 422, 'VALIDATION_FAILED').message, /since and from are the same filter \(the start of the time range\): send one of them/);
+    assert.match(error(await http('GET', `/v1/emails?${new URLSearchParams({ to, until: to })}`, key.secret), 422, 'VALIDATION_FAILED').message, /until and to are the same filter/);
+    assert.match(error(await http('GET', `/v1/emails?${new URLSearchParams({ since: to, to: from })}`, key.secret), 422, 'VALIDATION_FAILED').message, /from must precede to/);
     query.set('to', to); query.set('region', 'not-configured');
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'REGION_NOT_CONFIGURED');
     const metricQuery = new URLSearchParams({ from, to, region: REGION, stream: 'transactional' });
@@ -28707,10 +28733,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Money: $25 of credit today, and $12.40 owed.
       await db.query(`INSERT INTO billing_ledger(workspace_id,kind,source_id,paid_uc,balance_after_uc,promo_after_uc,actor) VALUES ($1,'topup',$2,2500000000,2500000000,0,'stripe')`, [wid, `attempt:${unique('glass')}`]);
       await db.query(`INSERT INTO billing_accounts(workspace_id,balance_uc,unpaid_since) VALUES ($1,-1240000000,now()) ON CONFLICT (workspace_id) DO UPDATE SET balance_uc=-1240000000,unpaid_since=now()`, [wid]);
-      // Visitors: an hour rolled up today, from a referrer.
+      // Visitors: an hour rolled up today, from a referrer, and signed-in dashboard page views, which carry no visitor code
+      // and are not the site's.
       await db.query(`INSERT INTO analytics_hours(hour,snapshot) VALUES (date_trunc('day',now(),'UTC'),'glass') ON CONFLICT (hour) DO NOTHING`);
-      await db.query(`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids) VALUES (date_trunc('day',now(),'UTC'),'page_view',$1,1000000,'{glass-a,glass-b}'),(date_trunc('day',now(),'UTC'),'visit','{}',3,'{glass-a,glass-b}')
-        ON CONFLICT (hour,metric,dimensions) DO UPDATE SET events=analytics_hourly.events+excluded.events,visitor_ids=analytics_hourly.visitor_ids||excluded.visitor_ids`, [{ path: '/', referrer: 'news.glass.example' }]);
+      await db.query(`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids) VALUES (date_trunc('day',now(),'UTC'),'page_view',$1,1000000,'{glass-a,glass-b}'),
+          (date_trunc('day',now(),'UTC'),'page_view',$2,500,'{}'),(date_trunc('day',now(),'UTC'),'page_view',$3,500,'{}'),(date_trunc('day',now(),'UTC'),'visit','{}',1003,'{glass-a,glass-b}')
+        ON CONFLICT (hour,metric,dimensions) DO UPDATE SET events=analytics_hourly.events+excluded.events,visitor_ids=analytics_hourly.visitor_ids||excluded.visitor_ids`,
+        [{ path: '/', referrer: 'news.glass.example' }, { path: '/overview', referrer: 'dashboard.glass.example' }, { path: '/compare/:vendor', referrer: 'template.glass.example' }]);
 
       const after = await readGlass(runtime), hour = (g: typeof after) => g.sending.hourly.at(-1)!;
       const usd = (uc: string) => BigInt(uc);
@@ -28728,6 +28757,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([after.system.ses!.maxSendRate - (before.system.ses?.maxSendRate ?? 0), after.system.ses!.max24HourSend - (before.system.ses?.max24HourSend ?? 0), after.system.ses!.sentLast24Hours - (before.system.ses?.sentLast24Hours ?? 0)], [14, 50000, 1200]);
       assert.deepEqual(after.system.deploy, { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' });
       assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors.n - before.visitors.visitors.n, after.visitors.visitors.atLeast, after.visitors.referrers[0]], [1000000, 2, false, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
+      assert.ok(after.visitors.referrers.every(r => !r.host.endsWith('dashboard.glass.example') && !r.host.endsWith('template.glass.example')), 'Dashboard page views are not the site’s.');
       assert.ok(after.visitors.referrers[0]!.views >= 1000000);
 
       // The route: an operator reads the same figures, every series its full length, cached for the next read.
@@ -29697,9 +29727,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('no-domain reminder: a workspace with no domain an hour after it was created is emailed once to add one, only with NO_DOMAIN_REMINDER on; not one created within the hour or days ago, not one with a domain, not one that adds a domain before the email goes', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { fresh } = await noticeFixture(runtime, db);
+      const { fresh, platform } = await noticeFixture(runtime, db);
       const { accountNotifyJob } = await import('./src/account-notices.js');
       const { domainSetupTick } = await import('./src/domain-setup.js');
+      const { connectionSummary } = await import('./src/provider-connections.js');
+      // GET /v1/me's connection says whether a workspace has sent anything (Overview's first-send card): here the platform
+      // workspace, which has sent nothing until the notice below goes out.
+      assert.equal((await connectionSummary(runtime, platform))?.sent, false);
       const { rows: [owner] } = await db.query('SELECT id FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
       // A workspace created `age` ago, owned by the fixture's verified user.
       const workspace = async (age: string, domain = false) => {
@@ -29729,6 +29763,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await tick(); await tick();
       assert.deepEqual(await notices(all), [{ workspace_id: idle, status: 'pending' }]);
       assert.deepEqual(await deliver(all), ['no_domain:sent']);
+      assert.equal((await connectionSummary(runtime, platform))?.sent, true);
       const [mail] = await fresh();
       assert.deepEqual([mail.subject, mail.to_addresses, mail.kind], ['Add your domain to start sending', [AUTH_EMAIL], 'transactional']);
       assert.equal(mail.text, `Pine Studio was created over an hour ago, but it has no domain yet.\n\nNightmail sends from your own domain, so nothing can be sent until you add one.\n\nIt takes about 5 minutes: add the domain, then copy the records it lists to where its DNS is hosted.\n\nAdd your domain: ${PUBLIC_ORIGIN}/domains\n\nNightmail sends this once, to the owners and admins of Pine Studio. To reach us, write to support@nightmail.dev.\n`);

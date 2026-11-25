@@ -78,7 +78,7 @@ export type SetupStep = { key: string; done: boolean; title: string; action?: Re
 // A failed read is `error` (with `retry`): the steps' place says so, rather than looking like finished setup.
 // `stuck`: the newest domain whose records public DNS still lacks an hour after it was added, for the banner above the steps
 // (shown also once the steps are done, while another domain waits).
-export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[]; error?: unknown; retry?: () => void; stuck?: { domain: Domain; gap: SetupGap } | null; hasDomain?: boolean } {
+export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; current?: SetupStep; open?: SetupStep[]; error?: unknown; retry?: () => void; stuck?: { domain: Domain; gap: SetupGap } | null; hasDomain?: boolean; sent?: boolean; verifiedDomain?: Domain } {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   const client = useQueryClient()
@@ -103,7 +103,9 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   const domainDone = !!verified || (identity?.connection?.domains?.verified ?? 0) > 0
   const pending = items.find(domain => domain.status !== 'verified')
   const sent = setup.data.emails.any || !!testId
-  if (domainDone && keyed && sent && !testId) return { loading: false, steps: null, stuck, hasDomain }
+  // What Overview's onboarding card reads (onboarding-card.tsx): whether any email exists, and the domain to send from.
+  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: verified }
+  if (domainDone && keyed && sent && !testId) return { loading: false, steps: null, ...known }
   const steps: SetupStep[] = [
     { key: 'domain', done: domainDone, title: 'Verify a domain',
       action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
@@ -118,7 +120,7 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   const current = steps.find(step => !step.done)
   // The first email's step stays open once sent, so its confirmation and the link to Logs are seen.
   const open = steps.filter(step => step === current || (step.key === 'send' && (!!testId || (!step.done && domainDone))))
-  return { loading: false, steps, current, open, stuck, hasDomain }
+  return { loading: false, steps, current, open, ...known }
 }
 
 // Numbered steps in Overview's detail column; only the current step is open, with its action. A finished step's number

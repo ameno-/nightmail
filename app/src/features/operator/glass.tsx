@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { ErrorState, PageHeader, StatusBadge, type Tone } from '../../components/ui'
+import { ErrorState, PageHeader, StatusBadge, Tooltip, type Tone } from '../../components/ui'
 import { useSession } from '../../data/context'
 import { ApiError } from '../../data/types'
 import { usd } from '../../data/billing'
@@ -13,7 +13,8 @@ import { GlassAsOf, GlassGroups, StaffOnly, type GlassFill } from './skeletons'
 const grades: GlassGrade[] = ['A+', 'A', 'B', 'C', 'D', 'F']
 // The lines the Overview's gauges end at (features/overview): 5% bounces, 0.1% complaints.
 const BOUNCE_LINE = 0.05, COMPLAINT_LINE = 0.001
-const count = (c: GlassCount) => `${number(c.n)}${c.atLeast ? '+' : ''}`
+// A count that stopped at its cap reads "more than": the + says so on hover or focus.
+const count = (c: GlassCount, why: string) => c.atLeast ? <Tooltip content={`More than ${number(c.n)}: ${why}`}><span className="glass-more" tabIndex={0}>{number(c.n)}+</span></Tooltip> : number(c.n)
 const share = (part: number, whole: number) => whole > 0 ? part / whole : 0
 const rateText = (rate: number) => rate > 0 && rate < 0.0001 ? percent(rate, 3) : percent(rate)
 const compact = (n: number) => new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(n)
@@ -33,8 +34,8 @@ function fill(g: Glass) {
       minute: { spark: s.minutes, value: number(s.perMinute) },
       transactional: { hint: 'today', spark: s.hourly.map(h => h.accepted - h.marketing), value: number(s.today.transactional) },
       marketing: { hint: 'today', spark: s.hourly.map(h => h.marketing), value: number(s.today.marketing) },
-      queued: { value: count(s.queued) },
-      held: { value: count(s.held), tone: s.held.n ? 'warning' : undefined },
+      queued: { value: count(s.queued, 'counting stops there') },
+      held: { value: count(s.held, 'counting stops there'), tone: s.held.n ? 'warning' : undefined },
       api: s.sendApi ? { hint: `p95 ≤ ${number(s.sendApi.p95Ms)}`, value: `≤ ${number(s.sendApi.p50Ms)}`, unit: 'ms' } : { hint: 'idle', value: '—' },
       ...Object.fromEntries([0, 1].map(i => { const c = s.campaigns[i]; return [`campaign:${i}`, c ? { label: c.name, hint: c.workspace, value: percent(share(c.released, c.total), 0),
         meter: { value: c.released, max: Math.max(1, c.total), label: `${c.name}: ${number(c.released)} of ${number(c.total)} released` } } : empty(i === 0, 'No campaign sending')] })),
@@ -74,12 +75,12 @@ function fill(g: Glass) {
       usage: { value: usd(money.usageMonth) },
     },
     receiving: {
-      today: { spark: receiving.hourly, value: `${number(receiving.today)}${receiving.atLeast ? '+' : ''}` },
+      today: { spark: receiving.hourly, value: count({ n: receiving.today, atLeast: receiving.atLeast }, 'counting stops at 10,000 a workspace') },
       spam: { hint: receiving.today ? percent(share(receiving.spam, receiving.today), 1) : undefined, value: number(receiving.spam) },
     },
     visitors: {
       views: { hint: 'today', spark: visitors.hourly, value: number(visitors.views) },
-      visitors: { hint: 'today', value: count(visitors.visitors) },
+      visitors: { hint: 'today', value: count(visitors.visitors, 'told apart among the first 50,000 visitor codes') },
       ...Object.fromEntries([0, 1, 2].map(i => { const r = visitors.referrers[i]; return [`referrer:${i}`, r ? { label: r.host, value: number(r.views) } : empty(i === 0, 'No referrers yet')] })),
     },
   }

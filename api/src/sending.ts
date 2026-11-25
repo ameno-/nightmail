@@ -439,7 +439,26 @@ export const EmailStatusFilter = z.enum([...Status.options, 'scheduled']);
 // A literal substring search of sent mail (sending_log_text ILIKE): the trigram index answers terms of 3 characters or
 // more; a shorter one can't use it and reads every email of the workspace, so it is refused.
 export const SubstringSearch = z.string().trim().min(3, 'Search for at least 3 characters.').max(200);
-const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: EmailStatusFilter.optional().describe('scheduled lists sends waiting for their time; queued includes them.'), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: SubstringSearch.optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.'), from: z.string().datetime({ offset: true }).optional(), to: z.string().datetime({ offset: true }).optional() }).refine(q => !q.from || !q.to || Date.parse(q.from) < Date.parse(q.to), 'from must precede to.').describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from and < to. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
+/**
+ * listEmails' time bounds. Integrations read from and to as sender and recipient (a production key sent an address in
+ * from 13 times in 3 minutes), so a value that isn't a date-time is refused saying what the field is, and where an
+ * address goes instead: search. (The 422's message ends the sentence: app.ts invalidFields.)
+ */
+const timeBound = (field: 'from' | 'to' | 'since' | 'until', edge: 'start' | 'end') => z.string().datetime({ offset: true, error: issue => {
+  const address = typeof issue.input === 'string' && issue.input.includes('@');
+  return `\`${field}\` is an ISO 8601 date-time (the ${edge} of the time range), such as 2026-11-01T00:00:00Z${address ? ', not an email address, and this looks like one' : ''}. To filter by ${edge === 'start' ? 'sender' : 'recipient'} address, use \`search\``;
+} });
+const EmailQuery = PageQuery.extend({ campaignId: z.string().max(120).optional(), status: EmailStatusFilter.optional().describe('scheduled lists sends waiting for their time; queued includes them.'), region: Region.optional(), kind: z.enum(['transactional', 'marketing']).optional(), search: SubstringSearch.optional().describe('Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address.'),
+  from: timeBound('from', 'start').optional().describe('The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them.'),
+  to: timeBound('to', 'end').optional().describe('The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them.'),
+  since: timeBound('since', 'start').optional().describe('The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both.'),
+  until: timeBound('until', 'end').optional().describe('The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both.'),
+}).superRefine((q, ctx) => {
+  if (q.from && q.since) ctx.addIssue({ code: 'custom', path: ['since'], message: 'since and from are the same filter (the start of the time range): send one of them' });
+  if (q.to && q.until) ctx.addIssue({ code: 'custom', path: ['until'], message: 'until and to are the same filter (the end of the time range): send one of them' });
+  const start = q.since ?? q.from, end = q.until ?? q.to;
+  if (start && end && Date.parse(start) >= Date.parse(end)) ctx.addIssue({ code: 'custom', path: [], message: 'from must precede to (since must precede until)' });
+}).describe('Newest created emails first, with an opaque cursor bound to the filters. Date range is createdAt >= from (or since) and < to (or until): times, not addresses. Search is literal and case-insensitive across sender address, To/Cc/Bcc recipients, subject and email/campaign/provider IDs. Use status, region, kind and creation-date filters for those fields; error codes, simulation state and timestamps are not free-text fields.').openapi('ListEmailsQuery');
 const CampaignQuery = PageQuery.extend({ region: Region.optional(), state: CampaignStateValue.optional(), archived: z.enum(['true', 'false']).default('false').describe('False lists active campaigns; true lists archived campaigns only.'), search: z.string().trim().min(1).max(200).optional(),
   listId: z.string().min(1).max(120).optional().describe('Only campaigns whose audience list is this one: a newsletter\u2019s issues.'),
   newsletter: z.enum(['true', 'false']).optional().describe('true: only campaigns whose audience list is a newsletter. false: only the others, with no list or a list that is not a newsletter.') }).describe('Newest created campaigns first, excluding archived campaigns by default, with an opaque cursor bound to the filters. Search is literal, case-insensitive name, subject or ID text.').openapi('ListCampaignsQuery');
@@ -1946,8 +1965,11 @@ export function registerSending(app: App) {
       throw error;
     }
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: `Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. ${readLimitNote(READ_LIMIT.emails)}`, tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
-    const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
+  app.openapi(createRoute({ method: 'get', path: '/v1/emails', operationId: 'listEmails', description: `Sent emails, newest first. from and to (or since and until) are ISO 8601 times that bound when an email was created, not addresses: filter by sender or recipient address with search. Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. ${readLimitNote(READ_LIMIT.emails)}`, tags: ['Emails'], security, request: { query: EmailQuery }, responses: { 200: response(page(Email)), ...errors } }), async c => {
+    // since and until are from and to by other names: one filter, so a cursor serves either.
+    // Only bounds that were sent: an absent one stays absent, as cursors already issued were bound without it.
+    const { since, until, ...named } = c.req.valid('query'), q = { ...named, ...since ? { from: since } : {}, ...until ? { to: until } : {} };
+    const a = actor(c), binding = await pageBinding(a, 'emails', q), cursor = readCursor(q.cursor, binding);
     if (q.region) region(c.env, q.region);
     const search = q.search ? literalSearch(q.search) : null;
     const maxBytes = Math.min(EMAIL_LIST_MAX_BYTES, responseByteLimit(c.req.raw) ?? EMAIL_LIST_MAX_BYTES);

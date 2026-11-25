@@ -30,13 +30,17 @@ const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'Typ
 
 // Sends a clearly labelled test from hello@<domain> to the signed-in user's own address. The server picks the
 // recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
+/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. */
+export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string) => void) {
+  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
+    onSuccess: data => onSent?.(data.id) })
+}
 export function TestSend({ domain, onSent, primary = false }: { domain: Domain; onSent?: (id: string) => void; primary?: boolean }) {
   const identity = useSession()?.identity
   const to = identity?.email
   const from = `hello@${domain.name}`
   const verified = domain.status === 'verified'
-  const test = useGuardedMutation({ target: domain.id, mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
-    onSuccess: data => onSent?.(data.id) })
+  const test = useTestSend(domain, onSent)
   if (!to) return null
   return <>
     <div className="first-send-test">

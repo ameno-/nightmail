@@ -35,6 +35,7 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   standing: z.object({ step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), marketingHeld: z.boolean() }).nullable().optional()
     .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
+  sent: z.boolean().optional().describe('Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).'),
   attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
 }).openapi('ConnectionSummary');
 type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number; stack_template_version?: string | null; stack_deleted_at?: string | null; stack_error?: string | null; stack_id?: string | null; health?: { checkedAt: string; issues: { code: string; region?: string; message: string }[] } | null };
@@ -89,10 +90,11 @@ async function get(runtime: Runtime, wid: string) {
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; allowance: HostedAllowance | null}>(sql`
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null}>(sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost')) AS verified_domains,
+      EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
     FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
   if (!row) return null;
@@ -101,7 +103,7 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
     sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
     standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
-    domains: { total: row.domains, verified: row.verified_domains }, ...(row.attention ? { attention: row.attention } : {}) };
+    domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, ...(row.attention ? { attention: row.attention } : {}) };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
