@@ -671,8 +671,15 @@ jobs:
         run: |
           # Same workflow, SHA, stage and run attempt. Bootstrap and API changes cannot race the service binding.
           endpoint="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100"
+          # GitHub's API can answer one request with a 5xx; only ten failed reads in a row stop the deploy.
+          failed=0
           while :; do
-            jobs=$(gh api "$endpoint")
+            if ! jobs=$(gh api "$endpoint"); then
+              failed=$((failed + 1))
+              if [ "$failed" -ge 10 ]; then exit 1; fi
+              sleep 3; continue
+            fi
+            failed=0
             job=$(jq -c --arg job "$DEPLOY_JOB" '[.jobs[] | select(.name == $job)] | first' <<< "$jobs")
             if jq -e '.status == "completed" and .conclusion != "success"' <<< "$job" >/dev/null; then exit 1; fi
             if jq -e 'any(.steps[]?; .name == "Health check" and .conclusion == "success")' <<< "$job" >/dev/null; then break; fi
