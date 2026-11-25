@@ -13,6 +13,17 @@ const newer = (current?: Published, next?: Published) => {
   return next.asOf && facetInstant(next.asOf) > facetInstant(current.asOf) ? next : current
 }
 
+// The counts the rail last showed for each set of filters, by scope (account, workspace and role: a new one never sees
+// another's). Coming back to Logs (Back from an email) shows them at once, beside the cached rows, while the next counts
+// load, instead of dashes first; the next counts replace them as they arrive.
+const shownCuts = new Map<string, Published>()
+const remember = (key: string, cut: Published | undefined) => {
+  shownCuts.delete(key)
+  if (!cut) return
+  shownCuts.set(key, cut)
+  if (shownCuts.size > 16) shownCuts.delete(shownCuts.keys().next().value!)
+}
+
 /** Register before the commit's next paint. Its rAF queues a task for AFTER that render step.
  * Rows (and then the historical digits) get their own frame without waiting two extra rAFs. */
 function usePainted(view: string, ready: boolean) {
@@ -67,17 +78,20 @@ export function useLogFacets({ filters, range, visibility, scope, railed, blank,
     }
   }, [scope])
 
-  const [accepted, setAccepted] = useState<{ view: string; cut: Published }>()
+  const memory = scope === null ? null : scope + '\n' + semantic
+  const [accepted, setAccepted] = useState<{ view: string; cut: Published; shown?: boolean } | undefined>(() => { const cut = memory ? shownCuts.get(memory) : undefined; return cut ? { view, cut, shown: true } : undefined })
+  // Counts shown before, for these filters: they need not wait for the rows' own frame.
+  const again = accepted?.view === view && accepted.shown === true
   const latest = newer(newer(accepted?.view === view ? accepted.cut : undefined, historical), fresh.isSuccess ? published(fresh.data) : undefined)
   const authorizationLost = denied || blocked
   // A busy server may not have been able to reauthorize a stored band. In that case keep
   // the stable count slots as dashes until a newer, scoped numerical result actually arrives.
   const reply = fresh.dataUpdatedAt >= last.dataUpdatedAt && fresh.data ? fresh.data : last.data
   const pending = reply && 'state' in reply ? reply : undefined
-  const cut = !authorizationLost && canRead && rowsPainted ? (pending ? pending.last ?? undefined : latest) : undefined
+  const cut = !authorizationLost && canRead && (rowsPainted || again) ? (pending ? pending.last ?? undefined : latest) : undefined
   useEffect(() => {
-    if (pending && !pending.last && accepted?.view === view) setAccepted(undefined)
-    else if (cut && (accepted?.view !== view || accepted.cut !== cut)) setAccepted({ view, cut })
-  }, [view, cut, accepted, pending])
+    if (pending && !pending.last && accepted?.view === view) { setAccepted(undefined); if (memory) remember(memory, undefined) }
+    else if (cut && (accepted?.view !== view || accepted.cut !== cut)) { setAccepted({ view, cut }); if (memory) remember(memory, cut) }
+  }, [view, cut, accepted, pending, memory])
   return { cut, authorizationLost, view }
 }
