@@ -1882,7 +1882,7 @@ async function previewParts(runtime: Runtime, workspaceId: string, draft: Campai
   const rendered = await renderCampaignContent(runtime, draft, false);
   if (!rendered.html && !rendered.text) return rendered;
   const origin = footer.requiredNotice ? runtime.config.publicUrl : await linkOrigin(runtime, runtime.db, workspaceId, draft.from)
-    .catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return runtime.config.publicUrl; throw error; });
+    .catch(error => { if (error instanceof ApiError && (error.code === 'LINK_RECORD_REQUIRED' || error.code === 'BUILTIN_DOMAIN_UNSUPPORTED')) return runtime.config.publicUrl; throw error; });
   footerParts(rendered, unsubscribePlaceholder(origin), footer);
   return rendered;
 }

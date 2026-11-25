@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, log, type Config, type DbExecutor, type Runtime } from './core.js';
-import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
+import { isBuiltinHost } from './builtin-domain.js';
 import { LINK_LABEL } from './link-hosts.js';
 import { cname, fqdn } from './public-dns.js';
 
@@ -29,8 +29,8 @@ export function linkRecordRequired(config: Config, domain: string, field = 'from
  *  workspace's domain it is under), else PUBLIC_URL when self-hosted. Hosted without one: LINK_RECORD_REQUIRED. */
 export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, field?: string): Promise<string> {
   const sender = domainOf(from), config = runtime.config;
-  // A built-in domain has no DNS of its own to publish a link record in, and sends transactional mail only.
-  if (isBuiltinHost(config, sender)) throw builtinRefusal(config, { code: 'BUILTIN_DOMAIN_UNSUPPORTED', field: 'kind', host: sender });
+  // A built-in domain has no DNS of its own to publish a link record in.
+  if (isBuiltinHost(config, sender)) throw new ApiError(422, 'BUILTIN_DOMAIN_UNSUPPORTED', `The built-in domain has no link host, so it can\u2019t send mail that carries one: campaign, marketing or forwarded mail. Verify a domain of your own for that.`, field ?? 'from');
   if (config.linkHosts) {
     const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname FROM operation_domains d
       LEFT JOIN link_hosts h ON h.workspace_id=d.workspace_id AND h.domain=d.name AND h.status='active'
