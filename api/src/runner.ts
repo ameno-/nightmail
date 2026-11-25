@@ -7,7 +7,7 @@ import { jobConcurrency } from './jobs.js';
 import { hourlyUpkeep, retentionTick } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
-import { foldSendingTallies } from './sending-tallies.js';
+import { auditSendingOutcomePage, foldSendingTallies } from './sending-tallies.js';
 import { healthTick } from './health.js';
 import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
@@ -93,7 +93,7 @@ try {
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
           lastPublicStats = Date.now();
-          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).then(() => signupsTick(runtime)).finally(() => { publicStats = undefined; });
+          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).then(() => signupsTick(runtime)).then(async () => { await auditSendingOutcomePage(runtime); }).finally(() => { publicStats = undefined; });
         }
         // Keep the display scanner scheduled without reserving a dispatch lane or using a request to seed it.
         if (!display && Date.now() - lastDisplay >= 60_000) {

@@ -571,6 +571,8 @@ export default {
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Fold sending_campaign_tallies and sending_metrics_hourly delta rows in bounded chunks every minute.
       try { await (await core.wrapModuleLoad(() => import('./sending-tallies.js'))).foldSendingTallies(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'SENDING_TALLIES_FOLD_FAILED' }); }
+      // The raw-event audit is independent of dispatch, folding, and the hourly whole-workspace tally repairs.
+      afterwards(env, ctx, async rt => { await (await import('./sending-tallies.js')).auditSendingOutcomePage(rt); });
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
