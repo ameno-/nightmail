@@ -209,7 +209,7 @@ export const guides: Guide[] = [
     body: () => <Section title="A setup token or a device code">
       <p>{agentSetupGuide.text}</p>
       <Code label="agent setup">{agentSetupGuide.code}</Code>
-      <p>Copy the prompt from <Link to="/docs#agent-prompt">the overview</Link> or Connect an agent in the sidebar; approve a code at <Link to="/connect">/connect</Link>. The agent’s key is listed in <Link to="/api-keys">API keys</Link>.</p>
+      <p>Copy the prompt from <Link to="/docs#agent-prompt">the overview</Link> or Connect your agent in the sidebar; approve a code at <Link to="/connect">/connect</Link>. The agent’s key is listed in <Link to="/api-keys">API keys</Link>.</p>
     </Section>,
   },
   {
