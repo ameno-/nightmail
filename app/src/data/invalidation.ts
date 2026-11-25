@@ -66,30 +66,48 @@ export function invalidateResources(client: QueryClient, resources: readonly str
 }
 
 /**
- * After a domain is deleted: its own queries (its page, its records check, receiving and its hosts: ['domain', id, …]
- * and ['mailbox-domain', id, …]) are cancelled and removed, never refetched, since every read of it now answers 404.
- * The cached lists that showed it (Domains, Receiving's domains, Overview's setup read) drop its row at once, so nothing
- * links to it or prefetches it, and are then read again. Call it once the page that read the domain has stopped reading
- * it (its queries disabled), so removing them can't start a fetch.
+ * Something the dashboard reads by ID was deleted (a domain, an agent inbox, an address): every read of it now answers
+ * 404, so its own queries (`own` resources whose key names the ID) are cancelled and removed, never refetched. The
+ * cached lists that showed it (`lists`) drop its row at once, so nothing links to it or prefetches it, and `refresh`
+ * (lists only) are then read again. The page that read it must stop reading first: disable its queries before the DELETE
+ * is sent (a poll that fired while it ran reached the API after the thing was gone), cancel what is in flight
+ * (cancelOwnQueries), and only after the DELETE answers go back and forget it, so removing the entries starts no fetch.
  */
-const domainQuery = (id: string) => (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === 'nightmail' && (resourceOf(query.queryKey) === 'domain' || resourceOf(query.queryKey) === 'mailbox-domain') && query.queryKey[2] === id
-/** Aborts any read of the domain in flight (its page's poll, its receiving or hosts read), keeping what is cached. */
-export const cancelDomainQueries = (client: QueryClient, id: string) => client.cancelQueries({ predicate: domainQuery(id) })
-export function forgetDomain(client: QueryClient, id: string) {
-  const own = domainQuery(id)
-  void client.cancelQueries({ predicate: own }).catch(() => {})
-  client.removeQueries({ predicate: own })
-  const without = (rows: unknown) => Array.isArray(rows) ? rows.filter(row => (row as { id?: unknown } | null)?.id !== id) : rows
-  client.setQueriesData<unknown>({ predicate: query => query.queryKey[0] === 'nightmail' && ['domains', 'mailbox-domains', 'overview-setup'].includes(resourceOf(query.queryKey)) }, (data: unknown) => {
-    if (Array.isArray(data)) return without(data)
-    if (!data || typeof data !== 'object') return data
-    const page = data as { items?: unknown[]; total?: number; domains?: unknown }
-    if (Array.isArray(page.items)) { const items = without(page.items) as unknown[]; return { ...page, items, ...typeof page.total === 'number' ? { total: page.total - (page.items.length - items.length) } : {} } }
-    if (Array.isArray(page.domains)) return { ...page, domains: without(page.domains) }
-    return data
-  })
-  return invalidateResources(client, invalidate.domains.filter(resource => resource !== 'domain' && resource !== 'mailbox-domain'))
+export type Forget = { own: readonly string[]; lists: readonly string[]; refresh: readonly string[] }
+const ownQuery = (id: string, own: readonly string[]) => (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === 'nightmail' && own.includes(resourceOf(query.queryKey)) && query.queryKey.slice(2).includes(id)
+/** Aborts any read of it in flight (a page's poll), keeping what is cached. */
+export const cancelOwnQueries = (client: QueryClient, id: string, { own }: Pick<Forget, 'own'>) => client.cancelQueries({ predicate: ownQuery(id, own) })
+// A list's cached data without the deleted row: an array, a page ({ items, total } or { data }), Overview's setup read
+// ({ domains }), or an infinite query's pages.
+function withoutRow(data: unknown, id: string): unknown {
+  if (Array.isArray(data)) return data.filter(row => (row as { id?: unknown } | null)?.id !== id)
+  if (!data || typeof data !== 'object') return data
+  const value = data as Record<string, unknown> & { total?: number }
+  if (Array.isArray(value.pages)) return { ...value, pages: value.pages.map(page => withoutRow(page, id)) }
+  for (const key of ['items', 'data', 'domains']) {
+    const rows = value[key]
+    if (!Array.isArray(rows)) continue
+    const kept = withoutRow(rows, id) as unknown[]
+    return { ...value, [key]: kept, ...key === 'items' && typeof value.total === 'number' ? { total: value.total - (rows.length - kept.length) } : {} }
+  }
+  return data
 }
+export function forgetResource(client: QueryClient, id: string, { own, lists, refresh }: Forget) {
+  const mine = ownQuery(id, own)
+  void client.cancelQueries({ predicate: mine }).catch(() => {})
+  client.removeQueries({ predicate: mine })
+  client.setQueriesData<unknown>({ predicate: query => query.queryKey[0] === 'nightmail' && lists.includes(resourceOf(query.queryKey)) }, (data: unknown) => withoutRow(data, id))
+  return invalidateResources(client, refresh)
+}
+const forgetting = (own: readonly string[], lists: readonly string[], group: readonly string[]): Forget => ({ own, lists, refresh: group.filter(resource => !own.includes(resource)) })
+/** A domain: its page, records check, receiving and hosts ['domain', id, …], ['mailbox-domain', id, …]. */
+export const domainForget = forgetting(['domain', 'mailbox-domain'], ['domains', 'mailbox-domains', 'overview-setup'], invalidate.domains)
+/** An agent inbox: its page, folders, messages and an open message. */
+export const inboxForget = forgetting(['agent-inbox', 'agent-inbox-folders', 'agent-inbox-messages', 'agent-inbox-message'], ['agent-inboxes', 'inbound-addresses'], invalidate.agentInboxes)
+/** A receiving address: its page and its own mail (its conversations list and an open conversation). */
+export const addressForget = forgetting(['inbound-address', 'inbound-threads', 'inbound-thread'], ['inbound-addresses'], invalidate.inboundAddresses)
+export const cancelDomainQueries = (client: QueryClient, id: string) => cancelOwnQueries(client, id, domainForget)
+export const forgetDomain = (client: QueryClient, id: string) => forgetResource(client, id, domainForget)
 
 // A polled detail page learns of a status change (domain verified, campaign done) before any cached list of the same
 // resource does; when the observed value changes, mark those lists stale so the next visit refetches them.

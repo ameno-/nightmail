@@ -116,17 +116,13 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .quota-meter::-webkit-meter-bar { background: var(--color-layer-2); border: 0; border-radius: 2px; height: 3px; }
 .quota-meter::-webkit-meter-optimum-value { background: var(--color-accent-data); }
 .quota-meter::-moz-meter-bar { background: var(--color-accent-data); }
-.page-surface { display: flex; flex-direction: column; margin: var(--topbar-height) 0 0 var(--sidebar-width); padding: 14px var(--space-20); height: calc(100dvh - var(--topbar-height)); min-height: 0; border-start-start-radius: var(--radius-lg); background: var(--color-surface); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.page-surface { display: flex; flex-direction: column; margin: var(--topbar-height) 0 0 var(--sidebar-width); padding: 14px var(--space-16); height: calc(100dvh - var(--topbar-height)); min-height: 0; border-start-start-radius: var(--radius-lg); background: var(--color-surface); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 /* Console pages (Overview, Logs, a sent email) run edge to edge from 900 px: each lays out its own strips and solid
    surfaces on the page's 16px gutter, and a notice above one sits on that gutter too, as a solid strip of its own. */
 .app-shell:not(.app-shell--compact) .page-surface:has(> :is(.ov-page, .logs-page, .email-detail)) { padding: 0; }
 .app-shell:not(.app-shell--compact) .page-surface:has(> :is(.ov-page, .logs-page, .email-detail)) > :is(.standing-banner, .page-notice) { margin: var(--space-8) var(--space-16) 0; padding: var(--space-8) var(--space-12); }
 .app-shell:not(.app-shell--compact) .page-surface:has(> :is(.ov-page, .logs-page, .email-detail)) > .page-notice { padding: 0; }
 .page-surface > :is(.stack, .audience-page, .ui-loading-layout) { flex: 1; }
-/* A list page (header, toolbar, table and pager together) stops widening on a wide window, left-aligned, so a row's
-   columns read as one group instead of spreading across the window; its skeleton carries the same classes. */
-.page-surface > .measure-list { width: 100%; max-width: var(--measure-list); }
-.page-surface > .measure-list.measure-list--narrow { max-width: var(--measure-list-narrow); }
 .page-surface > .stack { gap: var(--page-gap); }
 .page-surface > .stack > .section { margin-block: 0; }
 /* Route transitions: a new page (or a skeleton giving way to content) crossfades in 120 ms. Opacity only, no movement. */
@@ -289,9 +285,6 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .received-attachments li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--space-8); align-items: center; }
 .received-attachments li > :nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .identifier { color: var(--color-text); }
-@media (max-width: 1200px) {
-  .page-surface { padding-inline: var(--space-20); }
-}
 /* A small laptop or a landscape tablet: a narrower sidebar leaves the page room for its tables. */
 @media (max-width: 1100px) and (min-width: 900px) {
   :root { --sidebar-width: 200px; }

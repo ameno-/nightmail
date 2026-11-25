@@ -174,7 +174,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   }
   const [nameColumn, typeColumn, accessColumn, prefixColumn, lastColumn, actionsColumn] = settingsColumns.keys
 
-  return <div className="stack measure-list">
+  return <div className="stack">
     <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)} data-analytics="keys/create">Create key</Button></>} />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">

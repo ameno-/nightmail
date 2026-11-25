@@ -859,12 +859,24 @@ export async function seed(fx) {
     { field: 'property', key: 'mailbox', type: 'string', operator: 'eq', value: 'company' }, { field: 'property', key: 'attempts', type: 'number', operator: 'gt', value: 0 }, { field: 'property', key: 'let_in_at', type: 'date', operator: 'notSet' }] } });
   const template = await dana.api('POST', '/v1/templates', { name: 'Receipt' });
   const campaign = await dana.api('POST', '/v1/campaigns', { name: 'November product update', subject: 'What shipped in November', from: 'news@mail.northwind.example', html: '<p>Hello</p>' });
+  // Review's Send stage (Campaign review · send, · ramp): a campaign to 40 subscribers, which the send review finds ready,
+  // and one to 12,000 from a domain added today, which it recommends sending in two daily batches.
+  const subscribers = async (name, prefix, n) => {
+    const made = await dana.api('POST', '/v1/lists', { name });
+    await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_cls_'||$2||'_'||n,'ws_northwind',$2||'-'||n||'@example.org','subscribed' FROM generate_series(1,$3::int) n RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT 'ws_northwind',$1,id FROM c`, [made.id, prefix, n]);
+    return made;
+  };
+  const readyCampaign = await dana.api('POST', '/v1/campaigns', { name: 'Customer note', subject: 'A note for customers', from: 'news@mail.northwind.example', html: '<p>Hello</p>', audience: { listId: (await subscribers('Early customers', 'early', 40)).id } });
+  const waitlist = await subscribers('Waitlist import', 'waitlist', 12000);
+  const rampCampaign = await dana.api('POST', '/v1/campaigns', { name: 'Waitlist launch', subject: 'We are live', from: 'news@mail.northwind.example', html: '<p>Hello</p>', audience: { listId: waitlist.id } });
   const contact = contacts[0];
 
-  // Northwind's standing: graded B with a notice (a first complaint). Dana is also a Bane operator, so the operator
+  // Northwind's standing: graded B with a notice (two complaints in 10,000 accepted). Dana is also a Bane operator, so the operator
   // console has a signed-in user.
+  const { noticeReasons } = await tsImport(join(apiDir, 'src/standing-model.ts'), import.meta.url);
   await standing(db, 'ws_northwind', { score: 86.4, limit: null, step: 'notice', since: ago(90), factors: [factor('complaints', 'Complaints', 30, 0.0003, 93.1), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 91.1), factor('hygiene', 'List quality', 15, 0.012, 97.5), factor('auth', 'Authentication', 10, 0.85, 85), factor('engagement', 'Engagement', 10, 0.0031, 93.9)],
-    reasons: [{ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: 0.0011, count: 1, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: '1 accepted email was marked as spam in 24 hours.' }] });
+    reasons: noticeReasons({ accepted: 10_000, complaints: 2, bounces: 0 }, 'notice') });
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_dana','operator','CLS fixture')");
   // The waitlist (Operator · waitlist): refused sign-ins to email when Nightmail opens, one without a name.
   await db.query(`INSERT INTO nightmail_waitlist(email,name,attempts,first_at,last_at) VALUES
@@ -1009,6 +1021,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

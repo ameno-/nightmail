@@ -336,7 +336,8 @@ function NewThreadDialog({ open, onOpenChange, addresses, defaultAddress, onSent
 
 /** One address's mail (its page's Mail tab): its conversations beside the open one, with search, views and New message.
  *  Received mail lives per address; every address's together is Logs, filtered to received. */
-export function AddressMail({ addressId, hidden = false }: { addressId: string; hidden?: boolean }) {
+/** `enabled` false: the address was just deleted, so its mail is not read again. */
+export function AddressMail({ addressId, hidden = false, enabled = true }: { addressId: string; hidden?: boolean; enabled?: boolean }) {
   const [params, setParams] = useSearchParams()
   const navigate = useNavigate()
   const view = (views.some(item => item.value === params.get('view')) ? params.get('view') : 'inbox') as InboundThreadView
@@ -346,12 +347,12 @@ export function AddressMail({ addressId, hidden = false }: { addressId: string; 
   const pagination = useCursorPagination()
   const addressList = useApiDef(queries.inboundAddressOptions())
   const missing = !!addressList.data && !addressList.data.some(address => address.id === addressId)
-  const linked = useApiQuery(['inbound-address', addressId, missing], (api, signal) => missing ? api.inbound.address(addressId, signal) : Promise.resolve(null))
+  const linked = useApiQuery(['inbound-address', addressId, missing], (api, signal) => missing ? api.inbound.address(addressId, signal) : Promise.resolve(null), { enabled })
   const addresses = useMemo<Addresses>(() => new Map([...(addressList.data ?? []), ...(linked.data ? [linked.data] : [])].map(address => [address.id, address])), [addressList.data, linked.data])
   const own = useMemo(() => ownAddresses(addresses), [addresses])
   const q = search.trim()
-  const threads = useApiDef(queries.inboundThreads(addressId, view, q, pagination.cursor), { interval: 30_000, keepPrevious: true })
-  const thread = useApiQuery(['inbound-thread', threadId, addressId], (api, signal) => threadId ? api.inbound.thread(threadId, { addressId }, signal) : Promise.resolve(null))
+  const threads = useApiDef(queries.inboundThreads(addressId, view, q, pagination.cursor), { interval: 30_000, keepPrevious: true, enabled })
+  const thread = useApiQuery(['inbound-thread', threadId, addressId], (api, signal) => threadId ? api.inbound.thread(threadId, { addressId }, signal) : Promise.resolve(null), { enabled })
   function change(changes: Record<string, string | null>) {
     setParams(previous => {
       const next = new URLSearchParams(previous)

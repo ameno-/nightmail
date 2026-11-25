@@ -21,8 +21,8 @@
 .docs-picker { display: none; }
 .docs-main { min-width: 0; }
 .docs-main [id] { scroll-margin-top: var(--space-16); }
-/* In the dashboard the page sits at the panel's left edge, beside the contents. */
-.page-surface .docs-operation { margin-inline: 0; }
+/* In the dashboard the page fills the panel beside the contents. */
+.page-surface .docs-operation { width: 100%; margin-inline: 0; }
 
 /* A page and its sections, here so the loading skeleton has the same boxes as the page that replaces it. */
 .docs-operation { width: min(100%, 940px); margin-inline: auto; }

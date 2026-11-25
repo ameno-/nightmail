@@ -1,7 +1,6 @@
 .audience-page { display: flex; flex-direction: column; min-width: 0; min-height: 100%; }
 .audience-page > * { flex-shrink: 0; }
 /* A contact or a segment reads as label/value rows and a form: it keeps a readable width on a wide window. */
-.audience-page.audience-page--measure { width: 100%; max-width: var(--measure); }
 /* The head of Audience reads as one block: the title, its sections a short step under it, then search and filters. */
 .audience-page .ui-page-header { margin-bottom: var(--space-8); }
 .audience-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
