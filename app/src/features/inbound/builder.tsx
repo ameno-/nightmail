@@ -16,7 +16,8 @@ import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import { rootMxWarning } from '../settings/domain-records'
+import { isSubdomainName, rootMxWarning } from '../settings/domain-records'
+import { moveReason } from '../settings/receiving-hosts'
 import { isAbortError, request } from '../../data/live'
 import { invalidate, invalidateResources } from '../../data/invalidation'
 import { ApiError, errorText, type InboundAddress, type MailboxDomain } from '../../data/types'
@@ -205,6 +206,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [busy, setBusy] = useState(false)
   const [waiting, setWaiting] = useState<string | null>(null)
   const [conflict, setConflict] = useState(false)
+  // Another provider receives mail at the new address's host today: creating it waits for consent to move that mail.
+  const [moveHost, setMoveHost] = useState<{ host: string; domainId: string; message: string } | null>(null)
   const [leaving, setLeaving] = useState<(() => void) | null>(null)
   // Each write's idempotency (a retry of the same body reuses its key), and the destinations a save made, reused by a retry.
   const attempts = useRef(new Map<string, { key: string; body: string }>())
@@ -228,7 +231,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [opened, setOpened] = useState<{ entry: RouteEntry; overview: Overview } | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   // Opening starts afresh. Before the effects below, so the flow they capture from cached data isn't cleared after.
-  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setReceivingSetup(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (open && editing && !opened && entry && overview.data && !boxes.isPending && !resolvedBoxes.pending) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.isPending, resolvedBoxes.pending])
   // A rule given by key changes that rule only (its fork and its sides), on an address with any number of rules:
   // the address's route and its other rules stay.
@@ -423,6 +426,10 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     } catch (error) {
       if (isAbortError(error)) return
       if (error instanceof ApiError && error.code === 'VERSION_CONFLICT') setConflict(true)
+      else if (error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE' && !editing && domainOf(form.address.trim().toLowerCase().split('@')[1]!)) {
+        const host = form.address.trim().toLowerCase().split('@')[1]!, why = /another provider\. (.*?) To move it here anyway/.exec(error.detail)?.[1] ?? ''
+        setMoveHost({ host, domainId: domainOf(host)!.id, message: moveReason(why, hosts) })
+      }
       else if (error instanceof ApiError && error.fields['params.value']) setErrors({ value: error.fields['params.value'] })
       else setProblem(error)
     } finally { setBusy(false) }
@@ -517,6 +524,13 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     : <div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div>
   return <>
     <Dialog size="lg" open={open} onOpenChange={next => { if (!next) close() }} title={title} analytics="address-builder" footer={footer} className="builder">{body}</Dialog>
+    {/* Yes adds the host with consent (addReceivingHost, confirm) and creates the address again; No leaves both as they are. */}
+    <ConfirmDialog open={!!moveHost} onOpenChange={next => { if (!next) setMoveHost(null) }} title={`Move mail for ${moveHost?.host ?? ''}?`}
+      description={<>{moveHost?.message || 'Another provider receives mail there today.'} Creating this address turns receiving on there, so mail moves once you publish its MX record.{moveHost && !isSubdomainName(moveHost.host) && <> To keep that mail where it is, use a subdomain such as mail.{moveHost.host} instead.</>}</>}
+      confirmLabel={`Use ${moveHost?.host ?? ''}`} danger onConfirm={async () => {
+        await request(`/v1/inbound/domains/${encodeURIComponent(moveHost!.domainId)}/hosts`, { method: 'POST', body: { name: moveHost!.host, confirm: true }, scope })
+        void save({ preventDefault() {} } as FormEvent)
+      }} />
     <ConfirmDialog open={!!leaving} onOpenChange={next => { if (!next) setLeaving(null) }} title="Discard changes?" description="What you set here isn’t saved." confirmLabel="Discard" danger onConfirm={() => { const go = leaving; setLeaving(null); go?.() }} />
   </>
 }

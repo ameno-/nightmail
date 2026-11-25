@@ -32,8 +32,9 @@ const addedAt = sql`clock_timestamp()` as unknown as string;
 
 /** The full host for a name given as a label (acme), a host below the domain (acme.example.com) or the domain itself. */
 export function hostName(name: string, domain: string) {
+  // @ is the domain itself, as DNS zones and the dashboard's host column write it.
   const value = name.trim().toLowerCase().replace(/\.$/, '');
-  const host = value === domain || value.endsWith(`.${domain}`) ? value : `${value}.${domain}`;
+  const host = value === '@' ? domain : value === domain || value.endsWith(`.${domain}`) ? value : `${value}.${domain}`;
   const labels = host === domain ? [] : host.slice(0, -(domain.length + 1)).split('.');
   if (host.length > 253 || labels.some(label => !LABEL.test(label))) throw new ApiError(422, 'RECEIVING_HOST_INVALID', `Use ${domain} or one of its subdomains, such as acme or acme.${domain}.`, 'name');
   return host;
