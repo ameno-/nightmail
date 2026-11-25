@@ -73,7 +73,7 @@ const config = {
     'token-space': {
       level: 'report',
       title: 'Spacing from tokens',
-      why: 'Margins, padding and gaps come from the spacing scale (--space-4 … --space-40), so rhythm stays even across pages.',
+      why: 'Margins, padding and gaps come from the spacing scale (--space-4 … --space-40, and --space-2 for a track\'s inset or the split between two filled rows), so rhythm stays even across pages.',
       use: 'var(--space-N), or calc(-1 * var(--space-N)) for a negative margin.',
       properties: ['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-block', 'margin-block-start', 'margin-block-end', 'margin-inline', 'margin-inline-start', 'margin-inline-end', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'padding-block', 'padding-block-start', 'padding-block-end', 'padding-inline', 'padding-inline-start', 'padding-inline-end', 'gap', 'row-gap', 'column-gap', 'grid-gap'],
       allow: [email],
@@ -81,15 +81,15 @@ const config = {
     'token-radius': {
       level: 'report',
       title: 'Radii from tokens',
-      why: 'Corners come from the radius scale (--radius-xs 4, --radius-sm 6, --radius-lg 8), so controls and surfaces round alike.',
-      use: 'var(--radius-xs | --radius-sm | --radius-md | --radius-lg); 50% for a dot or a face.',
+      why: 'Corners come from the radius scale (--radius-xs 4, --radius-sm 6, --radius-lg 8; --radius-2xs 2 for marks, --radius-sheet 14 for a phone\'s sheet), so controls and surfaces round alike.',
+      use: 'var(--radius-xs | --radius-sm | --radius-md | --radius-lg), var(--radius-2xs) for a mark, var(--radius-sheet) for a sheet; 50% for a dot or a face.',
       allow: [email],
     },
     'token-font-size': {
       level: 'report',
       title: 'Font sizes from tokens',
-      why: 'Type has one size per role (--text-label 11 … --text-xl 24, tokens.css), and a phone steps body and titles up from the same tokens.',
-      use: 'var(--text-…) for the role: label, xs, sm, md (body), section, heading, lg, title, xl.',
+      why: 'Type has one size per role (--text-label 11 … --text-xl 24, --text-figure 22 and --text-display 26, tokens.css), and a phone steps body and titles up from the same tokens.',
+      use: 'var(--text-…) for the role: label, xs, sm, md (body), section, heading, lg, title, xl, figure, display.',
       allow: [email],
     },
     'font-family': {

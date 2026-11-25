@@ -38,7 +38,7 @@ export type EmailSnapshot = {
   unsubscribeUrl?: string;
   /** A sent required notice's email, which has no unsubscribe URL to keep: its body is re-rendered the same way. */
   requiredNotice?: true;
-  /** Bane-authored notice with a recipient-only capability; reads withhold it. */
+  /** Nightmail-authored notice with a recipient-only capability; reads withhold it. */
   sealed?: boolean;
   /** Sent from a receiving address or inbox: a reply, a new conversation, a forward or a mail-client submission. Reading it needs mailbox access. */
   mailbox?: boolean;

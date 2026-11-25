@@ -67,7 +67,7 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
 // `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice;
 // `skipped` is a workspace whose onboarding domain step this browser skipped (data/onboarding.ts).
-// dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
+// dana owns an established hosted workspace (and is a Nightmail operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [

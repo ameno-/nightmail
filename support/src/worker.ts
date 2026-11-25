@@ -270,12 +270,12 @@ const escape = (s: string) => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`
  * nothing from the email: it points to Help, where the person is signed in.
  */
 function confirm(env: Env): Response {
-  return page('Continue in Help', `<h1>Continue in Help</h1><p>To get help with your ${productName} account, sign in to <a href="${new URL(env.BANE_ORIGIN).origin}">${productName}</a> and press Help. There’s nothing to confirm here; you can close this page.</p>`);
+  return page('Continue in Help', `<h1>Continue in Help</h1><p>To get help with your ${productName} account, sign in to <a href="${new URL(env.NIGHTMAIL_ORIGIN).origin}">${productName}</a> and press Help. There’s nothing to confirm here; you can close this page.</p>`);
 }
 
 /** Support chat lives in the dashboard's Help panel; direct visits to / or /chat (such as a handoff URL) land here instead of 404. */
 function supportPage(env: Env): Response {
-  const dashboard = new URL(env.BANE_ORIGIN).origin;
+  const dashboard = new URL(env.NIGHTMAIL_ORIGIN).origin;
   return page(`${productName} Support`, `<h1>${productName} Support</h1><p>Support chat lives in the <a href="${dashboard}">${productName} dashboard</a>. Sign in and open Help, or email <a href="mailto:${addresses.support}">${addresses.support}</a> with your support reference.</p>`);
 }
 

@@ -1033,7 +1033,7 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[], arch
   };
   const textPart = (type: 'plain' | 'html', body: string): Segment[] => [`Content-Type: text/${type}; charset=UTF-8${crlf}Content-Transfer-Encoding: quoted-printable${crlf}${crlf}${quotedPrintable(body)}`];
   const multipart = (type: 'related' | 'alternative' | 'mixed', children: Segment[][]): Segment[] => {
-    const boundary = `bane_${archive ? `${archive.id}_${type}` : crypto.randomUUID()}`;
+    const boundary = `nightmail_${archive ? `${archive.id}_${type}` : crypto.randomUUID()}`;
     return [`Content-Type: multipart/${type}; boundary="${boundary}"${type === 'related' ? '; type="text/html"' : ''}${crlf}${crlf}`,
       ...children.flatMap(child => [`--${boundary}${crlf}`, ...child, crlf]), `--${boundary}--${crlf}`];
   };
@@ -1060,7 +1060,7 @@ export function inlineMessage(snapshot: EmailSnapshot, parts: Attachment[], arch
     ...(snapshot.replyTo.length ? [`Reply-To: ${snapshot.replyTo.join(`,${crlf} `)}`] : []),
     `Subject: ${/^[\x20-\x7e]{1,900}$/.test(snapshot.subject) && !snapshot.subject.includes('=?') ? snapshot.subject : encodedWords(snapshot.subject)}`,
     `Date: ${new Date(archive?.date??Date.now()).toUTCString()}`,
-    ...(archive?[`Message-ID: <${archive.id}@bane.invalid>`]:[]),
+    ...(archive?[`Message-ID: <${archive.id}@nightmail.invalid>`]:[]),
     'MIME-Version: 1.0',
     ...snapshot.headers.map(header => {
       if (!/^[A-Za-z0-9-]+$/.test(header.Name) || /[\r\n]/.test(header.Value)) throw new ApiError(422, 'INVALID_MIME_HEADER', 'Message headers cannot contain line breaks.');
