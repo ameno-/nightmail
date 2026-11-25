@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type FormEvent, type ReactNode } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useIsFetching, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useGuardedMutation } from '../../lib/single-flight'
 import { ArrowLeft, ArrowRight, ArrowUpRight, Check, ChevronRight, LogOut, Send, X } from 'lucide-react'
 import { Alert, Button, ErrorState, ErrorText, Field, Input, SecretCode, SectionHeader, Tabs, useToast } from '../../components/ui'
@@ -15,7 +15,8 @@ import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/
 import { AgentPrompt, McpSetup, agentPrompt, useAgentSetup } from '../docs/agent-setup'
 import { FirstSend } from '../docs/first-send'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
-import { ApiError, errorText, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
+import { ApiError, errorText, type BuiltinDomain, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
+import { BuiltinBadge, builtinSending } from '../settings/builtin-domain'
 import './onboarding.css'
 import { NightmailWordmark } from '../../components/NightmailLogo'
 import { apiKeyEnv, productName, secretPrefixes } from '../../../../api/src/brand'
@@ -184,6 +185,10 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   }, [awsPhase])
   const connectionState: ConnectionState | 'creating' = awsPhase === 'connected' ? 'ready' : current?.kind === 'byo' ? current.state : 'creating'
   const imported = importedCount(connection.data)
+  // Hosted: the built-in domain comes with the connection, so DNS can wait. A connection just made carries no summary of it
+  // until the session is read again (useConnectionCache), so the step waits for that read rather than showing the form first.
+  const builtin = identity?.connection?.builtinDomain
+  const readingIdentity = useIsFetching({ queryKey: ['identity'], exact: true }) > 0
   // Overview opens next: bring the identity's daily limit and counts up to date first.
   const finish = () => { setDomainStep(workspaceId, finishedStep); refreshIdentity() }
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
@@ -205,6 +210,12 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   else if (choosingDomain && flow === 'byo' && regionalDomain) {
     view = 'loading'
     content = <PendingDomain name={regionalDomain} onFound={id => { chooseRegional(null); setDomainStep(workspaceId, id ?? '') }} />
+  }
+  else if (choosingDomain && flow === 'shared' && builtin === undefined && readingIdentity) { view = 'loading'; content = <BootLoader inline /> }
+  else if (choosingDomain && flow === 'shared' && builtin?.id && builtin.sending !== 'off' && !addAnother) {
+    const builtinId = builtin.id
+    view = 'imported'
+    content = <BuiltinReady builtin={builtin} onContinue={() => setDomainStep(workspaceId, agentStep(builtinId))} onAddOwn={() => setAddAnother(true)} />
   }
   else if (choosingDomain && flow === 'byo' && imported > 0 && !addAnother) {
     view = 'imported'
@@ -366,6 +377,24 @@ function VerifyAccount({ connection }: { connection: ProviderConnection | null }
     </div>
     <Button type="submit" loading={verify.isPending} disabled={!connection} data-analytics="onboarding/byo/verify">Verify</Button>
   </form>
+}
+
+// Hosted: the workspace's built-in domain sends and receives already, with no DNS. Continue with it to the first email, or
+// add a domain of your own now (it can also be added any time later, in Domains).
+function BuiltinReady({ builtin, onContinue, onAddOwn }: { builtin: BuiltinDomain; onContinue: () => void; onAddOwn: () => void }) {
+  return <div className="onboarding onboarding--narrow">
+    <div className="onboarding-intro onb-rise" style={rise(0)}>
+      <h1 className="onboarding-title">Your domain is ready</h1>
+      <p className="muted onboarding-builtin-copy">Send and receive at any address on it now, with no DNS to set up. {builtinSending(builtin)}</p>
+    </div>
+    <ul className="onboarding-imported onb-rise" style={rise(1)}>
+      <li><span className="onboarding-builtin-name"><code>{builtin.name}</code><BuiltinBadge /></span><LiveStatus state={builtin.sending === 'pending' ? 'pending' : 'verified'} labels={{ pending: 'Setting up', verified: 'Ready' }} plain /></li>
+    </ul>
+    <div className="onboarding-connect-actions onb-rise" style={rise(2)}>
+      <Button variant="primary" data-analytics="onboarding/builtin/continue" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
+      <Button variant="ghost" data-analytics="onboarding/builtin/add-own" onClick={onAddOwn}>Add your own domain</Button>
+    </div>
+  </div>
 }
 
 // BYO with verified domains already in SES: they're done; continue, or add another.

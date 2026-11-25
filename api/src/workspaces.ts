@@ -10,6 +10,7 @@ import { accountSessionPolicy } from './account-login.js';
 import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
 import { productName } from './brand.js';
 import { shownName } from './notices.js';
+import type { Config } from './core.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -61,16 +62,19 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null) {
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null, config?: BuiltinConfig) {
   if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || productName).slice(0, 105)}'s workspace`, region);
+  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || productName).slice(0, 105)}'s workspace`, region, undefined, undefined, config);
   return true;
 }
 
 // One statement: the workspace, its regional settings and the owner membership. With `ownedBelow`,
 // nothing is inserted once the user already owns that many workspaces (the caller holds the user lock)
 // or is no longer a member of `memberOf`, the workspace the request authenticated through.
-async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }, audit?: AuditContext) {
+type BuiltinConfig = Pick<Config, 'multiTenant' | 'builtinDomain'>;
+// The built-in domain's label is given in the same transaction (builtin-domain.ts); the domain itself follows the workspace's
+// Hosted connection (provider-connections.ts).
+async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }, audit?: AuditContext, config?: BuiltinConfig) {
   const workspaceId = id('ws');
   const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
   const result = await db.execute<{ id: string; name: string; slug: string }>(sql`WITH created AS (
@@ -85,7 +89,9 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
     INSERT INTO workspace_members(id, workspace_id, user_id, role) SELECT ${id('mem')}, id, ${userId}, 'owner' FROM created
   )${audit ? sql`, audit AS (${auditInsert(audit, { action: 'workspace.create', workspaceId: sql`created.id`, target: { type: 'workspace', id: sql`created.id` }, after: { name, region } }, { from: sql`created` })})` : sql``}
   SELECT id, name, slug FROM created`);
-  return result.rows[0];
+  const row = result.rows[0];
+  if (row && config?.multiTenant && config.builtinDomain) await (await wrapModuleLoad(() => import('./builtin-domain.js'))).allocateBuiltinDomain(db, config, row.id, row.name);
+  return row;
 }
 const maxOwnedWorkspaces = 10;
 
@@ -179,7 +185,7 @@ export function registerWorkspaces(app: App) {
       // Hosted, everyone else is an approved account limited to the workspace it signed up with, not an unapproved one.
       if (c.env.config.multiTenant ? !user || policy?.staff !== true : !user || !policy || !c.env.config.allowedSubjects.includes(policy.subject))
         throw c.env.config.multiTenant ? new ApiError(403, 'WORKSPACE_LIMIT', 'Your account can have one workspace for now.') : new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
-      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c));
+      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c), c.env.config);
       if (row) return row;
       const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');

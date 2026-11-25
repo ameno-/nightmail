@@ -151,6 +151,8 @@
 .onboarding-imported { margin: 0; padding: 0; list-style: none; }
 .onboarding-imported li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); padding-block: 10px; }
 .onboarding-imported code { min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
+.onboarding-builtin-name { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.onboarding-builtin-copy { margin: 0; }
 
 /* DNS step */
 .onboarding-domain-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8) var(--space-12); }

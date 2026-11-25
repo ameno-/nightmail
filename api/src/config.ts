@@ -68,6 +68,13 @@ const values = z.object({
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
+  // Hosted only: the parent of every workspace's built-in domain (src/builtin-domain.ts), nightmail.email in production, whose
+  // SES identity is tagged for built-in domains in us-east-2 and whose wildcard MX points at Ohio. Unset (the kill switch):
+  // no new built-in domains, mail from existing ones is refused and mail to them is dropped. Never PUBLIC_URL's own domain.
+  NIGHTMAIL_BUILTIN_DOMAIN: optional(z.string().trim().toLowerCase().max(200).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Hosted only: who a built-in domain sends to. anyone (the default, 100 recipients a day) or members (the workspace
+  // members' own verified addresses, 10 a day): SEND_LIMITS.builtin.
+  NIGHTMAIL_BUILTIN_SEND_SCOPE: z.enum(['anyone', 'members']).default('anyone'),
   // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
   // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
   NIGHTMAIL_SIGNUPS_LIST_ID: z.unknown().optional(),
@@ -205,6 +212,13 @@ function planetscaleSecret(value: string | undefined) {
 }
 let signupsListIgnored = false;
 /** The sign-ups list, or undefined for a value that isn't a list ID: the optional sync is off, and nothing else is. Said once, never with the value. */
+// The built-in domains' parent is a domain of its own: never one the installation is served on, nor a parent or child of one.
+function builtinParent(name: string | undefined, origins: string[]) {
+  if (!name) return undefined;
+  const overlaps = (a: string, b: string) => a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+  if (origins.some(origin => overlaps(name, new URL(origin).hostname.toLowerCase()))) throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_BUILTIN_DOMAIN must be a domain of its own, not PUBLIC_URL’s domain or one of its earlier origins.');
+  return name;
+}
 function signupsListId(value: unknown): string | undefined {
   if (value == null || value === '') return undefined;
   if (typeof value === 'string' && /^lst_[0-9a-f]{32}$/.test(value)) return value;
@@ -282,6 +296,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
+    builtinDomain: v.MULTI_TENANT==='true' ? builtinParent(v.NIGHTMAIL_BUILTIN_DOMAIN, [url.origin, ...previousOrigins]) : undefined, builtinScope: v.NIGHTMAIL_BUILTIN_SEND_SCOPE,
     signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT

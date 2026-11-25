@@ -8,6 +8,7 @@ import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorks
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain, type ReceivingHost } from '../../data/types'
+import { productName } from '../../../../api/src/brand'
 import { request } from '../../data/live'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { mxTone, receivingStatus } from '../inbound/status'
@@ -18,6 +19,7 @@ import { DnsRecordTable, DnsWaitNote, DomainRecords, checkSummary, dnsChecks, do
 import { cancelDomainQueries, forgetDomain, invalidate } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 import { DomainSetupAlert, RecordsCorrectAlert, recordsCorrect, setupGap } from './domain-setup-alert'
+import { BuiltinBadge, builtinFirst, builtinStatus } from './builtin-domain'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
   const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${zoneLines(records)}\n`
@@ -105,7 +107,7 @@ function DomainsList() {
   const receivingOf = (id: string) => inbound.data?.find(d => d.id === id)
   const quota = domains.data?.quota
   const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true, invalidate.domains)
-  const [open, setOpen] = useState(() => Boolean(params.get('add')))
+  const [open, setOpen] = useState(() => params.has('add'))
   const [name, setName] = useState(() => params.get('add') ?? '')
   const [invalid, setInvalid] = useState('')
   function openCreate() { create.reset(); setName(''); setInvalid(''); setOpen(true) }
@@ -124,8 +126,8 @@ function DomainsList() {
   return <div className="stack measure-list measure-list--narrow">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
-        { ...columns[0], render: row => <span className="domain-name" title={row.name}>{row.name}</span> },
+      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={builtinFirst(domains.data?.items ?? [])} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+        { ...columns[0], render: row => <span className="domain-name-cell"><span className="domain-name" title={row.name}>{row.name}</span>{row.builtIn && <BuiltinBadge />}</span> },
         { ...columns[1], render: row => <SendingCell domain={row} /> },
         { ...columns[2], render: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} />, cardRender: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} card /> },
         { ...columns[3], render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted" title={inbound.error ? 'Couldn’t load receiving status' : undefined}>—</span> } },
@@ -243,6 +245,7 @@ function DomainDetail() {
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   // Check now's answers, or until it is pressed the background check's that the domain's reads carry (domain-setup-alert.tsx).
   const pressed = checks?.id === id ? checks.found : undefined, gap = setupGap(current, pressed)
+  if (current.builtIn) return <BuiltinDomainDetail domain={current} backTo={then || '/domains'} />
   return <div className="stack domain-page">
     <PageHeader title={current.name} backTo={then || '/domains'} actions={<>
       <StatusBadge status={state.status} tone={state.tone} />
@@ -273,6 +276,25 @@ function DomainDetail() {
     </Dialog>
   </div>
 }
+
+// The built-in domain has no records, MAIL FROM, hosts or Delete: what it is, who it sends to, and where its mail goes. Its
+// catch-all is a route to the default inbox (api/src/builtin-domain.ts), which Receiving shows with its addresses.
+function BuiltinDomainDetail({ domain, backTo }: { domain: Domain; backTo: string }) {
+  const builtin = useSession()?.identity?.connection?.builtinDomain
+  const state = domainState(domain)
+  return <div className="stack domain-page">
+    <PageHeader title={domain.name} backTo={backTo} actions={<><BuiltinBadge /><StatusBadge status={state.status} tone={state.tone} /></>} />
+    <div className="domain-sections">
+      <section className="section stack" aria-label="Built-in domain">
+        <SectionHeader title="Built-in domain" />
+        <p className="muted domain-builtin-copy">{[`${productName} set this domain up for your workspace, so it needs no DNS.`, builtin?.name === domain.name ? builtinStatus(builtin) : null,
+          'Once a domain of your own verifies, it stops sending and keeps receiving.', `Mail to an address with no inbox or route of its own goes to ${BUILTIN_INBOX}@${domain.name}.`].filter(Boolean).join(' ')}</p>
+        <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving?domain=${encodeURIComponent(domain.name)}`}>Open in Receiving</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/domains?add">Add your own domain</Link></div>
+      </section>
+    </div>
+  </div>
+}
+const BUILTIN_INBOX = 'hello'
 
 // Self-hosted receiving. Enabling it on a domain that isn't verified yet is refused by the API, which says so inline.
 function MailboxReceiving({ domainId, domainName }: { domainId: string; domainName: string }) {
