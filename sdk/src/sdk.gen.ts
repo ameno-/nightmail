@@ -1523,7 +1523,7 @@ export const previewEmail = <ThrowOnError extends boolean = false>(options: Opti
 });
 
 /**
- * Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * Sent emails, newest first. from and to (or since and until) are ISO 8601 times that bound when an email was created, not addresses: filter by sender or recipient address with search. Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  */
 export const listEmails = <ThrowOnError extends boolean = false>(options?: Options<ListEmailsData, ThrowOnError>): RequestResult<ListEmailsResponses, ListEmailsErrors, ThrowOnError> => (options?.client ?? client).get<ListEmailsResponses, ListEmailsErrors, ThrowOnError>({
     security: [

@@ -16207,6 +16207,31 @@ describe('Dashboard API capabilities', () => {
     assert.deepEqual(page(await http('GET', `/v1/emails?${query}`, key.secret)).map(row => row.id), [ids[2], ids[0]], 'Search must treat percent, underscore and backslash literally.');
     query.set('to', from);
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422);
+    // from and to are times, not addresses: integrations read them as sender and recipient (a production key sent an
+    // address in from 13 times in 3 minutes). The refusal names the field, says what it is, and points to search.
+    for (const [field, value, said] of [
+      ['from', contact.email, /^Request fields are invalid: from: `from` is an ISO 8601 date-time \(the start of the time range\), such as [^,]+, not an email address, and this looks like one\. To filter by sender address, use `search`\.$/],
+      ['to', contact.email, /`to` is an ISO 8601 date-time \(the end of the time range\).*looks like one\. To filter by recipient address, use `search`\.$/],
+      ['since', 'yesterday', /`since` is an ISO 8601 date-time \(the start of the time range\), such as [^,]+\. To filter by sender address, use `search`\.$/],
+      ['until', '2026-11-01', /`until` is an ISO 8601 date-time \(the end of the time range\)/],
+    ] as const) {
+      const refused = error(await http('GET', `/v1/emails?${new URLSearchParams({ [field]: value })}`, key.secret), 422, 'VALIDATION_FAILED');
+      assert.equal(refused.field, field); assert.match(refused.message, said);
+    }
+    // since and until are from and to by clearer names: the same rows and the same pages, a cursor serving either.
+    const bounds = (start: string, end: string, names: ['from', 'to'] | ['since', 'until']) => new URLSearchParams({ search: marker, kind: 'transactional', region: REGION, [names[0]]: start, [names[1]]: end, limit: '2' });
+    const byFrom = await http('GET', `/v1/emails?${bounds(from, to, ['from', 'to'])}`, key.secret), bySince = await http('GET', `/v1/emails?${bounds(from, to, ['since', 'until'])}`, key.secret);
+    assert.deepEqual(page(bySince).map(row => row.id), [ids[2], ids[1]]);
+    assert.deepEqual(bySince.body, byFrom.body);
+    const next = bounds(from, to, ['since', 'until']); next.set('cursor', byFrom.body.nextCursor);
+    assert.deepEqual(page(await http('GET', `/v1/emails?${next}`, key.secret)).map(row => row.id), [ids[0]]);
+    // They filter: nothing created at or after the end, or before the start.
+    assert.deepEqual(page(await http('GET', `/v1/emails?${bounds(to, new Date(Date.parse(to) + 60_000).toISOString(), ['since', 'until'])}`, key.secret)), []);
+    assert.deepEqual(page(await http('GET', `/v1/emails?${bounds(new Date(Date.parse(from) - 60_000).toISOString(), from, ['since', 'until'])}`, key.secret)), []);
+    // One name per bound, and the start before the end, whichever names are used.
+    assert.match(error(await http('GET', `/v1/emails?${new URLSearchParams({ from, since: from })}`, key.secret), 422, 'VALIDATION_FAILED').message, /since and from are the same filter \(the start of the time range\): send one of them/);
+    assert.match(error(await http('GET', `/v1/emails?${new URLSearchParams({ to, until: to })}`, key.secret), 422, 'VALIDATION_FAILED').message, /until and to are the same filter/);
+    assert.match(error(await http('GET', `/v1/emails?${new URLSearchParams({ since: to, to: from })}`, key.secret), 422, 'VALIDATION_FAILED').message, /from must precede to/);
     query.set('to', to); query.set('region', 'not-configured');
     error(await http('GET', `/v1/emails?${query}`, key.secret), 422, 'REGION_NOT_CONFIGURED');
     const metricQuery = new URLSearchParams({ from, to, region: REGION, stream: 'transactional' });

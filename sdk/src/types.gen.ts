@@ -10943,11 +10943,25 @@ export type ListEmailsData = {
         region?: string;
         kind?: 'transactional' | 'marketing';
         /**
-         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address.
          */
         search?: string;
+        /**
+         * The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them.
+         */
         from?: string;
+        /**
+         * The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them.
+         */
         to?: string;
+        /**
+         * The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both.
+         */
+        since?: string;
+        /**
+         * The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both.
+         */
+        until?: string;
     };
     url: '/v1/emails';
 };
