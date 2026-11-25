@@ -15402,7 +15402,10 @@ describe('Private attachment assets and campaign revisions', () => {
     const urlSafe = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'binary.bin', content: Buffer.from([0xfb, 0xff, 0xbf, 0xfe, 0x01]).toString('base64url') }), 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${urlSafe.id}`, key.secret), [200, 404]); });
     assert.equal(ok(await http('GET', `/v1/attachments/${urlSafe.id}/content`, key.secret)).content, Buffer.from([0xfb, 0xff, 0xbf, 0xfe, 0x01]).toString('base64'));
-    for (const content of ['QUJDR', 'QUJD\x01RA==', 'QUJD====', 'data:text/plain;base64,QUJDRA==']) error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content }), 422, 'INVALID_BASE64');
+    // Each says why from the content's shape alone: one offending character at most.
+    assert.deepEqual(await Promise.all(['QUJDR', 'QUJD\x01RA==', 'QUJD====', 'data:text/plain;base64,QUJDRA=='].map(async content => error(await http('POST', '/v1/attachments', key.secret, { filename: 'bad.txt', content }), 422, 'INVALID_BASE64').message.replace(/^Attachment content must be base64 of the file's bytes \(standard or URL-safe alphabet; spaces and line breaks are ignored\), but /, ''))),
+      ['its 5 characters without padding can\'t be base64 (one character past a multiple of 4).', 'character 5 (spaces and line breaks removed) is "\\u0001", which is not in the base64 alphabet (A-Z, a-z, 0-9, + and /, or - and _).',
+        'it ends in 4 = padding characters, and base64 has at most 2.', 'it starts with a data: URL prefix: send only the base64 after the comma.']);
     const calendar = Buffer.from('BEGIN:VCALENDAR\r\nVERSION:2.0\r\nMETHOD:REQUEST\r\nEND:VCALENDAR\r\n');
     const upload = async (filename: string, contentType: string, content: Buffer, extra: Record<string, string> = {}) => {
       const response = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': contentType, 'x-bane-filename': encodeURIComponent(filename), ...extra }, body: Uint8Array.from(content).buffer });
@@ -15420,10 +15423,21 @@ describe('Private attachment assets and campaign revisions', () => {
     const current=ok(await upload('ignored.gif','image/gif',Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64'),{'x-nightmail-filename':'new%20logo.gif','x-nightmail-disposition':'inline','x-nightmail-content-id':'nightmail-logo','x-bane-content-id':'bane-logo'}),201);
     cleanup(t,async()=>{ok(await http('DELETE',`/v1/attachments/${current.id}`,key.secret),[200,404]);});
     assert.deepEqual([current.filename,current.disposition,current.contentId],['new logo.gif','inline','nightmail-logo']);
+    // Every header that is wrong at once, each with what it held (or that it is missing) and what it must be.
+    const headers = await fetch(`${BASE}/v1/attachments/upload`, { method: 'POST', headers: { authorization: `Bearer ${key.secret}`, 'content-type': 'pdf', 'x-nightmail-disposition': 'sideways', 'x-nightmail-content-id': 'logo one' }, body: Uint8Array.from(bytes).buffer });
+    const wrong = error({ status: headers.status, body: await headers.json(), headers: headers.headers }, 422, 'ATTACHMENT_METADATA_INVALID');
+    assert.deepEqual([wrong.field, wrong.details.map((d: Json) => [d.field, d.value])], ['filename', [['filename', ''], ['contentType', 'pdf'], ['disposition', 'sideways'], ['contentId', 'logo one']]]);
+    assert.equal(wrong.message, '4 attachment fields are invalid: filename (X-Nightmail-Filename header) is missing: it must be the file\'s name: 1 to 200 characters, without control characters, / or \\; contentType (Content-Type header) is "pdf": it must be a MIME type such as application/pdf (type/subtype, optionally with ; parameters), at most 78 printable ASCII characters; disposition (X-Nightmail-Disposition header) is "sideways": it must be attachment (the default) or inline; contentId (X-Nightmail-Content-Id header) is "logo one": it must be 1 to 78 letters, digits, _ . @ or -, for an inline image the HTML shows as cid:<contentId>.');
+    // A send names every attachment problem at once, email by email: a missing file, one listed twice.
+    const several = error(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail({ attachments: ['attachment_missing'] }), mail(), mail({ attachments: [raw.id, raw.id] })] }), 404, 'ATTACHMENT_NOT_FOUND');
+    assert.deepEqual([several.field, several.details.map((d: Json) => [d.index, d.attachment, d.code])], ['emails.0.attachments.0', [[0, 0, 'ATTACHMENT_NOT_FOUND'], [2, 1, 'DUPLICATE_ATTACHMENT']]]);
+    assert.equal(several.message, '2 attachment problems: emails.0.attachments.0: attachment_missing was not found in this workspace: upload the file (POST /v1/attachments, or /v1/attachments/upload for raw bytes) and list the id it returns; emails.2.attachments.1: "invite.ics" is the same file as attachments.0: list each file once.');
     error(await upload('unsafe.vbs', 'text/plain', bytes), 422, 'UNSUPPORTED_ATTACHMENT_TYPE');
     error(await upload('inline.pdf', 'application/pdf', Buffer.from('%PDF-1.7'), { 'x-bane-disposition': 'inline' }), 422, 'INLINE_ATTACHMENT_INVALID');
     // 8 MiB + 1 stays within the base64 character ceiling but exceeds the decoded cap.
-    error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    const oversize = error(await http('POST', '/v1/attachments', key.secret, { filename: 'oversize.txt', content: Buffer.alloc(8 * 1024 * 1024 + 1).toString('base64') }, {}, 10_000), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    assert.match(oversize.message, /^Attachment "oversize\.txt" is 8\.0 MiB \(8,388,609 bytes\) decoded\. That route takes at most 8 MiB: upload files up to 25 MiB as raw bytes to POST \/v1\/attachments\/upload instead\. One file is at most 8 MiB .* One email carries at most 100 files and 25 MiB of them together, decoded\. A workspace keeps at most 100 GiB/);
+    assert.deepEqual(oversize.details, [{ limit: 'jsonFile', maxBytes: 8 * 1024 * 1024, bytes: 8 * 1024 * 1024 + 1 }]);
     // An attachment belongs to the workspace, not a sender domain: a domain-restricted send key can't delete one.
     const scoped = await keyFixture(t, { permissions: ['send'], domains: ['restricted.example.com'] });
     error(await http('DELETE', `/v1/attachments/${attachment.id}`, scoped.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
@@ -15441,12 +15455,14 @@ describe('Private attachment assets and campaign revisions', () => {
     // The sent email keeps its attachment (409 ATTACHMENT_IN_USE); the unused one goes.
     cleanup(t, async () => { for (const file of [big, small]) ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404, 409]); });
     assert.equal(big.size, max);
-    error(await upload('over.txt', max + 1), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    assert.match(error(await upload('over.txt', max + 1), 413, 'ATTACHMENT_LIMIT_EXCEEDED').message, /^Attachment "over\.txt" is 25\.0 MiB \(26,214,401 bytes\) decoded\. No file may be larger than 25 MiB: link to it from the email instead\./);
     const content = ok(await http('GET', `/v1/attachments/${big.id}/content`, key.secret, undefined, {}, 30_000)).content as string;
     assert.ok(content.length === Math.ceil(max / 3) * 4 && Buffer.from(content, 'base64').equals(Buffer.alloc(max, 0x61)), 'The download is the whole file as canonical base64.');
     // One message may carry 25 MiB of files; one byte more is refused before anything is queued.
     ok(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id] })), 202);
-    error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id, small.id] })), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    const together = error(await http('POST', '/v1/emails/send', key.secret, mail({ attachments: [big.id, small.id] })), 413, 'ATTACHMENT_LIMIT_EXCEEDED');
+    assert.equal(together.field, 'attachments');
+    assert.match(together.message, /^attachments: the files are 25\.0 MiB \(26,214,401 bytes\) together, decoded \(attachments\.0 "big\.txt" 25\.0 MiB \(26,214,400 bytes\), attachments\.1 "small\.txt" 1 byte\), and one email carries at most 25 MiB: send fewer or smaller files, split them across emails, or link to large files from the email\. One file is at most 8 MiB/);
     // A file inside JSON stays at 8 MiB: exactly 8 MiB is accepted (8 MiB + 1 is refused above).
     const json = ok(await http('POST', '/v1/attachments', key.secret, { filename: 'json.txt', content: Buffer.alloc(8 * 1024 * 1024, 0x62).toString('base64') }, {}, 30_000), 201);
     cleanup(t, async () => { ok(await http('DELETE', `/v1/attachments/${json.id}`, key.secret), [200, 404]); });
@@ -18278,7 +18294,8 @@ describe('Campaign authorization and dispatch credentials', () => {
       // The stored sender standing (score limit, ladder step) is read inside that same statement.
       await gradedSender(db, wid, 2000);
       const meter = await queryBudget(t, db);
-      await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      // A refused attachment costs one more read: the one that names every attachment problem in the send.
+      await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 2);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
       // The statement applies the mailbox rule too: an upload that has gone out only in conversation mail is attached by
       // a key that can read mailboxes, and any key attaches an upload that is not conversation content.
@@ -18286,7 +18303,7 @@ describe('Campaign authorization and dispatch credentials', () => {
       for (const key of [sender, managing]) { secrets.add(key.secret); ok(await request('GET', '/v1/me', key.secret)); }
       const conversationFile = ok(await local('POST', '/v1/attachments', file), 201);
       await db.query("INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) VALUES($1,$2,'mailbox','matt_fixture')", [wid, conversationFile.id]);
-      await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 1);
+      await meter('conversation-attachment-denied', async () => error(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [conversationFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 2);
       await meter('conversation-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', managing.secret, { ...direct, attachments: [conversationFile.id] }), 202), 1);
       await meter('shared-attachment-admitted', async () => ok(await request('POST', '/v1/emails/send', sender.secret, { ...direct, attachments: [privateFile.id] }), 202), 1);
     });
@@ -27640,6 +27657,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         svgInline:'ATTACHMENT_TYPE_UNSCREENABLE',svgAsPng:'ATTACHMENT_TYPE_UNSCREENABLE',fakePdf:'ATTACHMENT_CONTENT_MISMATCH',imageOnly:'CONTENT_IMAGE_ONLY',banner:'CONTENT_IMAGE_ONLY',minSized:'accepted',styledSize:'CONTENT_IMAGE_ONLY',fillerWords:'CONTENT_IMAGE_ONLY',logoShort:'accepted',
         ...Object.fromEntries(Object.keys(screenCorpus()).map(name=>[name,'accepted']))});
       assert.equal(report.sent,mail.length-9);
+      // Several files a probation sender can't attach are refused once, each with what is wrong with it: its size and what
+      // its first bytes are, never any of its content.
+      const several=error(await local('POST','/v1/emails/send',{from:'a@screened.invalid',to:'success@simulator.amazonses.com',subject:'several',html:`<img src="cid:logo2" alt="Receipt" width="120" height="40"><p>${copy}</p>`,attachments:[pdf,fakePdf,svgAsPng]},'live',{authorization:`Bearer ${key.secret}`}),422,'ATTACHMENT_CONTENT_MISMATCH');
+      assert.deepEqual([several.field,several.details.map((d:Json)=>[d.attachment,d.id,d.code])],['attachments.1',[[1,fakePdf,'ATTACHMENT_CONTENT_MISMATCH'],[2,svgAsPng,'ATTACHMENT_TYPE_UNSCREENABLE']]]);
+      assert.match(several.message,/^2 attachment problems: attachments\.1: Hosted sending cannot deliver "invoice\.pdf": its content is 9 bytes that match no known file signature, but its name \(\.pdf\) and declared type \(application\/pdf\) say a PDF\. .*; attachments\.2: Hosted sending cannot screen "logo\.png": its content is SVG markup, and SVG images are not delivered: convert it to PNG/);
+      assert.ok(!several.message.includes('not a pdf') && !several.message.includes('SampleMarker'),'No content is echoed.');
       const reading=(html:string)=>html.replace(/<[^>]*>/g,'').replace(/&nbsp;/g,' ').replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"').normalize('NFKC').replace(/[\p{Cf}\p{Mn}\s]/gu,'');
       for (const {subject,html,text} of mail) {
         const sent=delivered.get(screenedText(subject));
@@ -31457,7 +31480,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await meter('denied-batch',async()=>assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,late]},'live',headers),403,'SENDER_DOMAIN_NOT_VERIFIED').field,'emails.1.from'),1);
       assert.equal(await used(),credits+1,'A rejected request is still charged exactly once');
       // A denied batch names the item that failed: in the denial's checks and in local preparation.
-      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND').field,'emails.1');
+      assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,{...good,attachments:['missing-asset']}]},'live',headers),404,'ATTACHMENT_NOT_FOUND').field,'emails.1.attachments.0');
       const crowded={...good,kind:'marketing',headers:Array.from({length:14},(_,i)=>({name:`X-Fixture-${i}`,value:'v'}))};
       assert.equal(error(await local('POST','/v1/emails/batch',{emails:[good,crowded]},'live',headers),422,'TOO_MANY_HEADERS').field,'emails.1.headers');
       assert.equal(error(await local('POST','/v1/emails/send',crowded,'live',headers),422,'TOO_MANY_HEADERS').field,'headers','A single send keeps its own field.');

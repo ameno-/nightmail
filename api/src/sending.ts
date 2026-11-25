@@ -29,7 +29,7 @@ import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
+import { AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -43,6 +43,7 @@ import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Byt
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
 import { assertBuiltinInput, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_REFUSALS_TEXT, ATTACHMENT_RULES_TEXT, UPLOAD_HEADERS } from './attachment-limits.js';
 import { estimateFinish, judgeReadiness, RAMP, RAMP_HOUR_MS, rampPlan, rampStart, READINESS_REASONS, type RampAt, type ReadinessReason } from './standing-model.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -58,7 +59,7 @@ const MAX_BODY = 512 * 1024;
 // Upload storage and batch expansion; the limits a send is admitted against are in send-limits.ts. Stored uploads are
 // kept as long as their emails (30 days) and unused ones 30 days, so the stored quota is a rolling volume: it is set far
 // above any month of real attachments (100 GiB is about 100,000 emails with a 1 MB file) and only stops runaway uploads.
-const SENDING_LIMITS = { storedAttachmentBytes: 100 * 1024 * 1024 * 1024, expandedCampaignBytes: 128 * 1024 * 1024 } as const;
+const SENDING_LIMITS = { expandedCampaignBytes: 128 * 1024 * 1024 } as const;
 const limitsTable = (runtime: Pick<Runtime, 'config'>) => sql.identifier(runtime.config.multiTenant ? 'regional_workspace_limits' : 'sending_region_limits');
 // Preparation is bounded by bytes (4 MiB) and time (10 s) per job; a large row limit keeps small
 // campaigns to one scheduler hop instead of one per thousand recipients.
@@ -116,7 +117,10 @@ const StoredTemplateData = z.record(z.string(), z.unknown()).default({}).refine(
   try { return JSON.stringify(value).length <= 262144; } catch { return false; }
 }, 'Template data must be JSON serializable and at most 262,144 serialized characters.').describe('JSON substitution data, including nested objects and arrays, is passed unchanged to SES. SES stored templates do not automatically escape HTML: callers must escape untrusted values for their HTML context. Maximum serialized JSON length: 262,144 characters.');
 const Region = z.string().min(1).max(40);
-const AttachmentIds = z.array(z.string().min(1).max(120)).max(SEND_LIMITS.attachments).default([]);
+const AttachmentIds = z.array(z.string().min(1).max(120)).max(SEND_LIMITS.attachments).default([])
+  .describe(`IDs of files uploaded first (uploadAttachment). ${ATTACHMENT_LIMITS_TEXT}`);
+/** The send docs' attachment rules (sendEmail, sendEmailBatch, uploadAttachment), so an agent knows them before a refusal. */
+const ATTACHMENT_NOTE = `Attachments: ${ATTACHMENT_LIMITS_TEXT} ${ATTACHMENT_RULES_TEXT} ${ATTACHMENT_REFUSALS_TEXT}`;
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
   from: Address.describe('An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace\u2019s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.'), fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
@@ -871,10 +875,67 @@ const pausing = (audit: AuditContext | Ctx): CampaignChange => async (db, a, cam
 };
 /** Pausing a campaign (POST /v1/campaigns/{id}/pause, and a support action the customer confirmed signed in), in the caller's transaction. */
 export const pauseSendingCampaign = (runtime: Runtime, db: DbExecutor, a: Actor, campaignId: string, audit: AuditContext | Ctx) => controlCampaign(runtime, db, a, campaignId, pausing(audit));
-type AttachmentSize = Pick<typeof attachments.$inferSelect, 'id' | 'size' | 'contentId'>;
-function sesAttachment(metadata: { contentId?: string | null; contentType?: string }) {
-  const max = SEND_LIMITS.mimeFieldChars;
-  if ((metadata.contentId?.length ?? 0)>max || (metadata.contentType && (metadata.contentType.length>max || /[^ -~]/.test(metadata.contentType)))) throw new ApiError(422,'ATTACHMENT_METADATA_INVALID',`SES attachment content IDs and MIME types must fit in ${max} printable ASCII characters.`,'attachments');
+type AttachmentFacts = Pick<typeof attachments.$inferSelect, 'id' | 'size' | 'contentId'> & Partial<Pick<typeof attachments.$inferSelect, 'filename' | 'contentType'>>;
+/** What Amazon SES refuses in an attachment's content ID and MIME type, by field. */
+function sesProblems(metadata: { contentId?: string | null; contentType?: string | null }) {
+  const max = SEND_LIMITS.mimeFieldChars, out: Partial<Record<'contentId' | 'contentType', string>> = {};
+  if ((metadata.contentId?.length ?? 0) > max) out.contentId = `is ${metadata.contentId!.length} characters, and Amazon SES takes at most ${max}`;
+  if (metadata.contentType && metadata.contentType.length > max) out.contentType = `is ${metadata.contentType.length} characters, and Amazon SES takes at most ${max}`;
+  else if (metadata.contentType && /[^ -~]/.test(metadata.contentType)) out.contentType = 'has characters outside printable ASCII, which Amazon SES refuses';
+  return out;
+}
+function sesAttachment(metadata: { filename?: string; contentId?: string | null; contentType?: string }) {
+  const problems = sesProblems(metadata), fields = Object.keys(problems) as (keyof typeof problems)[];
+  if (fields.length) throw metadataInvalid(metadata, fields, false, problems);
+}
+type AttachmentProblem = { index: number; attachment?: number; id?: string; filename?: string; code: string; status: number; message: string };
+/**
+ * Every problem with the attachments of each email in a send, email by email and file by file, so a caller learns every
+ * rule it broke in one try (a production agent found them one refusal at a time): a file missing or listed twice, a
+ * content ID or type SES refuses, a content ID two files share, and files that together pass an email's limit, each
+ * with its size.
+ */
+function attachmentProblems(lists: string[][], byId: Map<string, AttachmentFacts>): AttachmentProblem[] {
+  const problems: AttachmentProblem[] = [];
+  for (const [index, list] of lists.entries()) {
+    const seen = new Map<string, number>(), cids = new Map<string, number>(), found: { k: number; row: AttachmentFacts }[] = [];
+    for (const [k, id] of list.entries()) {
+      const row = byId.get(id), at = { index, attachment: k, id, ...(row?.filename ? { filename: row.filename } : {}) }, name = row?.filename ? quoted(row.filename) : id;
+      if (seen.has(id)) { problems.push({ ...at, code: 'DUPLICATE_ATTACHMENT', status: 422, message: `${name} is the same file as attachments.${seen.get(id)}: list each file once` }); continue; }
+      seen.set(id, k);
+      if (!row) { problems.push({ ...at, code: 'ATTACHMENT_NOT_FOUND', status: 404, message: `${id} was not found in this workspace: upload the file (POST /v1/attachments, or /v1/attachments/upload for raw bytes) and list the id it returns` }); continue; }
+      found.push({ k, row });
+      for (const [field, why] of Object.entries(sesProblems(row))) problems.push({ ...at, code: 'ATTACHMENT_METADATA_INVALID', status: 422, message: `${name}'s ${field} ${why}` });
+      if (row.contentId) {
+        const other = cids.get(row.contentId);
+        if (other === undefined) cids.set(row.contentId, k);
+        else problems.push({ ...at, code: 'DUPLICATE_CONTENT_ID', status: 422, message: `${name} has contentId ${quoted(row.contentId)}, as attachments.${other} does: each inline file needs its own` });
+      }
+    }
+    const total = found.reduce((n, f) => n + f.row.size, 0);
+    if (total > SEND_LIMITS.attachmentBytes) problems.push({ index, code: 'ATTACHMENT_LIMIT_EXCEEDED', status: 413,
+      message: `the files are ${sizeText(total)} together, decoded (${found.map(f => `attachments.${f.k}${f.row.filename ? ` ${quoted(f.row.filename)}` : ''} ${sizeText(f.row.size)}`).join(', ')}), and one email carries at most ${mib(SEND_LIMITS.attachmentBytes)}: send fewer or smaller files, split them across emails, or link to large files from the email` });
+  }
+  return problems;
+}
+/** One refusal naming every problem: the first one's status, code and field, and each in the message and error.details. */
+function attachmentRefusal(problems: AttachmentProblem[], batch: boolean) {
+  const path = (p: AttachmentProblem) => `${batch ? `emails.${p.index}.` : ''}attachments${p.attachment === undefined ? '' : `.${p.attachment}`}`;
+  const line = (p: AttachmentProblem) => `${path(p)}: ${p.message.replace(/\.$/, '')}`, first = problems[0]!;
+  const limits = problems.some(p => p.code === 'ATTACHMENT_LIMIT_EXCEEDED') ? ` ${ATTACHMENT_LIMITS_TEXT}` : '';
+  const error = new ApiError(first.status, first.code, `${problems.length > 1 ? `${problems.length} attachment problems: ` : ''}${problems.map(line).join('; ')}.${limits}`, path(first));
+  error.details = problems.map(p => ({ ...(batch ? { index: p.index } : {}), ...(p.attachment === undefined ? {} : { attachment: p.attachment }), ...(p.id ? { id: p.id } : {}),
+    ...(p.filename ? { filename: p.filename } : {}), code: p.code, message: line(p) }));
+  return error;
+}
+const ATTACHMENT_REFUSALS = new Set(['ATTACHMENT_NOT_FOUND', 'ATTACHMENT_LIMIT_EXCEEDED', 'DUPLICATE_CONTENT_ID', 'ATTACHMENT_METADATA_INVALID', 'DUPLICATE_ATTACHMENT']);
+/** Before admitted: send_admission's attachment refusal (the first problem, for one email) becomes every problem in the send. */
+async function refusedAttachments(runtime: Runtime, a: Actor, d: Admitted | Refused, out: Outgoing[], batch: boolean) {
+  if (d.allowed || !ATTACHMENT_REFUSALS.has(d.code)) return;
+  const lists = out.map(m => m.snapshot.attachments), ids = [...new Set(lists.flat())];
+  const rows = ids.length ? await runtime.db.select().from(attachments).where(and(scope(attachments, a), scopedAttachment(a), inArray(attachments.id, ids))) : [];
+  const problems = attachmentProblems(lists, new Map(rows.map(row => [row.id, row])));
+  if (problems.length) throw attachmentRefusal(problems, batch);
 }
 function sesHeaders(count: number) {
   if (count>15) throw new ApiError(422,'TOO_MANY_HEADERS','SES accepts at most 15 message headers including unsubscribe and threading headers.','headers');
@@ -883,11 +944,9 @@ function distinctAttachmentIds(ids: string[]) {
   if (new Set(ids).size !== ids.length) throw duplicateAttachment();
   return ids;
 }
-function validateAttachmentRows(ids: string[], rows: AttachmentSize[]) {
-  if (rows.length !== ids.length) throw new ApiError(404, 'ATTACHMENT_NOT_FOUND', 'One or more attachments were not found in this workspace.');
-  if (rows.reduce((n, row) => n + row.size, 0) > SEND_LIMITS.attachmentBytes) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Combined attachments may not exceed ${mib(SEND_LIMITS.attachmentBytes)} of decoded data.`);
-  const cid = rows.flatMap(r => r.contentId ? [r.contentId] : []);
-  if (new Set(cid).size !== cid.length) throw new ApiError(422, 'DUPLICATE_CONTENT_ID', 'Inline content IDs must be unique.');
+function validateAttachmentRows(ids: string[], rows: AttachmentFacts[]) {
+  const problems = attachmentProblems([ids], new Map(rows.map(row => [row.id, row])));
+  if (problems.length) throw attachmentRefusal(problems, false);
 }
 export async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false, conversation = false) {
   if (!ids.length) return [];
@@ -1199,7 +1258,7 @@ async function screenRefusal(runtime: Runtime, snapshot: EmailSnapshot, index?: 
 }
 // A message from content the caller validated, before admission decides where it goes. `rows`: the attachments that
 // size the copy (a campaign's), or null when admission sizes it.
-async function prepare(request: SendRequest, rows: AttachmentSize[] | null, htmlValidated = false): Promise<EmailSnapshot> {
+async function prepare(request: SendRequest, rows: AttachmentFacts[] | null, htmlValidated = false): Promise<EmailSnapshot> {
   const snapshot = structuredSnapshot({ ...request, region: request.region ?? '' });
   sesHeaders(snapshot.headers.length + (request.kind === 'marketing' ? 2 : 0));
   if (!htmlValidated && snapshot.html) await validateHtmlUrls(snapshot.html);
@@ -1494,7 +1553,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
   const allAttachIds = [...new Set(out.flatMap(m => m.snapshot.attachments))];
   let loadedAttachments: Map<string, typeof attachments.$inferSelect> | undefined;
   type ScreenTask = { index: number; message: Outgoing; copy: EmailSnapshot; hosted: boolean; required: boolean; rules: 'probation' | 'standard' | null; region: string };
-  const tasks: ScreenTask[] = [];
+  const tasks: ScreenTask[] = [], unsendable: AttachmentProblem[] = [];
   for (const [i, m] of out.entries()) {
     const route = decided.mails[i]!;
     const conn = route.connection;
@@ -1517,14 +1576,18 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
           const rows = await db.select().from(attachments).where(and(scope(attachments, a), inArray(attachments.id, allAttachIds))).orderBy(asc(attachments.id));
           loadedAttachments = new Map(rows.map(r => [r.id, r]));
         }
-        for (const attId of m.snapshot.attachments) {
+        // Every file of every email is read before refusing, so one refusal names them all.
+        for (const [k, attId] of m.snapshot.attachments.entries()) {
           const attRow = loadedAttachments.get(attId);
           if (!attRow) continue;
           const body = await verifiedAttachment(runtime, attRow);
           try {
             if (rules === 'standard') delivery.shownAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
             else delivery.screenedAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
-          } catch (error) { throw atItem(error, batch ? i : undefined); }
+          } catch (error) {
+            if (!(error instanceof ApiError)) throw error;
+            unsendable.push({ index: i, attachment: k, id: attId, filename: attRow.filename, code: error.code, status: error.status, message: error.message });
+          }
         }
       }
     }
@@ -1540,6 +1603,7 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
       tasks.push({ index: i, message: m, copy, hosted, required: hosted && (!trusted || m.snapshot.kind === 'marketing'), rules, region: route.region });
     }
   }
+  if (unsendable.length) throw attachmentRefusal(unsendable, batch);
   if (!tasks.length) return;
   if (!settings) {
     if (tasks.some(t => t.required)) throw unavailableScreenError('Hosted content screening is unavailable; retry shortly.');
@@ -1647,6 +1711,7 @@ async function prepareFrontDoor(runtime: Runtime, a: Actor, out: Outgoing[], bat
     ...(scheduledAt ? scheduledCharges(runtime, out, scheduledAt) : charges(runtime, out)) }, undefined, actorAssets(a, out.flatMap(m => m.snapshot.attachments)));
   const { rows: [pre] } = await runtime.db.execute<{ s: Admitted | Refused; probation: ProbationReason | null }>(sql`
     SELECT ${check} AS s, ${cfg.multiTenant ? probationReason(sql`${a.workspaceId}`) : sql`NULL`} AS probation`);
+  await refusedAttachments(runtime, a, pre!.s, out, batch);
   const decided = admitted(runtime, pre!.s, a.workspaceId, { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
   await checkRecipientsEligible(runtime.db, a.workspaceId, out, batch, skipSuppression || isSystemNoticeKey(a.keyId));
   await screenOutgoingAtAccept(runtime, a, out, decided, pre!.probation !== null, batch, runtime.db);
@@ -1724,6 +1789,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   const state = result.s!;
   // The statement's claim is idempotency_claim: the one replay rule answers a key it did not get.
   if ('previous' in state) return replay<typeof receipt>(state, hash!);
+  await refusedAttachments(runtime, a, state as Admitted | Refused, out, batch);
   const decided = admitted(runtime, state as Admitted | Refused, a.workspaceId, { batch, invalid: i => out[i]!.invalid, oversize: i => out[i]!.oversize });
   if (result.ineligible?.length) {
     // The statement's own claim holds this receipt, and nothing was queued: free the key so a retry is judged again.
@@ -1859,8 +1925,8 @@ export async function tryAtomicKeyAdmission(c:Ctx,credentialCtes:(charge?:SQL)=>
 }
 
 /** The raw upload's body, at most MAX_ATTACHMENT_BYTES, read from the request stream without another copy when its length is known. */
-async function uploadBody(request: Request, length: number | null): Promise<Uint8Array> {
-  const tooLarge = () => new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachments must be at most ${mib(MAX_ATTACHMENT_BYTES)}.`);
+async function uploadBody(request: Request, length: number | null, filename: string): Promise<Uint8Array> {
+  const tooLarge = () => fileTooLarge(filename, null, MAX_ATTACHMENT_BYTES);
   if (!request.body) return new Uint8Array(0);
   const reader = request.body.getReader();
   try {
@@ -1911,7 +1977,8 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
       await runtime.db.transaction(async db=>{
         await lockSendScope(db,a.workspaceId);
         const {rows}=await db.execute<{bytes:string}>(sql`SELECT bytes FROM sending_asset_usage WHERE workspace_id=${a.workspaceId}`);
-        if(Number(rows[0]?.bytes??0)+bytes.length>SENDING_LIMITS.storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED',`Stored attachments may not exceed ${SENDING_LIMITS.storedAttachmentBytes/1024**3} GiB per workspace. Delete unused attachments.`);
+        const kept=Number(rows[0]?.bytes??0);
+        if(kept+bytes.length>SEND_LIMITS.storedAttachmentBytes) throw new ApiError(413,'STORED_ATTACHMENT_LIMIT_EXCEEDED',`This workspace keeps ${sizeText(kept)} of uploaded files and this one is ${sizeText(bytes.length)}: together they pass the ${SEND_LIMITS.storedAttachmentBytes/1024**3} GiB a workspace may keep. Delete attachments no draft or queued email uses (DELETE /v1/attachments/{id}).`);
         await db.execute(sql`INSERT INTO sending_upload_reservations(id,workspace_id,storage_key,size) VALUES(${attachmentId},${a.workspaceId},${storageKey},${bytes.length})`);
       });
       reserved=true;
@@ -1941,7 +2008,7 @@ function attachmentUpload(runtime:Runtime,a:Pick<Actor,'workspaceId'>,input:Retu
 export async function storeAttachmentBytes(runtime: Runtime, a: Pick<Actor,'workspaceId'>, metadata: { filename: string; contentType: string; disposition?: 'attachment' | 'inline'; contentId?: string }, bytes: Uint8Array, uploadedBy?: string) {
   sesAttachment(metadata);
   const parsed = AttachmentMetadata.safeParse({ filename: metadata.filename, contentType: metadata.contentType, disposition: metadata.disposition ?? 'attachment', ...(metadata.contentId ? { contentId: metadata.contentId } : {}) });
-  if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `Attachment ${metadata.filename} has an invalid name, type or content ID.`);
+  if (!parsed.success) throw metadataInvalid(metadata, invalidMetadataFields(parsed.error.issues));
   const upload=attachmentUpload(runtime,a,validateAttachment(parsed.data,bytes),bytes,await bytesDigest(bytes),uploadedBy);
   try {await upload.put();return await runtime.db.transaction(upload.finish);}finally{await upload.refund();}
 }
@@ -2099,7 +2166,7 @@ async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Foot
 const RECIPIENT_CONTENT_ERRORS = new Set(['CAMPAIGN_RECIPIENT_INVALID', 'MISSING_TEMPLATE_VARIABLE', 'UNSUPPORTED_TEMPLATE_SYNTAX', 'UNSAFE_TEMPLATE_CONTEXT', 'UNSAFE_HTML_URL', 'ENCODED_MESSAGE_TOO_LARGE', 'RENDERED_CONTENT_TOO_LARGE']);
 // rendered: the content the review already rendered and checked, or undefined to render the draft now (a test).
 // rows: the campaign's attachments that size each copy, or null when admission sizes it (a test).
-async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: ReviewedRecipient, test: boolean, rows: AttachmentSize[] | null, rendered?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
+async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: ReviewedRecipient, test: boolean, rows: AttachmentFacts[] | null, rendered?: { html?: string; text?: string }, templateValidated = false, htmlValidated = false, version = CAMPAIGN_RENDERER_VERSION) {
   try {
     const values = { ...draft.defaults, ...Object.fromEntries(Object.entries(contact.properties).filter(([, value]) => value !== null && value !== undefined)), email: contact.email, ...(contact.name ? { name: contact.name } : {}) };
     rendered ??= await renderCampaignContent(runtime, draft);
@@ -2168,7 +2235,7 @@ export function registerSending(app: App) {
     } else mail=input;
     return c.json(await advisoryCheck(c.env, a, mail, mail === input ? 'draft' : 'email'), 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', description: `${SCREEN_LIMIT_NOTE} ${RAMP_NOTE} ${BUILTIN_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/send', operationId: 'sendEmail', description: `${SCREEN_LIMIT_NOTE} ${RAMP_NOTE} ${BUILTIN_NOTE} ${ATTACHMENT_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(SingleSendInput) }, responses: { 202: response(SingleReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     const replyAddressId = input.replyAddressId ?? input.replyMailboxId;
     if (replyAddressId) {
@@ -2183,7 +2250,7 @@ export function registerSending(app: App) {
     const result = await admitEmails(sendCall(c), a, input, input.scheduledAt && new Date(Date.parse(input.scheduledAt)).toISOString());
     return c.json(SingleReceipt.parse({ ...result, ...recipientWarnings(sendRecipients(input)) }), 202);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: `${SCREEN_LIMIT_NOTE} ${RAMP_NOTE} ${BUILTIN_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/emails/batch', operationId: 'sendEmailBatch', description: `${SCREEN_LIMIT_NOTE} ${RAMP_NOTE} ${BUILTIN_NOTE} ${ATTACHMENT_NOTE}`, tags: ['Emails'], security, request: { headers: SendIdempotencyHeaders, body: json(BatchInput) }, responses: { 202: response(BatchReceipt), ...errors } }), async c => {
     const a = actor(c, 'send'); const input = c.req.valid('json');
     if (batchContent(input.emails) > SEND_LIMITS.batchContentChars) throw new ApiError(413, 'BATCH_CONTENT_TOO_LARGE', `Combined batch body content may not exceed ${SEND_LIMITS.batchContentChars / 1024 / 1024} MiB.`);
     const result = await batchMemory(input.emails, () => admitEmails(sendCall(c), a, input), { workspaceId: a.workspaceId, signal: c.req.raw.signal });
@@ -2357,7 +2424,8 @@ export function registerSending(app: App) {
       return 0;
     });
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/attachments', operationId: 'uploadAttachment', tags: ['Attachments'], security,
+    description: `Uploads one file as base64 in JSON; list the returned id in an email's attachments. For files over ${mib(MAX_JSON_ATTACHMENT_BYTES)}, POST /v1/attachments/upload takes the raw bytes as the body, with the fields in headers: ${UPLOAD_HEADERS.filename} (URI-encoded), Content-Type, ${UPLOAD_HEADERS.disposition} and ${UPLOAD_HEADERS.contentId}; 422 ATTACHMENT_METADATA_INVALID names every header that is wrong, what it held and what it must be. ${ATTACHMENT_NOTE}`, request: { headers: IdempotencyHeaders, body: json(AttachmentUpload) }, responses: { 201: response(AttachmentInfo), ...errors } }), async c => {
     const a = actor(c, 'send'); const { content, ...metadata } = c.req.valid('json');
     const bytes = decodeBase64(content);
     const result = await saveAttachment(c, a, metadata, bytes, MAX_JSON_ATTACHMENT_BYTES);
@@ -2369,13 +2437,15 @@ export function registerSending(app: App) {
     let filename = '';
     try { filename = encodedFilename ? decodeURIComponent(encodedFilename) : ''; } catch { throw new ApiError(422, 'ATTACHMENT_FILENAME_INVALID', `${headerPrefix}Filename must be URI-encoded UTF-8.`); }
     const contentLength = Number(c.req.header('content-length'));
-    if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_BYTES) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachments must be at most ${mib(MAX_ATTACHMENT_BYTES)}.`);
-    const parsed = AttachmentMetadata.safeParse({ filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: requestHeader(c.req.raw.headers, 'disposition') ?? 'attachment', contentId: requestHeader(c.req.raw.headers, 'content-id') ?? undefined });
-    if (!parsed.success) throw new ApiError(422, 'ATTACHMENT_METADATA_INVALID', 'Attachment headers are invalid.', parsed.error.issues.map(issue => issue.path.join('.')).filter(Boolean).join(', '));
+    const sent = { filename, contentType: c.req.header('content-type') ?? 'application/octet-stream', disposition: requestHeader(c.req.raw.headers, 'disposition') ?? 'attachment', contentId: requestHeader(c.req.raw.headers, 'content-id') ?? undefined };
+    const parsed = AttachmentMetadata.safeParse(sent);
+    // Every header that is wrong at once, each with what was sent and what it must be.
+    if (!parsed.success) throw metadataInvalid(sent, invalidMetadataFields(parsed.error.issues), true);
+    if (Number.isFinite(contentLength) && contentLength > MAX_ATTACHMENT_BYTES) throw fileTooLarge(filename, contentLength, MAX_ATTACHMENT_BYTES);
     // The isolate's memory for this file is held before a byte is read (isolate-memory.ts): with a Content-Length the
     // body is read into one buffer of that size; without one, into chunks of at most the limit, then one copy.
     const known = Number.isFinite(contentLength) && contentLength >= 0;
-    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null)), { route: 'attachment.upload', workspaceId: a.workspaceId, signal: c.req.raw.signal });
+    const result = await withMemory(known ? contentLength * 1.15 + 1024 * 1024 : 2.15 * MAX_ATTACHMENT_BYTES, async () => saveAttachment(c, a, parsed.data, await uploadBody(c.req.raw, known ? contentLength : null, filename)), { route: 'attachment.upload', workspaceId: a.workspaceId, signal: c.req.raw.signal });
     return c.json(AttachmentInfo.parse(result), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/attachments/{id}', operationId: 'getAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(AttachmentInfo), ...errors } }), async c => {
@@ -3665,7 +3735,7 @@ async function prepareStaticStamp(
   runtime: Runtime,
   draft: CampaignDraft,
   rendered: { html?: string; text?: string },
-  lockedAttachments: AttachmentSize[],
+  lockedAttachments: AttachmentFacts[],
   reviewVersion: number,
 ) {
   const parse = rendered.html ? await loadParse5() : undefined;

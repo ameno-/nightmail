@@ -59,6 +59,19 @@ const ATTACHMENT_TYPES: Record<string, { types: string[]; family?: Family }> = {
   txt: { types: ['text/plain'] }, csv: { types: ['text/csv'] }, tsv: { types: ['text/tab-separated-values'] }, json: { types: ['application/json'] }, ics: { types: ['text/calendar'] }, vcf: { types: ['text/vcard', 'text/x-vcard'] }, md: { types: ['text/markdown'] },
 };
 const RASTER = new Set<Family>(['png', 'jpeg', 'gif', 'webp', 'bmp']);
+/** What a family's bytes are, for a refusal that says what a file's content looks like. */
+const FAMILY_NAMES: Record<Family, string> = { png: 'a PNG image', jpeg: 'a JPEG image', gif: 'a GIF image', webp: 'a WebP image', bmp: 'a BMP image', tiff: 'a TIFF image', pdf: 'a PDF',
+  zip: 'a ZIP archive (as DOCX, XLSX, PPTX and OpenDocument files are)', ole: 'an older Office document (DOC, XLS, PPT)', gzip: 'a gzip archive', '7z': 'a 7z archive', rar: 'a RAR archive',
+  mp3: 'an MP3', mp4: 'an MP4 or M4A', wav: 'a WAV', ogg: 'an Ogg file', webm: 'a WebM', rtf: 'an RTF document' };
+const PROBATION = 'while the sender is on probation';
+/** Bytes that are themselves base64 text: a file encoded twice, the commonest way an upload's content goes wrong. */
+const base64Text = (bytes: Uint8Array) => bytes.length >= 16 && bytes.subarray(0, 4096).every(b => (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (b >= 0x30 && b <= 0x39) || b === 0x2b || b === 0x2f || b === 0x3d || b === 0x2d || b === 0x5f || b === 0x0a || b === 0x0d);
+/** What a file's content is, without any of it: its size and what its first bytes announce, and a fix when it shows one. */
+function contentOf(bytes: Uint8Array) {
+  const found = signature(bytes), size = `${bytes.length.toLocaleString('en-US')} bytes`;
+  if (found) return { what: `${size} that start like ${FAMILY_NAMES[found]}`, fix: '' };
+  return base64Text(bytes) ? { what: `${size} of base64 text`, fix: ' (the file was encoded twice: upload the decoded bytes)' } : { what: `${size} that match no known file signature`, fix: '' };
+}
 const DOCUMENT_TYPES = new Set(['image/svg+xml', 'text/html', 'application/xhtml+xml', 'text/xml', 'application/xml', 'message/rfc822', 'multipart/related', 'application/x-mimearchive']);
 const DOCUMENT_EXTENSIONS = new Set(['svg', 'svgz', 'html', 'htm', 'xhtml', 'xht', 'xml', 'mht', 'mhtml', 'eml']);
 /** The family the first bytes announce, if this reader knows it. */
@@ -95,15 +108,21 @@ function document(bytes: Uint8Array) {
  *  (application/octet-stream meaning unspecified), normalized extension and bytes must agree. */
 export function screenedAttachment(filename: string, contentType: string, bytes: Uint8Array, inline: boolean): { filename: string; contentType: string } {
   const name = screenedName(filename).replace(/[. ]+$/, ''), extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '', type = contentType.split(';')[0]!.trim().toLowerCase();
-  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${name}: ${why} while the sender is on probation.`);
-  const mismatch = (why: string) => new ApiError(422, 'ATTACHMENT_CONTENT_MISMATCH', `Hosted sending cannot deliver ${name}: ${why} while the sender is on probation.`);
-  if (DOCUMENT_TYPES.has(type) || DOCUMENT_EXTENSIONS.has(extension) || document(bytes)) throw unscreenable('markup, SVG and mail archives are not delivered');
+  const shown = JSON.stringify(name);
+  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${shown}: ${why} ${PROBATION}.`);
+  const mismatch = (why: string) => new ApiError(422, 'ATTACHMENT_CONTENT_MISMATCH', `Hosted sending cannot deliver ${shown}: ${why}. Its name, declared type and content must agree ${PROBATION}.`);
+  const markup = DOCUMENT_TYPES.has(type) ? `its type is ${type}` : DOCUMENT_EXTENSIONS.has(extension) ? `its name ends in .${extension}` : document(bytes) ? 'its content is markup or a mail message' : null;
+  if (markup) throw unscreenable(`${markup}, and markup, SVG and mail archives are not delivered`);
   const expected = own(ATTACHMENT_TYPES, extension);
-  if (!expected) throw mismatch('attachments need a standard extension (images, PDF, office documents, archives, audio, video or plain text)');
-  if (type !== 'application/octet-stream' && !expected.types.includes(type)) throw mismatch(`a .${extension} file must be sent as ${expected.types[0]}, not ${type}`);
+  if (!expected) throw mismatch(`${extension ? `.${extension} is not` : 'a name without an extension is not'} one of the standard types it delivers: ${Object.keys(ATTACHMENT_TYPES).map(e => `.${e}`).join(', ')}`);
+  const says = expected.family ? FAMILY_NAMES[expected.family] : `text (${expected.types[0]})`;
+  if (type !== 'application/octet-stream' && !expected.types.includes(type)) throw mismatch(`its declared type is ${type}, but a .${extension} file is ${expected.types.join(' or ')} (or application/octet-stream, to use that)`);
   const found = signature(bytes);
-  if (expected.family ? found !== expected.family : found !== undefined) throw mismatch(`the content is not a ${extension} file`);
-  if (inline && !RASTER.has(expected.family!)) throw unscreenable('inline attachments must be PNG, JPEG, GIF, WebP or BMP images');
+  if (expected.family ? found !== expected.family : found !== undefined) {
+    const content = contentOf(bytes);
+    throw mismatch(`its content is ${content.what}, but its name (.${extension})${type === 'application/octet-stream' ? ' says' : ` and declared type (${type}) say`} ${says}${content.fix}`);
+  }
+  if (inline && !RASTER.has(expected.family!)) throw unscreenable(`it is inline (disposition inline), and inline attachments must be PNG, JPEG, GIF, WebP or BMP images; it is ${says}, so send it with disposition attachment`);
   return { filename: screenedName(filename), contentType: type === 'application/octet-stream' ? expected.types[0]! : contentType };
 }
 /** Bytes that open as SVG markup. */
@@ -115,12 +134,13 @@ const svgBytes = (bytes: Uint8Array) => { let head = ''; for (const byte of byte
  */
 export function shownAttachment(filename: string, contentType: string, bytes: Uint8Array, inline: boolean) {
   const name = screenedName(filename).replace(/[. ]+$/, ''), extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '', type = contentType.split(';')[0]!.trim().toLowerCase();
-  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${name}: ${why}.`);
-  if (type === 'image/svg+xml' || extension === 'svg' || extension === 'svgz' || svgBytes(bytes)) throw unscreenable('SVG images are not delivered');
+  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${JSON.stringify(name)}: ${why}.`);
+  const svg = type === 'image/svg+xml' ? `its type is ${type}` : extension === 'svg' || extension === 'svgz' ? `its name ends in .${extension}` : svgBytes(bytes) ? 'its content is SVG markup' : null;
+  if (svg) throw unscreenable(`${svg}, and SVG images are not delivered: convert it to PNG`);
   if (!inline) return;
-  const expected = own(ATTACHMENT_TYPES, extension);
-  if (!expected?.family || !RASTER.has(expected.family) || signature(bytes) !== expected.family || (type !== 'application/octet-stream' && !expected.types.includes(type)))
-    throw unscreenable('inline attachments must be PNG, JPEG, GIF, WebP or BMP images');
+  const expected = own(ATTACHMENT_TYPES, extension), found = signature(bytes);
+  if (!expected?.family || !RASTER.has(expected.family) || found !== expected.family || (type !== 'application/octet-stream' && !expected.types.includes(type)))
+    throw unscreenable(`it is inline (disposition inline), and an inline attachment must be a PNG, JPEG, GIF, WebP or BMP image whose name, declared type and content agree; its name is .${extension || '(none)'}, its declared type ${type}, and its content ${contentOf(bytes).what}. Send it with disposition attachment, or as one of those images`);
 }
 /** A record's own entry, never an inherited one: tag, attribute and property names come from the message. */
 const own = <T>(record: Record<string, T>, key: string): T | undefined => Object.hasOwn(record, key) ? record[key] : undefined;
