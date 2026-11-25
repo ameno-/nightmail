@@ -32958,7 +32958,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       });
       try{
         const idle=ok(await local('GET',`/v1/inboxes/${sb.id}/messages?wait=2&subjectContains=never`));
-        assert.deepEqual(idle,{data:[],cursor:'0',hasMore:false});
+        const {servedAt,...page}=idle;
+        assert.deepEqual(page,{data:[],cursor:'0',hasMore:false});
+        assert.ok(Number.isFinite(Date.parse(servedAt)),'servedAt: when the page was read');
         assert.equal(msgScans,1,'idle wait=2 scans mailbox_messages only on tick 0, not on ticks 1..2');
         assert.ok(gateReads>=1,'subsequent idle ticks use the O(1) inbox_state.modseq gate');
       }finally{qSpy.mock.restore();}
@@ -33252,8 +33254,90 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('inbox wake: a watch ends on its inbox\'s wake, never on its time, another inbox\'s wake or an object out of reach, and leaves nothing waiting', async () => {
+    const { InboxWaiters, serveInboxWake, durableInboxWake, wakeTargets } = await import('./src/inbox-wake.js');
+    const objects = new Map<string, InstanceType<typeof InboxWaiters>>(), names: string[] = [];
+    // The dispatcher namespace as the Worker sees it: each name's object answers with the same code the object runs.
+    const namespace = { getByName: (name: string) => { names.push(name); const waiters = objects.get(name) ?? objects.set(name, new InboxWaiters()).get(name)!;
+      return { fetch: (input: string, init?: RequestInit) => serveInboxWake(waiters, new Request(input, init)) }; } };
+    const wake = durableInboxWake(namespace), sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+    const within = (woken: Promise<void>, ms: number) => Promise.race([woken.then(() => true), sleep(ms).then(() => false)]);
+    const first = wake.watch('ws_a', 'mbx_1', 1000);
+    await sleep(30);
+    await wake.notify('ws_b', null); // Another workspace's object.
+    assert.equal(await within(first.woken, 50), false);
+    await wake.notify('ws_a', ['mbx_1']);
+    assert.equal(await within(first.woken, 100), true, 'The wake ends the watch at once.');
+    const other = wake.watch('ws_a', 'mbx_1', 200);
+    await sleep(20);
+    await wake.notify('ws_a', ['mbx_2']);
+    assert.equal(await within(other.woken, 400), false, 'Another inbox\'s wake leaves it, and its time running out is not a wake.');
+    const all = wake.watch('ws_a', 'mbx_9', 1000);
+    await sleep(20);
+    await wake.notify('ws_a', null);
+    assert.equal(await within(all.woken, 100), true, 'A wake for every inbox (null) ends it too.');
+    const cancelled = wake.watch('ws_a', 'mbx_1', 1000);
+    await sleep(20);
+    cancelled.cancel();
+    await sleep(20);
+    await wake.notify('ws_a', ['mbx_1']);
+    assert.equal(await within(cancelled.woken, 50), false);
+    assert.ok([...new Set(names)].every(name => name.startsWith('inbox-wake:')) && objects.get('inbox-wake:ws_a')!.size === 0, 'Nothing is left waiting.');
+    const unreachable = durableInboxWake({ getByName: () => ({ fetch: async () => { throw new Error('unreachable'); } }) });
+    assert.equal(await within(unreachable.watch('ws_a', 'mbx_1', 1000).woken, 100), false, 'An object out of reach leaves the poll its second\'s read.');
+    await unreachable.notify('ws_a', ['mbx_1']); // Never throws.
+    // What ingest wakes: the inboxes a routed message reached; null when one may be made for it, or when it is unrouted.
+    const recipient = (tier: string, inboxes: string[]) => ({ address: 'a@x.invalid', tier, route: null, inboxes, webhooks: [], dropped: false, junk: false, domainDefault: 'store', warnings: [] });
+    assert.deepEqual(wakeTargets([{ version: 1, recipients: [recipient('catchall', ['mbx_1']), recipient('exact', ['mbx_1', 'mbx_2'])] }, { version: 1, recipients: [recipient('exact', ['mbx_3'])] }] as never), ['mbx_1', 'mbx_2', 'mbx_3']);
+    assert.equal(wakeTargets([{ version: 1, recipients: [recipient('exact', ['mbx_1'])] }, { version: 1, recipients: [recipient('default', [])] }] as never), null);
+    assert.equal(wakeTargets([null]), null);
+  });
+
+  test('inbox wake on Node: the store statement\'s notice wakes a watch in another process at its commit, only its own inboxes, and never costs a statement', async t => {
+    const [{ nodeInboxWake, postgresConnection }, { storeNotice }] = await Promise.all([import('./src/adapters/node.js'), import('./src/inbox-wake.js')]);
+    const a = await fixtureDatabase(t), api = nodeInboxWake(postgresConnection(FIXTURE_DATABASE_URL)), w = unique('wakew');
+    cleanup(t, () => api.close());
+    const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+    const within = (woken: Promise<void>, ms: number) => Promise.race([woken.then(() => true), sleep(ms).then(() => false)]);
+    const first = api.watch(w, 'mbx_1', 5000);
+    await sleep(300); // The listener starts with the first watch.
+    // The runner's statement, from another connection: inside a transaction, heard only at its commit.
+    const send = (notice: readonly [string, string] | null) => a.query('SELECT pg_notify($1, $2)', [...notice!]);
+    await a.query('BEGIN'); await send(storeNotice(api, w, ['mbx_1']));
+    assert.equal(await within(first.woken, 150), false, 'Not before the commit.');
+    await a.query('COMMIT');
+    assert.equal(await within(first.woken, 300), true);
+    const other = api.watch(w, 'mbx_1', 2000);
+    await send(storeNotice(api, w, ['mbx_2']));
+    await send(storeNotice(api, unique('wakew'), null));
+    assert.equal(await within(other.woken, 300), false, 'Another inbox\'s or workspace\'s notice leaves it.');
+    await send(storeNotice(api, w, Array.from({ length: 700 }, (_, i) => 'mbx_long_' + i)));
+    assert.equal(await within(other.woken, 300), true, 'A notice too long for its inboxes wakes every inbox of the workspace.');
+    assert.equal(storeNotice({ ...api, channel: undefined }, w, null), null, 'Without a channel (Workers) the store notifies nothing.');
+  });
+
+  test('receipt committed_at: the commit stamps it (migration 514), so a write that takes a while counts in full; storedAt and processingMs use it', async t => {
+    const a=await fixtureDatabase(t),w=unique('stampw'),mid=unique('receipt');
+    cleanup(t,async()=>{await a.query('DELETE FROM mail_receipts WHERE workspace_id=$1',[w]);});
+    await a.query(`INSERT INTO mail_receipts(workspace_id,ses_message_id,region,bucket,object_key,recipients,notification,status) VALUES($1,$2,$3,'b','staging/'||$2,'[]','{}','held')`,[w,mid,REGION]);
+    await a.query('BEGIN');
+    try{
+      await a.query(`UPDATE mail_receipts SET status='processed',processed_at=now() WHERE workspace_id=$1 AND ses_message_id=$2`,[w,mid]);
+      await a.query('SELECT pg_sleep(0.25)');
+      assert.equal((await a.query('SELECT committed_at FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid])).rows[0].committed_at,null,'Not before the commit.');
+      await a.query('COMMIT');
+    }catch(error){await a.query('ROLLBACK');throw error;}
+    const {rows:[row]}=await a.query('SELECT extract(epoch FROM committed_at-processed_at)*1000 AS ms,status FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid]);
+    assert.equal(row.status,'processed');
+    assert.ok(Number(row.ms)>=240,`committed_at ${row.ms} ms after the write began`);
+    // Only the move to processed stamps it: another update of a processed receipt leaves it.
+    const before=(await a.query('SELECT committed_at FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid])).rows[0].committed_at;
+    await a.query(`UPDATE mail_receipts SET status='processed',error=null WHERE workspace_id=$1 AND ses_message_id=$2`,[w,mid]);
+    assert.deepEqual((await a.query('SELECT committed_at FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[w,mid])).rows[0].committed_at,before);
+  });
+
   test('SES receipt wake: coalesced ingest stores agent inbox mail without a shared queue turn; feedback never starts it', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db, fetch }) => {
+    await simulatedSesFixture(t, async ({ runtime, db, fetch, local }) => {
       const { S3Client } = await import('@aws-sdk/client-s3'), { setupResources } = await import('./src/ses-setup.js');
       const { feedbackSink } = await import('./src/adapters/feedback-queue.js');
       const wid=runtime.config.workspaceId, host=unique('receipt')+'.invalid', addr='agent@'+host, dom=unique('domain'), box=unique('mbx');
@@ -33308,6 +33392,25 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const stored=await db.query(`SELECT m.ses_message_id FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id
         WHERE l.mailbox_id=$1 AND m.ses_message_id=ANY($2)`,[box,receipts]);
       assert.deepEqual(stored.rows.map(r=>r.ses_message_id).sort(),[...receipts].sort());
+      // Each message says when it was stored and how long after its receipt, and the page when it was read, on one clock.
+      const page=ok(await local('GET',`/v1/inboxes/${box}/messages?limit=50`));
+      assert.equal(page.data.length,receipts.length);
+      for(const m of page.data){assert.ok(Number.isInteger(m.processingMs)&&m.processingMs>=0,JSON.stringify(m.processingMs));assert.ok(Date.parse(page.servedAt)>=Date.parse(m.storedAt));}
+      // Wake on store: a poll mid-wait reads as soon as ingest stores the next message, not on its next second's read.
+      const wakes=runtime.inboxWake!,notified:{at:number;inboxes:readonly string[]|null}[]=[],told=wakes.notify.bind(wakes);
+      const spy=t.mock.method(wakes,'notify',async(workspaceId:string,inboxes:readonly string[]|null)=>{if(workspaceId===wid)notified.push({at:performance.now(),inboxes});return told(workspaceId,inboxes);});
+      try{
+        const waiting=(async()=>{const at=performance.now();const reply=await local('GET',`/v1/inboxes/${box}/messages?after=${page.data.at(-1).cursor}&wait=5`);return {reply,at:performance.now(),started:at};})();
+        await new Promise(resolve=>setTimeout(resolve,1300)); // Into the poll's second tick.
+        const late=unique('receipt');await notify(inbound,incoming(late));await Promise.all(tasks);
+        const {reply,at,started}=await waiting;
+        assert.deepEqual(ok(reply).data.map((m:Json)=>m.subject),['receipt wake']);
+        // Without routing rules ingest doesn't know the inboxes before the store: it wakes the workspace's (null).
+        assert.deepEqual(notified.map(n=>n.inboxes),[null],'Ingest wakes the polls once, after the store.');
+        const after=at-notified[0].at;
+        assert.ok(after<300,`Answered ${Math.round(after)} ms after the store, ${Math.round(at-started)} ms into the poll: the wake, not the second's read.`);
+        t.diagnostic(`wake: answered ${Math.round(after)} ms after the store`);
+      }finally{spy.mock.restore();}
       assert.ok(starts.length>0);
       assert.equal((await db.query('SELECT status FROM jobs WHERE id=$1',[sentinel])).rows[0].status,'pending');
       t.diagnostic(`${priority} signed feedback notifications: zero ingest wakes; ${receipts.length} receipts stored, ${starts.length} elected wake(s).`);

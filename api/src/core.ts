@@ -203,6 +203,8 @@ export interface Runtime {
   /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
    * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
   detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
+  /** Wakes inbox long polls as mail is stored (inbox-wake.ts): the DISPATCHER namespace on Workers, pg_notify on Node. */
+  inboxWake?: import('./inbox-wake.js').InboxWake;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
   startLogFacetFold?: (slot: string) => void;
   /** Coalesced off-request nudge for a workspace's incrementally certified Logs buckets. */
@@ -278,10 +280,13 @@ export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
   ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null, onPollWait: ms => addPollWait(c, ms) };
 const addPollWait = (c: Ctx, ms: number) => c.set('pollWaitMs', (c.get('pollWaitMs') ?? 0) + ms);
-/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. */
-export async function waitForPollTick(c: Ctx, ms: number) {
+/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. `until`: a wake
+ *  that ends the wait sooner (inbox-wake.ts). */
+export async function waitForPollTick(c: Ctx, ms: number, until?: Promise<void>) {
   const start = Date.now();
-  await new Promise(resolve => setTimeout(resolve, ms));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([new Promise(resolve => { timer = setTimeout(resolve, ms); }), ...until ? [until] : []]);
+  clearTimeout(timer);
   const elapsed = Math.max(0, Date.now() - start);
   addPollWait(c, elapsed);
   outerOf(c.env)?.onPollWait?.(elapsed);

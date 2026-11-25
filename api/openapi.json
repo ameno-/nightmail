@@ -13628,12 +13628,17 @@
           },
           "hasMore": {
             "type": "boolean"
+          },
+          "servedAt": {
+            "type": "string",
+            "description": "When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored."
           }
         },
         "required": [
           "data",
           "cursor",
-          "hasMore"
+          "hasMore",
+          "servedAt"
         ]
       },
       "InboxMessage": {
@@ -13701,7 +13706,19 @@
             "type": "string"
           },
           "receivedAt": {
-            "type": "string"
+            "type": "string",
+            "description": "When the sending server handed it over (SES received it)."
+          },
+          "storedAt": {
+            "type": "string",
+            "description": "When the write that stored it in Nightmail committed, on the clock servedAt uses."
+          },
+          "processingMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing, routing and storing the message. Null for mail that came another way (simulated, sent, copied)."
           },
           "read": {
             "type": "boolean"
@@ -13928,6 +13945,8 @@
           "subject",
           "snippet",
           "receivedAt",
+          "storedAt",
+          "processingMs",
           "read",
           "flags",
           "labels",
@@ -58675,7 +58694,7 @@
         ],
         "operationId": "listInboxMessages",
         "summary": "List or wait for inbox messages",
-        "description": "Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Oldest first, in commit order. Without after, the page starts at the first message, so mail that arrived before the call is included. With wait, the call holds until a matching message arrives or the time runs out, and answers as soon as the message is stored; pass the returned cursor as after on the next call. Pages are also bounded by response size and may return fewer than limit messages while hasMore is true; to returns at most 20 addresses with the total in toCount. Junk, unverified and held mail never wake a waiter: list them with include=held. Each waited second counts as one request against the key’s per-minute budget. Filtered queries: Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "parameters": [
           {
             "schema": {

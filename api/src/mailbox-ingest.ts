@@ -4,6 +4,7 @@ import {mimeIndex} from './mailbox-mime-index.js';
 import {wirePreview} from './protocol-preview.js';
 import { copyWorkspaceRaw, headWorkspaceRaw, transferWorkspaceRaw, PARSE_LIMIT, type RawObjectHead } from './mailbox-mime.js';
 import { matchRouting, plusBase } from './routing-match.js';
+import { storeNotice, wakeTargets } from './inbox-wake.js';
 import { storeIncoming, storeIncomingBatch, type IncomingBatchEntry } from './mailbox-ingest-store.js';
 import { mailJson } from './mailbox-text.js';
 import { platformHosts } from './domain-claims.js';
@@ -649,8 +650,10 @@ const ingestJob = async (runtime:Runtime, payload:Parameters<JobHandler>[1], job
     }
   } finally { s3.destroy(); }
   const preview=message.lifecycle==='kept'?wirePreview(raw,sizeBytes):undefined;
-  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHosts(runtime.config) : null,preview);
+  const {queued_count:runnable,wait_ms:waitMs,hold_ms:holdMs}=await storeIncoming(runtime.db,message,attachments,verifiedFrom,!receipt.notification.stagingEtag,verifiedAuthor,plan,receivingPolicy(runtime.config),runtime.config.multiTenant ? platformHosts(runtime.config) : null,preview,storeNotice(runtime.inboxWake,scope.workspaceId,wakeTargets([plan])));
   log('info', { code: 'MAILBOX_MESSAGE_INGESTED',workspaceId:scope.workspaceId,status,spam,rawMs,waitMs,holdMs,lagMs:Date.now()-Date.parse(receipt.createdAt), bytes:sizeBytes, attachments: attachments.length });
+  // Committed: polls waiting on its inboxes read now (inbox-wake.ts).
+  await runtime.inboxWake?.notify(scope.workspaceId, wakeTargets([plan]));
   if(sourceKey.startsWith(HELD_PREFIX))await dropHeld(runtime,receipt,scope.workspaceId,sourceKey);
   if (runnable > 0) try { await runtime.wake?.(runnable,'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
 };
@@ -1049,15 +1052,19 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
       ready.sort((a, b) => a.receivedAt!.localeCompare(b.receivedAt!) || a.sesMessageId.localeCompare(b.sesMessageId));
       const policy = receivingPolicy(runtime.config);
       let totalRunnable = 0;
+      // The committed messages' plans, for the polls waiting on their inboxes (inbox-wake.ts).
+      const stored: BatchState['entry'][] = [], reached = (st: BatchState) => { stored.push(st.entry); };
+      const noticeOf = (states: BatchState[]) => storeNotice(runtime.inboxWake, workspaceId, wakeTargets(states.map(st => st.entry!.plan)));
       try {
         const storedRows = ready.length === 1
-          ? [await storeIncoming(runtime.db, ready[0]!.entry!.m, ready[0]!.entry!.files, ready[0]!.entry!.verifiedFrom, ready[0]!.entry!.allowCreate, ready[0]!.entry!.replyAuthorVerified, ready[0]!.entry!.plan, policy, ready[0]!.entry!.platformHosts, ready[0]!.entry!.preview)]
-          : await storeIncomingBatch(runtime.db, workspaceId, ready.map(st => st.entry!), policy);
+          ? [await storeIncoming(runtime.db, ready[0]!.entry!.m, ready[0]!.entry!.files, ready[0]!.entry!.verifiedFrom, ready[0]!.entry!.allowCreate, ready[0]!.entry!.replyAuthorVerified, ready[0]!.entry!.plan, policy, ready[0]!.entry!.platformHosts, ready[0]!.entry!.preview, noticeOf(ready))]
+          : await storeIncomingBatch(runtime.db, workspaceId, ready.map(st => st.entry!), policy, noticeOf(ready));
         for (let i = 0; i < ready.length; i++) {
           const st = ready[i]!, row = storedRows[i];
           totalRunnable += row?.queued_count ?? 0;
           log('info', { code: 'MAILBOX_MESSAGE_INGESTED', workspaceId, status: st.status, spam: st.spam, rawMs: st.rawMs, waitMs: row?.wait_ms ?? 0, holdMs: row?.hold_ms ?? 0, lagMs: Date.now() - Date.parse(st.receipt!.createdAt), bytes: st.sizeBytes, attachments: st.attachmentsCount, batch: ready.length });
           outcomes.set(st.item.job.id, { id: st.item.job.id });
+          reached(st);
           if (st.sourceKey!.startsWith(HELD_PREFIX)) await dropHeld(runtime, st.receipt!, workspaceId, st.sourceKey!);
         }
       } catch {
@@ -1065,16 +1072,18 @@ async function ingestBatch(runtime: Runtime, items: JobBatchItem[]): Promise<Job
         for (const st of ready) {
           try {
             const e = st.entry!;
-            const row = await storeIncoming(runtime.db, e.m, e.files, e.verifiedFrom, e.allowCreate, e.replyAuthorVerified, e.plan, policy, e.platformHosts, e.preview);
+            const row = await storeIncoming(runtime.db, e.m, e.files, e.verifiedFrom, e.allowCreate, e.replyAuthorVerified, e.plan, policy, e.platformHosts, e.preview, noticeOf([st]));
             totalRunnable += row.queued_count;
             log('info', { code: 'MAILBOX_MESSAGE_INGESTED', workspaceId, status: st.status, spam: st.spam, rawMs: st.rawMs, waitMs: row.wait_ms, holdMs: row.hold_ms, lagMs: Date.now() - Date.parse(st.receipt!.createdAt), bytes: st.sizeBytes, attachments: st.attachmentsCount });
             outcomes.set(st.item.job.id, { id: st.item.job.id });
+            reached(st);
             if (st.sourceKey!.startsWith(HELD_PREFIX)) await dropHeld(runtime, st.receipt!, workspaceId, st.sourceKey!);
           } catch (error) {
             await failState(st, error);
           }
         }
       }
+      if (stored.length) await runtime.inboxWake?.notify(workspaceId, wakeTargets(stored.map(entry => entry!.plan)));
       if (totalRunnable > 0) try { await runtime.wake?.(totalRunnable, 'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox webhook jobs remain durable.' }); }
     }
   } finally {
