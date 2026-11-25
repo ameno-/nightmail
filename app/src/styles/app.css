@@ -42,27 +42,15 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .main-navigation a.active > .ui-icon { color: var(--color-text); }
 .main-navigation__title, .more-sheet__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-navigation a[data-locked] > .ui-icon:last-child { --icon-size: 12px; color: var(--color-faint); }
-/* The footer: legal links, privacy mode, SES's quota (self-hosted), then the sender score as one 32px row at the bottom;
+/* The footer: legal links, privacy mode, SES's quota (self-hosted), then the sender score card (64px) at the bottom;
    set off from the navigation by space, its rows on the navigation's 8px gutter and inset. */
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-4); margin-top: auto; padding: var(--space-8); }
 .sidebar-footer > .legal-footer-links { padding: 0 var(--sidebar-inset); }
 .sidebar-footer > .privacy-toggle { min-height: 28px; padding: 0 var(--sidebar-inset); border-radius: var(--radius-sm); }
 .sidebar-footer > :is(.sidebar-setup, .sidebar-quota:not(:empty)) { padding: var(--space-8) var(--sidebar-inset); }
-.sidebar-score-slot { height: 56px; }
-.sidebar .sidebar-score-slot { height: 32px; }
-/* In the sidebar the score card is a readout row: SENDER SCORE on the left, 86 · B on the right, no dial. */
-.sidebar .sidebar-score-slot > .gauge-card--compact { height: 32px; gap: var(--space-8); padding: 0 var(--sidebar-inset); border-radius: var(--radius-sm); background: none; box-shadow: none; }
-@media (hover: hover) and (pointer: fine) { .sidebar .sidebar-score-slot > .gauge-card--compact:hover { background: var(--color-hover); } }
-.sidebar .sidebar-score-slot > .gauge-card--compact:focus-visible { background: var(--color-hover); }
-.sidebar .sidebar-score-slot .gauge-dial { display: none; }
-.sidebar .sidebar-score-slot .gauge-stack { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-8); }
-.sidebar .sidebar-score-slot .gauge-eyebrow { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.sidebar .sidebar-score-slot .gauge-readout { align-items: center; gap: 0; height: 32px; line-height: 32px; }
-.sidebar .sidebar-score-slot .gauge-readout b { min-width: 0; font-size: var(--text-xs); line-height: 16px; letter-spacing: 0; }
-.sidebar .sidebar-score-slot .gauge-grade { font-size: var(--text-xs); line-height: 16px; font-weight: 400; }
-.sidebar .sidebar-score-slot .gauge-grade::before { content: '·'; margin: 0 var(--space-6); color: var(--color-faint); }
-.sidebar .sidebar-score-slot .gauge-alert { top: 13px; right: 6px; box-shadow: none; }
-.sidebar .sidebar-score-slot .gauge-skeleton { inset: 9px var(--sidebar-inset); border-radius: 3px; }
+/* The score card's place keeps its height from the first paint; while its code loads it is the card's neutral tile. */
+.sidebar-score-slot { height: 64px; }
+.sidebar-score-slot:empty { border-radius: var(--radius-md); background: var(--score-neutral); }
 /* The command bar, on the frame: where you are (workspace / page), the quick jumper in the middle (a solid field), then
    the search hint, the theme and Connect an agent. */
 .topbar { position: fixed; top: 0; right: 0; left: var(--sidebar-width); z-index: 15; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 380px) minmax(0, 1fr); align-items: center; gap: var(--space-16); height: var(--topbar-height); padding: 0 var(--space-12) 0 var(--space-16); background: var(--color-deep); }

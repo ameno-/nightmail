@@ -56,9 +56,9 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-gauge > i[data-on] { background: var(--color-accent-data); }
 .ov-gauge[data-zone='near'] > i[data-on] { background: var(--color-warning-marker); }
 .ov-gauge[data-zone='over'] > i[data-on] { background: var(--color-danger-marker); }
-/* Where there is no sidebar to carry it (the compact shell), the sender score is a row under the figures. */
-.ov-kpis > .gauge-card { grid-column: 1 / -1; padding: 0 var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); box-shadow: none; }
-.ov-kpis > .gauge-card:is(:hover, :focus-visible) { background: var(--color-well-hover); }
+/* Where there is no sidebar to carry it (the compact shell), the sender score card is a row under the figures; its
+   neutral tile is the tiles' well. */
+.ov-kpis > .score-card { grid-column: 1 / -1; --score-neutral: var(--color-well); --score-neutral-hover: var(--color-well-hover); }
 
 /* The body: the main column beside the inspector rail, 8px under the wells and 8px apart, on the 16px gutter. The rail
    is its own calm solid surface (#141414 dark, #F5F5F5 light), its right edge level with the last well's; hover and
@@ -68,8 +68,7 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-split__aside { display: flex; flex-direction: column; gap: var(--space-20); min-width: 0; padding: var(--space-6) 0 0; background: none; }
 /* The rail: compact sections 20px apart, no rule between; labels in mono capitals. */
 .ov-split__aside > * { flex: none; }
-.ov-split__aside > .gauge-card { height: 56px; margin-inline: calc(-1 * var(--space-8)); padding: 0 var(--space-8); border-radius: var(--radius-sm); background: none; box-shadow: none; }
-.ov-split__aside > .gauge-card:is(:hover, :focus-visible) { background: var(--color-hover); }
+.ov-split__aside > .score-card { --score-neutral: var(--color-well); --score-neutral-hover: var(--color-well-hover); }
 .ov-split__aside :is(.setup-rail__head h2, .next-steps__title) { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .ov-split__aside .setup-rail__head { height: 24px; }
 .ov-rail-section { display: flex; flex-direction: column; gap: var(--space-4); }
