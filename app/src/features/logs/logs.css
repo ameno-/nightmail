@@ -259,8 +259,7 @@
 .logs-bar .logs-controls .ui-tab[aria-selected='true']:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 .logs-bar__tools { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
 .logs-search.search-box { flex: 1 1 280px; width: auto; min-width: 160px; max-width: 420px; }
-.logs-search.search-box .ui-input { width: 100%; padding-inline: 30px; }
-.logs-search.search-box > .ui-icon { position: absolute; left: 10px; color: var(--color-faint); pointer-events: none; }
+.logs-search.search-box .ui-input { width: 100%; padding-inline-end: 30px; }
 .logs-search > .ui-kbd { position: absolute; right: 5px; background: var(--color-kbd-inset); pointer-events: none; }
 .logs-bar .ui-select-trigger.logs-filter, .logs-bar .logs-filter { width: 140px; min-width: 0; }
 @media (max-width: 1279px) { .logs-export { width: var(--control-height); padding: 0; } .logs-export > span { display: none; } }

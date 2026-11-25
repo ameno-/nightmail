@@ -3,7 +3,6 @@ import { Button, Dialog, Disclosure, ErrorState, Meter, MetricRow, SkeletonText,
 import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number, relativeTime } from '../../lib/format'
-import { gradeKey } from '../../lib/standing'
 import { EVALUATION, GOOD_STANDING, GRADE_BANDS } from '../../../../api/src/standing-model'
 
 const percent = (digits: number) => (value: number) => `${Number((value * 100).toFixed(digits))}%`
@@ -25,6 +24,13 @@ export function evaluationLeft(report: SenderScore, now = Date.now()) {
   return `Waiting for delivery results: graded by ${clock(report.gradedBy)} (${relativeTime(report.gradedBy, now)})`
 }
 
+/** The score's move over its history (up to 14 days), as "+3 in 14 days"; null before a grade or its first day. */
+export function scoreMove(report: SenderScore) {
+  if (report.state !== 'graded' || !report.history.length) return null
+  const moved = Math.round(report.score! - report.history[0].score)
+  return `${moved > 0 ? '+' : moved < 0 ? '−' : '±'}${Math.abs(moved)} in 14 days`
+}
+
 // What the sender score is and where each part stands: one dialog for the whole app, opened from the score card
 // (lib/score-about.ts). The status, the 14-day trend and (Hosted) the limit the score sets come first, then the six
 // parts, one line each: its score as a meter, what was measured and its score out of 100. Then how it is graded, with what each part measures.
@@ -36,7 +42,7 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   const graded = report?.state === 'graded'
   const days = graded ? report.history.slice(-14) : [], offset = 14 - days.length
   const low = days.length ? Math.min(...days.map(day => day.score)) - 4 : 0, high = days.length ? Math.max(...days.map(day => day.score)) : 1
-  const moved = graded && report.history.length ? Math.round(report.score! - report.history[0].score) : 0
+  const move = report && scoreMove(report)
   const limit = report?.limit
   const limitLine = !limit ? null : [limit.source === 'calibrating' ? `Evaluation: first ${number(EVALUATION.recipients)} recipients, once` : limit.daily === null ? 'No daily limit' : `Daily limit ${number(limit.daily)}${limit.source === 'override' ? ' (override)' : ''}`,
     limit.growth ? `growing: up to ${number(limit.growth.hourly)} this hour` : null,
@@ -44,11 +50,11 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"
     footer={<Button variant="primary" onClick={closeScoreAbout}>Done</Button>}>
     {!report ? error ? <ErrorState error={error} onRetry={onRetry} /> : <div className="score-about__status"><SkeletonText width="60%" /></div> : <>
-      <div className="score-about__status" data-grade={graded && report.grade ? gradeKey(report.grade) : undefined}>
+      <div className="score-about__status">
         <b>{graded ? Math.round(report.score!) : '—'}</b>
         <div className="score-about__status-text">
           <span>{graded ? <>Grade <strong className="score-about__grade">{report.grade}</strong> · {report.next ? `${Math.ceil(report.next.at - report.score!)} points to ${report.next.grade}` : 'Top grade'}</> : 'Not graded yet'}</span>
-          <span className="muted">{graded ? `From ${number(report.emails.last30Days)} real emails in 30 days${report.history.length ? ` · ${moved > 0 ? '+' : moved < 0 ? '−' : '±'}${Math.abs(moved)} in 14 days` : ''}` : `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails. ${evaluationLeft(report)}.`}</span>
+          <span className="muted">{graded ? `From ${number(report.emails.last30Days)} real emails in 30 days${move ? ` · ${move}` : ''}` : `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails. ${evaluationLeft(report)}.`}</span>
         </div>
         {graded && <div className="score-about__history" role="img" aria-label={days.length ? `Daily score over ${days.length} days, from ${Math.round(days[0].score)} to ${Math.round(report.score!)}.` : 'No history yet.'}>
           {Array.from({ length: 14 }, (_, i) => { const day = days[i - offset]; return <span key={i} data-last={i === 13 || undefined} style={{ transform: `scaleY(${day ? Math.max(.1, (day.score - low) / Math.max(1, high - low)) : .1})` }} /> })}

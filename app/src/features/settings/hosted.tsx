@@ -34,8 +34,8 @@ import { PostalAddressDialog, postalAddressLine } from '../../components/PostalA
 type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'billing' | 'account'
 const moved: Record<string, SectionKey> = { workspace: 'general', usage: 'billing' }
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
-// controls they can't use, so nothing is silently missing. Every section takes the whole panel, to the same right edge
-// as the app's other tables.
+// controls they can't use, so nothing is silently missing. Rows, members and webhooks keep a readable width on a wide
+// window (hosted.css); Activity and Billing take the whole panel.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
   { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'billing', label: 'Billing' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
@@ -71,7 +71,7 @@ export function HostedSettings() {
       </div>)}</div>
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
-    <div key={section} className="hosted-settings__content">
+    <div key={section} className="hosted-settings__content" data-section={section}>
       {locked(current) ? <AdminOnly title={current.label} />
         : <>
           {section === 'general' && <WorkspaceRows />}

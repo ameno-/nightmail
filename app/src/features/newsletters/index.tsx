@@ -93,7 +93,7 @@ function NewsletterView() {
   const engagement = rows.some(issue => rate(issue, 'opened') !== '')
   useEffect(() => { if (issues.data && page === 1) rememberIssuesShape(id, { rows: issues.data.items.length, engagement }) }, [id, page, issues.data, engagement])
   if (newsletter.isError) return <><PageHeader title={named ?? 'Newsletter'} backTo="/campaigns" /><ErrorState error={newsletter.error} onRetry={() => void newsletter.refetch()} /></>
-  return <div className="stack newsletter">
+  return <div className="stack newsletter measure-list">
     <PageHeader title={newsletter.data?.name ?? named ?? <SkeletonText width={140} lineHeight={24} />} actions={<Button variant="primary" onPointerEnter={() => void composer.preload().catch(() => {})} onClick={() => navigate(newIssuePath(id))}>New issue</Button>} />
     {newsletter.data ? <Readers newsletter={newsletter.data} /> : <ReadersSkeleton />}
     {issues.isError ? <ErrorState error={issues.error} onRetry={() => void issues.refetch()} /> : issues.isPending ? <IssuesSkeleton id={id} />
@@ -163,13 +163,13 @@ function NewslettersList() {
   const pagination = useCursorPagination()
   const query = useApiDef(queries.newsletters(pagination.cursor), { keepPrevious: true })
   const next = query.data?.nextCursor ?? null
-  return <div className="stack">
+  return <div className="stack measure-list">
     <PageHeader title="Newsletters" />
     {query.isError ? <ErrorState error={query.error} onRetry={() => void query.refetch()} /> : <>
       <DataTable className="newsletters-table" loading={query.isPending} skeletonRows={4} rows={query.data ?? []} rowKey={row => row.id} rowHref={row => newsletterPath(row.id)}
         empty={<EmptyState title="No newsletters yet" />} columns={[
           { ...newsletterColumns[0]!, render: row => row.name },
-          { ...newsletterColumns[1]!, render: row => <SenderLines name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
+          { ...newsletterColumns[1]!, render: row => <SenderLines inline name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
         ]} />
       {(pagination.page > 1 || next) && <Pagination page={pagination.page} pageSize={100} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
     </>}

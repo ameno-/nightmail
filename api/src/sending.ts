@@ -613,7 +613,7 @@ function draftSender(runtime: Runtime, a: Actor, draft: CampaignDraft) {
   if (!regionalSending(runtime)) region(runtime, draft.region);
   if (!draft.from && a.domains.length) throw denied('SENDER_DOMAIN_FORBIDDEN', 'A domain-restricted key must supply a From address on one of its domains.', { permission: 'sendEmail', level: 'on', scope: 'workspace' }, 'from');
   if (draft.from) keySender(a, draft.from);
-  if (a.domains.length && Object.keys(draft.audience).length) throw unrestrictedRequired('Selecting a campaign audience requires an unrestricted credential.', { permission: 'audience', level: 'write' });
+  if (a.domains.length && Object.keys(draft.audience).length) throw unrestrictedRequired(a, 'Choosing a campaign audience needs', { permission: 'audience', level: 'write' });
 }
 // A draft's audience names only this workspace's lists and segments. Another workspace's ID gets the answer of one that
 // doesn't exist, the answer the audience gives when it is read (audience.ts audienceConditions), so an ID can't be probed.
@@ -2173,7 +2173,7 @@ export function registerSending(app: App) {
   app.openapi(createRoute({ method: 'delete', path: '/v1/attachments/{id}', operationId: 'deleteAttachment', tags: ['Attachments'], security, request: { params: IdParams }, responses: { 200: response(Removed), ...errors } }), async c => {
     const a = actor(c, 'send'); const attachmentId = c.req.valid('param').id;
     // Attachments belong to the workspace, not to a sender domain, so a domain-restricted key can't show one is its own.
-    if (a.domains.length) throw unrestrictedRequired('A key restricted to sender domains can’t delete attachments. Unused attachments are removed automatically after 30 days.', { permission: 'sendEmail', level: 'on' });
+    if (a.domains.length) throw unrestrictedRequired(a, 'Deleting an attachment needs', { permission: 'sendEmail', level: 'on' }, 'Unused attachments are removed automatically after 30 days.');
     await c.env.db.transaction(async db => {
       const [row] = await attachmentRows(db, a, [attachmentId], true);
       const links = await db.select().from(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.attachmentId, attachmentId))).limit(1);

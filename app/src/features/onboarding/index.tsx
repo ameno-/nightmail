@@ -526,7 +526,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         <div className="onboarding-key-scope" inert={!!secret}>
           <Tabs label="Key access" value={scope} onValueChange={value => setScope(value as KeyScope)} items={scopes} />
         </div>
-        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : <>Store it as <code>{apiKeyEnv}</code> in your project’s environment. It’s shown once.</>}</p>
+        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : scope === 'send' ? <>It can only send{current ? ` from ${current.name}` : ''}. Store it as <code>{apiKeyEnv}</code>; it’s shown once.</> : <>Store it as <code>{apiKeyEnv}</code> in your project’s environment. It’s shown once.</>}</p>
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
           <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} data-analytics="onboarding/agent/create-key" onClick={() => void createKey()}>Create API key</Button></div>

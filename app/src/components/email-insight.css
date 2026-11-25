@@ -165,14 +165,15 @@ a.ss__fix:focus-visible > svg { color: var(--color-text); }
 .email-frame { position: relative; flex: none; box-sizing: content-box; overflow: clip; border-radius: var(--radius-sm); background: var(--color-layer-1); transition: width 200ms var(--ease-out-strong), height 200ms var(--ease-out-strong); }
 .email-frame[data-first] { transition: none; }
 .ev:has(iframe:focus-visible) .ev-caption__label { color: var(--color-text); }
-.email-frame iframe { position: absolute; top: 0; left: 0; display: block; border: 0; outline: 0; background: transparent; color-scheme: normal; transform-origin: 0 0; opacity: 0; transition: opacity 200ms ease-out; }
+.email-frame iframe { position: absolute; top: 0; left: 0; display: block; border: 0; outline: 0; background: transparent; transform-origin: 0 0; opacity: 0; transition: opacity 200ms ease-out; }
 .email-frame iframe[data-loaded] { opacity: 1; }
 .email-frame[data-pending] iframe[data-loaded] { opacity: .5; }
 .email-frame--empty { display: grid; place-items: center; height: 160px; }
 /* The source and the plain text: the email's own text on its own surface; the source in mono. */
 .email-source, .email-text { margin: 0; padding: var(--space-16); border-radius: var(--radius-sm); white-space: pre-wrap; overflow-wrap: anywhere; }
 .email-source { background: var(--color-layer-1); font-size: var(--text-xs); line-height: 18px; }
-.email-text { max-width: 800px; margin-inline: auto; padding: var(--space-24); background: var(--color-email-surface); color: var(--color-email-text); font-family: var(--font-email); line-height: 1.5; }
+.email-text { max-width: 800px; margin-inline: auto; padding: var(--space-24); background: var(--color-email-surface); color: var(--color-email-text); font-family: var(--font-email); line-height: 1.5; color-scheme: light; }
+.email-text[data-scheme='dark'] { background: var(--color-email-dark-surface); color: var(--color-email-dark-text); color-scheme: dark; }
 .ev:not([data-fill]) :is(.email-source, .email-text) { max-height: 1600px; overflow: auto; }
 
 /* Touch: 44 px targets for the toggles. */

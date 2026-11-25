@@ -68,11 +68,13 @@ a.ui-button:focus-visible { text-decoration: none; }
 .ui-button--primary:active:not(:disabled) { background: var(--color-accent-pressed); }
 .ui-icon-button { width: var(--control-height); padding: 0; }
 .ui-icon-button.ui-button--sm { width: var(--control-height-sm); }
-.ui-input { display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 10px; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
+.ui-input { --input-pad-x: 10px; display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 var(--input-pad-x); appearance: none; -webkit-appearance: none; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .ui-input:hover:not(:disabled):not([aria-invalid='true']):not(:focus) { background-color: var(--color-control-hover); } }
 .ui-input:is(:focus, :focus-visible) { background-color: var(--color-control-focus); }
 .ui-input::placeholder { color: var(--color-muted); opacity: 1; }
-.ui-input:disabled { background: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
+.ui-input:disabled { background-color: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
+/* On an overlay a disabled field keeps the overlay's control fill (the page's layer-1 would sink below the dialog). */
+:is(.ui-popover, .ui-dialog, .ui-sheet) .ui-input:disabled { background-color: var(--color-control); }
 /* An invalid field: a solid danger-tinted fill (no box), its message in red under it (.ui-field__error). */
 .ui-input[aria-invalid='true'] { background-color: var(--color-control-invalid); }
 .ui-input[aria-invalid='true']:is(:focus, :focus-visible) { background-color: var(--color-control-invalid-focus); }
@@ -80,12 +82,24 @@ a.ui-button:focus-visible { text-decoration: none; }
 .ui-input[type='file'] { display: flex; align-items: center; height: auto; min-height: var(--control-height); padding: 0; color: var(--color-muted); cursor: pointer; }
 .ui-input[type='file']::file-selector-button { height: calc(var(--control-height) - 8px); margin: 4px var(--space-8) 4px 4px; padding: 0 var(--space-12); border: 0; border-radius: var(--radius-xs); background: var(--color-layer-2); color: var(--color-text); font: inherit; font-weight: var(--font-weight-medium); cursor: pointer; transition: background var(--motion-duration) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .ui-input[type='file']:hover::file-selector-button { background: var(--color-layer-3); } }
-.ui-textarea { height: auto; min-height: 120px; resize: vertical; }
+/* A search field drops WebKit's own inset; a date reads from the left edge like every other value (iOS centres it). */
+.ui-input::-webkit-search-decoration { -webkit-appearance: none; }
+.ui-input::-webkit-date-and-time-value { text-align: start; }
+/* Number fields drop the native spinner (a white box on the fill); arrow keys still step them. */
+.ui-input[type='number'] { -moz-appearance: textfield; }
+.ui-input::-webkit-inner-spin-button, .ui-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+/* A textarea is padded evenly: its first line starts on the input's 10 px left edge, and 8 px of padding plus the
+   line's leading put the cap height about 10 px under the top edge, so the caret never hugs the top or the corner.
+   Its leading is --textarea-leading (a mono variant sets its own). */
+.ui-textarea { --textarea-leading: var(--leading-md); height: auto; min-height: 120px; padding-block: 8px; line-height: var(--textarea-leading); resize: vertical; }
 .ui-dialog .ui-textarea { resize: none; }
 .ui-field { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .ui-field__label { display: block; font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); }
 .ui-field__hint { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .ui-field__error { color: var(--color-danger); }
+/* A ghost button on its own line in a column of fields (Add an expiry, Load more) hangs out by its own padding, so its
+   icon or text starts on the fields' edge. */
+:is(.stack, .ui-dialog__body, form):has(> .ui-field) > .ui-button--ghost:not(.ui-icon-button) { align-self: flex-start; margin-inline-start: calc(-1 * var(--button-pad-x)); }
 .ui-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); text-align: left; }
 .ui-select-trigger > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-trigger > span:last-child { display: flex; flex-shrink: 0; color: var(--color-muted); }
@@ -163,6 +177,9 @@ a.ui-tab { text-decoration: none; }
 .ui-dialog__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-8); flex-shrink: 0; margin: 0; padding: var(--space-4) var(--dialog-pad) var(--space-16); }
 /* A destructive or secondary action leads the footer on its left, away from the primary one. */
 .ui-dialog__footer > .ui-dialog__footer-start { margin-right: auto; }
+/* A form that carries its footer inside the body: the buttons span the fields' width (the body already pads them) and
+   keep the standalone footer's spacing, 24 px under the last field and 16 px above the edge. */
+.ui-dialog__body .ui-dialog__footer { padding: var(--space-8) 0 0; margin-bottom: calc(var(--space-16) - var(--space-20)); }
 /* Inside a dialog: section labels with their rule, facts as key/value rows, an ID with its copy button. */
 .ui-dialog__body > .ui-label { margin: var(--space-20) 0 var(--space-4); }
 .ui-dialog__body > .ui-label:first-child { margin-top: 0; }
@@ -175,13 +192,16 @@ a.ui-tab { text-decoration: none; }
 .ui-kv__id code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-kv__id .ui-icon-button { width: 24px; height: 24px; }
 .ui-table-scroll { --table-row-height: var(--row-height); width: 100%; overflow-x: auto; }
+/* A table whose cells stack two lines (a name over its caption, a status over its response) takes the roomier row; set on
+   the table and its route skeleton alike. */
+.ui-table-scroll.ui-table--two-line { --table-row-height: var(--row-height-two-line); }
 .ui-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; text-align: left; font-size: var(--text-md); line-height: var(--leading-md); font-variant-numeric: tabular-nums; }
 /* Tables draw no rules: the head is a solid bar (6px ends), and rows part by their rhythm and a solid hover fill, drawn on
    the cells so the fill keeps the bar's rounded ends. */
 .ui-table th { height: 28px; padding: var(--space-4) var(--space-12); background: var(--color-thead); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); white-space: nowrap; }
 /* An empty table keeps its header row's height but shows neither its labels nor its bar. */
 .ui-table--empty thead { visibility: hidden; }
-.ui-table td { height: var(--table-row-height); padding: var(--space-6) var(--space-12); vertical-align: middle; overflow-wrap: anywhere; }
+.ui-table td { height: var(--table-row-height); padding: var(--space-4) var(--space-12); vertical-align: middle; overflow-wrap: anywhere; }
 .ui-table :is(th, td):first-child { border-start-start-radius: var(--radius-sm); border-end-start-radius: var(--radius-sm); }
 .ui-table :is(th, td):last-child { border-start-end-radius: var(--radius-sm); border-end-end-radius: var(--radius-sm); }
 .ui-table td[data-skeleton-align='right'] > * { margin-left: auto; }
@@ -223,7 +243,7 @@ a.ui-tab { text-decoration: none; }
 .ui-disclosure > summary > svg { flex-shrink: 0; margin-left: auto; color: var(--color-muted); transition: transform var(--motion-duration) ease-out; }
 .ui-disclosure[open] > summary > svg { transform: rotate(90deg); }
 .ui-disclosure__body { display: flex; flex-direction: column; gap: var(--space-12); padding-bottom: var(--space-12); }
-.ui-section-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin-bottom: var(--space-12); }
+.ui-section-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin-bottom: var(--space-8); }
 .ui-section-header > .cluster > .ui-button--ghost:not(.ui-icon-button):last-child { margin-inline-end: calc(-1 * var(--button-pad-x)); }
 /* A section's title is a sentence-case heading in the text colour; its actions sit at the right. */
 .ui-section-header h2 { display: flex; flex: 1; align-items: center; gap: var(--space-12); min-width: 0; color: var(--color-text); font-family: var(--font-body); font-size: var(--text-section); line-height: var(--leading-section); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-section); }
@@ -296,7 +316,7 @@ a.ui-tab { text-decoration: none; }
 .ui-tooltip { position: fixed; z-index: 120; max-width: min(300px, calc(100vw - 16px)); padding: var(--space-6) var(--space-8); border: 0; border-radius: var(--radius-sm); background: var(--color-overlay-surface); box-shadow: var(--shadow-popover); color: var(--color-text); font-size: var(--text-xs); line-height: var(--leading-xs); overflow-wrap: anywhere; pointer-events: none; animation: tooltip-in 150ms ease-out; }
 .ui-tooltip[data-instant] { animation: none; }
 @keyframes tooltip-in { from { opacity: 0; } }
-.stack { display: flex; flex-direction: column; gap: var(--space-16); }
+.stack { display: flex; flex-direction: column; gap: var(--space-12); }
 .cluster { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
 .muted { color: var(--color-muted); }
@@ -304,9 +324,9 @@ a.ui-tab { text-decoration: none; }
 .data-toolbar { padding: 0 0 var(--page-gap); }
 .data-toolbar > .cluster { flex-wrap: nowrap; min-width: 0; }
 .data-toolbar .ui-select-trigger { width: auto; min-width: 144px; max-width: 240px; flex-shrink: 0; }
-.section { margin-block: var(--space-24); }
+.section { margin-block: var(--space-16); }
 .section.stack { gap: var(--space-12); }
-.section--bordered { padding-top: var(--space-24); }
+.section--bordered { padding-top: var(--space-16); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
 @keyframes ui-pulse { to { opacity: .5; } }
@@ -374,7 +394,9 @@ button.ui-card__link { display: block; max-width: 100%; overflow: hidden; text-o
 /* An address wider than its cell or card line shrinks to it (its first two characters and the blur stay in view; a revealed one is cut with an ellipsis and says the whole of it, PrivateAddress.tsx) instead of overflowing into the next column. */
 :is(.ui-table td, .ui-card__segment, .ui-select-trigger) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; text-overflow: ellipsis; }
 .ui-card__segment:has(> .private-address) { display: flex; white-space: pre; }
-.ui-table td .settings-cell-stack { min-width: 0; }
+.ui-table td .settings-cell-stack { min-width: 0; max-width: 100%; }
+/* A stacked cell is two lines at most: each of its lines ends in an ellipsis rather than wrapping past the row. */
+:where(.ui-table td .settings-cell-stack) > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-card :is(a, button, input, select, label, [role='checkbox'], [role='switch']):not(.ui-card__link) { position: relative; z-index: 1; }
 .ui-card:has(.ui-card__link:focus-visible)::before { background: var(--color-hover); }
 /* An empty list keeps a page of cards' height (filtering to nothing doesn't collapse the page), but its message sits at
@@ -425,6 +447,7 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
 @media (pointer: coarse), (max-width: 899px) {
   :root { --control-height: 44px; --control-height-sm: 36px; }
   .ui-input { font-size: 16px; }
+  .ui-textarea { --textarea-leading: 22px; }
   .ui-button { --button-pad-x: 14px; font-size: 14px; }
   .ui-icon-button { padding: 0; }
   .ui-button--sm { --button-pad-x: 12px; position: relative; font-size: var(--text-sm); }

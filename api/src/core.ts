@@ -384,8 +384,40 @@ export function requiredFor(method: string, path: string, need?: Permission | 'e
   return { permission, level: read ? 'read' : 'write' };
 }
 export const requiredOf = (c: Ctx, need?: Parameters<typeof requiredFor>[2]) => requiredFor(c.req.method, c.req.path, need);
-/** UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. */
-export const unrestrictedRequired = (message: string, need: Required) => denied('UNRESTRICTED_KEY_REQUIRED', message, { ...need, scope: 'workspace' });
+/**
+ * What a limited credential may do, as one sentence that names its limits: "This key can only send from acme.com." A
+ * refusal starts with it, so whoever reads it (often an integration that made a key in onboarding's Send only tab) knows
+ * which key they used, not only what it lacks.
+ */
+export function credentialLimits(a: Pick<Actor, 'permissions' | 'domains' | 'credential'>) {
+  const who = a.credential === 'agentToken' ? 'This agent token' : a.credential === 'mcp' ? 'This MCP connection' : 'This key';
+  const domains = a.domains.length <= 2 ? a.domains.join(' and ') : `${a.domains[0]}, ${a.domains[1]} and ${a.domains.length - 2} more`;
+  const from = a.domains.length ? ` from ${domains}` : '', send = a.permissions.includes('send'), read = a.permissions.includes('read');
+  if (a.permissions.includes('manage')) return `${who} is limited to the sender domain${a.domains.length > 1 ? 's' : ''} ${domains}.`;
+  if (send && read) return `${who} can only send${from} and read what was sent${from ? ' from there' : ''}.`;
+  if (send) return `${who} can only send${from}.`;
+  return `${who} can only read${from ? ` mail sent${from}` : ''}.`;
+}
+/** Where a full-access key comes from: the dashboard's Create key, or a full-access key itself. */
+export const FULL_ACCESS_KEY = 'create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys';
+// The workspace-wide areas a credential limited to sender domains is refused (UNRESTRICTED_KEY_REQUIRED), by path, as the
+// subject of "… need a full-access key". The first match names it.
+const RESTRICTED_AREAS: [RegExp, string][] = [
+  [/^\/v1\/inbound\/addresses(?:\/|$)/, 'Inbound addresses need'], [/^\/v1\/inbound\/domains(?:\/|$)/, 'Inbound domains need'],
+  [/^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/, 'Mail client passwords need'], [/^\/v1\/(?:inbound|inboxes)(?:\/|$)/, 'Received mail and inboxes need'],
+  [/^\/v1\/billing(?:\/|$)/, 'Billing needs'], [/^\/v1\/campaigns(?:\/|$)/, 'A campaign’s audience and delivery need'],
+  [/^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query)(?:\/|$)/, 'The workspace audience needs'], [/^\/v1\/newsletters(?:\/|$)/, 'Newsletters need'],
+  [/^\/v1\/(?:templates|template-assets)(?:\/|$)/, 'Templates need'], [/^\/v1\/webhooks(?:\/|$)/, 'Webhooks need'], [/^\/v1\/regions(?:\/|$)/, 'Region settings need'],
+  [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
+];
+export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]) => pattern.test(path))?.[1] ?? 'This needs';
+/**
+ * UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. The message says
+ * what the credential is, what the area needs and where to get it: "This key can only send from acme.com. Inbound
+ * addresses need a full-access key: create one in the dashboard under API keys → Create key → Full access, …".
+ */
+export const unrestrictedRequired = (a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
+  denied('UNRESTRICTED_KEY_REQUIRED', `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, { ...need, scope: 'workspace' });
 export class ModuleLoadError extends ApiError {
   constructor(cause?: unknown) {
     super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);
@@ -534,6 +566,10 @@ export function receivingAdminRefusal(a: Actor | undefined, change?: string): Ap
  *  its key through agent setup can't make itself, or anyone, another API key or agent token. */
 export function keyAdminRefusal(a: Actor): ApiError | null {
   const need: Required = { permission: 'configuration', level: 'write' };
+  // An API key that isn't full access (onboarding's Send only key, most often): say which key it is and where keys are made.
+  if (a.credential === 'apiKey' && (!a.permissions.includes('manage') || a.domains.length))
+    return denied('PERMISSION_DENIED', `${credentialLimits(a).slice(0, -1)}, so it can't ${KEY_CHANGE}. Create keys in the dashboard under API keys → Create key, or with a full-access key via POST /v1/api-keys.`,
+      a.permissions.includes('manage') ? { ...need, scope: 'workspace' } : need);
   if (!a.permissions.includes('manage')) return denied('PERMISSION_DENIED', 'This operation requires manage permission.', need);
   const temporary = lastingRefusal(a, KEY_CHANGE, need);
   if (temporary) return temporary;

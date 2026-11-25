@@ -260,9 +260,10 @@ const KeyUpdate = z.object({ name: KeyName.optional(),
 }).strict().openapi('UpdateApiKey');
 /** Key administration's actor (core.ts keyAdminRefusal). */
 export function manageKeys(c: Parameters<typeof actor>[0]) {
-  const value = actor(c, 'manage'), refusal = keyAdminRefusal(value);
+  // keyAdminRefusal first: it refuses what actor's manage check would, saying more to a key that isn't full access.
+  const signedIn = c.get('actor'), refusal = signedIn && keyAdminRefusal(signedIn);
   if (refusal) throw refusal;
-  return value;
+  return actor(c, 'manage');
 }
 const workspaceAccess = { type: 'workspace' as const, addressIds: null, inboxId: null, mail: [], createdInboxIds: [] };
 /** The creator grant: a key with create also reaches the live agent inboxes it created, the first 1,000 by ID. Read here

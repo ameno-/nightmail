@@ -70,7 +70,7 @@ const DARK = '@media (prefers-color-scheme:dark){.nm-text{color:#ededed!importan
 export function notice(p: Parts): Notice {
   const records = p.records ?? [];
   const text = [p.lines.join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
-  const field = (label: string, value: string) => `<tr><td class="nm-why" style="padding:2px 12px 2px 0;vertical-align:top;font-size:13px;color:#5d5d5d">${label}</td><td style="padding:2px 0;font:14px/1.5 ${MONO};word-break:break-all">${escapeHtml(value)}</td></tr>`;
+  const field = (label: string, value: string) => `<tr><td class="nm-why" style="width:40px;padding:2px 12px 2px 0;vertical-align:top;font-size:13px;color:#5d5d5d;white-space:nowrap">${label}</td><td style="padding:2px 0;font:14px/1.5 ${MONO};word-break:break-all">${escapeHtml(value)}</td></tr>`;
   const paragraphs = p.lines.map(line => `<p style="margin:0 0 14px">${escapeHtml(line)}</p>`).join('')
     + records.map(r => `<p style="margin:0 0 4px;font-weight:600">${escapeHtml(r.type)} record</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px">${field('Name', r.name)}${field('Value', r.value)}</table>`).join('')
     + (p.link ? `<p style="margin:0 0 14px"><a href="${escapeHtml(p.link.url)}" style="color:inherit;text-decoration:underline">${escapeHtml(p.link.label)}</a></p>` : '');

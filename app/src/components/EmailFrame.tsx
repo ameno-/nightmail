@@ -7,8 +7,11 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 // page's origin (sandbox="allow-same-origin"), and read once its images and fonts are in: its height, and the span its
 // content takes. The frame then takes that height, so the whole email shows and nothing scrolls inside it, and is
 // cropped to that span (the empty margins around a 600 px email in an 800 px window) and scaled to fit its column.
+// Each frame has one colour scheme, light or dark, its document's (the email as sent has its light and dark media
+// queries settled for it: components/EmailPreview.tsx), never the dashboard's or the system's.
 export const FRAME_WIDTH = { desktop: 800, mobile: 390 } as const
 export type FrameDevice = keyof typeof FRAME_WIDTH
+export type FrameScheme = 'light' | 'dark'
 // An emulation drops remote images' src (the API's previewEmail): their boxes show as flat placeholders, so a missing
 // image reads as one not loaded, not as the email's design.
 const GUARD = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none'"><meta name="referrer" content="no-referrer"><style>html{scrollbar-width:none}html::-webkit-scrollbar{display:none}img:not([src]){background:rgba(128,128,128,.22)}</style>`
@@ -73,18 +76,18 @@ function hash(text: string) {
   b = Math.imul(b ^ (b >>> 16), 2246822507) ^ Math.imul(a ^ (a >>> 13), 3266489909)
   return `${(b >>> 0).toString(36)}${(a >>> 0).toString(36)}${text.length.toString(36)}`
 }
-/** A document's key at a width, the same for the same document. */
-export function frameKey(doc: string, width: number) {
+/** A document's key at a width and scheme, the same for the same document. */
+export function frameKey(doc: string, width: number, scheme: FrameScheme) {
   let key = hashes.get(doc)
   if (key === undefined) {
     key = hash(doc)
     if (hashes.size >= 32) hashes.delete(hashes.keys().next().value!)
     hashes.set(doc, key)
   }
-  return `${width}:${key}`
+  return `${width}:${scheme}:${key}`
 }
 
-function measure(doc: string, width: number, key: string) {
+function measure(doc: string, width: number, scheme: FrameScheme, key: string) {
   if (started.has(key)) return
   started.add(key)
   const frame = document.createElement('iframe')
@@ -93,7 +96,7 @@ function measure(doc: string, width: number, key: string) {
   frame.tabIndex = -1
   frame.inert = true
   // One pixel tall: what fills the window (height: 100%, 100vh) takes its content's height, as it does at that height.
-  frame.style.cssText = `position:fixed;top:0;left:${-2 * MAX_WIDTH}px;width:${width}px;height:1px;border:0;visibility:hidden;pointer-events:none;color-scheme:normal`
+  frame.style.cssText = `position:fixed;top:0;left:${-2 * MAX_WIDTH}px;width:${width}px;height:1px;border:0;visibility:hidden;pointer-events:none;color-scheme:${scheme}`
   let done = false
   const loaded = () => frame.contentWindow?.location.href === 'about:srcdoc'
   const keep = (size: FrameSize) => {
@@ -129,35 +132,35 @@ function measure(doc: string, width: number, key: string) {
   document.body.append(frame)
 }
 
-/** A document's size at a width, if it has been measured (read while subscribed through useFrameSizes). */
-export const frameSize = (doc: string, width: number) => sizes.get(frameKey(doc, width))
+/** A document's size at a width and scheme, if it has been measured (read while subscribed through useFrameSizes). */
+export const frameSize = (doc: string, width: number, scheme: FrameScheme) => sizes.get(frameKey(doc, width, scheme))
 
-/** Each document's size at its width once it has loaded off screen (undefined until then); null documents wait. */
-export function useFrameSizes(requests: readonly { doc: string | null; width: number }[]): (FrameSize | undefined)[] {
+/** Each document's size at its width and scheme once it has loaded off screen (undefined until then); null documents wait. */
+export function useFrameSizes(requests: readonly { doc: string | null; width: number; scheme: FrameScheme }[]): (FrameSize | undefined)[] {
   useSyncExternalStore(subscribe, () => version)
-  const keys = requests.map(({ doc, width }) => doc === null ? null : frameKey(doc, width))
+  const keys = requests.map(({ doc, width, scheme }) => doc === null ? null : frameKey(doc, width, scheme))
   const wanted = keys.filter(Boolean).join(' ')
   useEffect(() => {
-    requests.forEach(({ doc, width }, index) => { const key = keys[index]; if (doc !== null && key && !sizes.has(key)) measure(doc, width, key) })
+    requests.forEach(({ doc, width, scheme }, index) => { const key = keys[index]; if (doc !== null && key && !sizes.has(key)) measure(doc, width, scheme, key) })
   }, [wanted]) // eslint-disable-line react-hooks/exhaustive-deps
   return keys.map(key => key ? sizes.get(key) : undefined)
 }
 
-type Layer = { id: number; doc: string; size: FrameSize; loaded: boolean }
+type Layer = { id: number; doc: string; scheme: FrameScheme; size: FrameSize; loaded: boolean }
 let layerIds = 0
 /**
  * A document in a box `scale` times its shown span, cropped to it. A new document (another client, the other theme)
  * loads over the last one, which stays until it has, then fades in; the box eases to its size.
  */
-export function EmailFrame({ doc, size, scale, title, pending = false }: { doc: string; size: FrameSize; scale: number; title: string; pending?: boolean }) {
-  const [layers, setLayers] = useState<Layer[]>(() => [{ id: ++layerIds, doc, size, loaded: false }])
+export function EmailFrame({ doc, scheme, size, scale, title, pending = false }: { doc: string; scheme: FrameScheme; size: FrameSize; scale: number; title: string; pending?: boolean }) {
+  const [layers, setLayers] = useState<Layer[]>(() => [{ id: ++layerIds, doc, scheme, size, loaded: false }])
   const top = layers[layers.length - 1]
-  if (top.doc !== doc) setLayers([...layers.filter(layer => layer.loaded).slice(-1), { id: ++layerIds, doc, size, loaded: false }])
+  if (top.doc !== doc || top.scheme !== scheme) setLayers([...layers.filter(layer => layer.loaded).slice(-1), { id: ++layerIds, doc, scheme, size, loaded: false }])
   else if (top.size !== size) setLayers(layers.map(layer => layer === top ? { ...layer, size } : layer))
   const loaded = (id: number) => setLayers(list => { const index = list.findIndex(layer => layer.id === id); return index < 0 ? list : [{ ...list[index], loaded: true }, ...list.slice(index + 1)] })
   return <div className="email-frame" data-pending={pending || undefined} data-first={!layers.some(layer => layer.loaded) || undefined}
     style={{ width: Math.round(shownWidth(top.size) * scale), height: Math.round(top.size.height * scale) }}>
     {layers.map(layer => <iframe key={layer.id} title={title} srcDoc={layer.doc} sandbox="" referrerPolicy="no-referrer" data-loaded={layer.loaded || undefined} onLoad={() => loaded(layer.id)}
-      style={{ width: layer.size.width, height: layer.size.height, transform: `translateX(${-layer.size.left * scale}px) scale(${scale})` }} />)}
+      style={{ colorScheme: layer.scheme, width: layer.size.width, height: layer.size.height, transform: `translateX(${-layer.size.left * scale}px) scale(${scale})` }} />)}
   </div>
 }

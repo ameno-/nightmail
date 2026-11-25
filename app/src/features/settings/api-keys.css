@@ -1,13 +1,12 @@
 /* API keys page: plain sections set apart by space alone, no boxes and no rules (same rhythm as onboarding). */
 .keys-sections { display: flex; flex-direction: column; min-width: 0; }
 .keys-sections > .section { margin-block: 0; }
-.keys-sections > .section:not(:first-child) { margin-top: var(--space-40); }
+.keys-sections > .section:not(:first-child) { margin-top: var(--space-32); }
 .keys-sections .ui-tabs + .ui-cards { margin-top: calc(-1 * var(--space-12)); }
-/* Two-line rows (name + caption, access + scope) render 53px; the skeleton must match. */
-.ui-table-scroll.keys-table--two-line { --table-row-height: 53px; }
+/* Two-line rows (name + caption, access + scope) take the two-line row (.ui-table--two-line); the skeleton too. */
 /* Narrow screens scroll the table sideways rather than wrapping cells, so loaded rows keep the skeleton's height. */
 .keys-table .ui-table { min-width: 880px; }
-/* One-line cells clip rather than wrap, so every row stays 53px. */
+/* One-line cells clip rather than wrap, so every row stays two lines tall. */
 .keys-table td:is([data-col='type'], [data-col='prefix'], [data-col='last']) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* A tablet fits the whole table, Revoke included, by narrowing its columns instead of scrolling it sideways; the key
    prefix gives way (a phone's card still shows it). */

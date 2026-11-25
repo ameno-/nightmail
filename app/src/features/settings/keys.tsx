@@ -174,12 +174,12 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   }
   const [nameColumn, typeColumn, accessColumn, prefixColumn, lastColumn, actionsColumn] = settingsColumns.keys
 
-  return <div className="stack">
+  return <div className="stack measure-list">
     <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)} data-analytics="keys/create">Create key</Button></>} />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
-        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
+        {!listFailed && <DataTable className="keys-table ui-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
           columns={[
             { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
             ...(type === 'all' ? [{ ...typeColumn, render: (row: Row) => typeName[row.kind] }] : []),

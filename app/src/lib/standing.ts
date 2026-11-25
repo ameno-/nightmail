@@ -1,4 +1,4 @@
-import type { SenderGrade, StandingStep } from '../data/types'
+import type { StandingStep } from '../data/types'
 import { productName } from '../../../api/src/brand'
 import { stepRank } from '../../../api/src/standing-model'
 
@@ -6,8 +6,6 @@ import { stepRank } from '../../../api/src/standing-model'
 // (warn and above). Every message has three parts: what happened (the API's reason), what Nightmail did (below) and how
 // to fix it (the checklist on Overview).
 export const stepAtLeast = (step: StandingStep | null | undefined, floor: StandingStep) => Boolean(step) && stepRank(step!) >= stepRank(floor)
-/** A grade as the data-grade key its colour is styled by (A+ is aplus). */
-export const gradeKey = (grade: SenderGrade) => grade === 'A+' ? 'aplus' : grade.toLowerCase()
 export type RaisedStep = 'warn' | 'restrict' | 'pause'
 export const standingTitle: Record<RaisedStep, string> = { warn: 'Your limit is frozen', restrict: 'Marketing is held', pause: 'Sending is paused' }
 export const standingDid: Record<RaisedStep, string> = {
