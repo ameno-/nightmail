@@ -180,12 +180,14 @@ export async function linkReview(runtime: Runtime, db: DbExecutor, workspaceId: 
  * Whether a link page (unsubscribe, forwarding) may answer on the request's host for a link of `workspaceId`: this
  * installation's own origin (links sent before link hosts), the link domain if the workspace linked on it, or that
  * workspace's own active link host (or retired one, for LINK_RETENTION_DAYS after its domain was deleted). So
- * links.a.com never serves workspace B's links, and the link domain only the links it carried.
+ * links.a.com never serves workspace B's links, and the link domain only the links it carried. A host that went back to
+ * pending with its custom hostname kept (a certificate renewing, a check that saw it not served) still answers: mail that
+ * links on it, a campaign's earlier and later copies alike, keeps working, and only a proven claim ever records one.
  */
 export async function servesWorkspace(runtime: Pick<Runtime, 'config' | 'db'>, requestUrl: string, workspaceId: string) {
   const host = new URL(requestUrl).hostname.toLowerCase().replace(/\.$/, ''), config = runtime.config;
   if (linksOff(config) || [config.publicUrl, ...config.previousOrigins ?? []].some(origin => new URL(origin).hostname === host)) return true;
-  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts h WHERE h.workspace_id=${workspaceId} AND h.hostname=${host} AND (h.status='active' OR ${retained(sql`h`)})
+  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts h WHERE h.workspace_id=${workspaceId} AND h.hostname=${host} AND (h.status='active' OR (h.status='pending' AND h.custom_hostname_id IS NOT NULL) OR ${retained(sql`h`)})
     UNION ALL SELECT 1 FROM link_fallback_days WHERE workspace_id=${workspaceId} AND host=${host} LIMIT 1`)).rowCount;
 }
 

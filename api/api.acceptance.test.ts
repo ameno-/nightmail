@@ -41730,6 +41730,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("INSERT INTO operation_unsubscribe_tokens(token_hash,workspace_id,email) VALUES (encode(sha256(convert_to($1,'UTF8')),'hex'),$2,'kept@example.net')",[kept,wid]);
         for(const host of ['links.gone.example','links.deleted.example'])assert.equal((await page(new Request(`https://${host}/unsubscribe/${kept}`,{headers:{accept:'text/html'}}))).status,200,host);
         assert.equal(await servesWorkspace(runtime,'https://links.gone.example/v1/forwarding/stop/x','ws_link_other'),false);
+        // An active host a check finds not served (back to pending, its custom hostname kept) still answers the links its mail carries.
+        await db.query("UPDATE link_hosts SET status='pending' WHERE workspace_id=$1 AND domain=$2 AND custom_hostname_id IS NOT NULL",[wid,domain]);
+        assert.equal((await page(new Request(`https://links.${domain}/unsubscribe/${kept}`,{headers:{accept:'text/html'}}))).status,200);
+        assert.equal(await servesWorkspace(runtime,`https://links.${domain}/unsubscribe/x`,'ws_link_other'),false);
+        await db.query("UPDATE link_hosts SET status='active' WHERE workspace_id=$1 AND domain=$2",[wid,domain]);
         // The retention over: the retired hosts go with their custom hostnames, but ch_shared, which ws_link_gone_b's live row
         // uses, stays; their links answer 404.
         await db.query("UPDATE link_hosts SET retired_at=now()-make_interval(days=>31) WHERE status='retired'");
