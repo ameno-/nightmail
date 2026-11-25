@@ -4404,7 +4404,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const verify=()=>operationJobs['domain.verify']!(runtime,contender.payload,{id:contender.id,attempts:1,workspaceId:b.org.id});
           await assert.rejects(verify(),JobDeferred);
           assert.deepEqual((await pool.query('SELECT workspace_id,ever_proven FROM domain_claims WHERE name=$1',[race])).rows,[{workspace_id:b.org.id,ever_proven:true}]);
-          for(const name of [race,`child.${race}`]) error(await add(a.cookie,name),409,'DOMAIN_CLAIMED');
+          for(const name of [race,`child.${race}`]) assert.match(error(await add(a.cookie,name),409,'DOMAIN_CLAIMED').message,/If the domain is yours, remove .*_nightmail\..*DKIM CNAME.*released about 30 days after both are gone.*support@/);
           await pace();await assert.rejects(verify(),JobDeferred);
           assert.equal(identities.get(`${platform}:${race}`)?.Tags?.some((tag:Json)=>tag.Value===answer),true);
           ok(await local('DELETE',`/v1/domains/${second.id}`,undefined,b.cookie));
@@ -31814,6 +31814,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_released', workspace: 'W', domain: { name: 'Mail.Example' } }).subject, 'mail.example was released from W');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_released', workspace: 'W', domain: { name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain was released from W');
       // An address every workspace together has mailed five times in a day is not mailed a sixth.
       await db.query(`UPDATE api_request_budgets SET used=$1 WHERE workspace_id='global' AND key_id LIKE 'invitation-email:%'`, [INVITATION_EMAILS.addressDay]);
       const sixth = (await db.query(`SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND email='named-0@elsewhere.example' AND status='pending'`, [wid])).rows[0].id;
@@ -32015,8 +32017,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(await sweep(), 0); assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
         await age(); response = 'unavailable'; assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
         response = 'present'; assert.equal(await sweep(), 0);
-        assert.equal((await db.query('SELECT receiving_proof_missed_at FROM domain_claims WHERE token=$1',[token])).rows[0].receiving_proof_missed_at, null);
-        response = 'absent'; await age(); assert.equal(await sweep(), 1); assert.equal(await blocks(), false);
+        const missed = async () => (await db.query('SELECT receiving_proof_missed_at FROM domain_claims WHERE token=$1',[token])).rows[0].receiving_proof_missed_at;
+        assert.equal(await missed(), null);
+        // A proof seen in the last week is not looked at again; after a week a miss starts the grace period.
+        response = 'absent'; await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '6 days' WHERE token=$1",[token]);
+        await sweep(); assert.equal(await missed(), null);
+        await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '8 days' WHERE token=$1",[token]);
+        await sweep(); assert.notEqual(await missed(), null);
+        await age(); assert.equal(await sweep(), 1); assert.equal(await blocks(), false);
+        // Its owners and admins are told, once (the release is the claim's last moment).
+        assert.deepEqual((await db.query("SELECT data->>'name' AS name FROM account_notices WHERE workspace_id=$1 AND kind='domain_released'",[wid])).rows, [{name}]);
       } finally { globalThis.fetch = networkGuard; }
     });
   });
