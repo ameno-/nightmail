@@ -281,11 +281,15 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
 const NO_RECORDS = 'DNS records are not available yet.'
 // Onboarding: sending and receiving records in guided groups. The domain page: every record in one table, custom MAIL FROM last.
 export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, mailFrom, checks }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; mailFrom?: MailFromView; checks?: DnsChecks }) {
-  // The link record (links.<domain>) is one of the sending records: campaign and marketing mail waits for it.
+  // An own link record (links.<domain>, when own link hosts are on) is one of the sending records.
   const sending = [...recordsFor(domain, 'sending'), ...recordsFor(domain, 'links')], receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
   const alert = issue && <ReceivingIssueAlert issue={issue} />
   const warning = receivingWarning(domain.name, receiving)
   const { copy } = useCopy()
+  const { multiTenant } = useWorkspaceAccess()
+  // Hosted: unsubscribe links go on the link domain unless the domain has a link record of its own (own link hosts).
+  const linkNote = multiTenant && !domain.records.some(record => record.purpose === 'links')
+    ? `Unsubscribe links in campaign and marketing mail from ${domain.name} use ${productName}'s link domain, so they need no DNS record.` : null
   // Stays in place (invisible) once every record verifies, so nothing below moves.
   const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')} />
   if (guided) {
@@ -331,6 +335,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
     {rows.length > 0 && <div className="domain-records-list">
       <DnsRecordTable domain={domain.name} rows={rows} />
       {mailFrom && !domain.mailFromDomain && mailFromRecords.length === 0 && <div className="domain-records-add"><Button variant="ghost" onClick={mailFrom.onEdit}><Plus size={14} aria-hidden />Add custom MAIL FROM</Button></div>}
+      {linkNote && <p className="muted">{linkNote}</p>}
     </div>}
   </section>
 }

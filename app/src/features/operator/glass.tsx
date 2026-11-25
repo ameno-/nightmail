@@ -183,7 +183,7 @@ function eventText(e: GlassEvent): [ReactNode, ReactNode] {
     case 'standing': { const [from, to] = (e.detail ?? '').split('>'); return [<>{who} {stepNames[to ?? ''] ?? to}</>, [`was ${from === 'ok' ? 'OK' : stepNames[from ?? '']?.replace('back to ', '') ?? from}`, e.subject].filter(Boolean).join(' · ')] }
     case 'breaker': return [<><b>Built-in domains</b> stopped</>, `${e.subject} breaker tripped`]
     case 'alert': return [<b>{e.subject}</b>, e.detail]
-    case 'link_fallback': return [<>{who} linked on the shared host</>, [e.subject, e.detail && `${plural(Number(e.detail), 'recipient')} today`].filter(Boolean).join(' · ')]
+    case 'link_fallback': return [<>{who} linked on the link domain</>, [e.subject, e.detail && `${plural(Number(e.detail), 'recipient')} today`].filter(Boolean).join(' · ')]
   }
 }
 const order = (a: GlassEvent, b: GlassEvent) => a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0

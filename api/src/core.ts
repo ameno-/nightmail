@@ -170,10 +170,11 @@ export interface Config {
   sharedRegions?: string[];
   hostedSendCaps: { firstWeek: number };
   publicUrl: string;
-  /** Customers' link hosts (src/link-domains.ts): the Cloudflare for SaaS zone their links.<domain> CNAMEs reach
-   *  (`target`, a name in that zone), the token that edits its custom hostnames and, Hosted, the shared fallback host
-   *  (NIGHTMAIL_LINK_FALLBACK_HOST). Undefined: unset. */
-  linkHosts?: { zoneId: string; token: string; target: string; fallbackHost?: string };
+  /** Hosted: the link domain the links in campaign and marketing mail go on (NIGHTMAIL_LINK_HOST, src/link-domains.ts). */
+  linkHost?: string;
+  /** Own link hosts (src/link-domains.ts), off unless set: the Cloudflare for SaaS zone customers' links.<domain> CNAMEs
+   *  reach (`target`, a name in that zone) and the token that edits its custom hostnames. */
+  linkHosts?: { zoneId: string; token: string; target: string };
   sesFeedbackUrl?: string;
   regions: string[];
   liveEnabled: boolean;

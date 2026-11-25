@@ -74,6 +74,10 @@ export const gradeCounts = sql.join(GRADE_BANDS.map((band, i) => {
 /** The platform's own domains: the dashboard's (not an address or localhost) and the one built-in domains are under. */
 export const platformDomains = (config: Pick<Runtime['config'], 'publicUrl' | 'builtinDomain'>) => [...new Set([new URL(config.publicUrl).hostname, ...config.builtinDomain ? [config.builtinDomain] : []])]
   .filter(name => name.includes('.') && !/^[\d.]+$|^\[|:/.test(name));
+/** The domains whose Spamhaus DBL listing the board checks: the platform's own, and the link domain's zone (nightmailedge.com),
+ *  which every customer's campaign and marketing links share (src/link-domains.ts), so one listing there is everyone's. */
+export const blocklistDomains = (config: Pick<Runtime['config'], 'publicUrl' | 'builtinDomain' | 'linkHost' | 'linkHosts'>) => [...new Set([...platformDomains(config),
+  ...[config.linkHost, config.linkHosts?.target].flatMap(host => host ? [host.split('.').slice(-2).join('.')] : [])])];
 
 type Raw = {
   bounds: { since: string; until: string; prev: string; today: string }; coverage: string | null;
@@ -117,7 +121,7 @@ export async function readDeliverability(runtime: Pick<Runtime, 'db' | 'config'>
 
 const zeroCounts = (): CountsRow => Object.fromEntries(COUNT_KEYS.map(k => [k, 0])) as CountsRow;
 const zeroVdm = () => Object.fromEntries(Object.values(VDM_METRICS).map(k => [k, 0])) as z.infer<typeof Vdm>;
-function shape(r: Raw, window: DeliverabilityWindow, unit: 'hour' | 'day', config: Pick<Runtime['config'], 'publicUrl' | 'builtinDomain'>): DeliverabilityBoard {
+function shape(r: Raw, window: DeliverabilityWindow, unit: 'hour' | 'day', config: Pick<Runtime['config'], 'publicUrl' | 'builtinDomain' | 'linkHost' | 'linkHosts'>): DeliverabilityBoard {
   const counts = (row: Partial<CountsRow>) => Object.fromEntries(COUNT_KEYS.map(k => [k, Number(row[k] ?? 0)])) as CountsRow;
   const cube = new Map<string, DeliverabilityBoard['cube'][number]>();
   for (const row of r.cube) {
@@ -159,7 +163,7 @@ function shape(r: Raw, window: DeliverabilityWindow, unit: 'hour' | 'day', confi
     cube: [...cube.values()].sort((a, b) => a.provider.localeCompare(b.provider) || a.kind.localeCompare(b.kind) || a.region.localeCompare(b.region)),
     series: r.series.map(s => ({ at: s.at, kind: s.kind, region: s.region, ...counts(s) })),
     regions,
-    blocklist: domains.map(domain => { const c = check('dbl', domain); return { domain, status: c?.status ?? null, checkedAt: c?.checked_at ?? null }; }),
+    blocklist: blocklistDomains(config).map(domain => { const c = check('dbl', domain); return { domain, status: c?.status ?? null, checkedAt: c?.checked_at ?? null }; }),
     postmaster: domains.map(domain => {
       const c = check('postmaster', domain), days = r.postmaster.filter(p => p.domain === domain), last = days.at(-1);
       const mean = (list: typeof days) => { const known = list.filter(p => p.spam_ratio !== null); return known.length ? known.reduce((n, p) => n + Number(p.spam_ratio), 0) / known.length : null; };
@@ -191,7 +195,7 @@ export async function refreshDeliverabilitySources(runtime: Runtime, { fetch: ge
     const { rows } = await runtime.db.execute<{ kind: 'ses' | 'vdm' | 'dbl' | 'postmaster'; subject: string; account: string | null }>(sql`WITH wanted(kind,subject,account,every) AS (
         SELECT 'ses',region,aws_account_id,interval '10 minutes' FROM provider_pool_regions
         UNION ALL SELECT 'vdm',region,aws_account_id,interval '1 hour' FROM provider_pool_regions
-        UNION ALL SELECT 'dbl',d,NULL,interval '1 hour' FROM unnest(${sql.param(platformDomains(runtime.config))}::text[]) d
+        UNION ALL SELECT 'dbl',d,NULL,interval '1 hour' FROM unnest(${sql.param(blocklistDomains(runtime.config))}::text[]) d
         UNION ALL SELECT 'postmaster',d,NULL,interval '6 hours' FROM unnest(${sql.param(runtime.config.postmaster ? platformDomains(runtime.config) : [])}::text[]) d
       ), claimed AS (INSERT INTO deliverability_checks AS c (kind,subject,next_at) SELECT kind,subject,now()+every FROM wanted
         ON CONFLICT (kind,subject) DO UPDATE SET next_at=excluded.next_at WHERE c.next_at<=now() RETURNING c.kind,c.subject)

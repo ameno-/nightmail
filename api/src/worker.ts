@@ -324,11 +324,11 @@ export default {
     // The events host (BYO_EVENTS_ORIGIN) takes AWS's signed notifications and nothing else.
     let eventsHost: string | undefined; try { eventsHost = new URL(String((env as { BYO_EVENTS_ORIGIN?: unknown }).BYO_EVENTS_ORIGIN)).host; } catch { eventsHost = undefined; }
     if (eventsHost && url.host === eventsHost && pathname !== '/health' && !(request.method === 'POST' && (pathname === '/v1/events/ses' || pathname === '/v1/events/cloudformation'))) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
-    // A customer's link host (src/link-hosts.ts) answers the links in their mail and nothing else. With link hosts on,
-    // every host that is none of this installation's own came through the Cloudflare for SaaS zone: a links.<domain>.
+    // The link domain and customers' own link hosts (src/link-hosts.ts) answer the links in customer mail and nothing else.
+    // With either on, every host that is none of this installation's own came through the link zone's route.
     const own = [String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL), ...String((env as { PREVIOUS_PUBLIC_URLS?: unknown }).PREVIOUS_PUBLIC_URLS ?? '').split(',')]
       .flatMap(origin => { try { return [new URL(origin.trim()).hostname]; } catch { return []; } }).concat(eventsHost ? [eventsHost.replace(/:\d+$/, '')] : []);
-    const linkAnswer = linkHostRequest(!!setting(env, 'LINK_SAAS_ZONE_ID') && !!setting(env, 'LINK_SAAS_TOKEN'), url.hostname, pathname, own);
+    const linkAnswer = linkHostRequest(!!setting(env, 'LINK_HOST') || !!setting(env, 'LINK_SAAS_ZONE_ID') && !!setting(env, 'LINK_SAAS_TOKEN'), url.hostname, pathname, own);
     if (linkAnswer === 'missing') return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
     // A name of the zone that isn't this Worker's (dev, support, media): the zone-wide route runs before its custom domain
     // or bucket, so it goes on to them unchanged (a subrequest to the same zone skips the route).

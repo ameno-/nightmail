@@ -288,7 +288,7 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy' | 'support'>): G
 //  - domain_verified, builtin_ready: domain_claims.verified_at; campaign_launched, campaign_paused: sending_campaigns;
 //  - standing: a workspace's step changes (standing_events, per workspace through its page index);
 //  - breaker: the built-in domains' breaker tripping (builtin_parent); alert: the open health alerts;
-//  - link_fallback: a workspace's first use of the shared fallback link host on a UTC day (link_fallback_days), with its
+//  - link_fallback: a workspace's first use of the link domain on a UTC day (link_fallback_days), with its
 //    campaign and marketing recipients there that day so far.
 // No message content: a campaign is its name and size, a domain its name. A sign-up's address is there for the page
 // to blur with the dashboard's privacy toggle. Cached GLASS_TTL_SECONDS per installation; `after` only filters that.
@@ -297,7 +297,7 @@ const ActivityEvent = z.object({
   id: z.string().describe('Stable across reads: the page adds an event once.'), at: z.string(), kind: z.enum(ACTIVITY_KINDS),
   workspace: z.object({ id: z.string(), name: z.string() }).nullable(),
   subject: z.string().nullable().describe('What it is about: a domain, a campaign\u2019s name, the built-in parent or an alert\u2019s label.'),
-  detail: z.string().nullable().describe('A sign-up\u2019s method (google, github, email, password), a campaign\u2019s recipients, a pause reason\u2019s code, a step change (from>to), an alert\u2019s words or the recipients linked on the shared link host that day.'),
+  detail: z.string().nullable().describe('A sign-up\u2019s method (google, github, email, password), a campaign\u2019s recipients, a pause reason\u2019s code, a step change (from>to), an alert\u2019s words or the recipients linked on the link domain that day.'),
   place: z.enum(['open', 'waitlist']).nullable().describe('A sign-up\u2019s place.'),
   email: z.string().nullable().describe('A sign-up\u2019s address.'),
   tone: z.enum(['neutral', 'success', 'warning', 'danger']),
@@ -339,8 +339,8 @@ export async function readActivity(runtime: Pick<Runtime, 'db'>): Promise<GlassA
       FROM health_alerts a ORDER BY a.since DESC LIMIT ${n})
   ) x ORDER BY t DESC,id DESC LIMIT ${n}`);
   const tone = (row: ActivityRow): z.infer<typeof ActivityEvent>['tone'] => row.kind === 'alert' ? (row.severity === 'critical' ? 'danger' : 'warning')
-    : row.kind === 'standing' ? (row.severity as 'success' | 'warning' | 'danger') : row.kind === 'breaker' ? 'danger' : row.kind === 'campaign_paused' || row.kind === 'link_fallback' ? 'warning'
-    : row.kind === 'signup' ? 'neutral' : 'success';
+    : row.kind === 'standing' ? (row.severity as 'success' | 'warning' | 'danger') : row.kind === 'breaker' ? 'danger' : row.kind === 'campaign_paused' ? 'warning'
+    : row.kind === 'signup' || row.kind === 'link_fallback' ? 'neutral' : 'success';
   const events = rows.flatMap(row => {
     const label = row.kind === 'alert' ? alertLabel(row.alert_kind ?? '') : null;
     if (row.kind === 'alert' && !label) return [];

@@ -1921,7 +1921,7 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step. link_record: a campaign launched before link hosts waits until its sending domain's link record (links.<domain>) verifies, then continues by itself.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace's sending is paused, or with own link hosts, its domain's isn't active yet); it continues by itself.
      */
     waiting: {
         reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record';
