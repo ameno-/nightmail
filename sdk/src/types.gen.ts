@@ -2827,6 +2827,10 @@ export type DomainReadiness = {
          */
         publicDns?: {
             /**
+             * With missing on a CNAME: a wildcard record (e.g. *.example.com) answers this name with an address instead, as it does a random name beside it. Add the CNAME exactly: the specific record wins over the wildcard.
+             */
+            wildcard?: string;
+            /**
              * found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.
              */
             state: 'found' | 'missing' | 'wrong_value';

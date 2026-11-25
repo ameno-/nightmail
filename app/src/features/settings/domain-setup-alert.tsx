@@ -3,6 +3,7 @@ import { Link } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
 import { Alert } from '../../components/ui'
 import type { DnsRecord, Domain, PublicDns } from '../../data/types'
+import { wildcardMessage } from '../../../../api/src/dns-messages'
 import './domain-setup-alert.css'
 
 // The banner for a domain still pending an hour after it was added whose records public DNS lacks: how many of the records
@@ -15,7 +16,8 @@ import './domain-setup-alert.css'
 export type DnsChecks = Map<string, PublicDns | null>
 export const checkKey = (record: Pick<DnsRecord, 'type' | 'name' | 'value'>) => `${record.type} ${record.name} ${record.value}`
 /** noDns: nobody serves DNS for the domain (Domain.dnsIssue), so no record can be published: its name needs checking. */
-export type SetupGap = { missing: number; total: number; wrong: boolean; host: NonNullable<Domain['dnsHost']> | null; noDns?: true }
+/** wildcard: a wildcard record (*.domain) answers the missing CNAMEs' names with an address. */
+export type SetupGap = { missing: number; total: number; wrong: boolean; host: NonNullable<Domain['dnsHost']> | null; noDns?: true; wildcard?: string }
 
 /**
  * The records verification waits for that DNS lacks or has with another value, or null: nothing missing, a domain that
@@ -30,7 +32,9 @@ export function setupGap(domain: Domain, checks?: DnsChecks): SetupGap | null {
   if (domain.dnsHost === undefined) return null
   const state = (record: DnsRecord) => (checks?.has(checkKey(record)) ? checks.get(checkKey(record)) : record.publicDns)?.state
   const missing = records.filter(record => record.status !== 'verified' && (state(record) === 'missing' || state(record) === 'wrong_value'))
-  return missing.length ? { missing: missing.length, total: records.length, wrong: missing.some(record => state(record) === 'wrong_value'), host: domain.dnsHost } : null
+  const seen = (record: DnsRecord) => checks?.has(checkKey(record)) ? checks.get(checkKey(record)) : record.publicDns
+  const wildcard = missing.map(seen).find(found => found?.state === 'missing' && found.wildcard)?.wildcard
+  return missing.length ? { missing: missing.length, total: records.length, wrong: missing.some(record => state(record) === 'wrong_value'), host: domain.dnsHost, ...(wildcard ? { wildcard } : {}) } : null
 }
 
 export const gapTitle = ({ missing, total, wrong, host }: SetupGap) => `${missing} of ${total} ${total === 1 ? 'record' : 'records'} ${wrong ? 'missing or wrong' : 'missing'}${host ? ` at ${host.name}` : ''}`
@@ -59,8 +63,8 @@ export function DomainSetupAlert({ domain, gap, page = false, actions }: { domai
   </Alert>
   const one = gap.missing === 1, where = gap.host ? `at ${gap.host.name}` : 'where your DNS is hosted'
   return <Alert tone="warning" title={page ? gapTitle(gap) : `${domain.name}: ${gapTitle(gap)}`} data-domain-setup="">
-    {page ? `Public DNS doesn’t have ${one ? 'it' : 'them'} yet, so mail from ${domain.name} can’t be sent. Add ${one ? 'it' : 'them'} ${where}, then press Check now.`
-      : `Mail from ${domain.name} can’t be sent until ${one ? 'it is' : 'they are'} published ${where}.`}
+    {page ? `Public DNS doesn’t have ${one ? 'it' : 'them'} yet, so mail from ${domain.name} can’t be sent. ${gap.wildcard ? `${wildcardMessage(gap.wildcard, gap.host?.name)} Then press Check now.` : `Add ${one ? 'it' : 'them'} ${where}, then press Check now.`}`
+      : `Mail from ${domain.name} can’t be sent until ${one ? 'it is' : 'they are'} published ${where}.${gap.wildcard ? ` ${wildcardMessage(gap.wildcard, gap.host?.name)}` : ''}`}
     {(!page || gap.host?.url) && <span className="domain-setup-links">
       {!page && <Link to={`/domains/${domain.id}`}>View records</Link>}
       {gap.host?.url && <a href={gap.host.url} target="_blank" rel="noreferrer">Open {gap.host.name} DNS<ArrowUpRight size={14} aria-hidden /></a>}
