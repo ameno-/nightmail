@@ -22658,6 +22658,38 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(!logs.some(line => line.includes(email)));
     });
   });
+  test('request logs: an unmatched API path is logged as a scrubbed template (IDs, addresses, tokens and names replaced), at most 20 per workspace per 10 minutes', async t => {
+    await simulatedSesFixture(t, async ({ runtime, local, request }) => {
+      const { unmatchedTemplate } = await import('./src/app.js');
+      assert.equal(unmatchedTemplate('/v1/inboxes/mbx_9c67eea843964aefac3d404ad409eaab/threads/thr_0007zr8b4ef370/messages?limit=5'), '/v1/inboxes/{mbx_id}/threads/{thr_id}/messages');
+      assert.equal(unmatchedTemplate('/v1/addresses/support%40acme.example/send'), '/v1/addresses/{email}/send');
+      assert.equal(unmatchedTemplate(`/v1/keys/${'5e'.repeat(32)}`), '/v1/keys/{token}');
+      assert.equal(unmatchedTemplate('/v1/domains/acme.example/dns/123'), '/v1/domains/{host}/dns/{n}');
+      assert.equal(unmatchedTemplate('/v1/jobs/0f8fad5b-d9cb-469f-a165-70867728950e'), '/v1/jobs/{uuid}');
+      assert.equal(unmatchedTemplate('/v1/Mailboxes/List'), '/v1/mailboxes/list');
+      assert.equal(unmatchedTemplate('/v1/x/%E0%A4%A'), '/v1/x/{value}');
+      const lines: Json[] = [];
+      for (const level of ['error', 'info', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { lines.push(JSON.parse(String(line))); } catch { /* not a log line */ } });
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Guessing agent', permissions: ['read'] }), 201); secrets.add(key.secret);
+      const logged = async (path: string) => {
+        const reply = await request('GET', path, key.secret); assert.equal(reply.status, 404);
+        const entry = lines.find(l => l.event === 'request' && l.requestId === reply.headers.get('x-request-id'))!;
+        assert.deepEqual([entry.route, entry.code, entry.workspace], ['unmatched', 'NOT_FOUND', runtime.config.workspaceId]);
+        return entry.path;
+      };
+      // An agent guessing: method plus template, never the address or ID it put in the path.
+      assert.equal(await logged('/v1/inboxes/mbx_9c67eea843964aefac3d404ad409eaab/reply-all?to=someone@private.example'), '/v1/inboxes/{mbx_id}/reply-all');
+      assert.ok(!JSON.stringify(lines).includes('private.example') && !JSON.stringify(lines).includes('9c67eea843964aefac3d404ad409eaab'));
+      // A burst past the limit still writes its request lines, without the path.
+      const paths: unknown[] = [];
+      for (let i = 0; i < 22; i++) paths.push(await logged(`/v1/guess${i % 3}`));
+      assert.equal(paths.filter(Boolean).length, 19, 'Twenty per window, the first already used.');
+      // A path outside the API (a crawler) isn't recorded at all; a matched route never carries one.
+      const crawler = await local('GET', '/wp-admin/setup.php'); assert.equal(crawler.status, 404);
+      assert.equal(lines.find(l => l.event === 'request' && l.requestId === crawler.headers.get('x-request-id'))?.path, undefined);
+    });
+  });
+
   // The nightly report (scripts/nightly-report.ts) counts these lines; the Worker writes them to Workers Logs.
   test('request logs: one line per request with its route template, code, workspace and principal, and no addresses, tokens, bodies or smuggled stack text', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
@@ -36268,6 +36300,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'nope' }, addresses: [box.id] }), 422, 'INVALID_RECIPE');
         error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'support-hook' }, addresses: [box.id] }), 422, 'INVALID_RECIPE');
         error(await local('POST', recipes, { recipe: 'teleport', params: {}, addresses: [box.id] }), 422, 'UNKNOWN_RECIPE');
+        // A target the workspace doesn't have (a typo, or an inbox deleted since it was listed) is refused with the ones it can use.
+        const unknown = error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'recipe-chat' }, addresses: [box.address, 'mbx_deletedsince0000'] }), 422, 'UNKNOWN_TARGET');
+        assert.ok(unknown.message.startsWith('No receiving inbox or address mbx_deletedsince0000 in this workspace. Use one of: '), unknown.message);
+        assert.equal(unknown.field, 'addresses');
+        assert.ok(unknown.details.length >= 1 && unknown.details.length <= 10, 'The first ten valid targets.');
+        for (const d of unknown.details) assert.ok(unknown.message.includes(`${d.address} (${d.inboxId})`) && d.inboxId.startsWith('mbx_'), unknown.message);
         error(await local('POST', recipes, { recipe: 'slack', params: { channel: 'recipe-chat' }, addresses: ['nobody@receive.example'] }), 422, 'UNKNOWN_TARGET');
         const slack = await call('POST', recipes, { recipe: 'slack', params: { channel: 'recipe-chat' }, addresses: [box.id] }, 201);
         assert.equal(slack.key, 'slack-support');
