@@ -5907,7 +5907,7 @@ export const getPublicStats = <ThrowOnError extends boolean = false>(options?: O
 /**
  * What this workspace has set up, in one read
  *
- * The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, and each focus's first steps. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.
+ * The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus's first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.
  */
 export const getOverviewSetup = <ThrowOnError extends boolean = false>(options?: Options<GetOverviewSetupData, ThrowOnError>): RequestResult<GetOverviewSetupResponses, GetOverviewSetupErrors, ThrowOnError> => (options?.client ?? client).get<GetOverviewSetupResponses, GetOverviewSetupErrors, ThrowOnError>({
     security: [
