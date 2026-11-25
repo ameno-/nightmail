@@ -202,9 +202,13 @@ export type ConnectionSummary = {
         id: string | null;
         name: string;
         /**
-         * ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. paused: sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on; mail still queued from it when it paused was canceled, and it keeps receiving. off: turned off by the operator.
+         * ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).
          */
-        sending: 'ready' | 'pending' | 'closed' | 'paused' | 'off';
+        sending: 'ready' | 'pending' | 'closed' | 'off';
+        /**
+         * Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.
+         */
+        paused?: true;
         /**
          * Who it sends to: anyone, or the verified addresses of the workspace's members.
          */

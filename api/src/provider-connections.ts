@@ -38,7 +38,8 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.'),
   sent: z.boolean().optional().describe('Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).'),
   builtinDomain: z.object({ id: z.string().nullable().describe('Its ID in listDomains, once it is set up on this connection.'), name: z.string(),
-    sending: z.enum(['ready', 'pending', 'closed', 'paused', 'off']).describe('ready: it sends now. pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. paused: sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on; mail still queued from it when it paused was canceled, and it keeps receiving. off: turned off by the operator.'),
+    sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now. pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).'),
+    paused: z.literal(true).optional().describe('Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.'),
     scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\'s members.'), perDay: z.number().int(), perMinute: z.number().int() })
     .nullable().optional().describe('Hosted only: the subdomain of the installation\'s own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.'),
   attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
@@ -96,14 +97,15 @@ async function get(runtime: Runtime, wid: string) {
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
   const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'paused' | 'off' } | null}>(sql`
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true } | null}>(sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
       EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
-      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL THEN 'off' WHEN EXISTS (SELECT FROM builtin_parent p WHERE p.name=${runtime.config.builtinDomain} AND p.tripped_at IS NOT NULL) THEN 'paused' WHEN dc.sending_state='verified' THEN 'ready' ELSE 'pending' END)
+      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR tripped.at IS NOT NULL THEN 'off' WHEN dc.sending_state='verified' THEN 'ready' ELSE 'pending' END)||CASE WHEN b.revoked_at IS NULL AND tripped.at IS NOT NULL THEN '{"paused":true}'::jsonb ELSE '{}'::jsonb END
         FROM builtin_domains b LEFT JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
-        LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
+        LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL
+        LEFT JOIN LATERAL (SELECT p.tripped_at AS at FROM builtin_parent p WHERE p.name=${runtime.config.builtinDomain} AND p.tripped_at IS NOT NULL) tripped ON true WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
     FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
   if (!row) return null;

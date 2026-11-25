@@ -23230,7 +23230,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await sweep();
       const trip={line:'bounces',recipients:1500,bounces:272,complaints:1,windowHours:48,worst:bad.id};
       assert.deepEqual(await stored(),{ok:false,problem:'reputation',tripped:true,trip});
-      assert.equal(await claim(),'pending');assert.equal((await me()).sending,'paused');
+      assert.equal(await claim(),'pending');assert.deepEqual([(await me()).sending,(await me()).paused],['off',true]);
       await runDispatcher(runtime,{region:oh,accountId:acct});
       assert.equal(sent.length,0);assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[queued.id])).rows[0].status,'canceled');
       error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Tripped',text:'Tripped.'}),403,'SENDER_DOMAIN_NOT_VERIFIED');
@@ -23261,7 +23261,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual((await db.query("SELECT workspace_id,details->>'operator' AS operator,details->>'reason' AS reason,details->'trip' AS trip FROM hosted_operator_audit WHERE action='builtin-parent-reset'")).rows,
         [{workspace_id:'platform',operator,reason:'Revoked the workspace behind the bounces',trip}]);
       await pace();await run('domain.builtin');
-      assert.equal(await claim(),'verified');assert.equal((await me()).sending,'ready');assert.equal(associated.length,2);
+      assert.equal(await claim(),'verified');assert.deepEqual([(await me()).sending,(await me()).paused],['ready',undefined]);assert.equal(associated.length,2);
       assert.deepEqual(await stored(),{ok:true,problem:null,tripped:false,trip:null});
       await sweep();
       assert.equal((await stored()).tripped,false,'Mail from before the reset is not counted again.');
