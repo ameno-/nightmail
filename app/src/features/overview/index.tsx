@@ -258,6 +258,11 @@ function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefi
 }
 
 // Three whole-number steps with ~10% headroom so peaks breathe cleanly below the top gridline.
+// Light 3-bucket centered smoothing [0.25, 0.5, 0.25] for display only (tooltip always reads raw bucket counts).
+function smoothSeries(values: number[]) {
+  if (values.length < 4) return values
+  return values.map((v, i) => i === 0 ? 0.75 * v + 0.25 * values[1] : i === values.length - 1 ? 0.25 * values[i - 1] + 0.75 * v : 0.25 * values[i - 1] + 0.5 * v + 0.25 * values[i + 1])
+}
 function niceMax(value: number) {
   const padded = Math.max(1, value) * 1.1
   const raw = padded / 3, base = 10 ** Math.floor(Math.log10(raw))
@@ -354,13 +359,15 @@ function ActivityChart({ data }: { data: Overview }) {
     return () => observer.disconnect()
   }, [])
   const n = target.length
-  const visibleSentMax = Math.max(0, ...target.map(p => p.sent))
-  const visibleOutcomeMax = Math.max(2, ...target.map(p => Math.max(p.bounced, p.complaints)))
-  const shown = useMorph([...target.map(p => p.sent), ...target.map(p => p.bounced), ...target.map(p => p.complaints), niceMax(visibleSentMax), niceMax(visibleOutcomeMax)], swap)
-  if (!n) return <EmptyState title="No activity" />
-  const sent = shown.slice(0, n), bounced = shown.slice(n, 2 * n), complaints = shown.slice(2 * n, 3 * n), max = Math.max(1, shown[3 * n]), outcomeMax = Math.max(1, shown[3 * n + 1])
-  const compact = width < 520, height = 135, top = 10, bottom = height - 22, left = compact ? 38 : 48, right = width - (compact ? 34 : 48)
   const step = bucketOf(target)
+  const rawSent = target.map(p => p.sent)
+  // Smooth 10-minute buckets (24h) lightly for display only; keep 1h/4h spikes exact and tooltip always raw.
+  const plotSent = step < HOUR ? smoothSeries(rawSent) : rawSent
+  const visibleSentMax = Math.max(0, ...plotSent)
+  const shown = useMorph([...plotSent, niceMax(visibleSentMax)], swap)
+  if (!n) return <EmptyState title="No activity" />
+  const sent = shown.slice(0, n), max = Math.max(1, shown[n])
+  const compact = width < 520, height = 135, top = 10, bottom = height - 22, left = compact ? 38 : 48, right = width - (compact ? 26 : 36)
   const domainStart = Date.parse(data.periodStart), domainEnd = Math.max(domainStart + 1, Date.parse(data.periodEnd))
   const spanMs = domainEnd - domainStart, plotWidth = Math.max(1, right - left)
   const xOf = (ms: number) => left + ((ms - domainStart) / spanMs) * plotWidth
@@ -368,14 +375,9 @@ function ActivityChart({ data }: { data: Overview }) {
   // exact proportional bucket center so round clock ticks align mathematically with the series.
   const xs = n === 1 ? [right] : target.map((p, i) => i === 0 ? left : i === n - 1 ? right : Math.max(left + 0.01, Math.min(right - 0.01, xOf(Date.parse(p.at) + step / 2))))
   const ey = (value: number) => bottom - Math.max(0, Math.min(1, value / max)) * (bottom - top)
-  const band = (bottom - top) * .58, oy = (value: number) => bottom - Math.max(0, Math.min(1, value / outcomeMax)) * band
-  const emailsY = sent.map(ey), bounceY = bounced.map(oy), complaintY = complaints.map(oy)
-  const marked = target.map(p => ({ bounces: hourRate(p.bounced, p.sent) >= BOUNCE_LINE, complaints: p.complaints > 0 }))
-  const endText = (value: number) => axisNumber(value, compact)
+  const emailsY = sent.map(ey)
+  const pipRadius = (count: number, base: number, cap: number) => Math.min(cap, base + Math.log2(Math.max(1, count)) * 0.65)
   const lastIdx = n - 1
-  const ends = ([['sent', emailsY[lastIdx], target[lastIdx].sent], ['bounces', bounceY[lastIdx], target[lastIdx].bounced], ['complaints', complaintY[lastIdx], target[lastIdx].complaints]] as const)
-    .map(([tone, y, value]) => ({ tone, y, text: endText(value) })).sort((a, b) => a.y - b.y)
-  for (let i = ends.length - 2; i >= 0; i--) ends[i].y = Math.min(ends[i].y, ends[i + 1].y - 12)
   const nearest = (clientX: number, boxLeft: number) => {
     const x = clientX - boxLeft
     let best = 0, dist = Math.abs(xs[0] - x)
@@ -392,7 +394,7 @@ function ActivityChart({ data }: { data: Overview }) {
   const point = active === null ? undefined : target[active]
   const washPath = n > 1 ? `M ${xs[0].toFixed(2)} ${bottom} L ${xs[0].toFixed(2)} ${emailsY[0].toFixed(2)} ${monotone(xs, emailsY, top, bottom).join(' ')} L ${xs[lastIdx].toFixed(2)} ${bottom} Z` : ''
   return <div ref={container} className="ov-activity" onMouseLeave={() => setActive(null)} onPointerDown={scrub} onPointerMove={scrub}>
-    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket on the left scale; bounces and complaints on their own scale">
+    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket; bounces and complaints marked on the baseline where present">
       <defs>
         <linearGradient id={washId} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" className="ov-wash-stop ov-wash-stop--top" />
@@ -402,17 +404,16 @@ function ActivityChart({ data }: { data: Overview }) {
       {[0, 1, 2, 3].map(i => { const y = top + i * (bottom - top) / 3; return <g key={i}><line x1={left} x2={right} y1={y} y2={y} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} /><text x={left - 8} y={y + 3.5} textAnchor="end" className="chart-label">{axisNumber(max * (1 - i / 3), compact)}</text></g> })}
       {washPath && <path d={washPath} fill={`url(#${washId})`} className="ov-wash" />}
       <Line xs={xs} ys={emailsY} minY={top} maxY={bottom} tone="sent" />
-      <Line xs={xs} ys={bounceY} minY={top} maxY={bottom} tone="bounces" />
-      <Line xs={xs} ys={complaintY} minY={top} maxY={bottom} tone="complaints" keep={i => target[i].complaints > 0 || target[i + 1].complaints > 0} />
-      {marked.map((mark, i) => <g key={target[i].at}>{mark.bounces && dot(xs[i], bounceY[i], 'bounces', 'b')}{mark.complaints && dot(xs[i], complaintY[i], 'complaints', 'c')}</g>)}
-      {active === null
-        ? ends.map(end => <text key={end.tone} x={right + 8} y={end.y + 3.5} className={`chart-label ov-end ov-end--${end.tone}`}>{end.text}</text>)
-        : [0, 1, 2, 3].map(i => <text key={i} x={right + 8} y={oy(outcomeMax * (1 - i / 3)) + 3.5} className="chart-label ov-end ov-end--bounces">{axisNumber(outcomeMax * (1 - i / 3), compact)}</text>)}
+      {target.map((p, i) => <g key={p.at}>
+        {p.bounced > 0 && dot(xs[i], bottom - 3.5, 'bounces', 'b', pipRadius(p.bounced, 2.3, 4.4))}
+        {p.complaints > 0 && dot(xs[i], p.bounced > 0 ? bottom - 11 : bottom - 3.5, 'complaints', 'c', pipRadius(p.complaints, 2.8, 4.8))}
+      </g>)}
+      {active === null && <text x={right + 8} y={emailsY[lastIdx] + 3.5} className="chart-label ov-end ov-end--sent">{axisNumber(target[lastIdx].sent, compact)}</text>}
       {active !== null && <g>
         <line x1={xs[active]} x2={xs[active]} y1={top} y2={bottom} className="ov-crosshair" />
         {dot(xs[active], emailsY[active], 'sent', 'e', 3.25)}
-        {dot(xs[active], bounceY[active], 'bounces', 'b', 3)}
-        {target[active].complaints > 0 && dot(xs[active], complaintY[active], 'complaints', 'c', 3)}
+        {target[active].bounced > 0 && dot(xs[active], bottom - 3.5, 'bounces', 'b', Math.max(3.4, pipRadius(target[active].bounced, 2.3, 4.4)))}
+        {target[active].complaints > 0 && dot(xs[active], target[active].bounced > 0 ? bottom - 11 : bottom - 3.5, 'complaints', 'c', Math.max(3.6, pipRadius(target[active].complaints, 2.8, 4.8)))}
       </g>}
       {domainTicks(domainStart, domainEnd, left, right, compact ? 64 : 84).map(t => <text key={t.key} x={t.x} y={height - 6} textAnchor={t.anchor} className="chart-label">{t.text}</text>)}
       {target.map((p, i) => {

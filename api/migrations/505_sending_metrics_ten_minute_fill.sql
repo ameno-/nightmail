@@ -1,5 +1,5 @@
--- Backfills sending_metrics_ten_minute (migration 499) for the last 7 days without locking sending_emails.
--- Migration 499's trigger functions are already committed, so concurrent writes add their own deltas and this
+-- Backfills sending_metrics_ten_minute (migration 504) for the last 7 days without locking sending_emails.
+-- Migration 504's trigger functions are already committed, so concurrent writes add their own deltas and this
 -- single-statement (exact - stored) diff is idempotent with zero double-counting.
 
 WITH cutoff AS (
