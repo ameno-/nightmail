@@ -771,10 +771,12 @@ const AUTH_SECRET = process.env.BANE_ROOT_SECRET;
 if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BANE_ROOT_SECRET to sign synthetic local session fixtures; no scenarios were run.');
 const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
-// The simulated SES fixture's link domain (src/link-domains.ts): Hosted refuses campaign and marketing mail without one.
-const LINK_ORIGIN = 'https://links.fixture.example';
-// Scenarios that build a runtime from this process's environment get it too (the API under test, started before, doesn't).
-process.env.NIGHTMAIL_LINK_DOMAIN ??= new URL(LINK_ORIGIN).hostname;
+// Link hosts on (src/link-domains.ts), with a synthetic Cloudflare for SaaS zone that no scenario reaches unless it mocks
+// it: Hosted refuses campaign and marketing mail from a domain without an active link host. Scenarios that build a runtime
+// from this process's environment get it too (the API under test, started before, doesn't), and every domain a scenario
+// adds has an active one (the trigger installed in before()), as if its CNAME had been checked.
+const LINK_HOSTS = { NIGHTMAIL_LINK_SAAS_ZONE_ID: '0'.repeat(32), NIGHTMAIL_LINK_SAAS_TOKEN: 'acceptance-fixture-cloudflare-token', NIGHTMAIL_LINK_SAAS_TARGET: 'edge.links-fixture.example' };
+for (const [key, value] of Object.entries(LINK_HOSTS)) process.env[key] ??= value;
 const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-nightmail.session_token' : 'nightmail.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
 // The operator's issuer subject (= its user ID). Self-hosted access is by subject: AUTH_ALLOWED_SUBJECTS lists it.
@@ -932,6 +934,10 @@ before(async () => {
   // Drive the real job handlers directly on an isolated, entirely loopback
   // harness. Never start an extra worker on a remote API/database or live SES.
   const loopback=(url:string)=>['localhost','127.0.0.1','[::1]'].includes(new URL(url).hostname);
+  // Every domain a scenario adds gets an active link host, so Hosted scenarios send campaign and marketing mail from it.
+  await authDb.query(`CREATE OR REPLACE FUNCTION acceptance_link_host() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
+      INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES (NEW.workspace_id,lower(NEW.name),'links.'||lower(NEW.name),'active') ON CONFLICT DO NOTHING; RETURN NEW; END $$`);
+  for (const table of ['operation_domains', 'domain_claims']) await authDb.query(`CREATE OR REPLACE TRIGGER acceptance_link_host AFTER INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION acceptance_link_host()`);
   if (identity.simulated && LOCAL_API && String(process.env.ENABLE_LIVE_SES)==='false' && loopback(FIXTURE_DATABASE_URL!) && process.env.S3_ENDPOINT && loopback(process.env.S3_ENDPOINT)) {
     const {nodeRuntime}=await import('./src/adapters/node.js');
     fixtureWorker=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL,ENABLE_LIVE_SES:'false',SIMULATED_SES_LATENCY_MS:'0',SIMULATED_SES_DELIVERY_DELAY_MS:'0'});
@@ -940,6 +946,7 @@ before(async () => {
 after(async () => {
   await fixtureWorker?.close();
   if (authDb) {
+    for (const table of ['operation_domains', 'domain_claims']) await authDb.query(`DROP TRIGGER IF EXISTS acceptance_link_host ON ${table}`);
     try { if (manager) await authDb.query('DELETE FROM nightmail_users WHERE id = $1', [manager.userId]); }
     finally { await authDb.end(); }
   }
@@ -18516,7 +18523,7 @@ async function stripeFixture(t: TestContext) {
     import('./src/app.js'), import('./src/adapters/node.js'), import('node:async_hooks'), import('./src/billing/stripe.js'), import('./src/billing/stripe-jobs.js'),
   ]);
   const db = await fixtureDatabase(t);
-  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false', NIGHTMAIL_LINK_DOMAIN: process.env.NIGHTMAIL_LINK_DOMAIN,
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false', ...LINK_HOSTS,
     ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
     STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: STRIPE_TEST_WEBHOOK_SECRET, STRIPE_API_BASE: STRIPE_TEST_BASE,
     S3_BUCKET: 'synthetic-billing-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
@@ -20070,7 +20077,7 @@ describe('Scoped database source fixtures with HTTP security assertions', () => 
 describe('Campaign postal address', () => {
   test('postal address: campaign footers carry it in HTML and text; send and schedule need it, a test does not; marketing sends get it, transactional mail never', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
-      const wid = runtime.config.workspaceId, from = 'sender@example.com', placeholder = `${LINK_ORIGIN}/unsubscribe/u_${'0'.repeat(64)}`;
+      const wid = runtime.config.workspaceId, from = 'sender@example.com', placeholder = `${PUBLIC_ORIGIN}/unsubscribe/u_${'0'.repeat(64)}`;
       const content = async (id: string) => ok(await local('GET', `/v1/emails/${id}/content`));
       const footerOf = (address: string) => `margin:8px 0 0">${address.split('\n').join('<br>')}</p>`;
       await db.query('UPDATE operation_settings SET postal_address = NULL WHERE workspace_id = $1', [wid]);
@@ -20993,7 +21000,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
     ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
-    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', NIGHTMAIL_LINK_DOMAIN: process.env.NIGHTMAIL_LINK_DOMAIN,
+    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', ...LINK_HOSTS,
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
   const runtime = instance.runtime;
@@ -21414,7 +21421,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:origin,MULTI_TENANT:'true',NIGHTMAIL_LINK_DOMAIN:process.env.NIGHTMAIL_LINK_DOMAIN,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:origin,MULTI_TENANT:'true',...LINK_HOSTS,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
@@ -23101,7 +23108,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',NIGHTMAIL_LINK_DOMAIN:process.env.NIGHTMAIL_LINK_DOMAIN,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',...LINK_HOSTS,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -23397,7 +23404,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs,queueByoHealth},{JobDeferred},{ensureRegionSettings},{STSClient},{CloudFormationClient},{SESv2Client},{setByoV2}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-cloudformation'),import('@aws-sdk/client-sesv2'),import('./scripts/set-byo-v2.js')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),account='333344445555',other='666677778888',platform='000044445555',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',NIGHTMAIL_LINK_DOMAIN:process.env.NIGHTMAIL_LINK_DOMAIN,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'stack-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`,BYO_EVENTS_ORIGIN:'https://events.byo-acceptance.bane.dev'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',...LINK_HOSTS,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'stack-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`,BYO_EVENTS_ORIGIN:'https://events.byo-acceptance.bane.dev'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);runtime.snsCertificateState=new SnsCertificateState();
     const workspaces=['ws_'+randomUUID().replaceAll('-',''),'ws_'+randomUUID().replaceAll('-','')],[wid,wid2]=workspaces;
     for(const w of workspaces){
@@ -38271,21 +38278,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('link hosts: campaign, test and marketing mail link on the sender\'s verified link host, else the shared link domain, else refuse on Hosted, never on this installation\'s domain',async t=>{
+  test('link hosts: campaign, test and marketing mail link on the sending domain\'s verified links.<domain>, refuse on Hosted without it, never name this installation',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run,fetch:page})=>{
       const {SESv2Client,SendEmailCommand,GetEmailIdentityCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:Json[]=[];
+      const {linkOrigin}=await import('./src/link-domains.js'),{linkHostRequest}=await import('./src/link-hosts.js'),target=runtime.config.linkHosts!.target,wid=runtime.config.workspaceId;
       // The domain's SES identity, verified and signing, for its check; every send is captured as SES gets it, then simulated.
       t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){
         if(cmd instanceof GetEmailIdentityCommand)return Promise.resolve({VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true,SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:['t1','t2','t3']}});
         if(cmd instanceof SendEmailCommand)delivered.push(cmd.input);
         return (send as any).call(this,cmd,...rest);
       });
-      // Public DNS has links.example.com as a CNAME to the edge; Cloudflare's custom hostnames API serves it once `served`.
-      const prior=globalThis.fetch,cloudflare:{method:string;path:string;body?:Json;auth:string|null}[]=[];let served=false;
+      // Public DNS has links.example.com as a CNAME to the target once `published`; Cloudflare's custom hostnames API serves it once `served`.
+      const prior=globalThis.fetch,cloudflare:{method:string;path:string;body?:Json;auth:string|null}[]=[];let published=false,served=false;
       t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
         const url=new URL(input instanceof Request?input.url:String(input));
         if(url.hostname==='cloudflare-dns.com'){
-          const answer=url.searchParams.get('name')==='links.example.com'&&url.searchParams.get('type')==='CNAME'?[{name:'links.example.com.',type:5,data:'edge.sharedlinks.example.'}]:[];
+          const answer=published&&url.searchParams.get('name')==='links.example.com'&&url.searchParams.get('type')==='CNAME'?[{name:'links.example.com.',type:5,data:`${target}.`}]:[];
           return Response.json({Status:answer.length?0:3,Answer:answer});
         }
         if(url.hostname==='api.cloudflare.com'){
@@ -38299,9 +38307,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]}));
       const draft=()=>local('POST','/v1/campaigns',{name:unique('link-hosts'),from:'news@example.com',subject:'Links',html:'<p>Read <a href="https://example.com/read">this</a>.</p>',audience:{listId:list.id}});
       const marketing={from:'news@example.com',to:contact.email,subject:'Links',html:'<p>Hello</p>',text:'Hello',kind:'marketing'};
-      const own=new URL(PUBLIC_ORIGIN).host;
-      // Each kind of mail as SES got it: the host of its unsubscribe link, from the header (campaign and marketing) or the
-      // footer (a test, which is transactional), and nothing in its content, headers included, naming this installation.
+      // Each kind of mail as SES got it: the host of its unsubscribe link, from the footer (a test is transactional, without
+      // List-Unsubscribe), the header matching it, and nothing in its content, headers included, naming nightmail.dev.
       const hosts=async()=>{
         const before=delivered.length,c=ok(await draft(),201);
         ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);await run('campaign.run');
@@ -38311,54 +38318,60 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const mail=delivered.slice(before);assert.equal(mail.length,3);
         return mail.map(input=>{
           const content=input.Content.Simple,all=JSON.stringify(input.Content);
-          assert.ok(!all.includes(own)&&!all.includes('nightmail.dev'),`No link on this installation's domain: ${all}`);
+          assert.ok(!all.includes('nightmail.dev'),all);
           const header=content.Headers?.find((h:Json)=>h.Name==='List-Unsubscribe')?.Value as string|undefined;
-          const footer=/https:\/\/([^/\s"]+)\/unsubscribe\/u_[0-9a-f]{64}/.exec(content.Body.Text.Data)!;
+          const footer=/https?:\/\/([^/\s"]+)\/unsubscribe\/u_[0-9a-f]{64}/.exec(content.Body.Text.Data)!;
           assert.ok(footer&&content.Body.Html.Data.includes(footer[0]),'The footer links the same host in both parts.');
           if(header){assert.equal(header,`<${footer[0]}>`);assert.ok(content.Headers.some((h:Json)=>h.Name==='List-Unsubscribe-Post'));}
           return footer[1];
         });
       };
-      // Hosted with no link domain: campaign, test and marketing mail are refused, and nothing is sent.
+      const own=new URL(PUBLIC_ORIGIN).host;
+      // Hosted, and the sending domain has no link host: campaign, test and marketing mail are refused, naming the record.
       const refused=ok(await draft(),201);
-      Object.assign(runtime.config,{multiTenant:true,links:undefined});
+      runtime.config.multiTenant=true;
       for(const reply of [await local('POST',`/v1/campaigns/${refused.id}/send`,{revision:refused.revision}),await local('POST',`/v1/campaigns/${refused.id}/test`,{to:'tester@example.net'}),await local('POST','/v1/emails/send',marketing)])
-        assert.match(error(reply,409,'LINK_DOMAIN_REQUIRED').message,/link domain/);
+        assert.equal(error(reply,409,'LINK_RECORD_REQUIRED').message,`Campaign and marketing mail from example.com needs the domain's link record, which carries its unsubscribe link: add a CNAME at links.example.com pointing to ${target}, then check the domain.`);
       assert.equal(delivered.length,0);
-      // Self-hosted with none: the installation's own origin is the operator's domain.
+      // Self-hosted, it links on its own origin, the operator's domain.
       runtime.config.multiTenant=false;
-      const before=delivered.length,c=ok(await draft(),201);ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);await run('campaign.run');await run('email.dispatch');
-      assert.match(delivered.slice(before)[0].Content.Simple.Headers.find((h:Json)=>h.Name==='List-Unsubscribe').Value,new RegExp(`^<${PUBLIC_ORIGIN}/unsubscribe/u_`));
-      // The shared link domain.
-      runtime.config.links={domain:'sharedlinks.example'};
-      assert.deepEqual(await hosts(),['sharedlinks.example','sharedlinks.example','sharedlinks.example']);
-      // Customers' link hosts on: the domain shows its Link domain record, checked with the domain.
-      runtime.config.links={domain:'sharedlinks.example',saas:{zoneId:'0'.repeat(32),token:'fixture-cloudflare-token',target:'edge.sharedlinks.example'}};
-      const domainId=unique('dom');await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[domainId,runtime.config.workspaceId,'example.com',REGION]);
+      assert.deepEqual(await hosts(),[own,own,own]);
+      // The domain's link record, after its sending records: missing, then found while Cloudflare issues the certificate.
+      const domainId=unique('dom');await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[domainId,wid,'example.com',REGION]);
+      await db.query("DELETE FROM link_hosts WHERE workspace_id=$1 AND domain='example.com'",[wid]); // The fixture's trigger made it active.
       // Self-hosted domain reads ask SES (mocked above); mail stays simulated.
       const live=async(method:string,path:string)=>{Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'synthetic-fixture',secretAccessKey:'synthetic-fixture'}});
         try{return ok(await local(method,path));}finally{runtime.config.liveEnabled=false;}};
-      const verify=async()=>(await live('POST',`/v1/domains/${domainId}/verify`)).dns.find((r:Json)=>r.purpose==='links');
-      const pending=await verify();
-      assert.deepEqual({...pending,note:undefined},{name:'links.example.com',type:'CNAME',value:'edge.sharedlinks.example',purpose:'links',status:'pending',note:undefined});
-      assert.match(pending.note,/certificate is being issued/);
-      assert.deepEqual(cloudflare,[{method:'POST',path:`/client/v4/zones/${'0'.repeat(32)}/custom_hostnames`,body:{hostname:'links.example.com',ssl:{method:'http',type:'dv',settings:{min_tls_version:'1.2'}}},auth:'Bearer fixture-cloudflare-token'}]);
-      // Not yet served: the shared link domain still carries the links.
-      assert.deepEqual(await hosts(),['sharedlinks.example','sharedlinks.example','sharedlinks.example']);
+      const record=async(method='POST')=>{const dns=(await live(method,`/v1/domains/${domainId}${method==='POST'?'/verify':''}`)).dns as Json[],at=dns.findIndex(r=>r.purpose==='links');
+        assert.equal(at,dns.findLastIndex(r=>r.purpose==='sending')+1,'The link record follows the sending records.');return dns[at];};
+      const missing=await record();
+      assert.deepEqual([missing.name,missing.type,missing.value,missing.status,missing.publicDns.state],['links.example.com','CNAME',target,'pending','missing']);
+      assert.equal(cloudflare.length,0,'No custom hostname before the CNAME resolves.');
+      published=true;
+      const found=await record();
+      assert.deepEqual([found.status,found.publicDns.state],['pending','found']);assert.match(found.note,/certificate is being issued/);
+      assert.deepEqual(cloudflare,[{method:'POST',path:`/client/v4/zones/${runtime.config.linkHosts!.zoneId}/custom_hostnames`,body:{hostname:'links.example.com',ssl:{method:'http',type:'dv',settings:{min_tls_version:'1.2'}}},auth:`Bearer ${runtime.config.linkHosts!.token}`}]);
+      assert.deepEqual(await hosts(),[own,own,own],'Not served yet: still the installation\'s own origin.');
       served=true;
-      const verified=await verify();
-      assert.equal(verified.status,'verified');assert.match(verified.note,/use links\.example\.com/);
-      assert.deepEqual(cloudflare.slice(1).map(call=>[call.method,call.path]),[['GET',`/client/v4/zones/${'0'.repeat(32)}/custom_hostnames/ch_fixture`]]);
-      assert.equal((await live('GET',`/v1/domains/${domainId}`)).dns.find((r:Json)=>r.purpose==='links').status,'verified');
-      assert.equal((await live('GET','/v1/domains?refresh=false')).data.find((d:Json)=>d.id===domainId).dns.at(-1).status,'verified');
-      // The sender's own link host, for the campaign, its test and marketing mail.
-      const links=await hosts();assert.deepEqual(links,['links.example.com','links.example.com','links.example.com']);
-      // A link host answers the links, and its own page, and nothing else; the links work there.
+      assert.equal((await record()).status,'verified');
+      assert.deepEqual(cloudflare.slice(1).map(call=>[call.method,call.path]),[['GET',`/client/v4/zones/${runtime.config.linkHosts!.zoneId}/custom_hostnames/ch_fixture`]]);
+      assert.equal((await record('GET')).status,'verified');
+      // The domain's own link host, for the campaign, its test and marketing mail, and on Hosted too, for its subdomains as well.
+      assert.deepEqual(await hosts(),['links.example.com','links.example.com','links.example.com']);
+      runtime.config.multiTenant=true;
+      for(const from of ['news@example.com','news@mail.example.com'])assert.equal(await linkOrigin(runtime,runtime.db,wid,from),'https://links.example.com');
+      runtime.config.multiTenant=false;
+      // On the customer's host the unsubscribe page and its one-click POST answer themselves: no redirect, no URL of this installation.
       const unsubscribe=delivered.slice(-3).flatMap(input=>input.Content.Simple.Headers?.filter((h:Json)=>h.Name==='List-Unsubscribe')??[])[0].Value.slice(1,-1);
-      assert.match(await (await page(new Request(unsubscribe,{headers:{accept:'text/html'}}))).text(),/Unsubscribe from marketing emails\?/);
-      assert.equal((await page(new Request(unsubscribe,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'List-Unsubscribe=One-Click'}))).status,200);
-      assert.match(await (await page(new Request('https://sharedlinks.example/'))).text(),/Email links/);
-      for(const path of ['/v1/campaigns','/overview','/mcp'])assert.equal((await page(new Request(`https://sharedlinks.example${path}`))).status,404,path);
+      const shown=await page(new Request(unsubscribe,{headers:{accept:'text/html'}})),html=await shown.text();
+      assert.equal(shown.status,200);assert.match(html,/Unsubscribe from marketing emails\?/);assert.ok(!/https?:\/\//.test(html),html);
+      const oneClick=await page(new Request(unsubscribe,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'List-Unsubscribe=One-Click'}));
+      assert.equal(oneClick.status,200);assert.equal(oneClick.headers.get('location'),null);assert.ok(!/https?:\/\//.test(await oneClick.text()));
+      // The Worker's rule for a link host: its links, and nothing else; this installation's own hosts are untouched.
+      for(const [host,path,answer] of [['links.example.com','/unsubscribe/u_x','link'],['links.example.com','/v1/forwarding/stop/x','link'],['links.example.com','/i/x.png','link'],
+        ['links.example.com','/','missing'],['links.example.com','/overview','missing'],['links.example.com','/v1/campaigns','missing'],['links.example.com','/unsubscribe/u_x/y','missing'],['nightmail.dev','/overview','other']] as const)
+        assert.equal(linkHostRequest(true,host,path,['nightmail.dev']),answer,`${host}${path}`);
+      assert.equal(linkHostRequest(false,'links.example.com','/overview',['nightmail.dev']),'other');
     });
   });
 

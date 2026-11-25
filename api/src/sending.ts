@@ -30,7 +30,7 @@ import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { linkDomainRequired, linkOrigin, linkOrigins, sharedLinkOrigin } from './link-domains.js';
+import { linkOrigin, linkOrigins } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -1562,7 +1562,7 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   // without one is not refused: its caller writes the whole message and may include the address itself.
   const marketing = mails.some(m => m.kind === 'marketing'), db = call.db ?? call.runtime.db;
   const address = marketing ? await workspacePostalAddress(call.runtime, db, a.workspaceId) : null;
-  // Its unsubscribe link goes on the sender's link host (src/link-domains.ts): with none, the send is refused.
+  // Its unsubscribe link goes on the sending domain's link host (src/link-domains.ts): on Hosted without one, the send is refused.
   const origin = marketing ? linkOrigins(call.runtime, db, a.workspaceId) : undefined;
   const origins = origin ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? origin(m.from, batch ? `emails.${i}.from` : 'from') : undefined)) : [];
   const out = await directMessages(call.runtime, mails, batch, address, origins);
@@ -1874,7 +1874,7 @@ async function previewParts(runtime: Runtime, workspaceId: string, draft: Campai
   const rendered = await renderCampaignContent(runtime, draft, false);
   if (!rendered.html && !rendered.text) return rendered;
   const origin = footer.requiredNotice ? runtime.config.publicUrl : await linkOrigin(runtime, runtime.db, workspaceId, draft.from)
-    .catch(error => { if (error instanceof ApiError && error.code === 'LINK_DOMAIN_REQUIRED') return runtime.config.publicUrl; throw error; });
+    .catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return runtime.config.publicUrl; throw error; });
   footerParts(rendered, unsubscribePlaceholder(origin), footer);
   return rendered;
 }
@@ -2550,7 +2550,8 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // shows the same one. Without it the launch is refused after the admission check below, before anything is captured.
   const postalAddress = await workspacePostalAddress(runtime, db, a.workspaceId);
   // The host of the links Nightmail adds (src/link-domains.ts), frozen in the review too, so every copy of this launch
-  // links the same one. Refused here when there is none. A required notice has no unsubscribe link.
+  // links the same one. Refused here when the sending domain has no active link host on Hosted. A required notice has no
+  // unsubscribe link.
   const links = row.draft.requiredNotice ? undefined : await linkOrigin(runtime, db, a.workspaceId, row.draft.from);
   const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {}, ...links ? { linkOrigin: links } : {} };
   // A required notice: still allowed for this workspace, and confirmed by the sender as having no promotion.
@@ -3027,10 +3028,9 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     sizeCheck(keyed, rows);
     return { mail: { ...mail, snapshot: withoutLegacyFonts({ ...keyed, headers: [...keyed.headers] }) }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
   }
-  // The link host the launch froze. A review frozen before link hosts has none: its links go on the shared link host,
-  // or are refused on Hosted without one, never on this installation's own domain.
-  const origin = review.draft.linkOrigin ?? sharedLinkOrigin(runtime.config);
-  if (!origin) throw linkDomainRequired(runtime.config, review.draft.from.slice(review.draft.from.lastIndexOf('@') + 1));
+  // The link host the launch froze. A review frozen before link hosts has none: its links go on the sender's link host as
+  // it is now, or are refused on Hosted without one, never on this installation's own domain.
+  const origin = review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl?.startsWith(`${origin}/unsubscribe/`) ? mail.snapshot.unsubscribeUrl : undefined;
   const unsubscribe = reused

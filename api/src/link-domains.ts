@@ -5,42 +5,39 @@ import { cname, fqdn } from './public-dns.js';
 
 /**
  * Where the links Nightmail puts in customer mail live: the unsubscribe link (footer, text part and List-Unsubscribe),
- * forwarding's confirm and stop links, and linked images. Never on the installation's own domain, which a blocklist
- * would then list for every customer's mail at once. In order:
- *  1. the sender's own link host, links.<domain>, once its check finds it served (a Cloudflare for SaaS custom hostname
- *     on the link domain's zone: checkLinkHost);
- *  2. the shared link domain, NIGHTMAIL_LINK_DOMAIN;
- *  3. a self-hosted installation's own origin, PUBLIC_URL, which is the operator's domain.
- * Hosted with neither of the first two refuses mail that needs a link (linkDomainRequired), and never falls back to its own.
+ * forwarding's confirm and stop links, and linked images. Never on this installation's own domain, which a blocklist
+ * would then list for every customer's mail at once.
+ *
+ * Each sending domain has its own link host, links.<domain>: a standard record of the domain's setup, a CNAME to the
+ * installation's target (config.linkHosts.target, edge.nightmail.dev on Hosted), which is a name in its Cloudflare for
+ * SaaS zone. Once public DNS shows the CNAME, the domain's check makes it a custom hostname of that zone (checkLinkHost),
+ * and once Cloudflare has issued its certificate, the host is active: mail from the domain links there, served by the
+ * Worker on the customer's own name. Hosted refuses campaign and marketing mail from a domain whose link host isn't
+ * active (LINK_RECORD_REQUIRED); a self-hosted installation links on its own origin, PUBLIC_URL, instead.
  */
 export const linkHostName = (domain: string) => `${LINK_LABEL}.${domain}`;
 const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
 
-/** The origin of the links in mail that has no link host of its own: the shared link domain, else a self-hosted
- *  installation's own origin. Null on Hosted without a link domain. */
-export function sharedLinkOrigin(config: Config): string | null {
-  if (config.links) return `https://${config.links.domain}`;
-  return config.multiTenant ? null : config.publicUrl.replace(/\/$/, '');
-}
-export function linkDomainRequired(config: Config, domain: string, field = 'from') {
-  return new ApiError(409, 'LINK_DOMAIN_REQUIRED', config.links?.saas
-    ? `Mail from ${domain} needs a link host for its unsubscribe link. Publish the Link domain record (${linkHostName(domain)}) on the domain's page and check it.`
-    : 'Campaign and marketing mail carries an unsubscribe link, and this installation has no link domain for it yet, so it can\u2019t send that mail.', field);
+export function linkRecordRequired(config: Config, domain: string, field = 'from') {
+  return new ApiError(409, 'LINK_RECORD_REQUIRED', config.linkHosts
+    ? `Campaign and marketing mail from ${domain} needs the domain's link record, which carries its unsubscribe link: add a CNAME at ${linkHostName(domain)} pointing to ${config.linkHosts.target}, then check the domain.`
+    : 'Campaign and marketing mail carries an unsubscribe link on the sending domain\u2019s link host, and this installation has none set up, so it can\u2019t send that mail yet.', field);
 }
 
-/** The verified link host of the sender's domain (or of a domain it is under), if any. */
-async function ownLinkHost(runtime: Runtime, db: DbExecutor, workspaceId: string, domain: string) {
-  if (!runtime.config.links?.saas) return null;
-  const { rows: [row] } = await db.execute<{ hostname: string }>(sql`SELECT hostname FROM link_hosts WHERE workspace_id=${workspaceId} AND status='active'
-    AND (domain=${domain} OR right(${domain},length(domain)+1)='.'||domain) ORDER BY length(domain) DESC LIMIT 1`);
-  return row?.hostname ?? null;
-}
-/** The origin of the links in mail from `from` (an address or a domain), or LINK_DOMAIN_REQUIRED. */
+/** The origin of the links in mail from `from` (an address or a domain): the active link host of its domain (or of the
+ *  workspace's domain it is under), else PUBLIC_URL when self-hosted. Hosted without one: LINK_RECORD_REQUIRED. */
 export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, field?: string): Promise<string> {
-  const domain = domainOf(from), own = await ownLinkHost(runtime, db, workspaceId, domain);
-  const origin = own ? `https://${own}` : sharedLinkOrigin(runtime.config);
-  if (!origin) throw linkDomainRequired(runtime.config, domain, field);
-  return origin;
+  const sender = domainOf(from), config = runtime.config;
+  if (config.linkHosts) {
+    const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname FROM operation_domains d
+      LEFT JOIN link_hosts h ON h.workspace_id=d.workspace_id AND h.domain=d.name AND h.status='active'
+      WHERE d.workspace_id=${workspaceId} AND (d.name=${sender} OR right(${sender},length(d.name)+1)='.'||d.name) ORDER BY length(d.name) DESC`);
+    const active = rows.find(row => row.hostname);
+    if (active) return `https://${active.hostname}`;
+    if (config.multiTenant) throw linkRecordRequired(config, rows[0]?.name ?? sender, field);
+  }
+  if (config.multiTenant) throw linkRecordRequired(config, sender, field);
+  return config.publicUrl.replace(/\/$/, '');
 }
 /** linkOrigin for several messages: one lookup per sender domain. */
 export function linkOrigins(runtime: Runtime, db: DbExecutor, workspaceId: string) {
@@ -53,11 +50,11 @@ export function linkOrigins(runtime: Runtime, db: DbExecutor, workspaceId: strin
   };
 }
 
-// ----- Customers' link hosts: Cloudflare for SaaS custom hostnames ---------------------------------------------------
+// ----- Custom hostnames (Cloudflare for SaaS) ---------------------------------------------------------------------
 
-type Saas = NonNullable<NonNullable<Config['links']>['saas']>;
+type Saas = NonNullable<Config['linkHosts']>;
 type CustomHostname = { id: string; status?: string; ssl?: { status?: string; validation_errors?: { message?: string }[] } | null; verification_errors?: string[] };
-class CloudflareUnavailable extends Error {}
+class CloudflareUnavailable extends Error { constructor(readonly status?: number) { super('Cloudflare unavailable'); } }
 /** One call to the zone's custom hostnames API (https://developers.cloudflare.com/api/resources/custom_hostnames/). */
 async function customHostnames(saas: Saas, method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown) {
   let response: Response;
@@ -66,80 +63,80 @@ async function customHostnames(saas: Saas, method: 'GET' | 'POST' | 'DELETE', pa
       headers: { authorization: `Bearer ${saas.token}`, ...body ? { 'content-type': 'application/json' } : {} }, ...body ? { body: JSON.stringify(body) } : {} });
   } catch { throw new CloudflareUnavailable(); }
   const json = await response.json().catch(() => null) as { success?: boolean; result?: unknown; errors?: { code?: number }[] } | null;
-  if (response.status >= 500 || response.status === 429 || !json) throw new CloudflareUnavailable();
+  if (response.status >= 500 || response.status === 429 || !json) throw new CloudflareUnavailable(response.status);
   return { status: response.status, success: json.success === true, result: json.result, codes: (json.errors ?? []).map(error => error.code) };
 }
 /** The custom hostname for `hostname`, created with an HTTP-validated certificate if the zone has none yet. */
 async function ensureCustomHostname(saas: Saas, hostname: string): Promise<CustomHostname> {
   const created = await customHostnames(saas, 'POST', '', { hostname, ssl: { method: 'http', type: 'dv', settings: { min_tls_version: '1.2' } } });
   if (created.success) return created.result as CustomHostname;
-  // 1406: the zone already has it (an earlier check, or another workspace of a self-hosted installation with the domain).
+  // 1406: the zone already has it (an earlier check, or another workspace with the domain).
   if (created.codes.includes(1406)) {
     const found = await customHostnames(saas, 'GET', `?hostname=${encodeURIComponent(hostname)}`);
     const [existing] = found.success && Array.isArray(found.result) ? found.result as CustomHostname[] : [];
     if (existing) return existing;
   }
-  throw new CloudflareUnavailable();
+  throw new CloudflareUnavailable(created.status);
 }
 const served = (custom: CustomHostname) => custom.status === 'active' && custom.ssl?.status === 'active';
 function waiting(custom: CustomHostname) {
   const error = custom.ssl?.validation_errors?.[0]?.message ?? custom.verification_errors?.[0];
-  return (error ? `Cloudflare: ${error}` : 'The certificate is being issued, usually within a few minutes. Check again shortly.').slice(0, 500);
+  return (error ? `Cloudflare: ${error}` : 'The CNAME is in place and the certificate is being issued, usually within a few minutes.').slice(0, 500);
 }
+type Seen = { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string };
 
 /**
- * The check of a domain's link host, run with the domain's own (verifyDomain). Public DNS must show links.<domain> as a
- * CNAME to edge.<link domain>; then the zone gets a custom hostname for it, which is active once Cloudflare has validated
- * it and issued its certificate. Only a domain verified for sending gets one (`sending`): a domain this workspace
- * hasn't proven is never put on the zone. A host Cloudflare already serves stays active when public DNS hides its CNAME
- * (a record proxied by the customer's own Cloudflare zone). Never throws: an unanswered lookup keeps the last status.
+ * The check of a domain's link host, with the domain's own (Check now, and the background checks). Public DNS must show
+ * links.<domain> as a CNAME to the target; the first check that sees it makes it a custom hostname of the SaaS zone, and
+ * the host is active once Cloudflare has validated it and issued its certificate. The CNAME is the proof: whoever can
+ * point it at the target controls the domain's DNS. A host Cloudflare already serves stays active when public DNS hides
+ * its CNAME (a record proxied by the customer's own Cloudflare zone). Never throws: an unanswered lookup keeps the last status.
  */
-export async function checkLinkHost(runtime: Runtime, workspaceId: string, domain: string, sending: boolean) {
-  const saas = runtime.config.links?.saas;
+export async function checkLinkHost(runtime: Runtime, workspaceId: string, domain: string) {
+  const saas = runtime.config.linkHosts;
   if (!saas) return;
-  const hostname = linkHostName(domain);
-  const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active' }>(sql`SELECT custom_hostname_id, status FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
-  let id = row?.custom_hostname_id ?? null, status = row?.status ?? 'pending', detail: string;
+  const hostname = linkHostName(domain), checkedAt = new Date().toISOString();
+  const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active'; public_dns: Seen | null }>(sql`SELECT custom_hostname_id, status, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
+  let id = row?.custom_hostname_id ?? null, status = row?.status ?? 'pending', detail: string | null = null, seen: Seen | null = row?.public_dns ?? null;
   let target: string | null | undefined;
   try { target = await cname(hostname, AbortSignal.timeout(5000)); } catch { target = undefined; }
-  const pointed = !!target && fqdn(target) === saas.target;
+  if (target !== undefined) seen = target === null ? { state: 'missing', values: [], checkedAt } : fqdn(target) === saas.target ? { state: 'found', values: [], checkedAt } : { state: 'wrong_value', values: [fqdn(target)], checkedAt };
   try {
-    if (!sending) { status = 'pending'; detail = 'Verify the domain for sending first; its link host is checked after that.'; }
-    else if (pointed || id) {
+    if (seen?.state === 'found' || id) {
       let custom: CustomHostname | null = null;
-      if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(); }
-      if (!custom && pointed) custom = await ensureCustomHostname(saas, hostname);
+      if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(read.status); }
+      if (!custom && seen?.state === 'found') custom = await ensureCustomHostname(saas, hostname);
       id = custom?.id ?? null;
       status = custom && served(custom) ? 'active' : 'pending';
-      detail = status === 'active' ? `Links in campaign and marketing mail from ${domain} use ${hostname}.`
-        : custom ? waiting(custom) : unpointed(saas, hostname, target);
-    } else { status = 'pending'; detail = unpointed(saas, hostname, target); }
+      if (custom && status !== 'active') detail = waiting(custom);
+    } else status = 'pending';
   } catch (error) {
     if (!(error instanceof CloudflareUnavailable)) throw error;
-    log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId });
+    log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
     detail = 'Cloudflare didn\u2019t answer. Check again in a minute.';
   }
-  await runtime.db.execute(sql`INSERT INTO link_hosts(workspace_id, domain, hostname, custom_hostname_id, status, detail, verified_at)
-    VALUES(${workspaceId}, ${domain}, ${hostname}, ${id}, ${status}, ${detail}, CASE WHEN ${status}='active' THEN now() END)
-    ON CONFLICT (workspace_id, domain) DO UPDATE SET custom_hostname_id=excluded.custom_hostname_id, status=excluded.status, detail=excluded.detail, checked_at=now(),
-      verified_at=CASE WHEN excluded.status='active' THEN coalesce(link_hosts.verified_at, now()) END`);
-}
-function unpointed(saas: Saas, hostname: string, target: string | null | undefined) {
-  if (target === undefined) return 'Public DNS didn\u2019t answer. Check again in a minute.';
-  return target ? `${hostname} is a CNAME to ${fqdn(target)}. Point it at ${saas.target}.` : `Public DNS has no CNAME at ${hostname}. If the domain's DNS is on Cloudflare, set the record to DNS only.`;
+  await runtime.db.execute(sql`INSERT INTO link_hosts(workspace_id, domain, hostname, custom_hostname_id, status, detail, public_dns, verified_at)
+    VALUES(${workspaceId}, ${domain}, ${hostname}, ${id}, ${status}, ${detail}, ${seen ? JSON.stringify(seen) : null}::jsonb, CASE WHEN ${status}='active' THEN now() END)
+    ON CONFLICT (workspace_id, domain) DO UPDATE SET custom_hostname_id=excluded.custom_hostname_id, status=excluded.status, detail=excluded.detail,
+      public_dns=excluded.public_dns, checked_at=now(), verified_at=CASE WHEN excluded.status='active' THEN coalesce(link_hosts.verified_at, now()) END`);
 }
 
-type Readable = { name: string; dns: { name: string; type: 'CNAME' | 'TXT' | 'MX'; value: string; purpose: string; status: 'pending' | 'verified'; note?: string }[] };
-/** Each domain's link host record, last in its records: optional, so never part of whether the domain is ready. */
+type Readable = { name: string; dns: { name: string; type: 'CNAME' | 'TXT' | 'MX'; value: string; purpose: string; status: 'pending' | 'verified'; note?: string; publicDns?: Seen | null }[] };
+/**
+ * Each domain's link record, after its sending records: a standard record of its setup, which campaign and marketing
+ * mail from the domain waits for and transactional mail doesn't (so it is not part of whether the domain is ready). Its
+ * publicDns is what the last check of it saw; a domain never checked since link hosts came has none.
+ */
 export async function withLinkRecords<T extends Readable>(runtime: Runtime, workspaceId: string, reports: T[]): Promise<T[]> {
-  const saas = runtime.config.links?.saas;
+  const saas = runtime.config.linkHosts;
   if (!saas || !reports.length) return reports;
-  const { rows } = await runtime.db.execute<{ domain: string; status: 'pending' | 'active'; detail: string | null }>(sql`SELECT domain, status, detail FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=ANY(${sql.param(reports.map(report => report.name))}::text[])`);
+  const { rows } = await runtime.db.execute<{ domain: string; status: 'pending' | 'active'; detail: string | null; public_dns: Seen | null }>(sql`SELECT domain, status, detail, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=ANY(${sql.param(reports.map(report => report.name))}::text[])`);
   const found = new Map(rows.map(row => [row.domain, row]));
   for (const report of reports) {
-    const row = found.get(report.name);
-    report.dns.push({ name: linkHostName(report.name), type: 'CNAME', value: saas.target, purpose: 'links', status: row?.status === 'active' ? 'verified' : 'pending',
-      note: row?.detail ?? `Optional. Campaign and marketing mail from ${report.name} then links its unsubscribe page through ${linkHostName(report.name)}, on your own domain.` });
+    const row = found.get(report.name), active = row?.status === 'active', at = report.dns.findLastIndex(record => record.purpose === 'sending') + 1;
+    const record: T['dns'][number] = { name: linkHostName(report.name), type: 'CNAME', value: saas.target, purpose: 'links', status: active ? 'verified' : 'pending',
+      ...active ? {} : { note: row?.detail ?? `Campaign and marketing mail from ${report.name} carries its unsubscribe link on this host, and is refused until it verifies. If the domain's DNS is on Cloudflare, set the record to DNS only.`, ...row?.public_dns ? { publicDns: row.public_dns } : {} } };
+    report.dns.splice(at, 0, record);
   }
   return reports;
 }
@@ -148,7 +145,7 @@ export async function withLinkRecords<T extends Readable>(runtime: Runtime, work
 export async function forgetLinkHost(runtime: Runtime, workspaceId: string, domain: string) {
   const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; shared: boolean }>(sql`DELETE FROM link_hosts h WHERE workspace_id=${workspaceId} AND domain=${domain}
     RETURNING custom_hostname_id, EXISTS (SELECT 1 FROM link_hosts o WHERE o.custom_hostname_id=h.custom_hostname_id AND NOT (o.workspace_id=h.workspace_id AND o.domain=h.domain)) AS shared`);
-  const saas = runtime.config.links?.saas;
+  const saas = runtime.config.linkHosts;
   if (!saas || !row?.custom_hostname_id || row.shared) return;
   try { await customHostnames(saas, 'DELETE', `/${encodeURIComponent(row.custom_hostname_id)}`); }
   catch { log('warn', { code: 'LINK_HOST_DELETE_FAILED', workspaceId }); }

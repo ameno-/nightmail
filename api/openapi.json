@@ -7744,6 +7744,7 @@
               "type": "string",
               "enum": [
                 "sending",
+                "links",
                 "ownership",
                 "receiving",
                 "receivingReply",
@@ -39199,7 +39200,7 @@
             "schema": {
               "type": "string",
               "maxLength": 64,
-              "pattern": "^(sending|ownership|receiving|receivingReply|mailfrom)(,(sending|ownership|receiving|receivingReply|mailfrom))*$",
+              "pattern": "^(sending|links|ownership|receiving|receivingReply|mailfrom)(,(sending|links|ownership|receiving|receivingReply|mailfrom))*$",
               "description": "Optional comma-separated subset of pending groups. Only one receiving target is eligible: receiving (@) or receivingReply (reply). mailfrom is available only for email.<domain>; other MAIL FROM names use manual DNS."
             },
             "required": false,

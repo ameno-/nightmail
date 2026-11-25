@@ -148,9 +148,9 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       MAILGW_API_TOKEN: randomBytes(24).toString('hex'), MAILGW_PUBLIC_DOMAIN: 'northwind.example',
       // Bring your own AWS (regional): the hosted connections' account is the platform's, as in production.
       BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://nightmail-byo-templates-111122223333.s3.us-east-2.amazonaws.com/byo/6.0.yaml', BYO_EVENTS_ORIGIN: 'https://events.nightmail.dev',
-      // A link domain with customers' link hosts on, as production will have: each domain's page lists its Link domain
-      // record. Reads never call Cloudflare; only a domain's check does.
-      NIGHTMAIL_LINK_DOMAIN: 'links.northwind.example', NIGHTMAIL_LINK_SAAS_ZONE_ID: '0'.repeat(32), NIGHTMAIL_LINK_SAAS_TOKEN: randomBytes(24).toString('hex'),
+      // Link hosts on, as production has them: each domain's page lists its link record (missing: the fixture's domains
+      // were set up before it). Reads never call Cloudflare; only a domain's check does.
+      NIGHTMAIL_LINK_SAAS_ZONE_ID: '0'.repeat(32), NIGHTMAIL_LINK_SAAS_TOKEN: randomBytes(24).toString('hex'), NIGHTMAIL_LINK_SAAS_TARGET: 'edge.northwind.example',
     });
     execFileSync('node', ['--import', 'tsx', 'src/migrate.ts'], { cwd: api, env: envFor(0), stdio: ['ignore', 'ignore', 'inherit'] });
     log('postgres: migrated');

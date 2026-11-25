@@ -156,9 +156,9 @@ export interface Config {
   sharedRegions?: string[];
   hostedSendCaps: { firstWeek: number };
   publicUrl: string;
-  /** NIGHTMAIL_LINK_DOMAIN: the shared host of the links in customer mail, and with its Cloudflare for SaaS zone
-   *  (NIGHTMAIL_LINK_SAAS_ZONE_ID and _TOKEN) customers' own links.<domain> (src/link-domains.ts). Undefined: unset. */
-  links?: { domain: string; saas?: { zoneId: string; token: string; target: string } };
+  /** Customers' link hosts (src/link-domains.ts): the Cloudflare for SaaS zone their links.<domain> CNAMEs reach
+   *  (`target`, a name in that zone) and the token that edits its custom hostnames. Undefined: unset. */
+  linkHosts?: { zoneId: string; token: string; target: string };
   sesFeedbackUrl?: string;
   regions: string[];
   liveEnabled: boolean;

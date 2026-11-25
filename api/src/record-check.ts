@@ -65,11 +65,11 @@ export async function dnsHost(name: string, signal: AbortSignal): Promise<DnsHos
   return host;
 }
 
-/** Adds publicDns to every pending sending and MAIL FROM record (DMARC is a recommendation; receiving has its own MX check). */
+/** Adds publicDns to every pending sending, link and MAIL FROM record (DMARC is a recommendation; receiving has its own MX check). */
 export async function withPublicDns<T extends { dns: CheckedRecord[] }>(report: T): Promise<T> {
   const signal = AbortSignal.timeout(BUDGET_MS), checkedAt = new Date().toISOString();
   await Promise.all(report.dns.map(async record => {
-    if (record.status === 'verified' || (record.purpose !== 'sending' && record.purpose !== 'mail_from')) return;
+    if (record.status === 'verified' || (record.purpose !== 'sending' && record.purpose !== 'links' && record.purpose !== 'mail_from')) return;
     try { record.publicDns = { ...compare(record, await answer(record.name, record.type, signal)), checkedAt }; }
     catch { record.publicDns = null; }
   }));

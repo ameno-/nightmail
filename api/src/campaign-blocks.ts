@@ -95,9 +95,9 @@ A campaign created from a template copies them: give it a default for each one (
 ## Unsubscribe
 
 ${productName} adds an Unsubscribe link at the end of every campaign email and the one-click
-\`List-Unsubscribe\` headers. The link is on the sending domain's own link host (\`links.<domain>\`, once
-its Link domain record verifies) or else the installation's link domain. Where there is neither, a
-launch refuses with \`LINK_DOMAIN_REQUIRED\`. Under the link it shows the workspace's postal address, which US law
+\`List-Unsubscribe\` headers. The link is on the sending domain's own link host, \`links.<domain>\`: a
+record of the domain's setup. Until it verifies, a launch refuses with \`LINK_RECORD_REQUIRED\` (a
+self-hosted installation links on its own address instead). Under the link it shows the workspace's postal address, which US law
 (CAN-SPAM) requires: set \`postalAddress\` with updateWorkspaceSettings before sending or scheduling a
 campaign (until then both refuse with \`POSTAL_ADDRESS_REQUIRED\`); don't repeat it in the content.
 

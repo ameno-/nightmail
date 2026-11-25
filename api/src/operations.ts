@@ -927,12 +927,12 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
   return { data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.row.id : null };
 }
 
-/** Every domain a domain route returns, with its link host record last (src/link-domains.ts): one read per response.
- *  Only while customers' link hosts are on (Cloudflare for SaaS); the record is optional, so no route's own logic needs it. */
+/** Every domain a domain route returns, with its link record after its sending records (src/link-domains.ts): one read
+ *  per response, while link hosts are on. It is not part of whether a domain is ready, so no route's own logic needs it. */
 const domainLinkRecords = async (c: Ctx, next: () => Promise<void>) => {
   await next();
   const workspaceId = c.get('actor')?.workspaceId;
-  if (!c.env.config?.links?.saas || !workspaceId || c.res.status >= 300 || !c.res.headers.get('content-type')?.startsWith('application/json')) return;
+  if (!c.env.config?.linkHosts || !workspaceId || c.res.status >= 300 || !c.res.headers.get('content-type')?.startsWith('application/json')) return;
   const body = await c.res.clone().json().catch(() => null) as { name?: unknown; dns?: unknown; data?: unknown } | null;
   const domainLike = (value: unknown): value is { name: string; dns: Parameters<typeof withLinkRecords>[2][number]['dns'] } => typeof (value as { name?: unknown })?.name === 'string' && Array.isArray((value as { dns?: unknown }).dns);
   const reports = domainLike(body) ? [body] : Array.isArray(body?.data) ? body.data.filter(domainLike) : [];
@@ -1137,7 +1137,8 @@ export function registerOperations(app: App) {
     const a=dnsSetupActor(c), wid=a.workspaceId, id=c.req.valid('param').id;
     const row=await hostedDomain(c.env.db,wid,id) ?? notFound('Domain');
     const found=await discover(row.name);
-    const selection=pendingGroups(derivedReadiness(row),row.connection.kind==='shared',row.claim_scope!=='account' && (row.connection.kind==='byo' || row.pool_receiving) && row.identity?.mx?.state==='missing',row.sending_state==='failed' ? [] : c.req.valid('query').groups?.split(','));
+    const [report]=await withLinkRecords(c.env,wid,[derivedReadiness(row)]);
+    const selection=pendingGroups(report!,row.connection.kind==='shared',row.claim_scope!=='account' && (row.connection.kind==='byo' || row.pool_receiving) && row.identity?.mx?.state==='missing',row.sending_state==='failed' ? [] : c.req.valid('query').groups?.split(','));
     const provider=found && {id:found.id,name:found.name}, applyUrl=found && signedApply(c.env.config,found,row,selection,wid,a.keyId.slice(5));
     return c.json({provider,groups:selection.groups,applyUrl},200);
   });
@@ -1174,8 +1175,8 @@ export function registerOperations(app: App) {
     // Check now: what public DNS shows now for each pending record, and where the zone is hosted. A Hosted domain the
     // background check already follows (a stored check, domain-setup.ts) keeps this answer, so its banner moves with it.
     const checked = async (report: Readiness) => {
-      // The domain's link host is checked with it (src/link-domains.ts); domainLinkRecords adds its record to the answer.
-      await checkLinkHost(c.env, a.workspaceId, report.name, report.ready);
+      // The domain's link record is checked with it (src/link-domains.ts); domainLinkRecords adds it to the answer.
+      await checkLinkHost(c.env, a.workspaceId, report.name);
       const stored = c.env.config.multiTenant && report.sending === 'pending' && report.dnsHost !== undefined;
       const check = await (await wrapModuleLoad(() => import('./record-check.js'))).checkSetup(report);
       if (check.records.length) report.dnsHost = check.host;
@@ -1650,7 +1651,7 @@ function registerPublicEvents(app: App) {
 }
 
 function unsubscribePage(title: string, body: string) {
-  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>@font-face{font-family:Inter;src:url("/fonts/inter-variable.woff2") format("woff2");font-weight:100 900;font-style:normal;font-display:swap}body,body *{letter-spacing:-0.01em}</style><body style="font-family:Inter,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">${title}</h1>${body}</main></body></html>`;
+  return `<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${title}</title><style>body,body *{letter-spacing:-0.01em}</style><body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;letter-spacing:-0.01em;margin:48px;line-height:1.5"><main><h1 style="font-size:24px">${title}</h1>${body}</main></body></html>`;
 }
 function registerMetrics(app: App) {
   // The window's aggregate is one statement that reads every email in it (a 30-day Overview reads all retained mail):
@@ -2335,4 +2336,4 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     }
   });
 };
-export const operationJobs: Record<string, JobHandler> = { 'domain.placement': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./placement.js'))).shadowPlacement(...args); }), 'domain.verify': retryDatabaseFailures(domainVerify), 'domain.setupCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainSetupCheckJob(...args); }), 'domain.mx': retryDatabaseFailures(domainMx), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.resumeDeliveries': retryDatabaseFailures(resumeDeliveries), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };
+export const operationJobs: Record<string, JobHandler> = { 'domain.placement': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./placement.js'))).shadowPlacement(...args); }), 'domain.verify': retryDatabaseFailures(domainVerify), 'domain.setupCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainSetupCheckJob(...args); }), 'domain.linkCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainLinkCheckJob(...args); }), 'domain.mx': retryDatabaseFailures(domainMx), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.resumeDeliveries': retryDatabaseFailures(resumeDeliveries), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

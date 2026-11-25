@@ -2421,7 +2421,7 @@ export type DomainDnsSetup = {
         name: string;
     } | null;
     applyUrl: string | null;
-    groups: Array<'sending' | 'ownership' | 'receiving' | 'receivingReply' | 'mailfrom'>;
+    groups: Array<'sending' | 'links' | 'ownership' | 'receiving' | 'receivingReply' | 'mailfrom'>;
 };
 
 export type WebhookPage = {

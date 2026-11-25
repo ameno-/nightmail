@@ -43,7 +43,7 @@ const oneClickDns = false
 // records that are already on screen.
 export function useDnsSetup(domain: Domain | undefined) {
   const { multiTenant, canAdminister } = useWorkspaceAccess()
-  const needed = !!domain && domain.records.some(record => !optionalRecord(record) && record.status !== 'verified')
+  const needed = !!domain && domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')
   const enabled = oneClickDns && multiTenant && canAdminister && needed
   const query = useQuery({
     queryKey: ['nightmail', 'domain', domain?.id, 'dns-setup'],
@@ -69,9 +69,6 @@ function DnsConnect({ setup, open }: { setup: DnsSetup; open: boolean }) {
   </div>
 }
 
-// Records that never hold up sending: a DMARC recommendation, and the link domain (links.<domain>) for the links in
-// campaign and marketing mail.
-const optionalRecord = (record: DnsRecord) => record.purpose === 'dmarc' || record.purpose === 'links'
 // Records saved before purposes split into sending and receiving may still say dkim or ownership.
 const purposeOf = (record: DnsRecord): DnsRecordPurpose => {
   const purpose = record.purpose as string | undefined
@@ -98,7 +95,7 @@ export function zoneLines(records: DnsRecord[]) {
 export type RecordRow = { record: DnsRecord; purpose: string; status: { label: string; tone: Tone; detail?: string }; actions?: MenuItem[] }
 const purposeLabel = (record: DnsRecord) => {
   const purpose = purposeOf(record)
-  return purpose === 'sending' ? record.type === 'CNAME' ? 'DKIM' : 'Ownership' : purpose === 'mail_from' ? record.type === 'MX' ? 'MAIL FROM' : 'SPF' : purpose === 'dmarc' ? 'DMARC' : purpose === 'links' ? 'Link domain' : 'Receiving'
+  return purpose === 'sending' ? record.type === 'CNAME' ? 'DKIM' : 'Ownership' : purpose === 'mail_from' ? record.type === 'MX' ? 'MAIL FROM' : 'SPF' : purpose === 'dmarc' ? 'DMARC' : purpose === 'links' ? 'Links' : 'Receiving'
 }
 export const recordRow = (record: DnsRecord, status?: RecordRow['status']): RecordRow => ({ record, purpose: purposeLabel(record), status: status ?? (record.status === 'verified' ? { label: 'Verified', tone: 'success', detail: record.note } : { label: 'Pending', tone: 'warning', detail: record.note }) })
 
@@ -106,17 +103,19 @@ export const recordRow = (record: DnsRecord, status?: RecordRow['status']): Reco
 // record, since the page's polls read the domain without them (reads carry only the background check's, once it runs).
 export { checkKey, type DnsChecks }
 export const dnsChecks = (domain: Domain): DnsChecks => new Map(domain.records.flatMap(record => record.publicDns !== undefined ? [[checkKey(record), record.publicDns] as const] : []))
-const required = (record: DnsRecord) => record.status !== 'verified' && (purposeOf(record) === 'sending' || purposeOf(record) === 'mail_from')
+const required = (record: DnsRecord) => record.status !== 'verified' && (purposeOf(record) === 'sending' || purposeOf(record) === 'links' || purposeOf(record) === 'mail_from')
 function checkedStatus(record: DnsRecord, check: PublicDns | null | undefined): RecordRow['status'] | undefined {
+  // The link record before any check of it: a domain set up before link records has never had one.
+  if (check === undefined && required(record) && purposeOf(record) === 'links') return { label: 'Missing', tone: 'danger', detail: record.note }
   if (!required(record) || check === undefined) return undefined
   if (check === null) return { label: 'Pending', tone: 'warning', detail: 'Public DNS didn’t answer. Check again in a minute.' }
-  if (check.state === 'found') return { label: 'Found', tone: 'info', detail: `Public DNS has this record. ${RECORDS_CORRECT}` }
+  if (check.state === 'found') return { label: 'Found', tone: 'info', detail: purposeOf(record) === 'links' ? record.note : `Public DNS has this record. ${RECORDS_CORRECT}` }
   if (check.state === 'missing') return { label: 'Missing', tone: 'danger', detail: `Public DNS has no ${record.type} record at ${record.name}.` }
   return { label: 'Wrong value', tone: 'danger', detail: `Expected ${record.value}. Public DNS has ${check.values.join(', ')}.` }
 }
 
 const ordinals = ['first', 'second', 'third', 'fourth', 'fifth']
-const recordNoun = (record: DnsRecord) => ({ DKIM: 'DKIM CNAME', Ownership: 'ownership TXT', 'MAIL FROM': 'MAIL FROM MX', SPF: 'SPF TXT' } as Record<string, string>)[purposeLabel(record)] ?? `${purposeLabel(record)} ${record.type}`
+const recordNoun = (record: DnsRecord) => ({ DKIM: 'DKIM CNAME', Ownership: 'ownership TXT', Links: 'links CNAME', 'MAIL FROM': 'MAIL FROM MX', SPF: 'SPF TXT' } as Record<string, string>)[purposeLabel(record)] ?? `${purposeLabel(record)} ${record.type}`
 // A DKIM name starts with a 32-character token: its first characters are enough to find it in a DNS provider's list.
 const shortHost = (name: string, domain: string) => { const host = relativeHost(name, domain); return host.length > 28 ? `${host.slice(0, 12)}…` : host }
 const list = (items: string[]) => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
@@ -271,12 +270,13 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
 const NO_RECORDS = 'DNS records are not available yet.'
 // Onboarding: sending and receiving records in guided groups. The domain page: every record in one table, custom MAIL FROM last.
 export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, mailFrom, checks }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; mailFrom?: MailFromView; checks?: DnsChecks }) {
-  const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
+  // The link record (links.<domain>) is one of the sending records: campaign and marketing mail waits for it.
+  const sending = [...recordsFor(domain, 'sending'), ...recordsFor(domain, 'links')], receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
   const alert = issue && <ReceivingIssueAlert issue={issue} />
   const warning = receivingWarning(domain.name, receiving)
   const { copy } = useCopy()
   // Stays in place (invisible) once every record verifies, so nothing below moves.
-  const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => !optionalRecord(record) && record.status !== 'verified')} />
+  const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')} />
   if (guided) {
     const notes = [...new Set(receiving.flatMap(record => record.note && record.note !== issue?.message ? [record.note] : []))]
     const sendingVerified = (domain.sending ?? (domain.status === 'verified' ? 'verified' : 'pending')) === 'verified'
@@ -299,9 +299,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const mailFromRecords = recordsFor(domain, 'mail_from'), dmarc = dmarcRow(domain)
   const change: MenuItem[] = mailFrom ? [{ label: 'Change custom MAIL FROM', icon: <Pencil size={16} />, onSelect: mailFrom.onEdit }, { label: 'Remove custom MAIL FROM', icon: <Trash2 size={16} />, destructive: true, onSelect: mailFrom.onRemove }] : []
   const checked = (record: DnsRecord) => recordRow(record, checkedStatus(record, checks?.get(checkKey(record))))
-  // The link domain, last: optional, so it says so until it verifies, with what its check found on hover.
-  const linkRows = recordsFor(domain, 'links').map(record => recordRow(record, record.status === 'verified' ? undefined : { label: 'Optional', tone: 'neutral', detail: record.note }))
-  const rows = [...sending.map(checked), ...dmarc ? [dmarc] : [], ...receivingRows, ...mailFromRecords.map(record => ({ ...checked(record), actions: change })), ...linkRows]
+  const rows = [...sending.map(checked), ...dmarc ? [dmarc] : [], ...receivingRows, ...mailFromRecords.map(record => ({ ...checked(record), actions: change }))]
   // While sending records are pending, one line leads the records: what Check now does, then what it found to fix. Its
   // space is there from the first frame (clamped, the full text on hover), so the answer never moves the table.
   const summary = checks && domain.records.some(required) ? checkSummary(domain, checks) ?? { text: 'Check now looks up each record in public DNS.', tone: 'neutral' as const } : null
