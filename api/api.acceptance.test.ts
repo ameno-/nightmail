@@ -3616,8 +3616,9 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
         assert.equal(pending.state, 'ready'); assert.equal(pending.tenant, 'pending'); assert.equal(calls.length + identityChecks, 0, 'A cold pool must not trigger any AWS work on the request.');
         assert.equal(wakes,0); assert.equal((await pool.query("SELECT 1 FROM jobs WHERE workspace_id=$1 AND type='tenant.provision'",[a.org.id])).rowCount,0);
         assert.deepEqual(ok(await local('GET', path, undefined, a.cookie)).connection, pending);
-        const {sendingLimit,domains:claimed,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
+        const {sendingLimit,domains:claimed,sent,...summary}=ok(await local('GET','/v1/me',undefined,a.cookie)).connection;
         assert.deepEqual(summary,{kind:'shared',region,state:'ready',tenant:'pending',sendingPause:null,standing:{step:'ok',marketingHeld:false}}); assert.deepEqual(claimed,{total:0,verified:0});
+        assert.equal(sent,false,'Nothing sent yet: Overview\'s onboarding card reads this.');
         assert.deepEqual({...sendingLimit,resetAt:undefined},{cap:500,used:0,resetAt:undefined,nextCap:null,nextCapAt:null},'No time-only graduation promise.');
         assert.equal((await pool.query('SELECT lease_until FROM provider_connections WHERE id=$1', [pending.id])).rows[0].lease_until, null);
         // GET /v1/me reads the allowance without row locks: a pending operator pause or cap change (a row lock on the
@@ -29719,9 +29720,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('no-domain reminder: a workspace with no domain an hour after it was created is emailed once to add one, only with NO_DOMAIN_REMINDER on; not one created within the hour or days ago, not one with a domain, not one that adds a domain before the email goes', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { fresh } = await noticeFixture(runtime, db);
+      const { fresh, platform } = await noticeFixture(runtime, db);
       const { accountNotifyJob } = await import('./src/account-notices.js');
       const { domainSetupTick } = await import('./src/domain-setup.js');
+      const { connectionSummary } = await import('./src/provider-connections.js');
+      // GET /v1/me's connection says whether a workspace has sent anything (Overview's first-send card): here the platform
+      // workspace, which has sent nothing until the notice below goes out.
+      assert.equal((await connectionSummary(runtime, platform))?.sent, false);
       const { rows: [owner] } = await db.query('SELECT id FROM nightmail_users WHERE email=$1', [AUTH_EMAIL]);
       // A workspace created `age` ago, owned by the fixture's verified user.
       const workspace = async (age: string, domain = false) => {
@@ -29751,6 +29756,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await tick(); await tick();
       assert.deepEqual(await notices(all), [{ workspace_id: idle, status: 'pending' }]);
       assert.deepEqual(await deliver(all), ['no_domain:sent']);
+      assert.equal((await connectionSummary(runtime, platform))?.sent, true);
       const [mail] = await fresh();
       assert.deepEqual([mail.subject, mail.to_addresses, mail.kind], ['Add your domain to start sending', [AUTH_EMAIL], 'transactional']);
       assert.equal(mail.text, `Pine Studio was created over an hour ago, but it has no domain yet.\n\nNightmail sends from your own domain, so nothing can be sent until you add one.\n\nIt takes about 5 minutes: add the domain, then copy the records it lists to where its DNS is hosted.\n\nAdd your domain: ${PUBLIC_ORIGIN}/domains\n\nNightmail sends this once, to the owners and admins of Pine Studio. To reach us, write to support@nightmail.dev.\n`);

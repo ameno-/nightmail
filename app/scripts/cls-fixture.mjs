@@ -901,6 +901,9 @@ export async function seed(fx) {
   // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
   await hosted(db, 'ws_skipped');
+  // A verified domain and nothing sent yet: Overview's first card offers the first send.
+  await fx.signIn('ren', 'ren@rowanbakery.example', 'Ren Okafor', { id: 'ws_verified', name: 'Rowan Bakery' });
+  await domain(db, 'ws_verified', await hosted(db, 'ws_verified'), 'rowanbakery.example');
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');

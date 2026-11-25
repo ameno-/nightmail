@@ -515,6 +515,10 @@
             ],
             "description": "Domains claimed in this workspace and how many can send."
           },
+          "sent": {
+            "type": "boolean",
+            "description": "Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days)."
+          },
           "attention": {
             "type": "string",
             "description": "A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention."

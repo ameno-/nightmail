@@ -189,6 +189,10 @@ export type ConnectionSummary = {
         verified: number;
     };
     /**
+     * Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).
+     */
+    sent?: boolean;
+    /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
      */
     attention?: string;
