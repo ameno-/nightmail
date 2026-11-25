@@ -41510,6 +41510,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.ok(readable(input(tested.id)).includes(`<img src="${onLinkDomain}" alt="logo" width="100"`));
         assert.equal((await fetch(new Request(onLinkDomain))).status, 200);
       } finally { runtime.config.linkHost = undefined; }
+      // Hosted, its own domain never serves them, even as one of its own origins.
+      const hostedBefore = { multiTenant: runtime.config.multiTenant, previousOrigins: runtime.config.previousOrigins };
+      Object.assign(runtime.config, { multiTenant: true, previousOrigins: [...runtime.config.previousOrigins ?? [], 'https://nightmail.dev'] });
+      try { assert.equal((await fetch(new Request(`https://nightmail.dev${path}`))).status, 404); }
+      finally { Object.assign(runtime.config, hostedBefore); }
 
       // An email sent through the API keeps the parts its caller attached.
       const direct = ok(await local('POST', '/v1/emails/send', mail({ html: `<img src="cid:${contentId}">`, attachments: [image.id] })), 202);

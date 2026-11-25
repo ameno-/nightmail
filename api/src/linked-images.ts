@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { ApiError, type App } from './core.js';
 import { servesWorkspace } from './link-domains.js';
+import { servedDomains } from './brand.js';
 
 // Campaign mail links its inline pictures instead of carrying them. Each is served at <link origin>/i/<name>, on the same
 // host as the message's unsubscribe link (src/link-domains.ts: the link domain, links.nightmailedge.com, on Hosted;
@@ -73,7 +74,8 @@ export function registerLinkedImages(app: App) {
   // everywhere (the Worker keeps a copy in its colo, src/worker.ts): a name always means the same bytes.
   app.get('/i/:name', async c => {
     const match = NAME.exec(c.req.param('name'));
-    if (!match) throw missing();
+    // Hosted's own domain never serves customer pictures, whatever links an old message carries: only link hosts do.
+    if (!match || c.env.config.multiTenant && servedDomains.includes(new URL(c.req.url).hostname.toLowerCase())) throw missing();
     const [, id, hash, extension] = match as unknown as [string, string, string, string];
     const { rows: [row] } = await c.env.db.execute<{ workspace_id: string; storage_key: string; checksum: string; content_type: string; size: number; disposition: string }>(
       sql`SELECT workspace_id, storage_key, checksum, content_type, size, disposition FROM sending_attachments WHERE id = ${`attachment_${id}`}`);

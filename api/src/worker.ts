@@ -419,6 +419,9 @@ export default {
       if (images && imageKey && answer.status === 200) {
         const kept = new Response(answer.clone().body, answer);
         kept.headers.delete('x-request-id'); kept.headers.delete('server-timing');
+        // Kept here an hour, not the year browsers may: a deleted picture or one taken down stops being served from this colo
+        // within the hour (a Cloudflare purge of its URL ends it at once).
+        kept.headers.set('cache-control', 'public, max-age=3600');
         ctx.waitUntil(images.put(imageKey, kept).catch(() => {}));
       }
       return answer;
