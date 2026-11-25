@@ -15,7 +15,7 @@ import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-tit
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, checkSummary, dnsChecks, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines, type DnsChecks } from './domain-records'
-import { forgetDomain, invalidate } from '../../data/invalidation'
+import { cancelDomainQueries, forgetDomain, invalidate } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 import { DomainSetupAlert, RecordsCorrectAlert, recordsCorrect, setupGap } from './domain-setup-alert'
 
@@ -156,8 +156,9 @@ function DomainDetail() {
   const { multiTenant } = useWorkspaceAccess()
   const hosted = useSession()?.identity?.connection?.kind === 'shared'
   const [recheckUntil, setRecheckUntil] = useState(0)
-  // Set the moment the domain is deleted: every read of it below stops (no poll, no focus refetch), so dropping its cache
-  // entries on the way back to Domains starts nothing that would answer 404.
+  // Set when Delete is confirmed, before the DELETE goes out: every read of the domain below stops (no poll, no focus
+  // refetch), so nothing reaches the API after the domain is gone, and dropping its cache entries on the way back to
+  // Domains starts nothing either. Cleared again if the delete fails.
   const [deleted, setDeleted] = useState(false)
   const domain = useDomain(id, recheckUntil, !deleted)
   // Receiving set up through the API checks the domain in the background: follow it until it settles.
@@ -222,6 +223,15 @@ function DomainDetail() {
     const summary = checkSummary(current, found)
     return summary?.tone === 'danger' ? summary.text : null
   }
+  // The reads stop before the DELETE is sent, not once it answers: it takes a second or more (SES included), and a poll
+  // that fired meanwhile reached the API after the domain was gone and answered 404. A read already in flight is cancelled.
+  async function deleteDomain() {
+    flushSync(() => setDeleted(true))
+    void cancelDomainQueries(client, id).catch(() => {})
+    try { await remove.mutateAsync(id) } catch (error) { setDeleted(false); throw error }
+    navigate('/domains', { replace: true })
+    void forgetDomain(client, id).catch(() => {})
+  }
   if (domain.isPending || (!domain.error && (dns.pending || (multiTenant && ((receiving.isPending && !receiving.error) || (hosts.isPending && !hosts.error)))))) return <DomainDetailSkeleton />
   if (domain.error) return <div className="stack domain-page"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
@@ -252,7 +262,7 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); flushSync(() => setDeleted(true)); navigate('/domains', { replace: true }); void forgetDomain(client, id).catch(() => {}) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={deleteDomain} />
     <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
       description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
