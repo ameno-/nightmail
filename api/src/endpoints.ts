@@ -348,7 +348,7 @@ const forwardBase = (origin: string) => origin.replace(/\/$/, '') + '/v1/forward
  * workspace's sent-mail views show it with the link withheld, because the link alone confirms.
  */
 async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId: string, address: string, from?: string) {
-  const box = await senderBox(tx, w, from), origin = await linkOrigin(c.env, tx, w, box.address, 'from');
+  const box = await senderBox(tx, w, from), origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
   const addressHash = await digest(address);
   const declined = (await tx.execute<{ until: string }>(sql`SELECT (declined_at+interval '30 days')::text AS until FROM mail_forward_declines WHERE workspace_id=${w} AND address_hash=${addressHash} AND declined_at>now()-interval '30 days'`)).rows[0];
   if (declined) throw new ApiError(409, 'FORWARD_DECLINED', `${address} declined forwarding from this workspace. You can ask again after ${new Date(declined.until).toISOString()}.`, 'address');
@@ -825,7 +825,7 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
   await runtime.db.transaction(async tx => {
     await checkExternal(tx, w, address);
     const m = await received(tx), box = await forwardSender(tx, w, recipient, requestFrom);
-    const stopUrl = await forwardStopUrl(runtime, endpointId, await linkOrigin(runtime, tx, w, box.address));
+    const stopUrl = await forwardStopUrl(runtime, endpointId, await linkOrigin(runtime, tx, w, box.address, 'forward'));
     // One forward per message and endpoint, decided in the same transaction as the send.
     if (!(await tx.execute(sql`INSERT INTO mail_forward_once(workspace_id,message_id,endpoint,grants) VALUES(${w},${m.id},${endpointId},${JSON.stringify(grants)}::jsonb) ON CONFLICT DO NOTHING RETURNING 1`)).rowCount) return;
     // A forward is a send: the send admission applies the workspace's sending limits. Per endpoint, an hourly bound

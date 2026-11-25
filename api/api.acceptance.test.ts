@@ -38554,8 +38554,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         return (send as any).call(this,cmd,...rest);
       });
       // Public DNS has links.example.com as a CNAME to the target once `published`; Cloudflare's custom hostnames API serves it once `served`.
+      // Assigned, not mocked: a second mock of the fixture's own fetch mock would put the fixture's back when both are restored.
       const prior=globalThis.fetch,cloudflare:{method:string;path:string;body?:Json;auth:string|null}[]=[];let published=false,served=false;
-      t.mock.method(globalThis,'fetch',async(input:RequestInfo|URL,init?:RequestInit)=>{
+      globalThis.fetch=(async(input:RequestInfo|URL,init?:RequestInit)=>{
         const url=new URL(input instanceof Request?input.url:String(input));
         if(url.hostname==='cloudflare-dns.com'){
           const answer=published&&url.searchParams.get('name')==='links.example.com'&&url.searchParams.get('type')==='CNAME'?[{name:'links.example.com.',type:5,data:`${target}.`}]:[];
@@ -38566,7 +38567,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           return Response.json({success:true,errors:[],result:{id:'ch_fixture',hostname:'links.example.com',status:served?'active':'pending',ssl:{status:served?'active':'pending_validation'}}});
         }
         return prior(input,init);
-      });
+      }) as typeof fetch;
+      try {
       const list=ok(await local('POST','/v1/lists',{name:unique('link-hosts')}),201),contact=ok(await local('POST','/v1/contacts',{email:address()}),201);
       ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Synthetic fixture.',occurredAt:new Date().toISOString()}));
       ok(await local('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]}));
@@ -38637,6 +38639,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         ['links.example.com','/','missing'],['links.example.com','/overview','missing'],['links.example.com','/v1/campaigns','missing'],['links.example.com','/unsubscribe/u_x/y','missing'],['nightmail.dev','/overview','other']] as const)
         assert.equal(linkHostRequest(true,host,path,['nightmail.dev']),answer,`${host}${path}`);
       assert.equal(linkHostRequest(false,'links.example.com','/overview',['nightmail.dev']),'other');
+      } finally { globalThis.fetch=prior; }
     });
   });
 

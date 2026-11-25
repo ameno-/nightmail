@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, log, type Config, type DbExecutor, type Runtime } from './core.js';
-import { isBuiltinHost } from './builtin-domain.js';
+import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
 import { LINK_LABEL } from './link-hosts.js';
 import { cname, fqdn } from './public-dns.js';
 
@@ -17,8 +17,16 @@ import { cname, fqdn } from './public-dns.js';
  * active (LINK_RECORD_REQUIRED); a self-hosted installation links on its own origin, PUBLIC_URL, instead.
  */
 export const linkHostName = (domain: string) => `${LINK_LABEL}.${domain}`;
-const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
+export const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
 
+/** What the link is for: a campaign (and its test), a `kind: marketing` send, or a forward. */
+export type LinkPurpose = 'campaign' | 'marketing' | 'forward';
+/** Mail from a built-in domain that needs a link host: refused as the built-in domain's own rules refuse it. */
+export function builtinLinkRefusal(config: Config, host: string, purpose: LinkPurpose) {
+  return purpose === 'forward'
+    ? new ApiError(422, 'BUILTIN_DOMAIN_UNSUPPORTED', 'The built-in domain has no link host for the stop link every forwarded message carries, so it can\u2019t forward. Verify a domain of your own for that.', 'from')
+    : builtinRefusal(config, { code: 'BUILTIN_DOMAIN_UNSUPPORTED', field: purpose === 'marketing' ? 'kind' : 'campaign', host });
+}
 export function linkRecordRequired(config: Config, domain: string, field = 'from') {
   return new ApiError(409, 'LINK_RECORD_REQUIRED', config.linkHosts
     ? `Campaign and marketing mail from ${domain} needs the domain's link record, which carries its unsubscribe link: add a CNAME at ${linkHostName(domain)} pointing to ${config.linkHosts.target}, then check the domain.`
@@ -27,10 +35,10 @@ export function linkRecordRequired(config: Config, domain: string, field = 'from
 
 /** The origin of the links in mail from `from` (an address or a domain): the active link host of its domain (or of the
  *  workspace's domain it is under), else PUBLIC_URL when self-hosted. Hosted without one: LINK_RECORD_REQUIRED. */
-export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, field?: string): Promise<string> {
+export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, purpose: LinkPurpose = 'campaign'): Promise<string> {
   const sender = domainOf(from), config = runtime.config;
   // A built-in domain has no DNS of its own to publish a link record in.
-  if (isBuiltinHost(config, sender)) throw new ApiError(422, 'BUILTIN_DOMAIN_UNSUPPORTED', `The built-in domain has no link host, so it can\u2019t send mail that carries one: campaign, marketing or forwarded mail. Verify a domain of your own for that.`, field ?? 'from');
+  if (isBuiltinHost(config, sender)) throw builtinLinkRefusal(config, sender, purpose);
   // Self-hosted without link hosts links on its own origin, with nothing to look up. Hosted always looks: only a check
   // with link hosts on makes an active one, so without them it refuses.
   if (!config.multiTenant && !config.linkHosts) return config.publicUrl.replace(/\/$/, '');
@@ -41,18 +49,27 @@ export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: 
     WHERE d.name=${sender} OR right(${sender},length(d.name)+1)='.'||d.name ORDER BY length(d.name) DESC`);
   const active = rows.find(row => row.hostname);
   if (active) return `https://${active.hostname}`;
-  if (config.multiTenant) throw linkRecordRequired(config, rows[0]?.name ?? sender, field);
+  if (config.multiTenant) throw linkRecordRequired(config, rows[0]?.name ?? sender);
   return config.publicUrl.replace(/\/$/, '');
 }
-/** linkOrigin for several messages: one lookup per sender domain. */
+/** linkOrigin for several marketing messages: one lookup per sender domain. */
 export function linkOrigins(runtime: Runtime, db: DbExecutor, workspaceId: string) {
   const known = new Map<string, Promise<string>>();
-  return (from: string, field?: string) => {
+  return (from: string) => {
     const domain = domainOf(from);
     let origin = known.get(domain);
-    if (!origin) { origin = linkOrigin(runtime, db, workspaceId, domain, field); known.set(domain, origin); }
+    if (!origin) { origin = linkOrigin(runtime, db, workspaceId, domain, 'marketing'); known.set(domain, origin); }
     return origin;
   };
+}
+/** The link origin a campaign read found with it (`found`, its active link host's or its launch's), else what is left
+ *  without a lookup: refused on Hosted, the installation's own origin when self-hosted. */
+export function foundLinkOrigin(config: Config, from: string, found: string | null | undefined) {
+  if (found) return found;
+  const sender = domainOf(from);
+  if (isBuiltinHost(config, sender)) throw builtinLinkRefusal(config, sender, 'campaign');
+  if (config.multiTenant) throw linkRecordRequired(config, sender);
+  return config.publicUrl.replace(/\/$/, '');
 }
 
 // ----- Custom hostnames (Cloudflare for SaaS) ---------------------------------------------------------------------

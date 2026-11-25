@@ -30,7 +30,7 @@ import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, mib, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { linkOrigin, linkOrigins } from './link-domains.js';
+import { foundLinkOrigin, linkOrigin, linkOrigins } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -1570,7 +1570,7 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   const address = marketing ? await workspacePostalAddress(call.runtime, db, a.workspaceId) : null;
   // Its unsubscribe link goes on the sending domain's link host (src/link-domains.ts): on Hosted without one, the send is refused.
   const origin = marketing ? linkOrigins(call.runtime, db, a.workspaceId) : undefined;
-  const origins = origin ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? origin(m.from, batch ? `emails.${i}.from` : 'from') : undefined)) : [];
+  const origins = origin ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? origin(m.from).catch(error => { throw atItem(error, batch ? i : undefined); }) : undefined)) : [];
   const out = await directMessages(call.runtime, mails, batch, address, origins);
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   // A reply by header joins the conversation it answers only when its sender can read that message.
@@ -1825,11 +1825,16 @@ async function renderCampaignContent(runtime: Runtime, draft: Pick<CampaignDraft
  *  while it is still editable (campaignEditable). */
 async function campaignWithFooter(runtime: Runtime, a: Actor, campaignId: string): Promise<{ row: typeof campaigns.$inferSelect; footer: Footer }> {
   const frozen = sql`${campaigns.reviewId} IS NOT NULL AND NOT (${campaigns.state}='draft' OR (${campaigns.state}='failed' AND ${campaigns.expanded}=0))`;
+  // The link host its copies use (src/link-domains.ts): the one its launch froze, else the sender's active one now.
+  const sender = sql`lower(split_part(${campaigns.draft}->>'from','@',2))`;
   const [found] = await runtime.db.select({ row: campaigns, address: sql<string | null>`CASE WHEN ${frozen}
       THEN (SELECT r.draft->>'postalAddress' FROM sending_campaign_reviews r WHERE r.workspace_id=${a.workspaceId} AND r.id=${campaigns.reviewId})
-      ELSE ${postalAddressOf(runtime.config.multiTenant, a.workspaceId)} END` }).from(campaigns).where(campaignWhere(a, campaignId));
+      ELSE ${postalAddressOf(runtime.config.multiTenant, a.workspaceId)} END`,
+    link: sql<string | null>`coalesce(CASE WHEN ${frozen} THEN (SELECT r.draft->>'linkOrigin' FROM sending_campaign_reviews r WHERE r.workspace_id=${a.workspaceId} AND r.id=${campaigns.reviewId}) END,
+      (SELECT 'https://'||h.hostname FROM link_hosts h WHERE h.workspace_id=${a.workspaceId} AND h.status='active' AND (h.domain=${sender} OR right(${sender},length(h.domain)+1)='.'||h.domain) ORDER BY length(h.domain) DESC LIMIT 1))` })
+    .from(campaigns).where(campaignWhere(a, campaignId));
   if (!found) return notFound('Campaign');
-  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice } };
+  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice, ...found.link ? { linkOrigin: found.link } : {} } };
 }
 const displayAudience = (runtime: Runtime, a: Actor, draft: CampaignDraft, spec: z.infer<typeof AudienceSpec>) =>
   wrapModuleLoad(() => import('./audience.js')).then(m => m.countCampaignAudienceForDisplay(runtime.db, a, spec, draft.requiredNotice === true));
@@ -1878,11 +1883,11 @@ async function reviewPart<T>(c: Ctx, read: Promise<T>) {
 
 /** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder on the link host
  *  its launch would use. A draft that couldn't launch for want of one shows this installation's own: it is never sent. */
-async function previewParts(runtime: Runtime, workspaceId: string, draft: CampaignDraft, footer: Footer) {
+async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
   const rendered = await renderCampaignContent(runtime, draft, false);
   if (!rendered.html && !rendered.text) return rendered;
-  const origin = footer.requiredNotice ? runtime.config.publicUrl : await linkOrigin(runtime, runtime.db, workspaceId, draft.from)
-    .catch(error => { if (error instanceof ApiError && (error.code === 'LINK_RECORD_REQUIRED' || error.code === 'BUILTIN_DOMAIN_UNSUPPORTED')) return runtime.config.publicUrl; throw error; });
+  let origin = runtime.config.publicUrl;
+  if (!footer.requiredNotice) try { origin = foundLinkOrigin(runtime.config, draft.from, footer.linkOrigin); } catch { /* Never sent: shown as this installation's own. */ }
   footerParts(rendered, unsubscribePlaceholder(origin), footer);
   return rendered;
 }
@@ -2281,7 +2286,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, with the footer every email gets (the Unsubscribe link, a placeholder here, and the workspace’s postal address) and without personalization. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
     const a = actor(c), { row, footer } = await campaignWithFooter(c.env, a, c.req.valid('param').id);
-    const rendered = await previewParts(c.env, a.workspaceId, row.draft, footer);
+    const rendered = await previewParts(c.env, row.draft, footer);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/audience', operationId: 'previewCampaignAudience', description: 'Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(AudienceCounts), ...errors } }), async c => {
@@ -2312,7 +2317,7 @@ export function registerSending(app: App) {
     await chargeRenderBudget(c, a.workspaceId);
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
     // The page is passed on, not kept here: renderPreview drops it once it is rendered.
-    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, a.workspaceId, row.draft, footer)).html ?? '', inline, async item => {
+    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, row.draft, footer)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
@@ -2377,7 +2382,7 @@ export function registerSending(app: App) {
       // The footer as recipients get it, its link the placeholder on the link host they get: a test is transactional,
       // without List-Unsubscribe, and refused as the launch would be when there is no link host.
       const snapshot = { ...message, testCampaignId: campaignId };
-      footerParts(snapshot, unsubscribePlaceholder(footer.requiredNotice ? c.env.config.publicUrl : await linkOrigin(c.env, c.env.db, a.workspaceId, row.draft.from)), footer);
+      footerParts(snapshot, unsubscribePlaceholder(footer.requiredNotice ? c.env.config.publicUrl : foundLinkOrigin(c.env.config, row.draft.from, footer.linkOrigin)), footer);
       const out: Outgoing[] = [{ snapshot, recipients: hostedCost(input.to), marketing: false }];
       if (mayScreenAtAccept(c.env, out)) await prepareFrontDoor(c.env, a, out, false);
       return { out, campaign: { id: campaignId, revision: row.revision } };
@@ -2557,11 +2562,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // The footer's postal address (CAN-SPAM), read once and frozen in the review: every copy and rebuild of this launch
   // shows the same one. Without it the launch is refused after the admission check below, before anything is captured.
   const postalAddress = await workspacePostalAddress(runtime, db, a.workspaceId);
-  // The host of the links Nightmail adds (src/link-domains.ts), frozen in the review too, so every copy of this launch
-  // links the same one. Refused here when the sending domain has no active link host on Hosted. A required notice has no
-  // unsubscribe link.
-  const links = row.draft.requiredNotice ? undefined : await linkOrigin(runtime, db, a.workspaceId, row.draft.from);
-  const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {}, ...links ? { linkOrigin: links } : {} };
+  const draft = { ...readyCampaign(row.draft), ...postalAddress ? { postalAddress } : {} };
   // A required notice: still allowed for this workspace, and confirmed by the sender as having no promotion.
   await requiredNoticesAllowed(db, draft, a.workspaceId);
   if (draft.requiredNotice && !input.confirmRequiredNotice) throw new ApiError(422, 'REQUIRED_NOTICE_UNCONFIRMED', 'Confirm that this is a required notice with no promotion (confirmRequiredNotice: true).', 'confirmRequiredNotice');
@@ -2587,6 +2588,10 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   try { const check = await decide('none'); if (!check.allowed) throw refusal(runtime, check, local); }
   finally { await db.execute(sql`ROLLBACK TO SAVEPOINT launch_check`); await db.execute(sql`RELEASE SAVEPOINT launch_check`); }
   if (!postalAddress) throw postalAddressRequired();
+  // The host of the links Nightmail adds (src/link-domains.ts), frozen in the review like the postal address, so every
+  // copy of this launch links the same one. Refused here, after the sender's own checks, when the sending domain has no
+  // active link host on Hosted. A required notice has no unsubscribe link.
+  const links = draft.requiredNotice ? undefined : await linkOrigin(runtime, db, a.workspaceId, row.draft.from);
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
   const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
   const smallList = await audienceMod.isSmallAudienceList(db, a, draft.audience.listId);
