@@ -26,7 +26,7 @@ import { CampaignPacing, CampaignProgress, SendEstimateLine, SummaryLine, campai
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 import { ReadinessPanel, type Consent, type PlanChoice } from './readiness'
 import { CampaignBar, CampaignSteps, RowProblem } from './steps'
-import { productName } from '../../../../api/src/brand'
+import { previousDomains, productName } from '../../../../api/src/brand'
 export { CampaignsPage } from './CampaignList'
 export { TemplatesPage, TemplateEditorPage } from './templates'
 import { TemplatePickerDialog } from './templates'
@@ -203,6 +203,21 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   // The domain this workspace's campaigns go out from (its latest campaign with a sender): what an empty From suggests.
   const recent = useApiQuery(['campaigns', { pageSize: 10, senders: true }], (api, signal) => api.campaigns.list({ pageSize: 10 }, signal), { enabled: !form.fromEmail })
   const sendingDomain = recent.data?.items.find(item => item.fromEmail)?.fromEmail.split('@')[1]
+  // A new draft starts with the sender the workspace used last, while its domain is still verified (and is none of the
+  // service's earlier domains); without one, From stays empty with its placeholder. Typing in From first keeps what's typed.
+  const covers = (domain: string, parent: string) => domain === parent || domain.endsWith(`.${parent}`)
+  const latestSender = recent.data?.items.map(item => ({ name: item.fromName, email: item.fromEmail })).find(sender => {
+    const domain = sender.email.split('@')[1]?.toLowerCase()
+    return Boolean(domain) && !previousDomains.some(old => covers(domain, old)) && choices.domains.some(item => covers(domain, item.name.toLowerCase()))
+  })
+  const prefilled = useRef(Boolean(initial || newsletter))
+  useEffect(() => {
+    if (prefilled.current || !latestSender || formRef.current.fromEmail || formRef.current.fromName || document.activeElement?.id === 'campaign-from-email') return
+    prefilled.current = true
+    const domain = latestSender.email.split('@')[1].toLowerCase(), match = choices.domains.find(item => covers(domain, item.name.toLowerCase()))
+    updateForm({ ...formRef.current, fromName: latestSender.name, fromEmail: latestSender.email, ...(match ? { regionId: match.regionId } : {}) })
+    setRebased(value => ({ ...value, sender: value.sender + 1 }))
+  }, [latestSender?.email]) // eslint-disable-line react-hooks/exhaustive-deps
   const cache = useQueryClient()
   // Saves write the campaign into the cache instead of refetching every query on each autosave.
   const saveMutation = useApiMutation((api, input: CampaignInput) => api.campaigns.save(input), undefined, false, false)
@@ -583,8 +598,8 @@ function CampaignControlFallback({ id, state, error, refreshing, onRetry }: { id
     finally { setBusy(null) }
   }
   return <div className="campaign-review">
-    <CampaignBar back={state.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">Campaign</h1>}
-      actions={<><Link className="ui-button ui-button--secondary ui-button--md" to={campaignLogs(id)}>View logs</Link><StatusBadge status={campaignDisplayStatus(state)} /></>} />
+    <CampaignBar back={state.archivedAt ? '/campaigns?archived=true' : '/campaigns'} title={<h1 className="studio-title">Campaign</h1>} status={<StatusBadge status={campaignDisplayStatus(state)} />}
+      actions={<Link className="ui-button ui-button--secondary ui-button--md" to={campaignLogs(id)}>View logs</Link>} />
     <div className="campaign-review__body stack">
       <div className="campaign-scheduled" data-tone="warning" role="status">
         <div className="campaign-scheduled__text">
@@ -1074,7 +1089,7 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
     ...(unreadNote ? [['warning', unreadNote] as ['warning', ReactNode]] : []),
     ...(error ? [['danger', error] as ['danger', ReactNode]] : []),
   ]
-  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} crumb={issueOf?.name ?? 'Campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<><CampaignPresence present={present} room={draft} />{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}<StatusBadge status={campaignDisplayStatus(campaign)} />{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
+  const bar = <CampaignBar back={campaign.archivedAt ? '/campaigns?archived=true' : issueOf ? newsletterPath(issueOf.id) : '/campaigns'} crumb={issueOf?.name ?? 'Campaigns'} title={<h1 className="studio-title">{campaign.name}</h1>} status={<StatusBadge status={campaignDisplayStatus(campaign)} />} steps={draft && <CampaignSteps step="review" writeTo={campaignRoute(campaign, 'edit')} />} actions={<><CampaignPresence present={present} room={draft} />{stale && <span className="campaign-note" data-tone="warning" title="Showing the last available counts.">Couldn’t refresh</span>}{!campaignEditable(campaign) && !finished && sentSomething && <Link className="ui-button ui-button--secondary ui-button--md" to={`/logs?campaign=${encodeURIComponent(campaign.id)}`}>View logs</Link>}{campaign.archivedAt && <CampaignArchiveButton campaign={campaign} />}</>} />
   const dialogs = <>
     <ConfirmDialog open={confirmation !== null} onOpenChange={open => { if (!open && !sendMutation.isPending) setConfirmation(null) }} title={confirmation?.mode === 'schedule' ? `Schedule this ${thing}?` : `Send this ${thing} now?`} description={confirmation?.mode === 'schedule' ? `Send “${campaign.name}”${origin} to ${recipients}${audienceName} on ${utcLabel(confirmation.scheduledAt!)} (${localLabel(confirmation.scheduledAt!)}).${paceSummary(confirmation)}${cost}${noticeNote}${scoreNote} You can change this until sending starts.` : `Send “${campaign.name}”${origin} to ${recipients}${audienceName} now.${paceSummary(confirmation)}${cost}${noticeNote || ' Consent is checked again as each email sends.'}${scoreNote} You can’t undo this.`} confirmLabel={confirmation?.mode === 'schedule' ? 'Schedule' : 'Send now'} onConfirm={confirmSend} pending={sendMutation.isPending} />
     {draft && testOpen && <TestEmailDialog campaign={campaign} open={testOpen} onOpenChange={setTestOpen} />}

@@ -22,9 +22,6 @@ const ignore: Allow[] = [
 // (colours, px, fonts, its divider block), not the dashboard's custom properties.
 const email: Allow = { selector: /\.composer-document\b/, reason: 'the email itself, styled as delivered (mail clients get no tokens)' }
 
-// The campaign editor is being moved onto the tokens in its own pass (ui/campaign-editor-polish); its spacing, radii and
-// type sizes are exempt until that lands. Remove this then, so the three token rules cover it too.
-const campaignsPending: Allow = { files: ['src/features/campaigns/**'], reason: 'moved onto the tokens in its own pass (ui/campaign-editor-polish); remove when it lands' }
 
 const config = {
   include: ['src/**/*.css', 'src/**/*.ts', 'src/**/*.tsx'],
@@ -80,21 +77,21 @@ const config = {
       why: 'Margins, padding and gaps come from the spacing scale (--space-4 … --space-40, and --space-2 for a track\'s inset or the split between two filled rows), so rhythm stays even across pages.',
       use: 'var(--space-N), or calc(-1 * var(--space-N)) for a negative margin.',
       properties: ['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-block', 'margin-block-start', 'margin-block-end', 'margin-inline', 'margin-inline-start', 'margin-inline-end', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'padding-block', 'padding-block-start', 'padding-block-end', 'padding-inline', 'padding-inline-start', 'padding-inline-end', 'gap', 'row-gap', 'column-gap', 'grid-gap'],
-      allow: [email, campaignsPending],
+      allow: [email],
     },
     'token-radius': {
       level: 'error',
       title: 'Radii from tokens',
       why: 'Corners come from the radius scale (--radius-xs 4, --radius-sm 6, --radius-lg 8; --radius-2xs 2 for marks, --radius-sheet 14 for a phone\'s sheet), so controls and surfaces round alike.',
       use: 'var(--radius-xs | --radius-sm | --radius-md | --radius-lg), var(--radius-2xs) for a mark, var(--radius-sheet) for a sheet; 50% for a dot or a face.',
-      allow: [email, campaignsPending],
+      allow: [email],
     },
     'token-font-size': {
       level: 'error',
       title: 'Font sizes from tokens',
       why: 'Type has one size per role (--text-label 11 … --text-xl 24, --text-figure 22 and --text-display 26, tokens.css), and a phone steps body and titles up from the same tokens.',
       use: 'var(--text-…) for the role: label, xs, sm, md (body), section, heading, lg, title, xl, figure, display.',
-      allow: [email, campaignsPending],
+      allow: [email],
     },
     'font-family': {
       level: 'report',

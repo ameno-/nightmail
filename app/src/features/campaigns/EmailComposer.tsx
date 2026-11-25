@@ -34,6 +34,27 @@ const contentIdPrefix = 'nightmail-'
 const editorContentId = /^(?:nightmail|bane)-/
 // The rail's tooltips and menus open to its right, clear of the rail itself: its 8 px padding, then 8 px.
 const railOffset = 16
+// The editor library's bubble menus (text, link, button, image) are placed by floating-ui with no padding and no
+// cross-axis shift, and only re-placed when the window scrolls, so as the studio's own scroll area moved they slid under
+// its bar, and on a phone they ran to the screen's edge. Their view class builds its middleware in a getter: once the
+// first menu is registered, every menu keeps 8 px inside its scroll area, slides along that edge, and hides once what it
+// belongs to has scrolled out of view; the composer re-places them as the scroll area scrolls (below).
+type MenuView = { floatingUIOptions: Record<string, unknown>; isVisible?: boolean; updatePosition?: () => void }
+let menusInView = false
+function keepMenusInView(view: { pluginViews?: unknown[] } | undefined) {
+  if (menusInView || !view?.pluginViews) return
+  const menu = view.pluginViews.find((item): item is MenuView => typeof item === 'object' && item !== null && 'floatingUIOptions' in item)
+  const proto = menu && Object.getPrototypeOf(menu), read = proto && Object.getOwnPropertyDescriptor(proto, 'middlewares')?.get
+  if (!proto || !read) return
+  Object.defineProperty(proto, 'middlewares', { configurable: true, get(this: MenuView) {
+    const options = this.floatingUIOptions, kept = { flip: options.flip, shift: options.shift, hide: options.hide }
+    if (options.flip) options.flip = { padding: 8 }
+    if (options.shift) options.shift = { padding: 8, crossAxis: true }
+    options.hide = {}
+    try { return read.call(this) } finally { Object.assign(options, kept) }
+  } })
+  menusInView = true
+}
 
 // The library's slash menu reads this shared list and has no image entry, although the
 // editor supports images. Route "/image" to the mounted composer's file picker. The menu
@@ -71,6 +92,10 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
   const [panelChoice, setPanelChoice] = useState<boolean | null>(null)
   const panelShown = panelChoice ?? wide
   const docked = wide && panelShown
+  // Below 900 px the panel is a bottom sheet: closing slides it down before it goes (composer.css's sheet-out).
+  const [closing, setClosing] = useState(false)
+  // Images placed here, by their data: source: the Style panel names them by their file.
+  const imageNames = useRef(new Map<string, string>())
   const inspector = useRef<HTMLElement>(null)
   const editor = useRef<EmailEditorRef>(null)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -177,8 +202,29 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       return dom.matches(styled) ? dom : dom.querySelector<HTMLElement>(styled) ?? dom
     }
     const placeholders = () => {
-      const block = selectedBlock(), panel = inspector.current
+      const block = selectedBlock(), panel = inspector.current, value = editor.current?.editor
       if (!block || !panel) return
+      // The block and each section by name, so the panel leaves out what a block can't use (composer.css).
+      if (value) { const { selection } = value.state; panel.dataset.block = (selection.toJSON().type === 'node' ? value.state.doc.nodeAt(selection.from) : selection.$from.parent)?.type.name ?? '' }
+      panel.querySelectorAll<HTMLElement>('[data-re-inspector-section]').forEach(section => {
+        const title = section.querySelector('[data-re-inspector-section-toggle]')?.textContent?.trim().toLowerCase()
+        if (title && section.dataset.section !== title) section.dataset.section = title
+      })
+      // An image placed in the editor has a data: source: name its file (or say it was uploaded), and keep it from typing.
+      const source = panel.querySelector<HTMLInputElement>('input[aria-label="Attributes Source"]'), sourceRow = source?.closest<HTMLElement>('[data-re-inspector-prop-row]')
+      if (source && sourceRow) {
+        const encoded = source.value.startsWith('data:')
+        if (encoded) sourceRow.dataset.sourceName = imageNames.current.get(source.value) ?? uploadedInline.current.get(source.value)?.filename ?? 'Uploaded image'
+        else delete sourceRow.dataset.sourceName
+        source.readOnly = encoded
+      }
+      // A value's unit follows it: 100% says %, not the field's px.
+      panel.querySelectorAll<HTMLElement>('[data-re-inspector-number]').forEach(field => {
+        const input = field.querySelector('input'), unit = field.querySelector<HTMLElement>('[data-re-inspector-unit]'), text = unit?.firstChild
+        if (!input || !unit || !(text instanceof Text)) return
+        const own = unit.dataset.unit ??= text.data, shown = /%\s*$/.test(input.value) ? '%' : own
+        if (text.data !== shown) text.data = shown
+      })
       const style = getComputedStyle(block), size = parseFloat(style.fontSize)
       const set = (name: string, text: string) => {
         const control = panel.querySelector<HTMLInputElement>(`input[aria-label="${name}"]`)
@@ -194,14 +240,17 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     const refresh = () => { label(); placeholders() }
     refresh()
     const observer = new MutationObserver(refresh)
-    observer.observe(inspector.current, { childList: true, subtree: true })
+    // Fields the library reuses for another block change only their values: watch those too.
+    observer.observe(inspector.current, { childList: true, subtree: true, attributes: true, attributeFilter: ['value'] })
     // Another block selected (or this one restyled) can reuse the same fields: read its style again once they render.
     const instance = editor.current?.editor
     let frame = 0
     const later = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(placeholders) }
+    const panel = inspector.current
     instance?.on('selectionUpdate', later)
     instance?.on('update', later)
-    return () => { observer.disconnect(); cancelAnimationFrame(frame); instance?.off('selectionUpdate', later); instance?.off('update', later) }
+    panel.addEventListener('input', later)
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); instance?.off('selectionUpdate', later); instance?.off('update', later); panel.removeEventListener('input', later) }
   }, [panelShown, ready])
   useEffect(() => {
     pickImage = () => { if (!locked) { onDirty(); fileInput.current?.click() } }
@@ -288,7 +337,7 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     uploads.current += 1
     setBusy(true)
     busyListener.current?.(true)
-    try { return await prepareLocalImage(file) }
+    try { const image = await prepareLocalImage(file); imageNames.current.set(image.url, file.name); return image }
     catch (cause) { const message = errorText(cause, 'Couldn’t load this image.'); setError(message); throw new Error(message) }
     finally { uploads.current -= 1; if (!uploads.current) { setBusy(false); busyListener.current?.(false) } }
   }, [])
@@ -364,7 +413,24 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
     { label: '2 columns', icon: <Icon icon={Columns2} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertColumns(2).run()) },
   ]
   const variableItems: MenuItem[] = personalize ? variables.map(([text, key]) => ({ label: text, icon: <Icon icon={UserRound} />, onSelect: () => insertFromMenu(e => e.chain().focus().insertContent(`{{${key}}}`).run()) })) : []
-  const togglePanel = () => setPanelChoice(!panelShown)
+  function closePanel() {
+    if (railed || !panelShown) { setPanelChoice(false); return }
+    setClosing(true)
+    window.setTimeout(() => { setClosing(false); setPanelChoice(false) }, matchMedia('(prefers-reduced-motion: reduce)').matches ? 0 : 200)
+  }
+  const togglePanel = () => { if (panelShown) closePanel(); else setPanelChoice(true) }
+  useEffect(() => {
+    if (!ready) return
+    const instance = editor.current?.editor, view = instance?.view as { pluginViews?: unknown[]; dom?: HTMLElement } | undefined
+    const check = () => keepMenusInView(view)
+    check()
+    if (!menusInView) instance?.on('transaction', check)
+    const area = view?.dom?.closest('.campaign-compose-scroll')
+    let frame = 0
+    const follow = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(() => { for (const item of view?.pluginViews ?? []) { const menu = item as MenuView; if (menu?.floatingUIOptions && menu.isVisible) menu.updatePosition?.() } }) }
+    area?.addEventListener('scroll', follow, { passive: true })
+    return () => { instance?.off('transaction', check); area?.removeEventListener('scroll', follow); cancelAnimationFrame(frame) }
+  }, [ready])
   const fileField = <input ref={fileInput} type="file" hidden accept="image/png,image/jpeg,image/gif,image/webp,image/avif" onChange={event => void insertImage(event.target.files?.[0])} />
   // Icon-only tools say what they are in the dashboard's tooltip (beside the rail, above the toolbar), with their shortcut.
   const tip = (text: string, trigger: ComponentProps<typeof Tooltip>['children']) => <Tooltip content={text} side={railed ? 'right' : 'top'} offset={railed ? railOffset : undefined}>{trigger}</Tooltip>
@@ -377,6 +443,9 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       // These library forms stop bubbling before their own window Escape listener can run.
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
       requestAnimationFrame(() => { if (trigger?.isConnected) trigger.focus(); else editor.current?.editor?.commands.focus() })
+    } else if (event.key === 'Escape' && !railed && panelShown && (event.target as Element).closest('.composer-inspector')) {
+      event.preventDefault()
+      closePanel()
     } else if (locked) { event.preventDefault(); event.stopPropagation() }
   }}>
     {railed ? <nav className="composer-rail" aria-label="Email formatting" onMouseDown={keepFocus}>
@@ -414,12 +483,13 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
       </div>
     </div>}
     {error && <p className="campaign-note composer-error" data-tone="danger" role="alert">{error}</p>}
+    {!railed && panelShown && <div className="composer-inspector-backdrop" data-closing={closing || undefined} aria-hidden="true" onClick={closePanel} />}
     <div className="composer-visual">
       <div className="composer-canvas" onClickCapture={event => { if ((event.target as HTMLElement).closest('a')) event.preventDefault() }}>
         {!ready && <div className="composer-starting" role="status"><SkeletonText width="55%" lineHeight={36} /><SkeletonText /><SkeletonText width="80%" /><SkeletonText width="60%" /><span className="sr-only">Loading visual composer</span></div>}
         <EmailEditor key={generation} ref={editor} content={content as Record<string, unknown>} theme={theme} editable={!locked} placeholder="Write, or type / for blocks…" onUploadImage={upload} className="composer-document" onReady={instance => { synchronizeEditor(instance); trackCaret(instance); setReady(!hydrating); if (!hydrating) { console.info(`[${productName} timing] campaign editor ready`, { navigationMs: Number(performance.now().toFixed(1)) }); onReady() } }} onUpdate={() => { changed.current = true; onDirty() }}>
-          <Inspector.Root ref={inspector} className="composer-inspector" hidden={!panelShown} data-docked={docked || undefined} data-closed={panelShown ? undefined : ''}>
-            <div className="composer-inspector-header"><span className="composer-inspector-title">Style</span><IconButton size="sm" label="Close style" onClick={() => setPanelChoice(false)}><Icon icon={X} /></IconButton></div>
+          <Inspector.Root ref={inspector} className="composer-inspector" hidden={!panelShown} data-docked={docked || undefined} data-closed={panelShown ? undefined : ''} data-closing={closing || undefined}>
+            <div className="composer-inspector-header"><span className="composer-inspector-title">Style</span><IconButton size="sm" label="Close style" onClick={closePanel}><Icon icon={X} /></IconButton></div>
             <Inspector.Breadcrumb />
             {/* Styles are per block (api/src/block-style.ts): no document-wide controls, and a text selection offers its block's. */}
             <Inspector.Document>{() => <p className="composer-inspector-hint">Select a block to style it.</p>}</Inspector.Document>
