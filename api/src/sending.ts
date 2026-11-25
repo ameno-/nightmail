@@ -4631,16 +4631,21 @@ export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT
     if (!rows.length) break;
 
     let next = 0;
+    const active = new Set<Promise<void>>();
     const beforeJudged = passed + rejected;
     try {
-      await Promise.all(Array.from({ length: Math.min(rows.length, HELD_SCREEN_CONCURRENCY) }, async () => {
-        while (next < rows.length) {
-          if (Date.now() >= deadline || consecutiveOutages >= HELD_OUTAGE_ABORT) break;
-          const idx = next++;
-          await processRow(rows[idx]!);
+      while (next < rows.length || active.size) {
+        // Each outstanding screen can still report an outage. Reserve its place in the abort window
+        // before starting another row; a fast failure must not launch a fifth behind three slow ones.
+        while (next < rows.length && active.size < Math.min(HELD_SCREEN_CONCURRENCY, HELD_OUTAGE_ABORT - consecutiveOutages) && Date.now() < deadline) {
+          const task: Promise<void> = processRow(rows[next++]!).finally(() => active.delete(task));
+          active.add(task);
         }
-      }));
+        if (!active.size) break;
+        await Promise.race(active);
+      }
     } finally {
+      await Promise.allSettled(active);
       const unattempted = rows.slice(next);
       if (unattempted.length) {
         await runtime.db.execute(sql`UPDATE sending_emails e SET lease_until = NULL
