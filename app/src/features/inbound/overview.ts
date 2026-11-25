@@ -21,7 +21,8 @@ export type RecipeRef = { id: string; params: Record<string, string | string[]> 
 export type OverviewRule = { key: string; calls: string[]; delivers: string[]; decisions: string[]; /** Each decision's question (testRules' scores keys). */ questions?: string[]; attachedTo: string[]; addresses: string[]; recipe: RecipeRef | null; enabled: boolean; lastMatchedAt: string | null }
 export type OverviewEndpoint = { id: string; source: 'endpoint' | 'inbound_webhook'; name: string; type: 'webhook' | 'slack' | 'discord' | 'forward'; status: EndpointStatus; target: string; call: string | null; eventTypes: string[]; routes: number; rules: string[] }
 /** A domain as the overview lists it: its receiving host, receiving status and catch-all. */
-export type OverviewDomain = Pick<MailboxDomain, 'id' | 'name' | 'status' | 'catchAll'>
+/** `domain`: the domain itself, where `name` is its first receiving host; `hosts`: every host it receives at. */
+export type OverviewDomain = Pick<MailboxDomain, 'id' | 'name' | 'status' | 'catchAll'> & { domain?: string; hosts?: string[] }
 export type Overview = {
   counts: { address: number; auto: number; route: number; pattern: number; catch_all: number; inbox: number }
   routes: { data: RouteEntry[]; nextCursor: string | null }

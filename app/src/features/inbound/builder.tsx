@@ -14,7 +14,7 @@ import { Alert, Button, ConfirmDialog, Dialog, Field, Input, SearchField, Select
 import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApi, useRequestScope } from '../../data/context'
+import { useApi, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { isAbortError, request } from '../../data/live'
 import { invalidate, invalidateResources } from '../../data/invalidation'
@@ -30,7 +30,15 @@ import { RuleLine } from './recipes'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const FULL = 'Enter a full email address.'
-const onDomains = (receiving: { name: string }[]) => `Use a receiving domain: ${receiving.map(d => d.name).join(', ')}.`
+const onDomains = (names: string[]) => `Use an address on one of your domains: ${names.join(', ')}.`
+type CreatedReceiving = { domainId: string; host: string; turnedOn: boolean; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
+/** After an address is created on a host that doesn't route mail here yet: the MX record that makes it receive. */
+function ReceivingSetupNote({ setup }: { setup: CreatedReceiving }) {
+  const record = setup.dns[0]
+  return <Alert tone="info" title={setup.turnedOn ? `Receiving is on for ${setup.host}` : `${setup.host} doesn’t receive mail yet`}>
+    {record ? <>Publish this MX record at your DNS provider: <code>{record.name}</code> MX {record.priority} <code>{record.value}</code>. Mail arrives once it’s live.</> : 'Publish its MX record at your DNS provider.'}
+  </Alert>
+}
 const lifetimes = [{ value: '', label: 'Always' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
 
 /** What the rule checks, in plain words. ai asks the AI (a decision) whether the email looks like what is described. */
@@ -161,6 +169,15 @@ type Step = 'address' | 'flow' | 'done'
 export function AddressBuilder({ open, onOpenChange, domains, initial = '', address, split, rule: ruleKey, onSaved, onPattern }: { open: boolean; onOpenChange: (open: boolean) => void; domains: Pick<MailboxDomain, 'id' | 'name' | 'status'>[] | Overview['domains']; initial?: string; address?: InboundAddress; split?: Condition; rule?: string; onSaved?: (address: InboundAddress) => void; onPattern?: (match: string) => void }) {
   const client = useQueryClient()
   const receiving = receivingDomains(domains)
+  const { multiTenant } = useWorkspaceAccess()
+  // Hosted, an address on one of the workspace's domains (or a subdomain of one) where nothing receives yet turns
+  // receiving on there when it is created (createInboundAddress), so the address step takes it and says so.
+  const roots = [...new Set(domains.flatMap(d => 'domain' in d && typeof d.domain === 'string' ? [d.domain] : []))]
+  // Every host addresses can be made at: a domain's first host and any it receives at beside it (an added host).
+  const hosts = [...new Set([...receiving.map(d => d.name), ...domains.flatMap(d => 'hosts' in d && Array.isArray(d.hosts) ? d.hosts : [])])]
+  const turnsOn = (host: string) => multiTenant && !hosts.includes(host) && roots.some(root => host === root || host.endsWith(`.${root}`))
+  // What creating it said about receiving: the MX record to publish, until its host routes mail here.
+  const [receivingSetup, setReceivingSetup] = useState<CreatedReceiving | null>(null)
   const navigate = useNavigate()
   // Editing an address that exists: one given, or the one this builder just made (Edit on its result).
   const [editing, setEditing] = useState(!!address)
@@ -195,7 +212,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [opened, setOpened] = useState<{ entry: RouteEntry; overview: Overview } | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   // Opening starts afresh. Before the effects below, so the flow they capture from cached data isn't cleared after.
-  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setReceivingSetup(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (open && editing && !opened && entry && overview.data && !boxes.isPending && !resolvedBoxes.pending) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.isPending, resolvedBoxes.pending])
   // A rule given by key changes that rule only (its fork and its sides), on an address with any number of rules:
   // the address's route and its other rules stay.
@@ -224,7 +241,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
 
   // The * the address step turned away, for its button to the catch-all's or wildcard's route editor.
   const typed = form.address.trim().toLowerCase()
-  const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && receiving.some(d => d.name === typed.split('@')[1]) ? typed : null
+  const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && hosts.includes(typed.split('@')[1]!) ? typed : null
   const existing = errors.address ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
   async function next(event: FormEvent) {
     event.preventDefault()
@@ -233,7 +250,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (!EMAIL.test(value)) found.address = 'Enter a full email address, such as support@example.com.'
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
     else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'
-    else if (receiving.length && !receiving.some(d => d.name === value.split('@')[1])) found.address = onDomains(receiving)
+    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) found.address = onDomains([...new Set([...hosts, ...roots])])
     else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
     else if (boxes.hasMore) {
       setCheckingAddress(true)
@@ -264,7 +281,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (!pick.startsWith('new:')) return ''
     const type = pick.slice(4) as NewType, v = value.trim().toLowerCase()
     if (!v) return type === 'forward' || type === 'inbox' ? 'Enter its address.' : 'Paste the URL.'
-    if (type === 'inbox') return !EMAIL.test(v) || v.split('@')[0]!.includes('*') ? FULL : !receiving.some(d => d.name === v.split('@')[1]) ? onDomains(receiving) : v === own || allBoxes.some(b => b.address === v) ? 'That address exists: pick it above.' : ''
+    if (type === 'inbox') return !EMAIL.test(v) || v.split('@')[0]!.includes('*') ? FULL : !hosts.includes(v.split('@')[1]!) ? onDomains(hosts) : v === own || allBoxes.some(b => b.address === v) ? 'That address exists: pick it above.' : ''
     return type === 'slack' && !slackUrl.test(v) ? targetProblem('slack', v) : type === 'discord' && !discordUrl.test(v) ? targetProblem('discord', v) : targetProblem(type, v)
   }
 
@@ -361,8 +378,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         const flow = { ...(endpoints.length ? { endpoints } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) }
         const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase()
         const body = { address: value, displayName: form.displayName.trim() || null, ...(ownKey ? { key: ownKey } : {}), ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}), ...(Object.keys(flow).length ? { flow } : {}) }
-        const self = await request<InboundAddress>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
-        setSaved(self); setEditing(true)
+        const { receiving: setup, ...self } = await request<InboundAddress & { receiving?: CreatedReceiving }>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
+        setSaved(self); setEditing(true); setReceivingSetup(setup ?? null)
         await refresh()
         onSaved?.(self)
       } else {
@@ -427,8 +444,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   </div>
   let body: ReactNode
   if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
-    <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
-      <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${receiving[0]?.name ?? 'example.com'}`} autoFocus autoComplete="off" />
+    <Field label="Address" htmlFor="builder-address-input" error={errors.address} hint={!errors.address && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) ? `${typed.split('@')[1]} doesn’t receive mail yet. Creating this address turns receiving on there; then publish its MX record.` : undefined}>
+      <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
@@ -478,7 +495,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     {waiting && <AwaitingConfirm address={waiting} />}
     {problem !== null && <Alert tone="danger">{errorText(problem)}</Alert>}
   </form>
-  else body = entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div>
+  else body = receivingSetup ? <div className="stack"><ReceivingSetupNote setup={receivingSetup} />{entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div> : null}</div>
+    : entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div>
     : <div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div>
   return <>
     <Dialog size="lg" open={open} onOpenChange={next => { if (!next) close() }} title={title} analytics="address-builder" footer={footer} className="builder">{body}</Dialog>

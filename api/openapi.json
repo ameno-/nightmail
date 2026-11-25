@@ -14870,6 +14870,72 @@
           "kind"
         ]
       },
+      "CreatedInboundAddress": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/InboundAddress"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "receiving": {
+                "type": "object",
+                "properties": {
+                  "domainId": {
+                    "type": "string",
+                    "description": "The domain the address is on (receiving hosts: /v1/inbound/domains/{id}/hosts)."
+                  },
+                  "host": {
+                    "type": "string",
+                    "description": "Where the address receives."
+                  },
+                  "turnedOn": {
+                    "type": "boolean",
+                    "description": "Whether creating the address turned receiving on at this host (it didn’t receive mail before)."
+                  },
+                  "dns": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "type": {
+                          "type": "string",
+                          "enum": [
+                            "MX"
+                          ]
+                        },
+                        "name": {
+                          "type": "string"
+                        },
+                        "value": {
+                          "type": "string"
+                        },
+                        "priority": {
+                          "type": "number"
+                        }
+                      },
+                      "required": [
+                        "type",
+                        "name",
+                        "value",
+                        "priority"
+                      ]
+                    },
+                    "description": "The MX record to publish at the host, if it isn’t already: mail arrives once it is."
+                  }
+                },
+                "required": [
+                  "domainId",
+                  "host",
+                  "turnedOn",
+                  "dns"
+                ],
+                "description": "Present while the host doesn’t route mail here yet: hosted, an address on your own verified domain turns receiving on at its host if it was off."
+              }
+            }
+          }
+        ]
+      },
       "CreateInboundAddress": {
         "type": "object",
         "properties": {
@@ -16942,6 +17008,17 @@
             "type": "string",
             "description": "Receiving host: the domain, or the subdomain it receives at."
           },
+          "domain": {
+            "type": "string",
+            "description": "The domain itself. Hosted, an address on it or any of its subdomains turns receiving on there (createInboundAddress)."
+          },
+          "hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every host the domain receives at, or is being set up to (name is its first); addresses can be created at each."
+          },
           "status": {
             "type": "string",
             "enum": [
@@ -16965,6 +17042,8 @@
         "required": [
           "id",
           "name",
+          "domain",
+          "hosts",
           "status",
           "catchAll"
         ]
@@ -62270,7 +62349,7 @@
         "operationId": "createInboundAddress",
         "deprecated": true,
         "summary": "Create a receivable address",
-        "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
+        "description": "Admin only. The domain must be verified for this workspace; mail arrives once its receiving MX record is active. Hosted, an address on one of your own verified domains (or a subdomain of one) where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving.dns names the MX record to publish; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.",
         "requestBody": {
           "required": true,
           "content": {
@@ -62287,7 +62366,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/InboundAddress"
+                  "$ref": "#/components/schemas/CreatedInboundAddress"
                 }
               }
             }

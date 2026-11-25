@@ -104,7 +104,7 @@ function decodeEndpoint(cursor: string | undefined) {
     return { unnamed, key, id };
   } catch { throw new ApiError(422, 'INVALID_CURSOR', 'cursor is not a cursor this endpoint returned.', 'cursor'); }
 }
-type WorkspaceResult = { config: Partial<Config> | null; programs: Programs | null; acted: Record<string, string>; names: Record<string, string>; endpoints: (EndpointRow & { routes: number; listed: boolean })[]; endpoints_more: boolean; hooks: Hook[]; hooks_more: boolean; keyed: (Slim & { key: string })[]; domains: { id: string; name: string; status: string; catchAll: string }[] };
+type WorkspaceResult = { config: Partial<Config> | null; programs: Programs | null; acted: Record<string, string>; names: Record<string, string>; endpoints: (EndpointRow & { routes: number; listed: boolean })[]; endpoints_more: boolean; hooks: Hook[]; hooks_more: boolean; keyed: (Slim & { key: string })[]; domains: { id: string; name: string; domain: string; hosts: string[]; status: string; catchAll: string }[] };
 
 /** One rule as the overview lists it. `asks` names its AI decisions: decisions, or omens in the deprecated rituals list. */
 const overviewRule = (recipe: typeof RecipeRef, asks: 'decisions' | 'omens') => z.object({ key: z.string(), calls: z.array(z.string()).describe('Endpoint names it can call.'), delivers: z.array(z.string()).describe('Inbox keys it can deliver to.'), [asks]: z.array(z.string()).describe('The names of the AI decisions it asks for.'), questions: z.array(z.string()).describe('The question each of those decisions asks the AI, in the same order: testRules takes scores keyed by these.'), attachedTo: z.array(z.string()).describe('Address IDs or addresses it runs on.'),
@@ -132,6 +132,8 @@ export function registerInboundOverview(app: App, deps: Deps) {
   }).openapi('InboundOverviewRoute');
   const OverviewDomain = z.object({
     id: z.string().describe(`${productName} domain ID.`), name: z.string().describe('Receiving host: the domain, or the subdomain it receives at.'),
+    domain: z.string().describe('The domain itself. Hosted, an address on it or any of its subdomains turns receiving on there (createInboundAddress).'),
+    hosts: z.array(z.string()).describe('Every host the domain receives at, or is being set up to (name is its first); addresses can be created at each.'),
     status: deps.InboundDomainStatus, catchAll: deps.InboundCatchAll,
   }).openapi('InboundOverviewDomain');
   const Overview = z.object({
@@ -272,7 +274,7 @@ export function registerInboundOverview(app: App, deps: Deps) {
           (SELECT count(*) > ${OVERVIEW_ENDPOINTS} FROM hk) AS hooks_more,
           (SELECT coalesce(jsonb_agg(jsonb_build_object('id',m.id,'key',m.key,'address',m.address,'displayName',m.display_name)),'[]'::jsonb)
             FROM mailboxes m WHERE m.workspace_id=${w} AND m.key IN (SELECT substr(ref,7) FROM refs WHERE starts_with(ref,'inbox:'))) AS keyed,
-          (SELECT coalesce(jsonb_agg(jsonb_build_object('id',d.id,'name',coalesce(md.receiving_host,d.name),'status',coalesce(md.status,'off'),
+          (SELECT coalesce(jsonb_agg(jsonb_build_object('id',d.id,'name',coalesce(md.receiving_host,d.name),'domain',d.name,'hosts',(SELECT coalesce(jsonb_agg(coalesce(h.receiving_host,h.name) ORDER BY h.parent_id NULLS FIRST, h.created_at),'[]'::jsonb) FROM mailbox_domains h WHERE h.workspace_id=${w} AND h.domain_id=d.id AND h.status NOT IN ('disabled','disabling')),'status',coalesce(md.status,'off'),
             'catchAll',CASE WHEN md.catch_all IN ('create_mailbox','create_address') THEN 'create_address' ELSE 'store' END) ORDER BY d.name),'[]'::jsonb)
             FROM ${domains} d LEFT JOIN mailbox_domains md ON md.workspace_id=${w} AND md.domain_id=d.id AND md.parent_id IS NULL
             WHERE d.workspace_id=${w} AND d.region = ANY(${textArray(c.env.config.regions)})) AS domains`)).rows[0]!;
