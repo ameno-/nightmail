@@ -14,6 +14,16 @@ export function lifecycleRules(pool:boolean) {
     {ID:'bane-abort-uploads',Status:'Enabled' as const,Filter:{Prefix:''},AbortIncompleteMultipartUpload:{DaysAfterInitiation:1}}];
 }
 
+// CopyObject reset LastModified during the production Ohio bucket migration. These tagged
+// copies keep their original expiry dates. The writer and verifier must agree on the exact list.
+export function copiedMailExpiryRules(bucket:string) {
+  if (bucket!=='nightmail-009882681002-mail-us-east-2') return [];
+  return ['2026-11-16','2026-11-17','2026-11-18','2026-11-19','2026-12-12','2026-12-15','2026-12-16','2027-02-10'].map(date=>({
+    ID:`nightmail-copy-expiry-${date}`,Status:'Enabled' as const,
+    Filter:{Tag:{Key:'nightmail-copy-expiry',Value:date}},Expiration:{Date:`${date}T00:00:00Z`},
+  }));
+}
+
 const ruleSourceArn = (region:string,account:string,rulePrefix:string) => `arn:aws:ses:${region}:${account}:receipt-rule-set/*:receipt-rule/${rulePrefix}*`;
 export function bucketPolicy(bucket:string,region:string,account:string,rulePrefix:string) {
   return { Version:'2012-10-17', Statement:[

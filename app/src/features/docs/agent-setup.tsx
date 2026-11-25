@@ -9,8 +9,11 @@ import { request } from '../../data/live'
 import { errorText, type Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
 import { McpSignInSetup } from './connect-agent'
+import { mcpServerUrl } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { apiKeyEnv, productName, productSlug, sdkPackage, secretPrefixes } from '../../../../api/src/brand'
+import { builtinLimitsText } from '../../../../api/src/builtin-limits'
+import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_RULES_TEXT } from '../../../../api/src/attachment-limits'
 
 function receivingMx(domain: Domain) {
   const record = recordsFor(domain, 'receiving').find(row => row.type === 'MX')
@@ -27,7 +30,7 @@ function keyLines(origin: string, token: string | null | undefined) {
   const keep = `Save the key it returns as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit; it's shown once. It sends email and manages domains, inboxes and receiving; it can't create API keys, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords, and can't manage members or billing.`
   if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device} ${keep}`]
   return [
-    `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}"}. ${keep}`,
+    `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}","client_name":"<your name>"}. ${keep}`,
     `- If the setup token was already used or has expired, use a device code instead: ${device}`,
   ]
 }
@@ -43,6 +46,8 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index; each tag links its full Markdown reference).`,
     `- Install the TypeScript SDK: npm i ${sdkPackage}. Create the client with createClient from '${sdkPackage}/client' (baseUrl ${origin}) and call it from server code only.`,
     `- Auth: bearer API key from the ${apiKeyEnv} environment variable. Never hardcode it or ship it to a browser.`,
+    // The attachment rules up front, so the agent doesn't find them one refused upload or send at a time.
+    `- Attachments: ${ATTACHMENT_LIMITS_TEXT} ${ATTACHMENT_RULES_TEXT} A refusal names every attachment problem at once, in error.details.`,
   ]
   if (domain === undefined) {
     lines.push(`- Sending domain: use a verified domain from Domains in the ${productName} dashboard. Ask me which one before sending.`)
@@ -53,11 +58,15 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     return lines.join('\n')
   }
   const verified = domain.status === 'verified'
-  const to = email ?? 'an address I control (ask me which)'
+  // The built-in domain sending to members only: the first email goes to my own sign-in address, never one I'd pick.
+  const membersOnly = domain.builtIn && domain.limits?.scope === 'members'
+  const to = email ?? (membersOnly ? `the email address I sign in to ${productName} with (ask me which)` : 'an address I control (ask me which)')
   lines.push(
     `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
-    `- Send a test email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. 202 means queued, not delivered.`,
+    `- Send a first email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. Give it a short, real subject and plain text: "test" or placeholder words in either send it to spam. 202 means queued, not delivered.`,
   )
+  // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.
+  if (domain.builtIn) lines.push(`- ${domain.name} is this workspace's built-in domain. ${domain.limits?.summary ?? builtinLimitsText()} ${membersOnly ? 'Send only to the sign-in addresses of people in this workspace; anyone else is refused with 422 BUILTIN_DOMAIN_RECIPIENT, so ask me to add our own domain before emailing anyone else. ' : ''}A send that uses any of the other limits is refused once with 422 BUILTIN_DOMAIN_UNSUPPORTED, listing them in error.details[0].unsupported; GET /v1/domains/${domain.id} has the same limits. It stops sending once a domain of my own verifies: then send from that domain (a send from ${domain.name} gets 409 OWN_DOMAIN_VERIFIED with the address to use in error.details[0].suggestedFrom).`)
   const mx = receivingMx(domain)
   // Hosted suggests reply.<domain>; never tell an agent to change the root MX, which would move the domain's existing mail.
   if (mx) lines.push(multiTenant
@@ -65,6 +74,67 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     : `- Receiving: enable it with POST /v1/inbound/domains/${domain.id}/enable, then point the MX record for ${mx.name} to ${mx.host} (priority ${mx.priority}).`)
   lines.push('- Inbound mail arrives as message.received webhooks (subscribe with POST /v1/inbound/webhooks); fetch full messages with GET /v1/inbound/messages/{messageId}.')
   return lines.join('\n')
+}
+
+// The agent inboxes focus (onboarding, Overview): the agent gets its own key, then reads the inbox over MCP or REST.
+// inboxId is unknown only while the inbox is still being made.
+export function agentInboxPrompt({ origin, address, inboxId, setupToken }: { origin: string; address: string; inboxId?: string | null; setupToken?: string | null }) {
+  const messages = `${origin}/v1/inboxes/${inboxId ?? '{id}'}/messages`
+  return [
+    `Give this project's agent the ${productName} inbox ${address}: it receives every email sent to that address.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index).`,
+    `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Its tools list, wait for and read this inbox's mail.`,
+    `- To be told when mail arrives instead of waiting for it, if your MCP client supports MCP Events (OpenCode does): subscribe to the server's message.received event with {"addressIds":["${inboxId ?? '{id}'}"]}, then read each message it names.`,
+    `- Or use the REST API with the key as a bearer token: wait for mail with GET ${messages}?wait=30 (it answers as soon as one arrives) and read one with GET ${messages}/{messageId}.${inboxId ? '' : ` Find the inbox's id with GET ${origin}/v1/inboxes?q=${address}.`}`,
+    `- Test it: ask me to send an email to ${address}, wait for it, then tell me who sent it and its subject.`,
+  ].join('\n')
+}
+
+// The newsletter focus: a form on the project's site that adds readers to the newsletter, with consent, from the server.
+export function signupFormPrompt({ origin, newsletter, setupToken }: { origin: string; newsletter: { id: string; name: string }; setupToken?: string | null }) {
+  return [
+    `Add a signup form for my ${productName} newsletter "${newsletter.name}" to this project's website.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Audience and Consent).`,
+    `- The form asks for an email address (and, optionally, a name) and posts to a server route of this project, never straight to ${productName}: the key stays on the server.`,
+    `- That route adds the reader: create the contact with POST ${origin}/v1/contacts {"email": …, "name": …} (reuse it if the address is already a contact), record their consent with POST ${origin}/v1/contacts/{id}/consent {"status":"subscribed","source":"signup form"}, then add them with POST ${origin}/v1/lists/${newsletter.id}/members {"contactIds":["{id}"]}.`,
+    `- Keep bots out (a hidden honeypot field and a rate limit per IP address), and say "You're subscribed" once it worked.`,
+  ].join('\n')
+}
+
+// The marketing focus: the agent imports contacts and drafts campaigns, over MCP or REST; it never sends one on its own.
+export function marketingPrompt({ origin, setupToken }: { origin: string; setupToken?: string | null }) {
+  return [
+    `Help me send marketing email with ${productName}.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Audience and Campaigns).`,
+    `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Or call the REST API with the key as a bearer token.`,
+    '- Import my contacts from the CSV I point you to: previewContactImport, show me its summary, then commitContactImport. Mark them subscribed only if I confirm they agreed to hear from me.',
+    '- Draft a first campaign with createCampaign (read getCampaignContentGuide before writing its HTML). Leave it as a draft: never send or schedule a campaign without my go-ahead.',
+  ].join('\n')
+}
+
+// The personal inbox focus: their own address on their own domain. mailServers: the installation's IMAP/SMTP hosts, when
+// it has a mail gateway (a mail app's password is made in the dashboard: an agent's key can't make one).
+export function personalInboxPrompt({ origin, setupToken, mailServers }: { origin: string; setupToken?: string | null; mailServers: { imap: string; smtp: string } | null }) {
+  return [
+    `Set up my own email address with ${productName}: mail to me@<my domain> lands in a ${productName} inbox.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Domains and Agent inboxes).`,
+    '- Ask me which domain and which address I want before changing anything.',
+    `- Add the domain with createDomain (POST ${origin}/v1/domains) and walk me through its DNS records (getDomain lists them); it verifies by itself once they resolve. Receiving needs its MX record: on the domain itself that moves where the domain's existing mail goes, so confirm that with me first.`,
+    `- Once the domain receives, create a persistent inbox for the address with createInbox (POST ${origin}/v1/inboxes, {"type":"persistent","domain":…,"localPart":…}) and send me a test email from it.`,
+    ...mailServers ? [`- To read it in a mail app, I create an app password for that inbox under API keys in the dashboard (your key can't): the app signs in to ${mailServers.imap} (IMAP) and ${mailServers.smtp} (SMTP) with the inbox's address.`] : [],
+  ].join('\n')
 }
 
 const ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g
@@ -84,7 +154,7 @@ export function MaskedText({ text }: { text: string }) {
 }
 
 // A data URL needs no object URL to revoke, so the download can't race the cleanup.
-function downloadText(name: string, text: string) {
+export function downloadText(name: string, text: string) {
   Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
 }
 
@@ -117,21 +187,23 @@ export function useAgentSetup(enabled: boolean): AgentSetup | null {
 }
 
 // Every state is laid out in one cell, so the line never changes the section's height.
-const sampleKey = 'Agent (set up 0000-00-00)'
+// The line reserves this name's width: a longer one (an agent's own name) is cut to it, so the line never wraps further.
+const sampleKey = 'Agent, set up 0000-00-00'
 const setupLines: Record<AgentSetupState, (keyName: string) => ReactNode> = {
   idle: () => 'Copying adds a one-time setup token, so your agent gets its own API key. Revoke it any time under API keys.',
   waiting: () => 'Waiting for your agent to use the setup token. It works once, for 15 minutes.',
-  connected: keyName => <>Your agent connected. Its key is <strong>{keyName}</strong>, under API keys.</>,
+  connected: keyName => <>Your agent connected. Its key is <strong className="agent-setup-status__key" title={keyName}>{keyName}</strong>, under API keys.</>,
   expired: () => 'The setup token expired before your agent used it. Copy the prompt again for a new one.',
   replaced: () => 'A newer copy replaced this setup token. Use the prompt you copied last.',
   failed: () => 'Couldn’t add a setup token, so the copied prompt connects with a device code instead.',
 }
-export function AgentSetupStatus({ setup }: { setup: AgentSetup }) {
+// `idle`: the line before the first copy, where a page words it its own way (onboarding).
+export function AgentSetupStatus({ setup, idle }: { setup: AgentSetup; idle?: ReactNode }) {
   const { state } = setup, keyName = setup.keyName ?? sampleKey
   return <div className="agent-setup-status" data-state={state}>
     {(Object.keys(setupLines) as AgentSetupState[]).map(key => <p key={key} data-state={key} data-active={key === state || undefined} aria-hidden={key !== state || undefined}>
       {(key === 'connected' || key === 'waiting') && <span className="agent-setup-status__mark" aria-hidden="true">{key === 'connected' ? <Check size={14} strokeWidth={2.5} /> : <span className="connect-agent__pulse" />}</span>}
-      <span>{setupLines[key](key === state ? keyName : sampleKey)}</span>
+      <span>{key === 'idle' && idle ? idle : setupLines[key](key === state ? keyName : sampleKey)}</span>
     </p>)}
     <span className="sr-only" role="status">{state === 'idle' ? '' : state === 'connected' ? `Your agent connected. Its key is ${keyName}.` : state === 'failed' ? `Couldn’t add a setup token: ${errorText(setup.error)}` : String(setupLines[state](keyName))}</span>
   </div>
@@ -141,11 +213,12 @@ export function AgentSetupStatus({ setup }: { setup: AgentSetup }) {
 // prompt and its actions without the docs' paragraph on how to use it. With `setup` (an owner or admin), copying puts a
 // fresh setup token in the prompt (`copy` makes it), and the line above it says when the agent used it. A download never
 // has one, so no live credential lands in a file: it is `download`, the prompt with the device flow instead.
+export const agentPromptFile = `${productSlug}-agent-prompt.txt`
 export function AgentPrompt({ prompt, compact = false, setup, copy, download }: { prompt: string | null; compact?: boolean; setup?: AgentSetup | null; copy?: () => Promise<string>; download?: string }) {
   const value = setup && copy ? copy : prompt ?? ''
   return <section id="agent-prompt" className="section stack developer-section" aria-label="Agent prompt" aria-busy={prompt === null || undefined}>
     <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions" data-pending={prompt === null || undefined} inert={prompt === null}>
-      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(`${productSlug}-agent-prompt.txt`, download ?? prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
+      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(agentPromptFile, download ?? prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
       <CopyAction value={value} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
     </span>} />
     {!compact && <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>}

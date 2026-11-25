@@ -276,6 +276,8 @@
 .ft-dns span { color: var(--mx-screen-dim); }
 .ft-dns b { overflow: hidden; font-weight: 400; text-overflow: ellipsis; }
 .ft-dns em { color: var(--mx-ok); font-style: normal; }
+.ft-dns em[data-skip] { color: var(--mx-screen-dim); }
+.ft-dns-wide p { grid-template-columns: 8ch minmax(0, 1fr) auto; }
 /* Split-flap figures. */
 .ft-flapboard { display: grid; align-content: center; row-gap: 14px; }
 .ft-flapboard p { display: flex; align-items: center; gap: 14px; color: var(--cb-label); font-family: var(--font-mono); font-size: 13px; font-weight: 700; line-height: 1; letter-spacing: .14em; text-transform: uppercase; }
@@ -297,6 +299,8 @@
 .cb-bill { display: grid; justify-items: center; row-gap: 6px; max-width: 18em; margin: 0; color: var(--cb-caption); font-size: clamp(32px, 1.6cqw + 18px, 52px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.08; letter-spacing: -.03em; text-wrap: balance; }
 .cb-bill > span:first-child { color: var(--cb-paper); }
 .cb-bill b { font-weight: 700; }
+.cb-without { margin: 8px 0 0; color: var(--cb-caption); font-size: var(--text-sm); line-height: 1.5; text-wrap: balance; }
+.cb-first { margin: 20px 0 0; color: var(--cb-caption); font-size: var(--text-md); line-height: 1.5; text-wrap: balance; }
 .cb-close .cb-key-start { margin-top: 44px; }
 .cb-close .cb-consent { margin-top: 18px; }
 

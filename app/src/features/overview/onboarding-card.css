@@ -11,6 +11,8 @@
 .ov-onboarding[data-kind='first-send'] .ov-onboarding__text { grid-area: text; }
 .ov-onboarding[data-kind='first-send'] .ov-onboarding__dismiss { grid-area: dismiss; }
 .ov-onboarding__actions { grid-area: actions; display: flex; flex-wrap: wrap; gap: var(--space-8); }
+.ov-onboarding__copy { display: contents; }
+.ov-onboarding__copy[data-pending] > .ui-button { visibility: hidden; }
 /* A desktop's card is one fixed height per kind, so Latest emails can fit its rows under it from the first frame (latest.ts). */
 @media (min-width: 900px) {
   .ov-onboarding { box-sizing: border-box; height: 76px; }

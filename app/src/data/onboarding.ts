@@ -1,10 +1,12 @@
 import { useSyncExternalStore } from 'react'
 import type { Identity } from './types'
 
-// The add-domain and agent steps follow a fresh connection until the user continues to the dashboard.
-// Stored per workspace so a reload returns to the same step: '' before a domain is added, then its ID,
-// then `agent:<ID>` once the user continues to the agent setup, and `done` once they finish or skip.
-// Without a stored step (another browser, cleared storage) the server decides: no domain yet opens Add domain.
+// Onboarding's steps, stored per workspace so a reload returns to the same one: '' for the first (Hosted: the email to
+// yourself; otherwise Add domain), an own domain's ID while it verifies, then `focus:<ID>` for "What do you want to do?"
+// (once, while the workspace has no focus), then `agent:<ID>` for the screen its focus leads to, and `done` once they
+// finish or skip. Hosted runs them while its account is still being provisioned, before the ID is known: then it is ''.
+// Without a stored step (another browser, cleared storage) the server decides: no domain yet opens Add domain, unless the
+// workspace has sent mail already (from its built-in domain): then setup is done and the dashboard opens.
 const stepKey = (workspaceId: string) => `nightmail.onboarding.domain.${workspaceId}`
 const listeners = new Set<() => void>()
 const memory = new Map<string, string | null>()
@@ -31,17 +33,26 @@ export function setRegionalDomain(workspaceId: string, name: string | null) {
 
 // Hosted workspaces need a ready sending connection (summarised in /v1/me) before the dashboard opens for an owner or
 // admin, who sets it up. Members open the dashboard at once, with a banner until it is ready (SetupBanner).
-export type OnboardingStage = { step: 'sending' } | { step: 'domain'; domainId: string } | { step: 'agent'; domainId: string } | null
-const agentPrefix = 'agent:'
+export type OnboardingStage = { step: 'sending' } | { step: 'domain'; domainId: string } | { step: 'focus'; domainId: string } | { step: 'agent'; domainId: string } | null
+const agentPrefix = 'agent:', focusPrefix = 'focus:'
 export const agentStep = (domainId: string) => `${agentPrefix}${domainId}`
+export const focusStep = (domainId: string) => `${focusPrefix}${domainId}`
+/** After a domain: the focus question, unless the workspace answered it already. */
+export const afterDomainStep = (identity: Pick<Identity, 'focus'> | null | undefined, domainId: string) => identity?.focus == null ? focusStep(domainId) : agentStep(domainId)
 export const finishedStep = 'done'
+/** The stage a stored step opens; null for `done`. */
+export function storedStage(domainStep: string): OnboardingStage {
+  if (domainStep === finishedStep) return null
+  if (domainStep.startsWith(focusPrefix)) return { step: 'focus', domainId: domainStep.slice(focusPrefix.length) }
+  return domainStep.startsWith(agentPrefix) ? { step: 'agent', domainId: domainStep.slice(agentPrefix.length) } : { step: 'domain', domainId: domainStep }
+}
 export function onboardingStage(identity: Identity | null | undefined, domainStep: string | null): OnboardingStage {
   if (!identity?.multiTenant) return null
   if (identity.role !== 'owner' && identity.role !== 'admin') return null
   if (identity.connection?.state !== 'ready') return { step: 'sending' }
   if (domainStep === finishedStep) return null
-  if (domainStep === null) return identity.connection.domains?.total === 0 ? { step: 'domain', domainId: '' } : null
-  return domainStep.startsWith(agentPrefix) ? { step: 'agent', domainId: domainStep.slice(agentPrefix.length) } : { step: 'domain', domainId: domainStep }
+  if (domainStep === null) return identity.connection.domains?.total === 0 && !identity.connection.sent ? { step: 'domain', domainId: '' } : null
+  return storedStage(domainStep)
 }
 export const identityOnboardingStage = (identity: Identity | null | undefined) => onboardingStage(identity, identity ? readDomainStep(identity.workspaceId) : null)
 

@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
-import { ApiError, dashboardSession, denied, digest, errors, id, IdParams, json, memberAdminRefusal, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, digest, errors, id, IdParams, json, logError, memberAdminRefusal, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
+import type { WorkspaceFocus } from './workspace-focus.js';
 import { INVITATION_EMAILS, inviteByEmail } from './account-notices.js';
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
@@ -62,10 +63,19 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null, config?: BuiltinConfig) {
+// Returns the new workspace's ID, true for an account that joins by its invitation instead, or false.
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null, config?: BuiltinConfig): Promise<string | boolean> {
   if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || productName).slice(0, 105)}'s workspace`, region, undefined, undefined, config);
-  return true;
+  const row = await insertOwnedWorkspace(db, user.id, `${ownerName(user.name, user.email).slice(0, 105)}'s workspace`, region, undefined, undefined, config);
+  return row?.id ?? true;
+}
+/** Whose workspace it is, for its first name: the person's name, or their address's local part without a +tag when the
+ * name is only an address or its local part ("ryan+test@acme.com" names "ryan's workspace"). */
+export function ownerName(name: string, email: string | null) {
+  const given = name.trim(), local = email?.split('@')[0] ?? '';
+  const address = !given || given.includes('@') || given.toLowerCase() === local.toLowerCase();
+  if (!address) return given;
+  return (given ? given.split('@')[0]! : local).replace(/\+.*$/, '') || productName;
 }
 
 // One statement: the workspace, its regional settings and the owner membership. With `ownedBelow`,
@@ -95,13 +105,12 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
 }
 const maxOwnedWorkspaces = 10;
 
-/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Nightmail operator role (if any). */
-export async function sessionMemberships(db: DbExecutor, userId: string) {
-  // One row even with no memberships, so an operator who belongs to no workspace still gets the role.
-  const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
-    coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces`);
-  return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null };
-}
+export type SessionMembershipRow = { workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null; focus: WorkspaceFocus[] | null; ageSeconds: number | null; byo: boolean };
+/** One row even with no memberships: the person's roles and the selected workspace's onboarding flags. */
+export const sessionMembershipsQuery = (userId: string, current: string) => sql`SELECT ${operatorRoleOf(userId)} AS operator,
+  coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces,
+  cw.focus, extract(epoch FROM now()-cw.created_at)::float8 AS "ageSeconds", coalesce(cw.byo_v2_enabled,false) AS byo
+  FROM (SELECT 1) one LEFT JOIN workspaces cw ON cw.id=${current}`;
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:
 // concurrent demotions cannot authorize each other on an old snapshot or remove both owners.
@@ -191,6 +200,9 @@ export function registerWorkspaces(app: App) {
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
+    // With a built-in domain, its Hosted mail starts right after this answers, as a sign-up's does (startHostedMailAfter);
+    // onboarding starts it if it couldn't.
+    if (c.env.config.multiTenant && c.env.config.builtinDomain) void (await wrapModuleLoad(() => import('./provider-connections.js'))).startHostedMailAfter(c.env, created.id, auditContext(c));
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
   });
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {

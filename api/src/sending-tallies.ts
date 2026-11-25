@@ -15,12 +15,10 @@ export const UNFOLDED_ALERT_THRESHOLD = 25_000;
  * Dropping or disabling any of them (the one-statement emergency undo) immediately turns this false so reads fall back
  * to the live sending_emails queries behind budgetedRead without a deploy. One catalog index probe (~0.03 ms).
  */
+const enabledTriggers = sql`(SELECT count(*)=3 FROM pg_trigger WHERE tgrelid='sending_emails'::regclass
+  AND tgname=ANY(${sql.param([...TALLY_TRIGGERS])}::text[]) AND tgenabled<>'D')`;
 export async function talliesEnabled(db: DbExecutor): Promise<boolean> {
-  const { rows: [row] } = await db.execute<{ ok: boolean }>(sql`SELECT count(*) = 3 AS ok
-    FROM pg_trigger
-    WHERE tgrelid = 'sending_emails'::regclass
-      AND tgname = ANY(${sql.param([...TALLY_TRIGGERS])}::text[])
-      AND tgenabled <> 'D'`);
+  const { rows: [row] } = await db.execute<{ ok: boolean }>(sql`SELECT ${enabledTriggers} AS ok`);
   return row?.ok === true;
 }
 
@@ -34,11 +32,12 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
   const until = clock() + budgetMs;
   let campaignRemoved = 0, campaignKept = 0, campaignUnfolded = 0;
   let metricsRemoved = 0, metricsKept = 0, metricsUnfolded = 0;
+  let tenMinuteRemoved = 0, tenMinuteKept = 0, tenMinuteUnfolded = 0;
 
-  // Alternate bounded slices between campaign tallies and hourly metrics so a large backlog in one table never
-  // starves the other within the per-minute budget.
-  let campaignMore = true, metricsMore = true;
-  for (let pass = 0; pass < FOLD_MAX_PASSES && (campaignMore || metricsMore) && clock() < until; pass++) {
+  // Alternate bounded slices between campaign tallies, hourly metrics and 10-minute metrics so a large backlog in one
+  // table never starves the others within the per-minute budget.
+  let campaignMore = true, metricsMore = true, tenMinuteMore = true;
+  for (let pass = 0; pass < FOLD_MAX_PASSES && (campaignMore || metricsMore || tenMinuteMore) && clock() < until; pass++) {
     if (campaignMore && clock() < until) {
       const { rows: [c] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
         sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_campaign_tallies(${FOLD_BATCH_LIMIT})`
@@ -55,21 +54,32 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
       metricsRemoved += removed; metricsKept += kept; metricsUnfolded = Number(m?.unfolded_rows ?? 0);
       if (removed < FOLD_BATCH_LIMIT || metricsUnfolded === 0) metricsMore = false;
     }
+    if (tenMinuteMore && clock() < until) {
+      const { rows: [tm] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
+        sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_metrics_ten_minute(${FOLD_BATCH_LIMIT})`
+      );
+      const removed = Number(tm?.removed_rows ?? 0), kept = Number(tm?.kept_rows ?? 0);
+      tenMinuteRemoved += removed; tenMinuteKept += kept; tenMinuteUnfolded = Number(tm?.unfolded_rows ?? 0);
+      if (removed < FOLD_BATCH_LIMIT || tenMinuteUnfolded === 0) tenMinuteMore = false;
+    }
   }
 
-  if (campaignUnfolded > UNFOLDED_ALERT_THRESHOLD || metricsUnfolded > UNFOLDED_ALERT_THRESHOLD) {
+  if (campaignUnfolded > UNFOLDED_ALERT_THRESHOLD || metricsUnfolded > UNFOLDED_ALERT_THRESHOLD || tenMinuteUnfolded > UNFOLDED_ALERT_THRESHOLD) {
     log('error', {
       code: 'SENDING_TALLIES_UNFOLDED_HIGH',
       threshold: UNFOLDED_ALERT_THRESHOLD,
       campaignUnfolded,
       metricsUnfolded,
+      tenMinuteUnfolded,
       campaignFolded: campaignRemoved - campaignKept,
       metricsFolded: metricsRemoved - metricsKept,
+      tenMinuteFolded: tenMinuteRemoved - tenMinuteKept,
     });
   }
   return {
     campaignRemoved, campaignKept, campaignUnfolded,
     metricsRemoved, metricsKept, metricsUnfolded,
+    tenMinuteRemoved, tenMinuteKept, tenMinuteUnfolded,
   };
 }
 
@@ -106,6 +116,8 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
     SELECT workspace_id
     FROM (
       SELECT workspace_id FROM sending_metrics_hourly
+      UNION
+      SELECT workspace_id FROM sending_metrics_ten_minute
       UNION
       SELECT id AS workspace_id FROM workspaces
     ) w
@@ -144,7 +156,7 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
     }
   }
 
-  let workspacesRecounted = 0, workspacesCorrected = 0, workspacesFailed = 0, outcomeBitsDrifted = 0;
+  let workspacesRecounted = 0, workspacesCorrected = 0, workspacesFailed = 0;
   for (let i = 0; i < workspaceTargets.length && clock() < until; i += RECOUNT_WORKSPACE_BATCH) {
     const batch = workspaceTargets.slice(i, i + RECOUNT_WORKSPACE_BATCH);
     try {
@@ -176,42 +188,93 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
       logError(error, { code: 'METRICS_HOURLY_RECOUNT_FAILED' }, 'warn');
     }
 
-    // Verify stamped sending_emails.event_outcomes bits against raw sending_email_events so a mis-stamped bit can
-    // never stay hidden behind agreeing tallies. Isolated per workspace under its own 30 s timeout.
-    for (const target of batch) {
-      if (clock() >= until) break;
-      try {
-        const { rows: [bits] } = await runtime.db.transaction(async tx => {
-          await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${RECOUNT_STATEMENT_SECONDS}s'`));
-          return tx.execute<{ emails_with_other_bits: string; in_campaigns: string; extra_bits: number; missing_bits: number }>(
-            sql`SELECT * FROM check_sending_event_outcome_bits(${target.workspace_id})`
-          );
-        });
-        const drifted = Number(bits?.emails_with_other_bits ?? 0);
-        if (drifted > 0) {
-          outcomeBitsDrifted += drifted;
+    // Reconcile the 6-day 10-minute rollup alongside hourly so any deploy-window or runtime drift heals promptly.
+    try {
+      const { rows: tenMinRows } = await runtime.db.transaction(async tx => {
+        await tx.execute(sql.raw(`SET LOCAL statement_timeout = '${RECOUNT_STATEMENT_SECONDS}s'`));
+        return tx.execute<{ workspace_id: string; region: string; kind: string; bucket: string; emails: string; accepted: string; delivered: string; bounced: string; complained: string; opened: string; clicked: string; failed: string; delivery_delayed: string; simulated: string }>(
+          sql`SELECT w.workspace_id, r.*
+            FROM unnest(${sql.param(batch.map(x => x.workspace_id))}::text[]) w(workspace_id),
+                 reconcile_sending_metrics_ten_minute(w.workspace_id) r`
+        );
+      });
+      if (tenMinRows.length) {
+        const seen = new Set<string>();
+        for (const row of tenMinRows) {
+          seen.add(row.workspace_id);
           log('error', {
-            code: 'SENDING_EVENT_OUTCOMES_DRIFT',
-            workspace: target.workspace_id,
-            emailsWithOtherBits: drifted,
-            inCampaigns: Number(bits?.in_campaigns ?? 0),
-            extraBits: Number(bits?.extra_bits ?? 0),
-            missingBits: Number(bits?.missing_bits ?? 0),
+            code: 'METRICS_TEN_MINUTE_DRIFT', workspace: row.workspace_id, region: row.region, kind: row.kind, bucket: row.bucket,
+            emails: Number(row.emails), accepted: Number(row.accepted), delivered: Number(row.delivered),
+            bounced: Number(row.bounced), complained: Number(row.complained), opened: Number(row.opened),
+            clicked: Number(row.clicked), failed: Number(row.failed), deliveryDelayed: Number(row.delivery_delayed),
+            simulated: Number(row.simulated),
           });
         }
-      } catch (error) {
-        logError(error, { code: 'SENDING_EVENT_OUTCOMES_CHECK_FAILED', workspace: target.workspace_id }, 'warn');
+        workspacesCorrected += seen.size;
       }
+    } catch (error) {
+      workspacesFailed += batch.length;
+      logError(error, { code: 'METRICS_TEN_MINUTE_RECOUNT_FAILED' }, 'warn');
+    }
+  }
+
+  // Prune 10-minute rollup rows past the 7-day rolling retention window (bounded index scan on bucket).
+  if (clock() < until) {
+    try {
+      await runtime.db.execute(sql`DELETE FROM sending_metrics_ten_minute WHERE bucket < now() - interval '7 days'`);
+    } catch (error) {
+      logError(error, { code: 'METRICS_TEN_MINUTE_PRUNE_FAILED' }, 'warn');
     }
   }
 
   if (campaignTargets.length || workspaceTargets.length) {
-    log(campaignsFailed || workspacesFailed || outcomeBitsDrifted ? 'warn' : 'info', {
+    log(campaignsFailed || workspacesFailed ? 'warn' : 'info', {
       code: 'SENDING_TALLIES_RECOUNTED',
       campaigns: campaignTargets.length, campaignsRecounted, campaignsCorrected, campaignsFailed,
       workspaces: workspaceTargets.length, workspacesRecounted, workspacesCorrected, workspacesFailed,
-      outcomeBitsDrifted,
     });
   }
-  return { campaignsCorrected, workspacesCorrected, outcomeBitsDrifted };
+  return { campaignsCorrected, workspacesCorrected };
+}
+
+// Page probes use existing B-trees. A high estimate for the JSON expression can otherwise JIT-compile a tiny indexed read.
+const AUDIT_LIMITS = sql`SELECT set_config('lock_timeout','150ms',true),set_config('statement_timeout','1500ms',true),
+  set_config('max_parallel_workers_per_gather','0',true),set_config('jit','off',true)`;
+type AuditClaim = { after_id: string; page_size: number; fence: string };
+type AuditGroup = { workspace_id: string; last_id: string; checked: number; drifted: number; in_campaigns: number; extra_bits: number; missing_bits: number };
+
+/** Minute maintenance, outside the hourly upkeep window. Check one bounded page and checkpoint only a successful
+ *  read. A timeout or lost invocation retries the same cursor with a smaller page; nothing locks customer rows. */
+export async function auditSendingOutcomePage(runtime: Pick<Runtime, 'db'>, now = Date.now()) {
+  const idle = { checked: 0, drifted: 0 };
+  if (new Date(now).getUTCMinutes() < 15) return idle;
+  try {
+    const claim = await runtime.db.transaction(async tx => {
+      await tx.execute(AUDIT_LIMITS);
+      const { rows: [c] } = await tx.execute<AuditClaim>(sql`WITH due AS MATERIALIZED (
+        SELECT after_id,page_size FROM sending_outcome_audit_state WHERE singleton AND next_at<=now() AND ${enabledTriggers} FOR UPDATE SKIP LOCKED)
+        UPDATE sending_outcome_audit_state s SET pass_started_at=coalesce(s.pass_started_at,now()),
+          next_at=greatest(date_trunc('minute',now())+interval '1 minute',now()+interval '5 seconds'),page_size=greatest(1,due.page_size/2)
+        FROM due WHERE s.singleton RETURNING due.after_id,due.page_size,s.next_at::text AS fence`);
+      return c;
+    });
+    if (!claim) return idle;
+    const groups = await runtime.db.transaction(async tx => {
+      await tx.execute(AUDIT_LIMITS);
+      const started = performance.now();
+      const { rows } = await tx.execute<AuditGroup>(sql`SELECT * FROM check_sending_event_outcome_page(${claim.after_id},${claim.page_size})`);
+      const finished = rows.reduce((n, row) => n + row.checked, 0) < claim.page_size;
+      const size = finished ? 2048 : performance.now() - started < 500 ? Math.min(2048, claim.page_size * 2) : claim.page_size;
+      const moved = await tx.execute(sql`UPDATE sending_outcome_audit_state SET after_id=${finished ? '' : rows[0]!.last_id},page_size=${size},
+        next_at=CASE WHEN ${finished} THEN greatest(next_at,pass_started_at+interval '1 day') ELSE next_at END,
+        pass_started_at=CASE WHEN ${finished} THEN NULL ELSE pass_started_at END WHERE singleton AND next_at=${claim.fence}::timestamptz`);
+      return moved.rowCount ? rows : [];
+    });
+    for (const row of groups) if (row.drifted) log('error', { code: 'SENDING_EVENT_OUTCOMES_DRIFT', workspace: row.workspace_id,
+      emailsWithOtherBits: row.drifted, inCampaigns: row.in_campaigns, extraBits: row.extra_bits, missingBits: row.missing_bits });
+    return groups.reduce((r, row) => ({ checked: r.checked + row.checked, drifted: r.drifted + row.drifted }), idle);
+  } catch (error) {
+    logError(error, { code: 'SENDING_EVENT_OUTCOMES_CHECK_FAILED' }, 'warn');
+    return idle;
+  }
 }

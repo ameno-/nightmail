@@ -145,7 +145,7 @@ async function prepare(tx: DbExecutor, w: string, c: Config, unchanged?: Readonl
       sql`SELECT t FROM jsonb_array_elements_text(${JSON.stringify(c.attachments.filter(a => !stale.has(a.target + ':' + a.ritual)).map((a) => a.target))}::jsonb) t WHERE NOT EXISTS(SELECT FROM mailbox_addresses a WHERE a.workspace_id=${w} AND (a.address=t OR a.mailbox_id=t)) LIMIT 1`,
     )
   ).rows[0];
-  if (invalid) throw new ApiError(422, 'UNKNOWN_TARGET', `No receiving inbox or address ${invalid.t} in this workspace.`, 'attachments');
+  if (invalid) throw await unknownTarget(tx, w, invalid.t, 'attachments');
   return programs;
 }
 /**
@@ -452,6 +452,20 @@ const recipeCatalog = z.object({
 export const RecipeInputParams = RuleRecipeRef.shape.params;
 const RecipeAddresses = z.array(z.string().min(1).max(254)).min(1).max(10).describe('Inbox IDs (mbx_…) or receiving addresses it runs on.');
 type TargetRow = { address: string; mailbox_id: string; kind: string };
+/**
+ * A rule target this workspace doesn't have (a typo, or an address or inbox deleted since it was listed), refused with
+ * the ones it can use: each address with its inbox ID, the first ten, and how to make one when there are none.
+ */
+async function unknownTarget(tx: DbExecutor, w: string, target: string, field: string) {
+  const { rows } = await tx.execute<{ address: string; mailbox_id: string; total: number }>(sql`SELECT a.address,a.mailbox_id,count(*) OVER()::int AS total FROM mailbox_addresses a
+    JOIN mailboxes m ON m.id=a.mailbox_id AND m.workspace_id=a.workspace_id WHERE a.workspace_id=${w} AND a.kind='primary' AND (m.delete_after IS NULL OR m.delete_after>now()) ORDER BY a.address LIMIT 10`);
+  const valid = rows.map(r => `${r.address} (${r.mailbox_id})`), more = (rows[0]?.total ?? 0) - rows.length;
+  const error = new ApiError(422, 'UNKNOWN_TARGET', rows.length
+    ? `No receiving inbox or address ${target} in this workspace. Use one of: ${valid.join(', ')}${more > 0 ? `, or ${more} more (GET /v1/inbound/addresses)` : ''}.`
+    : `No receiving inbox or address ${target} in this workspace, and it has none yet. Create one with POST /v1/inbound/addresses or POST /v1/inboxes first.`, field);
+  error.details = rows.map(r => ({ address: r.address, inboxId: r.mailbox_id }));
+  return error;
+}
 export const targetRows = async (tx: DbExecutor, w: string, targets: string[]) => {
   const list = JSON.stringify([...new Set(targets)]);
   return (await tx.execute<TargetRow>(sql`SELECT address,mailbox_id,kind FROM mailbox_addresses WHERE workspace_id=${w}
@@ -460,11 +474,10 @@ export const targetRows = async (tx: DbExecutor, w: string, targets: string[]) =
 /** The address each attachment target names (its primary address for an inbox ID); an unknown target is refused. */
 async function targetAddresses(tx: DbExecutor, w: string, targets: string[]) {
   const rows = await targetRows(tx, w, targets);
-  return targets.map(t => {
-    const row = rows.find(r => r.address === t) ?? rows.find(r => r.mailbox_id === t && r.kind === 'primary') ?? rows.find(r => r.mailbox_id === t);
-    if (!row) throw new ApiError(422, 'UNKNOWN_TARGET', `No receiving inbox or address ${t} in this workspace.`, 'addresses');
-    return row.address;
-  });
+  const find = (t: string) => rows.find(r => r.address === t) ?? rows.find(r => r.mailbox_id === t && r.kind === 'primary') ?? rows.find(r => r.mailbox_id === t);
+  const missing = targets.find(t => !find(t));
+  if (missing !== undefined) throw await unknownTarget(tx, w, missing, 'addresses');
+  return targets.map(t => find(t)!.address);
 }
 /** The inbox an attachment target reaches: an address and its inbox's ID run on the same mail, in config order. */
 async function targetInboxes(tx: DbExecutor, w: string, targets: string[]) {

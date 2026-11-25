@@ -54,27 +54,40 @@ export interface OperatorHealth {
   database: { connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number; diskBytes: number | null } | null
 }
 /**
- * Glass (GET /v1/operator/glass, api/src/glass.ts): everything going on in the installation in one read, cached 30 s.
+ * Glass (GET /v1/operator/glass, api/src/glass.ts): everything going on in the installation in one read, cached 5 s.
+ * A Day is a rolling 24 hours (the current hour and the 23 before it) and the 24 hours before those.
  * Money is integer micro-cents as strings; a Count stopped at its cap when atLeast.
  */
 export type GlassCount = { n: number; atLeast: boolean }
 export type GlassHour = { accepted: number; marketing: number; delivered: number; bounced: number; complained: number }
 export type GlassGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
+export type GlassDay = { last: number; previous: number }
+export type GlassRequests = { requests: number; errors4xx: number; errors5xx: number }
+export type GlassRegion = { region: string; place: string; sending: boolean; receiving: boolean; maxSendRate: number | null; max24HourSend: number | null; sentLast24Hours: number | null; checkedAt: string | null }
 export interface Glass {
   generatedAt: string
-  signups: { places: SignupPlaces; today: { open: number; waitlist: number }; week: { open: number; waitlist: number }; daily: number[]
-    funnel: { signedUp: number; domainAdded: number; domainVerified: number; keyCreated: number; firstSend: number } }
-  sending: { perMinute: number; minutes: number[]; today: { transactional: number; marketing: number }; hourly: GlassHour[]; queued: GlassCount; held: GlassCount
+  signups: { places: SignupPlaces; today: { open: number; waitlist: number }; week: { open: number; waitlist: number }; daily: number[]; hourly: number[]; day: GlassDay
+    funnel: { signedUp: number; domainAdded: number; domainVerified: number; builtinReady: number; keyCreated: number; firstSend: number } }
+  sending: { perMinute: number; minutes: number[]; today: { transactional: number; marketing: number }; hourly: GlassHour[]; previous: GlassHour; queued: GlassCount; held: GlassCount
     campaigns: { id: string; name: string; workspace: string; total: number; released: number; rate: number | null }[]; sendApi: { requests: number; p50Ms: number; p95Ms: number } | null }
-  delivery: { grades: Record<GlassGrade, number>; calibrating: number; paused: number; held: number }
-  receiving: { today: number; spam: number; atLeast: boolean; hourly: number[] }
+  delivery: { grades: Record<GlassGrade, number>; calibrating: number; paused: number; held: number; steps: Record<StandingStep, number>; ramping: number; rampWaiting: number }
+  receiving: { today: number; spam: number; atLeast: boolean; hourly: number[]; day: GlassDay }
+  builtin: { active: number; ready: number; revoked: number; parent: { name: string; ok: boolean; problem: string | null; trippedAt: string | null; resetAt: string | null; checkedAt: string } | null }
+  support: { open: number; ticketed: number; hourly: number[]; day: GlassDay; configured: { chat: boolean; email: boolean } }
+  screening: { compared: GlassCount; agree: number | null; jevFlagged: number; jevfFlagged: number; jevFailed: number; jevfFailed: number; screened: number; rejected: number; hourly: number[] }
+  api: { hourly: GlassRequests[]; previous: GlassRequests; p50Ms: number | null; p95Ms: number | null }
   money: { creditToday: string; creditMonth: string; creditDaily: number[]; owed: string; owing: number; usageMonth: string }
   system: { status: 'ok' | 'warning' | 'critical' | 'stale'; measuredAt: string | null
     alerts: { critical: number; warning: number; top: { key: string; label: string; severity: 'critical' | 'warning'; words: string; since: string }[] }
-    ses: { regions: number; maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: string | null } | null
+    ses: { regions: GlassRegion[]; total: { maxSendRate: number; max24HourSend: number; sentLast24Hours: number } }
     deploy: { sha: string | null; at: string | null } }
-  visitors: { views: number; visitors: GlassCount; hourly: number[]; referrers: { host: string; views: number }[]; through: string | null }
+  visitors: { views: number; day: GlassDay; visitors: GlassCount; hourly: number[]; referrers: { host: string; views: number }[]; through: string | null }
 }
+/** Glass's activity feed (GET /v1/operator/glass/activity): the newest 50 events, newest first, each once by its id. */
+export type GlassEventKind = 'signup' | 'first_send' | 'domain_verified' | 'builtin_ready' | 'campaign_launched' | 'campaign_paused' | 'standing' | 'breaker' | 'alert'
+export interface GlassEvent { id: string; at: string; kind: GlassEventKind; workspace: { id: string; name: string } | null; subject: string | null; detail: string | null
+  place: 'open' | 'waitlist' | null; email: string | null; tone: 'neutral' | 'success' | 'warning' | 'danger' }
+export interface GlassActivity { events: GlassEvent[]; generatedAt: string }
 /** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
 export type AbuseBand = 'low' | 'watch' | 'review' | 'high'
 export interface AbuseReason { code: string; points: number; count?: number }
@@ -129,6 +142,8 @@ export const operatorApi = {
   signups: (signal?: AbortSignal) => request<SignupPlaces>(`${base}/signups`, { signal }),
   health: (signal?: AbortSignal) => request<OperatorHealth>(`${base}/health`, { signal }),
   glass: (signal?: AbortSignal) => request<Glass>(`${base}/glass`, { signal }),
+  /** after: the newest event's time the page has; the answer is the events at or after it. */
+  glassActivity: (after?: string, signal?: AbortSignal) => request<GlassActivity>(`${base}/glass/activity${after ? `?after=${encodeURIComponent(after)}` : ''}`, { signal }),
   setSignupLimit: (limit: number, raise: SignupRaise, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit, raise }, idempotencyKey: guard.idempotencyKey }),
   allWorkspaces: async (input: { cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: WorkspaceSummary[]; nextCursor: string | null }>(`${base}/signups/workspaces${query({ cursor: input.cursor, limit: 100 })}`, { signal })

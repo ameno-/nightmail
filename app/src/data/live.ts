@@ -89,21 +89,19 @@ export function selectAccount(id: string | null) {
   try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
 // Whether this browser has a dashboard session, as far as a page can tell without asking (its cookies are httpOnly): 'in'
-// after /v1/me last answered, 'out' after it last said signed out, and before either, any trace of a dashboard here.
-// The public marketing pages (/, /pricing, /compare/*) ask /v1/me only where a session is likely, so a visitor's page
-// makes no request that fails (a 401 is an error in the console, and those pages are measured: app/price-pages.ts).
-// Signing in always returns through the dashboard, which asks. public/theme.js reads the same keys.
+// after an expected sign-in return or a successful /v1/me, 'out' after it last said signed out, and before either,
+// a remembered dashboard or account. The hint never authorizes a request.
+// The public pages ask /v1/me only where a session is likely. public/theme.js reads the same keys for its early fetch.
 const sessionHintKey = 'nightmail.session'
-export function rememberSession(signedIn: boolean) { try { localStorage.setItem(sessionHintKey, signedIn ? 'in' : 'out') } catch { /* Then every page asks. */ } }
+export function rememberSession(signedIn: boolean) { try { localStorage.setItem(sessionHintKey, signedIn ? 'in' : 'out') } catch { /* The tab can still know its account. */ } }
 export function sessionLikely() {
   try {
     const hint = localStorage.getItem(sessionHintKey)
     return hint === 'in' || (hint === null && (localStorage.getItem('nightmail.dashboard-ready') !== null || sessionStorage.getItem(accountStorageKey) !== null))
-  } catch { return true }
+  } catch { return selectedAccount() !== null }
 }
-/** A page that shows a visitor what a member sees, other than their button: it asks /v1/me only where sessionLikely(). */
-export const asksOnlyIfLikely = (location: Pick<Location, 'pathname' | 'search'>) =>
-  (location.pathname === '/' || location.pathname === '/pricing' || location.pathname.startsWith('/compare/')) && !/[?&](?:account|invitation)=/.test(location.search)
+/** Pages a visitor can read without an account. A query string isn't evidence of a session. */
+export const asksOnlyIfLikely = (path: string) => path === '/' || /^\/pricing\/?$/.test(path) || /^\/(?:docs|compare|legal)(?:\/|$)/.test(path)
 
 /** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
  *  other request carries, so the API reads them from the query for its sockets (the campaign room). */
@@ -296,25 +294,34 @@ export function createLiveApi(scope?: RequestScope): Api {
       settings: signal => call<WorkspaceSettings>('/settings/workspace', 'GET', undefined, signal), updateSettings: (input, signal) => call<WorkspaceSettings>('/settings/workspace', 'PATCH', input, signal) },
     senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal), release: (input, signal) => call<SenderScore>('/sender-score/release', 'POST', input, signal) },
     overview: { get: async (input, signal) => {
-      const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
-      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
+      // The window ends at the API's now, not this device's: a browser clock ahead of the server can't send a start after
+      // the end, and the chart below is laid out from the from/to the API answers with.
+      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: new Date(Date.now() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000).toISOString() })
       if (input.stream) params.set('stream', input.stream)
-      const hourly = input.range !== '30d'
+      // 24h uses 10-minute buckets (sending_metrics_ten_minute); 7d uses 1-hour and 30d folds 1-hour into 4-hour
+      // buckets (sending_metrics_hourly), keeping every range around 144–180 points with zero raw table scans.
+      const granularity = input.range === '24h' ? '10m' : 'hour'
+      const step = input.range === '24h' ? 600_000 : input.range === '7d' ? 3_600_000 : 4 * 3_600_000
       // One request returns the chart buckets and the previous period's totals.
-      const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day'); chartParams.set('include', 'previous')
+      const chartParams = new URLSearchParams(params); chartParams.set('granularity', granularity); chartParams.set('include', 'previous')
       const metrics = await call(`/metrics?${chartParams}`, 'GET', undefined, signal)
       if (!metrics.previous) throw new ApiError('The API did not return the previous period’s totals.', 'INVALID_RESPONSE')
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
-      const buckets = hourly ? metrics.hourly : metrics.daily
+      const buckets = granularity === '10m' ? metrics.tenMinute : metrics.hourly
       if (!Array.isArray(buckets)) throw new ApiError('The API did not return the requested chart buckets.', 'INVALID_RESPONSE')
-      const series = new Map<number, Json>(buckets.map((row: Json) => [Date.parse(row.date), row]))
-      const step = hourly ? 3600000 : 86400000
+      const series = new Map<number, { sent: number; delivered: number; bounced: number; complaints: number }>()
+      for (const row of buckets as Json[]) {
+        const key = Math.floor(Date.parse(row.date) / step) * step
+        const acc = series.get(key) ?? { sent: 0, delivered: 0, bounced: 0, complaints: 0 }
+        acc.sent += row.count ?? 0; acc.delivered += row.delivered ?? 0; acc.bounced += row.bounced ?? 0; acc.complaints += row.complained ?? 0
+        series.set(key, acc)
+      }
       const startAt = Math.floor(Date.parse(metrics.from) / step) * step, endAt = Date.parse(metrics.to)
       const points = []
       for (let bucket = startAt; bucket < endAt; bucket += step) {
         const at = new Date(bucket).toISOString(), row = series.get(bucket)
-        points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
+        points.push({ at, sent: row?.sent ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complaints ?? 0 })
       }
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points }
     },

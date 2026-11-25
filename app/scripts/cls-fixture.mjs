@@ -142,7 +142,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       // Built-in domains (api/src/builtin-domain.ts): the workspaces seeded with one below show it in onboarding, Domains and Overview.
       NIGHTMAIL_BUILTIN_DOMAIN: 'nightmail.email',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
-      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
@@ -253,7 +253,10 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
             const headers = { cookie: req.headers.cookie ?? '', origin: req.headers.origin ?? origin, ...req.headers['x-nightmail-workspace'] ? { 'x-nightmail-workspace': req.headers['x-nightmail-workspace'] } : {} };
             const me = await fetch(apiOrigin + '/v1/me', { headers }).then(r => r.ok ? r.json() : null, () => null);
             if (me?.multiTenant) {
-              await hosted(db, me.workspaceId);
+              const conn = await hosted(db, me.workspaceId);
+              // Starting Hosted mail sets up the workspace's built-in domain too (startHostedMail): the first email sends from it.
+              // Pages measured at once (light, dark, phone) start it together: whichever comes second finds it made.
+              if (!(await db.query('SELECT 1 FROM builtin_domains WHERE workspace_id=$1', [me.workspaceId])).rowCount) await builtin(db, me.workspaceId, conn, me.workspaceId.replace(/[^a-z0-9]/g, '').slice(0, 16) + '-e5').catch(() => {});
               const read = await fetch(apiOrigin + '/v1/connection', { headers }), json = await read.json();
               res.writeHead(read.ok ? 201 : read.status, { 'content-type': 'application/json' });
               res.end(JSON.stringify(read.ok ? json.connection : json));
@@ -355,13 +358,13 @@ async function domain(db, workspaceId, conn, name, { receiving = false, mailFrom
 }
 
 // A workspace's built-in domain as its Hosted connection leaves it (create_builtin_claim, migration 495): sending, receiving
-// on its own name with no DNS of its own, and its default inbox's catch-all.
-async function builtin(db, workspaceId, conn, label) {
+// on its own name with no DNS of its own, and its default inbox's catch-all. `pending`: not associated with its tenant yet.
+async function builtin(db, workspaceId, conn, label, { pending = false } = {}) {
   const name = `${label}.nightmail.email`, id = 'dom_builtin_' + workspaceId, mdom = 'mdom_builtin_' + workspaceId;
   await db.query('INSERT INTO builtin_domains(workspace_id,label,name) VALUES($1,$2,$3)', [workspaceId, label, name]);
-  const identity = { builtin: true, proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
-  await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES($1,$2,$3,'verified','active',$2,$4::jsonb,now(),now())",
-    [workspaceId, name, conn, JSON.stringify(identity)]);
+  const identity = { builtin: true, proven: true, mx: null, note: null, ses: pending ? { VerificationStatus: 'PENDING' } : { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
+  await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES($1,$2,$3,$5,'active',$2,$4::jsonb,now(),now())",
+    [workspaceId, name, conn, JSON.stringify(identity), pending ? 'pending' : 'verified']);
   await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
   await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at) VALUES($1,$2,$3,$4,$5,$4,'active','store',now()-interval '1 day')", [mdom, workspaceId, id, name, REGION]);
   return { id, name };
@@ -370,17 +373,20 @@ async function builtin(db, workspaceId, conn, label) {
 // A domain added two hours ago whose records never went live, as the background DNS check (api/src/domain-setup.ts) left
 // it: the TXT and one DKIM CNAME missing at Cloudflare. Its page and Overview show the setup banner.
 // `correct`: its ownership is proven and every DKIM CNAME is in public DNS, but SES hasn't looked again yet.
-async function stuck(db, workspaceId, conn, name, { correct = false } = {}) {
+// `noDns`: nobody serves DNS for it (a typo): every record missing and the check's noDns, so its page says to check the name.
+// `wildcard`: a *.<domain> address record answers its DKIM names, so all three CNAMEs are missing and the banner names the wildcard.
+// `parking`: Porkbun's parking default (* CNAME pixie.porkbun.com) answers them instead.
+async function stuck(db, workspaceId, conn, name, { correct = false, noDns = false, wildcard = false, parking = false } = {}) {
   const id = 'dom_' + name.replace(/\W/g, '_'), tokens = [0, 1, 2].map(i => `${name.replace(/\W/g, '').slice(0, 10)}${i}p4w8v6dkim`);
   const identity = { ses: { VerificationStatus: 'PENDING', VerifiedForSendingStatus: false, DkimAttributes: { Status: 'PENDING', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com', Tokens: tokens } }, proven: correct, mx: null, note: null };
   const { rows: [{ token }] } = await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,identity,ever_proven,created_at) VALUES($1,$2,$3,'pending','off',$4::jsonb,$5,now()-interval '2 hours') RETURNING token",
     [workspaceId, name, conn, JSON.stringify(identity), correct]);
   await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
-  const checkedAt = ago(6), seen = state => ({ state, values: [], checkedAt });
-  const records = [...tokens.map((t, i) => ({ type: 'CNAME', name: `${t}._domainkey.${name}`, value: `${t}.dkim.amazonses.com`, publicDns: seen(i === 2 && !correct ? 'missing' : 'found') })),
+  const checkedAt = ago(6), seen = state => ({ state, values: [], checkedAt, ...(wildcard || parking) && state === 'missing' ? { wildcard: `*.${name}`, ...parking ? { parking: { owner: 'Porkbun', target: 'pixie.porkbun.com' } } : {} } : {} });
+  const records = [...tokens.map((t, i) => ({ type: 'CNAME', name: `${t}._domainkey.${name}`, value: `${t}.dkim.amazonses.com`, publicDns: seen(noDns || wildcard || parking || (i === 2 && !correct) ? 'missing' : 'found') })),
     ...correct ? [] : [{ type: 'TXT', name: `_nightmail.${name}`, value: token, publicDns: seen('missing') }]];
-  const host = { name: 'Cloudflare', zone: name, url: `https://dash.cloudflare.com/?to=/:account/${name}/dns/records` };
-  await db.query('UPDATE domain_claims SET setup_check=$3::jsonb WHERE workspace_id=$1 AND name=$2', [workspaceId, name, JSON.stringify({ checkedAt, host, records })]);
+  const host = noDns ? null : parking ? { name: 'Porkbun', zone: name, url: null } : { name: 'Cloudflare', zone: name, url: `https://dash.cloudflare.com/?to=/:account/${name}/dns/records` };
+  await db.query('UPDATE domain_claims SET setup_check=$3::jsonb WHERE workspace_id=$1 AND name=$2', [workspaceId, name, JSON.stringify({ checkedAt, host, ...noDns ? { noDns: true } : {}, records })]);
   return { id };
 }
 
@@ -931,6 +937,10 @@ export async function seed(fx) {
   await domain(db, 'ws_fresh', freshConn, 'lumenlabs.example');
   const stuckDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenmail.example');
   const correctDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpost.example', { correct: true });
+  // Lists after lumenmail.example, so Overview's setup banner stays that one's.
+  const noDnsDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenaml.example', { noDns: true });
+  const wildcardDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenwild.example', { wildcard: true });
+  const parkedDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpark.example', { parking: true });
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
   // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
@@ -941,9 +951,26 @@ export async function seed(fx) {
   const verifiedConn = await hosted(db, 'ws_verified');
   await builtin(db, 'ws_verified', verifiedConn, 'rowan-bakery-m2');
   await domain(db, 'ws_verified', verifiedConn, 'rowanbakery.example');
-  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its domain step.
+  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its first email.
   await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
   await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
+  // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
+  await fx.signIn('ula', 'ula@ulmus.example', 'Ula Berg', { id: 'ws_builtin_pending', name: 'Ulmus' });
+  await builtin(db, 'ws_builtin_pending', await hosted(db, 'ws_builtin_pending'), 'ulmus-r8', { pending: true });
+  // What each workspace said it is here for (onboarding's focus question): the step and Overview card each focus leads to.
+  // Alder: agent inboxes, its agent@ inbox made and two emails in it. Aspen: the same focus, nothing received yet (Overview's card).
+  const focused = async (user, email, name, workspace, label, focus) => {
+    await fx.signIn(user, email, name, { id: workspace, name: label })
+    const made = await builtin(db, workspace, await hosted(db, workspace), label.toLowerCase() + '-' + user.slice(0, 1) + '3')
+    await db.query('UPDATE workspaces SET focus = $2 WHERE id = $1', [workspace, focus])
+    return made
+  }
+  const alder = await focused('ada', 'ada@alder.example', 'Ada Moss', 'ws_focus_agents', 'Alder', ['agents', 'developer'])
+  await agentInbox(db, 'ws_focus_agents', { mdom: 'mdom_builtin_ws_focus_agents', host: alder.name }, 'Agent', 24 * 30, mix(2))
+  await focused('abe', 'abe@aspen.example', 'Abe Lowe', 'ws_focus_agents_new', 'Aspen', ['agents'])
+  await focused('mae', 'mae@maple.example', 'Mae Ford', 'ws_focus_marketing', 'Maple', ['marketing', 'newsletter'])
+  await focused('noa', 'noa@linden.example', 'Noa Hart', 'ws_focus_newsletter', 'Linden', ['newsletter'])
+  await focused('pam', 'pam@poplar.example', 'Pam Reid', 'ws_focus_personal', 'Poplar', ['personal'])
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');
@@ -1020,7 +1047,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

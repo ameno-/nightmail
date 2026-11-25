@@ -5,6 +5,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { ApiError, chargeBudget, denied, digest, errors, id, IdParams, isoTime, json, randomSecret, requestOrigin, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
 import { auditContext, auditInsert, ipNetwork, type AuditContext } from './audit.js';
 import { apiKeyEnv, secretPrefixes, shownPrefix } from './brand.js';
+import { agentKeyName } from './agent-key-name.js';
 import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
 
 /**
@@ -17,7 +18,8 @@ import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
  *   the person opens /connect?code=…, signs in, chooses a workspace and approves, and the agent's polls of
  *   POST /v1/agent/device/token receive the key.
  *
- * Either way the agent gets one API key, "Agent (set up <date>)", listed and revocable under API keys like any other,
+ * Either way the agent gets one API key named after the client it says it is ("OpenCode, set up <date>", or "Agent, set
+ * up <date>" when it doesn't say; api_keys.agent_client keeps the claim), listed and revocable under API keys like any other,
  * with AGENT_PERMISSIONS on every sender domain: what onboarding needs (sending, domains, inboxes and receiving, webhooks)
  * and the rest of the workspace's own resources. It never administers the workspace: keyAdminRefusal refuses it API keys
  * and agent tokens, and agentSetupRefusal billing and the credentials that would outlive it (inbox connection keys, inbox
@@ -46,6 +48,11 @@ const gone = { 410: { description: 'Expired, or replaced by a newer one; use err
 type Row = { id: string; kind: 'prompt' | 'device'; secret_hash: string; status: 'pending' | 'approved' | 'denied' | 'replaced' | 'used'; workspace_id: string | null; user_id: string | null;
   client_name: string | null; poll_interval: number; expired: boolean; too_soon: boolean };
 type Issued = { key: string; keyId: string; name: string; workspaceId: string; workspaceName: string };
+/** What the agent says it is, as one short line (mcp-auth.ts clientLabel), or null. */
+async function clientClaim(value: string | undefined) {
+  const { clientLabel } = await wrapModuleLoad(() => import('./mcp-auth.js'));
+  return Array.from(clientLabel(value)).slice(0, 100).join('') || null;
+}
 
 const hex = (bytes: number) => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), n => n.toString(16).padStart(2, '0')).join('');
 /** A new setup token or device code for a new row: the row's ID, then the verifier whose hash the row keeps. */
@@ -100,11 +107,11 @@ async function issueKey(tx: DbExecutor, c: Ctx, row: Row): Promise<Issued | null
   const { rows: [member] } = await tx.execute<{ role: string; name: string }>(sql`SELECT m.role, w.name FROM workspace_members m JOIN workspaces w ON w.id = m.workspace_id
     WHERE m.workspace_id = ${row.workspace_id} AND m.user_id = ${row.user_id} FOR SHARE OF m`);
   if (member?.role !== 'owner' && member?.role !== 'admin') return null;
-  const key = randomSecret(secretPrefixes.apiKey), keyId = id('key'), prefix = shownPrefix(key), name = `Agent (set up ${new Date().toISOString().slice(0, 10)})`;
+  const key = randomSecret(secretPrefixes.apiKey), keyId = id('key'), prefix = shownPrefix(key), name = agentKeyName(row.client_name);
   const context: AuditContext = { ...auditContext(c), actor: { type: 'member', id: row.user_id, userId: row.user_id, via: 'api', label: row.kind === 'device' ? 'Agent setup (device code)' : 'Agent setup (prompt)' } };
-  await tx.execute(sql`WITH k AS (INSERT INTO api_keys(id, workspace_id, name, hash, prefix, permissions, domains, agent_setup_id)
-      VALUES (${keyId}, ${row.workspace_id}, ${name}, ${await digest(key)}, ${prefix}, ${JSON.stringify(AGENT_PERMISSIONS)}::jsonb, '[]'::jsonb, ${row.id}) RETURNING id),
-    s AS (UPDATE agent_setups SET status = 'used', used_at = now(), key_id = ${keyId} WHERE id = ${row.id})
+  await tx.execute(sql`WITH k AS (INSERT INTO api_keys(id, workspace_id, name, hash, prefix, permissions, domains, agent_setup_id, agent_client)
+      VALUES (${keyId}, ${row.workspace_id}, ${name}, ${await digest(key)}, ${prefix}, ${JSON.stringify(AGENT_PERMISSIONS)}::jsonb, '[]'::jsonb, ${row.id}, ${row.client_name}) RETURNING id),
+    s AS (UPDATE agent_setups SET status = 'used', used_at = now(), key_id = ${keyId}, client_name = ${row.client_name} WHERE id = ${row.id})
     ${auditInsert(context, { action: 'api_key.create', workspaceId: row.workspace_id, target: { type: 'api_key', id: keyId },
       after: { name, permissions: AGENT_PERMISSIONS, domains: [], prefix: prefix.slice(0, 9), agentSetup: row.id, flow: row.kind, client: row.client_name ?? undefined } }, { from: sql`k` })}`);
   return { key, keyId, name, workspaceId: row.workspace_id!, workspaceName: member.name };
@@ -115,12 +122,30 @@ function issuedView(c: Ctx, issued: Issued) {
     mcp: { url, config: mcpClientConfig('generic', url, { key: issued.key, env: apiKeyEnv }) },
     nextStep: `Tell the person the key is for the workspace "${issued.workspaceName}", so they can confirm it's theirs. Save key as ${apiKeyEnv} in the project's environment (a gitignored .env, or the host's secrets), never in code or a commit: it is shown once. Send it as Authorization: Bearer on every request. A person revokes it under API keys.` };
 }
+/**
+ * A setup token or device code that already gave its key, presented again (an agent that dropped the response, or a
+ * second poller): which key it was, from the row the secret names, so an agent that kept it goes on with it instead of
+ * starting over. The secret was shown once and is never sent again, and no second key is made: every repeat gets this
+ * same answer. Only the key's own name, prefix and ID, never its workspace.
+ */
+async function alreadyIssued(c: Ctx, setupId: string, code: 'SETUP_TOKEN_USED' | 'DEVICE_CODE_USED', again: string) {
+  const what = code === 'SETUP_TOKEN_USED' ? 'This setup token' : 'This device code', field = code === 'SETUP_TOKEN_USED' ? 'token' : 'device_code';
+  const { rows: [key] } = await c.env.db.execute<{ id: string; name: string; prefix: string; used_at: string; revoked_at: string | null }>(sql`
+    SELECT k.id, k.name, k.prefix, s.used_at::text, k.revoked_at::text FROM agent_setups s JOIN api_keys k ON k.workspace_id = s.workspace_id AND k.id = s.key_id WHERE s.id = ${setupId}`);
+  if (!key) return new ApiError(409, code, `${what} already gave its key; it works once. If you lost the key, ask the person to revoke it under API keys, then ${again}`, field);
+  const issuedAt = isoTime(key.used_at)!, named = `"${key.name}" (${key.prefix}…)`;
+  const refusal = new ApiError(409, code, key.revoked_at
+    ? `${what} already gave its key, ${named}, at ${issuedAt}, and it has since been revoked. ${again[0]!.toUpperCase()}${again.slice(1)}`
+    : `${what} already gave its key at ${issuedAt}: ${named}, ID in error.details. It is shown once, so it isn't sent again and no second key is made: use the key you saved from that response (it starts with ${key.prefix}). If you didn't save it, ask the person to revoke ${named} under API keys, then ${again}`, field);
+  refusal.details = [{ keyId: key.id, name: key.name, prefix: key.prefix, issuedAt, revokedAt: isoTime(key.revoked_at) }];
+  return refusal;
+}
 const notAllowed = () => new ApiError(403, 'AGENT_SETUP_FORBIDDEN', 'The person who set this up is no longer an owner or admin of the workspace, so no key was made. Ask an owner or admin to set up the agent again.');
 
 const Permissions = z.array(z.enum(['read', 'send', 'manage']));
 const AgentKey = z.object({
   key: z.string().describe(`The API key (${secretPrefixes.apiKey}…), shown once. Save it as ${apiKeyEnv} in the project's environment, never in code or a commit.`),
-  keyId: z.string(), name: z.string().describe('Agent (set up <date>), under API keys, where a person revokes it.'),
+  keyId: z.string(), name: z.string().describe('"<client_name>, set up <date>" ("Agent, set up <date>" without one), under API keys, where a person revokes it.'),
   workspaceId: z.string(), workspaceName: z.string().describe('The workspace\'s name: tell the person, so they can confirm the key is in theirs.'),
   permissions: Permissions.describe('read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. It can\'t create API keys, agent tokens, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords; members, billing and deleting the workspace are a person\'s.'),
   baseUrl: z.string().describe('The API origin to call.'),
@@ -128,6 +153,7 @@ const AgentKey = z.object({
   nextStep: z.string(),
 }).openapi('AgentKey');
 const Token = z.string().min(1).max(300);
+const ClientName = z.string().trim().max(100).optional().openapi({ example: 'OpenCode' }).describe('What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").');
 const UserCode = z.string().trim().min(1).max(20).openapi({ example: 'BCDF-GHJK' }).describe('The code the agent shows, with or without its hyphen.');
 const DeviceStatus = z.enum(['pending', 'approved', 'denied', 'used', 'expired']);
 
@@ -161,11 +187,12 @@ export function registerAgentSetup(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/setup', operationId: 'exchangeAgentSetupToken', tags, security: [],
     summary: 'Exchange a setup token for the agent\'s API key',
-    description: `For a coding agent: the setup token in the prompt a person copied from the dashboard (${secretPrefixes.agentSetup}…) becomes a lasting API key for the agent, in that person's workspace. It works once, within ${SETUP_MINUTES} minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED, and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.`,
-    request: { body: json(z.object({ token: Token.openapi({ example: `${secretPrefixes.agentSetup}${'0'.repeat(32)}.${'0'.repeat(64)}` }).describe('The setup token from the prompt.') }).strict()) },
+    description: `For a coding agent: the setup token in the prompt a person copied from the dashboard (${secretPrefixes.agentSetup}…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within ${SETUP_MINUTES} minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.`,
+    request: { body: json(z.object({ token: Token.openapi({ example: `${secretPrefixes.agentSetup}${'0'.repeat(32)}.${'0'.repeat(64)}` }).describe('The setup token from the prompt.'),
+      client_name: ClientName }).strict()) },
     responses: { 201: response(AgentKey), ...errors, ...gone } }), async c => {
     await fromNetwork(c, 'exchange');
-    const presented = await readSecret(secretPrefixes.agentSetup, c.req.valid('json').token);
+    const body = c.req.valid('json'), presented = await readSecret(secretPrefixes.agentSetup, body.token);
     const invalid = () => new ApiError(400, 'SETUP_TOKEN_INVALID', 'This setup token is not valid. Copy the prompt from the dashboard again, or connect with a device code (POST /v1/agent/device).', 'token');
     if (!presented) throw invalid();
     const outcome = await c.env.db.transaction(async tx => {
@@ -175,10 +202,10 @@ export function registerAgentSetup(app: App) {
       if (row.status === 'used') return 'used' as const;
       if (row.status === 'replaced') return 'replaced' as const;
       if (row.expired) return 'expired' as const;
-      return await issueKey(tx, c, row) ?? 'forbidden' as const;
+      return await issueKey(tx, c, { ...row, client_name: await clientClaim(body.client_name) }) ?? 'forbidden' as const;
     });
     if (outcome === 'invalid') throw invalid();
-    if (outcome === 'used') throw new ApiError(409, 'SETUP_TOKEN_USED', 'This setup token was already exchanged; it works once. If you lost the key, ask the person to revoke it under API keys and copy the prompt again.', 'token');
+    if (outcome === 'used') throw await alreadyIssued(c, presented.rowId, 'SETUP_TOKEN_USED', 'ask them to copy the prompt again.');
     if (outcome === 'replaced') throw new ApiError(410, 'SETUP_TOKEN_REPLACED', 'A newer copy of the prompt replaced this setup token. Use the token in the newest copy.', 'token');
     if (outcome === 'expired') throw new ApiError(410, 'SETUP_TOKEN_EXPIRED', `This setup token expired: it works for ${SETUP_MINUTES} minutes after the prompt is copied. Ask the person to copy it again, or connect with a device code (POST /v1/agent/device).`, 'token');
     if (outcome === 'forbidden') throw notAllowed();
@@ -189,14 +216,14 @@ export function registerAgentSetup(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device', operationId: 'startAgentDeviceAuthorization', tags, security: [],
     summary: 'Start the device flow for a coding agent',
     description: `For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Ask the person to open verification_uri_complete (or verification_uri and type the user code), sign in, choose a workspace and approve. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for ${DEVICE_MINUTES} minutes.`,
-    request: { body: { ...json(z.object({ client_name: z.string().trim().max(100).optional().openapi({ example: 'OpenCode' }).describe('What the agent is, shown to the person as its claim.') }).strict()), required: false } },
+    request: { body: { ...json(z.object({ client_name: ClientName }).strict()), required: false } },
     responses: { 200: response(z.object({ device_code: z.string().describe(`${secretPrefixes.deviceCode}…: keep it private; only pollAgentDeviceToken takes it.`),
       user_code: z.string().describe('Show this to the person: they confirm it matches.'), verification_uri: z.string(), verification_uri_complete: z.string().describe('The page with the user code filled in: the link to give the person.'),
       expires_in: z.number().int(), interval: z.number().int().describe('Seconds to wait between polls.') }).openapi('AgentDeviceAuthorization')), ...errors } }), async c => {
     await fromNetwork(c, 'device');
     await limited(c, 'device:all', DEVICES_PER_MINUTE, 'Too many agents are starting the device flow right now. Retry in a minute.');
-    const body = c.req.valid('json') as { client_name?: string } | undefined, { clientLabel } = await wrapModuleLoad(() => import('./mcp-auth.js'));
-    const clientName = Array.from(clientLabel(body?.client_name)).slice(0, 100).join('') || null, { rowId, secret, hash } = await newSecret(secretPrefixes.deviceCode);
+    const body = c.req.valid('json') as { client_name?: string } | undefined;
+    const clientName = await clientClaim(body?.client_name), { rowId, secret, hash } = await newSecret(secretPrefixes.deviceCode);
     const expiresAt = new Date(Date.now() + DEVICE_MINUTES * 60_000).toISOString();
     // A user code is unique among the rows kept (a day past expiry); a collision draws another.
     for (let attempt = 0; ; attempt++) {
@@ -212,7 +239,7 @@ export function registerAgentSetup(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device/token', operationId: 'pollAgentDeviceToken', tags, security: [],
     summary: 'Poll for the agent\'s API key',
-    description: 'With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. Retry-After gives the seconds to wait.',
+    description: 'With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. A poll after that gets 409 DEVICE_CODE_USED naming the key it gave (error.details: keyId, name, prefix, issuedAt, revokedAt), never the key again and never a second one: use the key you saved. Retry-After gives the seconds to wait.',
     request: { body: json(z.object({ device_code: Token.openapi({ example: `${secretPrefixes.deviceCode}${'0'.repeat(32)}.${'0'.repeat(64)}` }),
       grant_type: z.literal('urn:ietf:params:oauth:grant-type:device_code').optional().describe('Optional, as RFC 8628 clients send it.') }).strict()) },
     responses: { 201: response(AgentKey), ...errors } }), async c => {
@@ -241,7 +268,7 @@ export function registerAgentSetup(app: App) {
     const wait = (error: ApiError, seconds: number) => Object.assign(error, { retryAfterSeconds: seconds });
     switch (outcome.error) {
       case 'invalid': throw invalid();
-      case 'used': throw new ApiError(409, 'DEVICE_CODE_USED', 'This device code already received its key; it works once. If you lost the key, ask the person to revoke it under API keys, then start again.', 'device_code');
+      case 'used': throw await alreadyIssued(c, presented.rowId, 'DEVICE_CODE_USED', 'start again with POST /v1/agent/device.');
       case 'expired': throw new ApiError(400, 'EXPIRED_TOKEN', `This device code expired (${DEVICE_MINUTES} minutes). Start again with POST /v1/agent/device.`, 'device_code');
       case 'denied': throw new ApiError(400, 'ACCESS_DENIED', 'The person denied this agent. Stop polling.', 'device_code');
       case 'slow': throw wait(new ApiError(400, 'SLOW_DOWN', `Polled too soon. Wait ${outcome.interval} seconds between polls from now on.`, undefined, true), outcome.interval);

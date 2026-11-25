@@ -3,7 +3,7 @@ import { dayOf, listOf, formatCount, money, nightmail, readOn, tierSizes, type E
 // Nightmail vs Resend (/compare/resend): a comparison's whole entry (prices.ts, Entry), and Resend's marketing plans,
 // which the calculator lists too (compare/index.ts, OFFERS). Every figure was read on Resend's own pricing page on
 // CHECKED.
-const CHECKED = '2026-11-22'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const RESEND = 'https://resend.com/pricing'
@@ -32,7 +32,7 @@ const offer: Offer = {
 export const resendOverage = read(RESEND, 'Overages are billed in buckets of 1,000 emails at your plan\'s overage rate. You can enable this in your team settings under "Transactional Overages."')
 export const resendReceived = read(RESEND, 'Each received email counts towards your transactional emails quota.')
 
-const resendMarketingFree = read(RESEND, 'Free: marketing 1,000 contacts')
+const resendMarketingFree = read(RESEND, '## Marketing Email … | Free | $0/mo | 1,000 |')
 export const resendMarketing: Offer = {
   id: 'resend-marketing', vendor: 'Resend', name: 'Resend marketing', pricing: RESEND, checked: CHECKED, unit: 'contacts', ladder: 'points',
   counts: 'contacts, not sends',
@@ -50,6 +50,7 @@ const sizes: Entry['sizes'] = [10_000, 100_000, 1_000_000]
 export const resend: Entry = {
   slug: 'resend',
   vendor: 'Resend',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,

@@ -54,6 +54,9 @@ const values = z.object({
   // Hosted: the one email to a domain's owners when its records are still missing an hour after it was added
   // (src/domain-setup.ts). Off by default; the dashboard's banner and the DNS check run either way.
   DOMAIN_SETUP_REMINDER: z.enum(['on', 'off']).default('off'),
+  // Hosted: one bounded NS lookup when a domain is added, so a name nobody serves DNS for says so at once (record-check.ts
+  // dnsZone). On by default; off, such a domain is only found by Check now and the background check.
+  DOMAIN_NS_CHECK: z.enum(['on', 'off']).default('on'),
   // Hosted: the one email to a new workspace's owners when it still has no domain an hour after sign-up (src/domain-setup.ts).
   // Off by default; the Overview card runs either way.
   NO_DOMAIN_REMINDER: z.enum(['on', 'off']).default('off'),
@@ -121,6 +124,10 @@ const values = z.object({
   PLANETSCALE_WEBHOOK_SECRET: optional(z.string()),
   // Hosted only. Reserved for a later release: monitoring only observes, and nothing reads this.
   NIGHTMAIL_ABUSE_ENFORCE: z.enum(['true','false']).default('false'),
+  // List hygiene (src/list-hygiene.ts): the nightly sync of the open disposable/role/provider lists (off: the vendored snapshot
+  // only), and the DNS-over-HTTPS resolver for its domain checks (off: none; Hosted defaults to Cloudflare's).
+  NIGHTMAIL_HYGIENE_LISTS: z.enum(['on','off']).default('on'),
+  NIGHTMAIL_HYGIENE_DNS: z.union([z.literal('off'), z.string().url().refine(u => u.startsWith('https://'), 'Use an https:// DNS-over-HTTPS URL, or off.')]).optional(),
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
   STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
@@ -172,19 +179,22 @@ const values = z.object({
   API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100000).default(1200),
   // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
   REPUTATION_ALERT_SLACK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
-  // Key for the opt-in Jev content screen on transactional sends (`screen: true`): a TypeSafe AI key, or an
+  // Jev's key for outbound fallback and inbound Ritual questions: a TypeSafe AI key, or an
   // OpenCode Console key when JEV_ENDPOINT is OpenCode's inference gateway. Treat as a secret.
   TYPESAFE_API_KEY: optional(z.string().min(1)),
   JEV_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://api.typesafe.ai/v1/systemone')),
   JEV_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jev-latest')),
   JEV_SCREEN_MODE: z.preprocess(v => v === '' ? undefined : v, z.enum(['reject', 'flag']).default('reject')),
-  JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.7)),
+  // Outbound policy: switch the order without moving either model's calibrated cutoff.
+  JEV_SCREEN_PRIMARY: z.preprocess(v => v === '' ? undefined : v, z.enum(['jevf', 'jev']).default('jevf')),
+  JEVF_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.50)),
+  JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.70)),
   // Screened-text limits in UTF-8 bytes (src/screen.ts): a message is screened on its own, a campaign once for all its
   // recipients, so a campaign may be longer. Each 8,000-byte classifier request reads at least 4.7 KB of new text
   // (about 7 KB for a message with few link hosts): src/screen.ts chunksFor.
   JEV_MESSAGE_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.messageBytes)),
   JEV_CAMPAIGN_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.campaignBytes)),
-  // Second classifier for shadow comparisons and for failover when the primary fails (401/402/403/429/451/5xx/timeouts).
+  // JevF gates outbound mail by default when its key is installed.
   JEVF_API_KEY: optional(z.string().min(1)),
   JEVF_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://jevf-inference.opencode.ai/v1/systemone')),
   JEVF_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jevf')),
@@ -294,7 +304,11 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const supportAddressIds = list(v.NIGHTMAIL_SUPPORT_ADDRESS_IDS ?? '');
   if (supportAddressIds.some(id => !/^mbx_[0-9a-f]{32}$/.test(id))) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_ADDRESS_IDS to inbound address IDs (mbx_…) separated by commas.');
   const url = new URL(v.PUBLIC_URL);
-  const jevf = v.TYPESAFE_API_KEY && v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined;
+  const jevf = v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, threshold: v.JEVF_SCREEN_THRESHOLD, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined;
+  const screen: Config['screen'] = v.TYPESAFE_API_KEY ? {
+    primary: jevf ? v.JEV_SCREEN_PRIMARY : 'jev', mode: v.JEV_SCREEN_MODE,
+    jev: { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, threshold: v.JEV_SCREEN_THRESHOLD }, jevf,
+  } : undefined;
   const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
@@ -320,6 +334,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.NIGHTMAIL_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
     hostedScreen: v.MULTI_TENANT==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true',
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
+    hygieneLists: v.NIGHTMAIL_HYGIENE_LISTS === 'on',
+    hygieneDnsUrl: v.NIGHTMAIL_HYGIENE_DNS === 'off' ? null : v.NIGHTMAIL_HYGIENE_DNS ?? (v.MULTI_TENANT === 'true' ? 'https://cloudflare-dns.com/dns-query' : null),
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
@@ -334,7 +350,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: EVALUATION.limit },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
-    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
+    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true' && v.DOMAIN_NS_CHECK === 'on', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
     analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
@@ -347,8 +363,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
-    screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD, ...(jevf && { failover: jevf }) } : undefined,
-    shadow: jevf, // Workers without a comparison queue disable only this handoff, not the failover gate.
+    screen,
+    shadow: screen?.primary === 'jev' ? jevf : undefined,
     screenLimits: { messageBytes: v.JEV_MESSAGE_LIMIT_BYTES, campaignBytes: v.JEV_CAMPAIGN_LIMIT_BYTES },
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },

@@ -2,7 +2,7 @@ import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type O
 
 // Nightmail vs Bird (/compare/bird): a comparison's whole entry (prices.ts, Entry). Every figure was read on Bird's own
 // pages on CHECKED. Bird sells SparkPost's email: sparkpost.com/pricing redirects to bird.com/pricing/email?sp=true.
-const CHECKED = '2026-11-24'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const BIRD = 'https://bird.com/pricing/email'
@@ -27,6 +27,7 @@ const sizes: Entry['sizes'] = [50_000, 100_000, 1_000_000]
 export const bird: Entry = {
   slug: 'bird',
   vendor: 'Bird',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,

@@ -2,12 +2,12 @@ import { setTimeout } from 'node:timers/promises';
 import { Client } from 'pg';
 import { nodeLogFacetLane, nodeRuntime, postgresConnection } from './adapters/node.js';
 import { drain,drainJobs } from './dispatch.js';
-import type { GateState } from './dispatcher.js';
+import { refreshPoolQuotas, type GateState } from './dispatcher.js';
 import { jobConcurrency } from './jobs.js';
 import { hourlyUpkeep, retentionTick } from './maintenance.js';
 import { reconcileSharedConnections } from './provider-connections.js';
 import { publicStatsTick } from './public-stats.js';
-import { foldSendingTallies } from './sending-tallies.js';
+import { auditSendingOutcomePage, foldSendingTallies } from './sending-tallies.js';
 import { healthTick } from './health.js';
 import { flushCounters } from './health-counters.js';
 import { standingTick } from './standing.js';
@@ -82,7 +82,7 @@ try {
         // Don't stall mail dispatch while waiting for a platform pool to come online.
         if (runtime.config.multiTenant && !sharedSetup && Date.now() - lastSharedSetup >= 60_000) {
           lastSharedSetup = Date.now();
-          sharedSetup = reconcileSharedConnections(runtime).catch(() => log('warn', { code: 'SHARED_SETUP_FAILED' })).finally(() => { sharedSetup = undefined; });
+          sharedSetup = reconcileSharedConnections(runtime).catch(() => log('warn', { code: 'SHARED_SETUP_FAILED' })).then(() => refreshPoolQuotas(runtime)).finally(() => { sharedSetup = undefined; });
         }
         // Health (src/health.ts): what is falling behind, once a minute, in the background. There are no Cloudflare
         // queues here: the jobs table is the queue. This process's own counts (its jobs' database errors) go first.
@@ -93,7 +93,7 @@ try {
         // GET /v1/public/stats serves only what this writes. In the background, so dispatch never waits on it.
         if (!publicStats && Date.now() - lastPublicStats >= 60_000) {
           lastPublicStats = Date.now();
-          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).then(() => signupsTick(runtime)).finally(() => { publicStats = undefined; });
+          publicStats = foldSendingTallies(runtime).catch(() => log('warn', { code: 'SENDING_TALLIES_FOLD_FAILED' })).then(() => publicStatsTick(runtime)).then(() => standingTick(runtime)).then(() => signupsTick(runtime)).then(async () => { await auditSendingOutcomePage(runtime); }).finally(() => { publicStats = undefined; });
         }
         // Keep the display scanner scheduled without reserving a dispatch lane or using a request to seed it.
         if (!display && Date.now() - lastDisplay >= 60_000) {

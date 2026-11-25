@@ -9,13 +9,15 @@ import type { Database } from './core.js';
 // recycled (20 seconds of counts at most) is lost, which a rollup can afford.
 //
 // Kinds: 'route' (method and route template, with a latency histogram), 'read' (a workspace's GET and HEAD requests,
-// to tell one client's storm), 'code' (the error code of a 5xx), 'sqlstate' (database errors, from requests and jobs)
-// and 'error' (error-level log lines by code, outside request lines: src/log.ts onErrorLine). Keys are route
+// to tell one client's storm), 'code' (the error code of a 5xx), 'status' (requests except operator board polls by status class,
+// with a latency histogram: Glass's API figures), 'sqlstate' (database errors, from requests and jobs) and 'error'
+// (error-level log lines by code, outside request lines: src/log.ts onErrorLine). Keys are route
 // templates, workspace IDs and codes: never a path, an address or anything a request carried.
 
 /** Upper bounds of the latency buckets in ms; the last bucket is everything slower. */
 export const LATENCY_BUCKETS = [5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000, REQUESTS.verySlowMs] as const;
 const FLUSH_MS = 20_000, KEYS = 500;
+const OPERATOR_POLLS = new Set(['/v1/operator/glass', '/v1/operator/glass/activity', '/v1/operator/health']);
 /** What every health write runs under, transaction-local: a second for a lock, three for the statement. Then it is dropped. */
 export const WRITE_LIMITS = sql`SELECT set_config('lock_timeout','1000',true),set_config('statement_timeout','3000',true)`;
 type Counter = { n: number; errors: number; ms: number; slowest: number; hist?: number[] };
@@ -37,6 +39,7 @@ function add(kind: string, key: string, errors = 0, ms?: number) {
 export function countRequest(r: { route: string; method: string; status: number; durationMs: number; workspace?: string; code?: string; databaseCode?: string }) {
   const failed = r.status >= 500 ? 1 : 0;
   add('route', `${r.method} ${r.route}`, failed, r.durationMs);
+  if (!OPERATOR_POLLS.has(r.route)) add('status', `${Math.min(5, Math.max(1, Math.floor(r.status / 100)))}xx`, failed, r.durationMs);
   if (r.workspace && (r.method === 'GET' || r.method === 'HEAD')) add('read', r.workspace);
   if (failed) add('code', r.code ?? 'UNKNOWN_ERROR');
   if (r.databaseCode) add('sqlstate', r.databaseCode);

@@ -24,6 +24,8 @@ BANE_ROOT_SECRET=$(openssl rand -hex 36); export BANE_ROOT_SECRET
 export ENABLE_LIVE_SES=false AWS_EC2_METADATA_DISABLED=true WEBHOOK_ALLOWED_HOSTS=example.com
 export S3_ACCESS_KEY_ID=S3RVER S3_SECRET_ACCESS_KEY=S3RVER S3_BUCKET=fixture
 export SIMULATED_SES_LATENCY_MS=0 SIMULATED_SES_DELIVERY_DELAY_MS=0
+# List hygiene never fetches its lists or resolves domains here: tests mock both where they mean to.
+export NIGHTMAIL_HYGIENE_LISTS=off NIGHTMAIL_HYGIENE_DNS=off
 # Migrate once; isolate global auth fixtures, row locks, storage and prototype
 # mocks between the two processes. Never parallelize tests inside one database.
 node --import tsx src/migrate.ts
@@ -51,13 +53,15 @@ shard() (
   if [[ $1 == integration ]]; then
     node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
   fi
-  # Start as soon as all fixtures are alive and the HTTP server accepts requests.
+  # A live issuer PID doesn't mean its TLS listener can serve the first OAuth grant yet.
+  issuer_ready() { curl -fs --max-time 1 --cacert "$NODE_EXTRA_CA_CERTS" "$ACCOUNT_ISSUER/jwks" | jq -e '.keys | any(.kid == "fixture" and .alg == "ES256")' >/dev/null; }
   for ((i=0; i<100; i++)); do
     kill -0 "${pids[@]}"
-    if curl -fs --max-time 1 "$PUBLIC_URL/health" >/dev/null; then break; fi
+    if curl -fs --max-time 1 "$PUBLIC_URL/health" >/dev/null && issuer_ready; then break; fi
     sleep .1
   done
   curl -fsS --max-time 1 "$PUBLIC_URL/health" >/dev/null
+  issuer_ready || { echo "${1}: fixture issuer did not serve its signing key" >&2; exit 1; }
   # /health only serves the base app. Wait for this shard's lazy auth router
   # before starting the tests: the first authenticated /v1/me in the shared
   # before hook otherwise spends its 5s request budget importing the router.

@@ -333,13 +333,43 @@ async function ownVerifiedDomain(runtime: Runtime, tx: DbExecutor, w: string, ad
     : await tx.execute(sql`SELECT FROM operation_domains WHERE workspace_id=${w} AND (name=${host} OR right(${host},length(name)+1)='.'||name) LIMIT 1`);
   return !!found.rowCount;
 }
-async function senderBox(tx: DbExecutor, w: string, from?: string) {
+/**
+ * Where a forward's confirmation request could come from when the workspace has no permanent address yet: forward@ (or
+ * forward-2@…, the first free) at the receiving host of its oldest verified domain of its own, else of its built-in
+ * domain. Null when it has no verified domain at all.
+ */
+async function suggestedSender(tx: DbExecutor, w: string, multiTenant: boolean) {
+  // Self-hosted, an address needs a domain that receives: the oldest one that does.
+  const { rows: [domain] } = !multiTenant ? await tx.execute<{ host: string }>(sql`SELECT name AS host FROM mailbox_domains WHERE workspace_id=${w} AND parent_id IS NULL AND status IN ('provisioning','waiting_for_mx','active') ORDER BY created_at LIMIT 1`)
+    : await tx.execute<{ host: string }>(sql`SELECT coalesce((SELECT coalesce(md.receiving_host,md.name) FROM mailbox_domains md WHERE md.workspace_id=d.workspace_id AND md.domain_id=d.id
+      AND md.status NOT IN ('disabled','disabling') ORDER BY md.parent_id NULLS FIRST,md.created_at LIMIT 1),d.name) AS host
+    FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
+    WHERE d.workspace_id=${w} AND ${claimSends()} ORDER BY coalesce(dc.identity ? 'builtin',false),d.created_at LIMIT 1`);
+  if (!domain) return null;
+  const taken = new Set((await tx.execute<{ address: string }>(sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${w} AND address LIKE ${'forward%@' + domain.host}`)).rows.map(r => r.address));
+  for (let n = 1; ; n++) { const address = `${n === 1 ? 'forward' : `forward-${n}`}@${domain.host}`; if (!taken.has(address)) return address; }
+}
+/**
+ * The permanent address a forward's confirmation request is sent from: `from`, else the workspace's oldest. An agent
+ * inbox only replies and an expiring address may be gone, so neither sends it. Refused, the answer names the address to
+ * create and the exact calls (error.details[0].suggestedFrom; the dashboard offers to create it in one click).
+ */
+async function senderBox(tx: DbExecutor, w: string, from?: string, multiTenant = true) {
   const [box] = from
     ? await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`(${mailboxes.id}=${from} OR ${mailboxes.id}=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address=${from.toLowerCase()}))`))
     : await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`${mailboxes.kind}<>'inbox' AND ${mailboxes.expiresAt} IS NULL`)).orderBy(mailboxes.id).limit(1);
-  if (!box || box.kind === 'inbox' || box.expiresAt)
-    throw new ApiError(422, 'FORWARD_SENDER_REQUIRED', from ? 'Choose a permanent receiving address (not an expiring inbox) to send the confirmation request.' : 'Create a permanent receiving address first; the confirmation request is sent from it.', 'from');
-  return box;
+  if (box && box.kind !== 'inbox' && !box.expiresAt) return box;
+  const suggested = await suggestedSender(tx, w, multiTenant);
+  const why = !from ? 'Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and this workspace has none yet.'
+    : !box ? `${from} isn’t one of this workspace’s addresses.`
+    : box.kind === 'inbox' ? `${box.address} is an agent inbox, which only replies, so it can’t send the confirmation request.`
+    : `${box.address} expires, so it can’t send the confirmation request.`;
+  const fix = suggested
+    ? ` Create one with POST /v1/inbound/addresses and {"address":"${suggested}"}, then send this again with "from":"${suggested}".`
+    : ' Add and verify a domain with POST /v1/domains, create a permanent address on it with POST /v1/inbound/addresses, then send this again with its address as "from".';
+  const error = new ApiError(422, 'FORWARD_SENDER_REQUIRED', why + fix, 'from');
+  if (suggested) error.details = [{ suggestedFrom: suggested }];
+  throw error;
 }
 // Forwarding's links are on the receiving address's link host (src/link-domains.ts), as an unsubscribe link is.
 const forwardBase = (origin: string) => origin.replace(/\/$/, '') + '/v1/forwarding';
@@ -348,7 +378,7 @@ const forwardBase = (origin: string) => origin.replace(/\/$/, '') + '/v1/forward
  * workspace's sent-mail views show it with the link withheld, because the link alone confirms.
  */
 async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId: string, address: string, from?: string) {
-  const box = await senderBox(tx, w, from), origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
+  const box = await senderBox(tx, w, from, !!c.env.config.multiTenant), origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
   const addressHash = await digest(address);
   const declined = (await tx.execute<{ until: string }>(sql`SELECT (declined_at+interval '30 days')::text AS until FROM mail_forward_declines WHERE workspace_id=${w} AND address_hash=${addressHash} AND declined_at>now()-interval '30 days'`)).rows[0];
   if (declined) throw new ApiError(409, 'FORWARD_DECLINED', `${address} declined forwarding from this workspace. You can ask again after ${new Date(declined.until).toISOString()}.`, 'address');

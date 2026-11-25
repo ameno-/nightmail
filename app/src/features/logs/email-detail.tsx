@@ -3,9 +3,10 @@ import { Link, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Email, EmailEvent } from '../../data/types'
+import { pendingEmailStatuses as pendingStatuses, type Email, type EmailEvent } from '../../data/types'
 import { Alert, Button, CopyButton, elapsed, ErrorState, FactsRow, Icon, Identifier, PageHeader, Sheet, Tooltip, Waterfall, type Fact, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
+import { mentionsRemoteImage } from '../../lib/html-scan'
 import { Checks, ChecksChip, ChecksToggle, EmailViews, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, Sender } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
@@ -25,8 +26,6 @@ import { errorText } from '../../data/types'
 
 // A scheduled email reads queued, with scheduled true, until it goes; the page calls it scheduled.
 const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
-// Statuses that can still change without user action; terminal emails are not polled.
-const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
   // Moving to another message of its thread keeps this one up until that one arrives (thread.tsx reads it ahead).
@@ -55,8 +54,15 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const text = email.text ?? ''
   const source = useMemo<InsightSource>(() => ({ kind: 'email', id: email.id, html: hasHtml }), [email.id, hasHtml])
   const check = useSendability(source)
-  // The email as its recipients saw it: its own fonts, styles and image sizes, and its remote images (tracking pixels removed).
-  const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: true, respectStyles: true, asSent: true, dark: true })
+  // The email as its recipients saw it: its own fonts, styles and image sizes. Its remote images (tracking pixels removed)
+  // wait for Load images, as received mail's do (ReceivedEmailPreview): a reply or forward can quote an outside
+  // sender's images, and loading them would tell that sender when, and from which address, it was opened.
+  const [imagesFor, setImagesFor] = useState<string | null>(null)
+  const remote = useMemo(() => mentionsRemoteImage(email.html), [email.html]), loadImages = imagesFor === email.html
+  const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: loadImages, respectStyles: true, asSent: true, dark: true })
+  const images = remote && !loadImages && <Tooltip content="Remote images are hidden so whoever wrote them can’t tell when this email is opened.">
+    <Button variant="ghost" size="sm" onClick={() => setImagesFor(email.html)}>Load images</Button>
+  </Tooltip>
   // A poll that brings new events starts the line over from them.
   // A phone says why under its status line; its Details sheet then adds only the receiving server's reply.
   const compact = mode === 'stack'
@@ -74,7 +80,7 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
         {thread && mode === 'panel' && <ThreadRows items={items} part="before" open={open} />}
         <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, dark: original.darkDoc === undefined ? undefined : original.complete ? original.darkDoc : null, error: original.error, html: email.html, text }}
           fill={!compact} wide={!compact} compact={compact}
-          toolbarEnd={mode === 'panel' && <ChecksToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />} />
+          toolbarEnd={<>{images}{mode === 'panel' && <ChecksToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />}</>} />
         {thread && mode === 'panel' && <ThreadRows items={items} part="after" open={open} />}
       </section>
       {mode === 'column' && <aside className="email-detail__side ui-scroll-fade" aria-label="Delivery and checks">

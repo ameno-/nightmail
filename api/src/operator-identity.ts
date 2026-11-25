@@ -4,7 +4,7 @@ import type { DbExecutor } from './core.js';
 // The one link between a Nightmail platform operator role and a user identity. The role is a row in platform_operators,
 // keyed by platform_operators.user_id, which references nightmail_users(id) (migration 278; it referenced auth_user before
 // #89). Every lookup and grant goes through this file: the operator API (operatorActor), GET /v1/me
-// (sessionMemberships) and scripts/set-operator.ts. A grant names the person by issuer subject, never by address.
+// (sessionMembershipsQuery) and scripts/set-operator.ts. A grant names the person by issuer subject, never by address.
 
 export type OperatorRole = 'operator' | 'operator:read';
 
@@ -15,11 +15,13 @@ export const operatorRoleOf = (userId: string | SQL) => sql`(SELECT role FROM pl
  * Whether this user may use staff UI notes (src/ui-notes.ts): the operator role and an identity whose issuer subject
  * is in UI_NOTES_SUBJECTS. False, without a query, when the list is empty (the feature is off).
  */
-export async function uiNotesAllowed(db: DbExecutor, subjects: { issuer: string; subject: string }[] | undefined, userId: string) {
-  if (!subjects?.length) return false;
+export function uiNotesAllowedQuery(subjects: { issuer: string; subject: string }[], userId: string) {
   const pairs = sql.join(subjects.map(s => sql`(${s.issuer}, ${s.subject})`), sql`, `);
-  return (await db.execute<{ ok: boolean }>(sql`SELECT EXISTS (SELECT FROM nightmail_oidc_identities i JOIN platform_operators p ON p.user_id = i.user_id AND p.role = 'operator'
-    WHERE i.user_id = ${userId} AND (i.issuer, i.subject) IN (${pairs})) AS ok`)).rows[0]?.ok === true;
+  return sql`EXISTS (SELECT FROM nightmail_oidc_identities i JOIN platform_operators p ON p.user_id = i.user_id AND p.role = 'operator'
+    WHERE i.user_id = ${userId} AND (i.issuer, i.subject) IN (${pairs}))`;
+}
+export async function uiNotesAllowed(db: DbExecutor, subjects: { issuer: string; subject: string }[] | undefined, userId: string) {
+  return !!subjects?.length && (await db.execute<{ ok: boolean }>(sql`SELECT ${uiNotesAllowedQuery(subjects,userId)} AS ok`)).rows[0]?.ok === true;
 }
 
 /** The user's platform role, or null. One indexed read. */

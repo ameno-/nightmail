@@ -498,7 +498,10 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
 }
 
 function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign; open: boolean; onOpenChange: (value: boolean) => void }) {
-  const [to, setTo] = useState('')
+  // Hosted sends a test only to the workspace's own addresses (testCampaign): it starts at the signed-in member's.
+  const own = useSession()?.identity?.email ?? ''
+  const { multiTenant } = useWorkspaceAccess()
+  const [to, setTo] = useState(own)
   const [error, setError] = useState('')
   const guard = useRef(false)
   // Placeholders without a fallback need a sample value, or the test can't render.
@@ -527,7 +530,7 @@ function TestEmailDialog({ campaign, open, onOpenChange }: { campaign: Campaign;
       <p className="campaign-note" data-tone="success" role="status"><span>Test sent to <PrivateAddress value={sent.to} />.{sent.id && <> <Link to={`/logs/${encodeURIComponent(sent.id)}`}>View in Logs</Link></>}</span></p>
       <div className="cluster campaign-dialog-actions"><Button variant="secondary" onClick={() => { setSent(null); mutation.reset() }}>Send another</Button><Button variant="primary" onClick={() => onOpenChange(false)}>Done</Button></div>
     </div> : <form className="stack" onSubmit={submit} noValidate>
-      <Field label="Recipient email" htmlFor="campaign-test-recipient"><Input id="campaign-test-recipient" type="email" autoComplete="email" autoFocus value={to} onChange={event => { setTo(event.target.value); setError('') }} disabled={mutation.isPending} /></Field>
+      <Field label="Recipient email" htmlFor="campaign-test-recipient" hint={multiTenant ? 'You, a teammate, or an address at one of your verified domains.' : undefined}><Input id="campaign-test-recipient" type="email" autoComplete="email" autoFocus value={to} onChange={event => { setTo(event.target.value); setError('') }} disabled={mutation.isPending} /></Field>
       {samples.map(key => <Field key={key} label={`Sample {{${key}}}`} htmlFor={`campaign-test-${key}`}><Input id={`campaign-test-${key}`} value={data[key] ?? ''} onChange={event => { setData({ ...data, [key]: event.target.value }); setError('') }} disabled={mutation.isPending} /></Field>)}
       {error && <p className="campaign-note" data-tone="danger" role="alert">{error}</p>}
       <div className="cluster campaign-dialog-actions"><Button variant="secondary" type="button" disabled={mutation.isPending} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" loading={mutation.isPending}>Send test</Button></div>

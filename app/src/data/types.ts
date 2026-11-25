@@ -1,3 +1,4 @@
+import type { WorkspaceFocus } from '../../../api/src/workspace-focus.js'
 import { productName } from '../../../api/src/brand.js'
 import type { Grade, Step } from '../../../api/src/standing-model.js'
 import type { WebhookFields } from '../features/settings/webhook-patch.js'
@@ -6,6 +7,8 @@ export type ISODate = string
 export type Stream = 'transactional' | 'marketing'
 export type AutoValidationMode = 'inherit' | 'off' | 'managed' | 'medium' | 'high' | 'unknown'
 export type EmailStatus = 'queued' | 'attempting' | 'accepted' | 'sent' | 'delivered' | 'bounced' | 'complained' | 'complaint' | 'deferred' | 'rejected' | 'rendering_failed' | 'delayed' | 'suppressed' | 'canceled' | 'acceptance_unknown' | 'simulated'
+// Statuses a sent email can still leave without anyone acting on it: a page showing one reads it again until it settles.
+export const pendingEmailStatuses: readonly string[] = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed'] satisfies EmailStatus[]
 export type ContactStatus = 'unknown' | 'subscribed' | 'unsubscribed' | 'suppressed'
 // The API's campaign states.
 export type CampaignStatus = 'draft' | 'preparing' | 'scheduled' | 'sending' | 'paused' | 'done' | 'failed' | 'canceled'
@@ -47,7 +50,7 @@ interface SesConfigurationSet { name: string; exists: boolean | null; owned: boo
 export interface Workspace { id: string; name: string; postalAddress: string | null; accountId?: string; role: string; members?: { id: string; name: string; email: string; role: string }[] }
 /** GET /v1/settings/workspace: the name and the postal address every campaign footer shows (null until set). */
 // requiredNotices: an operator let this workspace's campaigns be required notices (Campaign.requiredNotice).
-export interface WorkspaceSettings { name: string; postalAddress: string | null; requiredNotices?: boolean }
+export interface WorkspaceSettings { name: string; postalAddress: string | null; requiredNotices?: boolean; focus?: WorkspaceFocus[] | null }
 /** What a provider event recorded: a bounce's SES type and subtype, a delay's type and when SES stops retrying, a complaint's feedback type, a click's link, and whether SES thought an open or click came from a bot. */
 export interface EmailEventDetail { bounceType?: string; bounceSubType?: string; delayType?: string; retryUntil?: ISODate; feedbackType?: string; link?: string; bot?: boolean }
 /** diagnostic: a bounce's or a delay's reply from the receiving server, as SES reported it. */
@@ -84,7 +87,7 @@ export interface SenderScore { state: 'warmup' | 'graded'; emails: { firstEmails
 export interface StandingReleaseInput { checklist: { bouncedRemoved: true; listSourceConfirmed: true } }
 export interface Overview { periodStart: ISODate; periodEnd: ISODate; sent: number; delivered: number; bounced: number; complaints: number; deferred: number; previousSent: number; points: ChartPoint[]; recentCampaigns?: Campaign[] }
 /** Why list hygiene flags an address (API ContactRisk): campaigns skip the contact unless it is allowed. */
-export type RiskReason = 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead'
+export type RiskReason = 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain'
 export interface ContactRisk { reason: RiskReason; /** For typo_domain: the address it most likely meant. */ suggestion: string | null; allowed: boolean }
 export interface RiskBreakdown { total: number; byReason: Record<RiskReason, number> }
 export interface Contact { properties?: Record<string, string | number | boolean | null>; id: string; email: string; name: string; country: string; status: ContactStatus; listIds: string[]; createdAt: ISODate; lastOpenedAt: ISODate | null; suppressionReason?: string; risk: ContactRisk | null }
@@ -158,7 +161,7 @@ export type MailPermission = 'read' | 'send' | 'modify' | 'create'
 /** One API key type. workspace: permissions and domains. addresses: only mail at chosen receiving addresses (null: every
  *  address, including new ones; [] with create: only the inboxes it creates). inbox: one agent inbox. */
 export interface ApiKeyAccess { type: 'workspace' | 'addresses' | 'inbox'; addressIds: string[] | null; inboxId: string | null; mail: MailPermission[] }
-export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null; lastChange: Pick<AuditEntry, 'at' | 'action' | 'actor'> | null }
+export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null; lastChange: Pick<AuditEntry, 'at' | 'action' | 'actor'> | null; agent: { client: string | null } | null }
 /** The MCP approvals a key or webhook is tied to: it works only while every one of them is active (active), until the earliest end (endsAt). */
 export interface ApprovalTie { active: boolean; endsAt: ISODate; owners: { id: string; endsAt: ISODate; active: boolean }[] }
 export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: MailPermission[] }
@@ -190,13 +193,14 @@ export interface DisconnectSummary {
   stack: { name: string; consoleUrl: string } | null
 }
 /** What public DNS showed for a pending record: when Check now ran (verifyDomain), or at the API's last background check; null when DNS didn't answer. */
-export interface PublicDns { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string }
+/** wildcard: a wildcard record (*.domain) answers this missing CNAME's name with an address. */
+export interface PublicDns { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string; wildcard?: string; /** A registrar's parking or forwarding record answers it (Porkbun's pixie.porkbun.com). */ parking?: { owner: string; target: string } }
 export interface DnsRecord { id: string; type: 'TXT' | 'CNAME' | 'MX'; name: string; value: string; status: 'verified' | 'pending' | 'not_checked'; purpose?: DnsRecordPurpose; note?: string; publicDns?: PublicDns | null }
 // Why receiving at `host` needs attention, from the API's DNS checks. Blocking issues can't work until DNS or the choice changes.
 export interface ReceivingIssue { code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale'; host: string; blocking: boolean; message: string; provider?: string | null; target?: string | null; suggestion?: string | null }
 /** Hosted: the workspace's built-in domain (connection.builtinDomain in GET /v1/me): who it sends to, its caps, and whether it sends now. */
-export interface BuiltinDomain { id: string | null; name: string; sending: 'ready' | 'pending' | 'closed' | 'off'; /** Every built-in domain's sending is paused (the circuit breaker). */ paused?: true; scope: 'anyone' | 'members'; perDay: number; perMinute: number }
-export interface Domain { /** The workspace's built-in domain: no DNS of its own, can't be deleted. */ builtIn?: boolean; dnsHost?: { name: string; zone: string; url: string | null } | null; receivingIssue?: ReceivingIssue | null; releasesAt?: string | null; dmarc?: Dmarc | null; dnsStatus?: 'available' | 'unavailable'; dnsUnavailableReason?: string | null; id: string; regionId: RegionId; name: string; status: 'verified' | 'pending' | 'issue'; verified?: boolean; dkimStatus?: 'verified' | 'pending' | 'failed'; mailFromDomain?: string | null; mailFromStatus: 'verified' | 'pending' | 'not_configured' | 'failed'; sending?: 'pending' | 'verified'; receiving?: 'pending' | 'verified'; records: DnsRecord[]; createdAt: ISODate }
+export interface BuiltinDomain { id: string | null; name: string; sending: 'ready' | 'pending' | 'closed' | 'off'; /** Every built-in domain's sending is paused (the circuit breaker). */ paused?: true; scope: 'anyone' | 'members'; perDay: number; perMinute: number; /** Recipients in the rolling 24 hours, as perDay counts them (older APIs: absent). */ used?: number }
+export interface Domain { /** The workspace's built-in domain: no DNS of its own, can't be deleted. */ builtIn?: boolean; /** The built-in domain's limits (GET /v1/domains/{id}). */ limits?: { scope: 'anyone' | 'members'; perDay: number; perMinute: number; unsupported: string[]; summary: string }; /** No nameservers serve the domain (unregistered or mistyped): set when it is added, by Check now and by the background check. */ dnsIssue?: { code: 'no_dns'; message: string } | null; dnsHost?: { name: string; zone: string; url: string | null } | null; receivingIssue?: ReceivingIssue | null; releasesAt?: string | null; dmarc?: Dmarc | null; dnsStatus?: 'available' | 'unavailable'; dnsUnavailableReason?: string | null; id: string; regionId: RegionId; name: string; status: 'verified' | 'pending' | 'issue'; verified?: boolean; dkimStatus?: 'verified' | 'pending' | 'failed'; mailFromDomain?: string | null; mailFromStatus: 'verified' | 'pending' | 'not_configured' | 'failed'; sending?: 'pending' | 'verified'; receiving?: 'pending' | 'verified'; records: DnsRecord[]; createdAt: ISODate }
 export type MailboxDomainStatus = 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed'
 export interface MailboxDomain {
   id: string; name: string; region: RegionId; status: MailboxDomainStatus; catchAll: 'create_address' | 'store'
@@ -223,11 +227,13 @@ export interface InboxInput { type: Inbox['type']; domain?: string; name?: strin
 export interface CreatedInbox extends Inbox { credential?: { id: string; secret: string; permissions: string[]; expiresAt: ISODate } }
 export interface InboxMessage {
   id: string; threadId: string; cursor: string; from: MailAddress; to: MailAddress[]; toCount?: number; subject: string; snippet: string; receivedAt: ISODate; read: boolean; junk: boolean
+  /** When Nightmail stored it, and how long after its receipt reached it (older APIs: absent). */ storedAt?: ISODate; processingMs?: number | null
   held: 'quota' | 'expired' | null; attachmentCount: number; auth: { spf?: string; dkim?: string; dmarc?: string }; simulated: boolean; hiddenContent: boolean
   extract: { codes: string[]; links: { text: string; href: string; mismatch: boolean }[] }
 }
 export interface InboxMessageDetail extends InboxMessage { text: string; replyText: string; html: string | null; attachments: { id: string; filename: string; contentType: string; size: number; url: string | null; expiresAt: ISODate | null }[] }
-export interface InboxMessagePage { data: InboxMessage[]; cursor: string; hasMore: boolean }
+/** servedAt: when the page was read, on storedAt's clock (older APIs: absent). */
+export interface InboxMessagePage { data: InboxMessage[]; cursor: string; hasMore: boolean; servedAt?: ISODate }
 // Inbound is thread-first: a conversation can be visible through several receiving addresses.
 export type InboundAddress = Mailbox
 export interface InboundAddressInput { address: string; displayName?: string | null; aliases?: string[]; publicAddress?: string; ttlSeconds?: number }
@@ -375,7 +381,7 @@ export interface Api {
   audienceQuery: { plan(statement: string): Promise<AudiencePlan>; apply(input: { planId: string; confirmResubscribe?: boolean; evidence?: string }): Promise<{ affected: number }> }
   webhookDeliveries: (id: string, cursor?: string) => Promise<{items: WebhookDelivery[]; nextCursor: string | null}>
   regions: { list(signal?: AbortSignal): Promise<RegionCatalog>; configure(region: string, input: RegionConfigureInput, signal?: AbortSignal): Promise<RegionCatalog>; discover(region: string, options?: { refresh?: boolean }, signal?: AbortSignal): Promise<SesDiscovery>; provision(region: string, signal?: AbortSignal): Promise<RegionProvisionReceipt>; updateAutoValidation(region: string, stream: Stream, mode: Exclude<AutoValidationMode, 'inherit' | 'unknown'>, signal?: AbortSignal): Promise<{stream: Stream; mode: AutoValidationMode}> }
-  workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name?: string; postalAddress?: string | null }, signal?: AbortSignal): Promise<Workspace>; settings(signal?: AbortSignal): Promise<WorkspaceSettings>; updateSettings(input: { postalAddress: string | null }, signal?: AbortSignal): Promise<WorkspaceSettings> }
+  workspace: { get(signal?: AbortSignal): Promise<Workspace>; update(input: { name?: string; postalAddress?: string | null }, signal?: AbortSignal): Promise<Workspace>; settings(signal?: AbortSignal): Promise<WorkspaceSettings>; updateSettings(input: { postalAddress?: string | null; focus?: WorkspaceFocus[] | null }, signal?: AbortSignal): Promise<WorkspaceSettings> }
   overview: { get(input: { regionId: string; range: TimeRange; stream?: Stream }, signal?: AbortSignal): Promise<Overview>; setup(signal?: AbortSignal): Promise<OverviewSetup> }
   senderScore: { get(signal?: AbortSignal): Promise<SenderScore>; release(input: StandingReleaseInput, signal?: AbortSignal): Promise<SenderScore> }
   emails: { list(input: PageRequest, signal?: AbortSignal): Promise<PageResult<Email>>; get(id: string, signal?: AbortSignal): Promise<Email>; cancel(id: string, signal?: AbortSignal): Promise<Email>; reschedule(id: string, scheduledAt: ISODate, signal?: AbortSignal): Promise<Email>; check(input: EmailCheckInput, signal?: AbortSignal): Promise<SendabilityReport>; preview(input: EmailPreviewRequest, signal?: AbortSignal): Promise<ClientPreview[]> }
@@ -444,12 +450,16 @@ export interface Api {
 }
 
 export interface SendingLimit { cap: number | null; used: number; resetAt: string | null; nextCap: number | null; nextCapAt: string | null }
-export interface Identity { /** The workspace's newsletters, oldest first, at most 4: the sidebar names up to three. */ newsletters?: { id: string; name: string }[] | null; id: string; workspaceId: string; /** The OAuth scopes this installation's MCP server asks for (read, send, manage). */ mcpScopes?: string[]; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { attention?: string | null; sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; sent?: boolean; standing?: { step: StandingStep; marketingHeld: boolean } | null; builtinDomain?: BuiltinDomain | null }) | null; /** Nightmail staff only: the platform operator role, which opens /operator. Null in a session that didn't sign in with Google. */ operator?: 'operator' | 'operator:read' | null; /** Nightmail staff only: an operator role this session can't use until it signs in with Google. */ staffSignIn?: boolean; /** Staff UI notes, for the people the API allows (UI_NOTES_SUBJECTS); false for everyone else. */ uiNotes?: boolean; /** Whether this session can create another workspace: hosted, only staff for now. */ canCreateWorkspace?: boolean; /** Whether this installation records dashboard use (lib/analytics.ts). */ analytics?: boolean; /** Hosted: an operator lets this workspace connect its own AWS account. Otherwise onboarding sets up Hosted mail without asking. */ byo?: boolean; /** Whether this installation shows who else has a campaign open (the Cloudflare deployment's campaign rooms). */ presence?: boolean; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: { enforcement: 'off' | 'shadow' | 'enforce'; /** Anomaly made the workspace free: never charged or paused for the balance. */ free?: boolean; sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' } | null; /** The hosts mail apps connect to; null when this installation has no IMAP/SMTP gateway. */ mailServers?: { imap: string; smtp: string } | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
+/** What the workspace is here for, the first leading (api/src/workspace-focus.ts). */
+export type { WorkspaceFocus }
+/** Each focus's first steps, yes or no (GET /v1/overview/setup). */
+export interface SetupProgress { inbox: boolean; received: boolean; contacts: boolean; campaign: boolean; campaignSent: boolean; newsletter: boolean; readers: boolean; issueSent: boolean }
+export interface Identity { /** GET /v1/me: this workspace's focus; null until chosen, empty when skipped. */ focus?: WorkspaceFocus[] | null; /** GET /v1/me: starting while a workspace made seconds ago still has its Hosted mail written; read /v1/me again. */ hostedSetup?: 'starting' | null; /** The workspace's newsletters, oldest first, at most 4: the sidebar names up to three. */ newsletters?: { id: string; name: string }[] | null; id: string; workspaceId: string; /** The OAuth scopes this installation's MCP server asks for (read, send, manage). */ mcpScopes?: string[]; role?: WorkspaceRole | null; multiTenant?: boolean; workspaces?: WorkspaceMembership[] | null; connection?: (Pick<ProviderConnection, 'kind' | 'region' | 'state' | 'tenant'> & { attention?: string | null; sendingLimit?: SendingLimit | null; domains?: { total: number; verified: number }; sent?: boolean; received?: boolean; standing?: { step: StandingStep; marketingHeld: boolean } | null; builtinDomain?: BuiltinDomain | null }) | null; /** Nightmail staff only: the platform operator role, which opens /operator. Null in a session that didn't sign in with Google. */ operator?: 'operator' | 'operator:read' | null; /** Nightmail staff only: an operator role this session can't use until it signs in with Google. */ staffSignIn?: boolean; /** Staff UI notes, for the people the API allows (UI_NOTES_SUBJECTS); false for everyone else. */ uiNotes?: boolean; /** Whether this session can create another workspace: hosted, only staff for now. */ canCreateWorkspace?: boolean; /** Whether this installation records dashboard use (lib/analytics.ts). */ analytics?: boolean; /** Hosted: an operator lets this workspace connect its own AWS account. Otherwise onboarding sets up Hosted mail without asking. */ byo?: boolean; /** Whether this installation shows who else has a campaign open (the Cloudflare deployment's campaign rooms). */ presence?: boolean; /** Hosted dashboard sessions: an empty balance pausing sending or holding received mail, and auto-recharge. */ billing?: { enforcement: 'off' | 'shadow' | 'enforce'; /** Anomaly made the workspace free: never charged or paused for the balance. */ free?: boolean; sending: 'ok' | 'low' | 'paused'; receiving: 'ok' | 'grace' | 'held'; autoRecharge: 'off' | 'on' | 'pending' | 'failed' | 'capped' } | null; /** The hosts mail apps connect to; null when this installation has no IMAP/SMTP gateway. */ mailServers?: { imap: string; smtp: string } | null; name: string | null; email: string | null; permissions: string[]; domains: string[]; origin: string; host: string }
 
 export type WorkspaceRole = 'owner' | 'admin' | 'member'
 export interface WorkspaceMembership { id: string; name: string; slug: string; role: WorkspaceRole }
 // GET /v1/overview/setup: Overview's setup and next steps in one read. A part is null where its own list would refuse the caller.
-export interface OverviewSetup { domains: Domain[] | null; apiKeys: { active: number } | null; emails: { any: boolean }; webhooks: { total: number } | null; invitations: { pending: number } | null }
+export interface OverviewSetup { domains: Domain[] | null; apiKeys: { active: number } | null; emails: { any: boolean }; webhooks: { total: number } | null; invitations: { pending: number } | null; progress?: SetupProgress | null }
 export interface WorkspaceMember { id: string; userId: string; email: string; name: string; role: WorkspaceRole }
 export type ConnectionKind = 'shared' | 'byo'
 export type ConnectionState = 'awaiting_role' | 'provisioning' | 'ready' | 'failed' | 'scanning' | 'ready_to_import' | 'disconnecting'

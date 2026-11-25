@@ -12,7 +12,7 @@ import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATIO
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { RAMP } from './standing-model.js';
-import { bouncedElsewhere, classifyAddress, contactRisk, noRisks, RiskBreakdown, RiskReason, RISKS, riskCounts, riskSql, skippedRisk, validAddress, type Risk, type RiskCounts } from './list-hygiene.js';
+import { bouncedElsewhere, classifyAddress, contactRisk, domainOf, domainRisks, hygieneLists, noRisks, peekHygieneLists, RiskBreakdown, RiskReason, RISKS, riskCounts, riskFor, skippedRisk, staticRiskSql, validAddress, type HygieneLists, type Risk, type RiskCounts } from './list-hygiene.js';
 
 export const CONTACT_PROPERTIES_MAX_KEYS = 50;
 export const CONTACT_PROPERTIES_MAX_BYTES = 16 * 1024;
@@ -89,6 +89,8 @@ const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), 
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties, risk: RiskReason.optional().describe('What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.') });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), rowsRetained: z.boolean().describe('false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).'), risky: RiskBreakdown.nullable().describe('Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene.'), errorsRetained: z.boolean().describe('false once per-row error details are no longer kept after the retention window (errors is then []).'), ...Dates }).openapi('AudienceImport');
+// How long a preview looks up domains it hasn't checked before (src/list-hygiene.ts domainRisks).
+const IMPORT_DNS_MS = 3_000;
 const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_SAMPLE_CONTACT_IDS = 2000;
 export const IMPORT_PREVIEW_RATE_PER_MINUTE = 40;
 // Measured workerd isolate peaks (idle ~29 MB, 128 MB isolate cap, 64 MiB working budget):
@@ -103,7 +105,9 @@ export const importPreviewReservationBytes = (bytes: number) => Math.min(SEND_LI
 function importNotFound(): never { throw new ApiError(404, 'NOT_FOUND', `Import was not found. A preview that was never committed is removed once the workspace has ${IMPORT_OPEN_PREVIEW_CAP} newer ones (or after 7 days). Preview the file again.`); }
 const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, rowsScrubbedAt: imports.rowsScrubbedAt, errorsScrubbedAt: imports.errorsScrubbedAt, riskSummary: imports.riskSummary, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
 type ImportMeta = { [K in keyof typeof importMetaColumns]: (typeof imports.$inferSelect)[K] };
-const importSummary = ({ rowsScrubbedAt, errorsScrubbedAt, riskSummary, ...meta }: ImportMeta) => ({ ...meta, rowsRetained: rowsScrubbedAt === null, errorsRetained: errorsScrubbedAt === null, risky: riskSummary ?? null });
+// Retained receipts only counted the reasons known when they were written. A receipt from before hygiene still has no summary.
+const receiptRisk = (stored: ImportMeta['riskSummary']) => stored ? { total: stored.total, byReason: { ...noRisks(), ...stored.byReason } } : null;
+const importSummary = ({ rowsScrubbedAt, errorsScrubbedAt, riskSummary, ...meta }: ImportMeta) => ({ ...meta, rowsRetained: rowsScrubbedAt === null, errorsRetained: errorsScrubbedAt === null, risky: receiptRisk(riskSummary) });
 const ImportCommit = z.object({ consent: z.object({ status: z.literal('subscribed'), evidence: z.string().trim().min(1).max(2000).describe('How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.'), policyVersion: z.string().trim().min(1).max(120).optional() }).strict().optional().describe('Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.') }).strict().openapi('CommitContactImportInput');
 const CommittedImport = Import.extend({ subscribed: z.number().int().describe('Contacts this commit marked subscribed; 0 without consent or when the import was already committed.') }).openapi('CommittedContactImport');
 const ImportInput = z.object({ csv: z.string().min(1).max(IMPORT_MAX_BYTES), listId: z.string().min(1).max(120).optional(), mapping: z.object({ email: z.string().min(1).max(200), name: z.string().min(1).max(200).optional(), firstName: z.string().min(1).max(200).optional(), plan: z.string().min(1).max(200).optional(), country: z.string().min(1).max(200).optional() }).strict() }).strict();
@@ -747,7 +751,7 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
   if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
   return runtime.db.transaction(async tx => {
     const identity = { workspaceId };
-    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: riskSql(normalized.data, workspaceId) as unknown as Risk }).onConflictDoNothing();
+    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: staticRiskSql(normalized.data, workspaceId, peekHygieneLists()) as unknown as Risk }).onConflictDoNothing();
     const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, normalized.data))).limit(1).for('update');
     if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
     if (contact.marketingConsent === 'unsubscribed') return { contactId: contact.id, changed: false };
@@ -788,7 +792,7 @@ export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'w
   const { email, name, properties } = parsed.data;
   const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('share');
   if (!list) return 'no_list';
-  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties, risk: riskSql(email, identity.workspaceId) as unknown as Risk }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
+  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties, risk: staticRiskSql(email, identity.workspaceId, await hygieneLists(tx)) as unknown as Risk }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
   const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email))).limit(1).for('update');
   if (!contact) throw new ApiError(500, 'CONTACT_WRITE_FAILED', 'Unable to persist the contact.', undefined, true);
   if (contact.deletedAt) return 'deleted';
@@ -895,11 +899,13 @@ class JsonArrayBuilder {
     return out;
   }
 }
-function previewImport(input: z.infer<typeof ImportInput>) {
+function previewImport(input: z.infer<typeof ImportInput>, hygiene: HygieneLists) {
   const mapping = Object.entries(input.mapping);
   let headerLen = 0, emailIdx = -1, nameIdx: number | undefined;
   let propCols: ReadonlyArray<readonly ['firstName' | 'plan' | 'country', number]> = [];
   const rows = new JsonArrayBuilder(), failures = new JsonArrayBuilder(), seen = new Set<string>(), risky = { total: 0, byReason: noRisks() };
+  // Rows whose domain the DNS check decides (nothing the address says, or a role name a dead domain outranks), by domain.
+  const domains = new Map<string, { plain: number; role: number }>();
   forEachCsvRow(input.csv, (values, rowNum) => {
     if (rowNum === 1) {
       const headers = values.map(h => h.trim());
@@ -950,12 +956,13 @@ function previewImport(input: z.infer<typeof ImportInput>) {
     if (seen.has(email)) { failures.push(JSON.stringify({ row: rowNum, field: 'email', message: 'Duplicate normalized email within this import.' })); return; }
     seen.add(email);
     // The row keeps what its address says (list hygiene): commit stores it on a new contact.
-    const risk = classifyAddress(email)?.risk;
+    const risk = classifyAddress(email, hygiene)?.risk;
     if (risk) { risky.byReason[risk]++; risky.total++; rowJson = `${rowJson.slice(0, -1)},"risk":"${risk}"}`; }
+    if (!risk || risk === 'role') { const d = domainOf(email), n = domains.get(d) ?? { plain: 0, role: 0 }; n[risk ? 'role' : 'plain']++; domains.set(d, n); }
     rows.push(rowJson);
   });
   seen.clear();
-  return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count, risky };
+  return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count, risky, domains };
 }
 export const importStream = { idleMs: MEMORY_LIMITS.streamIdleMs, maxMs: MEMORY_LIMITS.streamMaxMs };
 const importStreamBytes = (chars: number) => Math.min(12 * 1024 * 1024, Math.max(256 * 1024, Math.ceil(chars)));
@@ -968,7 +975,7 @@ function streamImportResponse(c: Ctx, meta: ImportMeta, rowsJson: string, errors
     rowsJson,
     `,"errors":`,
     errorsJson,
-    `,"imported":${meta.imported},"rowsRetained":${meta.rowsScrubbedAt === null},"errorsRetained":${meta.errorsScrubbedAt === null},"risky":${JSON.stringify(meta.riskSummary ?? null)},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
+    `,"imported":${meta.imported},"rowsRetained":${meta.rowsScrubbedAt === null},"errorsRetained":${meta.errorsScrubbedAt === null},"risky":${JSON.stringify(receiptRisk(meta.riskSummary))},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
   ];
   return streamTextPartsResponse(c, parts, status, { lease, idleMs: importStream.idleMs, maxMs: importStream.maxMs });
 }
@@ -990,7 +997,7 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');
     let contact: typeof contacts.$inferSelect | undefined;
     try {
-      [contact] = await c.env.db.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), ...input, risk: riskSql(input.email, identity.workspaceId) as unknown as Risk }).onConflictDoNothing().returning();
+      [contact] = await c.env.db.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), ...input, risk: await riskFor(c.env, input.email, identity.workspaceId) as unknown as Risk }).onConflictDoNothing().returning();
     } catch (err) {
       if (isContactSizeCheckViolation(err)) throw new ApiError(422, 'VALIDATION_FAILED', 'Contact properties must total at most 16 KiB of JSON.', 'properties');
       throw err;
@@ -1134,7 +1141,13 @@ export function registerAudience(app: App) {
     try {
       const built = await runInMemoryScope(reserveBytes, async () => {
         if (c.req.raw.signal?.aborted) return null;
-        const { rowsJson, errorsJson, risky } = previewImport(input);
+        const hygiene = await hygieneLists(c.env.db), { rowsJson, errorsJson, risky, domains } = previewImport(input, hygiene);
+        // The domains' DNS verdicts (cached, else looked up for a few seconds; the rest are queued and the resolver flags
+        // their contacts once imported). The summary counts them; the commit stores what is known by then.
+        for (const [domain, risk] of await domainRisks(c.env, hygiene, domains.keys(), Date.now() + IMPORT_DNS_MS)) {
+          const n = domains.get(domain)!;
+          risky.byReason[risk] += n.plain + n.role; risky.byReason.role -= n.role; risky.total += n.plain;
+        }
         const newId = id('imp');
         const meta = await c.env.db.transaction(async tx => {
           // Transaction-scoped advisory lock (supported by Hyperdrive and PgBouncer transaction pooling) keeps the
@@ -1207,7 +1220,8 @@ export function registerAudience(app: App) {
           }
           // A share lock keeps the list from being changed or deleted mid-commit.
           if (job.listId) { const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
-          const now = new Date().toISOString();
+          // Domain verdicts count only while the checks are on (NIGHTMAIL_HYGIENE_DNS), as everywhere else.
+          const now = new Date().toISOString(), hygiene = await hygieneLists(tx), dnsOn = !!c.env.config.hygieneDnsUrl;
           let subscribed = 0;
           let sampleContactIds: string[] = [];
           let riskSummary = riskyFrom(null);
@@ -1221,15 +1235,20 @@ export function registerAudience(app: App) {
             const tsHex = Date.now().toString(16).padStart(12, '0');
             const { rows: [step1] } = await tx.execute<{ bad_row: number | null; inserted_subscribed: number; jobs_enqueued: number; existing_unknown_ids: string[] | null; contact_ids: string[] | null; sample_ids: string[] | null; risky: Record<string, number> | null }>(sql`
               WITH incoming AS (
-                SELECT (r->>'row')::int AS row_num, r->>'email' AS email, r->>'name' AS name, coalesce(r->'properties', '{}'::jsonb) AS properties, r->>'risk' AS risk
-                FROM audience_imports i, jsonb_array_elements(i.rows) r
+                SELECT (r->>'row')::int AS row_num, r->>'email' AS email, r->>'name' AS name, coalesce(r->'properties', '{}'::jsonb) AS properties, r->>'risk' AS risk,
+                  m.verdict AS domain_verdict, m.mx AS domain_mx
+                FROM audience_imports i CROSS JOIN LATERAL jsonb_array_elements(i.rows) r
+                  LEFT JOIN hygiene_mail_domains m ON m.domain = split_part(r->>'email', '@', 2)
                 WHERE i.workspace_id = ${identity.workspaceId} AND i.id = ${importId}
               ), upserted AS (
-                -- A new contact gets the risk its preview found, else dead when the address bounced elsewhere; an existing
-                -- contact keeps its own (and its owner's allowance), unless it was deleted and comes back new.
+                -- A new contact gets the risk its preview found, its domain's verdict as checked by now (a domain that can't
+                -- receive mail outranks a role name), else dead when the address bounced elsewhere; an existing contact keeps
+                -- its own (and its owner's allowance), unless it was deleted and comes back new.
                 INSERT INTO audience_contacts AS c (id, workspace_id, email, name, properties, marketing_consent, risk)
                 SELECT 'con_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, email, name, properties, ${initialConsent},
-                  coalesce(risk, CASE WHEN ${bouncedElsewhere(sql`incoming.email`, sql`${identity.workspaceId}::text`)} THEN 'dead' END)
+                  CASE WHEN risk IS NOT NULL AND risk <> 'role' THEN risk WHEN ${dnsOn} AND domain_verdict = 'no_mail' THEN 'no_mail_domain'
+                    WHEN ${dnsOn} AND domain_verdict = 'ok' AND domain_mx && ${sql.param([...hygiene.disposableMx])}::text[] THEN 'disposable' WHEN risk = 'role' THEN risk
+                    WHEN ${bouncedElsewhere(sql`incoming.email`, sql`${identity.workspaceId}::text`)} THEN 'dead' END
                 FROM incoming ORDER BY email
                 ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now},
                   risk = CASE WHEN c.deleted_at IS NULL THEN c.risk ELSE excluded.risk END, risk_allowed = c.risk_allowed AND c.deleted_at IS NULL

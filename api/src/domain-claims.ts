@@ -98,6 +98,16 @@ export const domainQuota = async (db: DbExecutor, workspace: string) => (await d
   count(*) FILTER (WHERE NOT ever_proven)::int AS unproven,CASE WHEN ${byoWorkspace(workspace)} THEN NULL ELSE workspace_domain_limit(${workspace}) END AS "limit" FROM domain_claims WHERE workspace_id=${workspace} AND NOT ${builtinClaim()}`)).rows[0]!;
 /** A workspace's built-in domain (builtin-domain.ts), which no domain total or unproven limit counts. */
 export const builtinClaim = (dc: SQL = sql`domain_claims`) => sql`coalesce(${dc}.identity ? 'builtin',false)`;
+/** How long a new workspace's built-in domain counts as ready while the request that made the workspace still sets it up. */
+export const BUILTIN_SETUP_GRACE_SECONDS = 60;
+/**
+ * Whether the built-in claim `dc` is still being set up by the request that made its workspace (startHostedMail, about
+ * 5 s): pending, its fallback job marked by that request and under BUILTIN_SETUP_GRACE_SECONDS old, its parent healthy.
+ * Meanwhile GET /v1/me says it sends, and a send from it waits for it (awaitBuiltinSetup) instead of being refused.
+ */
+export const builtinSettingUp = (dc: SQL, parent: string) => sql`(${dc}.sending_state='pending' AND EXISTS (SELECT FROM jobs j WHERE j.id='domain.builtin:'||${dc}.workspace_id
+  AND j.status IN ('pending','running') AND j.payload ? 'inline' AND j.created_at>now()-make_interval(secs=>${BUILTIN_SETUP_GRACE_SECONDS}))
+  AND EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND p.ok))`;
 /** The refusal names whichever limit was reached: the workspace's total (its own, which an operator can change) or the 10 unproven domains. */
 export const domainLimitError = (used: number, limit: number | null) => new ApiError(409, 'DOMAIN_LIMIT_REACHED', limit !== null && used >= limit
   ? `This workspace has ${used.toLocaleString('en-US')} of its ${limit.toLocaleString('en-US')} domains. Remove a domain first, or ask ${productName} support for a higher limit.`

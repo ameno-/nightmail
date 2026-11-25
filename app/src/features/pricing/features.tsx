@@ -5,6 +5,7 @@ import { Bolts, reducedMotion, useReplay } from './eggs'
 import { play } from './sound'
 import { PANELS } from './panels'
 import { formatCount, nightmail, type Comparison, type PanelId } from './prices'
+import { RAMP } from '../../../../api/src/standing-model'
 
 // What else Nightmail does, under a comparison's board: one wall of the homepage machine's pale concrete, cast in
 // panels as the machine's face is, a panel to each thing the product does with a display set into it and a few words
@@ -21,9 +22,15 @@ import { formatCount, nightmail, type Comparison, type PanelId } from './prices'
 type Feature = { face: 'screen' | 'object'; show: ReactNode }
 
 const TEAM = [['Dana', 'Owner'], ['Zahir', 'Admin'], ['Bertram', 'Member'], ['Mina', 'Member']] as const
-// A domain's records as the product lists them (api/src/operations.ts, readiness): three DKIM CNAMEs, MAIL FROM's SPF,
-// the DMARC it checks for, and the MX that receives.
-const RECORDS = [['DKIM', 'x7k2._domainkey'], ['DKIM', 'p4qd._domainkey'], ['SPF', 'email'], ['DMARC', '_dmarc'], ['MX', 'acme.example']] as const
+// The workspace's built-in domain (api/src/builtin-domain.ts), then a domain's records as the product lists them
+// (api/src/operations.ts, readiness): three DKIM CNAMEs, MAIL FROM's SPF, the DMARC it checks for, and the MX that receives.
+const RECORDS = [['Built-in', 'acme-k7.nightmail.email'], ['DKIM', 'x7k2._domainkey'], ['DKIM', 'p4qd._domainkey'], ['SPF', 'email'], ['DMARC', '_dmarc'], ['MX', 'acme.example']] as const
+// A campaign's review (api/src/sending.ts, readiness) and the first hours of the ramp (api/src/standing-model.ts, RAMP).
+const READY = [['DMARC', 'acme.example', '✓'], ['List', 'risky addresses skipped', '✓'], ...RAMP.steps.slice(0, 3).map((step, i) => [`Hour ${i + 1}`, `${formatCount(step.ceilingPerHour)} recipients`, i < 2 ? '✓' : '…'])] as const
+// What list hygiene flags (api/src/list-hygiene.ts, RISKS): campaigns skip those, and send to the rest.
+// (On acme.example, the page's other screens' domain: example.com and example.net are the CLS gate's seeded mailboxes,
+// which a page may not spell out.)
+const HYGIENE = [['OK', 'dana@acme.example', '✓'], ['Typo', 'zahir@gmial.com', 'skip'], ['Temp', 'k9@mailinator.com', 'skip'], ['Dead', 'old@acme.example', 'skip'], ['OK', 'mina@acme.example', '✓']] as const
 const free = formatCount(nightmail.freeSent), freeReceived = formatCount(nightmail.freeReceived), flaps = Math.max(free.length, freeReceived.length)
 /** A paper tag on its pin: it swings when the pointer brushes it or it's tapped (and rustles when tapped). */
 function Tag({ name, role, k }: { name: string; role: string; k: number }) {
@@ -53,8 +60,14 @@ const FEATURES: Record<PanelId, Feature> = {
   receive: { face: 'screen', show: <div className="ft-screen ft-receive">{SCREENS.receive}</div> },
   agent: { face: 'screen', show: <div className="ft-screen ft-agent">{SCREENS.agent}</div> },
   route: { face: 'screen', show: <div className="ft-screen ft-route">{routeScreen(6)}</div> },
-  domain: { face: 'screen', show: <div className="ft-screen ft-dns">
+  domain: { face: 'screen', show: <div className="ft-screen ft-dns ft-dns-wide">
     {RECORDS.map(([kind, name]) => <p key={name}><span>{kind}</span><b>{name}</b><em>✓</em></p>)}
+  </div> },
+  ready: { face: 'screen', show: <div className="ft-screen ft-dns">
+    {READY.map(([kind, name, mark]) => <p key={kind}><span>{kind}</span><b>{name}</b><em data-skip={mark === '…' || undefined}>{mark}</em></p>)}
+  </div> },
+  hygiene: { face: 'screen', show: <div className="ft-screen ft-dns">
+    {HYGIENE.map(([kind, name, mark]) => <p key={name}><span>{kind}</span><b>{name}</b><em data-skip={mark === 'skip' || undefined}>{mark}</em></p>)}
   </div> },
 }
 

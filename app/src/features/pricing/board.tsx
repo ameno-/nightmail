@@ -9,12 +9,13 @@ import { WaitlistLine } from '../home/get-started'
 import { toneVars } from '../home/tones'
 import { calculatorPath, Checked, CheckedPages, Cite, Ours, ReadOn, Terms } from './content'
 import { Features } from './features'
+import { FIRST_STEP } from './panels'
 import { FlapRow } from './splitflap'
 import { PRICE_LINKS } from './live'
 import { Bolts, keySound, reducedMotion, SoundSwitch, useReplay, useTypedWord } from './eggs'
 import { play, wake } from './sound'
 import { OFFERS } from './compare'
-import { claim, formatCount, money, nightmail, nightmailBill, sourcesOf, theirPrice, ucOf, type Comparison, type Usage } from './prices'
+import { claim, formatCount, listOf, money, nightmail, nightmailBill, offerSize, sourcesOf, theirPrice, ucOf, UNITS, usageLines, type Comparison, type Usage } from './prices'
 
 // The price pages' hall (Hall): a dark wall under one pendant lamp, with the board and its console hung in it, the same
 // for the three pages, so moving between them changes the board, not the room (scene.tsx; calculator.tsx is the
@@ -39,10 +40,9 @@ const pointAt = (c: Comparison, size: number): Point => {
   const usage = c.use(size)
   return { size, usage, ours: nightmailBill(usage.sent, usage.received), theirs: theirPrice(c.offer, usage)! }
 }
-const byContacts = (c: Comparison) => c.offer.unit === 'contacts'
-const unitOf = (c: Comparison) => byContacts(c) ? 'contacts' : 'emails a month'
+const unitOf = (c: Comparison) => UNITS[c.offer.unit].size
 /** The size the page opens at: the comparison's middle size, or the vendor's nearest that holds it. */
-const opening = (c: Comparison) => { const u = c.sizes[1] ?? c.use(c.steps[0]!), n = byContacts(c) ? u.contacts : u.sent; return c.steps.find(step => step >= n) ?? c.steps.at(-1)! }
+const opening = (c: Comparison) => { const u = c.sizes[1] ?? c.use(c.steps[0]!), n = offerSize(c.offer, u); return c.steps.find(step => step >= n) ?? c.steps.at(-1)! }
 const share = (p: Point) => Number(p.ours.uc) / Number(ucOf(p.theirs.cents))
 
 /** The widest text a figure can show, by the sizes the fader reaches. */
@@ -150,7 +150,7 @@ export function ComparisonBoard({ comparison: c, start }: { comparison: Comparis
   // The board's tiles settle from blank once, as it opens, and its bars fill (unless it opens painted).
   const [painted] = useState(opensPainted), settled = useRef(false), settle = !settled.current && !painted
   useEffect(() => { settled.current = true }, [])
-  const theirs = byContacts(c) ? [`${formatCount(p.usage.sent)} emails a month`, `${p.usage.sent / p.usage.contacts} to each contact`] : ['One recipient each', 'Nothing received']
+  const theirs = usageLines(c, p.usage)
   const [bump, replayBump] = useReplay()
   const change = (next: number) => {
     const k = c.steps.indexOf(next)
@@ -166,8 +166,8 @@ export function ComparisonBoard({ comparison: c, start }: { comparison: Comparis
     <div className="cb-board" aria-live="polite" onClick={resend}>
       <Bolts />
       <div className="cb-face">
-        <p className="cb-head" aria-hidden="true"><span>A month at</span><FlapRow text={formatCount(size)} width={room.size.length} end className="cb-small" x={[.38, .56]} {...flaps} /><span>{byContacts(c) ? 'contacts' : 'emails'}</span></p>
-        <p className="sr-only">{formatCount(size)} {unitOf(c)}{byContacts(c) && `, ${formatCount(p.usage.sent)} emails a month`}: Nightmail <Ours sent={p.usage.sent} received={p.usage.received}>{p.ours.text}</Ours>, {vendor} {money(p.theirs.cents)} a month.</p>
+        <p className="cb-head" aria-hidden="true"><span>A month at</span><FlapRow text={formatCount(size)} width={room.size.length} end className="cb-small" x={[.38, .56]} {...flaps} /><span>{UNITS[c.offer.unit].head}</span></p>
+        <p className="sr-only">{formatCount(size)} {unitOf(c)}{c.model.per !== 'email' && `, ${theirs[0]}`}: Nightmail <Ours sent={p.usage.sent} received={p.usage.received}>{p.ours.text}</Ours>, {vendor} {money(p.theirs.cents)} a month.</p>
         <div className="cb-row cb-mine" aria-hidden="true"><Mark className="cb-mark-board" /><FlapRow text={p.ours.text} width={room.price.length} end className="cb-price" size="big" x={[.72, 1]} row={1} {...flaps} /></div>
         <Cells lit={lit} mine settle={settle} />
         <div className="cb-row"><FlapRow text={vendor} width={vendor.length} className="cb-name" size="name" x={[0, .32]} row={2} {...flaps} /><FlapRow text={money(p.theirs.cents)} width={room.price.length} end className="cb-price" size="big" x={[.72, 1]} row={2} {...flaps} /></div>
@@ -180,7 +180,7 @@ export function ComparisonBoard({ comparison: c, start }: { comparison: Comparis
         signing in agrees to stands under the key. */}
     <div className="cb-console" {...keys}>
       <Bolts />
-      <label className="cb-stencil" htmlFor={id}>{byContacts(c) ? 'Contacts' : 'Emails'}</label>
+      <label className="cb-stencil" htmlFor={id}>{UNITS[c.offer.unit].label}</label>
       <Fader c={c} size={size} onChange={change} onStop={stop} bump={bump} id={id} />
       <Link className="cb-try" to={calculatorPath(p.usage)}>Try your numbers<ArrowRight size={17} strokeWidth={2} aria-hidden="true" /></Link>
       {start?.button('cb-key cb-key-start')}
@@ -200,6 +200,8 @@ export function ComparisonBelow({ comparison: c, start }: { comparison: Comparis
     </section> : null}
     <section className="cb-close" aria-labelledby="cb-close" {...keys}>
       <h2 id="cb-close" className="cb-bill"><span><b>{nightmail.perThousand}</b> per 1,000 emails, sent or received.</span> <span>Contacts and teammates are free.</span></h2>
+      <p className="cb-first">{FIRST_STEP[c.focus]}</p>
+      {c.without?.length ? <p className="cb-without">Not in the box: {listOf(c.without)}.</p> : null}
       {start && <>{start.button('cb-key cb-key-start')}{!start.signedIn && <SignInConsent className="cb-consent" />}</>}
     </section>
   </>

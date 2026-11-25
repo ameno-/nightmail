@@ -48,6 +48,8 @@ const rowName = (row: Row) => row.kind === 'key' ? row.key.name : row.kind === '
 // Everything about an API key is edited on its secret, an expired one's expiry included.
 const editable = (row: Row): row is Extract<Row, { kind: 'key' }> => row.kind === 'key' && !keyLocked(row.key)
 const revokeLabel = (row: Row) => row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? (row.agent.own ? 'Revoke agent' : 'Revoke its tokens') : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
+// An agent's key says which agent it is for, where its name doesn't already (a key named before it did, or renamed).
+const agentClient = (key: ApiKey) => key.agent?.client && !key.name.startsWith(key.agent.client) ? `${key.agent.client} · ` : ''
 const expiry = (token: AgentTokenSummary) => tokenState(token) ?? `Expires ${shortDateTime(token.expiresAt)} UTC`
 
 export function ApiKeysPage() {
@@ -72,7 +74,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const revokeToken = useApiMutation((api, id: string) => api.credentials.revokeAgentToken(id), 'Agent token revoked', false, invalidate.agents)
   const revokePassword = useApiMutation((api, password: AppPassword) => api.credentials.revokeAppPassword(password.inboxId, password.id), 'App password revoked', false, invalidate.appPasswords)
   // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here),
-  // and /api-keys?create=smtp on an SMTP login (the Keys guide links there);
+  // /api-keys?create=smtp on an SMTP login (the Keys guide links there) and /api-keys?create=app on an app password
+  // (onboarding's inbox for myself links there);
   // the parameters then leave the URL, so Back and reload don't open it again.
   const [params, setParams] = useSearchParams()
   const mailServers = useMailServers()
@@ -80,6 +83,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     if (!params.has('create')) return undefined
     // Without a mail gateway an SMTP login could never sign in: the link opens the key types instead.
     if (params.get('create') === 'smtp') return mailServers ? { smtp: true } : {}
+    if (params.get('create') === 'app') return { app: true }
     const asked = params.get('create') === 'inbound' ? 'addresses' : params.get('create')
     return { purpose: (['send', 'read_send', 'read', 'manage', 'addresses', 'inbox', 'create'] as Purpose[]).find(value => value === asked) ?? 'send', domain: params.get('domain') || undefined }
   })
@@ -143,7 +147,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     return { first: access.addressIds ? <>Addresses: <AddressList values={access.addressIds.map(address)} /></> : 'Every address', second: mailLabel(access.mail) }
   }
   const name = (row: Row): { first: ReactNode; second: ReactNode } => {
-    if (row.kind === 'key') return { first: row.key.name, second: `Created ${date(row.key.createdAt)}${row.key.expiresAt && !row.key.revokedAt ? ` · ${past(row.key.expiresAt) ? 'ended' : 'ends'} ${date(row.key.expiresAt)}` : ''}` }
+    if (row.kind === 'key') return { first: row.key.name, second: `${agentClient(row.key)}Created ${date(row.key.createdAt)}${row.key.expiresAt && !row.key.revokedAt ? ` · ${past(row.key.expiresAt) ? 'ended' : 'ends'} ${date(row.key.expiresAt)}` : ''}` }
     if (row.kind === 'agent') return { first: connectionTitle(row.agent), second: row.agent.own ? row.agent.clientId : <PrivateAddress value={row.agent.userEmail} /> }
     if (row.kind === 'token') return { first: row.token.purpose, second: expiry(row.token) }
     return { first: row.password.name, second: `Created ${date(row.password.createdAt)}` }
@@ -167,7 +171,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // Everything a row shows, in full: the table and the phone's cards clip long names, scopes and address lists.
   const details = (row: Row): [string, ReactNode][] => {
     const { first, second } = access(row)
-    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ['Expires', row.key.expiresAt ? `${past(row.key.expiresAt) ? 'Ended ' : ''}${shortDateTime(row.key.expiresAt)} UTC` : 'Never'], ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.lastChange ? [['Last changed', <>{date(row.key.lastChange.at)} · <Who actor={row.key.lastChange.actor} /></>] as [string, ReactNode]] : []), ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
+    if (row.kind === 'key') return [['Type', typeName.key], ...(row.key.agent ? [['Client', row.key.agent.client ? <><bdi>{row.key.agent.client}</bdi><span className="muted"> · as the agent named itself</span></> : <span className="muted">The agent didn’t name itself</span>] as [string, ReactNode]] : []), ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ['Expires', row.key.expiresAt ? `${past(row.key.expiresAt) ? 'Ended ' : ''}${shortDateTime(row.key.expiresAt)} UTC` : 'Never'], ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.lastChange ? [['Last changed', <>{date(row.key.lastChange.at)} · <Who actor={row.key.lastChange.actor} /></>] as [string, ReactNode]] : []), ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
     if (row.kind === 'agent') return [['Type', typeName.agent], ['Access', first], ['Client', row.agent.clientId], ['Account', row.agent.own ? 'You' : <PrivateAddress value={row.agent.userEmail} />], ['Signed in', date(row.agent.createdAt)], ['Last used', lastUsed(row.agent.lastUsedAt)], ['Status', agentState(row.agent) ?? 'Active']]
     if (row.kind === 'token') return [['Type', typeName.token], ['Access', first], ['Domains', second], ['Expires', tokenState(row.token) ?? `${shortDateTime(row.token.expiresAt)} UTC`], ['Last used', lastUsed(row.token.lastUsedAt)]]
     return [['Type', typeName.app], ['Access', first], ['Inbox', second], ['Created', date(row.password.createdAt)]]
@@ -265,7 +269,7 @@ function KeyChanges({ keyId }: { keyId: string }) {
 function RevokeDialog({ row, onClose, onConfirm, pending, returnFocus }: { row: Row | null; onClose: () => void; onConfirm: (row: Row) => Promise<void>; pending: boolean; returnFocus: RefObject<HTMLElement | null> }) {
   const description: ReactNode = !row ? ''
     : row.kind === 'key' ? row.key.access.type === 'workspace' ? 'Requests using this key will stop working. Revoking a key cannot be undone.' : 'Agents using this key stop working immediately, and queued mail it sent will not be dispatched. Revoking cannot be undone.'
-    : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. It can sign in again as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
+    : row.kind === 'agent' ? row.agent.own ? 'This revokes its sign-in and every agent token it made: they stop working immediately. To connect it again, sign out of Anomaly account or sign in there again first; it then connects as a new agent.' : <>This revokes the agent tokens it made in this workspace. The sign-in belongs to <PrivateAddress value={row.agent.userEmail} />.</>
     : row.kind === 'token' ? 'This short-lived token stops working immediately. Revoking it cannot be undone.'
     : 'Mail apps using it are signed out and can’t sign in with it again. The inbox and its mail stay.'
   const label = row ? revokeLabel(row) : 'Revoke'

@@ -1,6 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type Runtime } from './core.js';
 import { log, logError } from './core.js';
+import { logAnalyticsFailure } from './analytics-traffic.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -676,6 +677,9 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     // The daily exact recount of every list's counts.
     ['AUDIENCE_LIST_RECOUNT_FAILED', async () => { await recountLists(runtime); }],
     // List hygiene: classify contacts created before it, and every contact again for a new list or new bounces elsewhere.
+    // List hygiene: the open lists once a day, the domain checks waiting (a bounded slice), then the contacts.
+    ['HYGIENE_LISTS_SYNC_FAILED', async () => { await (await import('./list-hygiene.js')).syncHygieneLists(runtime); }],
+    ['HYGIENE_DOMAINS_FAILED', async () => { await (await import('./list-hygiene.js')).resolvePendingDomains(runtime, 30_000); }],
     ['AUDIENCE_HYGIENE_FAILED', async () => { await (await import('./list-hygiene.js')).classifyContacts(runtime); }],
     // The sign-ups list: contacts whose address got in by an invitation or staff since (src/signups.ts).
     ['SIGNUPS_RECONCILE_FAILED', async () => { await (await import('./signups.js')).queueSignupsReconcile(runtime); }],
@@ -683,6 +687,10 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
   ] as const) {
     try { await step(); } catch (error) {
       failed.push(code);
+      if (code === 'ANALYTICS_COMPACT_FAILED') {
+        logAnalyticsFailure(error, code, { step: code });
+        continue;
+      }
       const tables = (error as { tables?: unknown } | null)?.tables;
       log('warn', { code: error instanceof ApiError ? error.code : code, step: code, ...(Array.isArray(tables) ? { tables } : {}) });
     }

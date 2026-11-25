@@ -2,6 +2,7 @@ import { z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { Buffer } from 'node:buffer';
 import { productName } from './brand.js';
+import { ATTACHMENT_FIELD_RULES, ATTACHMENT_LIMITS_TEXT, UPLOAD_HEADERS } from './attachment-limits.js';
 import { ApiError } from './core.js';
 import { SEND_LIMITS } from './send-limits.js';
 
@@ -107,10 +108,30 @@ const BANNED_EXTENSIONS = new Set(['ade', 'adp', 'app', 'asp', 'bas', 'bat', 'ce
   'mad', 'maf', 'mag', 'mam', 'maq', 'mar', 'mas', 'mat', 'mau', 'mav', 'maw', 'mda', 'mdb', 'mde', 'mdt', 'mdw', 'mdz', 'msc', 'msh', 'msh1', 'msh2', 'mshxml', 'msh1xml', 'msh2xml', 'msi', 'msp', 'mst', 'ops', 'pcd', 'pif', 'plg', 'prf', 'prg',
   'reg', 'scf', 'scr', 'sct', 'shb', 'shs', 'sys', 'ps1', 'ps1xml', 'ps2', 'ps2xml', 'psc1', 'psc2', 'tmp', 'url', 'vb', 'vbe', 'vbs', 'vps', 'vsmacros', 'vss', 'vst', 'vsw', 'vxd', 'ws', 'wsc', 'wsf', 'wsh', 'xnk']);
 
-export const AttachmentFilename = z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/);
-export const AttachmentContentType = z.string().max(78).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$/, 'Use a MIME type such as application/pdf, optionally with parameters.');
-export const AttachmentContentId = z.string().min(1).max(78).regex(/^[a-zA-Z0-9_.@-]+$/);
+export const AttachmentFilename = z.string().min(1).max(200).regex(/^[^\x00-\x1f\x7f/\\]+$/, `Use ${ATTACHMENT_FIELD_RULES.filename}.`);
+export const AttachmentContentType = z.string().max(SEND_LIMITS.mimeFieldChars).regex(/^[a-zA-Z0-9!#$&^_.+-]+\/[a-zA-Z0-9!#$&^_.+-]+(?: *;[ -~]*)?$/, `Use ${ATTACHMENT_FIELD_RULES.contentType}.`);
+export const AttachmentContentId = z.string().min(1).max(SEND_LIMITS.mimeFieldChars).regex(/^[a-zA-Z0-9_.@-]+$/, `Use ${ATTACHMENT_FIELD_RULES.contentId}.`);
 export const AttachmentDisposition = z.enum(['attachment', 'inline']);
+/** A size as a person reads it, exact in bytes too once it is large: 512 bytes, 9.4 KiB (9,612 bytes), 31.2 MiB (32,712,345 bytes). */
+export const sizeText = (bytes: number) => bytes < 1024 ? `${bytes} byte${bytes === 1 ? '' : 's'}` : `${(bytes / 1024 ** (bytes < 1024 ** 2 ? 1 : 2)).toFixed(1)} ${bytes < 1024 ** 2 ? 'KiB' : 'MiB'} (${bytes.toLocaleString('en-US')} bytes)`;
+/** The value a caller sent for an attachment field, quoted and cut short (metadata, never a file's content). */
+export const quoted = (value: unknown) => { const text = String(value); return JSON.stringify(text.length > 80 ? `${text.slice(0, 77)}…` : text); };
+/**
+ * ATTACHMENT_METADATA_INVALID naming every field that is wrong at once: what was sent (or that it is missing), and what
+ * it must be. `headers`: the fields came from POST /v1/attachments/upload's headers, so each names its header.
+ */
+export function metadataInvalid(input: Partial<Record<keyof typeof ATTACHMENT_FIELD_RULES, unknown>>, fields: (keyof typeof ATTACHMENT_FIELD_RULES)[], headers = false, extra: Record<string, string> = {}) {
+  const wrong = [...new Set(fields)].map(field => {
+    const value = input[field], from = headers ? ` (${UPLOAD_HEADERS[field]} header)` : '';
+    const problem = extra[field] ?? `must be ${ATTACHMENT_FIELD_RULES[field]}`;
+    return { field, problem: `${field}${from} ${value === undefined || value === '' ? 'is missing' : `is ${quoted(value)}`}: it ${problem}` };
+  });
+  const error = new ApiError(422, 'ATTACHMENT_METADATA_INVALID', `${wrong.length > 1 ? `${wrong.length} attachment fields are invalid` : 'An attachment field is invalid'}: ${wrong.map(w => w.problem).join('; ')}.`, wrong[0]?.field);
+  error.details = wrong.map(w => ({ field: w.field, value: input[w.field] === undefined ? null : String(input[w.field]).slice(0, 200), message: w.problem }));
+  return error;
+}
+/** The metadata fields a parse found wrong. */
+export const invalidMetadataFields = (issues: readonly { path: PropertyKey[] }[]) => issues.flatMap(issue => typeof issue.path[0] === 'string' && issue.path[0] in ATTACHMENT_FIELD_RULES ? [issue.path[0] as keyof typeof ATTACHMENT_FIELD_RULES] : []);
 export const AttachmentMetadata = z.object({ filename: AttachmentFilename, contentType: AttachmentContentType.default('application/octet-stream'), disposition: AttachmentDisposition.default('attachment'), contentId: AttachmentContentId.optional() }).strict();
 export const AttachmentUpload = AttachmentMetadata.extend({ content: z.string().min(4).max(MAX_ATTACHMENT_BASE64).describe('Base64 (standard or URL-safe alphabet; line breaks are accepted). No data URLs. At most 8 MiB decoded in JSON; upload larger files, up to 25 MiB, as raw bytes to POST /v1/attachments/upload.') }).strict().openapi('AttachmentUpload');
 export type AttachmentMetadataInput = z.infer<typeof AttachmentMetadata>;
@@ -120,9 +141,18 @@ export function decodeBase64(content: string, field = 'content'): Uint8Array {
   // Flat character classes only: repeated groups would exhaust the stack on multi-megabyte uploads.
   const compact = content.replace(/[\r\n\t ]+/g, '');
   const unpadded = compact.replace(/=+$/, '');
-  if (!/^[A-Za-z0-9+/_-]*$/.test(unpadded) || unpadded.length % 4 === 1 || compact.length - unpadded.length > 2) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be base64.', field);
+  // Why it isn't base64, from its shape alone: a single offending character at most, never the content.
+  const invalid = () => {
+    const at = unpadded.search(/[^A-Za-z0-9+/_-]/);
+    const why = /^data:[^,]*,/i.test(compact) ? 'it starts with a data: URL prefix: send only the base64 after the comma'
+      : at >= 0 ? `character ${at + 1} (spaces and line breaks removed) is ${JSON.stringify(unpadded[at])}, which is not in the base64 alphabet (A-Z, a-z, 0-9, + and /, or - and _)`
+      : compact.length - unpadded.length > 2 ? `it ends in ${compact.length - unpadded.length} = padding characters, and base64 has at most 2`
+      : `its ${unpadded.length.toLocaleString('en-US')} characters without padding can't be base64 (one character past a multiple of 4)`;
+    return new ApiError(422, 'INVALID_BASE64', `Attachment content must be base64 of the file's bytes (standard or URL-safe alphabet; spaces and line breaks are ignored), but ${why}.`, field);
+  };
+  if (!/^[A-Za-z0-9+/_-]*$/.test(unpadded) || unpadded.length % 4 === 1 || compact.length - unpadded.length > 2) throw invalid();
   const bytes = Buffer.from(unpadded, 'base64');
-  if (bytes.length !== Math.floor(unpadded.length * 3 / 4)) throw new ApiError(422, 'INVALID_BASE64', 'Attachment content must be base64.', field);
+  if (bytes.length !== Math.floor(unpadded.length * 3 / 4)) throw invalid();
   return bytes;
 }
 
@@ -132,10 +162,20 @@ export function blockedExtension(filename: string) {
   const name = filename.replace(/[. ]+$/, ''), dot = name.lastIndexOf('.'), extension = dot > 0 ? name.slice(dot + 1).trim().toLowerCase() : '';
   return BANNED_EXTENSIONS.has(extension) ? extension : null;
 }
+/** One file over the per-file limit (or empty): its size, the limit its route has, and the way to send it instead. */
+export function fileTooLarge(filename: string, bytes: number | null, max: number) {
+  const json = max < MAX_ATTACHMENT_BYTES;
+  const what = bytes === 0 ? 'is empty' : bytes === null ? `is more than ${mib(max)}` : `is ${sizeText(bytes)} decoded`;
+  const instead = bytes === 0 ? 'Upload the file\'s bytes.' : json ? `That route takes at most ${mib(max)}: upload files up to ${mib(MAX_ATTACHMENT_BYTES)} as raw bytes to POST /v1/attachments/upload instead.`
+    : `No file may be larger than ${mib(max)}: link to it from the email instead.`;
+  const error = new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${quoted(filename)} ${what}. ${instead} ${ATTACHMENT_LIMITS_TEXT}`);
+  error.details = [{ limit: json ? 'jsonFile' : 'file', maxBytes: max, bytes }];
+  return error;
+}
 export function validateAttachment<T extends AttachmentMetadataInput>(metadata: T, bytes: Uint8Array, max = MAX_ATTACHMENT_BYTES): T {
-  if (!bytes.length || bytes.length > max) throw new ApiError(413, 'ATTACHMENT_LIMIT_EXCEEDED', `Attachment ${metadata.filename} must be nonempty and at most ${mib(max)} decoded${max < MAX_ATTACHMENT_BYTES ? ` when sent as base64 in JSON; upload files up to ${mib(MAX_ATTACHMENT_BYTES)} as raw bytes to POST /v1/attachments/upload` : ''}.`);
+  if (!bytes.length || bytes.length > max) throw fileTooLarge(metadata.filename, bytes.length, max);
   const extension = blockedExtension(metadata.filename);
-  if (extension) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', `Amazon SES does not deliver .${extension} attachments.`, 'filename');
-  if (metadata.disposition === 'inline' && !metadata.contentId) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', 'Inline attachments require contentId.', 'contentId');
+  if (extension) throw new ApiError(422, 'UNSUPPORTED_ATTACHMENT_TYPE', `Amazon SES does not deliver .${extension} attachments (${quoted(metadata.filename)}): it refuses executable and script types (.exe, .bat, .js, .vbs and others). Zip the file, or link to it.`, 'filename');
+  if (metadata.disposition === 'inline' && !metadata.contentId) throw new ApiError(422, 'INLINE_ATTACHMENT_INVALID', `An inline attachment needs a contentId: ${ATTACHMENT_FIELD_RULES.contentId}. Without one, use disposition attachment.`, 'contentId');
   return metadata;
 }

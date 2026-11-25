@@ -75,6 +75,9 @@ export interface Storage {
   /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
   list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;
 }
+export type ScreenClassifier = 'jevf' | 'jev';
+export type ScreenModel = { apiKey: string; endpoint: string; model: string; threshold: number };
+type JevFModel = ScreenModel & { deadlineMs: number; maxConcurrency: number };
 export interface Config {
   /** Requests per minute per credential. */
   apiRateLimitPerMinute: number;
@@ -104,6 +107,8 @@ export interface Config {
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
   /** Hosted: email a domain's owners once when it is still pending an hour after it was added (src/domain-setup.ts, DOMAIN_SETUP_REMINDER=on). Off unless set. */
+  /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). DOMAIN_NS_CHECK=off turns it off. */
+  domainNsCheck?: boolean;
   domainSetupReminder?: boolean;
   /** Hosted: email a new workspace's owners once when it has no domain an hour after sign-up (src/domain-setup.ts, NO_DOMAIN_REMINDER=on). Off unless set. */
   noDomainReminder?: boolean;
@@ -131,6 +136,10 @@ export interface Config {
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   hostedScreen?: boolean;
+  /** NIGHTMAIL_HYGIENE_LISTS: the nightly sync of list hygiene's open lists (src/list-hygiene.ts). False: the vendored snapshot only. */
+  hygieneLists?: boolean;
+  /** NIGHTMAIL_HYGIENE_DNS: the DNS-over-HTTPS resolver list hygiene checks recipient domains with (src/mail-dns.ts). Null: no domain checks. */
+  hygieneDnsUrl?: string | null;
   /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
@@ -175,11 +184,10 @@ export interface Config {
   // Subset of snsTopicArns that carries SES inbound receipt notifications for mailboxes.
   inboundTopicArns?: string[];
   reputationAlertUrl?: string;
-  // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
-  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number; failover?: Config['shadow'] };
-  // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
-  // JEVF_API_KEY (or without a screen), and then nothing of it runs.
-  shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };
+  // Outbound harm screening. Inbound Ritual questions always use the Jev entry.
+  screen?: { primary: ScreenClassifier; mode: 'reject' | 'flag'; jev: ScreenModel; jevf?: JevFModel };
+  // JevF comparisons run only with Jev primary; a successful JevF gate needs no second call.
+  shadow?: JevFModel;
   // Screened-text limits (src/screen.ts): one message, and one campaign screened once for all its recipients.
   screenLimits: { messageBytes: number; campaignBytes: number };
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
@@ -195,6 +203,9 @@ export interface Runtime {
   placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
+  /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
+   * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
+  detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
   startLogFacetFold?: (slot: string) => void;
   /** Coalesced off-request nudge for a workspace's incrementally certified Logs buckets. */
@@ -218,6 +229,9 @@ export interface Runtime {
   allowSnsCertMiss?: (peer: string) => Promise<boolean>;
   snsCertificateState?: import('./operations.js').SnsCertificateState; // Omitted by production: share one state per isolate, not per request.
   allowMalformedSns?: (peer: string) => Promise<boolean>;
+  // A peer's failed SNS verifications across isolates (Workers: the ADMISSION limiter, weighted); false spends its budget.
+  allowSnsFailure?: (peer: string) => Promise<boolean>;
+  snsFailureBudget?: import('./operations.js').SnsFailureBudget; // Tests only: production shares one per isolate.
   // A workspace's preview memory a minute (Workers: the ADMISSION limiter, weighted by bytes). Node has only the per-process budget.
   allowPreview?: (workspaceId: string, bytes: number) => Promise<boolean>;
   // Dashboard analytics (src/analytics.ts): the Workers ANALYTICS bucket and the ANALYTICS_INGEST limiter. Node uses
@@ -250,14 +264,16 @@ export type SupportScope = { userId: string; contentWorkspaceId: string | null;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
   conversation: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; importLease?: import('./isolate-memory.js').MemoryLease; importLeaseTransferred?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+  /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
+  pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
-  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string } };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
   principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 /** Who sent a request: its ID, and the client's address and user agent as the entry point (server.ts, worker.ts) set them. */
-export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null };
+export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null; onPollWait?: (ms: number) => void };
 // An in-process call (an MCP tool) is part of its outer request and keeps that request's ID, client and user agent.
 // It rides on the runtime under a private symbol, like the delegated actor, so no header can supply it.
 const outerRequest = Symbol('outerRequest');
@@ -266,7 +282,16 @@ const outerOf = (runtime: Runtime | undefined) => (runtime as (Runtime & { [oute
 /** A new request's ID: the outer request's for an in-process call. */
 export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.requestId ?? `req_${crypto.randomUUID().replaceAll('-', '')}`;
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
-  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null };
+  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null, onPollWait: ms => addPollWait(c, ms) };
+const addPollWait = (c: Ctx, ms: number) => c.set('pollWaitMs', (c.get('pollWaitMs') ?? 0) + ms);
+/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. */
+export async function waitForPollTick(c: Ctx, ms: number) {
+  const start = Date.now();
+  await new Promise(resolve => setTimeout(resolve, ms));
+  const elapsed = Math.max(0, Date.now() - start);
+  addPollWait(c, elapsed);
+  outerOf(c.env)?.onPollWait?.(elapsed);
+}
 /** One claimed delivery and what its endpoint needs to post it. `type` is the endpoint's (absent for sent-mail webhooks); url and encrypted_secret are a webhook's. */
 export type ClaimedWebhook = { type?: 'webhook' | 'slack' | 'discord' | 'forward'; routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobContext = { id: string; attempts: number; workspaceId: string;
@@ -290,6 +315,8 @@ export class ApiError extends Error {
   required?: Required;
   /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
+  /** What the request log may say about a refused request's Origin: its class and Sec-Fetch-Site, never the origin. */
+  origin?: { originClass: string; fetchSite?: string };
   /** Seconds for the HTTP Retry-After header when a retryable 503/429 has a fixed backoff instead of resetAt. */
   retryAfterSeconds?: number;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
@@ -416,6 +443,23 @@ const RESTRICTED_AREAS: [RegExp, string][] = [
   [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
 ];
 export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]) => pattern.test(path))?.[1] ?? 'This needs';
+/** Reading received mail: messages, threads, their attachments and events, which a key limited to addresses also reads. */
+export const receivedMailRead = (method: string, path: string) => method.toUpperCase() === 'GET' && /^\/v1\/(?:inbound\/(?:messages|threads|events)|inboxes\/[^/]+\/messages)(?:\/|$)/.test(path);
+const ADDRESS_KEY_EXAMPLE = '{"name":"Replies","access":{"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}}';
+/**
+ * Why an API key can't read received mail (a production agent with a key limited to its sender domain hit this reading
+ * its replies, then guessed at POST /v1/api-keys), and exactly what to change: the key limited to receiving addresses
+ * that reads them, made with the request shown or in the dashboard, or Full access. `origin` links the docs.
+ */
+export function receivedMailRefusal(code: 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_REQUIRED', a: Pick<Actor, 'permissions' | 'domains' | 'credential' | 'keyId'>, need: Required, origin: string) {
+  const domains = a.domains.length <= 2 ? a.domains.join(' and ') : `${a.domains[0]}, ${a.domains[1]} and ${a.domains.length - 2} more`;
+  const addressKey = `with a full-access key, find their IDs with GET /v1/inbound/addresses, then POST /v1/api-keys with ${ADDRESS_KEY_EXAMPLE}; or in the dashboard, API keys → Create key → Mail at chosen addresses`;
+  const docs = `Docs: ${origin}/docs/operations/createApiKey.md`;
+  return denied(code, a.domains.length
+    ? `${credentialLimits(a)} A limit to sender domains doesn't reach received mail, so it can't read replies. To read the replies to ${domains}, use a key limited to the receiving addresses there (Read, and Send to answer from them): ${addressKey}. A full-access key reads all received mail. ${docs}`
+    : `${credentialLimits(a)} Received mail needs Full access, or a key limited to receiving addresses. Make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${a.keyId} with {"permissions":["read","send","manage"]}. Or, for replies at some addresses only, use a key limited to them: ${addressKey}. ${docs}`,
+    code === 'UNRESTRICTED_KEY_REQUIRED' ? { ...need, scope: 'workspace' } : need);
+}
 /**
  * UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. The message says
  * what the credential is, what the area needs and where to get it: "This key can only send from acme.com. Inbound

@@ -255,7 +255,9 @@ export function ReceivingPage() {
   const pagination = useCursorPagination()
   const overview = useOverview({ ...kindQuery[filters.kind], domain: filters.domain || undefined, q: filters.q.trim() || undefined, cursor: pagination.cursor, limit: PAGE }, true)
   // New address (or Create this address, its address filled in), or an address's flow to change: one builder.
-  const [creating, setCreating] = useState<{ address: string } | null>(null)
+  // ?new=address (from a form that needs an address first, such as a rule's) opens New address.
+  const [creating, setCreating] = useState<{ address: string } | null>(() => params.get('new') === 'address' ? { address: '' } : null)
+  useEffect(() => { if (params.get('new') === 'address') setParams(previous => { const next = new URLSearchParams(previous); next.delete('new'); return next }, { replace: true }) }, []) // eslint-disable-line react-hooks/exhaustive-deps
   const [building, setBuilding] = useState<InboundAddress | null>(null)
   // ?build=<address ID> opens the builder on that address: from a Rules row (&rule=<key>), or New rule's Split by words
   // or meaning (&split=<check>), which split its mail on that check when it has no two-way rule yet.

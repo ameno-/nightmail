@@ -19,16 +19,37 @@ const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'nightmail.support'
 export type SupportMode = 'demo' | 'live'
+export type PendingSupportOpen = { message?: string; shareContent?: boolean }
+
+let pendingOpen: PendingSupportOpen | null = null
+let activeOpener: (() => void) | null = null
+
+/** Opens the in-dashboard Help panel when support chat is enabled for this session; returns false otherwise. */
+export function openSupportChat(detail?: PendingSupportOpen): boolean {
+  if (!activeOpener) return false
+  if (detail?.message || detail?.shareContent) pendingOpen = detail
+  activeOpener()
+  window.dispatchEvent(new CustomEvent('nightmail:support-handoff'))
+  return true
+}
+
+/** Consumes any message/content-sharing request queued by openSupportChat(). */
+export function consumePendingSupportOpen(): PendingSupportOpen | null {
+  const next = pendingOpen
+  pendingOpen = null
+  return next
+}
 
 function readMode(hosted: boolean, staff: boolean) {
   const param = new URLSearchParams(window.location.search).get('support')
+  const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
+  const demoAllowed = import.meta.env.DEV || flag === 'true' || staff
   try {
-    if (param === 'demo') sessionStorage.setItem(modeKey, 'demo')
-    if (param === 'off') sessionStorage.removeItem(modeKey)
+    if (param === 'demo' && demoAllowed) sessionStorage.setItem(modeKey, 'demo')
+    if (param === 'off' || !demoAllowed) sessionStorage.removeItem(modeKey)
   } catch { /* Session storage is unavailable: the parameter still applies to this load. */ }
   let stored: string | null = null
-  try { stored = sessionStorage.getItem(modeKey) } catch { stored = param === 'demo' ? 'demo' : null }
-  const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
+  try { stored = demoAllowed ? sessionStorage.getItem(modeKey) : null } catch { stored = demoAllowed && param === 'demo' ? 'demo' : null }
   const live = hosted && (flag === 'true' || flag === 'staff' && staff)
   const mode: SupportMode | null = stored === 'demo' ? 'demo' : live ? 'live' : null
   return { mode, resume: mode === 'live' && param?.startsWith('conv_') ? param : null }
@@ -40,6 +61,12 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)
+  useEffect(() => {
+    if (!mode) return
+    const openPanel = () => { setUsed(true); setOpen(true) }
+    activeOpener = openPanel
+    return () => { if (activeOpener === openPanel) activeOpener = null }
+  }, [mode])
   // The panel's code loads when the page is idle, so Help opens at once even on a first tap (a touch has no hover).
   useEffect(() => {
     if (!mode) return

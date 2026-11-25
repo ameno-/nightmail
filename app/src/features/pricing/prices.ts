@@ -1,4 +1,5 @@
 import { CREDIT, perThousandUsd, RATES, STORAGE_AFTER_DAYS, usd } from '../../../../api/src/billing/rates.ts'
+import type { WorkspaceFocus } from '../../../../api/src/workspace-focus.ts'
 
 // The price pages' arithmetic (features/pricing): Nightmail's prices, from the billing code (api/src/billing/rates.ts) so a
 // page can't drift from what is billed, and the shape of a competitor's, which each competitor's entry fills in
@@ -13,8 +14,9 @@ export type Source = { url: string; checked: string; quote: string }
 /** The sources of an entry read on one day: read(url, quote). */
 export const readOn = (checked: string) => (url: string, quote: string): Source => ({ url, checked, quote })
 
-/** What the calculator asks: emails sent and received a month, contacts on the list, teammates. */
-export type Usage = { sent: number; received: number; contacts: number; seats: number }
+/** What the calculator asks: emails sent and received a month, contacts on the list, teammates; and, for a comparison
+ *  of agent inboxes, how many inboxes. */
+export type Usage = { sent: number; received: number; contacts: number; seats: number; inboxes?: number }
 export const MAX_INPUT = 1_000_000_000
 /** Any text as a count: digits only, 0 when there are none, at most MAX_INPUT. */
 export function count(value: unknown): number {
@@ -66,8 +68,15 @@ export const yearlyFloor = (uc: bigint) => uc > 0n && uc * 12n < ucOf(CREDIT.min
 
 // ---------------------------------------------------------------- competitors priced in tiers
 
-/** overage: cents per 1,000 past the tier, from its own source when the tier's page doesn't give it. */
-export type Tier = { size: number; cents: number; sends?: number; overage?: number; overageSource?: Source; source: Source }
+/** size: the units the tier includes (contacts, emails or inboxes). sends, receives, emails: the most emails a month it
+ *  allows: sent, received, or both together (only where the vendor's page says it counts both). overage: cents per
+ *  1,000 emails past the tier, from its own source when the tier's page doesn't give it. extra: more units sold on top
+ *  of the tier, `per` at a time for `cents` each (inboxes: "+$0.40 per additional account"), adding none of its emails. */
+export type Tier = {
+  size: number; cents: number; sends?: number; receives?: number; emails?: number; overage?: number; overageSource?: Source
+  extra?: { per: number; cents: number; name: string; source: Source }
+  source: Source
+}
 export type Plan = {
   name: string
   /** Seats the plan includes (null: unlimited); undefined when the vendor's price doesn't depend on them. */
@@ -87,7 +96,7 @@ export type Offer = {
   /** The vendor's pricing page, and the day its prices were read there (YYYY-MM-DD). */
   pricing: string
   checked: string
-  unit: 'contacts' | 'emails'
+  unit: 'contacts' | 'emails' | 'inboxes'
   /** complete: every tier the vendor's page lists, so a size between two is priced at the next one up, as the vendor
    *  does. points: only the sizes that were read; a size between them has no checked price. */
   ladder: 'complete' | 'points'
@@ -101,36 +110,42 @@ export type Offer = {
 }
 
 export type Quote =
-  | { kind: 'price'; plan: Plan; tier: Tier; cents: number; payg: { plan: Plan; tier: Tier; buckets: number; cents: number } | null }
+  | { kind: 'price'; plan: Plan; tier: Tier; cents: number; extra: number; payg: { plan: Plan; tier: Tier; buckets: number; cents: number } | null }
   | { kind: 'unpublished'; text: string; source: Source }
   | { kind: 'unchecked' }
 
-export const offerSize = (offer: Offer, u: Usage) => offer.unit === 'contacts' ? u.contacts : u.sent + u.received
-type Fit = { tier: Tier } | 'no' | 'unknown'
-// The tier a plan would sell for a usage, as the vendor's page states it: the smallest tier that holds the size, its
-// sends and its seats. On a 'points' offer only a size that was read (or one below a plan's smallest tier) has one,
-// and when that tier's sends are too few, the bigger tier that would hold them wasn't read.
+export const offerSize = (offer: Offer, u: Usage) => offer.unit === 'contacts' ? u.contacts : offer.unit === 'inboxes' ? u.inboxes ?? 0 : u.sent + u.received
+type Fit = { tier: Tier; cents: number; extra: number } | 'no' | 'unknown'
+// The tier a plan would sell for a usage, as the vendor's page states it: its cheapest tier that holds the size (with
+// the extra units it sells on top, where it does), the emails and the seats. On a 'points' offer only a size that was
+// read (or one below a plan's smallest tier) has one, and when that tier's sends are too few, the bigger tier that would
+// hold them wasn't read.
 function fit(offer: Offer, plan: Plan, size: number, u: Usage): Fit {
   if (plan.seats && plan.seats.count !== null && u.seats > plan.seats.count) return 'no'
   if (plan.max && size > plan.max.size) return 'no'
-  const holds = (t: Tier) => t.sends === undefined || u.sent <= t.sends
+  const holds = (t: Tier) => (t.sends === undefined || u.sent <= t.sends) && (t.receives === undefined || u.received <= t.receives) && (t.emails === undefined || u.sent + u.received <= t.emails)
   if (offer.ladder === 'complete') {
-    const tier = plan.tiers.find(t => t.size >= size && holds(t))
-    return tier ? { tier } : 'no'
+    const options = plan.tiers.filter(holds).flatMap(tier => {
+      if (tier.size >= size) return [{ tier, cents: tier.cents, extra: 0 }]
+      if (!tier.extra) return []
+      const packs = Math.ceil((size - tier.size) / tier.extra.per)
+      return [{ tier, cents: tier.cents + packs * tier.extra.cents, extra: packs * tier.extra.per }]
+    })
+    return options.sort((a, b) => a.cents - b.cents)[0] ?? 'no'
   }
   const at = plan.tiers.find(t => t.size === size) ?? (plan.startsAtZero && size <= plan.tiers[0]!.size ? plan.tiers[0] : undefined)
   if (!at) return 'unknown'
-  if (holds(at)) return { tier: at }
+  if (holds(at)) return { tier: at, cents: at.cents, extra: 0 }
   return plan.max?.size === at.size ? 'no' : 'unknown'
 }
 /** A vendor's price for a usage: its cheapest plan that holds it, when every plan's answer is known. */
 export function quote(offer: Offer, u: Usage): Quote {
   const size = offerSize(offer, u)
   const fits = offer.plans.map(plan => ({ plan, fit: fit(offer, plan, size, u) }))
-  const priced = fits.flatMap(({ plan, fit }) => typeof fit === 'object' ? [{ plan, tier: fit.tier }] : []).sort((a, b) => a.tier.cents - b.tier.cents)
+  const priced = fits.flatMap(({ plan, fit }) => typeof fit === 'object' ? [{ plan, ...fit }] : []).sort((a, b) => a.cents - b.cents)
   const best = priced[0]
   // A $0 plan is the cheapest whatever the unknowns cost; otherwise an unknown plan might be cheaper.
-  if (best && (best.tier.cents === 0 || !fits.some(f => f.fit === 'unknown'))) return { kind: 'price', plan: best.plan, tier: best.tier, cents: best.tier.cents, payg: payg(offer, size, best.tier.cents) }
+  if (best && (best.cents === 0 || !fits.some(f => f.fit === 'unknown'))) return { kind: 'price', plan: best.plan, tier: best.tier, cents: best.cents, extra: best.extra, payg: payg(offer, size, best.cents) }
   if (!best && offer.beyond && fits.every(f => f.fit === 'no')) return { kind: 'unpublished', ...offer.beyond }
   return { kind: 'unchecked' }
 }
@@ -148,6 +163,8 @@ function payg(offer: Offer, size: number, price: number) {
 }
 
 const paygName = (offer: Offer, plan: Plan) => `${plan.name}${offer.payg ?? ', pay as you go'}`
+/** A plan as the price names it: with the extra units bought on top ("Pro + 950 accounts"). */
+const planName = (q: Extract<Quote, { kind: 'price' }>) => q.extra ? `${q.plan.name} + ${formatCount(q.extra)} ${q.tier.extra!.name}` : q.plan.name
 
 /** A vendor's line on the calculator's board, as a buyer would pay it: its cheapest plan that holds the numbers, or
  *  pay-as-you-go where that costs less. Vendors with no price read for the numbers have none. */
@@ -158,7 +175,7 @@ export function vendorRows(offers: readonly Offer[], u: Usage): VendorRow[] {
     const q = quote(offer, u)
     if (q.kind !== 'price') return []
     if (q.payg) return [{ offer, plan: paygName(offer, q.payg.plan), cents: q.payg.cents }]
-    return [{ offer, plan: offer.unit === 'contacts' && offer.name.endsWith(' marketing') && !/marketing/i.test(q.plan.name) ? `${q.plan.name} marketing` : q.plan.name, cents: q.cents }]
+    return [{ offer, plan: offer.unit === 'contacts' && offer.name.endsWith(' marketing') && !/marketing/i.test(q.plan.name) ? `${q.plan.name} marketing` : planName(q), cents: q.cents }]
   })
 }
 
@@ -173,7 +190,7 @@ export type Row = Fact | { text: string; short?: string; note?: string; source?:
 export const fact = (short: string, ours: string, note: string, source: Source): Fact => ({ short, note, text: `${ours} ${note}`, source })
 
 /** The panels of "Also in the box" (panels.ts, features.tsx), in a comparison's reading order. */
-export type PanelId = 'send' | 'campaign' | 'contacts' | 'team' | 'free' | 'receive' | 'agent' | 'route' | 'domain'
+export type PanelId = 'send' | 'campaign' | 'contacts' | 'team' | 'free' | 'receive' | 'agent' | 'route' | 'domain' | 'ready' | 'hygiene'
 /** How many panels a comparison shows: the wall's slots (features.tsx). */
 export const PANEL_SLOTS = 7
 
@@ -184,11 +201,14 @@ export type Entry = {
   /** The page's address: /compare/<slug>. */
   slug: string
   vendor: string
+  /** Who the page is for, as onboarding asks it (api/src/workspace-focus.ts): its Get started signs in with ?focus=. */
+  focus: WorkspaceFocus
   /** How the vendor charges and its price points, each with its source. */
   offer: Offer
   /** The usage both prices are for at a size on the fader: so many emails to every contact a month, with this many
-   *  teammates; or emails sent, one recipient each. */
-  model: { per: 'contact'; sendsPerContact: number; seats: number } | { per: 'email' }
+   *  teammates; emails sent, one recipient each; emails received, nothing sent; or so many emails received and sent by
+   *  every inbox a month. */
+  model: { per: 'contact'; sendsPerContact: number; seats: number } | { per: 'email' } | { per: 'received' } | { per: 'inbox'; receivedPerInbox: number; sentPerInbox: number }
   /** Small, medium and large, in the offer's unit: the page opens at the middle one. */
   sizes: [number, number, number]
   /** The sizes the page's fader can reach, each one the vendor prices and Nightmail costs less at (the pre-merge check
@@ -201,6 +221,9 @@ export type Entry = {
   rows: Row[]
   /** The panels of "Also in the box", in reading order: the first is the lead. */
   panels: PanelId[]
+  /** What the vendor's buyer may count on that Nightmail doesn't do ("signup forms", "a web archive"): said on the page
+   *  and in its twin as "Not in the box", so a comparison on price doesn't stand in for one on features. */
+  without?: string[]
   /** The search result's and the link preview's description. */
   description: string
   /** Questions the page answers, shown on it and given to search engines as an FAQ (FAQPage). */
@@ -217,12 +240,30 @@ export function comparisonOf(entry: Entry): Comparison {
   const m = entry.model
   const use = m.per === 'contact'
     ? (contacts: number): Usage => ({ contacts, sent: contacts * m.sendsPerContact, received: 0, seats: m.seats })
-    : (sent: number): Usage => ({ contacts: 0, sent, received: 0, seats: 1 })
+    : m.per === 'inbox'
+      ? (inboxes: number): Usage => ({ inboxes, contacts: 0, sent: inboxes * m.sentPerInbox, received: inboxes * m.receivedPerInbox, seats: 1 })
+      : m.per === 'received'
+        ? (received: number): Usage => ({ contacts: 0, sent: 0, received, seats: 1 })
+        : (sent: number): Usage => ({ contacts: 0, sent, received: 0, seats: 1 })
   return { ...entry, title: `Nightmail vs ${entry.vendor}`, path: `/compare/${entry.slug}`, sizes: entry.sizes.map(use), use }
+}
+/** A comparison's unit as its page names it: the fader's label, the board's head and a size in a sentence. */
+export const UNITS = {
+  contacts: { label: 'Contacts', head: 'contacts', size: 'contacts' },
+  emails: { label: 'Emails', head: 'emails', size: 'emails a month' },
+  inboxes: { label: 'Inboxes', head: 'inboxes', size: 'inboxes' },
+} as const
+/** The usage both prices are for at a size, as the board's foot says it: the emails a month and how they're made up. */
+export function usageLines(c: Pick<Comparison, 'model'>, u: Usage): string[] {
+  const m = c.model
+  if (m.per === 'contact') return [`${formatCount(u.sent)} emails a month`, `${m.sendsPerContact} to each contact`]
+  if (m.per === 'received') return [`${formatCount(u.received)} received and 0 sent a month`, 'Delivered to your app']
+  if (m.per === 'inbox') return [`${formatCount(u.received)} received and ${formatCount(u.sent)} sent a month`, `${m.receivedPerInbox} in and ${m.sentPerInbox} out per inbox`]
+  return ['One recipient each', 'Nothing received']
 }
 /** Every source an entry cites: its price points, its plans' limits and its rows. */
 export const sourcesOf = (entry: Pick<Entry, 'offer' | 'rows'>): Source[] => [
-  ...entry.offer.plans.flatMap(plan => [...plan.tiers.flatMap(tier => tier.overageSource ? [tier.source, tier.overageSource] : [tier.source]), ...plan.seats ? [plan.seats.source] : [], ...plan.max ? [plan.max.source] : []]),
+  ...entry.offer.plans.flatMap(plan => [...plan.tiers.flatMap(tier => [tier.source, ...tier.overageSource ? [tier.overageSource] : [], ...tier.extra ? [tier.extra.source] : []]), ...plan.seats ? [plan.seats.source] : [], ...plan.max ? [plan.max.source] : []]),
   ...entry.offer.beyond ? [entry.offer.beyond.source] : [], ...entry.rows.flatMap(row => row.source ? [row.source] : []),
 ]
 /** The last day any of an entry's figures was read: when its page last changed (the sitemap's lastmod). */
@@ -235,21 +276,26 @@ export const tierSizes = (offer: Offer, from: number, to: number) =>
 export function theirPrice(offer: Offer, u: Usage): { cents: number; plan: string } | null {
   const q = quote(offer, u)
   if (q.kind !== 'price') return null
-  return q.payg ? { cents: q.payg.cents, plan: paygName(offer, q.payg.plan) } : { cents: q.cents, plan: q.plan.name }
+  return q.payg ? { cents: q.payg.cents, plan: paygName(offer, q.payg.plan) } : { cents: q.cents, plan: planName(q) }
 }
-/** Every size the control can show: its steps, and on a 'complete' ladder every 1,000 between the first and the last. */
+/** Every size the control can show: its steps, and on a 'complete' ladder every 1,000 between the first and the last
+ *  (every inbox, for inboxes). */
 export function reachable(c: Comparison): number[] {
   if (c.offer.ladder !== 'complete') return c.steps
-  const first = c.steps[0]!, last = c.steps.at(-1)!, grid = new Set(c.steps)
-  for (let size = Math.ceil(first / 1000) * 1000; size <= last; size += 1000) grid.add(size)
+  const first = c.steps[0]!, last = c.steps.at(-1)!, grid = new Set(c.steps), unit = c.offer.unit === 'inboxes' ? 1 : 1000
+  for (let size = Math.ceil(first / unit) * unit; size <= last; size += unit) grid.add(size)
   return [...grid].sort((a, b) => a - b)
 }
-/** The page's headline: the gap as it holds at every size the control can reach. */
+/** The page's headline: the gap as it holds at every size the control can reach, up to 20 times. */
 export function claim(c: Comparison): string {
   const least = Math.min(...reachable(c).map(size => {
     const u = c.use(size), ours = nightmailBill(u.sent, u.received).uc, theirs = ucOf(theirPrice(c.offer, u)!.cents)
     return ours === 0n ? Infinity : Number(theirs) / Number(ours)
   }))
+  if (!Number.isFinite(least)) return `Nightmail costs less than ${c.offer.vendor}`
+  // Past 20 times the figure says more about Nightmail's free allowance than about either price (agent inboxes that
+  // receive within it), so the headline says no more than 20.
+  if (least > 20) return `${c.offer.vendor} costs at least 20\u00a0times as much as Nightmail`
   if (least >= 2) return `${c.offer.vendor} costs ${Number.isInteger(least) ? 'at least' : 'over'} ${Math.floor(least)}\u00a0times as much as Nightmail`
   return `Nightmail costs less than ${c.offer.vendor}`
 }
@@ -278,6 +324,7 @@ export function entryProblems(entry: Entry, today: string, panels: readonly stri
     plan.tiers.forEach((tier, t) => {
       checkSource(`offer.plans[${p}].tiers[${t}] (${plan.name} at ${tier.size})`, tier.source)
       if (tier.overageSource) checkSource(`offer.plans[${p}].tiers[${t}].overageSource`, tier.overageSource)
+      if (tier.extra) checkSource(`offer.plans[${p}].tiers[${t}].extra`, tier.extra.source)
     })
     if (plan.seats) checkSource(`offer.plans[${p}].seats`, plan.seats.source)
     if (plan.max) checkSource(`offer.plans[${p}].max`, plan.max.source)

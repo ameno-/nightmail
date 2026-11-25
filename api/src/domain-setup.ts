@@ -59,7 +59,7 @@ const relative = (name: string, zone: string | undefined) => !zone ? name : name
 
 export const domainSetupCheckJob: JobHandler = async (runtime, payload, job) => {
   if (!runtime.config.multiTenant || typeof payload.domainId !== 'string' || typeof payload.token !== 'string') return;
-  const [{ derivedReadiness, hostedDomain }, { checkSetup }, { checkLinkHost, withLinkRecords }] = await wrapModuleLoad(() => Promise.all([import('./operations.js'), import('./record-check.js'), import('./link-domains.js')]));
+  const [{ derivedReadiness, hostedDomain }, { checkSetup, wildcardOf }, { checkLinkHost, withLinkRecords }] = await wrapModuleLoad(() => Promise.all([import('./operations.js'), import('./record-check.js'), import('./link-domains.js')]));
   const row = await hostedDomain(runtime.db, job.workspaceId, payload.domainId);
   // Removed, added again, verified, released, adopted or built in since it was queued: nothing to check.
   if (!row || row.token !== payload.token || row.expired || row.sending_state !== 'pending' || row.identity?.adopted || row.identity?.builtin || Date.parse(row.created_at) <= Date.now() - 72 * 3600_000) return;
@@ -71,10 +71,11 @@ export const domainSetupCheckJob: JobHandler = async (runtime, payload, job) => 
   // The records verification waits for (the ownership TXT and the DKIM CNAMEs) and the link record campaign and marketing
   // mail waits for; a custom MAIL FROM is optional.
   const sending = report!.dns.filter(r => r.purpose === 'sending' || r.purpose === 'links'), missing = sending.filter(r => r.publicDns && r.publicDns.state !== 'found');
-  if (!missing.length) return;
+  // A domain nobody serves DNS for can't take records at all: the email says to check its name instead (notices.ts).
+  if (!missing.length && !check.noDns) return;
   const { domainSetup } = await wrapModuleLoad(() => import('./account-notices.js'));
   const queued = await domainSetup(runtime.db, job.workspaceId, row.token, {
-    domainId: row.id, name: row.name, total: sending.length, wrong: missing.some(r => r.publicDns?.state === 'wrong_value'),
+    domainId: row.id, name: row.name, total: sending.length, ...(check.noDns ? { noDns: true } : {}), ...wildcardOf(missing), wrong: missing.some(r => r.publicDns?.state === 'wrong_value'),
     missing: missing.map(r => ({ type: r.type, name: relative(r.name, check.host?.zone), value: r.value })),
     host: check.host && { name: check.host.name, url: check.host.url },
     // Only an unproven claim is released, and only for want of its ownership TXT.
