@@ -42,13 +42,15 @@ added=$(git diff --name-only --diff-filter=A "$BASE" HEAD -- migrations | wc -l 
 echo "Preview migrations: $added new on top of ${BASE:0:12}; fresh and upgraded schemas match ($((SECONDS - started)) s)."
 
 # 2. The Worker, from wrangler.dev.jsonc: drop what only exists on Cloudflare (the custom domain, account, placement,
-# Browser Rendering, observability), point Hyperdrive at Postgres, and turn live SES off. assets is copied verbatim.
+# Browser Rendering, observability, the link hosts' Cloudflare for SaaS zone, whose token only a deploy binds), point
+# Hyperdrive at Postgres, and turn live SES off. assets is copied verbatim.
 node --input-type=module - "$(url preview_upgrade)" "$port" <<'JS'
 import { readFileSync, writeFileSync } from 'node:fs';
 import ts from 'typescript';
 const [database, port] = process.argv.slice(2);
 const config = ts.parseConfigFileTextToJson('wrangler.dev.jsonc', readFileSync('wrangler.dev.jsonc', 'utf8')).config;
 for (const key of ['routes', 'account_id', 'placement', 'browser', 'observability']) delete config[key];
+for (const key of ['NIGHTMAIL_LINK_SAAS_ZONE_ID', 'NIGHTMAIL_LINK_SAAS_TARGET']) delete config.vars[key];
 config.name = 'bane-preview';
 Object.assign(config.vars, { PUBLIC_URL: `http://127.0.0.1:${port}`, ENABLE_LIVE_SES: 'false', SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0' });
 config.hyperdrive = config.hyperdrive.map(binding => ({ ...binding, localConnectionString: database }));
