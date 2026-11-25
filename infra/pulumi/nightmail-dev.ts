@@ -1,6 +1,6 @@
 import * as aws from '@pulumi/aws';
 import * as pulumi from '@pulumi/pulumi';
-import {bucketPolicy, deliveryPolicy, feedbackPolicy, FEEDBACK_EVENTS, inboundPolicy, lifecycleRules, receiptRule} from '../../api/src/mail-controls.js';
+import {bucketPolicy, copiedMailExpiryRules, deliveryPolicy, feedbackPolicy, FEEDBACK_EVENTS, inboundPolicy, lifecycleRules, receiptRule} from '../../api/src/mail-controls.js';
 import {deadLetterAlarm} from './receiving-alarm.js';
 
 const tag=(purpose:string)=>({'nightmail:installation-id':'nightmail:pool','nightmail:owner':'nightmail','nightmail:purpose':purpose});
@@ -33,12 +33,10 @@ export function prepareRuntime(va:aws.Provider,account:string,boundary:string,po
 // Independent of dev activation: no runtime key, subscription, event destination or route switch.
 export function prepareProductionMail(ohio:aws.Provider,va:aws.Provider,account:string) {
   if (pulumi.getStack()!=='production'||account!=='009882681002') throw Error('Expected the dedicated production account');
-  const dates=new pulumi.Config('bane').getObject<string[]>('copiedMailExpiryDates')??[];
-  if(!Array.isArray(dates)||dates.length>366||new Set(dates).size!==dates.length||dates.some(d=>typeof d!=='string'||!/^\d{4}-\d{2}-\d{2}$/.test(d)||new Date(`${d}T00:00:00Z`).toISOString().slice(0,10)!==d)) throw Error('Invalid copied mail expiry dates');
-  mailPath(ohio,va,account,new pulumi.Config('bane').getBoolean('nightmailMailActive')===true,dates);
+  mailPath(ohio,va,account,new pulumi.Config('bane').getBoolean('nightmailMailActive')===true);
 }
 
-function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolean,copiedExpiryDates:string[]=[]) {
+function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolean) {
   const keep={provider:ohio,protect:true};
   const bucketName=`nightmail-${account}-mail-us-east-2`;
   const bucket=new aws.s3.Bucket('nightmail-mail',{bucket:bucketName,tags:tag('mailbox-inbound')},keep);
@@ -53,7 +51,7 @@ function mailPath(ohio:aws.Provider,va:aws.Provider,account:string,active:boolea
   const mirror=retention.flatMap(r=>r.filter.tag?[{...r,id:r.id+'-renamed-tag',filter:{tag:{...r.filter.tag,key:'nightmail-kind'}}}]:[]);
   // CopyObject resets LastModified. Only copied, expiring objects get this additional
   // tag, set atomically on copy; source tags and ordinary relative lifecycle stay intact.
-  const expiry=copiedExpiryDates.map(date=>({id:`nightmail-copy-expiry-${date}`,status:'Enabled',filter:{tag:{key:'nightmail-copy-expiry',value:date}},expiration:{date:`${date}T00:00:00Z`}}));
+  const expiry=copiedMailExpiryRules(bucketName).map(r=>({id:r.ID,status:r.Status,filter:{tag:{key:r.Filter.Tag.Key,value:r.Filter.Tag.Value}},expiration:{date:r.Expiration.Date}}));
   new aws.s3.BucketLifecycleConfiguration('nightmail-mail-retention',{bucket:bucket.id,rules:[...retention,...mirror,...expiry]},keep);
   const topics=new Map<string,aws.sns.Topic>();
   for(const [provider,region] of [[ohio,'us-east-2'],[va,'us-east-1']] as const){

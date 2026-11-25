@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { SESClient as SESClientType, ReceiptRule } from '@aws-sdk/client-ses';
-import type { S3Client as S3ClientType } from '@aws-sdk/client-s3';
+import type { LifecycleRule, S3Client as S3ClientType } from '@aws-sdk/client-s3';
 import type { SNSClient as SNSClientType } from '@aws-sdk/client-sns';
 import type { STSClient as STSClientType } from '@aws-sdk/client-sts';
 import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
@@ -12,7 +12,7 @@ import { checkMx } from './mailbox-dns.js';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
 import { awsError, canonical, feedbackUrl, policyReady, POOL_INSTALLATION, setupResources } from './ses-setup.js';
-import { bucketPolicy, deliveryPolicy, inboundPolicy, lifecycleRules, publicAccessBlock, receiptRule, redrivePolicy, STAGING_PREFIX } from './mail-controls.js';
+import { bucketPolicy, copiedMailExpiryRules, deliveryPolicy, inboundPolicy, lifecycleRules, publicAccessBlock, receiptRule, redrivePolicy, STAGING_PREFIX } from './mail-controls.js';
 import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
 import { activateReceiving, claimReceivable, connectionReady, noteReconcileFailure } from './states.js';
 
@@ -202,6 +202,16 @@ async function poolRead<T>(resource:string,work:()=>Promise<T>) {
 function jsonMatches(value:string|undefined,want:unknown) {
   try {return !!value && canonical(JSON.parse(value))===canonical(want);} catch {return false;}
 }
+export function poolLifecycleMatches(bucket:string,actual:LifecycleRule[]|undefined) {
+  // S3 may return an empty Filter instead of Prefix:"", and the SDK returns a Date rather than its wire timestamp.
+  const rules=actual?.map(r=>({...r,...(r.Filter && !Object.keys(r.Filter).length?{Filter:{Prefix:''}}:{}),
+    ...(r.Expiration?.Date instanceof Date?{Expiration:{...r.Expiration,Date:r.Expiration.Date.toJSON()?.replace(/\.000Z$/,'Z')??null}}:{})}));
+  const oldRules=lifecycleRules(true);
+  if (!bucket.startsWith('nightmail-')) return canonical(rules)===canonical(oldRules);
+  const renamed=oldRules.map(r=>({...r,ID:r.ID.replace(/^bane-/,'nightmail-')}));
+  const mirrors=renamed.flatMap(r=>'Tag' in r.Filter?[{...r,ID:r.ID+'-renamed-tag',Filter:{Tag:{...r.Filter.Tag,Key:'nightmail-kind'}}}]:[]);
+  return canonical(rules)===canonical([...renamed,...mirrors,...copiedMailExpiryRules(bucket)]);
+}
 async function verifyPoolRegion(runtime:Runtime,region:string,account:string,signal:AbortSignal,{sdk,s3,sns,ses}:Omit<Clients,'sts'>,register:(account:string,bucket:string,topic:string)=>Promise<void>) {
   const {bucket,rulePrefix,topicName,ruleSetName}=mailboxResources(POOL_INSTALLATION,region,account);
   const topicArn=`arn:aws:sns:${region}:${account}:${topicName}`, endpoint=feedbackUrl(runtime.config), opts={abortSignal:signal}, b={Bucket:bucket,ExpectedBucketOwner:account};
@@ -210,11 +220,7 @@ async function verifyPoolRegion(runtime:Runtime,region:string,account:string,sig
   const block=await poolRead(`${bucket} PublicAccessBlock`,()=>s3.send(new sdk.s3.GetPublicAccessBlockCommand(b),opts));
   if (canonical(block.PublicAccessBlockConfiguration)!==canonical(publicAccessBlock)) throw receivingDrift(`${bucket} PublicAccessBlock`);
   const lifecycle=await poolRead(`${bucket} LifecycleConfiguration`,()=>s3.send(new sdk.s3.GetBucketLifecycleConfigurationCommand(b),opts));
-  // S3/terraform can represent the all-objects filter as <Filter/> rather than <Prefix/>.
-  const rules=lifecycle.Rules?.map(r=>({...r,Filter:r.Filter && !Object.keys(r.Filter).length?{Prefix:''}:r.Filter}));
-  const oldRules=lifecycleRules(true), renamed=oldRules.map(r=>({...r,ID:r.ID.replace(/^bane-/,'nightmail-')}));
-  const expectedRules=TAG_PREFIX==='bane'?oldRules:[...renamed,...renamed.flatMap(r=>'Tag' in r.Filter?[{...r,ID:r.ID+'-renamed-tag',Filter:{Tag:{...r.Filter.Tag,Key:'nightmail-kind'}}}]:[])];
-  if (canonical(rules)!==canonical(expectedRules)) throw receivingDrift(`${bucket} LifecycleConfiguration`);
+  if (!poolLifecycleMatches(bucket,lifecycle.Rules)) throw receivingDrift(`${bucket} LifecycleConfiguration`);
   const {Attributes:a}=await poolRead(topicArn,()=>sns.send(new sdk.sns.GetTopicAttributesCommand({TopicArn:topicArn}),opts));
   if (a?.Owner!==account || a.TopicArn!==topicArn || !policyReady(a.Policy,inboundPolicy(topicArn,region,account,rulePrefix))) throw receivingDrift(`${topicArn} Policy`);
   if (!jsonMatches(a.DeliveryPolicy,deliveryPolicy)) throw receivingDrift(`${topicArn} DeliveryPolicy`);

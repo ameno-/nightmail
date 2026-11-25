@@ -31843,6 +31843,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('Ohio receiving requires the exact copied-mail expirations on the migrated bucket only',async()=>{
+    const {poolLifecycleMatches}=await import('./src/mailbox-setup.js'),{copiedMailExpiryRules}=await import('./src/mail-controls.js');
+    const prod='nightmail-009882681002-mail-us-east-2',dev='nightmail-905840579680-mail-us-east-2';
+    const retention=lifecycleRules(true).map(r=>({...r,ID:r.ID.replace(/^bane-/,'nightmail-')}));
+    const base=[...retention,...retention.flatMap(r=>'Tag' in r.Filter?[{...r,ID:r.ID+'-renamed-tag',Filter:{Tag:{...r.Filter.Tag,Key:'nightmail-kind'}}}]:[])];
+    const copies=copiedMailExpiryRules(prod).map(r=>({...r,Expiration:{Date:new Date(r.Expiration.Date)}}));
+    assert.equal(copies.length,8);assert.ok(poolLifecycleMatches(prod,[...copies,...base].reverse()));
+    assert.ok(poolLifecycleMatches(dev,base));assert.ok(!poolLifecycleMatches(dev,[...base,...copies]));
+    assert.ok(!poolLifecycleMatches(prod,[...base,...copies.slice(1)]),'a missing expiry is drift');
+    const [first,...rest]=copies,other={...first!,Expiration:{Date:new Date(first!.Expiration.Date.getTime()+86400_000)}};
+    assert.ok(!poolLifecycleMatches(prod,[...base,other,...rest]),'the same tag and ID cannot hide a different expiration');
+    assert.ok(!poolLifecycleMatches(prod,[...base,{...first!,Filter:{Prefix:''}},...rest]),'a bucket-wide expiry is never equivalent');
+    assert.ok(!poolLifecycleMatches(prod,[...base.slice(1),...copies]),'original retention protections are still required');
+  });
   test('cold hosted receiving confirms without a workspace or a sending-ready pool',async t=>{
     await simulatedSesFixture(t,async({runtime,db})=>{
       const [{health},{reconcileSharedConnections},{STSClient},{SESClient},{SESv2Client},{S3Client},{SNSClient}]=await Promise.all([import('./src/receiving-health.js'),import('./src/provider-connections.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-s3'),import('@aws-sdk/client-sns')]);
