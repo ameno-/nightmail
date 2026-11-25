@@ -41602,6 +41602,118 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('campaign images: linked from the host of the message\'s links (PUBLIC_URL here, the link domain on Hosted) instead of attached, the message is its HTML, and a link serves only its own picture, only on a host that serves its workspace', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, fetch, run }) => {
+      const { crc32, deflateSync } = await import('node:zlib'), { inlineMessage } = await import('./src/sending.js');
+      // November's newsletter as it was sent: an editor body and one 272,311-byte PNG shown 100 px wide, under its bane- content ID.
+      const chunk = (type: string, data: Buffer) => { const body = Buffer.concat([Buffer.from(type, 'latin1'), data]), out = Buffer.alloc(data.length + 12); out.writeUInt32BE(data.length); body.copy(out, 4); out.writeUInt32BE(crc32(body), data.length + 8); return out; };
+      const side = 260, header = Buffer.alloc(13); header.writeUInt32BE(side); header.writeUInt32BE(side, 4); header.set([8, 6, 0, 0, 0], 8);
+      const pixels = Buffer.alloc((side * 4 + 1) * side); let seed = 7;
+      for (let i = 0; i < pixels.length; i++) pixels[i] = i % (side * 4 + 1) ? (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24 : 0;
+      const start = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', header), chunk('IDAT', deflateSync(pixels, { level: 0 }))]), end = chunk('IEND', Buffer.alloc(0));
+      const png = Buffer.concat([start, chunk('tEXt', Buffer.concat([Buffer.from('Comment\0'), Buffer.alloc(272_311 - start.length - end.length - 20, 0x20)])), end]);
+      assert.equal(png.length, 272_311);
+      const objects = new Map<string, Uint8Array>();
+      runtime.storage = { put: async (key: string, body: Uint8Array) => { objects.set(key, new Uint8Array(body)); }, get: async (key: string) => objects.has(key) ? { body: objects.get(key)!, contentType: 'application/octet-stream' } : null, delete: async (key: string) => { objects.delete(key); } } as typeof runtime.storage;
+      const { SESv2Client, SendEmailCommand } = await import('@aws-sdk/client-sesv2'), send = SESv2Client.prototype.send, sent: Json[] = [];
+      t.mock.method(SESv2Client.prototype, 'send', async function (this: unknown, cmd: unknown, ...rest: unknown[]) { if (cmd instanceof SendEmailCommand) sent.push(cmd.input); return (send as (...a: unknown[]) => unknown).call(this, cmd, ...rest); });
+      const input = (id: string) => sent.find(s => s.EmailTags.some((tag: Json) => tag.Name === 'bane_email_id' && tag.Value === id))!;
+      // Raw MIME as SES received it, or the same message built from simple content; readable with quoted-printable decoded.
+      const message = (s: Json) => Buffer.from(s.Content.Raw ? s.Content.Raw.Data : inlineMessage({ kind: 'marketing', testCampaignId: null, from: 'sender@example.com', to: s.Destination.ToAddresses, cc: [], bcc: [], replyTo: [], region: REGION,
+        subject: s.Content.Simple.Subject.Data, html: s.Content.Simple.Body.Html?.Data, text: s.Content.Simple.Body.Text?.Data, tracking: false, attachments: [], headers: s.Content.Simple.Headers ?? [] }, s.Content.Simple.Attachments ?? []));
+      const readable = (s: Json) => message(s).toString('latin1').replace(/=\r\n/g, '').replace(/=([0-9A-F]{2})/g, (_: string, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+      const contentId = `bane-${randomUUID()}`;
+      const image = ok(await local('POST', '/v1/attachments', { filename: 'image-57c04568d0ca.png', content: png.toString('base64'), contentType: 'image/png', disposition: 'inline', contentId }), 201);
+      const checksum: string = (await db.query('SELECT checksum FROM sending_attachments WHERE id=$1', [image.id])).rows[0].checksum;
+      const path = `/i/${image.id.slice('attachment_'.length)}${checksum.slice(0, 32)}.png`, url = PUBLIC_ORIGIN + path;
+      const list = ok(await local('POST', '/v1/lists', { name: unique('linked-images') }), 201), contact = ok(await local('POST', '/v1/contacts', { email: address() }), 201);
+      ok(await local('POST', `/v1/contacts/${contact.id}/consent`, { status: 'subscribed', source: 'fixture', policyVersion: 'v1', evidence: 'Synthetic fixture.', occurredAt: new Date().toISOString() }));
+      ok(await local('POST', `/v1/lists/${list.id}/members`, { contactIds: [contact.id] }));
+      const html = `<p>hey,</p>\n<p>three new things just shipped.</p>\n<p>try them out.</p>\n<img src="cid:${contentId}" alt="logo" width="100">`;
+      // Each campaign is reviewed and released while pictures are embedded, as one scheduled before this release was, and
+      // dispatched with the setting under test: the link is made at dispatch, after the reviewed content hash.
+      const campaign = async (name: string, linked: boolean) => {
+        runtime.config.linkedImages = false;
+        const c = ok(await local('POST', '/v1/campaigns', { name, from: 'sender@example.com', subject: name, html, attachments: [image.id], audience: { listId: list.id } }), 201);
+        ok(await local('POST', `/v1/campaigns/${c.id}/send`, { revision: c.revision }), 202);
+        await run('campaign.run');
+        runtime.config.linkedImages = linked;
+        await run('email.dispatch');
+        const [mail] = page(await local('GET', `/v1/emails?campaignId=${c.id}`));
+        return { id: mail!.id as string, sent: input(mail!.id) };
+      };
+      const embedded = await campaign('Embedded', false), linked = await campaign('Linked', true);
+      const before = message(embedded.sent).length, after = message(linked.sent).length;
+      t.diagnostic(`one newsletter message: ${before} bytes with the picture embedded, ${after} bytes with it linked`);
+      assert.ok(readable(embedded.sent).includes(`Content-ID: <${contentId}>`) && before > 360_000, `Embedded, the picture travels in every message (${before} bytes).`);
+      assert.ok(after < 8_000, `Linked, the message is its HTML (${after} bytes).`);
+      assert.equal(linked.sent.Content.Raw, undefined);
+      assert.equal(linked.sent.Content.Simple.Attachments?.length ?? 0, 0);
+      assert.ok(linked.sent.Content.Simple.Body.Html.Data.includes(`<img src="${url}" alt="logo" width="100"`) && !linked.sent.Content.Simple.Body.Html.Data.includes('cid:'), linked.sent.Content.Simple.Body.Html.Data);
+      assert.ok(ok(await local('GET', `/v1/emails/${linked.id}/content`)).html.includes(`cid:${contentId}`), 'The sent message still reads back from its frozen review.');
+
+      // The link is public, cached for a year and serves the picture byte for byte; nothing else answers under /i/.
+      const get = (target: string, headers: Record<string, string> = {}, method = 'GET') => fetch(new Request(PUBLIC_ORIGIN + target, { method, headers }));
+      const served = await get(path);
+      assert.equal(served.status, 200);
+      assert.deepEqual(Object.fromEntries(['content-type', 'content-length', 'cache-control', 'etag', 'x-content-type-options', 'content-security-policy'].map(name => [name, served.headers.get(name)])), {
+        'content-type': 'image/png', 'content-length': '272311', 'cache-control': 'public, max-age=31536000, immutable', etag: `"${checksum}"`, 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; sandbox" });
+      assert.ok(Buffer.from(await served.arrayBuffer()).equals(png));
+      assert.equal((await get(path, { 'if-none-match': `"${checksum}"` })).status, 304);
+      const head = await get(path, {}, 'HEAD');
+      assert.equal(head.status, 200); assert.equal((await head.arrayBuffer()).byteLength, 0);
+      const name = path.slice(3, -4);
+      for (const wrong of [`/i/${name.slice(0, 32)}${'0'.repeat(32)}.png`, `/i/${name}.gif`, `/i/${name}.svg`, '/i/', `/i/${image.id}`, `/i/${name}.png/`]) {
+        const refused = await get(wrong);
+        assert.equal(refused.status, 404, wrong); assert.equal(refused.headers.get('cache-control'), 'no-store', wrong);
+      }
+
+      // A campaign's test links too. An inline part whose bytes don't open as its declared picture stays attached, and
+      // no link to it answers.
+      const fake = ok(await local('POST', '/v1/attachments', { filename: 'fake.png', content: Buffer.from('<html><script>alert(1)</script></html>').toString('base64'), contentType: 'image/png', disposition: 'inline', contentId: 'fake' }), 201);
+      const mixed = ok(await local('POST', '/v1/campaigns', { name: 'Mixed', from: 'sender@example.com', subject: 'Mixed', html: `${html}<img src="cid:fake" alt="fake">`, attachments: [image.id, fake.id] }), 201);
+      const test = ok(await local('POST', `/v1/campaigns/${mixed.id}/test`, { to: address() }), 202);
+      await run('email.dispatch');
+      const tested = readable(input(test.id));
+      assert.ok(tested.includes(`<img src="${url}" alt="logo" width="100"`) && tested.includes('<img src="cid:fake" alt="fake"') && tested.includes('Content-ID: <fake>') && !tested.includes(`Content-ID: <${contentId}>`), tested.slice(0, 4000));
+      const fakeChecksum: string = (await db.query('SELECT checksum FROM sending_attachments WHERE id=$1', [fake.id])).rows[0].checksum;
+      assert.equal((await get(`/i/${fake.id.slice('attachment_'.length)}${fakeChecksum.slice(0, 32)}.png`)).status, 404);
+
+      // With the link domain (Hosted's links.nightmailedge.com), a campaign's pictures are linked from it, the host of its
+      // unsubscribe link, alt text and size kept; they answer there only for a workspace that has linked there, and on
+      // this installation's own origin as before.
+      const linkDomain = 'links.image-fixture.example', onLinkDomain = `https://${linkDomain}${path}`;
+      runtime.config.linkHost = linkDomain;
+      try {
+        const hosted = await campaign('On the link domain', true), body = hosted.sent.Content.Simple.Body.Html.Data as string;
+        assert.ok(body.includes(`<img src="${onLinkDomain}" alt="logo" width="100"`) && body.includes(`https://${linkDomain}/unsubscribe/`) && !body.includes(`${PUBLIC_ORIGIN}/i/`), body);
+        assert.equal(hosted.sent.Content.Simple.Attachments?.length ?? 0, 0);
+        const there = await fetch(new Request(onLinkDomain));
+        assert.equal(there.status, 200); assert.equal(there.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+        assert.ok(Buffer.from(await there.arrayBuffer()).equals(png));
+        const wid = runtime.config.workspaceId;
+        await db.query('DELETE FROM link_fallback_days WHERE workspace_id=$1 AND host=$2', [wid, linkDomain]);
+        assert.equal((await fetch(new Request(onLinkDomain))).status, 404, 'A workspace that never linked on the link domain has nothing served there.');
+        assert.equal((await get(path)).status, 200);
+        // A campaign's test on the link domain records its use, so its pictures answer there too.
+        const tested = ok(await local('POST', `/v1/campaigns/${mixed.id}/test`, { to: address() }), 202);
+        await run('email.dispatch');
+        assert.ok(readable(input(tested.id)).includes(`<img src="${onLinkDomain}" alt="logo" width="100"`));
+        assert.equal((await fetch(new Request(onLinkDomain))).status, 200);
+      } finally { runtime.config.linkHost = undefined; }
+      // Hosted, its own domain never serves them, even as one of its own origins.
+      const hostedBefore = { multiTenant: runtime.config.multiTenant, previousOrigins: runtime.config.previousOrigins };
+      Object.assign(runtime.config, { multiTenant: true, previousOrigins: [...runtime.config.previousOrigins ?? [], 'https://nightmail.dev'] });
+      try { assert.equal((await fetch(new Request(`https://nightmail.dev${path}`))).status, 404); }
+      finally { Object.assign(runtime.config, hostedBefore); }
+
+      // An email sent through the API keeps the parts its caller attached.
+      const direct = ok(await local('POST', '/v1/emails/send', mail({ html: `<img src="cid:${contentId}">`, attachments: [image.id] })), 202);
+      await run('email.dispatch');
+      assert.ok(readable(input(direct.id)).includes(`Content-ID: <${contentId}>`) && !readable(input(direct.id)).includes(`${PUBLIC_ORIGIN}/i/`));
+    });
+  });
+
   test('static campaign preparation validates the second frozen recipient instead of trusting the first', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, run, jobs, db }) => {
       const list = ok(await local('POST', '/v1/lists', { name: unique('static-validation') }), 201);
