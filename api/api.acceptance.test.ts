@@ -30557,6 +30557,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO identity_links(a_type,a_id,b_type,b_id,kind,shared,first_at,last_at) VALUES ('workspace',least($1,$2),'workspace',greatest($1,$2),'send_domain',1,now(),now())`, [one.workspace, two.workspace]);
       await h.hourly();
       assert.deepEqual([(await clusterOf(one.workspace))?.accounts, (await reason(one.workspace, 'SIMILAR_CONTENT'))?.points], [2, 20]);
+      // The same message from more than 25 workspaces is a growing ring: the content links written before keep counting.
+      for (const value of await values(one.workspace, 'content'))
+        await db.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at) SELECT 'workspace',$2||n,'content',$1,now(),now() FROM generate_series(1,24) n`, [value, unique('ws-ring')]);
+      await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly();
+      assert.deepEqual([(await clusterOf(one.workspace))?.accounts, (await reason(one.workspace, 'SIMILAR_CONTENT'))?.points], [2, 20]);
       // More than 25 holders later, the link written then joins nobody: the next rescore finds no cluster.
       await db.query(`INSERT INTO abuse_signals(entity_type,entity_id,kind,value,first_at,last_at) SELECT 'workspace',$2||n,'send_domain',$1,now(),now() FROM generate_series(1,24) n`, [common, unique('ws-common')]);
       await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly();

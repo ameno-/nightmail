@@ -15,7 +15,9 @@ import { operatorActor, type OperatorIdentity } from './operator.js';
 //   links changed, then rescores the clusters longest unscored. A group is found by walking links outward from one
 //   entity, a few statements a step, up to a fixed size.
 // - A link counts only while both sides still hold a shared value that is still rare (abuse.ts rare), so erased or
-//   excluded entities drop out when read, and so does a value that became common after the link was written.
+//   excluded entities drop out when read, and so does a value that became common after the link was written. Except
+//   content: the same message from more and more workspaces is a growing ring, not common infrastructure, so the links
+//   written while it was rare keep counting (new ones still stop at the limit).
 // - Every read by a person goes through the operator guard and leaves a staff-only access record: who, which
 //   cluster, when; never a signal's value.
 
@@ -66,7 +68,7 @@ async function gather(runtime: Hosted, seed: Entity): Promise<Component> {
             WHERE x.entity_type=l.a_type AND x.entity_id=l.a_id AND x.kind='browser' AND x.value<>'other')) AS same_browser
         FROM identity_links l WHERE ((l.a_type,l.a_id) IN (${pairsOf(frontier)}) OR (l.b_type,l.b_id) IN (${pairsOf(frontier)}))
           AND EXISTS (SELECT FROM abuse_signals x JOIN abuse_signals y ON y.entity_type=l.b_type AND y.entity_id=l.b_id AND y.kind=x.kind AND y.value=x.value
-            WHERE x.entity_type=l.a_type AND x.entity_id=l.a_id AND x.kind=l.kind AND ${rare(sql`x.kind`, sql`x.value`)})
+            WHERE x.entity_type=l.a_type AND x.entity_id=l.a_id AND x.kind=l.kind AND (x.kind='content' OR ${rare(sql`x.kind`, sql`x.value`)}))
         ORDER BY l.last_at DESC LIMIT ${LINKS_A_STEP}`);
       const users = idsOf(frontier, 'user'), workspaces = idsOf(frontier, 'workspace');
       const { rows: owned } = await tx.execute<{ user_id: string; workspace_id: string }>(sql`SELECT o.user_id,o.workspace_id FROM (
