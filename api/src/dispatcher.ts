@@ -206,8 +206,8 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'ses'|'transport'> & { a
 export const POOL_QUOTA_STALE_MS = 5 * 60_000;
 /**
  * The shared pool's SES quota in every region it sends from. The dispatcher samples a region only while it sends mail
- * there (ensureQuota), so a region nothing had gone through yet had no sample at all: Glass and the customer share
- * didn't see it. The minute tick (worker.ts, runner.ts) fills that in for a region whose sample is missing or older
+ * there (ensureQuota), so a region nothing had gone through yet had no sample at all, and Glass couldn't show it. The
+ * minute tick (worker.ts, runner.ts) fills that in for a region whose sample is missing or older
  * than POOL_QUOTA_STALE_MS, through the same election as the dispatcher (one GetAccount per account and region at a
  * time), with the platform's own credentials. A region that sends keeps its fresh sample and costs nothing here. Never
  * throws: a region that can't be read is logged and tried again the next minute.

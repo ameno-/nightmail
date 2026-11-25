@@ -173,7 +173,7 @@ function eventText(e: GlassEvent): [ReactNode, ReactNode] {
     case 'builtin_ready': return [<>{who}’s built-in domain is ready</>, e.subject]
     case 'campaign_launched': return [<>{who} launched a campaign</>, [e.subject, e.detail && plural(Number(e.detail), 'recipient')].filter(Boolean).join(' · ')]
     case 'campaign_paused': return [<>{who}’s campaign paused</>, [e.subject, e.detail].filter(Boolean).join(' · ')]
-    case 'standing': { const [from, to] = (e.detail ?? '').split('>'); return [<>{who} {stepNames[to ?? ''] ?? to}</>, [`was ${stepNames[from ?? ''] ?? from}`, e.subject].filter(Boolean).join(' · ')] }
+    case 'standing': { const [from, to] = (e.detail ?? '').split('>'); return [<>{who} {stepNames[to ?? ''] ?? to}</>, [`was ${from === 'ok' ? 'OK' : stepNames[from ?? '']?.replace('back to ', '') ?? from}`, e.subject].filter(Boolean).join(' · ')] }
     case 'breaker': return [<><b>Built-in domains</b> stopped</>, `${e.subject} breaker tripped`]
     case 'alert': return [<b>{e.subject}</b>, e.detail]
   }
