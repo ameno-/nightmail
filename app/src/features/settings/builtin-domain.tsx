@@ -6,10 +6,10 @@ import type { BuiltinDomain, Domain } from '../../data/types'
 // sends and receives with no DNS, until a domain of the workspace's own verifies. These are its words, said the same
 // way in Domains, onboarding and Overview.
 
-/** Who it sends to and how many, as one sentence. */
+/** Who it sends to and how many. Members only, it also says how to email anyone else. */
 export function builtinSending(builtin: Pick<BuiltinDomain, 'scope' | 'perDay'>) {
   return builtin.scope === 'members'
-    ? `It sends only to your workspace members’ own addresses, up to ${number(builtin.perDay)} a day.`
+    ? `For now it sends only to your workspace members’ own sign-in addresses, up to ${number(builtin.perDay)} a day. Add your own domain to email anyone.`
     : `It sends to anyone, up to ${number(builtin.perDay)} recipients a day.`
 }
 /** What it does now, for its page and Overview. */

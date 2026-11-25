@@ -12,6 +12,8 @@ export const apiKeys = pgTable('api_keys', {
   expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }),
   // The agent setup that made it (migration 469): such a key never administers keys (core.ts keyAdminRefusal).
   agentSetupId: text('agent_setup_id'),
+  // What that agent said it is, its claim (migration 510): listApiKeys agent.client.
+  agentClient: text('agent_client'),
 });
 export const requestBudgets = pgTable('api_request_budgets', {
   workspaceId: text('workspace_id').notNull(), keyId: text('key_id').notNull(),

@@ -117,6 +117,49 @@ function routeOf(c: Ctx) {
   return (exact.findLast(route => route.method !== 'ALL') ?? exact.findLast(route => route.handler.length < 2)
     ?? routes.findLast(route => route.method !== 'ALL'))?.path ?? 'unmatched';
 }
+/**
+ * An unmatched API path as a template, so the request log shows which endpoints agents guess at without what they put in
+ * them: the query is dropped, and each segment that isn't a short plain word becomes a placeholder: {mbx_id} for a
+ * prefixed ID, {email}, {uuid}, {n}, {host} for a dotted name, {token} for anything long or random, {value} for the rest.
+ */
+/** The endpoint an unmatched request most likely meant: the routes agents guessed at in production, and where they are. */
+const ROUTE_HINTS: [RegExp, RegExp, string][] = [
+  [/^DELETE$/, /^\/v1\/api-keys\/[^/]+$/, 'Revoke a key with POST /v1/api-keys/{id}/revoke.'],
+  [/./, /^\/v1\/inbound\/messages\/[^/]+\/deliver(?:y|ies)$/, 'A message\'s delivery details: GET /v1/inbound/messages/{id}?includeDelivery=true.'],
+  [/./, /^\/v1\/(?:inbound\/routes|forwarding|forwards|inbound\/forwarding)(?:\/|$)/, 'Receiving routes: GET /v1/routing/routes; forward and webhook destinations: GET /v1/endpoints.'],
+  [/./, /^\/v1\/(?:inbound\/rules|automations|inbound\/automations)(?:\/|$)/, 'Receiving rules: GET /v1/rules; routes: GET /v1/routing/routes.'],
+  [/./, /^\/v1\/webhook-endpoints(?:\/|$)/, 'Sending event webhooks: GET /v1/webhooks; received mail webhooks: GET /v1/inbound/webhooks; forward destinations: GET /v1/endpoints.'],
+];
+const routeHint = (method: string, path: string) => { const hint = ROUTE_HINTS.find(([m, p]) => m.test(method) && p.test(path)); return hint ? ` ${hint[2]}` : ''; };
+export function unmatchedTemplate(path: string) {
+  const segments = path.split('?')[0]!.split('/').filter(Boolean);
+  const shown = segments.slice(0, 12).map(raw => {
+    let s: string; try { s = decodeURIComponent(raw); } catch { return '{value}'; }
+    if (s.includes('@')) return '{email}';
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{uuid}';
+    const prefixed = /^([a-z]{2,10})_[A-Za-z0-9]{6,}$/.exec(s);
+    if (prefixed) return `{${prefixed[1]}_id}`;
+    if (/^\d+$/.test(s)) return '{n}';
+    if (/^[a-z0-9-]+\.(?:md|json|txt|xml|yaml|html)$/i.test(s) && s.length <= 40) return s.toLowerCase();
+    if (s.includes('.')) return '{host}';
+    if (s.length > 32 || (/\d/.test(s) && /[a-z]/i.test(s) && s.length >= 16)) return '{token}';
+    return /^[a-z][a-z0-9_-]{0,31}$/i.test(s) ? s.toLowerCase() : '{value}';
+  });
+  return `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+}
+// At most UNMATCHED_PER_WINDOW unmatched paths per workspace (or per anonymous caller) every 10 minutes per isolate: a
+// burst of guesses shows its shape, a crawler doesn't fill the log. The request line itself is written either way.
+const UNMATCHED_PER_WINDOW = 20, UNMATCHED_WINDOW_MS = 10 * 60_000;
+const unmatchedSeen = new Map<string, { since: number; n: number }>();
+function unmatchedPath(c: Ctx, workspace: string | undefined) {
+  if (!/^\/(?:v1|mcp|api)(?:\/|$)/.test(c.req.path)) return undefined;
+  const key = workspace || 'anonymous', now = Date.now(), seen = unmatchedSeen.get(key);
+  const slot = seen && now - seen.since < UNMATCHED_WINDOW_MS ? seen : { since: now, n: 0 };
+  if (slot.n >= UNMATCHED_PER_WINDOW) return undefined;
+  slot.n++; unmatchedSeen.delete(key); unmatchedSeen.set(key, slot);
+  while (unmatchedSeen.size > 1000) unmatchedSeen.delete(unmatchedSeen.keys().next().value!);
+  return unmatchedTemplate(c.req.path);
+}
 function principalOf(c: Ctx, route: string) {
   const actor = c.get('actor') as Ctx['var']['actor'] | undefined;
   if (route === '/internal/v1/mail') return 'gateway';
@@ -138,7 +181,9 @@ function logRequest(c: Ctx, durationMs: number) {
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
     code, field: failure?.field, databaseCode: failure?.databaseCode,
-    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : undefined,
+    // Which endpoint a caller expected, scrubbed (unmatchedTemplate): only for a path no route answered.
+    path: route === 'unmatched' ? unmatchedPath(c, workspace || undefined) : undefined,
+    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : failure?.origin?.originClass, fetchSite: failure?.origin?.fetchSite,
     workspace, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
   });
@@ -197,6 +242,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
+    // SES owns its two lanes: a newly queued inbound receipt starts ingest; sending feedback uses its own queue.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
     const actor = c.get('actor'), targets = actor?.dispatchTargets;
@@ -231,7 +277,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // workspace-scoped.
     if (c.req.path === '/v1/public/stats' || c.req.path === '/v1/public/signups') return next();
     // Forward recipients answer with the emailed link alone; the routes check the token themselves.
-    if (['GET','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
+    if (['GET','HEAD','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
@@ -336,7 +382,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Messages, record keys and unsupported keys are caller text: log only the schema's own top-level field names.
     const field = responseError.logField !== undefined ? responseError.logField || undefined : schemaFields(responseError.field);
     // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
-    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
+    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error), origin: responseError.origin });
     // Best effort, and never this request's failure: limitReached and dailyLimitAlert log what they could not queue.
     if (responseError.limitReachedFor) {
       await (await import('./account-notices.js')).limitReached(c.env, responseError.limitReachedFor).catch(() => {});
@@ -349,7 +395,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: apiFailureBody(responseError, requestId) }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: `Route not found.${routeHint(c.req.method, c.req.path)} Every endpoint is listed in /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
   // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
   // security.txt (RFC 9116) for the hosted service; a self-hosted installation has its own contact, so it has none.

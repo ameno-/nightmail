@@ -357,3 +357,6 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 @media (max-width: 640px) {
   .app-shell--compact .mailbox-composer:not(:focus-within):not([data-filled]) :is(.inbound-composer__target, .inbound-recipients-review, .mailbox-composer__actions) { display: none; }
 }
+
+/* A refused forward's offer to create the address it sends from: its button under the sentence. */
+.forward-sender-offer { margin-top: var(--space-8); }

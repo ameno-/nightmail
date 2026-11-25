@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Client, Pool } from 'pg';
 import { drizzle } from 'drizzle-orm/node-postgres';
 import dns from 'node:dns';
 import { request } from 'node:https';
@@ -7,6 +7,7 @@ import { loadConfig } from '../config.js';
 import { ApiError, log } from '../core.js';
 import type { Runtime, WebhookFetch } from '../core.js';
 import { s3Storage } from './storage.js';
+import { InboxWaiters, MAX_WATCH_MS, onlyWhenWoken, readNotice, type InboxWake } from '../inbox-wake.js';
 
 // Node can reach loopback, RFC1918, link-local (cloud metadata), CGNAT, ULA and other non-global
 // ranges, so a webhook host is checked at connect time, after DNS, where rebinding cannot help.
@@ -95,10 +96,43 @@ export function nodeLogFacetLane(runtime:Runtime, connectionString:string|undefi
     await Promise.all([...inflight.values(),...aggregates.values()]);await pool?.end();
   })();}};
 }
+const INBOX_CHANNEL = 'nightmail_inbox';
+/**
+ * Inbox long polls on Node (inbox-wake.ts): notify wakes this process's polls at once, and the statement that stored the
+ * mail notifies INBOX_CHANNEL at its commit for every other process's, since the runner stores and the API serves the
+ * poll. The listener starts with a process's first watch, so one that only stores never listens; a lost listener just
+ * leaves the polls their second's read.
+ */
+export function nodeInboxWake(connection: ConstructorParameters<typeof Client>[0]): InboxWake & { close(): Promise<void> } {
+  const local = new Map<string, InboxWaiters>();
+  let listener: Promise<Client | null> | null = null, closed = false;
+  const listen = () => listener ??= (async () => {
+    const client = new Client(connection);
+    client.on('error', () => { listener = null; void client.end().catch(() => {}); });
+    client.on('notification', message => { const notice = readNotice(message.payload ?? ''); if (notice) local.get(notice.workspaceId)?.wake(notice.inboxIds); });
+    await client.connect();
+    await client.query(`LISTEN ${INBOX_CHANNEL}`);
+    if (closed) { await client.end(); return null; }
+    return client;
+  })().catch(() => { listener = null; return null; });
+  return {
+    channel: INBOX_CHANNEL,
+    watch(workspaceId, inboxId, ms) {
+      if (!closed) void listen();
+      const waiters = local.get(workspaceId) ?? local.set(workspaceId, new InboxWaiters()).get(workspaceId)!, controller = new AbortController();
+      const woken = waiters.wait(inboxId, Math.min(MAX_WATCH_MS, ms), controller.signal).finally(() => { if (!waiters.size && local.get(workspaceId) === waiters) local.delete(workspaceId); });
+      return { woken: onlyWhenWoken(woken), cancel: () => controller.abort() };
+    },
+    async notify(workspaceId, inboxIds) { local.get(workspaceId)?.wake(inboxIds); },
+    async close() { closed = true; const client = await listener; listener = null; await client?.end().catch(() => {}); },
+  };
+}
 export function nodeRuntime(env: Record<string, string | undefined>): { runtime: Runtime; close: () => Promise<void> } {
   const pool = new Pool({ ...postgresConnection(env.DATABASE_URL), max: 10, idleTimeoutMillis: 30000 });
   // pg evicts failed idle clients, but an unhandled pool error also terminates Node.
   // Keep the API/runner alive to reconnect; never log the error's client/config data.
   pool.on('error', () => log('error', { code: 'POSTGRES_POOL_ERROR', message: 'An idle PostgreSQL connection failed; the pool will reconnect.' }));
-  return { runtime: { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env), webhookFetch: nodeWebhookFetch }, close: () => pool.end() };
+  const inboxWake = nodeInboxWake(postgresConnection(env.DATABASE_URL));
+  const runtime: Runtime = { db: drizzle(pool), storage: s3Storage(env), config: loadConfig(env), webhookFetch: nodeWebhookFetch, inboxWake };
+  return { runtime, close: async () => { await inboxWake.close(); await pool.end(); } };
 }

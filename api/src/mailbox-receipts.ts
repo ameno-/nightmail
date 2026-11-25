@@ -101,6 +101,37 @@ export async function acceptInboundNotification(runtime:Runtime,input:{topicArn:
   return r.n;
 }
 
+/** A committed receipt shouldn't wait for delivery of a shared work-queue hint. Elect one Worker across
+ * isolates per second. Claim immediately and check again at the end of the window for coalesced commits.
+ * The ordinary consumer and cron keep the durable leases, retries and overflow moving. */
+export async function wakeReceivedMail(runtime:Runtime, runnable:number) {
+  if (!runnable) return;
+  if (!runtime.detach) { await runtime.wake?.(runnable,'ingest'); return; }
+  const key='scheduler:inbound-receipts';
+  const elected=await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before)
+    SELECT ${key},clock_timestamp()+interval '1 second' WHERE NOT EXISTS (
+      SELECT FROM job_schedule WHERE workspace_id=${key} AND wake_not_before>clock_timestamp())
+    ON CONFLICT(workspace_id) DO UPDATE SET wake_not_before=clock_timestamp()+interval '1 second'
+    WHERE job_schedule.wake_not_before IS NULL OR job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`);
+  if (!elected.rowCount) return;
+  void runtime.detach(async worker=>{
+    try {
+      const closes=Date.now()+1000, limit=24;
+      const [{drainJobs},{nextWakeDelay}]=await Promise.all([import('./dispatch.js'),import('./jobs.js')]);
+      const ran=await drainJobs(worker,limit,3,5000,'ingest');
+      const remaining=closes-Date.now();
+      if (remaining>0) await new Promise(resolve=>setTimeout(resolve,remaining));
+      const due=await nextWakeDelay(worker,'ingest');
+      if (due===null) return;
+      if (due===0 && ran<limit) {
+        await drainJobs(worker,limit-ran,3,5000,'ingest');
+        if (await nextWakeDelay(worker,'ingest')===null) return;
+      }
+    } catch { log('warn',{code:'MAILBOX_RECEIPT_DRAIN_FAILED'}); }
+    await worker.wake?.(1,'ingest');
+  }).catch(()=>log('warn',{code:'QUEUE_WAKE_FAILED',message:'Mailbox ingestion remains durable.'}));
+}
+
 export async function recoverHeldReceipts(runtime:Runtime) {
   return (await route(runtime,sql`SELECT bucket,ses_message_id AS mid,region,topic_arn,received_at AS at,expires_at,notification,recipients,owners,true AS fenced,binding_workspace
     FROM mail_receipt_holds WHERE status='held' AND next_check<=now() ${runtime.config.multiTenant?sql``:sql`AND binding_workspace=${runtime.config.workspaceId}`}

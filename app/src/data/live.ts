@@ -89,21 +89,19 @@ export function selectAccount(id: string | null) {
   try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
 // Whether this browser has a dashboard session, as far as a page can tell without asking (its cookies are httpOnly): 'in'
-// after /v1/me last answered, 'out' after it last said signed out, and before either, any trace of a dashboard here.
-// The public marketing pages (/, /pricing, /compare/*) ask /v1/me only where a session is likely, so a visitor's page
-// makes no request that fails (a 401 is an error in the console, and those pages are measured: app/price-pages.ts).
-// Signing in always returns through the dashboard, which asks. public/theme.js reads the same keys.
+// after an expected sign-in return or a successful /v1/me, 'out' after it last said signed out, and before either,
+// a remembered dashboard or account. The hint never authorizes a request.
+// The public pages ask /v1/me only where a session is likely. public/theme.js reads the same keys for its early fetch.
 const sessionHintKey = 'nightmail.session'
-export function rememberSession(signedIn: boolean) { try { localStorage.setItem(sessionHintKey, signedIn ? 'in' : 'out') } catch { /* Then every page asks. */ } }
+export function rememberSession(signedIn: boolean) { try { localStorage.setItem(sessionHintKey, signedIn ? 'in' : 'out') } catch { /* The tab can still know its account. */ } }
 export function sessionLikely() {
   try {
     const hint = localStorage.getItem(sessionHintKey)
     return hint === 'in' || (hint === null && (localStorage.getItem('nightmail.dashboard-ready') !== null || sessionStorage.getItem(accountStorageKey) !== null))
-  } catch { return true }
+  } catch { return selectedAccount() !== null }
 }
-/** A page that shows a visitor what a member sees, other than their button: it asks /v1/me only where sessionLikely(). */
-export const asksOnlyIfLikely = (location: Pick<Location, 'pathname' | 'search'>) =>
-  (location.pathname === '/' || location.pathname === '/pricing' || location.pathname.startsWith('/compare/')) && !/[?&](?:account|invitation)=/.test(location.search)
+/** Pages a visitor can read without an account. A query string isn't evidence of a session. */
+export const asksOnlyIfLikely = (path: string) => path === '/' || /^\/pricing\/?$/.test(path) || /^\/(?:docs|compare|legal)(?:\/|$)/.test(path)
 
 /** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
  *  other request carries, so the API reads them from the query for its sockets (the campaign room). */
@@ -296,8 +294,9 @@ export function createLiveApi(scope?: RequestScope): Api {
       settings: signal => call<WorkspaceSettings>('/settings/workspace', 'GET', undefined, signal), updateSettings: (input, signal) => call<WorkspaceSettings>('/settings/workspace', 'PATCH', input, signal) },
     senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal), release: (input, signal) => call<SenderScore>('/sender-score/release', 'POST', input, signal) },
     overview: { get: async (input, signal) => {
-      const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
-      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
+      // The window ends at the API's now, not this device's: a browser clock ahead of the server can't send a start after
+      // the end, and the chart below is laid out from the from/to the API answers with.
+      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: new Date(Date.now() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000).toISOString() })
       if (input.stream) params.set('stream', input.stream)
       // 24h uses 10-minute buckets (sending_metrics_ten_minute); 7d uses 1-hour and 30d folds 1-hour into 4-hour
       // buckets (sending_metrics_hourly), keeping every range around 144–180 points with zero raw table scans.

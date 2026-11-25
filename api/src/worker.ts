@@ -4,6 +4,7 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount, shardsForRate } from './dispatcher-do.js';
 import { CampaignRoom } from './campaign-room.js';
+import { durableInboxWake } from './inbox-wake.js';
 import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
@@ -205,6 +206,8 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowQueue && (items => { const sent = enqueueShadow(shadowQueue, items); if (keepShadow) keepShadow(sent); else handovers.push(sent); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
       allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
       allowMalformedSns: async peer => (await env.ADMISSION.limit({key:`bane:sns-malformed:${await core.digest(peer)}`})).success,
+      // Weighted so a peer's 20 failed SNS verifications a minute spend the limiter's 6,000 (operations.ts SnsFailureBudget).
+      allowSnsFailure: async peer => (await env.ADMISSION.limit({key:`bane:sns-invalid:${await core.digest(peer)}`,delta:300} as RateLimitOptions)).success,
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
       // The per-isolate budget is the memory bound, so a limiter that rejects the weight fails open.
       allowPreview:(workspaceId,bytes)=>env.ADMISSION.limit({key:`bane:preview:${workspaceId}`,delta:Math.max(1,Math.ceil(bytes/16384))} as RateLimitOptions).then(r=>r.success,()=>{core.log('warn',{code:'PREVIEW_RATE_LIMIT_UNAVAILABLE'});return true;}),
@@ -226,6 +229,8 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         catch { core.log('warn',{code:'LOG_FACET_AGGREGATE_FAILED',workspaceId:workspace}); }
       }) : undefined,
       placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined,
+      // Inbox long polls wait on their workspace's object in the dispatcher namespace and end as mail is stored.
+      inboxWake: durableInboxWake(env.DISPATCHER),
       detach: ctx ? detached => { const run = withRuntime(env, detached, 1, ctx); ctx.waitUntil(run.catch(() => {})); return run; } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
@@ -571,6 +576,8 @@ export default {
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Fold sending_campaign_tallies and sending_metrics_hourly delta rows in bounded chunks every minute.
       try { await (await core.wrapModuleLoad(() => import('./sending-tallies.js'))).foldSendingTallies(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'SENDING_TALLIES_FOLD_FAILED' }); }
+      // The raw-event audit is independent of dispatch, folding, and the hourly whole-workspace tally repairs.
+      afterwards(env, ctx, async rt => { await (await import('./sending-tallies.js')).auditSendingOutcomePage(rt); });
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.

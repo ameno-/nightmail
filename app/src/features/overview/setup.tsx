@@ -10,12 +10,11 @@ import { leadFocus, type WorkspaceFocus } from '../../data/focus'
 import { openConnectAgent } from '../../lib/connect-agent'
 import { newIssuePath, readersPath } from '../newsletters/shared'
 import { date, number } from '../../lib/format'
-import { TestSend } from '../docs/first-send'
+import { TestSend, TestSentLine } from '../docs/first-send'
 import { Button, Dialog } from '../../components/ui'
 import { limitNotes } from '../score'
 import { SendingLimitsGuide } from '../score/limits'
 import './setup.css'
-import { PrivateAddress } from '../../components/PrivateAddress'
 import { resourceOf } from '../../data/invalidation'
 import { setupGap, type SetupGap } from '../settings/domain-setup-alert'
 import { builtinLimitText, sendsFromBuiltin } from '../settings/builtin-domain'
@@ -138,7 +137,9 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   // Another focus than developer emails (onboarding's question, Settings) has its own first steps after the domain.
   const lead = leadFocus(identity)
   if (lead !== 'developer' && progress) {
-    const focusSteps = [domainStep, ...stepsFor(lead, progress, keyed, newsletter)]
+    // An inbox of their own is on their own domain: the built-in one doesn't count.
+    const ownDomain: SetupStep = { key: 'domain', done: !!ownVerified, title: 'Add your own domain', action: !ownVerified && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> }
+    const focusSteps = [lead === 'personal' ? ownDomain : domainStep, ...stepsFor(lead, progress, keyed, newsletter)]
     if (focusSteps.every(step => step.done)) return { loading: false, steps: null, ...known }
     const current = focusSteps.find(step => !step.done)
     return { loading: false, steps: focusSteps, current, open: current ? [current] : [], ...known }
@@ -150,7 +151,7 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
       action: !keyed && <Link className={`ui-button ui-button--${domainDone ? 'primary' : 'secondary'} ui-button--md`} to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
     // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.
     { key: 'send', done: sent, title: 'Send your first email',
-      note: testId ? <>Test email queued to {identity?.email && <PrivateAddress value={identity.email} />}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : undefined,
+      note: testId && identity?.email ? <TestSentLine id={testId} to={identity.email} /> : undefined,
       action: !sent && (verified ? <TestSend domain={verified} onSent={sentTest} primary={keyed} /> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Code examples</Link>) },
   ]
   // Sending a test needs only a verified domain (it uses this session, not a key), so its step opens beside the key step.
@@ -168,6 +169,11 @@ function stepsFor(lead: Exclude<WorkspaceFocus, 'developer'>, progress: SetupPro
     // The prompt's setup token gets the agent a key of its own: a key is what connecting leaves behind.
     { key: 'connect', done: keyed, title: 'Connect your agent', action: !keyed && <Button variant="primary" onClick={openConnectAgent}>Connect an agent</Button> },
     { key: 'receive', done: progress.received, title: 'Receive your first email', action: !progress.received && action('/receiving/inboxes', 'Open inboxes', false) },
+  ]
+  // An inbox of their own: mail to their domain lands in Receiving's inbox, which a mail app can also open where the
+  // installation has a mail gateway (onboarding's step says so).
+  if (lead === 'personal') return [
+    { key: 'inbox', done: progress.received, title: 'Read your mail', action: !progress.received && action('/receiving', 'Open Receiving', false) },
   ]
   if (lead === 'marketing') return [
     { key: 'contacts', done: progress.contacts, title: 'Import your contacts', action: !progress.contacts && action('/audience', 'Open Audience') },

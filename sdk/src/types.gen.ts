@@ -353,9 +353,21 @@ export type ApiKey = {
     expiresAt: string | null;
     approval: ApprovalTie;
     lastChange: ApiKeyLastChange;
+    /**
+     * A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key.
+     */
+    agent: {
+        /**
+         * What the agent said it is (client_name), its claim, never verified. Null when it didn't say.
+         */
+        client: string | null;
+    } | null;
 };
 
 export type CreateApiKey = {
+    /**
+     * Any text, 1 to 100 characters once trimmed. Need not be unique.
+     */
     name: string;
     /**
      * Workspace keys: read, send and manage. Defaults to send.
@@ -475,6 +487,9 @@ export type AuditEntry = {
 };
 
 export type UpdateApiKey = {
+    /**
+     * Any text, 1 to 100 characters once trimmed. Need not be unique.
+     */
     name?: string;
     /**
      * Workspace keys: replaces its permissions.
@@ -553,7 +568,7 @@ export type AgentKey = {
     key: string;
     keyId: string;
     /**
-     * Agent (set up <date>), under API keys, where a person revokes it.
+     * "<client_name>, set up <date>" ("Agent, set up <date>" without one), under API keys, where a person revokes it.
      */
     name: string;
     workspaceId: string;
@@ -1397,6 +1412,9 @@ export type SendEmailInput = {
             [key: string]: unknown;
         };
     };
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     /**
@@ -1481,6 +1499,9 @@ export type BatchSendEmailItem = {
             [key: string]: unknown;
         };
     };
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     /**
@@ -1793,6 +1814,9 @@ export type CampaignDraft = {
      */
     regionPinned?: boolean;
     subject?: string | '';
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -1979,6 +2003,9 @@ export type CreateCampaignInput = {
      */
     regionPinned?: boolean;
     subject?: string | '';
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -2417,6 +2444,9 @@ export type CampaignUpdateInput = {
          */
         regionPinned?: boolean;
         subject?: string | '';
+        /**
+         * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+         */
         attachments?: Array<string>;
         tracking?: boolean;
         audience?: {
@@ -2712,9 +2742,9 @@ export type WorkspaceSettings = {
      */
     requiredNotices: boolean;
     /**
-     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
      */
-    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type UpdateWorkspaceSettings = {
@@ -2724,9 +2754,9 @@ export type UpdateWorkspaceSettings = {
      */
     postalAddress?: string | null;
     /**
-     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
      */
-    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type SesAccount = {
@@ -2803,6 +2833,23 @@ export type DomainReadiness = {
          */
         publicDns?: {
             /**
+             * With wildcard: the answer is a registrar’s parking or forwarding record.
+             */
+            parking?: {
+                /**
+                 * The registrar or host, e.g. Porkbun.
+                 */
+                owner: string;
+                /**
+                 * What its record points to, e.g. pixie.porkbun.com.
+                 */
+                target: string;
+            };
+            /**
+             * With missing on a CNAME: a wildcard record (e.g. *.example.com) answers this name with an address instead, as it does a random name beside it. Add the CNAME exactly: the specific record wins over the wildcard.
+             */
+            wildcard?: string;
+            /**
              * found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.
              */
             state: 'found' | 'missing' | 'wrong_value';
@@ -2829,6 +2876,16 @@ export type DomainReadiness = {
          * The provider's DNS page for the zone, when it has a known address.
          */
         url: string | null;
+    } | null;
+    /**
+     * Set when adding the domain (one bounded NS lookup), by Check now and by the background check: the domain has no DNS at all. Never set when DNS couldn’t be read. Fix the name (add the right domain and delete this one) or register the domain.
+     */
+    dnsIssue?: {
+        /**
+         * no_dns: no nameservers serve this domain: it is unregistered, lapsed or mistyped, so its records can’t be published and it can’t verify.
+         */
+        code: 'no_dns';
+        message: string;
     } | null;
     /**
      * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
@@ -2859,9 +2916,34 @@ export type DomainReadiness = {
         suggestion?: string | null;
     } | null;
     /**
-     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
+     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
      */
     builtIn?: boolean;
+    /**
+     * Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.
+     */
+    limits?: {
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace’s members.
+         */
+        scope: 'anyone' | 'members';
+        /**
+         * Recipients in a rolling 24 hours.
+         */
+        perDay: number;
+        /**
+         * Recipients in a minute.
+         */
+        perMinute: number;
+        /**
+         * Request fields a send from it can’t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign.
+         */
+        unsupported: Array<'from' | 'replyTo' | 'headers' | 'attachments' | 'template' | 'scheduledAt' | 'kind' | 'campaign'>;
+        /**
+         * The same, in one sentence.
+         */
+        summary: string;
+    };
 };
 
 export type CreateDomain = {
@@ -2885,6 +2967,11 @@ export type TestEmailQueued = {
     id: string;
     status: 'queued';
     simulated: boolean;
+};
+
+export type TestEmailContent = {
+    subject?: string;
+    text?: string;
 };
 
 export type DomainDnsSetup = {
@@ -4377,6 +4464,10 @@ export type InboxMessagePage = {
      */
     cursor: string;
     hasMore: boolean;
+    /**
+     * When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored.
+     */
+    servedAt: string;
 };
 
 export type InboxMessage = {
@@ -4406,7 +4497,18 @@ export type InboxMessage = {
     toCount: number;
     subject: string;
     snippet: string;
+    /**
+     * When the sending server handed it over (SES received it).
+     */
     receivedAt: string;
+    /**
+     * When the write that stored it in Nightmail committed, on the clock servedAt uses.
+     */
+    storedAt: string;
+    /**
+     * Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing, routing and storing the message. Null for mail that came another way (simulated, sent, copied).
+     */
+    processingMs: number | null;
     read: boolean;
     flags: Array<'flagged' | 'answered' | 'draft' | 'forwarded' | 'junk' | 'notJunk' | 'mdnSent'>;
     labels: Array<string>;
@@ -4685,7 +4787,7 @@ export type AddReceivingHost = {
         [key: string]: unknown;
     };
     /**
-     * The host: the domain itself, a label (acme) or a subdomain (acme.example.com).
+     * The host: the domain itself (or @), a label (acme) or a subdomain (acme.example.com).
      */
     name: string;
     confirm?: boolean;
@@ -4827,6 +4929,43 @@ export type InboundAddress = {
      * inbox: an agent inbox; manage it with /v1/inboxes.
      */
     kind: 'address' | 'inbox';
+};
+
+export type CreatedInboundAddress = InboundAddress & {
+    /**
+     * Present while the host doesn’t route mail here yet: hosted, an address on one of your own domains, verified or still being verified, turns receiving on at its host if it was off.
+     */
+    receiving?: {
+        /**
+         * The domain the address is on (receiving hosts: /v1/inbound/domains/{id}/hosts).
+         */
+        domainId: string;
+        /**
+         * Where the address receives.
+         */
+        host: string;
+        /**
+         * Whether creating the address turned receiving on at this host (it didn’t receive mail before).
+         */
+        turnedOn: boolean;
+        /**
+         * The host’s receiving status now: waiting_for_mx until its MX record is live (poll getInboundDomain or listReceivingHosts).
+         */
+        status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
+        /**
+         * Whether the domain is verified. Until it is (its DNS records: getDomain), mail waits even with the MX record live.
+         */
+        verified: boolean;
+        /**
+         * The MX record to publish at the host, if it isn’t already: mail arrives once it is.
+         */
+        dns: Array<{
+            type: 'MX';
+            name: string;
+            value: string;
+            priority: number;
+        }>;
+    };
 };
 
 export type CreateInboundAddress = {
@@ -5617,6 +5756,14 @@ export type InboundOverviewDomain = {
      * Receiving host: the domain, or the subdomain it receives at.
      */
     name: string;
+    /**
+     * The domain itself. Hosted, an address on it or any of its subdomains turns receiving on there (createInboundAddress).
+     */
+    domain: string;
+    /**
+     * Every host the domain receives at, or is being set up to (name is its first); addresses can be created at each.
+     */
+    hosts: Array<string>;
     status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
     catchAll: 'create_address' | 'store';
 };
@@ -5778,6 +5925,17 @@ export type InboundEvent = {
      * Receiving address ID at the time of the event; null for workspace events.
      */
     addressId: string | null;
+    /**
+     * message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone.
+     */
+    message: {
+        from: {
+            name: string | null;
+            address: string;
+        };
+        subject: string;
+        receivedAt: string;
+    } | null;
 };
 
 export type InboundWebhookSecret = InboundWebhook & {
@@ -6928,9 +7086,13 @@ export type GetCurrentIdentityResponses = {
         mcpScopes: Array<string>;
         connection: ConnectionSummary;
         /**
+         * A hosted dashboard session in a workspace made seconds ago whose Hosted mail (its connection and built-in domain) is still being written: starting. Read /v1/me again shortly; null otherwise.
+         */
+        hostedSetup?: 'starting' | null;
+        /**
          * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
          */
-        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
+        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
         /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
@@ -7664,6 +7826,10 @@ export type ExchangeAgentSetupTokenData = {
          * The setup token from the prompt.
          */
         token: string;
+        /**
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
+         */
+        client_name?: string;
     };
     path?: never;
     query?: never;
@@ -7731,7 +7897,7 @@ export type ExchangeAgentSetupTokenResponse = ExchangeAgentSetupTokenResponses[k
 export type StartAgentDeviceAuthorizationData = {
     body?: {
         /**
-         * What the agent is, shown to the person as its claim.
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
          */
         client_name?: string;
     };
@@ -14099,7 +14265,7 @@ export type ChooseReceivingHostResponses = {
 export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
 
 export type SendDomainTestEmailData = {
-    body?: never;
+    body?: TestEmailContent;
     path: {
         id: string;
     };
@@ -22163,7 +22329,7 @@ export type CreateInboundAddressResponses = {
     /**
      * Success
      */
-    201: InboundAddress;
+    201: CreatedInboundAddress;
 };
 
 export type CreateInboundAddressResponse = CreateInboundAddressResponses[keyof CreateInboundAddressResponses];

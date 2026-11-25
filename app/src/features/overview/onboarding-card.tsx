@@ -10,7 +10,7 @@ import type { Domain, SetupProgress } from '../../data/types'
 import { agentInboxQuery, leadFocus, type WorkspaceFocus } from '../../data/focus'
 import { newIssuePath } from '../newsletters/shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useTestSend } from '../docs/first-send'
+import { TestSentLine, useTestSend } from '../docs/first-send'
 import { agentInboxPrompt, agentPrompt, signupFormPrompt, useAgentSetup } from '../docs/agent-setup'
 import { productName } from '../../../../api/src/brand'
 import { builtinSending, sendsFromBuiltin } from '../settings/builtin-domain'
@@ -77,7 +77,7 @@ function NoDomainCard() {
   const identity = useSession()?.identity, workspaceId = identity?.workspaceId ?? ''
   // With a built-in domain the workspace already sends: the card asks for its own domain to send more, and says to whom it sends now.
   const builtin = identity?.connection?.builtinDomain, sends = sendsFromBuiltin(builtin)
-  const text = sends ? `You can send from ${builtin.name} now. ${builtinSending(builtin)} Your own domain lifts the limit.` : noDomainWhy
+  const text = sends ? `You can send from ${builtin.name} now. ${builtinSending(builtin)}${builtin.scope === 'members' ? '' : ' Your own domain lifts the limit.'}` : noDomainWhy
   return <section className="ov-onboarding" data-kind="no-domain" aria-labelledby="ov-onboarding-title">
     <div className="ov-onboarding__text">
       <h2 id="ov-onboarding-title">{sends ? 'Add your own domain' : 'Add your domain to start sending'}</h2>
@@ -99,7 +99,7 @@ function FirstSendCard({ domain, onSent }: { domain?: Domain; onSent?: () => voi
   // The prompt onboarding copies: a one-time setup token in it gets the agent its own key.
   const setup = useAgentSetup(canAdminister)
   const promptFor = (setupToken: string | null | undefined) => agentPrompt({ origin: origin!, domain: domain ?? null, email: to, multiTenant: true, setupToken })
-  const line = test.isSuccess && to ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></>
+  const line = test.isSuccess && to ? <TestSentLine id={test.data.id} to={to} simulated={test.data.simulated} />
     : test.error ? <ErrorText error={test.error} />
     : domain ? `${domain.name} can send now: try it on yourself, or copy the prompt for your coding agent.` : 'Your domain can send now.'
   return <section className="ov-onboarding" data-kind="first-send" aria-labelledby="ov-onboarding-title">
@@ -108,7 +108,7 @@ function FirstSendCard({ domain, onSent }: { domain?: Domain; onSent?: () => voi
       <p data-tone={test.error ? 'danger' : undefined} role="status">{line}</p>
     </div>
     <div className="ov-onboarding__actions">
-      <Button variant="primary" loading={test.isPending} disabled={!domain || !to || test.isSuccess} onClick={() => test.mutate()} data-analytics="overview/first-send/test"><Send size={14} aria-hidden />Send a test to yourself</Button>
+      <Button variant="primary" loading={test.isPending} disabled={!domain || !to || test.isSuccess} onClick={() => test.mutate()} data-analytics="overview/first-send/test"><Send size={14} aria-hidden />Send it to yourself</Button>
       <span className="ov-onboarding__copy" data-pending={!origin || !domain || undefined} inert={!origin || !domain}>
         <CopyAction value={origin && domain ? setup ? setup.copy(promptFor) : promptFor(undefined) : ''} label="Copy agent prompt" text="Copy agent prompt" />
       </span>
@@ -118,7 +118,7 @@ function FirstSendCard({ domain, onSent }: { domain?: Domain; onSent?: () => voi
 }
 
 /** The setup steps whose actions the card already has, for each focus (Overview leaves them out of the steps beside it). */
-export const cardActions: Record<WorkspaceFocus, string[]> = { developer: ['send'], agents: ['inbox', 'connect'], marketing: ['contacts', 'campaign'], newsletter: ['newsletter', 'issue'] }
+export const cardActions: Record<WorkspaceFocus, string[]> = { developer: ['send'], agents: ['inbox', 'connect'], marketing: ['contacts', 'campaign'], newsletter: ['newsletter', 'issue'], personal: [] }
 
 const ImportContactsDialog = lazy(() => import('../audience/import').then(module => ({ default: module.ImportContactsDialog })))
 

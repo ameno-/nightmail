@@ -15,6 +15,7 @@ import { actor, ApiError, assertSesConfigured, chargeBudget, denied, requiredOf,
 import { chargeManualDelivery, claimedWithWebhooks, enqueue, JobDeferred, WEBHOOK_ATTEMPTS, retryDatabaseFailures, webhookClaimCtes } from './jobs.js';
 import { applyClaim, connectionReady, domainHosts, receivingSetup, type ReceivingSetup, hostGraceStart, identityOnly, LOST_GRACE_MS, poolReceives, poolSends, transitionClaim, type ClaimEvidence, type ClaimState, type HostEvidence, type HostStatus, type HostWrite, type IdentityFacts, type TenantState, PROOF_LABELS, proofRecordName, type ProofLabel } from './states.js';
 import { WORKSPACE_FOCUS, type WorkspaceFocus } from './workspace-focus.js';
+import { SETUP_LIMITS, SETUP_SENDER } from './setup-email.js';
 import { jobs } from './db/core.js';
 import { contacts, mergeSuppression } from './db/audience.js';
 import { lasting, RECEIVING_HOST_CHANGE, EmailEventData, withoutVerdict, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, readCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
@@ -38,6 +39,7 @@ import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, establishedHost, hostOwners, inspectReceivingHost, observeReceiving, refusedCodes, takenIssue, type DomainObservation, type ReceivingHostRow, type ReceivingIssue } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, type PublishedEvent, type EventType } from './db/operations.js';
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
+import { BUILTIN_CAPS, BUILTIN_UNSUPPORTED, builtinLimitsText } from './builtin-limits.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 import { PostalAddress, postalAddressText, unsubscribePageLink } from './outbound-content.js';
 export type { PublishedEvent } from './db/operations.js';
@@ -67,7 +69,7 @@ const secretSchema = z.object({ secret: z.string() }).openapi('WebhookSecret');
 const deliverySchema = z.object({ id: z.string(), webhookId: z.string(), eventId: z.string(), payload: eventSchema, synthetic: z.boolean(), status: z.enum(['pending', 'delivered', 'failed', 'paused']), attemptCount: z.number(), lastStatusCode: z.number().nullable(), lastError: z.string().nullable(), createdAt: z.string(), updatedAt: z.string() }).openapi('WebhookDelivery');
 const attemptSchema = z.object({ id: z.string(), deliveryId: z.string(), statusCode: z.number().nullable(), error: z.string().nullable(), durationMs: z.number(), createdAt: z.string() }).openapi('WebhookAttempt');
 const dnsState = z.enum(['pending','verified']);
-const publicDns = z.object({ state:z.enum(['found','missing','wrong_value']).describe('found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.'), values:z.array(z.string()).describe('wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise.'), checkedAt:z.string() })
+const publicDns = z.object({ parking:z.object({ owner:z.string().describe('The registrar or host, e.g. Porkbun.'), target:z.string().describe('What its record points to, e.g. pixie.porkbun.com.') }).optional().describe('With wildcard: the answer is a registrar\u2019s parking or forwarding record.'), wildcard:z.string().optional().describe('With missing on a CNAME: a wildcard record (e.g. *.example.com) answers this name with an address instead, as it does a random name beside it. Add the CNAME exactly: the specific record wins over the wildcard.'), state:z.enum(['found','missing','wrong_value']).describe('found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.'), values:z.array(z.string()).describe('wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise.'), checkedAt:z.string() })
   .nullable().optional().describe('For pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1) shows for this record. verifyDomain looks it up now (answers cached up to 30 seconds). Other reads show the last background check, which runs every 15 to 60 minutes for a Hosted domain still pending an hour after it was added. Null when DNS did not answer in time; absent before any check and on other records.');
 const dnsRecord = z.object({ name:z.string(), type:z.enum(['CNAME','TXT','MX']), value:z.string(), priority:z.number().optional(), purpose:z.enum(['sending','receiving','mail_from','dmarc']), status:dnsState, note:z.string().optional(), publicDns });
 const dmarcSchema=z.object({status:z.enum(['missing','invalid','none','quarantine','reject']),record:z.string().nullable(),source:z.string().nullable().describe('Domain publishing the effective TXT record; may be the organizational domain.'),adkim:z.enum(['r','s']),aspf:z.enum(['r','s']),alignment:z.object({dkim:z.boolean(),spf:z.boolean()})}).nullable().describe('Last DNS and SES observation for this From domain. Null when unchecked, unavailable or stale. Alignment describes configured identifiers, not a delivery verdict.');
@@ -79,12 +81,18 @@ export const receivingIssueSchema = z.object({
 const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), dmarc:dmarcSchema, ready: z.boolean(), sending:dnsState, receiving:dnsState, mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord),
   dnsHost: z.object({ name: z.string().describe('The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap.'), zone: z.string().describe('The zone it hosts, which record names are relative to there.'), url: z.string().nullable().describe('The provider\'s DNS page for the zone, when it has a known address.') })
     .nullable().optional().describe(`Where this domain\u2019s DNS is hosted, from its zone\u2019s NS records, alongside publicDns: null when the provider is not one ${productName} recognizes.`),
+  dnsIssue: z.object({ code: z.enum(['no_dns']).describe('no_dns: no nameservers serve this domain: it is unregistered, lapsed or mistyped, so its records can\u2019t be published and it can\u2019t verify.'), message: z.string() })
+    .nullable().optional().describe('Set when adding the domain (one bounded NS lookup), by Check now and by the background check: the domain has no DNS at all. Never set when DNS couldn\u2019t be read. Fix the name (add the right domain and delete this one) or register the domain.'),
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.'),
-  builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`) }).openapi('DomainReadiness');
+  builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`),
+  limits: z.object({ scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\u2019s members.'), perDay: z.number().int().describe('Recipients in a rolling 24 hours.'), perMinute: z.number().int().describe('Recipients in a minute.'),
+    unsupported: z.array(z.enum(BUILTIN_UNSUPPORTED)).describe('Request fields a send from it can\u2019t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign.'),
+    summary: z.string().describe('The same, in one sentence.') })
+    .optional().describe('Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const Focus = z.enum(WORKSPACE_FOCUS);
-const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
+const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
 const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.'),
   requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.'),
   focus: z.array(Focus).nullable().describe(FOCUS_NOTE) }).openapi('WorkspaceSettings');
@@ -297,6 +305,8 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 }
 const claimTag = tagKey('domain-claim');
 type Readiness = z.infer<typeof domainSchema>;
+/** A domain nobody serves DNS for (record-check.ts dnsZone): unregistered, lapsed or mistyped. It can never verify, so this replaces "add these records". */
+export const noDnsIssue = (name: string) => ({ code: 'no_dns' as const, message: `No DNS found for ${name}: check the spelling, or that the domain is registered.` });
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
 export type HostedDomain = DomainRef & ClaimState & ProofTimes & { setup_check: SetupCheck | null; connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; receiving_setup:ReceivingSetup|null; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean; hosts: ReceivingHostRow[] };
@@ -404,15 +414,16 @@ export async function verifyHostedDomain(runtime: Runtime, a: Actor, domainId: s
   const row=await hostedDomain(runtime.db,a.workspaceId,domainId,false,{domains:a.domains,mode:'manual',platformAccount:runtime.config.platformAccount}) ?? notFound('Domain'); allowedDomain(a,row.name);
   assertSharedAccount(runtime,row.connection);
   if (row.queued) a.wakeJobs=1;
-  return derivedReadiness(row);
+  return derivedReadiness(row, runtime.config);
 }
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
-export function derivedReadiness(row: ClaimRow): Readiness {
+export function derivedReadiness(row: ClaimRow, config?: Pick<Config, 'builtinScope'>): Readiness {
   const facts=row.identity, held=sends(row);
   // The built-in domain has no DNS records of its own: it sends under its parent's identity and receives on its name.
   if (facts?.builtin) return { id:row.id, name:row.name, region:row.region, verificationStatus:held ? 'SUCCESS' : 'PENDING', verified:held, dkimStatus:held ? 'SUCCESS' : 'PENDING', dmarc:null, ready:held, sending:state(held),
     receiving:state(row.receiving_state==='active' || row.receiving_state==='lost'), mailFromDomain:facts.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus:facts.ses.MailFromAttributes?.MailFromDomainStatus ?? null,
-    dnsStatus:'available', dnsUnavailableReason:null, dns:[], releasesAt:null, receivingIssue:null, builtIn:true };
+    dnsStatus:'available', dnsUnavailableReason:null, dns:[], releasesAt:null, receivingIssue:null, builtIn:true,
+    ...(config ? { limits: { scope: config.builtinScope, ...BUILTIN_CAPS[config.builtinScope], unsupported: [...BUILTIN_UNSUPPORTED], summary: builtinLimitsText(config.builtinScope) } } : {}) };
   const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note,facts?.dmarc);
   if(row.dns_first && !row.ever_proven){
     if(!report.dns.some(record=>record.name===proofRecordName(row.proof_label,row.name))) report.dns.unshift({name:proofRecordName(row.proof_label,row.name),type:'TXT',value:row.token,purpose:'sending',status:'pending'});
@@ -454,6 +465,7 @@ export function derivedReadiness(row: ClaimRow): Readiness {
       if (seen) r.publicDns=seen.publicDns;
     }
     report.dnsHost=check.host;
+    report.dnsIssue=check.noDns ? noDnsIssue(row.name) : null;
   }
   if (row.created_at!==undefined && row.ever_proven===false && !held) report.releasesAt=new Date(new Date(row.created_at).getTime()+72*3600_000).toISOString();
   else if (row.ever_proven!==undefined) report.releasesAt=null;
@@ -921,7 +933,7 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
       .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
       .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
       .where(where).orderBy(desc(domains.id)).limit(q.limit+1),a.domains.length || q.countedElsewhere ? undefined : domainQuota(c.env.db,a.workspaceId)]);
-    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null,...quota && quota.limit !== null ? {quota:{used:quota.used,limit:quota.limit}} : {}};
+    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}},c.env.config)),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null,...quota && quota.limit !== null ? {quota:{used:quota.used,limit:quota.limit}} : {}};
   }
   const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
   if (q.refresh === 'false') {
@@ -980,6 +992,16 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Regional BYO defaults to the first enabled region, otherwise Ohio.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema),202:response(RegionalAccepted), ...errors } }), async c => {
     const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name, true);
+    // Hosted, one NS lookup beside the claim (two seconds, cached): a name nobody serves DNS for is added all the same,
+    // and the answer says so. A resolver error or timeout says nothing. Hosted, it is stored as the domain's first setup check, so
+    // reads, Check now and the background check carry it until DNS answers.
+    const noDns = c.env.config.domainNsCheck ? wrapModuleLoad(() => import('./record-check.js')).then(m => m.noDnsAt(input.name), () => false) : Promise.resolve(false);
+    const created = async (report: Readiness, claimToken?: string) => {
+      if (!await noDns) return c.json(report, 201);
+      if (claimToken) await c.env.db.execute(sql`UPDATE domain_claims SET setup_check=${JSON.stringify({ checkedAt: new Date().toISOString(), host: null, noDns: true, records: [] })}::jsonb
+        WHERE workspace_id=${a.workspaceId} AND token=${claimToken}::uuid AND sending_state='pending' AND setup_check IS NULL`);
+      return c.json({ ...report, dnsIssue: noDnsIssue(report.name) }, 201);
+    };
     if (c.env.config.multiTenant) {
       const pending=await (await wrapModuleLoad(() => import('./byo-regional.js'))).newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
       if (pending) {a.wakeJobs=1;return c.json(pending,202);}
@@ -988,7 +1010,7 @@ export function registerOperations(app: App) {
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region,reserved=>auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`${reserved}.id`},
         after:sql`jsonb_build_object('name',${input.name}::text,'region',${reserved}.connection->>'region')`},{from:reserved,where:sql`${reserved}.fresh AND ${reserved}.id IS NOT NULL AND ${reserved}.error_code IS NULL`})),
         row={name:input.name,region:claim.connection.region,id:claim.id};
-      if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
+      if (claim.claim.identity) return created(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),claim.token);
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
       // The reservation already queued the verify job, which creates the identity itself if this request dies here.
@@ -1003,13 +1025,13 @@ export function registerOperations(app: App) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
-      if (identity===null) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection,dns_first:true}),201);
+      if (identity===null) return created(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection,dns_first:true}),claim.token);
       if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
       const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL ${claim.connection.kind==='shared' && runtime.config.platformAccount ? sql`AND EXISTS(SELECT FROM provider_connections c WHERE c.id=connection_id AND (c.aws_account_id IS NULL OR c.aws_account_id=${runtime.config.platformAccount}))` : sql``} RETURNING ${row.id}::text AS id,token`;
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
-      return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
+      return created(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),claim.token);
     }
     assertSesConfigured(c.env);
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
@@ -1028,7 +1050,7 @@ export function registerOperations(app: App) {
       DO UPDATE SET updated_at=now() RETURNING id,name,region,xmax=0 AS created),
       audit AS (${auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`saved.id`},after:body},{from:sql`saved`,where:sql`saved.created`})})
       SELECT id,name,region FROM saved`);
-    return c.json(await domainReadiness(c.env, row!, identity,'create'), 201);
+    return created(await domainReadiness(c.env, row!, identity,'create'));
   });
   // Sets (mailFromDomain) or removes (null) a domain's custom MAIL FROM. Removing it calls SES without a MailFromDomain, which
   // returns the identity to the default amazonses.com MAIL FROM, and drops its MX and SPF records and SPF alignment. Removing
@@ -1123,17 +1145,22 @@ export function registerOperations(app: App) {
     return c.json(saved,200);
   });
   const dashboardSecurity=[{dashboardSession:[]},{secureDashboardSession:[]}] as Record<string,string[]>[];
-  // The guarantee is the server's, not the dashboard's: no recipient or content is accepted, only the domain.
+  // The guarantee is the server's, not the dashboard's: no recipient is accepted, only the domain, and words of the
+  // person's own are screened like any send (sending.ts platformTestVerdict).
+  const setupLine=(max:number)=>z.string().trim().min(1).max(max);
+  // Other fields are ignored, as they were before the route took any: no recipient is ever read from the body.
+  const TestEmailContent=z.object({subject:setupLine(SETUP_LIMITS.subject).refine(v=>!/[\r\n]/.test(v),'Subject cannot contain line breaks.').optional(),text:setupLine(SETUP_LIMITS.text).optional()}).openapi('TestEmailContent');
   app.openapi(createRoute({method:'post',path:'/v1/domains/{id}/test-send',operationId:'sendDomainTestEmail',tags:['Domains'],security:dashboardSecurity,
-    description:'Dashboard only. Sends a fixed test email from hello@<domain> to the signed-in user’s own address; it takes no recipient, subject or body. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.',
-    request:{params:IdParams},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
-    const a=actor(c,'send');
+    description:`Dashboard only. Sends a test email to the signed-in user’s own address; it takes no recipient. Without a body it is fixed content from hello@<domain>. With both subject and text (onboarding’s first email) it comes from "${SETUP_SENDER.name}" <${SETUP_SENDER.local}@<domain>> with those words, screened like any send unless they are onboarding’s own; a reply to it comes back into the workspace on a domain that receives. Other fields are ignored. Needs send permission and a verified domain, and counts like any other send. Use an Idempotency-Key to make a retry safe.`,
+    request:{params:IdParams,body:{...json(TestEmailContent),required:false}},responses:{202:response(z.object({id:z.string(),status:z.literal('queued'),simulated:z.boolean()}).openapi('TestEmailQueued')),...errors}}),async c=>{
+    const a=actor(c,'send'), content=c.req.valid('json') as z.infer<typeof TestEmailContent>|undefined;
     if (a.credential!=='dashboard' || !a.email) throw denied('DASHBOARD_SESSION_REQUIRED','Sign in to the dashboard to send a test email to yourself.',{ permission: 'sendEmail', level: 'on', credential: 'dashboard' });
     const [row]=await c.env.db.select({name:domains.name}).from(domains).where(and(scoped(domains,a),eq(domains.id,c.req.valid('param').id)));
     if (!row) return notFound('Domain');
     allowedDomain(a,row.name);
     const { admitTestEmail }=await wrapModuleLoad(() => import('./sending.js'));
-    return c.json(await admitTestEmail(c,a,row.name,a.email),202);
+    const custom=content?.subject && content.text ? { subject: content.subject, text: content.text } : undefined;
+    return c.json(await admitTestEmail(c,a,row.name,a.email,custom),202);
   });
   const dnsSetup='/v1/domains/{id}/dns-setup';
   const dnsGroup=`(${groupIds.join('|')})`;
@@ -1184,7 +1211,7 @@ export function registerOperations(app: App) {
     const checked = async (report: Readiness) => {
       const stored = c.env.config.multiTenant && report.sending === 'pending' && report.dnsHost !== undefined;
       const check = await (await wrapModuleLoad(() => import('./record-check.js'))).checkSetup(report);
-      if (check.records.length) report.dnsHost = check.host;
+      if (check.records.length) { report.dnsHost = check.host; report.dnsIssue = check.noDns ? noDnsIssue(report.name) : null; }
       if (stored) await c.env.db.execute(sql`UPDATE domain_claims SET setup_check=${JSON.stringify(check)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${report.name} AND sending_state='pending' AND setup_check IS NOT NULL`);
       return report;
     };
@@ -1194,7 +1221,7 @@ export function registerOperations(app: App) {
       const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,mode ? {domains:a.domains,mode,platformAccount:c.env.config.platformAccount} : undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
       // A stale dashboard may read persisted facts; its opportunistic recheck was fenced in SQL.
       if (row.queued) a.wakeJobs=1;
-      return c.json(derivedReadiness(row),200);
+      return c.json(derivedReadiness(row,c.env.config),200);
     }
     const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const report = await domainReadiness(c.env,row,undefined,verifyRoute?'verify':'read');
@@ -1406,7 +1433,53 @@ async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertifi
     const pem = await res.text(); if (pem.length > 16384) throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.');
     try { return new X509Certificate(pem); } catch { throw new ApiError(403, 'SNS_INVALID_CERTIFICATE', 'The SNS signing certificate is invalid.'); }
 }
+/**
+ * A budget of failed SNS signatures, checked before any verification work. SNS itself never fails verification, so its
+ * traffic never spends it. A peer gets SNS_PEER_FAILURES failures a minute in each isolate (and its share of the edge
+ * limiter across isolates); past SNS_ISOLATE_FAILURES in an isolate, a peer that has failed this minute gets no more tries
+ * unless it verified in the last 15 minutes. A peer with no failure is always verified: SNS delivers from addresses this
+ * isolate may not have seen yet, and its feedback must keep flowing.
+ */
+const SNS_PEER_FAILURES = 20, SNS_ISOLATE_FAILURES = 1200, SNS_PEERS = 4096;
+export class SnsFailureBudget {
+  private minute = 0; private total = 0;
+  private readonly failures = new Map<string, number>(); private readonly verified = new Map<string, number>();
+  constructor(private readonly clock = () => Date.now()) {}
+  private tick() { const minute = Math.floor(this.clock() / 60_000); if (minute !== this.minute) { this.minute = minute; this.total = 0; this.failures.clear(); } }
+  /** Whether this peer may be verified now: a check of counts, before any cryptography. */
+  admits(peer: string) {
+    this.tick();
+    if ((this.failures.get(peer) ?? 0) >= SNS_PEER_FAILURES) return false;
+    return this.total < SNS_ISOLATE_FAILURES || !this.failures.has(peer) || (this.verified.get(peer) ?? 0) > this.clock();
+  }
+  failed(peer: string, edgeExhausted = false) {
+    this.tick(); this.total++;
+    if (!this.failures.has(peer) && this.failures.size >= SNS_PEERS) return;
+    this.failures.set(peer, edgeExhausted ? SNS_PEER_FAILURES : (this.failures.get(peer) ?? 0) + 1);
+  }
+  succeeded(peer: string) {
+    this.verified.delete(peer);
+    if (this.verified.size >= SNS_PEERS) this.verified.delete(this.verified.keys().next().value!);
+    this.verified.set(peer, this.clock() + 15 * 60_000);
+  }
+}
+const isolateSnsFailures = new SnsFailureBudget();
+const snsFailuresLimited = () => new ApiError(429, 'SNS_RATE_LIMITED', 'Too many SNS envelopes failed verification from this address. Retry after one minute.', undefined, true);
 async function verifySns(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
+  const failures = runtime.snsFailureBudget ?? isolateSnsFailures;
+  if (!failures.admits(peer)) throw snsFailuresLimited();
+  try {
+    const trusted = await verifySnsSignature(envelope, runtime, peer);
+    failures.succeeded(peer);
+    return trusted;
+  } catch (error) {
+    // A signature that fails spends the peer's budget (certificate misses have their own budget); the edge limiter's
+    // refusal spends the rest of it here.
+    if (error instanceof ApiError && error.code === 'SNS_INVALID_SIGNATURE') failures.failed(peer, runtime.allowSnsFailure ? !await runtime.allowSnsFailure(peer).catch(() => true) : false);
+    throw error;
+  }
+}
+async function verifySnsSignature(envelope: SnsEnvelope, runtime: Runtime, peer: string) {
   const certificateTimeout = envelope.Type === 'SubscriptionConfirmation' ? 3000 : 10000;
   const trusted = snsHost(envelope);
   const url = trustedSnsUrl(envelope.SigningCertURL, trusted.host, true);
@@ -1581,8 +1654,9 @@ function registerPublicEvents(app: App) {
     let message: unknown; try { message = JSON.parse(envelope.Message); } catch { throw new ApiError(400, 'SES_INVALID_EVENT', 'SNS Message must contain a SES JSON event.'); }
     // Mailbox receipt notifications arrive on a separate Nightmail-owned topic and carry no sending account.
     if (c.env.config.inboundTopicArns?.includes(envelope.TopicArn)) {
-      const runnable = await (await wrapModuleLoad(() => import('./mailbox-receipts.js'))).acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
-      if (runnable > 0) try { await c.env.wake?.(runnable,'ingest'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
+      const {acceptInboundNotification,wakeReceivedMail}=await wrapModuleLoad(() => import('./mailbox-receipts.js'));
+      const runnable = await acceptInboundNotification(c.env, { topicArn: envelope.TopicArn, region: trusted.region, message });
+      try { await wakeReceivedMail(c.env,runnable); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Mailbox ingestion remains durable.' }); }
       return c.json({ accepted: true }, 202);
     }
     // An SES tenant status event (EventBridge) has no mail object: it is judged by its topic, account, region and an
@@ -1619,15 +1693,14 @@ function registerPublicEvents(app: App) {
   const TOKEN = /^u_[a-f0-9]{64}$/;
   // A person who opens a link that is cut short, mistyped or no longer known gets a page that says so; an API client
   // (no text/html in Accept) and a mailbox's one-click POST still get the JSON error.
-  const browser = (c: Ctx) => c.req.method === 'GET' && /\btext\/html\b/i.test(c.req.header('accept') ?? '');
+  const browser = (c: Ctx) => ['GET', 'HEAD'].includes(c.req.method) && /\btext\/html\b/i.test(c.req.header('accept') ?? '');
   const invalidLink = (c: Ctx) => {
     c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     c.set('failure', { code: 'NOT_FOUND' });
     return c.html(unsubscribePage('This unsubscribe link isn’t valid', '<p>It may be incomplete or out of date. To stop these emails, use the unsubscribe link in a more recent email from the sender, or ask the sender to remove you.</p>'), 404);
   };
-  // Hono matches HEAD as GET; intercept the original method before the mutating GET route.
+  // Hono serves HEAD through the read-only GET handler and drops the body.
   app.use('/unsubscribe/:token', async (c, next) => {
-    if (c.req.method === 'HEAD') { c.header('Allow', 'GET, POST'); c.header('Cache-Control', 'no-store'); throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Use GET or POST to unsubscribe.'); }
     if (browser(c) && !TOKEN.test(c.req.param('token') ?? '')) return invalidLink(c);
     await next();
   });
@@ -1663,11 +1736,16 @@ function registerMetrics(app: App) {
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
   const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
   const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), tenMinute: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
-    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString();
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. to defaults to now and from to 24 hours (granularity=10m) or 30 days before to; from equal to to is an empty window. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+    // Only a range the caller wrote can be refused: an omitted end is now (or the given start, if that is later, which
+    // reads as an empty window), and an omitted start is a window that fits the granularity (24 hours for 10m, else 30 days).
+    // A zero-length window is empty, not inverted.
+    const a = workspaceActor(c), q = c.req.valid('query'), nowMs = Date.now();
+    const end = q.to ?? (q.from && Date.parse(q.from) > nowMs ? q.from : new Date(nowMs).toISOString());
+    const start = q.from ?? new Date(Date.parse(end) - (q.granularity === '10m' ? 1 : 30) * 86400000).toISOString();
     const qStartMs = Date.parse(start), qEndMs = Date.parse(end);
-    if (qStartMs >= qEndMs || qEndMs - qStartMs > (q.granularity === '10m' ? 6 : 366) * 86400000 || (q.granularity === '10m' && qStartMs < Date.now() - 6 * 86400000)) {
-      throw new ApiError(422, 'INVALID_DATE_RANGE', q.granularity === '10m' ? '10-minute metrics require an increasing range within the last 6 days.' : 'Metrics require an increasing range of at most 366 days.');
+    if (qStartMs > qEndMs || qEndMs - qStartMs > (q.granularity === '10m' ? 6 : 366) * 86400000 || (q.granularity === '10m' && qStartMs < nowMs - 6 * 86400000)) {
+      throw new ApiError(422, 'INVALID_DATE_RANGE', q.granularity === '10m' ? '10-minute metrics require a range within the last 6 days with from no later than to.' : 'Metrics require a range of at most 366 days with from no later than to.');
     }
     const compute = async () => {
     if (q.region) region(await withRegionSettings(c.env,a.workspaceId),q.region);
@@ -1869,7 +1947,7 @@ function registerMetrics(app: App) {
     // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
     // 60-second cache per workspace/filters/window; API keys, MCP and agent tokens stay exact.
     if (a.credential !== 'dashboard') return c.json(await compute(), 200);
-    const startMs = Date.parse(start), endMs = Date.parse(end), nowMs = Date.now();
+    const startMs = Date.parse(start), endMs = Date.parse(end);
     // "Last N days/hours as of now" windows move every request; bucket them by minute and window length.
     // The Overview's "previous period" ends one window-length ago, so it is relative too: key it by how far back it
     // ends as well, or it never hits the cache.

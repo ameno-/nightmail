@@ -1,6 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type Runtime } from './core.js';
 import { log, logError } from './core.js';
+import { logAnalyticsFailure } from './analytics-traffic.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -686,6 +687,10 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
   ] as const) {
     try { await step(); } catch (error) {
       failed.push(code);
+      if (code === 'ANALYTICS_COMPACT_FAILED') {
+        logAnalyticsFailure(error, code, { step: code });
+        continue;
+      }
       const tables = (error as { tables?: unknown } | null)?.tables;
       log('warn', { code: error instanceof ApiError ? error.code : code, step: code, ...(Array.isArray(tables) ? { tables } : {}) });
     }

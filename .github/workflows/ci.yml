@@ -167,7 +167,7 @@ jobs:
           bun-version: 1.3.14
       # M6: fail on any high or critical advisory in a locked dependency (runtime and tooling alike;
       # bun audit reads bun.lock). Fix by upgrading or a patch-level override in that package.json.
-      # An ignore must name the advisory, why it cannot reach Bane, and what removes it.
+      # An ignore must name the advisory, why it cannot reach Nightmail, and what removes it.
       - name: Audit locked dependencies for high and critical advisories
         run: |
           set -euo pipefail
@@ -337,7 +337,7 @@ jobs:
           retention-days: 14
 
   # The support Worker (support/, the AI support agent's backend): types, the deployable bundle, and its tests, which
-  # drive that bundle in Miniflare with a fake Bane and a scripted model (no network, no model calls).
+  # drive that bundle in Miniflare with a fake Nightmail and a scripted model (no network, no model calls).
   support-work:
     needs: changes
     if: needs.changes.outputs.support == 'true'
@@ -364,24 +364,22 @@ jobs:
       - run: bun run test
         working-directory: support
 
-  # These are the existing protected check names. A failed classifier, a missing
-  # decision, or a selected suite that didn't succeed must never report green.
+  # Don't publish all six protected checks at once after the slowest shard. The dev queue saw
+  # them go green together while branch protection still saw build in progress on the batch tip.
   required:
-    name: ${{ matrix.check }}
-    needs: [changes, build-work, acceptance-shard, cls-shard, preview-work, gateway-work, support-work]
-    if: always() && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
+    name: &protected-name ${{ matrix.check }}
+    needs: [changes, build-work, preview-work, gateway-work, support-work]
+    if: &report-required always() && (github.event_name != 'push' || github.actor != 'github-merge-queue[bot]')
     runs-on: blacksmith-2vcpu-ubuntu-2404
     strategy:
       fail-fast: false
       matrix:
         include:
           - { check: build, job: build-work, flag: build }
-          - { check: acceptance, job: acceptance-shard, flag: acceptance }
-          - { check: cls, job: cls-shard, flag: cls }
           - { check: preview, job: preview-work, flag: preview }
           - { check: gateway, job: gateway-work, flag: gateway }
           - { check: support, job: support-work, flag: support }
-    steps:
+    steps: &verify-required
       - name: Verify suite result
         env:
           SCOPE: ${{ needs.changes.result }}
@@ -391,3 +389,27 @@ jobs:
           echo "Scope: $SCOPE; selected: $SELECTED; suite: $RESULT"
           [[ $SCOPE == success ]]
           [[ $SELECTED:$RESULT == true:success || $SELECTED:$RESULT == false:skipped ]]
+
+  required-cls:
+    name: *protected-name
+    needs: [changes, cls-shard]
+    if: *report-required
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      matrix:
+        include:
+          - { check: cls, job: cls-shard, flag: cls }
+    steps: *verify-required
+
+  # The acceptance shards still run in parallel with all the work above. Only publication
+  # of their verdict waits for the other five protected checks to finish.
+  required-acceptance:
+    name: *protected-name
+    needs: [changes, acceptance-shard, required, required-cls]
+    if: *report-required
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    strategy:
+      matrix:
+        include:
+          - { check: acceptance, job: acceptance-shard, flag: acceptance }
+    steps: *verify-required

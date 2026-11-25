@@ -41,13 +41,15 @@ export const SearchField = forwardRef<HTMLInputElement, Omit<InputHTMLAttributes
 export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<HTMLTextAreaElement>>(function Textarea({ className, ...props }, ref) {
   return <textarea data-component="Textarea" {...props} ref={ref} className={cx('ui-input', 'ui-textarea', className)} />;
 });
-export function Field({ label, htmlFor, error, hint, children }: { label: ReactNode; htmlFor?: string; error?: ReactNode; hint?: ReactNode; children: ReactNode }) {
+/** `errorCode`: which rule refused it, for analytics (a constant, never the value). `pulse`: bump it to flash the error again,
+ *  as when a form is submitted unchanged and its error would otherwise just sit there. */
+export function Field({ label, htmlFor, error, errorCode, pulse = 0, hint, children }: { label: ReactNode; htmlFor?: string; error?: ReactNode; errorCode?: string; pulse?: number; hint?: ReactNode; children: ReactNode }) {
   const generatedId = useId();
   const onlyChild = Children.count(children) === 1 && isValidElement(children) && children.type !== Fragment && !(typeof children.type === 'string' && ['div', 'span', 'section'].includes(children.type)) ? children as ReactElement<{ id?: string; 'aria-describedby'?: string; 'aria-invalid'?: boolean }> : null;
-  useFieldErrorAnalytics(error, label, htmlFor ?? onlyChild?.props.id);
+  useFieldErrorAnalytics(error, label, htmlFor ?? onlyChild?.props.id, error ? errorCode : undefined);
   const id = htmlFor ?? onlyChild?.props.id ?? generatedId;
   const descriptionId = `${id}-description`;
-  return <div data-component="Field" className="ui-field"><label className="ui-field__label" htmlFor={id}>{label}</label>{onlyChild ? cloneElement(onlyChild, { id, 'aria-invalid': error ? true : onlyChild.props['aria-invalid'], 'aria-describedby': [onlyChild.props['aria-describedby'], error || hint ? descriptionId : null].filter(Boolean).join(' ') || undefined }) : children}{(error || hint) && <div id={descriptionId} className={cx('ui-field__hint', Boolean(error) && 'ui-field__error')} role={error ? 'alert' : undefined}>{error || hint}</div>}</div>;
+  return <div data-component="Field" className="ui-field"><label className="ui-field__label" htmlFor={id}>{label}</label>{onlyChild ? cloneElement(onlyChild, { id, 'aria-invalid': error ? true : onlyChild.props['aria-invalid'], 'aria-describedby': [onlyChild.props['aria-describedby'], error || hint ? descriptionId : null].filter(Boolean).join(' ') || undefined }) : children}{(error || hint) && <div key={error ? pulse : undefined} id={descriptionId} className={cx('ui-field__hint', Boolean(error) && 'ui-field__error', Boolean(error) && pulse > 0 && 'ui-field__error--pulse')} role={error ? 'alert' : undefined}>{error || hint}</div>}</div>;
 }
 // A label may be any node (the menu and the trigger render it); `text` is its plain form for the phone's native picker, which can't
 // show a node. `mask`: string labels are email addresses, shown through PrivateAddress (blurred until hovered or focused, like every
@@ -222,9 +224,10 @@ function cardShape<C extends SkeletonColumn>(columns: C[]): CardShape<C> {
   });
   return shape;
 }
-// Every card of a table is the same height (12 px padding, a 20 px title line, 24 px per further line, or the 44 px
-// end control if taller), so its skeleton, a short page and a full page all hold the same space.
-const cardHeight = (shape: CardShape<unknown>) => 25 + Math.max(20 + 24 * shape.lines.length, shape.end.length ? 44 : 0);
+// Every card of a table is the same height (12 px padding above and below, a 20 px title line, 24 px per further line,
+// or the 44 px end control if taller, and the 6 px to the next card: .ui-card in ui.css), so its skeleton, a short page
+// and a full page all hold the same space.
+const cardHeight = (shape: CardShape<unknown>) => 30 + Math.max(20 + 24 * shape.lines.length, shape.end.length ? 44 : 0);
 const cardLabel = (label: ReactNode) => typeof label === 'string' && label ? <span className="ui-card__label">{label}</span> : null;
 // onRowIntent: a pointer resting on a row (not crossing it) or focus on it, before the click: warm what the row opens.
 // rowHref: rows that open a page are real links. The first cell's content is an <a href> (keyboard, middle-click,

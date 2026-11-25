@@ -249,9 +249,20 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
  */
 function receivingWarning(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
-  return host === domain && !receiving.every(record => record.status === 'verified')
-    ? `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today.`
-    : null
+  return host === domain && !receiving.every(record => record.status === 'verified') ? rootMxWarning(domain) : null
+}
+// Two-label public suffixes, so acme.co.uk counts as a registered domain and not a subdomain of co.uk.
+const SECOND_LEVEL = /^(?:co|com|net|org|gov|edu|ac|ltd|plc|me|ne|or|go|gen|nom|sch)\.[a-z]{2}$/
+/** Whether a name is a subdomain of a registered domain (nightmail.acme.dev), not a registered domain (acme.dev, acme.co.uk). */
+export function isSubdomainName(name: string) { const labels = name.split('.'); return labels.length > (SECOND_LEVEL.test(labels.slice(-2).join('.')) ? 3 : 2) }
+/**
+ * What receiving at a domain's own name takes over, worded for the case: a registered domain usually has mailboxes
+ * elsewhere today; a subdomain such as nightmail.acme.dev usually exists for exactly this, and its parent keeps its mail.
+ */
+export function rootMxWarning(host: string) {
+  return isSubdomainName(host)
+    ? `This MX record sends all mail for ${host} to ${productName}. ${host.slice(host.indexOf('.') + 1)} and its other subdomains keep their own mail.`
+    : `This MX record sends all mail for ${host} to ${productName}, including mailboxes hosted elsewhere today.`
 }
 
 // The domain page's receiving records (hosted): Off until the domain receives (publishing the record turns it on), and its own host's row offers

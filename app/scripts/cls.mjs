@@ -67,7 +67,7 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
 // `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice;
 // `skipped` is a workspace whose onboarding domain step this browser skipped (data/onboarding.ts).
-// dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
+// dana owns an established hosted workspace (and is a Nightmail operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [
@@ -182,6 +182,13 @@ const pages = ids => [
   ['Domain · built-in', `/domains/${ids.builtinDomain}`, { user: 'pia', skipped: 'ws_skipped', from: '/domains' }],
   // Every record in public DNS, SES not verified yet: "Your records are correct" over the records.
   ['Domain · records correct', `/domains/${ids.correctDomain}`, { user: 'nia', from: '/domains' }],
+  // Nobody serves DNS for it (a typo): "No DNS found" over the records, with Change name and Delete domain.
+  ['Domain · no DNS', `/domains/${ids.noDnsDomain}`, { user: 'nia', from: '/domains' }],
+  // A *.<domain> record answers its DKIM names: the banner says to add the CNAMEs exactly.
+  ['Domain · wildcard', `/domains/${ids.wildcardDomain}`, { user: 'nia', from: '/domains' }],
+  // Porkbun's parking default answers its DKIM names: the banner names Porkbun's record.
+  ['Domain · parking', `/domains/${ids.parkedDomain}`, { user: 'nia', from: '/domains' }],
+  ['Domain · change name dialog', `/domains/${ids.noDnsDomain}`, { user: 'nia', dialog: 'Change name' }],
   ['API keys', '/api-keys', { from: '/overview' }],
   ['Settings', '/settings', { from: '/overview' }],
   ['Settings · members', '/settings#members', { from: '/settings' }],
@@ -243,15 +250,18 @@ const pages = ids => [
   ['Docs · keys guide', '/docs/keys', { from: '/api-keys' }],
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
+  ['Docs · signed out operation', '/docs/api/sendEmail', { user: null }],
+  // No connection yet: the first email is up at once, with the provisioning bar along the top until Hosted mail is ready.
   ['Onboarding', '/onboarding', { user: 'ona' }],
-  // Onboarding's domain step with the built-in domain ready: continue with it, or add a domain of your own.
-  ['Onboarding · built-in domain', '/onboarding', { user: 'uma' }],
-  // The same while the built-in domain is still being set up: it says so, and reads /v1/me again until it is ready.
-  ['Onboarding · built-in domain setting up', '/onboarding', { user: 'ula' }],
-  // Its last step with the built-in domain: the agent prompt to copy and a test email, with no code or key on screen.
-  ['Onboarding · first email', '/onboarding', { user: 'uma', step: ['ws_builtin', 'agent:dom_builtin_ws_builtin'] }],
-  // The focus question, then the step each focus leads to (onboarding/focus-steps.tsx).
+  // The first email with the built-in domain ready: Send is on (onboarding/email-step.tsx).
+  ['Onboarding · first email', '/onboarding', { user: 'uma' }],
+  // The same while the built-in domain is still being set up: the bar runs and Send waits, reading /v1/me again until it is ready.
+  ['Onboarding · first email provisioning', '/onboarding', { user: 'ula' }],
+  // "What do you want to do?", then the screen each pick leads to (onboarding/focus-steps.tsx); developer emails' is the agent
+  // prompt and an API key, with no code or key on screen.
   ['Onboarding · focus', '/onboarding', { user: 'uma', step: ['ws_builtin', 'focus:dom_builtin_ws_builtin'] }],
+  ['Onboarding · developer', '/onboarding', { user: 'uma', step: ['ws_builtin', 'agent:dom_builtin_ws_builtin'] }],
+  ['Onboarding · personal', '/onboarding', { user: 'pam', step: ['ws_focus_personal', 'agent:dom_builtin_ws_focus_personal'] }],
   ['Onboarding · agent inbox', '/onboarding', { user: 'ada', step: ['ws_focus_agents', 'agent:dom_builtin_ws_focus_agents'] }],
   ['Onboarding · marketing', '/onboarding', { user: 'mae', step: ['ws_focus_marketing', 'agent:dom_builtin_ws_focus_marketing'] }],
   ['Onboarding · newsletter', '/onboarding', { user: 'noa', step: ['ws_focus_newsletter', 'agent:dom_builtin_ws_focus_newsletter'] }],
@@ -312,6 +322,31 @@ const pages = ids => [
   ['Compare · Mandrill', '/compare/mandrill', { user: null, from: '/pricing', click: 'Mandrill' }],
   ['Compare · Postmark', '/compare/postmark', { user: null, from: '/pricing', click: 'Postmark' }],
   ['Compare · SendGrid', '/compare/sendgrid', { user: null, from: '/pricing', click: 'SendGrid' }],
+  ['Compare · Nylas', '/compare/nylas', { user: null, from: '/pricing', click: 'Nylas' }],
+  ['Compare · Robotomail', '/compare/robotomail', { user: null, from: '/pricing', click: 'Robotomail' }],
+  ['Compare · Postfleet', '/compare/postfleet', { user: null, from: '/pricing', click: 'Postfleet' }],
+  ['Compare · Lumbox', '/compare/lumbox', { user: null, from: '/pricing', click: 'Lumbox' }],
+  ['Compare · Mails.ai', '/compare/mails-ai', { user: null, from: '/pricing', click: 'Mails.ai' }],
+  ['Compare · Dead Simple Email', '/compare/dead-simple-email', { user: null, from: '/pricing', click: 'Dead Simple Email' }],
+  ['Compare · Agent Identity', '/compare/agent-identity', { user: null, from: '/pricing', click: 'Agent Identity' }],
+  ['Compare · Inkbox', '/compare/inkbox', { user: null, from: '/pricing', click: 'Inkbox' }],
+  ['Compare · beehiiv', '/compare/beehiiv', { user: null, from: '/pricing', click: 'beehiiv' }],
+  ['Compare · MailerLite', '/compare/mailerlite', { user: null, from: '/pricing', click: 'MailerLite' }],
+  ['Compare · Buttondown', '/compare/buttondown', { user: null, from: '/pricing', click: 'Buttondown' }],
+  ['Compare · EmailOctopus', '/compare/emailoctopus', { user: null, from: '/pricing', click: 'EmailOctopus' }],
+  ['Compare · Ghost(Pro)', '/compare/ghost', { user: null, from: '/pricing', click: 'Ghost(Pro)' }],
+  ['Compare · AWeber', '/compare/aweber', { user: null, from: '/pricing', click: 'AWeber' }],
+  ['Compare · Loops', '/compare/loops', { user: null, from: '/pricing', click: 'Loops' }],
+  ['Compare · Brevo', '/compare/brevo', { user: null, from: '/pricing', click: 'Brevo' }],
+  ['Compare · MailerSend', '/compare/mailersend', { user: null, from: '/pricing', click: 'MailerSend' }],
+  ['Compare · Mailtrap', '/compare/mailtrap', { user: null, from: '/pricing', click: 'Mailtrap' }],
+  ['Compare · SMTP2GO', '/compare/smtp2go', { user: null, from: '/pricing', click: 'SMTP2GO' }],
+  ['Compare · AhaSend', '/compare/ahasend', { user: null, from: '/pricing', click: 'AhaSend' }],
+  ['Compare · CloudMailin', '/compare/cloudmailin', { user: null, from: '/pricing', click: 'CloudMailin' }],
+  ['Compare · SocketLabs', '/compare/socketlabs', { user: null, from: '/pricing', click: 'SocketLabs' }],
+  ['Compare · MailPace', '/compare/mailpace', { user: null, from: '/pricing', click: 'MailPace' }],
+  ['Compare · UniOne', '/compare/unione', { user: null, from: '/pricing', click: 'UniOne' }],
+  ['Compare · MailChannels', '/compare/mailchannels', { user: null, from: '/pricing', click: 'MailChannels' }],
   ['Support chat', '/logs', { from: '/overview', support: true }],
   ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
@@ -355,7 +390,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · focus agent inbox', 'Overview · focus marketing', 'Overview · focus newsletter', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · built-in domain', 'Onboarding · built-in domain setting up', 'Onboarding · first email', 'Onboarding · focus', 'Onboarding · agent inbox', 'Onboarding · marketing', 'Onboarding · newsletter', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
+const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · focus agent inbox', 'Overview · focus marketing', 'Overview · focus newsletter', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · first email', 'Onboarding · first email provisioning', 'Onboarding · focus', 'Onboarding · developer', 'Onboarding · personal', 'Onboarding · agent inbox', 'Onboarding · marketing', 'Onboarding · newsletter', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Compare · Nylas', 'Compare · Robotomail', 'Compare · Postfleet', 'Compare · Lumbox', 'Compare · Mails.ai', 'Compare · Dead Simple Email', 'Compare · Agent Identity', 'Compare · Inkbox', 'Compare · beehiiv', 'Compare · MailerLite', 'Compare · Buttondown', 'Compare · EmailOctopus', 'Compare · Ghost(Pro)', 'Compare · AWeber', 'Compare · Loops', 'Compare · Brevo', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email', 'Compare · MailerSend', 'Compare · Mailtrap', 'Compare · SMTP2GO', 'Compare · AhaSend', 'Compare · CloudMailin', 'Compare · SocketLabs', 'Compare · MailPace', 'Compare · UniOne', 'Compare · MailChannels']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -551,7 +586,12 @@ async function measure(browser, job, fx) {
     if (job.panel) await context.addInitScript(panel => { try { localStorage.setItem('nightmail.overview-panel', panel); } catch {} }, job.panel);
     page = await context.newPage();
     net = network(page);
-    page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });
+    page.on('request', request => {
+      const url = request.url();
+      if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`);
+      if (!job.user && url === origin + '/v1/me' && /^\/(?:$|docs(?:\/|$)|pricing\/?$|compare\/)/.test(new URL(page.url()).pathname))
+        problems.push('Public page asked for /v1/me without a sign-in hint');
+    });
     // A guard that makes a write fail on purpose expects its one 500 (expected500), and says so itself if it doesn't come.
     page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429) && !(expected500 && response.status() === 500 && expected500(response))) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
     page.on('pageerror', error => problems.push(`page error: ${error.message}`));

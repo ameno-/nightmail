@@ -1,17 +1,20 @@
-import { lazy, Suspense, useState, type CSSProperties, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { ArrowLeft, ArrowRight, ArrowUpRight, Check, Download, LayoutTemplate, Mail, Newspaper, PenLine, Upload } from 'lucide-react'
+import { ArrowLeft, ArrowUpRight, Check, ChevronRight, Download, Globe, Inbox, KeyRound, LayoutTemplate, Mail, MonitorSmartphone, Newspaper, PenLine, Upload } from 'lucide-react'
 import { Button, ErrorText, Input, useToast } from '../../components/ui'
 import { CopyAction, LiveStatus } from '../../components/motion'
-import { FocusPicker } from '../../components/FocusPicker'
+import { focusChoices } from '../../components/FocusPicker'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApi, useApiDef, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { request } from '../../data/live'
 import { queries } from '../../data/queries'
-import { agentInboxQuery, type WorkspaceFocus } from '../../data/focus'
+import { agentInboxQuery, focusLabels, type WorkspaceFocus } from '../../data/focus'
 import { errorText, type Newsletter } from '../../data/types'
-import { AgentSetupStatus, agentInboxPrompt, downloadText, signupFormPrompt, useAgentSetup } from '../docs/agent-setup'
+import { AgentSetupStatus, agentInboxPrompt, downloadText, marketingPrompt, personalInboxPrompt, signupFormPrompt, useAgentSetup, type AgentSetup } from '../docs/agent-setup'
+import { useMailServers } from '../docs/mail-settings'
+import { analytics } from '../../lib/analytics'
+import { Kbd, useStepKeys } from './keys'
 import { useRememberNewsletter } from '../newsletters/shared'
 import { relativeTime } from '../../lib/format'
 import { productSlug } from '../../../../api/src/brand'
@@ -25,21 +28,54 @@ function Back({ onBack }: { onBack: () => void }) {
   return <button type="button" className="onboarding-back" onClick={onBack}><ArrowLeft size={14} aria-hidden />Back</button>
 }
 
-/** "What do you want to focus on?": any of the four, the first leading; Continue saves them in the background, Skip saves none. */
-export function FocusStep({ initial, onBack, onContinue }: { initial: WorkspaceFocus[]; onBack?: () => void; onContinue: (focus: WorkspaceFocus[]) => void }) {
-  const [picked, setPicked] = useState(initial)
+/** The order step 2 asks in; its number key picks one. */
+export const FOCUS_ORDER: WorkspaceFocus[] = ['developer', 'agents', 'marketing', 'newsletter', 'personal']
+
+/** Step 2, "What do you want to do?": one pick, by a tap, a click or its number, opens its own next screen; Skip goes to the dashboard. */
+export function FocusStep({ current, onBack, onPick, onSkip }: { current: WorkspaceFocus | null; onBack?: () => void; onPick: (focus: WorkspaceFocus) => void; onSkip: () => void }) {
+  const shown = useRef(false)
+  useEffect(() => { if (!shown.current) { shown.current = true; analytics().track('onboarding', 'focus/shown') } }, [])
+  const skip = () => { analytics().track('onboarding', 'focus/skip'); onSkip() }
+  useStepKeys({ digit: n => { const focus = FOCUS_ORDER[n - 1]; if (focus) onPick(focus) }, escape: skip })
   return <div className="onboarding onboarding--narrow onboarding--focus">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       {onBack && <Back onBack={onBack} />}
-      <h1 className="onboarding-title">What do you want to focus on?</h1>
-      <p className="muted onboarding-builtin-copy">Pick any. The first leads, and you can change it in Settings.</p>
+      <h1 className="onboarding-title">What do you want to do?</h1>
+      <p className="muted onboarding-builtin-copy">Pick one to set up first. You can change it in Settings.</p>
     </div>
-    <FocusPicker value={picked} onChange={setPicked} rise={rise} />
-    <div className="onboarding-connect-actions onb-rise" style={rise(5)}>
-      <Button variant="primary" disabled={!picked.length} data-analytics="onboarding/focus/continue" onClick={() => onContinue(picked)}>Continue<ArrowRight size={16} aria-hidden /></Button>
-      <button type="button" className="onboarding-skip" data-analytics="onboarding/focus/skip" onClick={() => onContinue([])}>Skip</button>
+    <div className="onb-choices" role="group" aria-label="What do you want to do?">
+      {FOCUS_ORDER.map((focus, index) => {
+        const { icon: Icon, line } = focusChoices[focus]
+        return <button key={focus} type="button" className="onb-choice onb-rise" style={rise(index + 1)} aria-pressed={current === focus} aria-keyshortcuts={String(index + 1)} data-analytics={`onboarding/focus/${focus}`} onClick={() => onPick(focus)}>
+          <span className="onb-choice__icon" aria-hidden="true"><Icon size={18} /></span>
+          <span className="onb-choice__text"><span className="onb-choice__title">{focusLabels[focus]}</span><span className="onb-choice__line">{line}</span></span>
+          <span className="onb-choice__go" aria-hidden="true"><Kbd>{index + 1}</Kbd><ChevronRight size={16} /></span>
+        </button>
+      })}
+    </div>
+    <div className="onboarding-connect-actions onb-rise" style={rise(6)}>
+      <button type="button" className="onboarding-skip" data-analytics="onboarding/focus/skip" onClick={skip}>Skip<Kbd>Esc</Kbd></button>
     </div>
   </div>
+}
+
+/** Each focus's next screen: counted once as it opens, and Enter or Esc goes on to the dashboard. */
+export function useNextScreen(focus: WorkspaceFocus, onFinish: () => void) {
+  const shown = useRef(false)
+  useEffect(() => { if (!shown.current) { shown.current = true; analytics().track('onboarding', `next/${focus}/shown`) } }, [focus])
+  useStepKeys({ enter: onFinish, escape: onFinish })
+}
+
+/** A next screen's agent row: the prompt for this focus (a setup token in each copy), its docs, and how the agent is doing. */
+export function AgentRow({ copy, docs, setup, idle, index, download }: { copy: string | (() => Promise<string>) | null; docs: string; setup: AgentSetup | null; idle: string; index: number; download?: { name: string; text: () => string } }) {
+  return <section className="onboarding-agent onb-rise" style={rise(index)} aria-label="Agent prompt">
+    <div className="onboarding-connect-actions" data-pending={copy === null || undefined} inert={copy === null}>
+      <CopyAction value={copy ?? ''} label="Copy agent prompt" text="Copy agent prompt" variant="primary" />
+      <a className="ui-button ui-button--ghost ui-button--md" href={docs} target="_blank" rel="noopener" data-analytics="onboarding/next/docs">Read the docs<ArrowUpRight size={16} aria-hidden /></a>
+      {download && <Button variant="ghost" data-analytics="onboarding/next/download" onClick={() => downloadText(download.name, download.text())}><Download size={16} aria-hidden />Download</Button>}
+    </div>
+    {setup ? <AgentSetupStatus setup={setup} idle={idle} /> : <p className="muted onboarding-agent-line">Paste it into your coding agent: it connects with a device code.</p>}
+  </section>
 }
 
 // A task row: its icon, title and one line, and its action on the right (under it on a phone).
@@ -51,8 +87,8 @@ function Task({ icon, title, line, done, children, index }: { icon: ReactNode; t
   </li>
 }
 
-function Finish({ onFinish }: { onFinish: () => void }) {
-  return <div className="onboarding-actions"><Button onClick={onFinish}>Go to dashboard<ArrowRight size={16} aria-hidden /></Button></div>
+export function Finish({ onFinish }: { onFinish: () => void }) {
+  return <div className="onboarding-actions"><Button onClick={onFinish} data-analytics="onboarding/finish">Go to dashboard<Kbd>↵</Kbd></Button></div>
 }
 
 // ---- Agent inboxes -------------------------------------------------------------------------------------------------
@@ -83,6 +119,7 @@ export function AgentInboxStep({ domain, onBack, onFinish }: { domain: string; o
     return setup ? setup.copy(promptFor(id))() : promptFor(id)(undefined)
   }
   const messages = mail.data ?? []
+  useNextScreen('agents', onFinish)
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <Back onBack={onBack} />
@@ -153,17 +190,21 @@ export function MarketingStep({ domain, onBack, onFinish }: { domain: string | n
   const [importing, setImporting] = useState(false)
   const { draft, pending, start } = useDraft()
   const imported = setup.data?.progress?.contacts === true
+  const origin = usePublicOrigin(), { canAdminister } = useWorkspaceAccess(), agent = useAgentSetup(canAdminister)
+  const promptFor = (setupToken: string | null | undefined) => marketingPrompt({ origin: origin!, setupToken })
+  useNextScreen('marketing', onFinish)
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <Back onBack={onBack} />
       <h1 className="onboarding-title">Send your first campaign</h1>
       <p className="muted onboarding-builtin-copy">Set it up here; nothing sends until you press Send.</p>
     </div>
+    <AgentRow index={1} copy={origin ? agent ? agent.copy(promptFor) : promptFor(undefined) : null} docs="/docs/mcp" setup={agent} idle="Paste it into your coding agent: it imports your contacts and drafts campaigns, and never sends one on its own." />
     <ul className="focus-tasks">
-      <Task index={1} icon={<Upload size={16} />} title="Import your contacts" done={imported} line="A CSV from anywhere. Risky addresses are flagged, and campaigns skip them.">
+      <Task index={2} icon={<Upload size={16} />} title="Import your contacts" done={imported} line="A CSV from anywhere. Risky addresses are flagged, and campaigns skip them.">
         <Button variant={imported ? 'secondary' : 'primary'} size="sm" data-analytics="onboarding/marketing/import" onClick={() => setImporting(true)}>Import contacts</Button>
       </Task>
-      <Task index={2} icon={<LayoutTemplate size={16} />} title={draft ? `Draft ready: ${draft.name}` : 'Start from a template'} done={Boolean(draft)} line={draft ? 'Saved under Campaigns. Pick its audience and send when it’s right.' : 'A short announcement to rewrite, saved as a draft.'}>
+      <Task index={3} icon={<LayoutTemplate size={16} />} title={draft ? `Draft ready: ${draft.name}` : 'Start from a template'} done={Boolean(draft)} line={draft ? 'Saved under Campaigns. Pick its audience and send when it’s right.' : 'A short announcement to rewrite, saved as a draft.'}>
         <span className="onboarding-slot focus-task__slot">
           <span data-active={!draft || undefined} aria-hidden={draft ? true : undefined}>
             <Button size="sm" loading={pending === 'starter'} disabled={pending !== null} data-analytics="onboarding/marketing/starter" onClick={() => void start({ key: 'starter', ...starter(workspace), fromEmail: domain ? `hello@${domain}` : '', fromName: workspace })}><PenLine size={14} aria-hidden />Announcement</Button>
@@ -172,7 +213,7 @@ export function MarketingStep({ domain, onBack, onFinish }: { domain: string | n
         </span>
       </Task>
     </ul>
-    <p className="muted focus-ramp onb-rise" style={rise(3)}>{RAMP} <a href="/docs#sending-limits" target="_blank" rel="noopener">How limits work</a></p>
+    <p className="muted focus-ramp onb-rise" style={rise(4)}>{RAMP} <a href="/docs#sending-limits" target="_blank" rel="noopener">How limits work</a></p>
     {/* A link in the import's dialogs (Review them) leaves onboarding too. */}
     {importing && <div className="focus-portal" onClickCapture={event => { if ((event.target as Element).closest('a[href^="/"]')) onFinish() }}>
       <Suspense fallback={null}><ImportContactsDialog onClose={() => { setImporting(false); void setup.refetch() }} /></Suspense>
@@ -211,10 +252,12 @@ export function NewsletterStep({ domain, onBack, onFinish }: { domain: string; o
   }
   const promptFor = (setupToken: string | null | undefined) => signupFormPrompt({ origin: origin!, newsletter: created!, setupToken })
   const ready = Boolean(created && origin)
+  useNextScreen('newsletter', onFinish)
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
       <Back onBack={onBack} />
       <h1 className="onboarding-title">Start your newsletter</h1>
+      <p className="muted onboarding-builtin-copy">Name it, then copy the agent prompt that adds its signup form to your site. <a href="/docs/mcp" target="_blank" rel="noopener" data-analytics="onboarding/next/docs">Read the docs</a></p>
     </div>
     <ul className="focus-tasks">
       <Task index={1} icon={<Newspaper size={16} />} title={created ? created.name : 'Name it'} done={Boolean(created)} line={created ? <>Sends from <PrivateAddress value={created.from ?? from} />.</> : <>It sends from <PrivateAddress value={from} />.</>}>
@@ -227,7 +270,7 @@ export function NewsletterStep({ domain, onBack, onFinish }: { domain: string; o
         </span>
       </Task>
       <Task index={2} icon={<PenLine size={16} />} title="Add a signup form" line={setup?.state === 'connected' ? 'Your agent connected and is adding the form.' : 'Copy the prompt for your coding agent: it adds a form to your site that subscribes readers.'}>
-        <span data-pending={!ready || undefined} inert={!ready} className="focus-task__copy"><CopyAction value={ready ? setup ? setup.copy(promptFor) : promptFor(undefined) : ''} label="Copy signup form prompt" text="Copy prompt" size="sm" /></span>
+        <span data-pending={!ready || undefined} inert={!ready} className="focus-task__copy"><CopyAction value={ready ? setup ? setup.copy(promptFor) : promptFor(undefined) : ''} label="Copy agent prompt" text="Copy agent prompt" size="sm" /></span>
       </Task>
       <Task index={3} icon={<Mail size={16} />} title={draft ? 'First issue drafted' : 'Draft the first issue'} done={Boolean(draft)} line={draft ? 'Saved under the newsletter. Write it and send when it’s ready.' : 'To everyone who signs up; nothing sends until you press Send.'}>
         <span className="onboarding-slot focus-task__slot" data-pending={!created || undefined} inert={!created}>
@@ -237,6 +280,44 @@ export function NewsletterStep({ domain, onBack, onFinish }: { domain: string; o
           <span data-active={draft ? true : undefined} aria-hidden={draft ? undefined : true}>{draft && <LeaveLink to={`/campaigns/${encodeURIComponent(draft.id)}/edit`} onLeave={onFinish}>Open draft</LeaveLink>}</span>
         </span>
       </Task>
+    </ul>
+    <Finish onFinish={onFinish} />
+  </div>
+}
+
+// ---- An inbox for myself ------------------------------------------------------------------------------------------
+
+/** The built-in domain's Inbox (builtin-domain.ts): the reply to onboarding's first email is in it. */
+const builtinInboxQuery = (domain: string) => ({ queryKey: ['nightmail', 'builtin-inbox', domain], staleTime: Infinity, retry: 1,
+  queryFn: async ({ signal }: { signal?: AbortSignal }) => (await request<{ data: { id: string; address: string }[] }>(`/v1/inboxes?q=${encodeURIComponent(`hello@${domain}`)}&limit=5`, { signal })).data.find(inbox => inbox.address === `hello@${domain}`)?.id ?? null })
+
+/**
+ * An inbox for myself: what's live for a personal address today. Their own domain (Domains, whose records include the MX
+ * that brings its mail here), reading and answering it here, and, where the installation has a mail gateway, a mail app
+ * signed in with an app password. Nothing it doesn't have is offered.
+ */
+export function PersonalStep({ domain, onBack, onFinish }: { domain: string | null; onBack: () => void; onFinish: () => void }) {
+  const origin = usePublicOrigin(), { canAdminister } = useWorkspaceAccess(), agent = useAgentSetup(canAdminister), servers = useMailServers()
+  const inbox = useQuery({ ...builtinInboxQuery(domain ?? ''), enabled: Boolean(domain) })
+  const promptFor = (setupToken: string | null | undefined) => personalInboxPrompt({ origin: origin!, setupToken, mailServers: servers })
+  useNextScreen('personal', onFinish)
+  return <div className="onboarding onboarding--narrow">
+    <div className="onboarding-intro onb-rise" style={rise(0)}>
+      <Back onBack={onBack} />
+      <h1 className="onboarding-title">Your own inbox</h1>
+      <p className="muted onboarding-builtin-copy">Mail to your own domain, read and answered here{servers ? ' or in your mail app' : ''}.</p>
+    </div>
+    <AgentRow index={1} copy={origin ? agent ? agent.copy(promptFor) : promptFor(undefined) : null} docs={servers ? '/docs/keys' : '/docs/receiving'} setup={agent} idle="Paste it into your coding agent: it adds your domain, walks you through its records and creates your inbox." />
+    <ul className="focus-tasks">
+      <Task index={2} icon={<Globe size={16} />} title="Add your domain" line="Your own name, like you.com. Add its DNS records once, and mail to it comes here.">
+        <LeaveLink to="/domains?add" onLeave={onFinish} primary>Add domain</LeaveLink>
+      </Task>
+      <Task index={3} icon={<Inbox size={16} />} title="Read and reply here" line="Mail to your addresses lands in an inbox here, where you read it and answer from the address it came to.">
+        <LeaveLink to={inbox.data ? `/receiving/addresses/${encodeURIComponent(inbox.data)}?tab=mail` : '/receiving'} onLeave={onFinish}>Open inbox</LeaveLink>
+      </Task>
+      {servers && <Task index={4} icon={<MonitorSmartphone size={16} />} title="Use your mail app" line="Apple Mail, Outlook or Thunderbird: an app password signs it in over IMAP and SMTP.">
+        <LeaveLink to="/api-keys?create=app" onLeave={onFinish}><KeyRound size={14} aria-hidden />App password</LeaveLink>
+      </Task>}
     </ul>
     <Finish onFinish={onFinish} />
   </div>

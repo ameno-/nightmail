@@ -99,6 +99,8 @@ export type McpConnection = {
   defaultWorkspace: { id: string; source: 'set' | 'only' | 'last-used' } | null;
   /** Everything the connection could do in some workspace: what its listing shows. Each call is checked again. */
   listing: Actor;
+  /** When the access token this request presented expires (epoch ms): nothing the request starts outlives it. */
+  tokenExpiresAt?: number;
 };
 export class WorkspaceChoice extends Error {
   constructor(readonly code: 'WORKSPACE_REQUIRED' | 'WORKSPACE_NOT_FOUND' | 'WORKSPACE_AMBIGUOUS' | 'WORKSPACE_ACCESS_DENIED', message: string) { super(message); }
@@ -174,7 +176,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
     const methods = acceptedMethods(runtime.config.accountRequiredAcr);
     const message = error === 'insufficient_user_authentication' ? methods ? `${productName} requires ${methods} sign-in. Reconnect this MCP client and choose ${methods} at Anomaly account.` : 'Reconnect this MCP client using the sign-in method this installation requires.'
       : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : `This client has no active ${productName} approval for the requested access.`;
-    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="${requestedScopes(runtime.config).join(' ')}"${extra}` }});
+    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${detail ?? message}", resource_metadata="${metadata}", scope="${requestedScopes(runtime.config).join(' ')}"${extra}` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -210,41 +212,61 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // One approval per account and client: the same client used by two accounts (a personal and a work entry) gets two.
   // The account service's consent behind this token: its access tokens' jti is <consent>.<random>.
   const consent = typeof claims.jti === 'string' ? /^([A-Za-z0-9_-]{8,200})\.[A-Za-z0-9_-]{8,200}$/.exec(claims.jti)?.[1] ?? null : null;
+  // Account copies the original sign-in's auth_time into every token of the family. It is a lower bound on
+  // when consent was given; access-token iat advances on refresh and cannot establish that.
+  const authTime = consent && typeof claims.auth_time === 'number' && Number.isSafeInteger(claims.auth_time)
+    && claims.auth_time > 0 && claims.auth_time <= Math.min(claims.iat, Date.now()/1000) ? claims.auth_time : 0;
+  // A revoked row's updated_at is the cutoff. Carry it in the revocation history on reconnect, before later
+  // activity can overwrite updated_at. '@' cannot start an issuer grant ID. For rows already reconnected by an
+  // older build, created_at is the time of that reconnect: a conservative cutoff when the revoke time is lost.
+  // A row an older build already reconnected keeps working with the consent it reconnected with (issuer_grant): that
+  // build accepted it after the revocation, and refusing it would sign out every such connection at deploy. Any other
+  // consent needs a sign-in after the reconnect.
+  const eligible = sql`NOT coalesce(${consent}::text=ANY(g.revoked_issuer_grants), false) AND (${authTime}::bigint > CASE
+    WHEN g.revoked THEN floor(extract(epoch FROM g.updated_at))
+    WHEN starts_with(g.revoked_issuer_grants[1], '@') THEN substr(g.revoked_issuer_grants[1], 2)::bigint
+    WHEN cardinality(g.revoked_issuer_grants)>0 THEN floor(extract(epoch FROM g.created_at)) ELSE -1 END
+    OR (NOT g.revoked AND cardinality(g.revoked_issuer_grants)>0 AND NOT starts_with(g.revoked_issuer_grants[1], '@') AND ${consent}::text=g.issuer_grant))`;
   // `?profile=` on the MCP URL is only a label for that entry, shown in Nightmail; it never selects or authorizes anything.
   const profile = profileLabel(new URL(request.url).searchParams.get('profile'));
   // Revoked in Nightmail, an approval refuses the tokens of the consents it had. A token of a new consent (the person
   // connected the client again at the account service) starts it again under a new key, so nothing tied to the revoked
   // one comes back: its credentials, objects, rule parts and scheduled mail stay ended. (Clients with a fixed
   // client_id, such as OpenCode's metadata document, could otherwise never reconnect that account.)
-  if (consent) await runtime.db.execute(sql`UPDATE nightmail_resource_grants SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
+  if (authTime) await runtime.db.execute(sql`UPDATE nightmail_resource_grants AS g SET id=${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id, consent]))},
       revoked=false, issuer_grant=${consent}, issuer_grant_seen_at=now(), permissions=${sql.param(allowed)}::text[], expires_at=to_timestamp(${claims.exp}), issued_at=${claims.iat},
+      revoked_issuer_grants=array_prepend('@' || floor(extract(epoch FROM updated_at))::bigint::text,
+        CASE WHEN starts_with(revoked_issuer_grants[1], '@') THEN revoked_issuer_grants[2:] ELSE revoked_issuer_grants END),
       profile=coalesce(${profile}, profile), created_at=now(), updated_at=now(), issuer=${claims.iss}, subject=${claims.sub}
-    WHERE user_id=${userId} AND client_id=${claims.client_id} AND revoked AND issuer_grant IS NOT NULL AND NOT ${consent}=ANY(revoked_issuer_grants)`);
+    WHERE user_id=${userId} AND client_id=${claims.client_id} AND revoked AND ${eligible}`);
   // The approval follows the newest token: its scopes, expiry and consent. It names no workspace: every tool call names
   // one (or uses the connection's default, workspace_id) and is checked against the person's membership and role there.
   // A consent it has not seen before starts its 90 days (issuer_grant_seen_at, nightmail_approval_ends).
-  const { rows: [upserted] } = await runtime.db.execute<{created:boolean}>(sql`INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at,profile,issuer_grant)
+  const { rows: [upserted] } = await runtime.db.execute<{created:boolean}>(sql`INSERT INTO nightmail_resource_grants AS g(id,issuer,subject,user_id,client_id,permissions,expires_at,issued_at,profile,issuer_grant)
     VALUES (${'mcp_at_' + await digest(JSON.stringify([userId, claims.client_id]))},${claims.iss},${claims.sub},${userId},${claims.client_id},${sql.param(allowed)}::text[],to_timestamp(${claims.exp}),${claims.iat},${profile},${consent})
-    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,profile=coalesce(excluded.profile,nightmail_resource_grants.profile),
-      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,issuer_grant=coalesce(excluded.issuer_grant,nightmail_resource_grants.issuer_grant),
-      issuer_grant_seen_at=CASE WHEN excluded.issuer_grant IS DISTINCT FROM nightmail_resource_grants.issuer_grant AND excluded.issuer_grant IS NOT NULL THEN now() ELSE nightmail_resource_grants.issuer_grant_seen_at END
-    WHERE NOT nightmail_resource_grants.revoked AND NOT coalesce(excluded.issuer_grant=ANY(nightmail_resource_grants.revoked_issuer_grants), false)
-      AND (excluded.issued_at>nightmail_resource_grants.issued_at OR (excluded.issued_at=nightmail_resource_grants.issued_at AND
-        excluded.permissions=nightmail_resource_grants.permissions AND excluded.expires_at>nightmail_resource_grants.expires_at))
+    ON CONFLICT(user_id,client_id) DO UPDATE SET permissions=excluded.permissions,expires_at=excluded.expires_at,profile=coalesce(excluded.profile,g.profile),
+      issued_at=excluded.issued_at,updated_at=now(),issuer=excluded.issuer,subject=excluded.subject,issuer_grant=coalesce(excluded.issuer_grant,g.issuer_grant),
+      issuer_grant_seen_at=CASE WHEN excluded.issuer_grant IS DISTINCT FROM g.issuer_grant AND excluded.issuer_grant IS NOT NULL THEN now() ELSE g.issuer_grant_seen_at END
+    WHERE NOT g.revoked AND ${eligible}
+      AND (excluded.issued_at>g.issued_at OR (excluded.issued_at=g.issued_at AND
+        excluded.permissions=g.permissions AND excluded.expires_at>g.expires_at))
     RETURNING (xmax=0) AS created`);
   if (upserted?.created) log('info', { code: 'MCP_APPROVAL_CREATED', userId, client: String(claims.client_id).slice(0, 200) });
   // The same statement notes when the agent was last used (the API keys page shows it), at most once a minute and
   // never waiting: a row another transaction holds (a revoke, a receiving write) is skipped this time.
   const { rows: [approval] } = await runtime.db.execute<{ id: string; blocked: boolean }>(sql`WITH used AS (UPDATE nightmail_resource_grants SET last_used_at=now()
-      WHERE id IN (SELECT id FROM nightmail_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id} AND NOT revoked
+      WHERE id IN (SELECT id FROM nightmail_resource_grants g WHERE user_id=${userId} AND client_id=${claims.client_id} AND NOT revoked AND ${eligible}
         AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute') FOR NO KEY UPDATE SKIP LOCKED))
-    SELECT id, revoked OR coalesce(${consent}::text=ANY(revoked_issuer_grants), false) AS blocked
-    FROM nightmail_resource_grants WHERE user_id=${userId} AND client_id=${claims.client_id}`);
-  if (!approval || approval.blocked) return denied(403);
+    SELECT id, revoked OR NOT (${eligible}) AS blocked
+    FROM nightmail_resource_grants g WHERE user_id=${userId} AND client_id=${claims.client_id}`);
+  // Revoked in Nightmail: only a sign-in after the revocation reconnects (auth_time). The account service reuses an
+  // existing session for a new consent, so its older sign-in stays refused: the message (header too) says what to do.
+  if (!approval || approval.blocked) return denied(403, undefined, '', `This connection was revoked in ${productName}. Sign out of Anomaly account (or sign in again there), then reconnect this MCP client.`);
   const keyId = approval.id;
   // The presented token's own scopes: a token older than the approval's newest may carry fewer.
   const connection = await mcpConnection(runtime, keyId, allowed);
   if (!connection) return denied(403);
   if (!connection.workspaces.length) return denied(403, undefined, '', `This account belongs to no ${productName} workspace these scopes can act in. Join or create one in ${productName}, then reconnect.`);
+  if (typeof claims.exp === 'number') connection.tokenExpiresAt = claims.exp * 1000;
   return handler(connection);
 }

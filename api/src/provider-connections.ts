@@ -96,15 +96,18 @@ function view(runtime: Runtime, row: Row) {
 async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
-export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
-  // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
+export type ConnectionSummaryRow = Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; received: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null};
+export function connectionSummaryQuery(runtime: Runtime, wid: string) {
+  // Read the same allowance admission enforces, without taking its row locks.
   const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; received: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null}>(sql`
+  return sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
-      EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
-      EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=c.workspace_id AND m.direction='inbound') AS received,
+      -- Ordered scalar probes keep the workspace indexes even for a workspace with no mail. EXISTS can
+      -- discard ordering and choose a low-startup-cost sequential scan of every other workspace's mail.
+      coalesce((SELECT true FROM sending_emails e WHERE e.workspace_id=${wid} ORDER BY e.created_at DESC,e.id DESC LIMIT 1),false) AS sent,
+      coalesce((SELECT true FROM mail_messages m WHERE m.workspace_id=${wid} AND m.direction='inbound' ORDER BY m.received_at DESC,m.id DESC LIMIT 1),false) AS received,
       ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR tripped.at IS NOT NULL THEN 'off'
             WHEN dc.sending_state='verified' OR ${builtinSettingUp(sql`dc`, runtime.config.builtinDomain!)} THEN 'ready' ELSE 'pending' END,
           -- Its recipients in the rolling 24 hours, as send_admission counts them against its daily cap; read only while it can
@@ -116,8 +119,11 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
         LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL
         LEFT JOIN LATERAL (SELECT p.tripped_at AS at FROM builtin_parent p WHERE p.name=${runtime.config.builtinDomain} AND p.tripped_at IS NOT NULL) tripped ON true WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
-    FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
+    FROM provider_connections c WHERE c.workspace_id=${wid}`;
+}
+export function connectionSummaryOf(runtime: Runtime, row: ConnectionSummaryRow | null | undefined): z.infer<typeof ConnectionSummary> | null {
   if (!row) return null;
+  const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
   const iso = (value: string | null | undefined) => value ? new Date(value).toISOString() : null;
   const allowance = row.allowance;
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
@@ -126,6 +132,9 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
     domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, received: row.received, ...(row.attention ? { attention: row.attention } : {}),
     // Sending from the built-in domain closes once a domain of the workspace's own verifies (send_admission).
     ...(builtin ? { builtinDomain: row.builtin ? { ...row.builtin, sending: row.builtin.sending !== 'off' && row.verified_domains > 0 ? 'closed' : row.builtin.sending, scope: builtin, ...SEND_LIMITS.builtin[builtin] } : null } : {}) };
+}
+export async function connectionSummary(runtime: Runtime, wid: string) {
+  return connectionSummaryOf(runtime,(await runtime.db.execute<ConnectionSummaryRow>(connectionSummaryQuery(runtime,wid))).rows[0]);
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
@@ -505,7 +514,7 @@ export async function startHostedMail(runtime: Runtime, wid: string, context: Au
  * A new workspace's Hosted mail, started after the request that made it has answered (the sign-up callback, a new
  * workspace): its connection and built-in domain rows, then its SES setup, all on the Worker's waitUntil (runtime.detach),
  * on Node without being awaited. The jobs startHostedMail queues are the fallback, and onboarding starts Hosted mail
- * itself if even the rows were never written. Until they are, the workspace's /v1/me waits for them (awaitHostedStart).
+ * itself if even the rows were never written. Until they are, the workspace's /v1/me says so at once (hostedSetup).
  */
 export function startHostedMailAfter(runtime: Runtime, wid: string, context: AuditContext) {
   const run = async (rt: Runtime) => {
@@ -514,27 +523,12 @@ export function startHostedMailAfter(runtime: Runtime, wid: string, context: Aud
   };
   return runtime.detach ? runtime.detach(run) : run(runtime);
 }
-/** How long a new workspace's first reads wait for the Hosted mail its sign-up starts after answering, and for how long
- *  after the workspace was made. */
-export const HOSTED_START_WAIT = { ms: 2000, freshSeconds: 15 } as const;
 /**
- * connectionSummary for /v1/me, which a new workspace reads while its sign-up's Hosted mail is still being written
- * (startHostedMailAfter, a few hundred ms): a workspace made in the last 15 s without its connection or built-in domain
- * waits for them, up to 2 s, re-reading every 100 ms, so onboarding opens on "Your domain is ready" rather than a choice
- * or a form. Any other workspace answers at once (one more read only when its summary has no built-in domain).
+ * For how long after a workspace is made GET /v1/me says its Hosted mail is still starting (hostedSetup: 'starting') while
+ * its connection or built-in domain isn't written yet: the sign-up writes them after answering (startHostedMailAfter, a few
+ * hundred ms). Onboarding reads /v1/me again meanwhile; after it, onboarding starts Hosted mail itself (createConnection).
  */
-export async function settledConnectionSummary(runtime: Runtime, wid: string) {
-  const summary = await connectionSummary(runtime, wid);
-  if (!runtime.config.multiTenant || !runtime.config.builtinDomain || (summary && summary.builtinDomain)) return summary;
-  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-  for (const deadline = Date.now() + HOSTED_START_WAIT.ms; Date.now() < deadline; await sleep(100)) {
-    const { rows: [row] } = await runtime.db.execute<{ fresh: boolean; ready: boolean }>(sql`SELECT w.created_at > now() - make_interval(secs => ${HOSTED_START_WAIT.freshSeconds}) AS fresh,
-      EXISTS (SELECT FROM provider_connections c WHERE c.workspace_id=w.id) AND EXISTS (SELECT FROM builtin_domains b WHERE b.workspace_id=w.id) AS ready FROM workspaces w WHERE w.id=${wid}`);
-    if (!row?.fresh) return summary;
-    if (row.ready) return connectionSummary(runtime, wid);
-  }
-  return connectionSummary(runtime, wid);
-}
+export const HOSTED_STARTING_SECONDS = 15;
 export function registerProviderConnections(app: App) {
   const path = '/v1/connection';
   app.openapi(createRoute({ method: 'get', path, operationId: 'getConnection', tags, security, description: 'Get the current MX workspace connection or null. Poll during BYO setup for awaiting_role, provisioning, ready or failed and the imported domain count. Owner/admin dashboard only.', responses: { 200: response(z.object({ connection: z.union([Connection, z.null()]) })), ...errors } }), async c => {

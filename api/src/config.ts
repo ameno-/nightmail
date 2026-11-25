@@ -54,6 +54,9 @@ const values = z.object({
   // Hosted: the one email to a domain's owners when its records are still missing an hour after it was added
   // (src/domain-setup.ts). Off by default; the dashboard's banner and the DNS check run either way.
   DOMAIN_SETUP_REMINDER: z.enum(['on', 'off']).default('off'),
+  // Hosted: one bounded NS lookup when a domain is added, so a name nobody serves DNS for says so at once (record-check.ts
+  // dnsZone). On by default; off, such a domain is only found by Check now and the background check.
+  DOMAIN_NS_CHECK: z.enum(['on', 'off']).default('on'),
   // Hosted: the one email to a new workspace's owners when it still has no domain an hour after sign-up (src/domain-setup.ts).
   // Off by default; the Overview card runs either way.
   NO_DOMAIN_REMINDER: z.enum(['on', 'off']).default('off'),
@@ -333,7 +336,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: EVALUATION.limit },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
-    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
+    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true' && v.DOMAIN_NS_CHECK === 'on', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
     analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,

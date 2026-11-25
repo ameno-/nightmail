@@ -1,10 +1,10 @@
 import { DurableObject } from 'cloudflare:workers';
-import { baneApi, BaneError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './bane.js';
+import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './nightmail.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, plainText } from './gate.js';
 import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext } from './tickets.js';
 import { addressHash, MissingSecret, newId } from './tokens.js';
-import { alertOnce, countToday, holdOverCap, limits, mailAllowed, ticketAllowed } from './limits.js';
+import { alertOnce, countToday, holdOverCap, limits, mailAllowed, registrableDomain, ticketAllowed } from './limits.js';
 import { external, WorkQueue, type NewWork, type Outcome, type WorkRow, type WorkState } from './work.js';
 import { attachmentLink, deleteConversationUploads, MAX_ATTACHMENTS, modelImage, safeName, storeImage, type Attachment } from './attachments.js';
 import { cleanImage, ImageRejected, IMAGE_TYPES, MAX_IMAGE_BYTES } from './image.js';
@@ -47,6 +47,7 @@ const CONTEXT_MS = 5 * 60_000;
 const CHAT_IDLE_MS = 30 * 86_400_000, EMAIL_IDLE_MS = 7 * 86_400_000, KEEP_AFTER_CLOSE_MS = 7 * 86_400_000;
 const EMAIL_BURST = 5, EMAIL_BURST_MS = 10 * 60_000;
 const MAX_FRAME = 16_384, MAX_TEXT = 8000;
+const MAX_PENDING_TURNS = 5, MAX_PENDING_BYTES = 32_768, CHAT_BURST = 10, CHAT_BURST_MS = 60_000, MAX_TRANSCRIPT_MESSAGES = 200;
 const MODEL_LABEL = `${MODEL.model}#${MODEL.variant}`;
 const REDACTED = `I’ve sent this one to the ${productName} team to check before I answer. Someone will follow up by email.`;
 /** What a chat answer becomes when the model declines to answer (stop_reason "refusal"). */
@@ -73,8 +74,8 @@ const helpLine = (origin: string) => `For anything about your account, sign in t
 const GENERAL_ONLY = `Email answers are general: you can’t see or change any ${productName} account from email. Answer from what you know about ${productName}; the reply ends with a line (added for you) telling them to sign in and press Help for anything about their account.`;
 /** What any email turn is told when it reaches for a change, a note or content access. */
 const EMAIL_READS_ONLY = `By email you read only the account's status, domains and sending. Billing, API keys, the activity log, request logs and webhooks are answered in Help in the dashboard, and so is any change: tell them to sign in to ${productName}, open Help and ask there (they confirm a change on the card). Notes and message content are for a chat too.`;
-/** The only /v1/support reads an email conversation makes: the account's status, domains and sending (Nightmail refuses the rest for email too). */
-const EMAIL_ROUTES = /^\/v1\/support\/(?:context|workspaces|domains|domains\/[^/]+\/health|standing|emails|emails\/[^/]+|emails\/[^/]+\/lint|events|deliverability\/(?:metrics|bounces)|screen|campaigns|campaigns\/[^/]+|campaigns\/[^/]+\/lint|audience\/health|scope)$/;
+/** The only /v1/support reads an email conversation makes: status, domains, standing and aggregate deliverability summaries (Nightmail refuses the rest for email too). */
+const EMAIL_ROUTES = /^\/v1\/support\/(?:context|workspaces|domains|domains\/[^/]+\/health|standing|deliverability\/(?:metrics|bounces)|scope)$/;
 const ACCESS_CHANGED = 'This conversation ended because your access to a workspace changed. Open Help to start a new one.';
 /** A chat from before the stamp: it ends at its next message. */
 const LEGACY_ENDED = 'This conversation has ended. Open Help to start a new one.';
@@ -216,6 +217,10 @@ export class SupportConversation extends DurableObject<Env> {
   /** OpenCode, booting or booted: started in the background when a chat opens or reconnects, awaited by the first turn. */
   private booting: Promise<Harness> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  private pendingTurns = 0;
+  private pendingBytes = 0;
+  private chatTimestamps: number[] = [];
+  private closingForLimit = false;
   /** The DMARC verdict of the email being answered, for the ticket it may file. */
   private currentDmarc: string | null = null;
   /**
@@ -539,7 +544,7 @@ export class SupportConversation extends DurableObject<Env> {
    * registered, and Nightmail's scope still gives it what its last turn ran with (less ends it now). 'unavailable': Nightmail
    * couldn't say; the panel tries again.
    */
-  private async joinable(userId: string | null): Promise<'ok' | 'gone' | 'unavailable'> {
+  private async joinable(userId: string | null, tokenIssuedAt?: number): Promise<'ok' | 'gone' | 'unauthorized' | 'unavailable'> {
     const meta = this.meta();
     if (!meta || !userId || meta.channel !== 'chat' || meta.userId !== userId || meta.status === 'closed') return 'gone';
     if (!meta.registered) { await this.retireLegacy(); return 'gone'; }
@@ -549,6 +554,12 @@ export class SupportConversation extends DurableObject<Env> {
     try { scope = await this.stamped<Scope>('GET', '/v1/support/scope'); } catch (error) { logError(error, { event: 'chat', code: 'SCOPE_READ_FAILED' }, 'warn'); return 'unavailable'; }
     if (scope.status >= 500 || scope.status === 429) return 'unavailable';
     if (scope.status !== 200) return 'gone';
+    // Tokens issued before a sign-out are refused once no matching live session remains.
+    if (tokenIssuedAt !== undefined) {
+      if (scope.body.user.activeSession === false) return 'unauthorized';
+      const since = scope.body.user.sessionSince ? Date.parse(scope.body.user.sessionSince) : NaN;
+      if (Number.isFinite(since) && tokenIssuedAt + 5_000 < since) return 'unauthorized';
+    }
     if (this.reduced(meta, scope.body)) { await this.endForAccess(); return 'gone'; }
     this.applyScope(scope.body);
     return 'ok';
@@ -557,13 +568,14 @@ export class SupportConversation extends DurableObject<Env> {
   async admits({ userId }: { userId: string }): Promise<{ ok: true } | { ok: false; code: 'EMAIL' | 'GONE' | 'UNAVAILABLE' }> {
     if (this.meta()?.channel === 'email') return { ok: false, code: 'EMAIL' };
     const joinable = await this.joinable(userId);
-    return joinable === 'ok' ? { ok: true } : { ok: false, code: joinable === 'gone' ? 'GONE' : 'UNAVAILABLE' };
+    return joinable === 'ok' ? { ok: true } : { ok: false, code: joinable === 'gone' || joinable === 'unauthorized' ? 'GONE' : 'UNAVAILABLE' };
   }
 
   override async fetch(request: Request): Promise<Response> {
     if (request.headers.get('upgrade')?.toLowerCase() !== 'websocket') return new Response(null, { status: 404 });
-    const joinable = await this.joinable(request.headers.get('x-support-user'));
-    if (joinable !== 'ok') return new Response(null, { status: joinable === 'gone' ? 404 : 503 });
+    const iatRaw = Number(request.headers.get('x-support-token-iat') ?? ''), expRaw = Number(request.headers.get('x-support-token-exp') ?? '');
+    const joinable = await this.joinable(request.headers.get('x-support-user'), Number.isFinite(iatRaw) && iatRaw > 0 ? iatRaw : undefined);
+    if (joinable !== 'ok') return new Response(null, { status: joinable === 'unauthorized' ? 401 : joinable === 'gone' ? 404 : 503 });
     // Open proposals' cards only as Nightmail returns them now, read through the stamp (a refusal ends the chat).
     const cards = await this.openCards();
     if (cards === 'refused') { await this.endForAccess(); return new Response(null, { status: 404 }); }
@@ -575,6 +587,7 @@ export class SupportConversation extends DurableObject<Env> {
     if (opening) this.record({ id: newId('msg'), role: 'user', kind: null, text: opening, at: new Date().toISOString(), tools: [] });
     const pair = new WebSocketPair();
     this.ctx.acceptWebSocket(pair[1]);
+    if (Number.isFinite(expRaw) && expRaw > 0) pair[1].serializeAttachment({ exp: expRaw });
     const messages = this.history();
     this.sendTo(pair[1], this.hello(meta));
     this.sendTo(pair[1], { type: 'history', messages, pending: { consent: this.pendingConsent(), ticket: this.pendingTicket(meta), actions: cards } });
@@ -586,6 +599,8 @@ export class SupportConversation extends DurableObject<Env> {
   }
 
   override async webSocketMessage(ws: WebSocket, raw: string | ArrayBuffer) {
+    const att = ws.deserializeAttachment() as { exp?: number } | null;
+    if (att?.exp && Date.now() >= att.exp) { ws.close(4401, 'expired'); return; }
     if (typeof raw !== 'string' || raw.length > MAX_FRAME) { this.sendTo(ws, { type: 'error', code: 'BAD_MESSAGE', message: 'Frames are JSON text up to 16 KB.', retryable: false }); return; }
     let message: Record<string, unknown>;
     try { message = JSON.parse(raw); } catch { this.sendTo(ws, { type: 'error', code: 'BAD_MESSAGE', message: 'Not JSON.', retryable: false }); return; }
@@ -598,15 +613,38 @@ export class SupportConversation extends DurableObject<Env> {
         const requested = Array.isArray(message.attachments) ? message.attachments.filter((a): a is string => typeof a === 'string').slice(0, MAX_ATTACHMENTS) : [];
         if ((!text && !requested.length) || !clientId) { this.sendTo(ws, { type: 'error', code: 'BAD_MESSAGE', message: 'user.message needs text (or attachments) and clientMessageId.', retryable: false }); return; }
         if (meta.status === 'closed') { this.sendTo(ws, { type: 'closed', reason: 'ended' }); return; }
+        // Check conversation budgets, queue bounds and burst rate before persisting or queueing any work.
+        const refused = this.admit(meta);
+        if (refused) {
+          this.sendTo(ws, { type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its limit. I’ve passed it to the ${productName} team, who will follow up by email.`, retryable: false });
+          if (!this.closingForLimit) {
+            this.closingForLimit = true;
+            this.enqueueTurn({ text });
+          }
+          return;
+        }
+        const storedUsers = this.sql.exec<{ n: number }>("SELECT count(*) AS n FROM _support_transcript WHERE role = 'user'").one().n;
+        if (storedUsers >= MAX_TRANSCRIPT_MESSAGES || meta.turns + this.pendingTurns >= TURNS_PER_CONVERSATION) {
+          this.sendTo(ws, { type: 'error', code: 'BUDGET_EXHAUSTED', message: `This conversation has reached its message limit. Start a new conversation or email ${addresses.support}.`, retryable: false });
+          return;
+        }
+        const textBytes = new TextEncoder().encode(text).length;
+        const now = Date.now();
+        this.chatTimestamps = this.chatTimestamps.filter(at => now - at < CHAT_BURST_MS);
+        if (this.pendingTurns >= MAX_PENDING_TURNS || this.pendingBytes + textBytes > MAX_PENDING_BYTES || this.chatTimestamps.length >= CHAT_BURST) {
+          this.sendTo(ws, { type: 'error', code: 'RATE_LIMITED', message: 'Please wait a moment before sending more messages.', retryable: true, retryAfter: 5 });
+          return;
+        }
         // Only this conversation's own uploads that no earlier message used.
         const unused = new Map(this.sql.exec<{ id: string; type: string; width: number | null; height: number | null; name: string }>('SELECT id, type, width, height, name FROM _support_attachments WHERE message_id IS NULL').toArray().map(a => [a.id, a]));
         if (requested.some(id => !unused.has(id))) { this.sendTo(ws, { type: 'error', code: 'BAD_MESSAGE', message: 'Unknown or already used attachment.', retryable: false }); return; }
         if (this.sql.exec('INSERT INTO _support_client_ids (id) VALUES (?) ON CONFLICT (id) DO NOTHING', clientId).rowsWritten === 0) return;
+        this.chatTimestamps.push(now);
         const messageId = newId('msg');
         for (const id of requested) this.sql.exec('UPDATE _support_attachments SET message_id = ? WHERE id = ?', messageId, id);
-        this.update(m => { m.lastActivity = Date.now(); });
-        this.record({ id: messageId, role: 'user', kind: null, text, at: new Date().toISOString(), tools: [], attachments: requested.map(id => unused.get(id)!) });
-        this.enqueueTurn({ text: text || '(The customer sent a screenshot without text.)', attachments: requested });
+        this.update(m => { m.lastActivity = now; });
+        this.record({ id: messageId, role: 'user', kind: null, text, at: new Date(now).toISOString(), tools: [], attachments: requested.map(id => unused.get(id)!) });
+        this.enqueueTurn({ text: text || '(The customer sent a screenshot without text.)', attachments: requested }, textBytes);
         return;
       }
       case 'consent.respond': {
@@ -639,7 +677,9 @@ export class SupportConversation extends DurableObject<Env> {
         this.hint(id);
         return;
       }
-      case 'human.request': this.record({ id: newId('msg'), role: 'user', kind: null, text: 'Talk to a person', at: new Date().toISOString(), tools: [] });
+      case 'human.request':
+        if (meta.status === 'closed' || meta.ticketId || this.pendingTurns >= MAX_PENDING_TURNS) return;
+        this.record({ id: newId('msg'), role: 'user', kind: null, text: 'Talk to a person', at: new Date().toISOString(), tools: [] });
         this.enqueueTurn({ text: '[The customer pressed “Talk to a person”. File a ticket of the type that fits (topic human_requested) with what you know so far, then tell them what happens next.]', hidden: true }); return;
       case 'cancel': this.abort?.abort(); return;
       case 'feedback': if (message.rating === 'up' || message.rating === 'down') this.update(m => { (m as Meta & { rating?: string }).rating = message.rating as string; }); return;
@@ -745,7 +785,7 @@ export class SupportConversation extends DurableObject<Env> {
       if (reply.status === 404) return false;
       return platformBody(reply).agentState === 'paused';
     } catch (error) {
-      if (strict) throw error instanceof BaneError ? error : new BaneError(503, 'INBOX_STATE_UNAVAILABLE', 'The inbox state could not be read');
+      if (strict) throw error instanceof NightmailError ? error : new NightmailError(503, 'INBOX_STATE_UNAVAILABLE', 'The inbox state could not be read');
       logError(error, { event: 'inbox', code: 'INBOX_STATE_UNAVAILABLE' }, 'warn');
       return false;
     }
@@ -824,7 +864,7 @@ export class SupportConversation extends DurableObject<Env> {
         const last = meta.lastInbound;
         if (!recipient || !last) { progress.failed = recipient ? 'no message to reply to' : 'sender not verified'; save(); return settle('failed'); }
         if (!progress.emailed) {
-          await external(baneApi(this.env).reply(last.threadId, { replyToMessageId: last.messageId, text: reply.text, to: recipient, addressId: this.route({ addressIds: last.addressIds } as Snapshot, last.messageId, 'reply').addressId }, `staff-${reply.id}`));
+          await external(nightmailApi(this.env).reply(last.threadId, { replyToMessageId: last.messageId, text: reply.text, to: recipient, addressId: this.route({ addressIds: last.addressIds } as Snapshot, last.messageId, 'reply').addressId }, `staff-${reply.id}`));
           progress.emailed = true; save();
         }
       } else {
@@ -839,13 +879,13 @@ export class SupportConversation extends DurableObject<Env> {
         if (!open && !progress.emailed) {
           if (!recipient) { progress.failed = 'no account address'; save(); return settle('failed'); }
           const first = meta.name?.split(/\s+/)[0] ?? 'there';
-          await external(baneApi(this.env).startThread({ to: [recipient], subject: `Re: your ${productName} support chat`, text: [`Hi ${first},`, '', reply.text, '', `${author}, ${productName}`].join('\n') }, `staff-${reply.id}`));
+          await external(nightmailApi(this.env).startThread({ to: [recipient], subject: `Re: your ${productName} support chat`, text: [`Hi ${first},`, '', reply.text, '', `${author}, ${productName}`].join('\n') }, `staff-${reply.id}`));
           progress.emailed = true; save();
         }
       }
     } catch (error) {
       // A reply Nightmail refuses for good (no reply target, recipients changed): failed, so staff see it wasn't sent.
-      if (error instanceof BaneError && error.status >= 400 && error.status < 500 && error.status !== 429 && !['IDEMPOTENCY_IN_PROGRESS'].includes(error.code)) {
+      if (error instanceof NightmailError && error.status >= 400 && error.status < 500 && error.status !== 429 && !['IDEMPOTENCY_IN_PROGRESS'].includes(error.code)) {
         progress.failed = error.code; save();
         return settle('failed');
       }
@@ -987,8 +1027,13 @@ export class SupportConversation extends DurableObject<Env> {
 
   // ---------- turns ----------
 
-  private enqueueTurn(input: { text?: string; hidden?: boolean; attachments?: string[] }) {
-    this.queue = this.queue.then(() => this.chatTurn(input)).catch(error => logError(error, { event: 'chat', code: 'TURN_FAILED' }));
+  private enqueueTurn(input: { text?: string; hidden?: boolean; attachments?: string[] }, bytes = 0) {
+    this.pendingTurns += 1;
+    this.pendingBytes += bytes;
+    this.queue = this.queue.then(() => this.chatTurn(input)).catch(error => logError(error, { event: 'chat', code: 'TURN_FAILED' })).finally(() => {
+      this.pendingTurns = Math.max(0, this.pendingTurns - 1);
+      this.pendingBytes = Math.max(0, this.pendingBytes - bytes);
+    });
     this.ctx.waitUntil(this.queue);
   }
 
@@ -1308,12 +1353,19 @@ export class SupportConversation extends DurableObject<Env> {
   private async person(meta: Meta) { return meta.channel === 'chat' && meta.userId ? `user:${meta.userId}` : `sender:${await addressHash(meta.email ?? meta.conversationId)}`; }
 
   /**
-   * The daily turn caps, before any model call: the person's (a chat's user, at turnsPerPerson; an email's sender address,
-   * at turnsPerEmailSender, and a verified email's stamped person too, at turnsPerPerson), then everyone's.
+   * The daily turn caps, before any model call. Signed-in chats and verified customer emails draw from the customer
+   * reserve (`global:turns`). General (non-member) emails draw from their own per-domain and daily budget so they can
+   * never exhaust the customer reserve.
    */
   private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false): Promise<{ ok: boolean; global: boolean }> {
     const cap = limits(this.env), email = meta.channel === 'email';
     if (!(await count(this.env, `${await this.person(meta)}:${email ? 'email_turns' : 'turns'}`, email ? cap.turnsPerEmailSender : cap.turnsPerPerson)).ok) return { ok: false, global: false };
+    if (email && !verifiedEmail) {
+      const domain = registrableDomain(meta.email ?? meta.conversationId);
+      if (domain && !(await count(this.env, `domain:${await addressHash(domain)}:email_turns`, cap.turnsPerEmailDomain)).ok) return { ok: false, global: false };
+      if (!(await count(this.env, 'global:turns:general', cap.turnsGeneralPerDay)).ok) return { ok: false, global: true };
+      return { ok: true, global: false };
+    }
     if (email && verifiedEmail && meta.userId && !(await count(this.env, `user:${meta.userId}:turns`, cap.turnsPerPerson)).ok) return { ok: false, global: false };
     if (!(await count(this.env, 'global:turns', cap.turnsPerDay)).ok) { await alertOnce(this.env, 'turns', cap.turnsPerDay); return { ok: false, global: true }; }
     return { ok: true, global: false };
@@ -1384,13 +1436,13 @@ export class SupportConversation extends DurableObject<Env> {
       case 'close': await this.closeRemote(); return {};
       // A chat opening whose answer from Nightmail was never handled: closed here, and with Nightmail (the close item).
       case 'opening': if (!this.meta()!.registered && this.meta()!.status !== 'closed') await this.close('ended'); return {};
-      case 'alert': { const { key, input } = payload as Alert; await external(baneApi(this.env).startThread(input, key)); return {}; }
+      case 'alert': { const { key, input } = payload as Alert; await external(nightmailApi(this.env).startThread(input, key)); return {}; }
       case 'notify': {
         const { ticketId, key, input } = payload as Notify;
         const row = await external(this.env.DB.prepare('SELECT notified_at FROM tickets WHERE id = ?').bind(ticketId).first<{ notified_at: number | null }>());
         if (!row) throw new Error('Missing ticket');
         if (row.notified_at === null) {
-          await external(baneApi(this.env).startThread(input, key));
+          await external(nightmailApi(this.env).startThread(input, key));
           await external(this.env.DB.prepare('UPDATE tickets SET notified_at = ? WHERE id = ?').bind(Date.now(), ticketId).run());
         }
         return {};
@@ -1412,7 +1464,7 @@ export class SupportConversation extends DurableObject<Env> {
     const decided = this.sql.exec<{ result: string }>('SELECT result FROM _support_work WHERE id = ?', `msg:${messageId}`).toArray()[0];
     const kept = decided ? (JSON.parse(decided.result) as Decision).message : undefined;
     if (kept) return kept;
-    if (!progress.message) { progress.message = snapshotOf(await external(baneApi(this.env).message(messageId))); save(); }
+    if (!progress.message) { progress.message = snapshotOf(await external(nightmailApi(this.env).message(messageId))); save(); }
     return progress.message;
   }
 
@@ -1442,7 +1494,7 @@ export class SupportConversation extends DurableObject<Env> {
    */
   private async decide(item: WorkRow, next: Incoming): Promise<Outcome> {
     const progress: Decision = JSON.parse(item.result), save = () => this.work.checkpoint(item.id, progress), count = charged(progress, save);
-    if (!progress.message) { progress.message = snapshotOf(await external(baneApi(this.env).message(next.messageId))); save(); }
+    if (!progress.message) { progress.message = snapshotOf(await external(nightmailApi(this.env).message(next.messageId))); save(); }
     const message = progress.message, sender = message.from;
     // Never answer automatic mail or ourselves (loops). Nightmail flags auto-replies, bounces, reports, bulk and list mail.
     if (!sender || message.automated === true || /^(?:mailer-daemon|postmaster|no-?reply|bounces?)@/i.test(sender) || sender === this.env.SUPPORT_ADDRESS.toLowerCase()) return { result: progress };
@@ -1491,7 +1543,7 @@ export class SupportConversation extends DurableObject<Env> {
         await keep('open conversations per person');
         if (!progress.busy) {
           const route = this.route(message, next.messageId, 'reply');
-          await external(baneApi(this.env).reply(message.threadId ?? next.threadId, { replyToMessageId: next.messageId, text: FIXED.busy(), to: sender, subject: FIXED_SUBJECT, addressId: route.addressId }, `${route.key}:busy`));
+          await external(nightmailApi(this.env).reply(message.threadId ?? next.threadId, { replyToMessageId: next.messageId, text: FIXED.busy(), to: sender, subject: FIXED_SUBJECT, addressId: route.addressId }, `${route.key}:busy`));
           progress.busy = true; save();
         }
         return { state: 'held', result: progress };
@@ -1560,8 +1612,8 @@ export class SupportConversation extends DurableObject<Env> {
     // A message that proved nothing: its fixed reply, with a sign-in for this one message, goes once under a key of its
     // own; then its answer waits, parked, until Nightmail lists that sign-in (signIns). Closing holds it.
     if (answer.signin && !progress.challenged) {
-      const origin = new URL(this.env.BANE_ORIGIN).origin, link = `${origin}/support/continue/${meta.conversationId}/${answer.messageId}`;
-      await external(baneApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: FIXED.signin(origin, link, receivedOn(message.receivedAt)), to: answer.sender, subject: FIXED_SUBJECT, addressId: answer.route.addressId }, `${answer.route.key}:signin`));
+      const origin = new URL(this.env.NIGHTMAIL_ORIGIN).origin, link = `${origin}/support/continue/${meta.conversationId}/${answer.messageId}`;
+      await external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: FIXED.signin(origin, link, receivedOn(message.receivedAt)), to: answer.sender, subject: FIXED_SUBJECT, addressId: answer.route.addressId }, `${answer.route.key}:signin`));
       this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: FIXED_LABEL.signin!, at: new Date().toISOString(), tools: [], channel: 'email' });
       progress.challenged = true; save();
       return { state: 'parked', result: progress };
@@ -1593,7 +1645,7 @@ export class SupportConversation extends DurableObject<Env> {
       }
     }
     // Only ever to the address that wrote (a verified answer: to that address as the account stores it); Reply-To and Cc are ignored.
-    await external(baneApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: progress.text, to: progress.mode === 'verified' ? progress.recipient! : answer.sender, addressId: answer.route.addressId, ...(progress.fixed ? { subject: FIXED_SUBJECT } : {}) }, answer.route.key));
+    await external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: progress.text, to: progress.mode === 'verified' ? progress.recipient! : answer.sender, addressId: answer.route.addressId, ...(progress.fixed ? { subject: FIXED_SUBJECT } : {}) }, answer.route.key));
     const at = new Date().toISOString();
     if (progress.fixed) this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: FIXED_LABEL[progress.fixed]!, at, tools: [], channel: 'email' });
     else this.record({ id: newId('msg'), role: 'assistant', kind: 'reply', text: progress.text, at, tools: [], channel: 'email' });
@@ -1634,8 +1686,8 @@ export class SupportConversation extends DurableObject<Env> {
       this.record({ id: progress.held, role: 'assistant', kind: 'held', text: draft, at: new Date().toISOString(), tools: [], channel: 'email' });
     }
     if (progress.noticed === false) {
-      const origin = new URL(this.env.BANE_ORIGIN).origin;
-      await external(baneApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: FIXED.access(origin), to: answer.sender, subject: FIXED_SUBJECT, addressId: answer.route.addressId }, `${answer.route.key}:ended`));
+      const origin = new URL(this.env.NIGHTMAIL_ORIGIN).origin;
+      await external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: FIXED.access(origin), to: answer.sender, subject: FIXED_SUBJECT, addressId: answer.route.addressId }, `${answer.route.key}:ended`));
       this.record({ id: newId('msg'), role: 'assistant', kind: 'notice', text: FIXED_LABEL.access!, at: new Date().toISOString(), tools: [], channel: 'email' });
       progress.noticed = true; save();
     }
@@ -1665,7 +1717,7 @@ export class SupportConversation extends DurableObject<Env> {
    * and a ticket. A scope offered during a verified turn that gives less stops the turn, and its answer is held.
    */
   private async compose(answer: Answer, message: Snapshot, progress: Composed, save: () => void): Promise<void> {
-    const origin = new URL(this.env.BANE_ORIGIN).origin;
+    const origin = new URL(this.env.NIGHTMAIL_ORIGIN).origin;
     if (answer.fixed) { progress.fixed = answer.fixed; progress.text = FIXED[answer.fixed](origin); progress.mode = 'general'; save(); return; }
     let meta = this.meta()!;
     const body = bodyOf(message), dmarc = answer.dmarc;
@@ -1877,7 +1929,7 @@ export class SupportConversation extends DurableObject<Env> {
       if (kept && this.attachments().some(a => a.id === kept)) { ids.push(kept); continue; }
       if (this.attachments().length >= MAX_ATTACHMENTS) { skipped.push(`${fileName(part.filename)} (the conversation already has ${MAX_ATTACHMENTS} images)`); continue; }
       try {
-        const bytes = await baneApi(this.env).part(messageId, part.id, MAX_IMAGE_BYTES);
+        const bytes = await nightmailApi(this.env).part(messageId, part.id, MAX_IMAGE_BYTES);
         if (!bytes) { skipped.push(`${fileName(part.filename)} (too large)`); continue; }
         const clean = cleanImage(bytes);
         const id = newId('att'), image = await storeImage(this.env, meta.conversationId, id, clean, 'email', safeName(part.filename, `attachment-${this.attachments().length + 1}`));
@@ -2085,7 +2137,7 @@ function codeOf(body: unknown): string | null {
   return typeof code === 'string' ? code : null;
 }
 /** A Nightmail refusal as the work queue retries it (work.ts failure()). */
-const platformError = (reply: PlatformReply, fallback: string) => new BaneError(reply.status, codeOf(reply.body) ?? fallback, `${productName} answered ${reply.status}`, reply.requestId, reply.retryAfter);
+const platformError = (reply: PlatformReply, fallback: string) => new NightmailError(reply.status, codeOf(reply.body) ?? fallback, `${productName} answered ${reply.status}`, reply.requestId, reply.retryAfter);
 /**
  * A file's name inside the harness's own bracketed note: safeName keeps letters, digits, spaces, dots, parentheses and
  * hyphens (no bracket, line break or control character) up to 80 characters, and the name is fenced as untrusted, so it

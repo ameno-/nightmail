@@ -4,8 +4,8 @@ A Cloudflare Worker per stage, beside Nightmail in the same account:
 
 | Stage | Worker | URL | Account | Binds |
 | --- | --- | --- | --- | --- |
-| dev | `bane-support-dev` | `https://support.dev.bane.mx` | anomaly-dev | `bane-dev` |
-| production | `bane-support` | `https://support.bane.mx` | anomaly-production | `bane-production` |
+| dev | `nightmail-support-dev` | `https://support.dev.nightmail.dev` | anomaly-dev | `nightmail-dev` |
+| production | `nightmail-support` | `https://support.nightmail.dev` | anomaly-production | `nightmail-production` |
 
 Each conversation (a chat from the dashboard's Help panel, or an email thread at the support address) is one `SupportConversation` Durable Object. The agent inside it is **OpenCode**, embedded with `@opencode/sdk/workerd`. The panel talks to it over the WebSocket protocol in [PROTOCOL.md](PROTOCOL.md). How it writes is in [VOICE.md](VOICE.md), and what it knows and may do is in [src/agent/system.md](src/agent/system.md). The design is in the Nightmail plans (`support-agent-design.md`).
 
@@ -56,18 +56,18 @@ The bundle is 16 MB raw and 2.9 MB gzipped, against a 10 MB limit. In Miniflare 
 
 Run these from `support/` with the stage's Cloudflare account. Ryan's work profile is `wwrangler`; use `--config wrangler.prod.jsonc` for production.
 
-1. **D1:** run `wrangler d1 create bane-support-dev` (production: `bane-support`), put the id in `wrangler.<stage>.jsonc`, then `bun run migrate:dev` (production: `migrate:production`).
-2. **Uploads bucket:** create `bane-support-dev-uploads` (production: `bane-support-uploads`) with a 90-day lifecycle rule, which matches transcript retention: `wrangler r2 bucket create <name>`, then add a rule with `wrangler r2 bucket lifecycle add` that deletes objects after 90 days. The Images binding (`IMAGES`) downscales screenshots over 1.4 MB before the model sees them. It needs no setup beyond Images being enabled on the account.
-3. **DNS:** nothing to add by hand. The Worker's Custom Domain (`support.dev.bane.mx` / `support.bane.mx`) creates its record on first deploy, as long as the zone `bane.mx` is in the same account.
+1. **D1:** run `wrangler d1 create nightmail-support-dev` (production: `nightmail-support`), put the id in `wrangler.<stage>.jsonc`, then `bun run migrate:dev` (production: `migrate:production`).
+2. **Uploads bucket:** create `nightmail-support-dev-uploads` (production: `nightmail-support-uploads`) with a 90-day lifecycle rule, which matches transcript retention: `wrangler r2 bucket create <name>`, then add a rule with `wrangler r2 bucket lifecycle add` that deletes objects after 90 days. The Images binding (`IMAGES`) downscales screenshots over 1.4 MB before the model sees them. It needs no setup beyond Images being enabled on the account.
+3. **DNS:** nothing to add by hand. The Worker's Custom Domain (`support.dev.nightmail.dev` / `support.nightmail.dev`) creates its record on first deploy, as long as the zone `nightmail.dev` is in the same account.
 4. **The support address** in Nightmail's platform workspace (production `ws_90b0…`, or dev's own), through Nightmail's API with an admin key:
-   - create the inbound address `support@bane.mx` (dev: `support@dev.bane.mx`) and put its ID (`mbx_…`) in `SUPPORT_ADDRESS_ID`. Give it the key `support`: routes name an inbox by its address's key;
+   - create the inbound address `support@nightmail.dev` (dev: `support@dev.bane.mx`) and put its ID (`mbx_…`) in `SUPPORT_ADDRESS_ID`. Give it the key `support`: routes name an inbox by its address's key;
    - create an API key limited to that address, read and reply (`POST /v1/api-keys` with `access: {"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}`): this is `BANE_SUPPORT_INBOX_KEY`;
-   - create a webhook (Nightmail format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-inbound` (dev: `support.dev.bane.mx`). Its `whsec_…` is `BANE_INBOUND_WEBHOOK_SECRET`;
+   - create a webhook (Nightmail format, `include: ["message"]`) to `https://support.nightmail.dev/hooks/bane-inbound` (dev: `support.dev.nightmail.dev`). Its `whsec_…` is `BANE_INBOUND_WEBHOOK_SECRET`;
    - add a route for the address to `["inbox:support", "webhook:<that webhook>"]`. Keep the root catch-all at `store`.
-5. **The intake addresses** `abuse@`, `privacy@` and `legal@bane.mx` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`). A ticket names only the sender address and its DMARC verdict, never an account:
+5. **The intake addresses** `abuse@`, `privacy@` and `legal@nightmail.dev` (dev: `@dev.bane.mx`), in the same platform workspace. These go straight to typed tickets and never reach the agent (`src/intake.ts`). A ticket names only the sender address and its DMARC verdict, never an account:
    - create the three inbound addresses, and one API key limited to those three, read and reply. This is `BANE_INTAKE_INBOX_KEY`;
-   - create a second webhook (Nightmail format, `include: ["message"]`) to `https://support.bane.mx/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
-   - add a route for each address to its own inbox and the shared webhook, such as `abuse@bane.mx` → `["inbox:abuse", "webhook:<that webhook>"]` (an inbox is per address, so there's no single `inbox:intake`). The team reads full messages and non-image attachments in those inboxes;
+   - create a second webhook (Nightmail format, `include: ["message"]`) to `https://support.nightmail.dev/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
+   - add a route for each address to its own inbox and the shared webhook, such as `abuse@nightmail.dev` → `["inbox:abuse", "webhook:<that webhook>"]` (an inbox is per address, so there's no single `inbox:intake`). The team reads full messages and non-image attachments in those inboxes;
    - `INTAKE_ADDRESSES` in the wrangler config lists them.
 6. **Secrets**, set with `wrangler secret put <NAME> --config wrangler.<stage>.jsonc` and never through CI:
    - `CONSOLE_GATEWAY_KEY`: the Console service key (`models:request`, budgeted). Without it, chat turns refuse with "isn't fully set up" and emails wait in the inbox.
@@ -75,7 +75,7 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
    - `BANE_INBOUND_WEBHOOK_SECRET` and `BANE_SUPPORT_INBOX_KEY`, from step 4.
    - `BANE_INTAKE_WEBHOOK_SECRET` and `BANE_INTAKE_INBOX_KEY`, from step 5.
 7. **Deploy.** With `SUPPORT_DEPLOY=true`, CI prepares support alongside Nightmail and waits for this attempt's healthy Nightmail Worker before migrating D1 or deploying support. By hand: `wrangler deploy --config wrangler.<stage>.jsonc`. Deploy Nightmail first: the binding needs Nightmail's `SupportPlatform` entrypoint.
-8. **Point the dashboard at it:** set Nightmail's `BANE_SUPPORT_URL` to `https://support.bane.mx/chat` (dev: `support.dev.bane.mx`).
+8. **Point the dashboard at it:** set Nightmail's `BANE_SUPPORT_URL` to `https://support.nightmail.dev/chat` (dev: `support.dev.nightmail.dev`).
 
 ## Develop and test
 
@@ -167,7 +167,7 @@ Nightmail records a `message.received` event for every message an address receiv
   - mail: 20 a day per DMARC-passing sender, 30 per address for all unauthenticated mail together (a spoofed From can't spread across keys), of which at most 3 per From address at support@ (`LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS`, so a forged address can't use up the sign-in replies of every sender without DMARC), and 2,000 in total.
 
   Mail over a cap is never dropped. It's kept, bounded, in D1 `overflow`, and the daily cron (00:10 UTC) emails the team one "N messages over cap" digest. The first time a global cap is hit each day, the team gets an alert at once. Both emails are frozen when first queued (D1 `support_notices`) and resent by the five-minute sweep, under the same idempotency key, until Nightmail accepts them. The daily cron also runs the retention sweep.
-- **Per sender at the edge:** 10 messages a minute (the `EMAIL_IN` limiter). Mail over it is never read or answered, but it's recorded in the work ledger and listed in the digest.
+- **Per sender at the edge:** 10 messages a minute (the `EMAIL_IN` limiter), counted apart for a sender's DMARC-verified mail and for mail that only claims its address. Mail over it is never read or answered, but it's recorded in the work ledger and listed in the digest.
 - **Per conversation:** 60 turns, and 500K tokens weighted by cost (cache reads count a tenth). Past either, the conversation files a ticket.
 - **Per person:** 10 chats a day.
 - **Per email thread:** 5 messages in 10 minutes.

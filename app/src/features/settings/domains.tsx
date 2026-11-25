@@ -179,6 +179,30 @@ function DomainDetail() {
     return updated
   }, 'Custom MAIL FROM removed', true, invalidate.domains)
   const [deleteOpen, setDeleteOpen] = useState(false)
+  // A domain with no DNS at all is usually a typo: Change name adds the right one, then deletes this one (there's no rename).
+  const [renameOpen, setRenameOpen] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [renameInvalid, setRenameInvalid] = useState('')
+  const [renameKept, setRenameKept] = useState<Domain | null>(null)
+  const createRenamed = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true, invalidate.domains)
+  function openRename() { createRenamed.reset(); setRenameValue(domain.data?.name ?? ''); setRenameInvalid(''); setRenameOpen(true) }
+  async function submitRename(event: FormEvent) {
+    event.preventDefault()
+    const current = domain.data, value = normalizeDomain(renameValue)
+    if (!current) return
+    if (!domainPattern.test(value)) { setRenameInvalid('Enter a domain like updates.acme.com.'); return }
+    if (value === current.name) { setRenameInvalid('Enter the corrected name.'); return }
+    setRenameInvalid('')
+    let made: Domain
+    try { made = await createRenamed.mutateAsync({ regionId: current.regionId, name: value }) } catch { return /* Shown inline; this domain is kept. */ }
+    setRenameOpen(false)
+    // The mistyped one goes as Delete domain removes it, its reads stopped first; if that fails, both stay and it says so.
+    flushSync(() => setDeleted(true))
+    void cancelDomainQueries(client, id).catch(() => {})
+    try { await remove.mutateAsync(id) } catch { setDeleted(false); setRenameKept(made); return }
+    navigate(`/domains/${made.id}`, { replace: true })
+    void forgetDomain(client, id).catch(() => {})
+  }
   // The name stays in the dialog's text while it closes, after the domain no longer has one.
   const [removingMailFrom, setRemovingMailFrom] = useState({ open: false, name: '' })
   const [mailFromOpen, setMailFromOpen] = useState(false)
@@ -254,8 +278,9 @@ function DomainDetail() {
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error ?? choose.error} />
+    {renameKept && <Alert tone="warning" title={`${renameKept.name} was added, but ${current.name} wasn’t deleted`}>Delete it with Delete domain, or <Link to={`/domains/${renameKept.id}`}>open {renameKept.name}</Link>.</Alert>}
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
-    {gap ? <DomainSetupAlert domain={current} gap={gap} page /> : recordsCorrect(current, pressed) && <RecordsCorrectAlert />}
+    {gap ? <DomainSetupAlert domain={current} gap={gap} page actions={gap.noDns && multiTenant && <><Button size="sm" onClick={openRename}>Change name</Button><Button size="sm" variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button></>} /> : recordsCorrect(current, pressed) && <RecordsCorrectAlert />}
     <div className="domain-sections">
       <DomainRecords domain={current} setup={dns.setup} checks={pressed ?? dnsChecks(current)} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
@@ -265,6 +290,13 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
+    <Dialog open={renameOpen} onOpenChange={next => { if (!createRenamed.isPending) setRenameOpen(next) }} title="Change name" footer={<><Button disabled={createRenamed.isPending} onClick={() => setRenameOpen(false)}>Cancel</Button><Button variant="primary" loading={createRenamed.isPending} type="submit" form="rename-domain">Add and delete {current.name}</Button></>}>
+      <form id="rename-domain" className="stack" onSubmit={submitRename} noValidate>
+        <p className="muted">Adds the domain with the corrected name, then deletes {current.name}.</p>
+        <MutationError error={fieldError(createRenamed.error, 'name') ? null : createRenamed.error} />
+        <Field label="Domain name" htmlFor="rename-domain-name" error={renameInvalid || fieldError(createRenamed.error, 'name')}><Input id="rename-domain-name" autoFocus required value={renameValue} onChange={event => setRenameValue(event.target.value)} disabled={createRenamed.isPending} placeholder="updates.acme.com" /></Field>
+      </form>
+    </Dialog>
     <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={deleteDomain} />
     <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
       description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />

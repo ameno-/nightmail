@@ -1,4 +1,4 @@
-import { baneApi, BaneError, type InboundEvent } from './bane.js';
+import { nightmailApi, NightmailError, type InboundEvent } from './nightmail.js';
 import type { Env } from './env.js';
 import { INTAKE } from './intake.js';
 import { acceptIntake, acceptSupport, holdAtEdge, ledgered } from './ledger.js';
@@ -37,7 +37,7 @@ export async function replay(env: Env, flow: Flow, now = Date.now()) {
     extra = seen.filter(s => !want.includes(s.address)).length;
     keys = missing ? 'missing' : extra ? 'extra' : 'ok';
   } catch (error) {
-    keys = error instanceof MissingSecret ? 'not_configured' : error instanceof BaneError && [401, 403].includes(error.status) ? 'unauthorized' : 'unavailable';
+    keys = error instanceof MissingSecret ? 'not_configured' : error instanceof NightmailError && [401, 403].includes(error.status) ? 'unauthorized' : 'unavailable';
     logError(error, { event: 'replay', code: 'SUPPORT_KEY_CHECK_FAILED', flow }, 'warn');
   }
   const before = await env.DB.prepare('SELECT keys FROM support_checks WHERE flow = ?').bind(flow).first<{ keys: Keys }>();
@@ -52,7 +52,7 @@ export async function replay(env: Env, flow: Flow, now = Date.now()) {
 
 /** Every receiving address the flow's key can read. */
 async function readable(env: Env, flow: Flow): Promise<Address[]> {
-  const api = baneApi(env, flow), out: Address[] = [];
+  const api = nightmailApi(env, flow), out: Address[] = [];
   let cursor: string | null = null;
   for (let page = 0; page < 10; page++) {
     const { data, nextCursor } = await api.addresses(cursor);
@@ -69,7 +69,7 @@ async function readable(env: Env, flow: Flow): Promise<Address[]> {
  * install (mail before it went through the webhooks). The flow's '*' row says when the poller was last caught up.
  */
 async function poll(env: Env, flow: Flow, covered: Address[], now: number) {
-  const api = baneApi(env, flow), save = (address: string, cursor: string) => env.DB.prepare(`INSERT INTO replay_cursors (flow, address_id, cursor, updated_at) VALUES (?, ?, ?, ?)
+  const api = nightmailApi(env, flow), save = (address: string, cursor: string) => env.DB.prepare(`INSERT INTO replay_cursors (flow, address_id, cursor, updated_at) VALUES (?, ?, ?, ?)
     ON CONFLICT (flow, address_id) DO UPDATE SET cursor = excluded.cursor, updated_at = excluded.updated_at`).bind(flow, address, cursor, now);
   const base = await env.DB.prepare("SELECT cursor FROM replay_cursors WHERE flow = ? AND address_id = '*'").bind(flow).first<{ cursor: string }>();
   if (!base) { await save('*', (await api.events({ limit: 1 })).cursor).run(); return 0; }

@@ -107,6 +107,8 @@ export interface Config {
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
   /** Hosted: email a domain's owners once when it is still pending an hour after it was added (src/domain-setup.ts, DOMAIN_SETUP_REMINDER=on). Off unless set. */
+  /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). DOMAIN_NS_CHECK=off turns it off. */
+  domainNsCheck?: boolean;
   domainSetupReminder?: boolean;
   /** Hosted: email a new workspace's owners once when it has no domain an hour after sign-up (src/domain-setup.ts, NO_DOMAIN_REMINDER=on). Off unless set. */
   noDomainReminder?: boolean;
@@ -201,6 +203,8 @@ export interface Runtime {
   /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
    * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
   detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
+  /** Wakes inbox long polls as mail is stored (inbox-wake.ts): the DISPATCHER namespace on Workers, pg_notify on Node. */
+  inboxWake?: import('./inbox-wake.js').InboxWake;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
   startLogFacetFold?: (slot: string) => void;
   /** Coalesced off-request nudge for a workspace's incrementally certified Logs buckets. */
@@ -224,6 +228,9 @@ export interface Runtime {
   allowSnsCertMiss?: (peer: string) => Promise<boolean>;
   snsCertificateState?: import('./operations.js').SnsCertificateState; // Omitted by production: share one state per isolate, not per request.
   allowMalformedSns?: (peer: string) => Promise<boolean>;
+  // A peer's failed SNS verifications across isolates (Workers: the ADMISSION limiter, weighted); false spends its budget.
+  allowSnsFailure?: (peer: string) => Promise<boolean>;
+  snsFailureBudget?: import('./operations.js').SnsFailureBudget; // Tests only: production shares one per isolate.
   // A workspace's preview memory a minute (Workers: the ADMISSION limiter, weighted by bytes). Node has only the per-process budget.
   allowPreview?: (workspaceId: string, bytes: number) => Promise<boolean>;
   // Dashboard analytics (src/analytics.ts): the Workers ANALYTICS bucket and the ANALYTICS_INGEST limiter. Node uses
@@ -247,7 +254,11 @@ export interface Runtime {
 export type WebhookFetch = (url: string, init: { method: 'POST'; headers: Record<string, string>; body: string; signal: AbortSignal }) => Promise<{ status: number;retryAfter?:string|null }>;
 // mailboxIds is what the credential can see now (a provisioning key also sees the inboxes it created);
 // scopeIds is an inbox key's configured scope, which never changes for that key.
-export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[] };
+export type MailboxAccess = { keyId: string; grantId?:string; workspaceId: string; admin: boolean; mailboxIds: string[] | null; scopeIds?: string[] | null; permissions: import('./db/mailbox.js').MailboxPermission[];
+  /** An API key limited to sender domains, with read (domainMailAccess): it reads only mail addressed to those domains.
+   *  mailboxIds are the receiving addresses there (mailboxAuth reads them), and each message must also have an envelope
+   *  recipient there, or for sent mail be from there (thread-view.ts addressedToDomains). */
+  domains?: string[] };
 /**
  * A support conversation (src/support-conversations.ts) as supportGate loaded it: its person, the workspace whose content
  * they shared, and the workspaces this route's dashboard counterpart lets the person's role read now.
@@ -259,7 +270,7 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
   /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
   pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
-  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
+  failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean; origin?: { originClass: string; fetchSite?: string } };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
   principal?: { type: string; workspace?: string }; support?: SupportScope } };
 export type App = OpenAPIHono<AppEnv>;
@@ -276,10 +287,13 @@ export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
   ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null, onPollWait: ms => addPollWait(c, ms) };
 const addPollWait = (c: Ctx, ms: number) => c.set('pollWaitMs', (c.get('pollWaitMs') ?? 0) + ms);
-/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. */
-export async function waitForPollTick(c: Ctx, ms: number) {
+/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. `until`: a wake
+ *  that ends the wait sooner (inbox-wake.ts). */
+export async function waitForPollTick(c: Ctx, ms: number, until?: Promise<void>) {
   const start = Date.now();
-  await new Promise(resolve => setTimeout(resolve, ms));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  await Promise.race([new Promise(resolve => { timer = setTimeout(resolve, ms); }), ...until ? [until] : []]);
+  clearTimeout(timer);
   const elapsed = Math.max(0, Date.now() - start);
   addPollWait(c, elapsed);
   outerOf(c.env)?.onPollWait?.(elapsed);
@@ -307,6 +321,8 @@ export class ApiError extends Error {
   required?: Required;
   /** The workspace whose daily limit refused this send (admission.ts): the error handler queues its once-a-day email and operator alert. */
   limitReachedFor?: string;
+  /** What the request log may say about a refused request's Origin: its class and Sec-Fetch-Site, never the origin. */
+  origin?: { originClass: string; fetchSite?: string };
   /** Seconds for the HTTP Retry-After header when a retryable 503/429 has a fixed backoff instead of resetAt. */
   retryAfterSeconds?: number;
   constructor(public status: number, public code: string, message: string, public field?: string, public retryable = false, public resetAt?: string) { super(message); }
@@ -433,6 +449,26 @@ const RESTRICTED_AREAS: [RegExp, string][] = [
   [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
 ];
 export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]) => pattern.test(path))?.[1] ?? 'This needs';
+/** Reading received mail: messages, threads, their attachments and events, which a key limited to addresses also reads. */
+export const receivedMailRead = (method: string, path: string) => method.toUpperCase() === 'GET' && /^\/v1\/(?:inbound\/(?:messages|threads|events)|inboxes\/[^/]+\/messages)(?:\/|$)/.test(path);
+const ADDRESS_KEY_EXAMPLE = '{"name":"Replies","access":{"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}}';
+/**
+ * Why an API key can't read received mail (a production agent with a key limited to its sender domain hit this reading
+ * its replies, then guessed at POST /v1/api-keys), and exactly what to change: the key limited to receiving addresses
+ * that reads them, made with the request shown or in the dashboard, or Full access. `origin` links the docs.
+ */
+export function receivedMailRefusal(code: 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_REQUIRED', a: Pick<Actor, 'permissions' | 'domains' | 'credential' | 'keyId'>, need: Required, origin: string) {
+  const domains = a.domains.length <= 2 ? a.domains.join(' and ') : `${a.domains[0]}, ${a.domains[1]} and ${a.domains.length - 2} more`;
+  const addressKey = `with a full-access key, find their IDs with GET /v1/inbound/addresses, then POST /v1/api-keys with ${ADDRESS_KEY_EXAMPLE}; or in the dashboard, API keys → Create key → Mail at chosen addresses`;
+  const docs = `Docs: ${origin}/docs/operations/createApiKey.md`;
+  // A key limited to sender domains reads the replies addressed to them once it has Read (domainMailAccess).
+  if (a.domains.length && !a.permissions.includes('read') && !a.permissions.includes('manage')) return denied(code, `${credentialLimits(a)} To read the replies to ${domains}, it needs Read: add Read to it in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${a.keyId} with {"permissions":${JSON.stringify([...a.permissions, 'read'])}}. Or create a key with Read and Send limited to ${domains}, in the dashboard (API keys → Create key) or with a full-access key: POST /v1/api-keys with {"name":"Agent","permissions":["read","send"],"domains":${JSON.stringify(a.domains)}}. It reads only received mail addressed to ${domains}. ${docs}`,
+    { ...need, scope: 'workspace' });
+  return denied(code, a.domains.length
+    ? `${credentialLimits(a)} It reads the received mail addressed to ${domains} with GET /v1/inbound/messages, /v1/inbound/threads and /v1/inbound/events, not agent inboxes or the rest of receiving. For an inbox's mail, use a key limited to the receiving addresses (Read, and Send to answer from them): ${addressKey}. A full-access key reads all received mail. ${docs}`
+    : `${credentialLimits(a)} Received mail needs Full access, or a key limited to receiving addresses. Make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${a.keyId} with {"permissions":["read","send","manage"]}. Or, for replies at some addresses only, use a key limited to them: ${addressKey}. ${docs}`,
+    code === 'UNRESTRICTED_KEY_REQUIRED' ? { ...need, scope: 'workspace' } : need);
+}
 /**
  * UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. The message says
  * what the credential is, what the area needs and where to get it: "This key can only send from acme.com. Inbound
@@ -714,10 +750,24 @@ export function actorMailAccess(actor: Actor): MailboxAccess | null {
  * webhook settings, not mail or delivery history.
  */
 export function workspaceMailAccess(actor: Actor, method: string, path: string): MailboxAccess | 'UNRESTRICTED_KEY_REQUIRED' | 'ADMIN_REQUIRED' {
-  if (actor.domains.length) return 'UNRESTRICTED_KEY_REQUIRED';
+  if (actor.domains.length) return domainMailAccess(actor, method, path) ?? 'UNRESTRICTED_KEY_REQUIRED';
   if (!actor.permissions.includes('manage') && actor.credential === 'apiKey' && actor.permissions.includes('read') && method.toUpperCase() === 'GET' && /^\/v1\/inbound\/webhooks(?:\/[^/]+)?$/.test(path))
     return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: null, permissions: [] };
   return actorMailAccess(actor) ?? 'ADMIN_REQUIRED';
+}
+/** The received-mail reads a key limited to sender domains may make: messages, their attachments, threads and events. */
+const DOMAIN_MAIL_READS = /^\/v1\/inbound\/(?:messages(?:\/[^/]+(?:\/(?:attachments|parts)\/[^/]+)?)?|threads(?:\/[^/]+)?|events)$/;
+/**
+ * A workspace API key limited to sender domains that can read (read, or manage) reads the received mail addressed to
+ * those domains, so "Read and Send limited to example.com" is a whole agent key: it sends from there and reads the replies.
+ * Only those reads: everything else under /v1/inbound and /v1/inboxes stays a full-access key's (UNRESTRICTED_KEY_REQUIRED).
+ * mailboxIds start empty, so the access reaches nothing until mailboxAuth puts the receiving addresses there in them.
+ * A send-only key stays send-only; agent tokens and MCP sign-ins limited to domains read none.
+ */
+export function domainMailAccess(actor: Actor, method: string, path: string): MailboxAccess | null {
+  if (actor.credential !== 'apiKey' || !actor.domains.length || (!actor.permissions.includes('read') && !actor.permissions.includes('manage'))) return null;
+  if (method.toUpperCase() !== 'GET' || !DOMAIN_MAIL_READS.test(path)) return null;
+  return { keyId: actor.keyId, workspaceId: actor.workspaceId, admin: false, mailboxIds: [], permissions: ['read'], domains: [...actor.domains] };
 }
 export function senderDomainAllowed(allowed: readonly string[], candidate: string) {
   const domain = candidate.toLowerCase();
