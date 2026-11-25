@@ -2194,10 +2194,11 @@ async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: 
   }
 }
 
-/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain>, to the signed-in user. */
+/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain>, to the signed-in user. It
+ *  reads as a real first email, plain text: "test" and placeholder wording in a subject or body send mail to spam. */
 export const platformTestEmail = (domain: string) => {
   const from = `hello@${domain}`;
-  return { from, subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` };
+  return { from, subject: `Your first email from ${productName}`, text: `Hi,\n\n${domain} is set up, and this is the first email sent from ${from}.\n\nThanks,\n${productName}\n` };
 };
 /**
  * The content screen's verdict for the dashboard's test email: its words are ours and it goes only to the person who
