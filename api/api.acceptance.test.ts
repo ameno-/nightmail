@@ -23633,9 +23633,21 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await receive([`while-paused@${host}`])).n,1);
       await db.query('UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE id=$1',[wid]);
       await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('own-domain.example',$1,$1,'verified')",[wid]);
-      assert.match(error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Closed',text:'Closed.'}),409,'OWN_DOMAIN_VERIFIED').message,/own-domain\.example/);
+      // Its own domain verified: a send from the built-in address says exactly which address to use instead.
+      const closed=error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Closed',text:'Closed.'}),409,'OWN_DOMAIN_VERIFIED');
+      assert.equal(closed.message,`Send from your own domain now: use hello@own-domain.example instead of ${from}. own-domain.example is verified, so ${host} no longer sends; it still receives. Change the From address where your code or agent keeps it.`);
+      assert.deepEqual([closed.field,closed.details],['from',[{from,suggestedFrom:'hello@own-domain.example',verifiedDomains:['own-domain.example']}]]);
       assert.equal((await me()).sending,'closed');
-      await db.query("DELETE FROM domain_claims WHERE name='own-domain.example' AND workspace_id=$1",[wid]);
+      // Replies from its default inbox get the same answer.
+      const received=(await db.query("SELECT message_id FROM mailbox_messages WHERE workspace_id=$1 AND mailbox_id=$2 AND thread_id=$3 AND direction='inbound' LIMIT 1",[wid,inbox.id,thread])).rows[0].message_id;
+      assert.deepEqual(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,replyToMessageId:received,text:'Thanks.'}),409,'OWN_DOMAIN_VERIFIED').details,[{from,suggestedFrom:'hello@own-domain.example',verifiedDomains:['own-domain.example']}]);
+      // Several verified (a lost one last): every one is named, and each email of a batch from the built-in domain gets its own address.
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,lost_since) VALUES('another.example',$1,$1,'verified',NULL),('stale.example',$1,$1,'lost',now())",[wid]);
+      const several=error(await local('POST','/v1/emails/batch',{emails:[{from:'news@own-domain.example',to:AUTH_EMAIL,subject:'Own',text:'Own.'},{from:`billing@${host}`,to:AUTH_EMAIL,subject:'A',text:'A.'},{from,to:AUTH_EMAIL,subject:'B',text:'B.'}]}),409,'OWN_DOMAIN_VERIFIED');
+      const verifiedDomains=['another.example','own-domain.example','stale.example'];
+      assert.deepEqual([several.field,several.details],['emails.1.from',[{index:1,from:`billing@${host}`,suggestedFrom:'billing@another.example',verifiedDomains},{index:2,from,suggestedFrom:'hello@another.example',verifiedDomains}]]);
+      assert.match(several.message,/^Send from your own domain now: use billing@another\.example instead of billing@.+\. Your verified domains are another\.example, own-domain\.example and stale\.example, so /);
+      await db.query("DELETE FROM domain_claims WHERE name IN ('own-domain.example','another.example','stale.example') AND workspace_id=$1",[wid]);
       assert.equal(await builtin.revokeBuiltinDomain(runtime.db,wid,'Synthetic phishing report','arn:aws:sts::111122225555:assumed-role/operator/fixture'),host);
       error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Revoked',text:'Revoked.'}),403,'BUILTIN_DOMAIN_REVOKED');
       assert.equal((await receive([`after-revoke@${host}`])).n,0);
