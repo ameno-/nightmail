@@ -101,7 +101,7 @@ export const domainUnverified = (db: DbExecutor, workspaceId: string, domain: { 
   queueNotice(db, { workspaceId, kind: 'domain_unverified', dedupe: `domain:${domain.id}:${domain.lostSince ?? ''}`, data: { domainId: domain.id, name: domain.name } }, true);
 
 /** What the setup reminder says (src/domain-setup.ts builds it from the background DNS check). */
-export type DomainSetupData = { domainId: string; name: string; total: number; wrong: boolean; missing: { type: string; name: string; value: string }[]; host: { name: string; url: string | null } | null; releasesAt: string | null };
+export type DomainSetupData = { domainId: string; name: string; /** Nobody serves DNS for it (record-check.ts dnsZone). */ noDns?: boolean; total: number; wrong: boolean; missing: { type: string; name: string; value: string }[]; host: { name: string; url: string | null } | null; releasesAt: string | null };
 /**
  * A domain still pending an hour after it was added, whose records public DNS lacks: once per domain (its claim's token),
  * and at most one a day per workspace, so a workspace that added several hears about one at a time. Queued only while the
@@ -214,8 +214,8 @@ function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: st
     // Still pending: one that verified meanwhile, or was removed, needs no reminder.
     case 'domain_setup': {
       const d = row.data as DomainSetupData;
-      return row.domain === 'pending' && Array.isArray(d.missing) && d.missing.length ? { to: row.recipients, input: { kind: 'domain_setup', workspace, domain: { id: String(d.domainId), name: String(d.name) },
-        missing: d.missing, total: Number(d.total), wrong: d.wrong === true, host: d.host ?? null, releasesAt: d.releasesAt ? new Date(d.releasesAt) : null } } : null;
+      return row.domain === 'pending' && Array.isArray(d.missing) && (d.missing.length || d.noDns === true) ? { to: row.recipients, input: { kind: 'domain_setup', workspace, domain: { id: String(d.domainId), name: String(d.name) },
+        noDns: d.noDns === true, missing: d.missing, total: Number(d.total), wrong: d.wrong === true, host: d.host ?? null, releasesAt: d.releasesAt ? new Date(d.releasesAt) : null } } : null;
     }
     // Still no domain: one added meanwhile, in any state, needs no email.
     case 'no_domain': return row.hasDomain ? null : { to: row.recipients, input: { kind: 'no_domain', workspace,

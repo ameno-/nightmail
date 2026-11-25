@@ -1,4 +1,5 @@
 import { cname, dns, fqdn } from './public-dns.js';
+import { placementRoot } from './domain-registry.js';
 
 // What public DNS shows for each record a domain still waits for, so Check now can say which one is missing or
 // different, not just that SES hasn't verified yet. SES reports DKIM for the three CNAMEs together; this reads each.
@@ -47,23 +48,36 @@ const PROVIDERS: [RegExp, string, ((zone: string) => string) | null][] = [
   [/\.digitalocean\.com$/, 'DigitalOcean', zone => `https://cloud.digitalocean.com/networking/domains/${zone}`],
   [/\.ui-dns\.(?:com|de|org|biz)$/, 'IONOS', null], [/\.porkbun\.com$/, 'Porkbun', null], [/\.hover\.com$/, 'Hover', null],
   [/\.gandi\.net$/, 'Gandi', null], [/\.ovh\.net$/, 'OVHcloud', null], [/\.hetzner\.(?:com|de)$/, 'Hetzner', null],
-  [/\.azure-dns\.(?:com|net|org|info)$/, 'Azure DNS', null], [/\.dnsimple\.com$/, 'DNSimple', null], [/\.name\.com$/, 'Name.com', null],
+  [/\.azure-dns\.(?:com|net|org|info)$/, 'Azure DNS', null], [/\.dnsimple\.com$/, 'DNSimple', null], [/\.dreamhost\.com$/, 'DreamHost', null], [/\.name\.com$/, 'Name.com', null],
 ];
 const HOST_TTL_MS = 30 * 60_000;
-const hostCache = new Map<string, { at: number; host: DnsHost | null }>();
-/** The provider that answers for `name`'s zone: the NS records at the name, or at the zone its SOA names. Null when unknown. */
-export async function dnsHost(name: string, signal: AbortSignal): Promise<DnsHost | null> {
+export type DnsZone = { host: DnsHost | null; noDns: boolean };
+const hostCache = new Map<string, { at: number } & DnsZone>();
+/**
+ * The zone that answers for `name`: the NS records at the name, or at the zone its SOA names. `host`: its provider, null
+ * when unknown. `noDns`, only on a definitive answer: no nameservers serve the name's own registered domain, because the
+ * closest zone DNS knows is its top-level domain or public suffix (acme.co → co, acme.co.uk → co.uk), or there is none.
+ * A subdomain that has no records yet (mail.acme.com under a served acme.com) has DNS. Resolver errors and timeouts throw:
+ * callers treat them as unknown, never as no DNS.
+ */
+export async function dnsZone(name: string, signal: AbortSignal): Promise<DnsZone> {
   const key = fqdn(name), hit = hostCache.get(key);
-  if (hit && Date.now() - hit.at < HOST_TTL_MS) return hit.host;
+  if (hit && Date.now() - hit.at < HOST_TTL_MS) return { host: hit.host, noDns: hit.noDns };
   let zone = key, answer = await dns(zone, 'NS', signal);
   const soa = answer.values.length ? '' : fqdn(answer.authority.find(r => r.type === 6)?.name ?? '');
   if (soa.includes('.') && key.endsWith(`.${soa}`)) { zone = soa; answer = await dns(zone, 'NS', signal); }
   const servers = answer.values.map(fqdn), found = PROVIDERS.find(([pattern]) => servers.length > 0 && servers.every(server => pattern.test(server)));
   const host = found ? { name: found[1], zone, url: found[2]?.(zone) ?? null } : null;
-  hostCache.delete(key); hostCache.set(key, { at: Date.now(), host });
+  // Served, but by a zone above the name's registered domain (a public suffix such as co.uk): nobody serves the domain.
+  const root = servers.length && zone !== key ? await placementRoot(key).catch(() => null) : null;
+  const noDns = servers.length ? !!root?.known && !!root.root && root.root !== zone && root.root.endsWith(`.${zone}`)
+    : answer.status === 3 || !!soa;
+  hostCache.delete(key); hostCache.set(key, { at: Date.now(), host, noDns });
   while (hostCache.size > MAX_ENTRIES) hostCache.delete(hostCache.keys().next().value!);
-  return host;
+  return { host, noDns };
 }
+/** One bounded lookup when a domain is added: whether anyone serves DNS for it. Never throws; unknown is false. */
+export const noDnsAt = (name: string, timeoutMs = 2_000) => dnsZone(name, AbortSignal.timeout(timeoutMs)).then(zone => zone.noDns, () => false);
 
 /** Adds publicDns to every pending sending and MAIL FROM record (DMARC is a recommendation; receiving has its own MX check). */
 export async function withPublicDns<T extends { dns: CheckedRecord[] }>(report: T): Promise<T> {
@@ -80,11 +94,11 @@ export async function withPublicDns<T extends { dns: CheckedRecord[] }>(report: 
  * A pending domain's DNS as the background check saw it (domain_claims.setup_check): each pending record's publicDns
  * and where the zone is hosted. Reads show it until the next check (src/domain-setup.ts), so no read asks DNS itself.
  */
-export type SetupCheck = { checkedAt: string; host: DnsHost | null; records: { type: string; name: string; value: string; publicDns: PublicDns | null }[] };
+export type SetupCheck = { checkedAt: string; host: DnsHost | null; /** Nobody serves DNS for the domain (dnsZone). */ noDns?: boolean; records: { type: string; name: string; value: string; publicDns: PublicDns | null }[] };
 /** withPublicDns and dnsHost together, within the same three seconds: the report gains publicDns, the answer is what to store. */
 export async function checkSetup<T extends { name: string; dns: CheckedRecord[] }>(report: T): Promise<SetupCheck> {
   // A domain with nothing left to publish needs no host either.
   const waiting = report.dns.some(r => r.status !== 'verified' && (r.purpose === 'sending' || r.purpose === 'mail_from'));
-  const [, host] = await Promise.all([withPublicDns(report), waiting ? dnsHost(report.name, AbortSignal.timeout(BUDGET_MS)).catch(() => null) : null]);
-  return { checkedAt: new Date().toISOString(), host, records: report.dns.flatMap(r => r.publicDns === undefined ? [] : [{ type: r.type, name: r.name, value: r.value, publicDns: r.publicDns }]) };
+  const [, zone] = await Promise.all([withPublicDns(report), waiting ? dnsZone(report.name, AbortSignal.timeout(BUDGET_MS)).catch(() => null) : null]);
+  return { checkedAt: new Date().toISOString(), host: zone?.host ?? null, ...(zone?.noDns ? { noDns: true } : {}), records: report.dns.flatMap(r => r.publicDns === undefined ? [] : [{ type: r.type, name: r.name, value: r.value, publicDns: r.publicDns }]) };
 }

@@ -91,7 +91,8 @@ export type NoticeInput =
   | Workspace & { kind: 'campaign_paused'; campaign: { id: string; name: string } }
   | Workspace & { kind: 'domain_unverified'; domain: { id: string; name: string } }
   /** missing: of the domain's `total` sending records, the ones public DNS lacks or has with another value. host: where its DNS is hosted, when known. */
-  | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
+  /** noDns: nobody serves DNS for the domain, so the email asks to check its name instead of listing records. */
+  | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; noDns?: boolean; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
   /** builtin: the workspace's built-in domain while it sends (builtin-domain.ts), with who it sends to and its daily cap. */
   | Workspace & { kind: 'no_domain'; builtin?: { name: string; scope: 'anyone' | 'members'; perDay: number } | null }
   | Workspace & { kind: 'evaluation_finished'; limited: boolean }
@@ -160,6 +161,10 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
     }
     case 'domain_setup': {
       const host = hostName(n.domain.name), name = host ?? 'the domain', provider = n.host?.name ?? null;
+      if (n.noDns) return notice({ subject: host ? `No DNS found for ${host}` : 'No DNS found for your domain', action: { label: 'Open the domain', url: `${base}/domains/${encodeURIComponent(n.domain.id)}` },
+        why: `${productName} sends this once for each domain, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: [
+          `${host ? `${host} was` : 'A domain was'} added over an hour ago, but no DNS server answers for it, so its records can’t be published and it can’t verify.`,
+          `Check the spelling, or that the domain is registered. If the name is wrong, add the right one and delete this one.${n.releasesAt ? ` If it still has no records on ${moment(n.releasesAt)}, it is released.` : ''}`] });
       const records = n.missing.filter(r => /^(?:TXT|CNAME|MX)$/.test(r.type) && recordName(r.name) && recordValue(r.value));
       const all = records.length === n.total, which = n.total === 1 ? 'its record' : all ? `all ${n.total} of its records` : `${records.length} of its ${n.total} records`;
       const gap = n.wrong ? `${which} ${records.length === 1 ? 'is' : 'are'} missing from public DNS or ${records.length === 1 ? 'has' : 'have'} another value there`

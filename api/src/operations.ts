@@ -80,6 +80,8 @@ export const receivingIssueSchema = z.object({
 const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.string(), verificationStatus: z.string(), verified: z.boolean(), dkimStatus: z.string(), dmarc:dmarcSchema, ready: z.boolean(), sending:dnsState, receiving:dnsState, mailFromDomain: z.string().nullable(), mailFromStatus: z.string().nullable(), dnsStatus: z.enum(['available', 'unavailable']), dnsUnavailableReason: z.string().nullable(), dns: z.array(dnsRecord),
   dnsHost: z.object({ name: z.string().describe('The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap.'), zone: z.string().describe('The zone it hosts, which record names are relative to there.'), url: z.string().nullable().describe('The provider\'s DNS page for the zone, when it has a known address.') })
     .nullable().optional().describe(`Where this domain\u2019s DNS is hosted, from its zone\u2019s NS records, alongside publicDns: null when the provider is not one ${productName} recognizes.`),
+  dnsIssue: z.object({ code: z.enum(['no_dns']).describe('no_dns: no nameservers serve this domain: it is unregistered, lapsed or mistyped, so its records can\u2019t be published and it can\u2019t verify.'), message: z.string() })
+    .nullable().optional().describe('Set when adding the domain (one bounded NS lookup), by Check now and by the background check: the domain has no DNS at all. Never set when DNS couldn\u2019t be read. Fix the name (add the right domain and delete this one) or register the domain.'),
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.'),
   builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`),
@@ -302,6 +304,8 @@ export async function unsubscribeUrl(runtime: Runtime, workspaceId: string, emai
 }
 const claimTag = tagKey('domain-claim');
 type Readiness = z.infer<typeof domainSchema>;
+/** A domain nobody serves DNS for (record-check.ts dnsZone): unregistered, lapsed or mistyped. It can never verify, so this replaces "add these records". */
+export const noDnsIssue = (name: string) => ({ code: 'no_dns' as const, message: `No DNS found for ${name}: check the spelling, or that the domain is registered.` });
 type DomainRef = Pick<Readiness,'id'|'name'|'region'>;
 type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Date|string|null;receiving_proof_missed_at?:Date|string|null};
 export type HostedDomain = DomainRef & ClaimState & ProofTimes & { setup_check: SetupCheck | null; connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; receiving_setup:ReceivingSetup|null; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean; hosts: ReceivingHostRow[] };
@@ -460,6 +464,7 @@ export function derivedReadiness(row: ClaimRow, config?: Pick<Config, 'builtinSc
       if (seen) r.publicDns=seen.publicDns;
     }
     report.dnsHost=check.host;
+    report.dnsIssue=check.noDns ? noDnsIssue(row.name) : null;
   }
   if (row.created_at!==undefined && row.ever_proven===false && !held) report.releasesAt=new Date(new Date(row.created_at).getTime()+72*3600_000).toISOString();
   else if (row.ever_proven!==undefined) report.releasesAt=null;
@@ -986,6 +991,16 @@ export function registerOperations(app: App) {
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/domains', operationId: 'createDomain', tags: ['Domains'], security, request: { body: json(z.object({ name: claimName, region: z.string().optional().describe('Regional BYO defaults to the first enabled region, otherwise Ohio.') }).openapi('CreateDomain')) }, responses: { 201: response(domainSchema),202:response(RegionalAccepted), ...errors } }), async c => {
     const a = actor(c, 'manage'); const input = c.req.valid('json'); allowedDomain(a, input.name, true);
+    // Hosted, one NS lookup beside the claim (two seconds, cached): a name nobody serves DNS for is added all the same,
+    // and the answer says so. A resolver error or timeout says nothing. Hosted, it is stored as the domain's first setup check, so
+    // reads, Check now and the background check carry it until DNS answers.
+    const noDns = c.env.config.domainNsCheck ? wrapModuleLoad(() => import('./record-check.js')).then(m => m.noDnsAt(input.name), () => false) : Promise.resolve(false);
+    const created = async (report: Readiness, claimToken?: string) => {
+      if (!await noDns) return c.json(report, 201);
+      if (claimToken) await c.env.db.execute(sql`UPDATE domain_claims SET setup_check=${JSON.stringify({ checkedAt: new Date().toISOString(), host: null, noDns: true, records: [] })}::jsonb
+        WHERE workspace_id=${a.workspaceId} AND token=${claimToken}::uuid AND sending_state='pending' AND setup_check IS NULL`);
+      return c.json({ ...report, dnsIssue: noDnsIssue(report.name) }, 201);
+    };
     if (c.env.config.multiTenant) {
       const pending=await (await wrapModuleLoad(() => import('./byo-regional.js'))).newRegionalDomain(c.env,a.workspaceId,input.name,a.credential==='dashboard' && (a.role==='owner' || a.role==='admin'),input.region,c.req.header('Idempotency-Key'));
       if (pending) {a.wakeJobs=1;return c.json(pending,202);}
@@ -994,7 +1009,7 @@ export function registerOperations(app: App) {
       const claim=await reserveClaim(c.env,a.workspaceId,input.name,input.region,reserved=>auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`${reserved}.id`},
         after:sql`jsonb_build_object('name',${input.name}::text,'region',${reserved}.connection->>'region')`},{from:reserved,where:sql`${reserved}.fresh AND ${reserved}.id IS NOT NULL AND ${reserved}.error_code IS NULL`})),
         row={name:input.name,region:claim.connection.region,id:claim.id};
-      if (claim.claim.identity) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),201);
+      if (claim.claim.identity) return created(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection}),claim.token);
       a.wakeJobs=1;
       const runtime={...c.env,config:{...c.env.config,workspaceId:a.workspaceId,regions:[row.region]}};
       // The reservation already queued the verify job, which creates the identity itself if this request dies here.
@@ -1009,13 +1024,13 @@ export function registerOperations(app: App) {
         if (e instanceof ApiError && (e.code==='DOMAIN_UNAVAILABLE' || (claim.fresh && !e.retryable && e.status<500))) await releaseClaim(c.env.db,a.workspaceId,claim);
         throw e;
       }
-      if (identity===null) return c.json(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection,dns_first:true}),201);
+      if (identity===null) return created(derivedReadiness({...row,...claim.claim,token:claim.token,connection:claim.connection,dns_first:true}),claim.token);
       if (!identity) throw new ApiError(409,'DOMAIN_CLAIM_EXPIRED','The domain claim is no longer active.');
       const facts=identityOnly(sesFacts({...identity,VerificationStatus:'PENDING'}));
       // Never overwrite a verifier that already recovered a lost/slow Create response.
       const saved=sql`UPDATE domain_claims SET identity=${JSON.stringify(facts)}::jsonb WHERE token=${claim.token} AND name=${row.name} AND identity IS NULL ${claim.connection.kind==='shared' && runtime.config.platformAccount ? sql`AND EXISTS(SELECT FROM provider_connections c WHERE c.id=connection_id AND (c.aws_account_id IS NULL OR c.aws_account_id=${runtime.config.platformAccount}))` : sql``} RETURNING ${row.id}::text AS id,token`;
       await c.env.db.execute(claim.fresh ? saved : sql`WITH recovered AS (${saved}) ${recheckJob(a.workspaceId,sql`SELECT id,token FROM recovered`,'supersede')}`);
-      return c.json(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),201);
+      return created(derivedReadiness({...row,...claim.claim,identity:facts,token:claim.token,connection:claim.connection}),claim.token);
     }
     assertSesConfigured(c.env);
     const body = { name: input.name, region: input.region ?? c.env.config.regions[0]! };
@@ -1034,7 +1049,7 @@ export function registerOperations(app: App) {
       DO UPDATE SET updated_at=now() RETURNING id,name,region,xmax=0 AS created),
       audit AS (${auditInsert(auditContext(c),{action:'domain.create',workspaceId:a.workspaceId,target:{type:'domain',id:sql`saved.id`},after:body},{from:sql`saved`,where:sql`saved.created`})})
       SELECT id,name,region FROM saved`);
-    return c.json(await domainReadiness(c.env, row!, identity,'create'), 201);
+    return created(await domainReadiness(c.env, row!, identity,'create'));
   });
   // Sets (mailFromDomain) or removes (null) a domain's custom MAIL FROM. Removing it calls SES without a MailFromDomain, which
   // returns the identity to the default amazonses.com MAIL FROM, and drops its MX and SPF records and SPF alignment. Removing
@@ -1190,7 +1205,7 @@ export function registerOperations(app: App) {
     const checked = async (report: Readiness) => {
       const stored = c.env.config.multiTenant && report.sending === 'pending' && report.dnsHost !== undefined;
       const check = await (await wrapModuleLoad(() => import('./record-check.js'))).checkSetup(report);
-      if (check.records.length) report.dnsHost = check.host;
+      if (check.records.length) { report.dnsHost = check.host; report.dnsIssue = check.noDns ? noDnsIssue(report.name) : null; }
       if (stored) await c.env.db.execute(sql`UPDATE domain_claims SET setup_check=${JSON.stringify(check)}::jsonb WHERE workspace_id=${a.workspaceId} AND name=${report.name} AND sending_state='pending' AND setup_check IS NOT NULL`);
       return report;
     };

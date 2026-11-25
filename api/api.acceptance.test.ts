@@ -31379,6 +31379,65 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('no DNS: a domain nobody serves DNS for is added with a warning that names the fix, kept on reads, Check now and the background check, and the setup reminder says to check its name instead of listing records; resolver errors and timeouts never warn', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { wid, fresh } = await noticeFixture(runtime, db);
+      const [{ accountNotifyJob }, { domainSetupCheckJob }, { dnsZone, noDnsAt }, { SESv2Client }] = await Promise.all([import('./src/account-notices.js'), import('./src/domain-setup.js'), import('./src/record-check.js'), import('@aws-sdk/client-sesv2')]);
+      Object.assign(runtime.config, { domainNsCheck: true, liveEnabled: true, aws: { accessKeyId: 'fixture', secretAccessKey: 'fixture' } });
+      t.mock.method(SESv2Client.prototype, 'send', async () => ({ DkimAttributes: { Tokens: ['tokena', 'tokenb', 'tokenc'], SigningHostedZone: 'dkim.amazonses.com', Status: 'PENDING' } }));
+      // Public DNS: typo.co and typo.co.uk are unregistered (their closest zone is the TLD's or the public suffix's); served.example
+      // is on DreamHost, with no records at mail.served.example yet; the resolver fails for broken.example and never answers for slow.example.
+      const typo = `${unique('typo')}.co`, typoUk = `${unique('typo')}.co.uk`, served = `${unique('served')}.com`, lookups: string[] = [];
+      const networkGuard = globalThis.fetch;
+      t.after(() => { globalThis.fetch = networkGuard; });
+      globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!, soa = (zone: string) => ({ name: `${zone}.`, type: 6, data: 'ns. hostmaster. 1 1 1 1 1' });
+        if (type === 'NS') lookups.push(name);
+        if (name.endsWith('broken.example')) return new Response('', { status: 500 });
+        if (name.endsWith('slow.example')) return new Promise<Response>((_, reject) => init!.signal!.addEventListener('abort', () => reject(new Error('fixture timeout')), { once: true }));
+        if (type === 'NS' && name === served) return Response.json({ Status: 0, Answer: ['ns1', 'ns2'].map(ns => ({ name: `${name}.`, type: 2, data: `${ns}.dreamhost.com.` })) });
+        if (type === 'NS' && name === 'co.uk') return Response.json({ Status: 0, Answer: [{ name: 'co.uk.', type: 2, data: 'dns1.nic.uk.' }] });
+        const zone = name.endsWith(served) ? served : name.endsWith('.co.uk') ? 'co.uk' : name.endsWith('.co') ? 'co' : 'example';
+        return Response.json({ Status: 3, Authority: [soa(zone)] });
+      };
+
+      // The lookup itself: definitive answers only.
+      assert.equal(await noDnsAt(typo), true);
+      assert.equal(await noDnsAt(typoUk), true, 'A zone above the registered domain (a public suffix) serves nothing for it.');
+      assert.deepEqual(await dnsZone(served, AbortSignal.timeout(2_000)), { host: { name: 'DreamHost', zone: served, url: null }, noDns: false });
+      assert.equal(await noDnsAt(`mail.${served}`), false, 'A subdomain with no records yet has DNS: its domain serves it.');
+      assert.equal(await noDnsAt('broken.example'), false, 'A resolver error is unknown, never no DNS.');
+      assert.equal(await noDnsAt('slow.example', 50), false, 'Nor is a timeout.');
+      const counted = lookups.length;
+      assert.equal(await noDnsAt(typo), true); assert.equal(lookups.length, counted, 'Cached.');
+
+      // Adding it: accepted, with the warning, which reads carry (stored as its first setup check).
+      const added = ok(await local('POST', '/v1/domains', { name: typo }), 201);
+      const warning = { code: 'no_dns', message: `No DNS found for ${typo}: check the spelling, or that the domain is registered.` };
+      assert.deepEqual(added.dnsIssue, warning);
+      assert.deepEqual(ok(await local('GET', `/v1/domains/${added.id}`)).dnsIssue, warning);
+      assert.deepEqual(ok(await local('GET', '/v1/domains')).data.find((d: Json) => d.id === added.id).dnsIssue, warning);
+      // A subdomain whose records aren't published yet, and a name the resolver can't answer for: no warning.
+      assert.equal(ok(await local('POST', '/v1/domains', { name: `mail.${served}` }), 201).dnsIssue, undefined);
+      assert.equal(ok(await local('POST', '/v1/domains', { name: 'news.broken.example' }), 201).dnsIssue, undefined);
+      // Check now keeps saying so.
+      assert.deepEqual(ok(await local('POST', `/v1/domains/${added.id}/verify`)).dnsIssue, warning);
+
+      // The background check an hour on, with the reminder on: the one email says to check the name, not which records to add.
+      runtime.config.domainSetupReminder = true;
+      const { rows: [claim] } = await db.query(`UPDATE domain_claims SET created_at=now()-interval '2 hours' WHERE workspace_id=$1 AND name=$2 RETURNING token`, [wid, typo]);
+      await domainSetupCheckJob(runtime, { domainId: added.id, token: claim.token }, { id: `domain.setupCheck:${claim.token}`, attempts: 1, workspaceId: wid });
+      assert.deepEqual(ok(await local('GET', `/v1/domains/${added.id}`)).dnsIssue, warning);
+      const jobs = (await db.query(`SELECT id,payload FROM jobs WHERE type='account.notify' AND status='pending' AND workspace_id=$1`, [wid])).rows;
+      for (const j of jobs) for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, j.payload, { id: j.id, attempts: i + 1, workspaceId: wid });
+      const [mail] = (await fresh()).filter(m => m.subject.includes(typo));
+      assert.equal(mail.subject, `No DNS found for ${typo}`);
+      for (const part of [`${typo} was added over an hour ago, but no DNS server answers for it`, 'Check the spelling, or that the domain is registered.', `/domains/${added.id}`]) assert.ok(mail.text.includes(part), part);
+      assert.doesNotMatch(mail.text, /_domainkey|Add these records/);
+    });
+  });
+
   test('no-domain reminder: a workspace with no domain an hour after it was created is emailed once to add one, only with NO_DOMAIN_REMINDER on; not one created within the hour or days ago, not one with a domain, not one that adds a domain before the email goes', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { fresh, platform } = await noticeFixture(runtime, db);

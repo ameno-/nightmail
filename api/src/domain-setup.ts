@@ -49,10 +49,11 @@ export const domainSetupCheckJob: JobHandler = async (runtime, payload, job) => 
   if (!runtime.config.domainSetupReminder) return;
   // The records verification waits for (the ownership TXT and the DKIM CNAMEs); a custom MAIL FROM is optional.
   const sending = report.dns.filter(r => r.purpose === 'sending'), missing = sending.filter(r => r.publicDns && r.publicDns.state !== 'found');
-  if (!missing.length) return;
+  // A domain nobody serves DNS for can't take records at all: the email says to check its name instead (notices.ts).
+  if (!missing.length && !check.noDns) return;
   const { domainSetup } = await wrapModuleLoad(() => import('./account-notices.js'));
   const queued = await domainSetup(runtime.db, job.workspaceId, row.token, {
-    domainId: row.id, name: row.name, total: sending.length, wrong: missing.some(r => r.publicDns?.state === 'wrong_value'),
+    domainId: row.id, name: row.name, total: sending.length, ...(check.noDns ? { noDns: true } : {}), wrong: missing.some(r => r.publicDns?.state === 'wrong_value'),
     missing: missing.map(r => ({ type: r.type, name: relative(r.name, check.host?.zone), value: r.value })),
     host: check.host && { name: check.host.name, url: check.host.url },
     // Only an unproven claim is released, and only for want of its ownership TXT.
