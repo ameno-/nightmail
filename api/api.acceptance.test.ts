@@ -38170,9 +38170,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(reads, 6); assert.equal(occurrences(rendered[0]!, part), 6);
       await refused(await draft(refs(names, 2), parts));
 
-      // A content type may contain "cid:". Its 1,000 data URIs are never scanned again for references, so the part
-      // referenced once is embedded once, not 1,001 times (334 MiB).
-      const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png;x=cid:part0');
+      // A content type's quoted parameter may contain "cid:". Its 1,000 data URIs are never scanned again for references
+      // (and carry only the bare type), so the part referenced once is embedded once, not 1,001 times (334 MiB).
+      const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png; x="cid:part0"');
       ok((await measure(await draft(refs(['tiny'], 1000) + refs(['part0']), [tiny, parts[0]!]))).reply, 303);
       assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, part), 1); assert.ok(rendered[0]!.length < 2 * MiB);
 
@@ -44062,7 +44062,7 @@ describe('dashboard analytics', () => {
     const stored = ingest.rows();
     assert.equal(stored.length, events.length);
     assert.ok(!JSON.stringify(stored).match(/dana|Dana|Lee|example|Acme|con_0123/), JSON.stringify(stored));
-    assert.deepEqual(stored.map(row => row.target).filter(Boolean), ['textbox:[email]', 'members/invite', 'field:Email', 'members/invite', 'button:Invite [email]', 'button:', 'link:/audience/contacts/:id', 'button:', 'none:', 'dialog:Invite [email]', 'dialog:Invite [email]']);
+    assert.deepEqual(stored.map(row => row.target).filter(Boolean), ['textbox:[email]', 'members/invite', 'field:Email', 'members/invite', 'button:Invite [email]', 'button:', 'link:/audience/contacts/:id', 'button:', 'inbound/message', 'none:', 'dialog:Invite [email]', 'dialog:Invite [email]']);
     // Do Not Track or Global Privacy Control: on or not, nothing listens and nothing is sent.
     optedOut = true;
     const dnt = page();
