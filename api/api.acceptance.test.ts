@@ -4748,7 +4748,7 @@ test('permission refusals: every refusal helper names the permission, scope, cre
     assert.equal(permission ? error.message.slice(0, message.length) : error.message, message, name);
     if (permission) assert.match(error.message.slice(message.length), new RegExp(`^ Needs ${core.PERMISSIONS[permission]}.*\\.$`, 's'), name);
   }
-  assert.equal(refused(rows[19][1]).message, 'Send from your own address. Needs Send email for "a"\r\n@example.com.');
+  assert.equal(refused(rows.find(([name]) => name === 'denied: an address')![1]).message, 'Send from your own address. Needs Send email for "a"\r\n@example.com.');
   assert.ok(Object.keys(core.PERMISSIONS).length === 7 && rows.every(([, , , , required]) => !('role' in required)));
   // What each helper admits is unchanged.
   for (const value of [core.keyAdminRefusal(key(['manage'])), core.receivingAdminRefusal(key(['manage']), 'change routes'), core.agentTokenMintRefusal(signIn(['read']) as never),
