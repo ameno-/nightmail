@@ -177,7 +177,7 @@ impl Gateway {
         let mut discard = 0usize;
         let mut terminator = 0usize;
         let mut buf = [0u8; 4096];
-        let mut deadline = auth_deadline.min(Instant::now() + PREAUTH_IDLE);
+        let mut deadline = auth_deadline.min(Instant::now() + Duration::from_secs(5));
         const KEEPALIVE: Duration = Duration::from_secs(240);
         let mut heartbeat = Instant::now() + KEEPALIVE;
         loop {
