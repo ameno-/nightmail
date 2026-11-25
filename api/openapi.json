@@ -5945,6 +5945,23 @@
                   "null"
                 ],
                 "description": "When the next 24-hour window opens, when a daily cap is set."
+              },
+              "plan": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer"
+                },
+                "description": "Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise."
+              },
+              "batch": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "With a plan: the batch the current window releases, from 1."
               }
             },
             "required": [
@@ -5953,8 +5970,29 @@
               "rateShare",
               "windowStartedAt",
               "windowExpanded",
-              "nextWindowAt"
+              "nextWindowAt",
+              "plan",
+              "batch"
             ]
+          },
+          "consent": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "confirmedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "confirmedAt"
+            ],
+            "description": "The consent source confirmed at launch, if any."
           },
           "pausedAt": {
             "type": [
@@ -6043,6 +6081,7 @@
           "canceled",
           "error",
           "pacing",
+          "consent",
           "pausedAt",
           "pauseReason",
           "deliveredOnly",
@@ -6993,6 +7032,332 @@
               "role",
               "dead"
             ]
+          },
+          "readiness": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "ramp_recommended",
+                  "ramp_required"
+                ],
+                "description": "ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan \"recommended\"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise."
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why, in one or two plain sentences, when a ramp is recommended or required."
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "NEW_DOMAIN",
+                        "SIZE_JUMP",
+                        "NO_HISTORY",
+                        "RISKY_LIST",
+                        "NEVER_MAILED",
+                        "NO_DMARC",
+                        "BOUNCES",
+                        "COMPLAINTS"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                },
+                "description": "Every finding behind the verdict."
+              },
+              "domain": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "firstSeenAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When the From domain (or the domain it is under) was added to this workspace."
+                  },
+                  "ageDays": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "dmarc": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "reject",
+                      "quarantine",
+                      "none",
+                      "missing",
+                      "invalid",
+                      null
+                    ],
+                    "description": "The DMARC policy last observed; null when not checked yet."
+                  },
+                  "mailFrom": {
+                    "type": "string",
+                    "enum": [
+                      "verified",
+                      "pending",
+                      "failed",
+                      "not_configured"
+                    ],
+                    "description": "The custom MAIL FROM domain (aligned SPF)."
+                  },
+                  "linkHost": {
+                    "type": "string",
+                    "enum": [
+                      "not_configured"
+                    ],
+                    "description": "A link host of the domain's own for tracked links: not configurable yet."
+                  }
+                },
+                "required": [
+                  "name",
+                  "firstSeenAt",
+                  "ageDays",
+                  "dmarc",
+                  "mailFrom",
+                  "linkHost"
+                ]
+              },
+              "history": {
+                "type": "object",
+                "properties": {
+                  "workspace": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Every kind of mail the workspace sent; largestSend counts campaigns."
+                  },
+                  "domain": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Campaigns from this From domain."
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "domain"
+                ]
+              },
+              "list": {
+                "type": "object",
+                "properties": {
+                  "recipients": {
+                    "type": "integer"
+                  },
+                  "risky": {
+                    "type": "integer",
+                    "description": "Risky contacts the send skips."
+                  },
+                  "neverMailed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long."
+                  },
+                  "createdAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "lastSentAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When a campaign last went to this list."
+                  },
+                  "lastImport": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "contacts": {
+                        "type": "integer"
+                      },
+                      "consent": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The consent evidence it was imported with, if any."
+                      }
+                    },
+                    "required": [
+                      "at",
+                      "contacts",
+                      "consent"
+                    ]
+                  }
+                },
+                "required": [
+                  "recipients",
+                  "risky",
+                  "neverMailed",
+                  "createdAt",
+                  "lastSentAt",
+                  "lastImport"
+                ]
+              },
+              "sizeJump": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "This send ÷ the largest campaign its domain sent in the last 90 days; null without one."
+              },
+              "plan": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "batches": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "description": "Recipients per day, in order: one batch a day, the most engaged first and never-mailed last."
+                  },
+                  "seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "How long the plan takes from its start, the hourly ramp included."
+                  }
+                },
+                "required": [
+                  "batches",
+                  "seconds"
+                ],
+                "description": "The recommended daily batches; null when one day covers everyone."
+              },
+              "required": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "NEW_DOMAIN",
+                      "SIZE_JUMP"
+                    ]
+                  },
+                  "maxPerDay": {
+                    "type": "integer",
+                    "description": "The largest daily limit that counts as a ramp: the plan's first day."
+                  }
+                },
+                "required": [
+                  "by",
+                  "maxPerDay"
+                ]
+              }
+            },
+            "required": [
+              "verdict",
+              "summary",
+              "reasons",
+              "domain",
+              "history",
+              "list",
+              "sizeJump",
+              "plan",
+              "required"
+            ],
+            "description": "With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender."
           }
         },
         "required": [
@@ -7388,6 +7753,333 @@
               "byReason"
             ],
             "description": "Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch."
+          },
+          "readiness": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "ramp_recommended",
+                  "ramp_required"
+                ],
+                "description": "ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan \"recommended\"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise."
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why, in one or two plain sentences, when a ramp is recommended or required."
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "NEW_DOMAIN",
+                        "SIZE_JUMP",
+                        "NO_HISTORY",
+                        "RISKY_LIST",
+                        "NEVER_MAILED",
+                        "NO_DMARC",
+                        "BOUNCES",
+                        "COMPLAINTS"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                },
+                "description": "Every finding behind the verdict."
+              },
+              "domain": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "firstSeenAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When the From domain (or the domain it is under) was added to this workspace."
+                  },
+                  "ageDays": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "dmarc": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "reject",
+                      "quarantine",
+                      "none",
+                      "missing",
+                      "invalid",
+                      null
+                    ],
+                    "description": "The DMARC policy last observed; null when not checked yet."
+                  },
+                  "mailFrom": {
+                    "type": "string",
+                    "enum": [
+                      "verified",
+                      "pending",
+                      "failed",
+                      "not_configured"
+                    ],
+                    "description": "The custom MAIL FROM domain (aligned SPF)."
+                  },
+                  "linkHost": {
+                    "type": "string",
+                    "enum": [
+                      "not_configured"
+                    ],
+                    "description": "A link host of the domain's own for tracked links: not configurable yet."
+                  }
+                },
+                "required": [
+                  "name",
+                  "firstSeenAt",
+                  "ageDays",
+                  "dmarc",
+                  "mailFrom",
+                  "linkHost"
+                ]
+              },
+              "history": {
+                "type": "object",
+                "properties": {
+                  "workspace": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Every kind of mail the workspace sent; largestSend counts campaigns."
+                  },
+                  "domain": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Campaigns from this From domain."
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "domain"
+                ]
+              },
+              "list": {
+                "type": "object",
+                "properties": {
+                  "recipients": {
+                    "type": "integer"
+                  },
+                  "risky": {
+                    "type": "integer",
+                    "description": "Risky contacts the send skips."
+                  },
+                  "neverMailed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long."
+                  },
+                  "createdAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "lastSentAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When a campaign last went to this list."
+                  },
+                  "lastImport": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "contacts": {
+                        "type": "integer"
+                      },
+                      "consent": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The consent evidence it was imported with, if any."
+                      }
+                    },
+                    "required": [
+                      "at",
+                      "contacts",
+                      "consent"
+                    ]
+                  }
+                },
+                "required": [
+                  "recipients",
+                  "risky",
+                  "neverMailed",
+                  "createdAt",
+                  "lastSentAt",
+                  "lastImport"
+                ]
+              },
+              "sizeJump": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "This send ÷ the largest campaign its domain sent in the last 90 days; null without one."
+              },
+              "plan": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "batches": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "description": "Recipients per day, in order: one batch a day, the most engaged first and never-mailed last."
+                  },
+                  "seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "How long the plan takes from its start, the hourly ramp included."
+                  }
+                },
+                "required": [
+                  "batches",
+                  "seconds"
+                ],
+                "description": "The recommended daily batches; null when one day covers everyone."
+              },
+              "required": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "NEW_DOMAIN",
+                      "SIZE_JUMP"
+                    ]
+                  },
+                  "maxPerDay": {
+                    "type": "integer",
+                    "description": "The largest daily limit that counts as a ramp: the plan's first day."
+                  }
+                },
+                "required": [
+                  "by",
+                  "maxPerDay"
+                ]
+              }
+            },
+            "default": null,
+            "required": [
+              "verdict",
+              "summary",
+              "reasons",
+              "domain",
+              "history",
+              "list",
+              "sizeJump",
+              "plan",
+              "required"
+            ],
+            "description": "The send review as of the launch (list.neverMailed is not counted then); null for a required notice."
           }
         },
         "required": [
@@ -7407,6 +8099,9 @@
           },
           "pacing": {
             "$ref": "#/components/schemas/CampaignPacing"
+          },
+          "consent": {
+            "$ref": "#/components/schemas/CampaignConsentConfirmation"
           },
           "confirmRequiredNotice": {
             "type": "boolean",
@@ -7443,9 +8138,39 @@
             "minimum": 0.05,
             "maximum": 1,
             "description": "Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate."
+          },
+          "plan": {
+            "type": "string",
+            "enum": [
+              "recommended"
+            ],
+            "description": "Send in the daily batches previewCampaignAudience recommends (readiness.plan), worked out again at launch: the most engaged contacts first, never-mailed last. Not with perDay."
           }
         },
         "additionalProperties": false
+      },
+      "CampaignConsentConfirmation": {
+        "type": "object",
+        "properties": {
+          "confirmed": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "source": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 500,
+            "description": "Where this list's consent comes from, for example \"Signed up at checkout on our site since 2023\"."
+          }
+        },
+        "required": [
+          "confirmed",
+          "source"
+        ],
+        "additionalProperties": false,
+        "description": "The sender confirms everyone on the list agreed to this mail, and where that consent comes from. Lets a send the review requires a ramp for (readiness.verdict ramp_required) go out without the plan. Stored with the campaign, with who and when, and in the workspace's Activity. An agent asks the person first."
       },
       "CampaignScheduleInput": {
         "type": "object",
@@ -7456,6 +8181,9 @@
           },
           "pacing": {
             "$ref": "#/components/schemas/CampaignPacing"
+          },
+          "consent": {
+            "$ref": "#/components/schemas/CampaignConsentConfirmation"
           },
           "confirmRequiredNotice": {
             "type": "boolean",
@@ -35785,7 +36513,7 @@
     "/v1/campaigns/{id}/audience": {
       "get": {
         "operationId": "previewCampaignAudience",
-        "description": "Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.",
+        "description": "Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. With readiness=true it also reviews the send (CampaignReadiness): whether it is ready to go out as it is, why, and the daily batches it recommends; send it with pacing.plan \"recommended\" to follow them. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.",
         "tags": [
           "Campaigns"
         ],
@@ -35810,6 +36538,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "Also review the send (readiness)."
+            },
+            "required": false,
+            "description": "Also review the send (readiness).",
+            "name": "readiness",
+            "in": "query"
           }
         ],
         "responses": {

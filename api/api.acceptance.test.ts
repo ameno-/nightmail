@@ -12281,14 +12281,14 @@ describe('Import property boundaries', () => {
       const { memoryInUse } = await import('./src/isolate-memory.js');
       assert.equal(memoryInUse(), 0, 'Preview and commit must release isolate memory before returning their streams.');
 
-      // 7. Campaign snapshot order hashes contact IDs so time-ordered UUIDv7 IDs do not skew the Hosted list probe.
+      // 7. The campaign's first recipients (the Hosted list probe) are the smallest contact ID hashes, so time-ordered UUIDv7 IDs do not skew it.
       const probeList = ok(await local('POST', '/v1/lists', { name: 'Probe Order List' }), 201);
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000017'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'early_'||g||'@example.com','subscribed' FROM generate_series(1,100) g`, [wid]);
       await db.query(`INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_019a000000097'||substr(replace(gen_random_uuid()::text,'-',''),14),$1,'late_'||g||'@example.com','subscribed' FROM generate_series(1,500) g`, [wid]);
       await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1 AND (email LIKE 'early_%' OR email LIKE 'late_%')`, [wid, probeList.id]);
       const { snapshotCampaignAudience } = await import('./src/audience.js');
       const probeReviewId = 'rev_probe_' + randomUUID().replaceAll('-', '').slice(0, 12);
-      await snapshotCampaignAudience(runtime.db, { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never, { listId: probeList.id }, probeReviewId, [], false);
+      await snapshotCampaignAudience(runtime.db, { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never, { listId: probeList.id }, probeReviewId, [], false, { leading: (await import('./src/sending.js')).probeSize });
       const lateInFirst100 = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id=$1 AND ordinal<=100 AND recipient->>'email' LIKE 'late_%'`, [probeReviewId])).rows[0].n;
       assert.ok(lateInFirst100 >= 50 && lateInFirst100 <= 99, `Expected uniform mix of later UUIDv7 contacts in first 100 (got ${lateInFirst100}).`);
 
@@ -12519,7 +12519,9 @@ describe('Import property boundaries', () => {
       assert.deepEqual(Object.keys(sampleRec.properties), ['plan'], 'Only referenced personalization properties are materialized.');
       assert.ok(typeof sampleRec.name === 'string' && sampleRec.name.startsWith('User '));
       const laterInFirst100 = (await db.query(`SELECT count(*)::int AS n FROM sending_review_recipients WHERE review_id = $1 AND ordinal <= 100 AND recipient->>'id' LIKE 'con_019a000000097%'`, [revId])).rows[0].n;
-      assert.ok(laterInFirst100 >= 40 && laterInFirst100 <= 95, `Skinny capture must hash-order IDs inside each priority bucket (got ${laterInFirst100}/100 later).`);
+      // Inside a priority bucket contacts go in the order they joined the list (here at once, so by ID), mailed before ahead of
+      // never mailed; only the Hosted list probe's sample is hash-ordered (`leading`, see 'campaign order: ...').
+      assert.equal(laterInFirst100, 0, `Inside a priority bucket, contacts go in the order they joined (got ${laterInFirst100}/100 later).`);
 
       // 2. A1-5: audienceHealth marks >10k scopes as sampled estimates (uniformly hashed) and <=10k scopes as exact.
       const { audienceHealth } = await import('./src/deliverability.js');
@@ -29705,6 +29707,108 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT ramp_step FROM sending_campaigns WHERE id=$1', [next.id])).rows[0].ramp_step, RAMP.steps.length);
     });
   });
+  test('campaign order: the list probe is a uniform sample of the whole audience, then the most engaged go first and contacts who joined since the list was last sent to go last; the review counts them', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId, { probeSize } = await import('./src/sending.js'), { snapshotCampaignAudience } = await import('./src/audience.js');
+      const list = ok(await local('POST', '/v1/lists', { name: unique('engaged-order') }), 201);
+      // 300 subscribers: 1-30 opened in the last 30 hours (1 most recently), 31-60 last opened 200 days ago, 61-200 on the
+      // list when it was last sent to (yesterday), 201-300 joined since, with nothing on record.
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent,last_open_at,observed_since)
+          SELECT 'con_'||md5($1||n),$1,'order-'||n||'@example.net','subscribed',
+            CASE WHEN n<=30 THEN now()-make_interval(hours=>n) WHEN n<=60 THEN now()-interval '200 days' END,
+            CASE WHEN n<=60 THEN now()-interval '300 days' END FROM generate_series(1,300) n RETURNING id,email)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id,created_at) SELECT $1,$2,id,CASE WHEN split_part(split_part(email,'-',2),'@',1)::int>200 THEN now() ELSE now()-interval '2 days' END FROM c`, [wid, list.id]);
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,review_id,total,prepared,expanded) VALUES ('cmp_prev_'||$1,$1,jsonb_build_object('name','Earlier','audience',jsonb_build_object('listId',$2::text)),'done','rev_prev_'||$1,1,1,1)`, [wid, list.id]);
+      await db.query(`INSERT INTO sending_campaign_reviews(id,workspace_id,campaign_id,revision,draft,content_hash,captured_at) VALUES ('rev_prev_'||$1,$1,'cmp_prev_'||$1,1,'{}','synthetic',now()-interval '1 day')`, [wid]);
+      const reviewId = 'rev_order_' + randomUUID().replaceAll('-', '').slice(0, 12);
+      await snapshotCampaignAudience(runtime.db, { workspaceId: wid, keyId: 'fixture', permissions: ['read', 'write', 'manage', 'send'], domains: [], role: 'owner', credential: 'dashboard' } as never, { listId: list.id }, reviewId, [], false, { leading: probeSize });
+      const order = (await db.query(`SELECT r.ordinal, split_part(split_part(r.recipient->>'email','-',2),'@',1)::int AS n FROM sending_review_recipients r WHERE r.review_id=$1 ORDER BY r.ordinal`, [reviewId])).rows.map(r => r.n as number);
+      assert.equal(order.length, 300);
+      // The probe: the 100 smallest ID hashes, whatever their engagement.
+      const sample = (await db.query(`SELECT split_part(split_part(email,'-',2),'@',1)::int AS n FROM audience_contacts WHERE workspace_id=$1 AND email LIKE 'order-%' ORDER BY hashtextextended(id,0), id LIMIT $2`, [wid, probeSize(300)])).rows.map(r => r.n as number);
+      assert.deepEqual(order.slice(0, 100), sample);
+      // The rest: the recently engaged by their last open, then the mailed before in the order they joined, never-mailed last.
+      const rest = order.slice(100), tier = (n: number) => n <= 30 ? 0 : n <= 200 ? 1 : 2;
+      assert.deepEqual(rest.map(tier), [...rest.map(tier)].sort((x, y) => x - y));
+      assert.deepEqual(rest.filter(n => n <= 30), rest.filter(n => n <= 30).sort((x, y) => x - y), 'The most recently engaged first.');
+      assert.deepEqual(new Set(rest.filter(n => n > 200)), new Set(Array.from({ length: 100 }, (_, i) => i + 201).filter(n => !sample.includes(n))));
+      // The review counts the never-mailed: the 100 who joined since the list was last sent to.
+      const c = ok(await local('POST', '/v1/campaigns', { name: 'Engaged first', from: 'news@example.com', subject: 'Order', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201);
+      const counted = ok(await local('GET', `/v1/campaigns/${c.id}/audience?readiness=true`));
+      assert.deepEqual([counted.eligible, counted.readiness.list.neverMailed, Boolean(counted.readiness.list.lastSentAt)], [300, 100, true]);
+    });
+  });
+  test('send readiness: a large send from a new domain needs the plan, a small enough daily limit or a confirmed consent source; the plan releases a batch a day', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
+      const wid = runtime.config.workspaceId, pool = '111122223342', domain = 'fresh.example', from = `news@${domain}`;
+      Object.assign(runtime.config, { multiTenant: true, liveEnabled: true, aws: { accessKeyId: 'fixture-platform', secretAccessKey: 'fixture-only' } });
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [REGION, pool, `arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`, [wid, REGION, pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`, [domain, wid]);
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,computed_at,evidence_at) VALUES($1,'graded',500,92,92,92,NULL,NULL,now(),now())`, [wid]);
+      await db.query("UPDATE billing_config SET mode='off' WHERE singleton");
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now()+interval '1 hour',1000,10000000,0)`, [pool, REGION]);
+      const { rampPlan, judgeReadiness } = await import('./src/standing-model.js');
+      // The lines (RAMP.readiness and RAMP.plan).
+      assert.deepEqual([rampPlan(8_000, 0), rampPlan(60_000, 0), rampPlan(1_820_000, 0), rampPlan(1_000_000, 40_000)],
+        [[8_000], [10_000, 40_000, 10_000], [10_000, 40_000, 160_000, 640_000, 970_000], [80_000, 320_000, 600_000]]);
+      const facts = { matched: null, risky: 0, neverMailed: null, domainAgeDays: 400, dmarc: true, largestSend: 1_000, largestCleanSend: 1_000, accepted: 10_000, bounced: 10, complained: 0, enforced: true };
+      assert.deepEqual([4_000, 9_000, 49_999, 50_000, 100_000, 100_001].map(recipients => judgeReadiness({ ...facts, recipients }).verdict),
+        ['ready', 'ready', 'ramp_recommended', 'ramp_recommended', 'ramp_recommended', 'ramp_required']);
+      assert.deepEqual([judgeReadiness({ ...facts, recipients: 50_000, domainAgeDays: 29 }).requiredBy, judgeReadiness({ ...facts, recipients: 50_000, domainAgeDays: 29, enforced: false }).verdict], ['NEW_DOMAIN', 'ramp_recommended']);
+      const list = ok(await local('POST', '/v1/lists', { name: unique('readiness') }), 201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'fresh-'||n||'@example.net','subscribed' FROM generate_series(1,60000) n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
+      const create = async (name: string) => ok(await local('POST', '/v1/campaigns', { name, from, subject: 'Readiness', html: '<p>Fixture.</p>', audience: { listId: list.id } }), 201);
+      const c = await create('Big first send'), path = `/v1/campaigns/${c.id}`;
+      assert.equal(ok(await local('GET', `${path}/audience`)).readiness, undefined, 'Only when asked for.');
+      const review = ok(await local('GET', `${path}/audience?readiness=true`)).readiness;
+      assert.deepEqual([review.verdict, review.required, review.plan.batches], ['ramp_required', { by: 'NEW_DOMAIN', maxPerDay: 10_000 }, [10_000, 40_000, 10_000]]);
+      assert.equal(review.summary, "This domain is new and this list is much larger than anything it has sent. Mailbox providers block new senders who send to huge lists at once, so we'll send 10,000 today and grow from there.");
+      assert.deepEqual(review.reasons.map((r: Json) => r.code), ['NEW_DOMAIN', 'NO_HISTORY', 'NEVER_MAILED']);
+      assert.deepEqual([review.domain.name, review.domain.ageDays, review.domain.dmarc, review.domain.mailFrom, review.domain.linkHost, review.list.neverMailed, review.list.lastSentAt, review.sizeJump],
+        [domain, 0, null, 'not_configured', 'not_configured', 60_000, null, null]);
+      assert.ok(review.plan.seconds > 2 * 86_400 && review.plan.seconds < 3 * 86_400, String(review.plan.seconds));
+      // All at once, or a daily limit over the plan's first day: refused, with why.
+      const refused = error(await local('POST', `${path}/send`, { revision: c.revision }), 422, 'RAMP_REQUIRED');
+      assert.ok(refused.message.startsWith(review.summary), refused.message);
+      error(await local('POST', `${path}/send`, { revision: c.revision, pacing: { perDay: 20_000 } }), 422, 'RAMP_REQUIRED');
+      error(await local('POST', `${path}/send`, { revision: c.revision, pacing: { plan: 'recommended', perDay: 5_000 } }), 422);
+      // The plan: accepted, stored, and kept unless a daily limit no larger than its first day replaces it.
+      const queued = ok(await local('POST', `${path}/send`, { revision: c.revision, pacing: { plan: 'recommended', rateShare: 1 } }), 202);
+      assert.deepEqual([queued.readiness.verdict, queued.readiness.plan.batches, queued.readiness.list.neverMailed], ['ramp_required', [10_000, 40_000, 10_000], null]);
+      let seen = ok(await local('GET', path));
+      assert.deepEqual([seen.delivery.pacing.plan, seen.delivery.pacing.batch, seen.delivery.consent], [[10_000, 40_000, 10_000], 1, null]);
+      error(await local('POST', `${path}/pacing`, { perDay: null }), 422, 'RAMP_REQUIRED');
+      error(await local('POST', `${path}/pacing`, { perDay: 20_000 }), 422, 'RAMP_REQUIRED');
+      assert.deepEqual(ok(await local('POST', `${path}/pacing`, { rateShare: 0.5 })).delivery.pacing.plan, [10_000, 40_000, 10_000]);
+      seen = ok(await local('POST', `${path}/pacing`, { perDay: 5_000 }));
+      assert.deepEqual([seen.delivery.pacing.plan, seen.delivery.pacing.perDay], [null, 5_000]);
+      ok(await local('POST', `${path}/cancel`));
+      // Or a consent source the sender confirms: stored with the campaign and in Activity.
+      const other = await create('Confirmed list');
+      error(await local('POST', `/v1/campaigns/${other.id}/send`, { revision: other.revision, consent: { confirmed: true, source: 'short' } }), 422);
+      ok(await local('POST', `/v1/campaigns/${other.id}/send`, { revision: other.revision, consent: { confirmed: true, source: 'Signed up on our site since 2023.' } }), 202);
+      assert.equal(ok(await local('GET', `/v1/campaigns/${other.id}`)).delivery.consent.source, 'Signed up on our site since 2023.');
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1 AND action='campaign.consent_confirmed' AND target_id=$2`, [wid, other.id])).rows[0].n, 1);
+      ok(await local('POST', `/v1/campaigns/${other.id}/cancel`));
+      // A plan releases one batch a day, its last repeating (set here on a small send, which needs none).
+      const small = ok(await local('POST', '/v1/lists', { name: unique('plan-days') }), 201);
+      await db.query(`INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM audience_contacts WHERE workspace_id=$1 AND email LIKE 'fresh-%' ORDER BY id LIMIT 700`, [wid, small.id]);
+      const daily = ok(await local('POST', '/v1/campaigns', { name: 'Daily', from, subject: 'Daily', html: '<p>Fixture.</p>', audience: { listId: small.id } }), 201), dailyPath = `/v1/campaigns/${daily.id}`;
+      ok(await local('POST', `${dailyPath}/send`, { revision: daily.revision }), 202);
+      await db.query("UPDATE sending_campaigns SET probe_cleared_at=now(), pace_plan='{100,300}' WHERE id=$1", [daily.id]);
+      const day = async () => { await run('campaign.run'); const v = ok(await local('GET', dailyPath)); return [v.delivery.expanded, v.delivery.pacing.batch, v.delivery.waiting?.reason ?? null]; };
+      assert.deepEqual(await day(), [100, 1, 'pacing_window']);
+      assert.equal(ok(await local('GET', dailyPath)).sendEstimate.seconds > 86_400 - 60, true, 'The rest waits for the next days.');
+      const nextDay = () => db.query("UPDATE sending_campaigns SET window_started_at=window_started_at-interval '25 hours', waiting_until=now() WHERE id=$1", [daily.id]);
+      await nextDay();
+      assert.deepEqual(await day(), [400, 2, 'pacing_window']);
+      await nextDay();
+      assert.deepEqual(await day(), [700, 2, null]);
+    });
+  });
   test('campaign list probe follows standing: in good standing, recipients an earlier campaign delivered to with clean, mature feedback go out without the probe; swapped or unresolved recipients, a growing or capped sender, and a sender that falls below mid-campaign are probed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const wid = runtime.config.workspaceId, pool = '111122223334', domain = 'clean-list.example', from = `news@${domain}`;
@@ -32917,8 +33021,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // defers to campaign.run (tested in part 3 below). Every 200th contact is subscribed; the first is also suppressed.
     const listId=await audience(4_000,200);
     const contact=(n:number)=>'con_'+createHash('md5').update(w+n).digest('hex');
-    // The audience as it stands before any launch: subscribed, not suppressed, in send order (hash of contact ID).
-    const before=(await g.query("SELECT email FROM audience_contacts WHERE workspace_id=$1 AND marketing_consent='subscribed' AND NOT suppressed ORDER BY hashtextextended(id, 0), id",[w])).rows.map(r=>r.email);
+    // The audience as it stands before any launch: subscribed, not suppressed, in send order (the order they joined the
+    // list, here at once, so by contact ID; nobody was mailed before and no list probe applies).
+    const before=(await g.query("SELECT c.email FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed ORDER BY m.created_at, c.id",[w,listId])).rows.map(r=>r.email);
     assert.equal(before.length,19);
     const blockedBy=async(pid:number)=>(await g.query('SELECT count(*)::int AS n FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid))',[pid])).rows[0].n as number;
     const within=(p:Promise<unknown>,ms:number)=>Promise.race([p,new Promise(r=>setTimeout(r,ms))]);
@@ -32995,7 +33100,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // 3. Deferred background REPEATABLE READ capture (>5,000 members): launch returns 202 immediately, and the background
     //    capture holds a single consistent snapshot without blocking sends while concurrent consent/import changes commit.
     const bigList = await audience(5_100, 250, 'bigsnap');
-    const bigBefore = (await g.query("SELECT c.email FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed ORDER BY hashtextextended(c.id, 0), c.id", [w, bigList])).rows.map(r => r.email);
+    const bigBefore = (await g.query("SELECT c.email FROM audience_contacts c JOIN audience_list_members m ON m.workspace_id=c.workspace_id AND m.contact_id=c.id WHERE c.workspace_id=$1 AND m.list_id=$2 AND c.marketing_consent='subscribed' AND NOT c.suppressed ORDER BY m.created_at, c.id", [w, bigList])).rows.map(r => r.email);
     const bigCamp = await draft('BigDeferred', bigList);
     const bigLaunched = await launch(bigCamp);
     assert.equal(bigLaunched.status, 202, JSON.stringify(bigLaunched.body));
@@ -38940,8 +39045,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         contacts.push(contact);
       }
       // Seed invalid historical contact data before snapshotting. Recipient order
-      // is by hashtextextended(id, 0), id; keep the first valid so the static-message cache is used.
-      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY hashtextextended(id, 0), id", [runtime.config.workspaceId])).rows;
+      // is the order they joined the list (here at once, so by ID); keep the first valid so the static-message cache is used.
+      const ordered = (await db.query("SELECT id FROM audience_contacts WHERE workspace_id = $1 ORDER BY id", [runtime.config.workspaceId])).rows;
       const invalidContactId = ordered[1].id;
       const invalidAddress = `${'a'.repeat(250)}@example.com`;
       assert.equal((await db.query("UPDATE audience_contacts SET email = $1 WHERE workspace_id = $2 AND id = $3", [invalidAddress, runtime.config.workspaceId, invalidContactId])).rowCount, 1);

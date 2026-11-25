@@ -1924,7 +1924,7 @@ export const previewCampaign = <ThrowOnError extends boolean = false>(options: O
 });
 
 /**
- * Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.
+ * Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. With readiness=true it also reviews the send (CampaignReadiness): whether it is ready to go out as it is, why, and the daily batches it recommends; send it with pacing.plan "recommended" to follow them. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.
  */
 export const previewCampaignAudience = <ThrowOnError extends boolean = false>(options: Options<PreviewCampaignAudienceData, ThrowOnError>): RequestResult<PreviewCampaignAudienceResponses, PreviewCampaignAudienceErrors, ThrowOnError> => (options.client ?? client).get<PreviewCampaignAudienceResponses, PreviewCampaignAudienceErrors, ThrowOnError>({
     security: [

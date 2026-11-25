@@ -24,6 +24,7 @@ import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { riskBreakdown } from '../audience/consent'
 import { CampaignPacing, CampaignProgress, SendEstimateLine, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
+import { ReadinessPanel, type Consent, type PlanChoice } from './readiness'
 import { CampaignBar, CampaignSteps } from './steps'
 import { productName } from '../../../../api/src/brand'
 export { CampaignsPage } from './CampaignList'
@@ -940,7 +941,12 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
   const [noticeConfirmed, setNoticeConfirmed] = useState(false)
   const [paceToggled, setPaceToggled] = useState(false)
   // Review is four stages, one open at a time, starting with recipients.
-  const [openRow, setOpenRow] = useState<ReviewRowId>('to')
+  // #send opens the Send stage.
+  const [openRow, setOpenRow] = useState<ReviewRowId>(() => window.location.hash === '#send' ? 'when' : 'to')
+  // How to send when the review recommends a plan: the plan unless the sender chose otherwise; and the consent source
+  // they confirm when a ramp is required and they send another way.
+  const [planChoice, setPlanChoice] = useState<PlanChoice | null>(null)
+  const [consent, setConsent] = useState<Consent>({ confirmed: false, source: '' })
   const [seen, setSeen] = useState(() => new Set<ReviewRowId>())
   useEffect(() => { if (openRow && !seen.has(openRow)) setSeen(new Set([...seen, openRow])) }, [openRow, seen])
   const guard = useRef(false)
@@ -974,10 +980,16 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
   const paceDays = pace.limit && !paceError && audience.data?.eligible ? Math.ceil(audience.data.eligible / perDay) : null
   const sharePercent = Number(pace.share.trim())
   const shareError = ratePercentError(sharePercent)
+  const readiness = audience.data?.readiness ?? null
+  const choice: PlanChoice = planChoice ?? (readiness?.plan && readiness.verdict !== 'ready' ? 'plan' : 'manual')
+  const planned = choice === 'plan' && Boolean(readiness?.plan)
+  // A required ramp is met by the plan, by a daily limit no larger than its first day, or by a confirmed consent source.
+  const needsConsent = Boolean(readiness?.required) && !planned && !(pace.limit && !paceError && perDay <= readiness!.required!.maxPerDay)
+  const consentError = needsConsent && (!consent.confirmed || consent.source.trim().length < 10) ? 'Confirm that everyone on this list agreed to get this email, and say where that consent comes from (at least 10 characters).' : ''
   // A value that needs fixing keeps the fields open.
   const paceOpen = paceToggled || Boolean(paceError || shareError)
-  const paceLine = [pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
-  const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
+  const paceLine = [planned ? 'daily batches' : pace.limit && `${number(perDay)} per day`, `${pace.share.trim()}% speed`, !multiTenant && (pace.autoPause ? 'auto-pause on' : 'auto-pause off')].filter(Boolean).join(' · ')
+  const paceSummary = (input: SendCampaignInput | null) => !input?.pacing ? '' : `${input.pacing.plan && readiness?.plan ? ` Sends in ${readiness.plan.batches.length} daily batches, starting with ${number(readiness.plan.batches[0]!)}.` : ''}${input.pacing.perDay ? ` Sends to up to ${number(input.pacing.perDay)} recipients per day${paceDays ? ` (about ${paceDays} ${paceDays === 1 ? 'day' : 'days'})` : ''}.` : ''}${input.pacing.rateShare != null && input.pacing.rateShare < 1 ? ` Uses at most ${Math.round(input.pacing.rateShare * 100)}% of your sending speed.` : ''}${input.pacing.autoPause === false ? ' Auto-pause on high bounces or complaints is off.' : ''}`
   const toast = useToast()
   const staleRefetch = useStaleRefetch()
   const sendMutation = useApiMutation((api, input: SendCampaignInput) => api.campaigns.send(input), undefined, false, invalidate.campaignSend)
@@ -1000,9 +1012,12 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
     if (paceError) { setError(`Recipients per day: ${paceError}`); return }
     if (shareError) { setError(`Sending speed limit: ${shareError}`); return }
     if (campaign.requiredNotice && !noticeConfirmed) { setError('Confirm that this is a required notice with no promotion.'); return }
+    if (consentError) { setError(consentError); return }
     const input: SendCampaignInput = { id: campaign.id, mode, revision: campaign.revision, ...(campaign.requiredNotice ? { confirmRequiredNotice: true } : {}) }
     // Defaults (no daily limit, auto-pause on, full send rate) need no pacing object.
-    if (pace.limit || !pace.autoPause || sharePercent < 100) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause, rateShare: sharePercent / 100 }
+    if (planned) input.pacing = { plan: 'recommended', autoPause: pace.autoPause, rateShare: sharePercent / 100 }
+    else if (pace.limit || !pace.autoPause || sharePercent < 100) input.pacing = { perDay: pace.limit ? perDay : null, autoPause: pace.autoPause, rateShare: sharePercent / 100 }
+    if (needsConsent) input.consent = { confirmed: true, source: consent.source.trim() }
     if (mode === 'schedule') {
       // datetime-local has no offset: this field is explicitly UTC, never the browser's local zone.
       const problem = scheduleError(scheduled)
@@ -1062,7 +1077,8 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
     const toSummary = !campaign.listId ? 'No list chosen'
       : !audience.data ? `${listName ?? 'Your list'}${audience.isError ? ' · couldn’t count' : ''}`
       : eligible ? `${number(eligible)} ${eligible === 1 ? 'contact' : 'contacts'} in ${listName ?? 'your list'}${segmentLabel}${campaign.requiredNotice ? ' · required notice' : ''}`
-      : <span className="review-warn">Nobody in {listName ?? 'your list'} can receive it yet</span>
+      // One text node, so the list's name arriving moves nothing (the summary is right-aligned: campaigns.css).
+      : <span className="review-warn">{`Nobody in ${listName ?? 'your list'} can receive it yet`}</span>
     const scoreSummary = sendability.data ? checksSummary(sendability.data) : missing.length ? 'After the message is complete' : !campaign.listId ? 'After you choose a list' : sendability.error ? 'Couldn’t check' : 'Checking…'
     const scheduledAt = mode === 'schedule' && scheduled && !scheduleError(scheduled) ? parseUtc(scheduled)!.toISOString() : null
     const messageSummary = missing.length ? `Add ${missing.join(', ').replace(/, ([^,]*)$/, ' and $1')} in Write` : campaign.subject
@@ -1107,14 +1123,17 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
           <div className="campaign-pacing-options" role="group" aria-labelledby="campaign-pacing-label">
             <div className="campaign-pacing-head"><Button id="campaign-pacing-label" variant="ghost" size="sm" className="campaign-pacing-toggle" aria-expanded={paceOpen} aria-controls="campaign-pacing-fields" onClick={() => setPaceToggled(!paceOpen)}><ChevronRight size={14} aria-hidden="true" />Pace sending</Button>{!paceOpen && <span className="muted campaign-pacing-summary">{paceLine}</span>}</div>
             {paceOpen && <div id="campaign-pacing-fields" className="campaign-pacing-fields">
-              <Checkbox label="Limit recipients per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />
-              {pace.limit && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
+              {!planned && <Checkbox label="Limit recipients per day" checked={pace.limit} disabled={sendMutation.isPending} onCheckedChange={limit => { setPace({ ...pace, limit }); setError('') }} />}
+              {pace.limit && !planned && <Field label="Recipients per day" htmlFor="campaign-per-day" error={paceError}><Input id="campaign-per-day" type="number" inputMode="numeric" min={minPerDay} max={maxPerDay} step={1} value={pace.perDay} onChange={event => { setPace({ ...pace, perDay: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>}
               <Field label="Sending speed limit (%)" htmlFor="campaign-rate-share" error={shareError}><Input id="campaign-rate-share" type="number" inputMode="numeric" min={minRatePercent} max={maxRatePercent} step={1} value={pace.share} onChange={event => { setPace({ ...pace, share: event.target.value }); setError('') }} disabled={sendMutation.isPending} /></Field>
               {/* Hosted always pauses on high bounces or complaints. */}
               {!multiTenant && <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />}
             </div>}
           </div>
-          <SendEstimateLine campaign={campaign} recipients={audience.data?.eligible ?? null} start={scheduledAt ? Date.parse(scheduledAt) : Date.now()} perDay={pace.limit && !paceError ? perDay : null} rateShare={shareError ? 1 : sharePercent / 100} />
+          {!planned && <SendEstimateLine campaign={campaign} recipients={audience.data?.eligible ?? null} start={scheduledAt ? Date.parse(scheduledAt) : Date.now()} perDay={pace.limit && !paceError ? perDay : null} rateShare={shareError ? 1 : sharePercent / 100} />}
+          {/* Last in the stage, right above Send: it arrives with the audience count and moves nothing when it does. */}
+          {readiness && <ReadinessPanel readiness={readiness} start={scheduledAt ? Date.parse(scheduledAt) : Date.now()} choice={choice} onChoice={value => { setPlanChoice(value); setError('') }}
+            consent={consent} onConsent={value => { setConsent(value); setError('') }} needsConsent={needsConsent} disabled={sendMutation.isPending} />}
         </ReviewStage>
       </div>
       {dialogs}
