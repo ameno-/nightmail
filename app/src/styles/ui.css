@@ -532,7 +532,7 @@ button.ui-facet:focus-visible:not([aria-pressed='true']) { background: var(--col
 .ui-facet__dot--none.ui-facet__dot { background: none; }
 .ui-facet__dot[class*='ui-series--'] { background: var(--series); }
 .ui-facet__label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.ui-facet__label > svg { margin-left: var(--space-4); color: var(--color-muted); vertical-align: -1px; }
+.ui-facet__label > svg { height: 1lh; margin-left: var(--space-4); color: var(--color-muted); vertical-align: top; }
 /* Counts sit right-aligned in a fixed slot: a count arriving (or growing) never moves its row. */
 .ui-facet__count { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; }
 /* Split pane: a rail and its list, apart by a gap (a page may set the rail on a surface of its own). */
