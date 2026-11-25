@@ -1222,7 +1222,7 @@ export function registerAudience(app: App) {
           // A share lock keeps the list from being changed or deleted mid-commit.
           if (job.listId) { const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
           // Domain verdicts count only while the checks are on (NIGHTMAIL_HYGIENE_DNS), as everywhere else.
-          const now = new Date().toISOString(), hygiene = await hygieneLists(tx), dnsOn = !!c.env.config.hygieneDnsUrl;
+          const now = new Date().toISOString(), dnsOn = !!c.env.config.hygieneDnsUrl;
           let subscribed = 0;
           let sampleContactIds: string[] = [];
           let riskSummary = riskyFrom(null);
@@ -1237,7 +1237,7 @@ export function registerAudience(app: App) {
             const { rows: [step1] } = await tx.execute<{ bad_row: number | null; inserted_subscribed: number; jobs_enqueued: number; existing_unknown_ids: string[] | null; contact_ids: string[] | null; sample_ids: string[] | null; risky: Record<string, number> | null }>(sql`
               WITH incoming AS (
                 SELECT (r->>'row')::int AS row_num, r->>'email' AS email, r->>'name' AS name, coalesce(r->'properties', '{}'::jsonb) AS properties, r->>'risk' AS risk,
-                  m.verdict AS domain_verdict, m.mx AS domain_mx
+                  m.verdict AS domain_verdict
                 FROM audience_imports i CROSS JOIN LATERAL jsonb_array_elements(i.rows) r
                   LEFT JOIN hygiene_mail_domains m ON m.domain = split_part(r->>'email', '@', 2)
                 WHERE i.workspace_id = ${identity.workspaceId} AND i.id = ${importId}
@@ -1248,7 +1248,7 @@ export function registerAudience(app: App) {
                 INSERT INTO audience_contacts AS c (id, workspace_id, email, name, properties, marketing_consent, risk)
                 SELECT 'con_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, email, name, properties, ${initialConsent},
                   CASE WHEN risk IS NOT NULL AND risk <> 'role' THEN risk WHEN ${dnsOn} AND domain_verdict = 'no_mail' THEN 'no_mail_domain'
-                    WHEN ${dnsOn} AND domain_verdict = 'ok' AND domain_mx && ${sql.param([...hygiene.disposableMx])}::text[] THEN 'disposable' WHEN risk = 'role' THEN risk
+                    WHEN risk = 'role' THEN risk
                     WHEN ${bouncedElsewhere(sql`incoming.email`, sql`${identity.workspaceId}::text`)} THEN 'dead' END
                 FROM incoming ORDER BY email
                 ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now},

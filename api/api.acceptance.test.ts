@@ -21143,7 +21143,7 @@ describe('List hygiene', () => {
   });
 
   // The nightly sync of the open lists and the domain checks, with every source and the DNS resolver mocked.
-  test('synced lists and domain checks: a poisoned, failing or shrunken source keeps its last copy; NXDOMAIN, null MX, no MX and disposable mail servers flag contacts at create, import and in the hourly pass', async t => {
+  test('synced lists and domain checks: keep the last copy when a source lists a known provider, fails or shrinks; NXDOMAIN, null MX, no MX and listed disposable domains flag contacts at create, import and in the hourly pass', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const [{ SOURCES }, hygiene] = await Promise.all([import('./src/hygiene-sources.js'), import('./src/list-hygiene.js')]);
       const wid = runtime.config.workspaceId, before = { lists: runtime.config.hygieneLists, dns: runtime.config.hygieneDnsUrl };
@@ -21219,10 +21219,10 @@ describe('List hygiene', () => {
           assert.equal(await create('y@gone.example'), 'no_mail_domain');
           assert.equal(calls.length, asked);
 
-          // Mail servers that serve three listed domains serve disposable ones, unless they are a known provider's.
+          // A shared mail server does not make an unlisted domain disposable.
           await hygiene.domainRisks(runtime, await hygiene.hygieneLists(runtime.db), traps, Date.now() + 5_000);
           await hygiene.syncHygieneLists(runtime, fetcher, true);
-          assert.deepEqual((await built()).meta.disposableMx, ['mx.trashhost.test']);
+          assert.equal(await create('reader@trapmx1.example'), 'disposable');
           // A day's change is bounded: a source that suddenly adds 10,000 domains (over 2% of the ~214,000 built) keeps the
           // last built lists until accepted.
           const kept = (await built()).version;
@@ -21235,13 +21235,13 @@ describe('List hygiene', () => {
           sources.mailchecker = many('d', 50000).join('\n');
           await hygiene.syncHygieneLists(runtime, fetcher, true, true);
           hygiene.forgetHygieneLists();
-          assert.equal(await create('z@newtrap.example'), 'disposable');
+          assert.equal(await create('z@newtrap.example'), null);
 
           // An import: the preview counts the domains' verdicts (outranking a role name), and the commit stores them.
           const csv = ['Email', 'p@gone.example', 'abuse@nomx.example', 'q@fine.example', 'r@newtrap2.example', 'postmaster@fine.example'].join('\n');
           const preview = ok(await local('POST', '/v1/contact-imports', { csv, mapping: { email: 'Email' } }), 201);
           const NONE = { invalid: 0, disposable: 0, typo_domain: 0, role: 0, dead: 0, no_mail_domain: 0 };
-          assert.deepEqual(preview.risky, { total: 4, byReason: { ...NONE, no_mail_domain: 2, disposable: 1, role: 1 } });
+          assert.deepEqual(preview.risky, { total: 3, byReason: { ...NONE, no_mail_domain: 2, role: 1 } });
           const committed = ok(await local('POST', `/v1/contact-imports/${preview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
           assert.deepEqual(committed.risky, preview.risky);
 
