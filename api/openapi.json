@@ -63486,8 +63486,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
@@ -63858,8 +63858,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
@@ -64273,8 +64273,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
@@ -64505,8 +64505,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
@@ -64689,8 +64689,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
@@ -64882,8 +64882,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
@@ -66002,8 +66002,8 @@
         "x-nightmail-permission": {
           "permission": "receivedMail",
           "level": "read",
-          "scope": "address",
-          "text": "Needs Received mail: read for the address or inbox."
+          "scope": "recipient",
+          "text": "Needs Received mail: read for the address it reached, or a sender domain it was addressed to."
         },
         "x-codeSamples": [
           {
