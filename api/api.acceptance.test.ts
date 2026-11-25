@@ -40817,8 +40817,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('link hosts: while a domain waits for its own, a workspace in good standing links campaign and marketing mail on the shared host within its daily allowance, then moves to its own',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run,fetch:page})=>{
-      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:Json[]=[];
-      t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){if(cmd instanceof SendEmailCommand)delivered.push(cmd.input);return (send as any).call(this,cmd,...rest);});
+      // Hosted's SES, live: the account's quota, and every send captured as SES gets it.
+      const {SESv2Client,SendEmailCommand,GetAccountCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:Json[]=[];
+      t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){
+        if(cmd instanceof GetAccountCommand)return Promise.resolve({SendingEnabled:true,SendQuota:{MaxSendRate:100,Max24HourSend:100000,SentLast24Hours:0}});
+        if(cmd instanceof SendEmailCommand){delivered.push(cmd.input);return Promise.resolve({MessageId:`fixture-${delivered.length}`});}
+        return (send as any).call(this,cmd,...rest);
+      });
       const {linkChoice,withLinkRecords,LINK_FALLBACK}=await import('./src/link-domains.js'),{readActivity}=await import('./src/glass.js');
       const wid=runtime.config.workspaceId,pool='111122223333',domain='fallback-links.example',from=`news@${domain}`,shared='links.fallback-fixture.example';
       const saas={zoneId:'0'.repeat(32),token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'};
