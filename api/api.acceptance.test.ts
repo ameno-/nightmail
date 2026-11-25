@@ -23934,6 +23934,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ['ryans','acme-corp','cafe-creme','mail','mail','mail','mail','mail','the-very-long-name','mail','mail','mail','mail','mail','mail']);
       assert.deepEqual(['MyGoogleDesk', 'Pay Pal Tools', 'Nіghtmail Desk', 'G00gle Team', 'Cloud Studio'].map(builtin.builtinBase),
         ['mail', 'mail', 'mail', 'mail', 'cloud-studio']);
+      // Ordinary names keep their label: a short brand word counts only on its own, also spelled across words or digits.
+      assert.deepEqual(['First Round Capital', 'Groups Inc', 'Delivery Hero', 'Purchase Co', 'Olive Garden'].map(builtin.builtinBase),
+        ['first-round-capital', 'groups', 'delivery-hero', 'purchase', 'olive-garden']);
+      const lookalikes = ['UPS Delivery', 'UPSDelivery', 'U P S Billing', 'Up5 Tracking', 'AWS Billing', 'MetaSupport', 'Ch4se Alerts', 'IRS Refunds', 'AppleBilling', 'MyGmailDesk', 'SecureLogin', 'Sign In Help', 'L\u0456ve Support'];
+      assert.deepEqual(lookalikes.map(builtin.builtinBase), lookalikes.map(() => 'mail'));
       const labels=new Set<string>();
       for (let i=0;i<40;i++) {const w=unique('ws-acme');await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)',[w,'Acme']);labels.add((await builtin.allocateBuiltinDomain(runtime.db,runtime.config,w,'Acme'))!);}
       assert.equal(labels.size,40,'Every workspace gets its own label.');
