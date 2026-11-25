@@ -71,7 +71,7 @@ const managed = w => w.role === 'owner' || w.role === 'admin';
 let noteIds = 0;
 function scopeOf(c) {
   const all = memberships(c.userId), workspace = c.workspaceId ? all.find(w => w.id === c.workspaceId) ?? null : null, who = person(c.userId);
-  return { conversation: { id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, signedIn: [...c.signedIn] }, user: { id: c.userId ?? null, name: who.name, email: who.email, mailboxProven: !!c.userId && !!who.verified && who.proven !== false },
+  return { conversation: { id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, signedIn: [...c.signedIn] }, user: { id: c.userId ?? null, name: who.name, email: who.email, mailboxProven: !!c.userId && !!who.verified && who.proven !== false, activeSession: who.activeSession !== false, sessionSince: who.sessionSince ?? null },
     workspace, workspaces: c.channel === 'email' || !c.workspaceId ? all : all.filter(w => w.id === c.workspaceId),
     contentWorkspaceId: all.some(w => w.id === c.content) ? c.content : null, page: c.page, shrunk: [...c.read].some(id => !all.some(w => w.id === id)) };
 }
@@ -316,6 +316,7 @@ export default {
       if (!c.signedIn.includes(messageId)) c.signedIn.push(messageId);
       return new Response(null, { status: 200 });
     }
+    if (url.pathname === '/__session') { const { userId, activeSession, sessionSince } = await request.json(); known(userId, userId.slice(4) + '@other.test'); Object.assign(people.get(userId), { activeSession, sessionSince: sessionSince ?? null }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__workspaceName') { const { id, name } = await request.json(); WORKSPACES[id] = name; return new Response(null, { status: 204 }); }
     if (url.pathname === '/__full') { full.add((await request.json()).userId); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__close') { closeFailures = (await request.json()).fail ?? 0; return new Response(null, { status: 204 }); }
