@@ -19948,6 +19948,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // Opened in a browser, the hosted address asks first (a GET changes nothing), records the opt-out, then continues to the page.
     const path = `/unsubscribe/${tokenOf(second)}`, prompt = await http('GET', path);
     assert.match(ok(prompt), /<form method="post">/);
+    assert.match(ok(prompt), /continue to brand\.example/);
     assert.match(prompt.headers.get('content-security-policy') ?? '', /form-action 'self' https:\/\/brand\.example;/, 'The form may continue to the page.');
     assert.equal(ok(await http('GET', `/v1/contacts/${second.id}`, key.secret)).marketingConsent, 'subscribed');
     const confirmed = await http('POST', path, undefined, 'confirm=footer', form);
