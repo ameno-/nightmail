@@ -84,6 +84,8 @@ Hosted installations use their own bucket, `nightmail-<stage>-analytics`, create
 
 Compaction and rollup use the UTC hour of **receipt**, settled five minutes after it ends. Upkeep rereads all parts for a changed hour, deduplicates event IDs, replaces its SQL groups atomically, and only then deletes those raw batches. A failure leaves the raw objects for retry. Older, already compacted hours from before this migration remain available in R2. For direct object reads, deduplicate on `id` across both prefixes.
 
+On an ingest storage failure the API tries once more before returning 503. Only an exhausted first POST includes an `NM-R` retry suffix: the page can see it on the keepalive fetch and sends the same bytes once more with `sendBeacon` after 0–500 ms of jitter. It never replays a response it did not receive. The receipt is good for one minute; it pins the original UTC hour, raw object key and public event ID, including over midnight. Dashboard events keep their original IDs. Validation, privacy and rate-limit responses do not request retries.
+
 ## SQL and export
 
 - `analytics_hourly`: `hour, metric, dimensions, events, visitors`. Dimensions are JSONB. Internal `visitor_ids` holds the per-group daily codes for exact daily unions; they never leave the export.

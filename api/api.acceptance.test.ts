@@ -26774,10 +26774,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         if (failing.test(text)) throw new Error('canceling statement due to statement timeout');
         return execute(query);
       });
-      // The cleanup step fails; the Node runner runs this in the background, so dispatch never waits on it either.
+      const warnings: Json[] = [];
+      t.mock.method(console, 'warn', (line: string) => { warnings.push(JSON.parse(line)); });
+      runtime.config.dashboardAnalytics = true;
+      runtime.analyticsStorage = { ...runtime.storage, list: async () => { throw new Error('list: R2 internal error (10001)'); } };
+      // The analytics and cleanup steps fail; the Node runner runs this in the background.
       let failed: string[];
       try { failed = [...await hourlyUpkeep(runtime)]; } finally { globalThis.fetch = fixtureFetch; }
       assert.ok(failed.includes('MAINTENANCE_CLEANUP_FAILED'), failed.join());
+      assert.ok(failed.includes('ANALYTICS_COMPACT_FAILED'));
+      const rollup = warnings.find(w => w.code === 'ANALYTICS_COMPACT_FAILED');
+      assert.deepEqual([rollup?.errorType, rollup?.cause], ['Error','list: R2 internal error (10001)']);
       const failedAt = seen.findIndex(text => failing.test(text));
       assert.ok(failedAt >= 0, 'the retention statement ran and failed');
       // Retention runs last, so receipt recovery ran before it; and its other tables still ran.
@@ -43329,9 +43336,9 @@ describe('dashboard analytics', () => {
     const db = new Proxy({}, { get(_target, prop) { throw new Error('Dashboard analytics touched Postgres (' + String(prop) + ').'); } }) as import('./src/core.js').Runtime['db'];
     const runtime: import('./src/core.js').Runtime = { config: loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: 'fixture-only-'.repeat(4), DASHBOARD_ANALYTICS: 'on', ...env }), db, storage };
     const app = createApp();
-    const post = async (body: unknown, headers: Record<string, string> = {}, peer = '198.51.100.' + Math.floor(Math.random() * 250)) => {
+    const post = async (body: unknown, headers: Record<string, string> = {}, peer = '198.51.100.' + Math.floor(Math.random() * 250), suffix = '') => {
       const { clientIpHeader } = await import('./src/brand.js');
-      return app.fetch(new Request(origin + path, { method: 'POST', headers: { origin, 'content-type': 'application/json', [clientIpHeader]: peer, ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) }), runtime);
+      return app.fetch(new Request(origin + path + suffix, { method: 'POST', headers: { origin, 'content-type': 'application/json', [clientIpHeader]: peer, ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) }), runtime);
     };
     const rows = (prefix = 'analytics/v1/raw/') => [...map].filter(([key]) => key.startsWith(prefix)).sort(([a], [b]) => a.localeCompare(b))
       .flatMap(([, body]) => new TextDecoder().decode(body).trim().split('\n').map(line => JSON.parse(line) as Record<string, unknown>));
@@ -43377,6 +43384,40 @@ describe('dashboard analytics', () => {
     assert.ok(!rows().some(row => row.type === 'sign_in'));
     assert.equal((await post(envelope([{ id: 'evt_00000012', seq: 12, t: now, type: 'page_view', route: '/overview' }]))).status, 204);
     assert.deepEqual([rows().at(-1)!.ws, rows().at(-1)!.uid], ['ws_' + 'a'.repeat(32), '0b5c7e1e-2f6c-4a51-9d0e-3c1f2a4b5c6d']);
+  });
+
+  test('dashboard analytics: retry a transient store failure, and replay an ambiguous put across midnight exactly once', async t => {
+    const { post, runtime, rows } = await setup(), storage = runtime.storage, original = storage.put.bind(storage);
+    const now = Date.parse('2026-11-24T23:59:59.800Z'), keys: string[] = [], warnings: Json[] = [];
+    t.mock.timers.enable({ apis: ['Date'], now });
+    t.mock.method(console, 'warn', (line: string) => { warnings.push(JSON.parse(line)); });
+    let failures = 1;
+    t.mock.method(storage, 'put', async (key: string, bytes: Uint8Array, type: string) => {
+      await original(key, bytes, type);
+      if (!key.includes('/raw/')) return;
+      keys.push(key);
+      if (failures-- > 0) throw new Error('put: transient object-storage failure');
+    });
+    const event = { id: 'evt_retry0001', seq: 0, t: now, type: 'page_view', route: '/overview' };
+    assert.equal((await post(envelope([event]))).status, 204);
+    assert.equal(keys.length, 2); assert.equal(keys[0], keys[1]); assert.equal(rows().length, 1);
+    failures = 2;
+    const publicEvent = { p: '/pricing', s: 'session-retry', w: 1200 };
+    const failed = await post(publicEvent), suffix = failed.headers.get('NM-R')!;
+    assert.equal(failed.status, 503); assert.match(suffix, /^\?r=\d{13}-[a-f0-9]{16}\.[a-f0-9]{32}$/);
+    assert.deepEqual(warnings.filter(w => w.stage === 'raw_put').map(w => [w.attempt,w.cause]), [1,1,2].map(i => [i,'put: transient object-storage failure']));
+    const before = rows(); assert.equal(before.length, 2);
+    t.mock.timers.setTime(now + 500);
+    const replayed = await post(publicEvent, {}, '198.51.100.100', suffix);
+    assert.equal(replayed.status, 204); assert.equal(replayed.headers.get('NM-R'), null);
+    assert.equal(new Set(keys.slice(2)).size, 1); assert.match(keys.at(-1)!, /dt=2026-11-24\/h=23\//);
+    assert.deepEqual(rows(), before);
+    // A receipt cannot overwrite the previous body with a different event, or reopen a settled hour.
+    assert.equal((await post({ ...publicEvent, c: 'sign-in' }, {}, '198.51.100.100', suffix)).status, 422);
+    assert.deepEqual(rows(), before);
+    t.mock.timers.setTime(now + 70_000);
+    assert.equal((await post(publicEvent, {}, '198.51.100.100', suffix)).status, 422);
+    assert.deepEqual(rows(), before);
   });
 
   test('dashboard analytics: off by default and then discarded unread, the dashboard origin only, DNT and GPC honored, and bounded', async t => {
@@ -43541,14 +43582,22 @@ describe('dashboard analytics', () => {
     // Five minutes after an hour ends, a batch written in it has landed: 11:03 is too early for 10:00 to 11:00.
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:03:00Z')), { hours: 0, batches: 0, expired: 1 });
     assert.ok(!map.has(old) && map.has(kept), 'Days past 400 are deleted; younger ones stay');
-    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), { hours: 1, batches: 3, expired: 0 });
-    const compacted = [...map.keys()].filter(key => key.startsWith('analytics/v1/events/dt=2026-11-19/'));
+    const put = t.mock.method(runtime.storage, 'put');
+    put.mock.mockImplementationOnce(async () => { throw new Error('put: transient compaction failure'); });
+    await assert.rejects(compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), /transient compaction failure/);
+    assert.equal(rows().length, 4, 'A failed compaction preserves its raw retry trigger');
+    put.mock.restore();
+    at('2026-11-19T12:01:00Z');
+    assert.equal((await post(envelope([{ id: 'evt_current1', seq: 5, t: Date.now(), type: 'page_view', route: '/overview' }]))).status, 204);
+    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 2, batches: 4, expired: 0 });
+    cleanup(t, () => client.query("DELETE FROM analytics_hours WHERE hour='2026-11-19 11:00Z'").then(() => {}));
+    const compacted = [...map.keys()].filter(key => key.startsWith('analytics/v1/events/dt=2026-11-19/h=10/'));
     assert.equal(compacted.length, 1);
     assert.match(compacted[0]!, /^analytics\/v1\/events\/dt=2026-11-19\/h=10\/[0-9a-f]{16}\.ndjson\.gz$/);
     const lines = new TextDecoder().decode(gunzipSync(map.get(compacted[0]!)!)).trim().split('\n').map(line => JSON.parse(line) as { id: string });
     assert.deepEqual(lines.map(line => line.id).sort(), ['evt_00000001', 'evt_00000002', 'evt_00000003']);
-    assert.deepEqual(rows().map(row => row.id), ['evt_00000004'], 'The current hour stays raw');
-    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T11:07:00Z')), { hours: 0, batches: 0, expired: 0 });
+    assert.deepEqual(rows().map(row => row.id), ['evt_current1'], 'The current hour stays raw');
+    assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 0, batches: 0, expired: 0 });
     runtime.config.dashboardAnalytics = false;
     assert.deepEqual(await compactAnalytics(runtime, Date.parse('2026-11-19T12:07:00Z')), { hours: 0, batches: 0, expired: 0 });
   });

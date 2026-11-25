@@ -1,5 +1,6 @@
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import { authenticate } from './auth.js';
-import { ANALYTICS_ROOT, analyticsStore, attribution, expireSalts, publicRows, trafficRows } from './analytics-traffic.js';
+import { ANALYTICS_ROOT, analyticsStore, attribution, expireSalts, logAnalyticsFailure, publicRows, trafficRows } from './analytics-traffic.js';
 import { exportRange, exportRollups, partition, pushDue, rollupHour } from './analytics-rollups.js';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
@@ -72,8 +73,12 @@ const userId = (value: unknown) => typeof value === 'string' && /^[A-Za-z0-9-]{8
 
 const encoder = new TextEncoder(), decoder = new TextDecoder();
 type StoredRow = AnalyticsRow | Pick<AnalyticsRow, 'v' | 'id' | 'received' | 'type' | 'route'>;
-async function writeBatch(runtime: Runtime, rows: StoredRow[], now: number) {
-  const key = ANALYTICS_ROOT + 'raw/' + partition(now) + '/' + now + '-' + crypto.randomUUID().replaceAll('-', '').slice(0, 16) + '.ndjson';
+const nonce = () => crypto.randomUUID().replaceAll('-', '').slice(0, 16);
+// Only failed live requests pay for a receipt. Never store a digest of the original (unrekeyed) public session.
+const retryMac = (secret: string, ticket: string, json: string) => createHmac('sha256', secret)
+  .update('nightmail:analytics-retry:v1\0').update(ticket).update('\0').update(json).digest().subarray(0,16);
+async function writeBatch(runtime: Runtime, rows: StoredRow[], now: number, suffix = nonce()) {
+  const key = ANALYTICS_ROOT + 'raw/' + partition(now) + '/' + now + '-' + suffix + '.ndjson';
   await analyticsStore(runtime).put(key, encoder.encode(rows.map(row => JSON.stringify(row)).join('\n') + '\n'), 'application/x-ndjson');
 }
 
@@ -131,16 +136,34 @@ export function registerAnalytics(app: App) {
     if (Number(c.req.header('content-length')) > ANALYTICS_LIMITS.bodyBytes) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 32 KiB limit.');
     const bytes = new Uint8Array(await c.req.arrayBuffer());
     if (bytes.byteLength > ANALYTICS_LIMITS.bodyBytes) throw new ApiError(413, 'REQUEST_TOO_LARGE', 'Request exceeds the 32 KiB limit.');
+    const json = decoder.decode(bytes);
     let body: unknown;
-    try { body = JSON.parse(decoder.decode(bytes)); } catch { throw new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.'); }
-    const now = Date.now(), { rows, dropped } = body && typeof body === 'object' && 'p' in body
-      ? { rows: publicRows(body, now), dropped: 0 } : analyticsRows(body, now);
+    try { body = JSON.parse(json); } catch { throw new ApiError(400, 'INVALID_JSON', 'Request body is not valid JSON.'); }
+    // A put can land despite a failed acknowledgement. Both retries address the same object and event IDs, even
+    // across midnight. Sign the ticket for the exact body; a caller cannot pick a key or reopen a settled hour.
+    const received = Date.now(), retry = c.req.query('r'), match = retry?.match(/^(\d{13})-([a-f0-9]{16})\.([a-f0-9]{32})$/);
+    const now = match ? Number(match[1]) : received, batchId = match?.[2] ?? nonce(), ticket = now + '-' + batchId;
+    if (retry !== undefined && (!match || now > received || received - now > 60_000 ||
+      ![config.authSecret, config.previousAuthSecret].some(secret => secret && timingSafeEqual(retryMac(secret,ticket,json),Buffer.from(match[3]!,'hex')))))
+      throw new ApiError(422, 'VALIDATION_FAILED', 'Invalid or expired analytics retry.');
+    const { rows, dropped } = body && typeof body === 'object' && 'p' in body
+      ? { rows: publicRows(body, now, 'p:' + ticket), dropped: 0 } : analyticsRows(body, now);
     if (dropped) log('warn', { requestId: c.get('requestId'), code: 'ANALYTICS_EVENTS_DROPPED', dropped, accepted: rows.length });
-    // A bucket that can't take the batch loses it: the dashboard never retries, and this isn't a database outage.
-    if (rows.length) await (async () => {
-      const enriched = await trafficRows(runtime, rows, c.req.header('user-agent') ?? '', runtime.analyticsPeer?.ip ?? c.req.header(clientIpHeader) ?? '', now);
-      if (enriched.length) await writeBatch(runtime, enriched, now);
-    })().catch(() => { throw new ApiError(503, 'ANALYTICS_UNAVAILABLE', 'Analytics storage is unavailable.', undefined, true); });
+    let enriched: StoredRow[] | undefined;
+    for (let attempt = 1; rows.length && attempt <= 2; attempt++) {
+      try {
+        enriched ??= await trafficRows(runtime, rows, c.req.header('user-agent') ?? '', runtime.analyticsPeer?.ip ?? c.req.header(clientIpHeader) ?? '', now);
+        if (enriched.length) await writeBatch(runtime, enriched, now, batchId);
+        break;
+      } catch (error) {
+        logAnalyticsFailure(error, attempt === 1 ? 'ANALYTICS_INGEST_RETRY' : 'ANALYTICS_INGEST_FAILED',
+          { requestId: c.get('requestId'), stage: enriched ? 'raw_put' : 'enrich', attempt });
+        if (attempt === 2) {
+          if (retry === undefined) c.header('NM-R', '?r=' + ticket + '.' + Buffer.from(retryMac(config.authSecret,ticket,json)).toString('hex'));
+          throw new ApiError(503, 'ANALYTICS_UNAVAILABLE', 'Analytics storage is unavailable.', undefined, true);
+        }
+      }
+    }
     return c.body(null, 204);
   });
 }
