@@ -29407,6 +29407,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // without it takes. (A call starts only when its own run has ended, so the run after is the one it could delay.)
       // The calls are held until the run has been timed, then answered.
       const timed = { off: [] as number[], hanging: [] as number[] };
+      // The hanging-call deadline was exercised above. For this ordering check only, drive the held
+      // requests by the release below: descheduling the test must not expire a primed request mid-round.
+      const deadline = AbortSignal.timeout.bind(AbortSignal);
+      t.mock.method(AbortSignal, 'timeout', (ms: number) => mode === 'held' && ms === 30_000 ? new AbortController().signal : deadline(ms));
       // Each is the second of two rounds, and the two take turns going first.
       for (let i = 0; i < 4; i++) for (const arm of i % 2 ? ['hanging', 'off'] as const : ['off', 'hanging'] as const) {
         if (arm === 'off') { use('off'); await round(); const without = await round(); timed.off.push(without.ms); assert.deepEqual(without.seen, baseline.seen); continue; }
@@ -35200,11 +35204,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { nodeRuntime } = await import('./src/adapters/node.js');
       const { jobHandlers } = await import('./src/sending.js');
       const { processJobs } = await import('./src/jobs.js');
-      const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+      // The background worker uses separate connections for capture and its progress write.
+      // Give all of them the same private queue, containing only this campaign's real job.
+      const schema = 'capture_queue_' + randomUUID().replaceAll('-', ''), url = new URL(FIXTURE_DATABASE_URL!);
+      await g.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE ${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL)`);
+      url.searchParams.set('options', `-c search_path=${schema},public`);
+      const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: url.href });
       try {
         Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
         const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
-        await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
+        const jobId = 'campaign.run:' + c.id;
+        assert.equal((await g.query(`INSERT INTO ${schema}.jobs SELECT * FROM public.jobs WHERE workspace_id=$1 AND id=$2 AND status='pending'`, [cRow.workspace_id, jobId])).rowCount, 1);
+        await g.query(`UPDATE ${schema}.jobs SET available_at = clock_timestamp() WHERE id=$1`, [jobId]);
         await stale();
         await processJobs(runtime, jobHandlers, 2, 1, 15_000);
         const capMs = Date.now() - capStart;
@@ -35216,7 +35227,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(after.total, Math.floor(members/every));
         assert.equal(after.prepared, Math.floor(members/every));
         assert.ok(capMs < 10_000, `Deferred ${name} capture took ${capMs} ms.`);
-      } finally { await close(); }
+      } finally { await close(); await g.query(`DROP SCHEMA ${schema} CASCADE`); }
     }
   });
 
@@ -40834,7 +40845,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const tag = unique('r').slice(-8), slowRoute = `GET /v1/fixture-${tag}/:id`, failing = `POST /v1/fixture-${tag}`, workspace = `ws_${tag}`, code = `FIXTURE_${tag.toUpperCase()}_FAILED`;
-      counters.resetCounters();
+      // Health lists only the eight busiest-by-latency non-alerting routes. Don't let an unrelated
+      // API process's samples displace our 3 ms route. Exercise both the minute and hour rollups.
+      await db.query('CREATE TEMP TABLE health_minutes (LIKE public.health_minutes INCLUDING ALL) ON COMMIT DROP; CREATE TEMP TABLE health_hours (LIKE public.health_hours INCLUDING ALL) ON COMMIT DROP');
+      counters.resetCounters(); t.after(counters.resetCounters);
       const errorLines = t.mock.method(console, 'error', () => {});
       const batch = () => {
         for (let i = 0; i < 38; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace });
