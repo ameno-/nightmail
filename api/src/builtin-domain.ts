@@ -159,18 +159,19 @@ export function breakerVerdict(m: BuiltinReputation): 'bounces' | 'complaints' |
 }
 /**
  * Every built-in domain's mail in the breaker's window, revoked ones included (their mail signed as the parent too), by
- * real recipient: SES accepted it, not simulated, never the SES mailbox simulator. Each domain is read through its
+ * real recipient: SES accepted it, not simulated, never the SES mailbox simulator. A complaint is one person reporting one
+ * email, so it counts once per email, not once per recipient: one report on a 50-recipient email is one complaint. Each domain is read through its
  * workspace's sender-domain index, so a workspace's own domains' mail is never scanned.
  */
 async function builtinReputation(db: DbExecutor, parent: string): Promise<BuiltinReputation> {
   const { rows: [r] } = await db.execute<BuiltinReputation>(sql`WITH p AS (
       SELECT greatest(now()-make_interval(hours=>${BUILTIN_BREAKER.windowHours}),coalesce(reset_at,'-infinity')) AS since FROM builtin_parent WHERE name=${parent}
     ), mail AS (
-      SELECT e.to_addresses||e.cc_addresses||e.bcc_addresses AS rcpt,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained
-      FROM p CROSS JOIN builtin_domains b CROSS JOIN LATERAL (SELECT e.to_addresses,e.cc_addresses,e.bcc_addresses,e.status,e.event_outcomes FROM sending_emails e
+      SELECT e.id,e.to_addresses||e.cc_addresses||e.bcc_addresses AS rcpt,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained
+      FROM p CROSS JOIN builtin_domains b CROSS JOIN LATERAL (SELECT e.id,e.to_addresses,e.cc_addresses,e.bcc_addresses,e.status,e.event_outcomes FROM sending_emails e
         WHERE e.workspace_id=b.workspace_id AND ((reverse(lower(split_part(e.from_address,'@',2)))||'.') COLLATE "C")=((reverse(b.name)||'.') COLLATE "C")
           AND e.created_at>p.since AND NOT e.simulated AND (e.provider_id IS NOT NULL OR e.event_outcomes & 1 <> 0)) e
-    ) SELECT count(*)::int AS recipients,count(*) FILTER (WHERE bounced)::int AS bounces,count(*) FILTER (WHERE complained)::int AS complaints
+    ) SELECT count(*)::int AS recipients,count(*) FILTER (WHERE bounced)::int AS bounces,count(DISTINCT mail.id) FILTER (WHERE complained)::int AS complaints
     FROM mail CROSS JOIN LATERAL jsonb_array_elements_text(mail.rcpt) x WHERE lower(x) NOT LIKE '%@simulator.amazonses.com'`);
   return { recipients: r?.recipients ?? 0, bounces: r?.bounces ?? 0, complaints: r?.complaints ?? 0 };
 }
