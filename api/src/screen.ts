@@ -520,12 +520,15 @@ async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | und
       if (!eligible) throw error;
     }
   }
+  // Jev as the fallback keeps the concurrency it had as the primary (its callers bound it, 4 each): a JevF outage or open
+  // breaker sends every screen here, and two slots would halve screening for as long as it lasts.
+  if (second === 'jev') return ask(backup, DEADLINE_MS, { classifier: second, failoverReason: timing.outcome ?? 'primary_breaker' });
   let slots = failoverSlots.get(runtime.db);
   if (!slots) failoverSlots.set(runtime.db, slots = { active: 0, waiting: [] });
-  if (slots.active < (second === 'jevf' ? Math.min(2, policy.jevf!.maxConcurrency) : 2)) slots.active++;
+  if (slots.active < Math.min(2, policy.jevf!.maxConcurrency)) slots.active++;
   else await new Promise<void>(resolve => slots.waiting.push(resolve));
   try {
-    return await ask(backup, second === 'jevf' ? policy.jevf!.deadlineMs : DEADLINE_MS, { classifier: second, failoverReason: timing.outcome ?? 'primary_breaker' });
+    return await ask(backup, policy.jevf!.deadlineMs, { classifier: second, failoverReason: timing.outcome ?? 'primary_breaker' });
   } finally {
     const next = slots.waiting.shift(); if (next) next(); else slots.active--;
   }
