@@ -3808,7 +3808,8 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const created=ok(await add(b.cookie,name),201), detail=`/v1/domains/${created.id}`, setup=detail+'/dns-setup';
           dc.after(async()=>{runtime.config.domainConnect=undefined; await local('DELETE',detail,undefined,b.cookie,select(b.org.id));});
           const getSetup=async(query='')=>ok(await local('GET',setup+query,undefined,b.cookie));
-          assert.equal(requests.length,0,'Domain creation does not discover the provider.');
+          // Creation asks DNS one thing, whether anyone serves the name (its NS records); never the provider.
+          assert.deepEqual(requests.map(u=>new URL(u).searchParams.get('type')),['NS'],'Domain creation does not discover the provider.'); requests.length=0;
           const expectedProvider={id:providerId,name:providerName};
           assert.deepEqual(await getSetup(),{provider:expectedProvider,groups:['sending','ownership'],applyUrl:null},'Supported provider with signing disabled.');
           assert.equal(requests.length,4,'Cold GET walks two labels, fetches settings, and checks template support inline.');
