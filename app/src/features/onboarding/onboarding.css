@@ -161,12 +161,11 @@
 .onboarding-test .first-send-test .muted { font-size: var(--text-sm); line-height: var(--leading-sm); }
 
 
-/* The focus step and the steps each focus leads to (focus-steps.tsx): a list of tasks, each its icon, title and one line
-   with its action at the end; a done task's icon turns into a check. Every action sits in a slot that holds its place
+/* The focus step and the steps each focus leads to (focus-steps.tsx): a list of tasks, each a well (as the focus choices
+   are) with its icon, title and one line, its action at the end; a done task's icon turns into a check. Every action sits in a slot that holds its place
    (.onboarding-slot), so nothing moves as drafts and names land. */
-.focus-tasks { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.focus-task { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); min-height: 64px; padding-block: var(--space-12); border-top: 1px solid var(--color-border); }
-.focus-task:last-child { border-bottom: 1px solid var(--color-border); }
+.focus-tasks { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.focus-task { display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); min-height: 64px; padding: var(--space-12) var(--space-16) var(--space-12) var(--space-12); border-radius: var(--radius-lg); background: var(--color-well, var(--color-layer-1)); }
 .focus-task__icon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: var(--radius-lg); background: var(--color-layer-2); color: var(--color-text); }
 .focus-task[data-done] .focus-task__icon { background: var(--color-success-marker); color: var(--color-surface); }
 .focus-task__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }

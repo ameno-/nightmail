@@ -230,7 +230,7 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .rcv-to { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; overflow: hidden; white-space: normal; line-height: 18px; }
 .rcv-to > .rcv-targets, .rcv-card-to .rcv-targets { display: inline; }
 :is(.rcv-to, .rcv-card-to) .rcv-target { display: inline; margin-right: var(--space-12); }
-:is(.rcv-to, .rcv-card-to) .rcv-target > .rcv-icon { margin-right: var(--space-6); vertical-align: -2px; }
+:is(.rcv-to, .rcv-card-to) .rcv-target > .rcv-icon { height: 1lh; margin-right: var(--space-6); vertical-align: top; }
 /* A rule in plain words on one line, and how many more. */
 .rcv-rules { display: flex; align-items: baseline; gap: var(--space-6); min-width: 0; }
 .rcv-rules__first { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -4,7 +4,7 @@
    the delivery runs on one line under the facts and the checks open beside the preview from its toolbar. A phone or
    tablet reads the email first: a short header with its status, one row of controls, the email edge to edge, and
    everything else in sheets. */
-.email-detail { --side-width: clamp(280px, 22cqi, 380px); container-type: inline-size; display: flex; flex-direction: column; min-width: 0; }
+.email-detail { --side-width: clamp(280px, 22cqi, 380px); --details-width: 320px; container-type: inline-size; display: flex; flex-direction: column; min-width: 0; }
 .page-surface .email-detail > .ui-page-header { flex: none; flex-wrap: nowrap; align-items: flex-start; margin-bottom: var(--space-16); }
 .page-surface .email-detail > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
 .page-surface .email-detail > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
@@ -311,10 +311,16 @@
 .email-bar__status { display: inline-flex; align-items: center; gap: var(--space-6); color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
 .email-bar .ui-identifier { padding-left: var(--space-4); }
 .email-bar .ui-identifier__value { color: var(--color-muted); font-size: var(--text-xs); }
-.email-detail > .email-facts.ui-facts-row { display: flex; flex: none; gap: var(--space-24); height: 36px; margin: 0 var(--space-16); padding: 0; background: none; }
+/* The facts strip shares the body's columns: From and To over the preview, the rest over the details column (from 1200 px,
+   where the column is always there), Stream's label on the column's edge and the last fact at the strip's end, as the
+   column's times are. A longer group (Region, self-hosted) widens its track rather than clipping. */
+.email-detail > .email-facts { display: grid; flex: none; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-24); height: 36px; margin: 0 var(--space-16); }
+.email-detail[data-mode='column'] > .email-facts { grid-template-columns: minmax(0, 1fr) minmax(var(--details-width), max-content); }
+.email-facts > .ui-facts-row { display: flex; gap: var(--space-24); min-width: 0; margin: 0; padding: 0; background: none; }
+.email-detail[data-mode='column'] > .email-facts > .ui-facts-row:last-child { justify-content: space-between; gap: var(--space-16); }
 .email-facts .ui-facts-row__item { flex-direction: row; align-items: center; gap: var(--space-8); min-width: 0; padding: 0; }
-.email-facts .ui-facts-row__item:nth-child(-n + 2) { flex: 1 1 0; }
-.email-facts .ui-facts-row__item:nth-child(n + 3) { flex: none; }
+.email-facts > .ui-facts-row:first-child > .ui-facts-row__item { flex: 1 1 0; }
+.email-facts > .ui-facts-row:last-child > .ui-facts-row__item { flex: none; }
 .email-facts dt { flex: none; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
 .email-facts dd { flex: 1 1 auto; height: 16px; font-size: var(--text-xs); line-height: 16px; }
 .email-facts dd.ui-facts-row__mono { font-size: var(--text-xs); }
@@ -332,7 +338,7 @@
   .email-detail .ev[data-fill] .ev-placeholder { background: var(--color-hover); }
   .email-detail .ev-stage:has(iframe:focus-visible) { background: var(--color-hover); }
   /* The inspector: its own solid surface, its sections 20px apart, no rule between them. */
-  .email-detail__side { --fade-pad-y: 0px; gap: var(--space-20); width: 320px; margin: 0 0 0 var(--space-24); padding: var(--space-4) 0; background: none; }
+  .email-detail__side { --fade-pad-y: 0px; gap: var(--space-20); width: var(--details-width); margin: 0 0 0 var(--space-24); padding: var(--space-4) 0; background: none; }
   .email-detail[data-mode='panel'] .email-detail__side { padding-top: var(--space-4); }
   .email-detail__side > * { flex: none; }
   .email-detail__side :is(.ss__title, .thread-line__title) { min-height: 24px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
