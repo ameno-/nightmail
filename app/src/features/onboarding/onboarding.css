@@ -156,22 +156,11 @@
 .onboarding-surface .onb-kbd { margin-inline-end: calc(-1 * var(--space-4)); background: var(--color-kbd-inset); }
 .onboarding-surface .ui-button--primary > .onb-kbd { background: color-mix(in oklab, var(--color-on-accent) 16%, transparent); color: var(--color-on-accent-muted); }
 
-/* Provisioning (index.tsx ProvisioningBar): a 2 px bar along the surface's top edge with its label under it, both in
-   the surface's top padding and out of the flow, so they move nothing as they come and go. Ready, the bar fills and both
-   fade. */
-.onb-provisioning { position: absolute; top: 0; left: 0; right: 0; z-index: 3; pointer-events: none; transition: opacity 300ms ease-out 350ms; }
-.onb-provisioning[data-state='done'] { opacity: 0; }
-.onb-provisioning__track { position: relative; height: 2px; overflow: hidden; border-start-start-radius: var(--radius-lg); }
-.onb-provisioning__track > span { position: absolute; inset: 0; background: var(--color-text); transform-origin: left; animation: onb-provision 1.6s cubic-bezier(.4, 0, .2, 1) infinite; }
-.onb-provisioning[data-state='done'] .onb-provisioning__track > span { animation: none; transform: none; transition: transform 300ms var(--ease-out-strong); }
-@keyframes onb-provision { 0% { transform: translateX(-100%) scaleX(.35); } 60% { transform: translateX(60%) scaleX(.5); } 100% { transform: translateX(100%) scaleX(.35); } }
-.onb-provisioning__label { margin: 0; padding-top: var(--space-8); color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-align: center; }
 
 /* Get started (get-started.tsx): the built-in domain's one line, two tabs whose panels share one cell (the taller sets the
    height, so switching moves nothing below), the optional test email, then Go to dashboard. The shown panel comes in from
    the side of its tab. */
 .onb-start-line a { color: var(--color-text); }
-.onb-start-line[data-pending] { visibility: hidden; }
 .onb-start { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .onb-panels { display: grid; min-width: 0; }
 .onb-panel { grid-area: 1 / 1; display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }
@@ -181,7 +170,6 @@
 @keyframes onb-from-left { from { opacity: 0; transform: translateX(-24px); } }
 @keyframes onb-from-right { from { opacity: 0; transform: translateX(24px); } }
 .onb-panel__actions { display: flex; }
-.onb-panel__actions[data-pending] { visibility: hidden; }
 .onb-panel__line { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 /* The prompt fills what the panel has left (at least eight lines) and scrolls; its text fades where it runs on. */
 .onb-prompt { flex: 1 1 0; height: 0; min-height: 168px; margin-top: var(--space-4); }
@@ -203,10 +191,14 @@
 .onb-start-time[data-shown] { visibility: visible; animation: onboarding-fade 200ms ease-out both; }
 .onb-num { color: var(--color-text); font-family: var(--font-mono); font-weight: var(--font-weight-bold); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .onb-start-test .first-send-test > .muted { font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
+.onb-test-line { justify-items: start; }
+/* Try again after a failed test email: a quiet link at the end of its line. */
+.onb-retry { padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+/* Skip's two labels share one cell, so the button keeps its width when it turns into Go to dashboard. */
+.onb-finish-label { justify-items: center; }
 
 @media (prefers-reduced-motion: reduce) {
   .onboarding-continue[data-timer]::after { display: none; }
-  .onb-provisioning__track > span { animation: none; transform: scaleX(.4); opacity: .5; }
   .onb-panel[data-enter] { animation: onboarding-fade 150ms ease-out both; }
 }
 

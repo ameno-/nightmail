@@ -33,9 +33,6 @@
 .developer-icon-actions[data-pending] { visibility: hidden; }
 
 .first-send-test { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-12); }
-.first-send-test__line { display: grid; }
-.first-send-test__line > * { grid-area: 1 / 1; }
-.first-send-test__line > :not([data-active]) { visibility: hidden; }
 /* Copy sits at the top-right of the code it copies. */
 .developer-snippet { position: relative; min-width: 0; }
 .developer-snippet > .developer-code { padding-right: calc(var(--space-8) + var(--control-height-sm) + var(--space-16)); }

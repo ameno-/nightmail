@@ -196,16 +196,15 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // until the session is read again (useConnectionCache), so the step waits for that read rather than showing the form first.
   const builtin = identity?.connection?.builtinDomain
   const readingIdentity = useIsFetching({ queryKey: ['identity'], exact: true }) > 0
-  // Hosted with nothing to choose opens Get started from the first frame, while its account is provisioned (the bar along
-  // the top): its connection, then the built-in domain the first sends go out on, which the test email waits for. The steps
-  // follow what this browser stored, as they will once the gate lets them (data/onboarding.ts).
+  // Hosted with nothing to choose opens Get started from the first frame, as if its account were set up: its connection and
+  // built-in domain finish meanwhile (a test email pressed early waits for them). The steps follow what this browser stored,
+  // as they will once the gate lets them (data/onboarding.ts).
   const hosted = flow === 'shared'
   const stored = useDomainStep(workspaceId)
   const step = sending && hosted ? stored === null ? { step: 'domain' as const, domainId: '' } : storedStage(stored) : stage
   const builtinReady = Boolean(builtin?.id) && builtin?.sending === 'ready'
   // No built-in domain to send from (an installation without them, or one that stopped sending): Add domain instead.
   const noBuiltin = !sending && !starting && !readingIdentity && (builtin == null || builtin.sending === 'off' || builtin.sending === 'closed')
-  const provisioning = hosted && !noBuiltin && !builtinReady && !shared.error
   // A built-in domain still being set up reports pending: the session is read again until it sends.
   useEffect(() => {
     if (!hosted || sending || builtin?.sending !== 'pending') return
@@ -263,11 +262,12 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const [frame, setFrame] = useState<{ view: View; previous: View | null }>({ view, previous: null })
   if (frame.view !== view) setFrame({ view, previous: frame.view })
   const previous = frame.view === view ? frame.previous : frame.view
-  const motion = previous === null || view === 'loading' ? undefined : 'fade'
+  // Get started is there at once, whatever came before it.
+  const motion = previous === null || view === 'loading' || view === 'start' ? undefined : 'fade'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
   // Get started is Hosted's first step: stored, so the gate keeps it open after a test email (data/onboarding.ts).
   useEffect(() => { if (view === 'start' && stored === null) setDomainStep(workspaceId, '') }, [view, stored]) // eslint-disable-line react-hooks/exhaustive-deps
-  return <>{hosted && <ProvisioningBar active={provisioning} />}<div key={view} className="onboarding-step" data-motion={motion}>{content}</div></>
+  return <div key={view} className="onboarding-step" data-motion={motion}>{content}</div>
 }
 
 /** A step's way back: a quiet text link above its heading. */
@@ -483,23 +483,5 @@ function DomainSetup({ domainId, onContinue, onMissing }: { domainId: string; on
     <div className="onboarding-actions">
       <Button variant="primary" className="onboarding-continue" data-timer={verified || undefined} data-analytics="onboarding/verify/continue" onClick={onContinue}>Continue<ArrowRight size={16} aria-hidden /></Button>
     </div>
-  </div>
-}
-
-/** The thin bar along the top while the account is provisioned: it fills and fades once it's ready, and never moves anything. */
-function ProvisioningBar({ active }: { active: boolean }) {
-  const [state, setState] = useState<'running' | 'done' | 'gone'>(active ? 'running' : 'gone')
-  if (active && state !== 'running') setState('running')
-  if (!active && state === 'running') setState('done')
-  useEffect(() => {
-    if (state !== 'done') return
-    const timer = setTimeout(() => setState('gone'), 700)
-    return () => clearTimeout(timer)
-  }, [state])
-  if (state === 'gone') return null
-  return <div className="onb-provisioning" data-state={state}>
-    <div className="onb-provisioning__track" aria-hidden="true"><span /></div>
-    <p className="onb-provisioning__label">Provisioning your account</p>
-    <span className="sr-only" role="status">{state === 'running' ? 'Provisioning your account' : 'Your account is ready'}</span>
   </div>
 }

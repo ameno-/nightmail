@@ -257,12 +257,12 @@ const pages = ids => [
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Docs · signed out operation', '/docs/api/sendEmail', { user: null }],
-  // No connection yet: Get started is up at once, with the provisioning bar along the top until Hosted mail is ready.
+  // No connection yet: Get started is up at once, whole, while onboarding starts Hosted mail.
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Get started on the built-in domain, ready (onboarding/get-started.tsx): the Agent tab, and By hand's key and send example.
   ['Onboarding · get started', '/onboarding', { user: 'uma' }],
   ['Onboarding · get started by hand', '/onboarding', { user: 'uma', tab: 'By hand' }],
-  // The same while the built-in domain is still being set up: the bar runs and the test email waits, reading /v1/me again until it is ready.
+  // The same while the built-in domain is still being set up: the same screen (a test email pressed now waits for it).
   ['Onboarding · get started provisioning', '/onboarding', { user: 'ula' }],
   // On a domain of the workspace's own, just verified (the step after its records): no built-in domain line.
   ['Onboarding · get started own domain', '/onboarding', { user: 'ren', step: ['ws_verified', 'agent:dom_rowanbakery_example'] }],

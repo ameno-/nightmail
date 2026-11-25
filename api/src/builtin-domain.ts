@@ -344,21 +344,43 @@ export const queueBuiltinJob = (wid: string, afterSeconds = 0) => sql`INSERT INT
     ${afterSeconds > 0 ? '{"inline":true}' : '{}'}::jsonb,now()+make_interval(secs=>${afterSeconds}))
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed')`;
 
-/** How long a send from a built-in domain still being set up waits for it, at most. */
-const SETUP_WAIT_MS = 8000;
+/** How long a send from a built-in domain still being set up waits for it, at most: well past the longest setup of a new
+ *  workspace's domain measured in production (8.4 s from sign-up, 5.6 s at the 90th percentile, Nov 2026). */
+export const SETUP_WAIT_MS = 20_000;
+/** How recently a built-in domain's job must have been queued for a send to wait for it: a new workspace's setup, never a
+ *  domain whose setup stalled long ago. */
+const SETUP_JOB_RECENT_MINUTES = 10;
 /**
- * A send from the workspace's built-in domain while the request that made the workspace still sets it up
- * (builtinSettingUp, about 5 s): onboarding shows the domain ready, so the send waits for its setup here instead of being
- * refused, then admission decides as for any send (its checks are unchanged). Returns at once for any other domain.
+ * A send from the workspace's built-in domain while it is still being set up, by the request that made the workspace
+ * (builtinSettingUp) or by its domain.builtin job (queued in the last ten minutes, pending or running, its parent healthy):
+ * the send waits for the setup here, then admission decides as for any send (its checks and limits are unchanged), so the
+ * first send of a new workspace, a dashboard test email or an agent's, is accepted as soon as the domain is ready instead
+ * of being refused for the setup's own seconds. The job is woken once, in case it is the one doing the work. Past
+ * SETUP_WAIT_MS it is 503 BUILTIN_DOMAIN_SETTING_UP (retryable); one whose setup stopped while the parent is healthy (its job
+ * failed or stalled) is 409 BUILTIN_DOMAIN_UNAVAILABLE at once. Returns at once for a domain that sends, and leaves an
+ * unhealthy parent (a tripped breaker, a parent still verifying) to admission, as before.
  */
-export async function awaitBuiltinSetup(runtime: Runtime, wid: string) {
+export async function awaitBuiltinSetup(runtime: Runtime, wid: string, waitMs = SETUP_WAIT_MS) {
   const parent = runtime.config.builtinDomain;
   if (!runtime.config.multiTenant || !parent) return;
-  for (const deadline = Date.now() + SETUP_WAIT_MS; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 200))) {
-    const { rows: [row] } = await runtime.db.execute<{ waiting: boolean }>(sql`SELECT ${builtinSettingUp(sql`dc`, parent)} AS waiting FROM builtin_domains b
-      JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin' WHERE b.workspace_id=${wid} AND b.revoked_at IS NULL`);
-    if (!row?.waiting) return;
+  let woken = false, host = '';
+  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 200))) {
+    const { rows: [row] } = await runtime.db.execute<{ name: string; pending: boolean; waiting: boolean; parent_ok: boolean }>(sql`SELECT b.name,dc.sending_state='pending' AS pending,
+      EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND p.ok) AS parent_ok,
+      (${builtinSettingUp(sql`dc`, parent)} OR (dc.sending_state='pending' AND EXISTS (SELECT FROM jobs j WHERE j.id='domain.builtin:'||dc.workspace_id AND j.status IN ('pending','running')
+        AND j.created_at>now()-make_interval(mins=>${SETUP_JOB_RECENT_MINUTES})) AND EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND p.ok))) AS waiting
+      FROM builtin_domains b JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin' WHERE b.workspace_id=${wid} AND b.revoked_at IS NULL`);
+    if (!row?.pending) return;
+    host = row.name;
+    if (!row.waiting) {
+      if (row.parent_ok) throw new ApiError(409, 'BUILTIN_DOMAIN_UNAVAILABLE', `${host} isn’t set up: ${productName} couldn’t finish setting it up. Try again in a minute, or verify a domain of your own to send.`, 'from', true);
+      return;
+    }
+    if (!woken) { woken = true; await runtime.wake?.(1)?.catch(() => {}); }
   }
+  const error = new ApiError(503, 'BUILTIN_DOMAIN_SETTING_UP', `${host} is still being set up. Try again in a few seconds: the send is accepted once it is ready.`, 'from', true);
+  error.retryAfterSeconds = 5;
+  throw error;
 }
 /** domain.builtin: setUpBuiltinDomain for the job's workspace. */
 export const builtinDomainJob: JobHandler = (runtime, payload, job) => setUpBuiltinDomain(runtime, job.workspaceId, payload);
