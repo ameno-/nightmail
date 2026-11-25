@@ -186,7 +186,7 @@ export function createTracker(host: TrackerHost) {
         else if (/^\/v1\/domains\/[^/]+$/.test(p) && body.ready === true) once('domain_verified')
       }
     },
-    track(step: FunnelStep) { push('track', { step }) },
+    track(step: FunnelStep, name?: string) { push('track', { step, name }) },
     flush,
   }
 }

@@ -75,6 +75,12 @@ const pages = ids => [
   ['Overview · setup', '/overview', { user: 'nia' }],
   // No domain yet, onboarding's domain step skipped: Overview's first card asks for one.
   ['Overview · no domain', '/overview', { user: 'pia', skipped: 'ws_skipped' }],
+  // A verified domain, nothing sent: the same card slot offers a test to yourself, an API key and the cURL example.
+  ['Overview · first send', '/overview', { user: 'ren' }],
+  // Overview's first card and Get started steps for each focus but developer emails.
+  ['Overview · focus agent inbox', '/overview', { user: 'abe', step: ['ws_focus_agents_new', 'done'] }],
+  ['Overview · focus marketing', '/overview', { user: 'mae', step: ['ws_focus_marketing', 'done'] }],
+  ['Overview · focus newsletter', '/overview', { user: 'noa', step: ['ws_focus_newsletter', 'done'] }],
   // Switching the time range keeps the old figures up while the new ones load, then tweens, morphs and crossfades them.
   ['Overview · range', '/overview', { from: '/overview', click: '30d' }],
   // A stream scopes the figures and Latest emails; a figure's tile opens Logs on that status, over the same range.
@@ -137,6 +143,10 @@ const pages = ids => [
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
   ['Campaign review', `/campaigns/${ids.campaign}/review`, { from: '/campaigns' }],
+  // The Send stage open (#send): the send review (readiness) arrives with the audience count, last in the stage; ready,
+  // and recommending daily batches (its dated plan and the choice between it and your own pace).
+  ['Campaign review · send', `/campaigns/${ids.readyCampaign}/review#send`, { from: '/campaigns' }],
+  ['Campaign review · ramp', `/campaigns/${ids.rampCampaign}/review#send`, { from: '/campaigns' }],
   // A sent issue's results (its emails still in the history), and one whose emails are past it: only the stored figures.
   ['Campaign results', `/campaigns/${ids.issueSent}/review`, { user: 'mara', from: `/newsletters/${ids.newsletter}` }],
   ['Templates', '/campaigns/templates', { from: '/campaigns' }],
@@ -152,9 +162,11 @@ const pages = ids => [
   ['Newsletters', '/newsletters', { user: 'ivy', from: '/campaigns' }],
   ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt', leave: true }],
   ['Audience', '/audience', { from: '/overview' }],
+  ['Audience · risky', '/audience?status=risky', { from: '/audience' }],
   ['Contact', `/audience/contacts/${ids.contact}`, { from: '/audience' }],
   ['Lists', '/audience/lists', { from: '/audience' }],
   ['List', `/audience/lists/${ids.list}`, { from: '/audience/lists' }],
+  ['List · risky', `/audience/lists/${ids.list}?status=risky`, { from: `/audience/lists/${ids.list}` }],
   ['Segments', '/audience/segments', { from: '/audience' }],
   ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
   // Property rules: the name beside the field, a day with its zone, and a presence check without a value.
@@ -165,6 +177,11 @@ const pages = ids => [
   ['Domain · custom MAIL FROM', `/domains/${ids.sendingDomain}`, { from: '/domains' }],
   // Added two hours ago, its records still missing at its DNS host: the setup banner over the records (Overview · setup shows it too).
   ['Domain · records missing', `/domains/${ids.stuckDomain}`, { user: 'nia', from: '/domains' }],
+  // The built-in domain: first in the list with its badge, and its page with no records (api/src/builtin-domain.ts).
+  ['Domains · built-in', '/domains', { user: 'pia', skipped: 'ws_skipped', from: '/overview' }],
+  ['Domain · built-in', `/domains/${ids.builtinDomain}`, { user: 'pia', skipped: 'ws_skipped', from: '/domains' }],
+  // Every record in public DNS, SES not verified yet: "Your records are correct" over the records.
+  ['Domain · records correct', `/domains/${ids.correctDomain}`, { user: 'nia', from: '/domains' }],
   ['API keys', '/api-keys', { from: '/overview' }],
   ['Settings', '/settings', { from: '/overview' }],
   ['Settings · members', '/settings#members', { from: '/settings' }],
@@ -198,8 +215,9 @@ const pages = ids => [
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
-  // Glass: every group's rows are fixed, so the figures (and their 30-second refresh) land in place. Anyone but an
-  // operator gets the app's "Page not found".
+  // Glass: the board's tiles, funnel, region rows (two at least), metric rows and feed column have fixed sizes, and feed
+  // rows move by transforms, so the figures (and their 5-second refresh) land in place. Anyone but an operator gets the
+  // app's "Page not found".
   ['Glass', '/glass', { from: '/operator' }],
   ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The support inbox (staff): Needs you and its counts, Agent handling, a conversation beside its customer panel, and
@@ -226,6 +244,17 @@ const pages = ids => [
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
+  // Onboarding's domain step with the built-in domain ready: continue with it, or add a domain of your own.
+  ['Onboarding · built-in domain', '/onboarding', { user: 'uma' }],
+  // The same while the built-in domain is still being set up: it says so, and reads /v1/me again until it is ready.
+  ['Onboarding · built-in domain setting up', '/onboarding', { user: 'ula' }],
+  // Its last step with the built-in domain: the agent prompt to copy and a test email, with no code or key on screen.
+  ['Onboarding · first email', '/onboarding', { user: 'uma', step: ['ws_builtin', 'agent:dom_builtin_ws_builtin'] }],
+  // The focus question, then the step each focus leads to (onboarding/focus-steps.tsx).
+  ['Onboarding · focus', '/onboarding', { user: 'uma', step: ['ws_builtin', 'focus:dom_builtin_ws_builtin'] }],
+  ['Onboarding · agent inbox', '/onboarding', { user: 'ada', step: ['ws_focus_agents', 'agent:dom_builtin_ws_focus_agents'] }],
+  ['Onboarding · marketing', '/onboarding', { user: 'mae', step: ['ws_focus_marketing', 'agent:dom_builtin_ws_focus_marketing'] }],
+  ['Onboarding · newsletter', '/onboarding', { user: 'noa', step: ['ws_focus_newsletter', 'agent:dom_builtin_ws_focus_newsletter'] }],
   // Connecting their own AWS account (cls-fixture.mjs connectedAccount): the stack link, a refused stack, the account
   // being checked, domains to choose, a region in the SES sandbox and its production access request, and a region being set up.
   ['Onboarding · AWS stack', '/onboarding', { user: 'bea' }],
@@ -326,7 +355,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
+const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · focus agent inbox', 'Overview · focus marketing', 'Overview · focus newsletter', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · built-in domain', 'Onboarding · built-in domain setting up', 'Onboarding · first email', 'Onboarding · focus', 'Onboarding · agent inbox', 'Onboarding · marketing', 'Onboarding · newsletter', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -465,9 +494,10 @@ async function masking(page, hover, shell) {
     if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
   }
   // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
-  // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a signed-out page (the waitlist) reveals by hover only.
+  // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a page without the shell (the signed-out waitlist,
+  // onboarding) reveals by hover only.
   const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
-  if (!count || !shell) return problems;
+  if (!count || !shell || !await page.evaluate(() => !!document.querySelector('.privacy-toggle'))) return problems;
   const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
   // ⇧P is ignored while typing (the support chat's box, a rule's editor), so leave whatever field has focus first.
   await page.evaluate(() => document.activeElement?.blur());
@@ -515,6 +545,8 @@ async function measure(browser, job, fx) {
     if (job.notes) await context.addInitScript(() => localStorage.setItem('nightmail.ui-notes', 'on'));
     // Onboarding's domain step skipped in this browser (data/onboarding.ts), so a workspace with no domain opens the dashboard.
     if (job.skipped) await context.addInitScript(workspace => { try { localStorage.setItem(`nightmail.onboarding.domain.${workspace}`, 'done'); } catch {} }, job.skipped);
+    // `step`: [workspace, the onboarding step this browser is on] (data/onboarding.ts).
+    if (job.step) await context.addInitScript(([workspace, value]) => { try { localStorage.setItem(`nightmail.onboarding.domain.${workspace}`, value); } catch {} }, job.step);
     // Overview's detail column hidden, as its toggle leaves it (features/overview/panel.ts).
     if (job.panel) await context.addInitScript(panel => { try { localStorage.setItem('nightmail.overview-panel', panel); } catch {} }, job.panel);
     page = await context.newPage();
@@ -884,12 +916,12 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
-    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   // Multi-step jobs (Support chat, live rules, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);

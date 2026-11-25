@@ -13,7 +13,8 @@
   font-display: swap;
 }
 /* Inter in two files per style: Latin (preloaded, ~110 KB) and every other script Inter covers, fetched only for text
-   that uses it. The full inter-variable*.woff2 files stay for sent email, which links them (api/src/campaign-blocks.ts). */
+   that uses it. The full inter-variable*.woff2 files stay for the API's hosted pages (operations.ts) and for mail sent before
+   campaigns stopped linking web fonts. */
 @font-face {
   font-family: 'Inter';
   src: url('/fonts/inter-latin.woff2') format('woff2');
@@ -101,6 +102,9 @@
   color-scheme: light;
   --color-email-surface: #FFFFFF;
   --color-email-text: #181818;
+  /* An email on a dark mail client's canvas (Apple Mail's): the preview's dark mode. */
+  --color-email-dark-surface: #1E1E1E;
+  --color-email-dark-text: #FFFFFF;
   --color-brand: #798ABA; /* a periwinkle accent, oklch(0.638 0.075 269.2): 3.0:1 on deep */
   --color-logo: #0A0B0F; /* the brand's ink: the wordmark and the stamp on a pale ground; docs/brand.md */
   --color-contrast: #111111;
@@ -169,7 +173,10 @@
      their own, from --focus-width and --color-focus. --focus-reach is the room a scroll area keeps at its edges. */
   --focus-width: 2px;
   --focus-reach: 4px;
-  --row-height: 53px;
+  /* Table rows: one line of text or one control (DataTable). A table whose cells stack two lines (a name over its
+     caption) takes the two-line row (ui.css, .ui-table--two-line). */
+  --row-height: 38px;
+  --row-height-two-line: 52px;
   --row-height-lg: 44px;
   /* Event timelines (delivery waterfall, facts): one mono line. */
   --row-height-dense: 28px;
@@ -184,7 +191,7 @@
   --sidebar-gutter: var(--space-8);
   --sidebar-inset: var(--space-8);
   --page-inset: 0px;
-  --page-gap: var(--space-16);
+  --page-gap: var(--space-12);
   /* Colour, fill and border changes on controls, links, rows and tabs. */
   --motion-duration: 150ms;
   --ease-standard: cubic-bezier(.4, 0, .2, 1);
@@ -201,12 +208,20 @@
   --shadow-button: none;
   --shadow-popover: 0 8px 24px rgb(0 0 0 / 10%), 0 2px 6px rgb(0 0 0 / 6%);
   --shadow-dialog: 0 16px 40px rgb(0 0 0 / 14%), 0 4px 12px rgb(0 0 0 / 6%);
-  /* Sender score grade bands (the gauge's arcs), solid like the status colours. B is the data blue. */
-  --grade-aplus: #15803D; --grade-a: #16A34A; --grade-b: var(--color-accent-data); --grade-c: #CA8A04; --grade-d: #EA580C; --grade-f: #DC2626;
+  /* The sender score card's ramp (features/score/score.css): one hue per score, the deepest red at 25 and below, red-
+     orange at 50, amber at 75 and green from 95, at one lightness and chroma per theme, so every stop keeps the same
+     contrast. Light: ink 9.8:1 and the label
+     5.9:1 on the tile, 5.4:1 on its hover. A score-less tile (loading, before a grade) is neutral, one step off the frame. */
+  --score-hue-poor: 25; --score-hue-mid: 75; --score-hue-high: 150;
+  --score-tile-l: .88; --score-tile-hover-l: .855; --score-tile-c: .055;
+  --score-ink-l: .29; --score-ink-c: .05; --score-soft-l: .42; --score-soft-c: .05;
+  --score-neutral: var(--color-deep-control); --score-neutral-hover: var(--color-deep-control-hover);
 }
 
 :root[data-theme='dark'] {
-  --grade-aplus: #22C55E; --grade-a: #4ADE80; --grade-b: var(--color-accent-data); --grade-c: #FACC15; --grade-d: #FB923C; --grade-f: #EF4444;
+  /* Dark: ink 10.5:1 and the label 7.1:1 on the tile, 6.3:1 on its hover (above 5:1 with the grain's lighter specks). */
+  --score-tile-l: .34; --score-tile-hover-l: .37; --score-tile-c: .065;
+  --score-ink-l: .97; --score-ink-c: .01; --score-soft-l: .84; --score-soft-c: .035;
   color-scheme: dark;
   --color-brand: #798ABA; /* the same colour as light: 5.5:1 on deep */
   --color-logo: #F4F2EC; /* the brand's paper: the marks on a dark ground */

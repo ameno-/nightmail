@@ -45,6 +45,9 @@ const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Lo
 const staffLinks: readonly NavItem[] = [['/support', 'Support'], ['/operator', 'Operator']]
 // A self-hosted installation has no operator area; the same address is its Health page (features/operator/health.tsx).
 const selfHostedLinks: readonly NavItem[] = [['/operator', 'Health']]
+// Operator pages with no sidebar entry, reached by their address: named in the breadcrumb and the window title for an
+// operator only, so anyone else sees what an unknown address shows.
+const operatorPages: readonly NavItem[] = [['/glass', 'Glass']]
 // Below 900 px the sidebar becomes a top bar (workspace, theme) and a bottom tab bar: the four areas used most, one
 // thumb-tap away and always in view, and More, a sheet with the rest. A drawer would hide every destination behind a
 // button; the tab bar keeps the main ones visible and says where you are.
@@ -107,7 +110,10 @@ export function AppShell() {
   // The page in front of the user: its first-screen requests start with its code, not after it, on a cold load too.
   useEffect(() => {
     const path = latest.current.pathname
-    if (regionReady && ((sidebarPaths as readonly string[]).includes(path) || path.startsWith('/newsletters'))) void latest.current.prefetchRoute(path)
+    // Logs starts its actual filtered rows at the table ref's first fit. Warming a
+    // remembered default page here can race that read with a different range or size.
+    if (regionReady && path === '/logs') void preloadRouteChunk(path)
+    else if (regionReady && ((sidebarPaths as readonly string[]).includes(path) || path.startsWith('/newsletters'))) void latest.current.prefetchRoute(path)
     if (access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
   }, [regionReady])
   // Once the page in front of the user has settled, warm every other sidebar page's JS chunk one at a time (never
@@ -178,7 +184,8 @@ export function AppShell() {
     if (!access.multiTenant && regions.data && !current && enabled.length) setRegionId(enabled.find(region => region.region === preferred)?.region ?? enabled[0].region)
   }, [access.multiTenant, regions.data, current, enabled, setRegionId])
   // Docs pages name themselves (features/docs).
-  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...newsletters, ...navigation, ...(access.multiTenant ? staffLinks : selfHostedLinks)].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname, newsletters.map(([, title]) => title).join('\n')])
+  const unlisted = session?.identity?.operator ? operatorPages : []
+  useEffect(() => { if (location.pathname === '/docs' || location.pathname.startsWith('/docs/')) return; document.title = `${[...unlisted, ...newsletters, ...navigation, ...(access.multiTenant ? staffLinks : selfHostedLinks)].find(([path]) => location.pathname.startsWith(path))?.[1] ?? productName.toLowerCase()} · ${productName.toLowerCase()}` }, [location.pathname, newsletters.map(([, title]) => title).join('\n'), unlisted.length]) // eslint-disable-line react-hooks/exhaustive-deps
   // "/" jumps to the page's search box, as in most list-heavy tools, unless you are already typing somewhere.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -274,7 +281,7 @@ export function AppShell() {
   // The quick jumper lists every page of the navigation, grouped as the sidebar groups them.
   const commands = useMemo<Command[]>(() => links.map(([path, title]) => ({ path, title, group: groupOf(path), icon: glyphOf(path), keys: goKeys[path], locked: !access.canAdminister && adminOnly.has(path) })), [links.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
   const grouped = groups.map(([name]) => ({ name, links: links.filter(([path]) => groupOf(path) === name) })).filter(group => group.links.length)
-  const section = links.find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
+  const section = [...links, ...unlisted].find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName
   const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} commands={commands} /></>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}

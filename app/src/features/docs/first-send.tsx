@@ -30,18 +30,26 @@ const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'Typ
 
 // Sends a clearly labelled test from hello@<domain> to the signed-in user's own address. The server picks the
 // recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
-export function TestSend({ domain, onSent, primary = false }: { domain: Domain; onSent?: (id: string) => void; primary?: boolean }) {
+/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. */
+export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string) => void) {
+  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
+    onSuccess: data => onSent?.(data.id) })
+}
+// `onLeave` runs before View in Logs opens the email: onboarding finishes there, so the dashboard opens instead of sending
+// the browser back to the step it came from. `ready`: whether it can send, where the caller knows better than the domain's
+// status (a new built-in domain still being set up sends: its send waits for the setup).
+export function TestSend({ domain, onSent, primary = false, onLeave, ready }: { domain: Domain; onSent?: (id: string) => void; primary?: boolean; onLeave?: () => void; ready?: boolean }) {
   const identity = useSession()?.identity
   const to = identity?.email
   const from = `hello@${domain.name}`
-  const verified = domain.status === 'verified'
-  const test = useGuardedMutation({ target: domain.id, mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
-    onSuccess: data => onSent?.(data.id) })
+  const verified = ready ?? domain.status === 'verified'
+  const test = useTestSend(domain, onSent)
   if (!to) return null
   return <>
     <div className="first-send-test">
       <Button variant={primary ? 'primary' : undefined} loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
-      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></> : `Available once ${domain.name} is verified.`}</span>
+      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`} onClick={onLeave}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></>
+        : domain.builtIn ? `Available in a moment, once ${domain.name} is ready.` : `Available once ${domain.name} is verified.`}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}
   </>

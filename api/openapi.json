@@ -513,7 +513,78 @@
               "total",
               "verified"
             ],
-            "description": "Domains claimed in this workspace and how many can send."
+            "description": "Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them."
+          },
+          "sent": {
+            "type": "boolean",
+            "description": "Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days)."
+          },
+          "received": {
+            "type": "boolean",
+            "description": "Whether this workspace has received any email (kept as long as its received mail is)."
+          },
+          "builtinDomain": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Its ID in listDomains, once it is set up on this connection."
+              },
+              "name": {
+                "type": "string"
+              },
+              "sending": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "pending",
+                  "closed",
+                  "off"
+                ],
+                "description": "ready: it sends now (in a new workspace's first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused)."
+              },
+              "paused": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving."
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "members"
+                ],
+                "description": "Who it sends to: anyone, or the verified addresses of the workspace's members."
+              },
+              "perDay": {
+                "type": "integer"
+              },
+              "perMinute": {
+                "type": "integer"
+              },
+              "used": {
+                "type": "integer",
+                "description": "Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends."
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "sending",
+              "scope",
+              "perDay",
+              "perMinute",
+              "used"
+            ],
+            "description": "Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one."
           },
           "attention": {
             "type": "string",
@@ -839,6 +910,25 @@
           },
           "lastChange": {
             "$ref": "#/components/schemas/ApiKeyLastChange"
+          },
+          "agent": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "client": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "What the agent said it is (client_name), its claim, never verified. Null when it didn't say."
+              }
+            },
+            "required": [
+              "client"
+            ],
+            "description": "A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key."
           }
         },
         "required": [
@@ -853,7 +943,8 @@
           "access",
           "expiresAt",
           "approval",
-          "lastChange"
+          "lastChange",
+          "agent"
         ]
       },
       "CreateApiKey": {
@@ -1410,7 +1501,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Agent (set up <date>), under API keys, where a person revokes it."
+            "description": "\"<client_name>, set up <date>\" (\"Agent, set up <date>\" without one), under API keys, where a person revokes it."
           },
           "workspaceId": {
             "type": "string"
@@ -1616,6 +1707,43 @@
           }
         ]
       },
+      "ContactRisk": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role",
+              "dead",
+              "no_mail_domain"
+            ],
+            "description": "invalid: not a deliverable address. disposable: a public temporary inbox, or a domain whose mail servers serve them. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce). no_mail_domain: the domain can't receive mail (it doesn't exist, or has no mail server)."
+          },
+          "suggestion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For typo_domain, the address with the provider it most likely meant."
+          },
+          "allowed": {
+            "type": "boolean",
+            "description": "Its owner allowed it: campaigns and marketing sends reach it anyway."
+          }
+        },
+        "required": [
+          "reason",
+          "suggestion",
+          "allowed"
+        ],
+        "description": "Why campaigns and marketing sends skip this contact, or null when nothing is wrong with the address. Flagged when the contact is created or imported, and again hourly for every contact. Transactional mail is never refused."
+      },
       "Contact": {
         "type": "object",
         "properties": {
@@ -1671,6 +1799,9 @@
               "null"
             ]
           },
+          "risk": {
+            "$ref": "#/components/schemas/ContactRisk"
+          },
           "lastOpenAt": {
             "type": [
               "string",
@@ -1723,6 +1854,7 @@
           "marketingConsent",
           "suppressed",
           "suppressionReason",
+          "risk",
           "lastOpenAt",
           "lastClickAt",
           "observedSince",
@@ -2938,6 +3070,18 @@
                       }
                     ]
                   }
+                },
+                "risk": {
+                  "type": "string",
+                  "enum": [
+                    "invalid",
+                    "disposable",
+                    "typo_domain",
+                    "role",
+                    "dead",
+                    "no_mail_domain"
+                  ],
+                  "description": "What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it."
                 }
               },
               "required": [
@@ -2976,6 +3120,9 @@
             "type": "boolean",
             "description": "false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count)."
           },
+          "risky": {
+            "$ref": "#/components/schemas/RiskBreakdown"
+          },
           "errorsRetained": {
             "type": "boolean",
             "description": "false once per-row error details are no longer kept after the retention window (errors is then [])."
@@ -2996,10 +3143,58 @@
           "errors",
           "imported",
           "rowsRetained",
+          "risky",
           "errorsRetained",
           "createdAt",
           "updatedAt"
         ]
+      },
+      "RiskBreakdown": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer"
+          },
+          "byReason": {
+            "type": "object",
+            "properties": {
+              "invalid": {
+                "type": "integer"
+              },
+              "disposable": {
+                "type": "integer"
+              },
+              "typo_domain": {
+                "type": "integer"
+              },
+              "role": {
+                "type": "integer"
+              },
+              "dead": {
+                "type": "integer"
+              },
+              "no_mail_domain": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role",
+              "dead",
+              "no_mail_domain"
+            ]
+          }
+        },
+        "required": [
+          "total",
+          "byReason"
+        ],
+        "description": "Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene."
       },
       "CommittedContactImport": {
         "allOf": [
@@ -4129,6 +4324,13 @@
           "screen": {
             "$ref": "#/components/schemas/EmailScreenSummary"
           },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientWarning"
+            },
+            "description": "Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts."
+          },
           "scheduledAt": {
             "type": "string",
             "description": "A scheduled send: when it goes (UTC)."
@@ -4168,13 +4370,42 @@
         ],
         "description": "Content-screen outcome recorded at accept time when screening applies."
       },
+      "RecipientWarning": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role"
+            ]
+          },
+          "suggestion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "email",
+          "risk",
+          "suggestion"
+        ]
+      },
       "SendEmailInput": {
         "type": "object",
         "properties": {
           "from": {
             "type": "string",
             "maxLength": 254,
-            "pattern": "^[\\x21-\\x7e]+$"
+            "pattern": "^[\\x21-\\x7e]+$",
+            "description": "An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies."
           },
           "fromName": {
             "type": "string",
@@ -4323,7 +4554,7 @@
           },
           "screen": {
             "type": "boolean",
-            "description": "Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After."
+            "description": "Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After."
           },
           "replyAddressId": {
             "type": "string",
@@ -4341,7 +4572,7 @@
           "scheduledAt": {
             "type": "string",
             "format": "date-time",
-            "description": "Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId."
+            "description": "Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected), except Hosted marketing its ramp hour has no room for, which is held until there is (RAMP_LIMIT_REACHED in sendEmail's description). Not with replyAddressId."
           }
         },
         "required": [
@@ -4381,6 +4612,13 @@
           },
           "screen": {
             "$ref": "#/components/schemas/EmailScreenSummary"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientWarning"
+            },
+            "description": "Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts."
           }
         },
         "required": [
@@ -4413,7 +4651,8 @@
           "from": {
             "type": "string",
             "maxLength": 254,
-            "pattern": "^[\\x21-\\x7e]+$"
+            "pattern": "^[\\x21-\\x7e]+$",
+            "description": "An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies."
           },
           "fromName": {
             "type": "string",
@@ -4562,7 +4801,7 @@
           },
           "screen": {
             "type": "boolean",
-            "description": "Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After."
+            "description": "Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After."
           }
         },
         "required": [
@@ -5461,6 +5700,9 @@
           },
           "delivery": {
             "$ref": "#/components/schemas/CampaignDelivery"
+          },
+          "sendEstimate": {
+            "$ref": "#/components/schemas/CampaignSendEstimate"
           }
         },
         "required": [
@@ -5476,7 +5718,8 @@
           "createdAt",
           "updatedAt",
           "counts",
-          "delivery"
+          "delivery",
+          "sendEstimate"
         ]
       },
       "CampaignDraft": {
@@ -5737,6 +5980,23 @@
                   "null"
                 ],
                 "description": "When the next 24-hour window opens, when a daily cap is set."
+              },
+              "plan": {
+                "type": [
+                  "array",
+                  "null"
+                ],
+                "items": {
+                  "type": "integer"
+                },
+                "description": "Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise."
+              },
+              "batch": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "description": "With a plan: the batch the current window releases, from 1."
               }
             },
             "required": [
@@ -5745,8 +6005,29 @@
               "rateShare",
               "windowStartedAt",
               "windowExpanded",
-              "nextWindowAt"
+              "nextWindowAt",
+              "plan",
+              "batch"
             ]
+          },
+          "consent": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "confirmedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "confirmedAt"
+            ],
+            "description": "The consent source confirmed at launch, if any."
           },
           "pausedAt": {
             "type": [
@@ -5790,7 +6071,8 @@
                   "hosted_daily_quota",
                   "list_probe",
                   "balance",
-                  "feedback_lag"
+                  "feedback_lag",
+                  "ramp"
                 ]
               },
               "until": {
@@ -5801,7 +6083,7 @@
               "reason",
               "until"
             ],
-            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up."
+            "description": "Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step."
           },
           "feedbackLag": {
             "type": [
@@ -5834,6 +6116,7 @@
           "canceled",
           "error",
           "pacing",
+          "consent",
           "pausedAt",
           "pauseReason",
           "deliveredOnly",
@@ -5841,6 +6124,92 @@
           "feedbackLag"
         ],
         "description": "The current launch: null until the campaign is sent or scheduled, and cleared by a new revision."
+      },
+      "CampaignSendEstimate": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "recipients": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Recipients still to release: for a draft, the last audience count (previewCampaignAudience; null before one); once launched, those not released yet."
+          },
+          "ratePerSecond": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "The region's send rate the campaign plans at, per second, before its rate share; null until the region's quota was read."
+          },
+          "ramp": {
+            "$ref": "#/components/schemas/CampaignRamp"
+          },
+          "seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "How long releasing the recipients left takes from when it starts (the campaign's last change, updatedAt, or scheduledAt): from the ramp, the daily cap (pacing.perDay), the rate share and the region's send rate. A draft is estimated without a daily cap at the full rate. An estimate: it assumes clean, prompt feedback and leaves out the list probe's wait, quota holds and other mail sharing the rate. Null when it cannot be told (no audience count or send rate yet)."
+          },
+          "finishAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A launched campaign: when its last recipient is expected to be released, as of its last change (updatedAt or scheduledAt, plus seconds). Null for a draft, while paused or failed, or when it cannot be told."
+          }
+        },
+        "required": [
+          "recipients",
+          "ratePerSecond",
+          "ramp",
+          "seconds",
+          "finishAt"
+        ],
+        "description": "How long sending takes, for a draft or a campaign that has recipients left to release. Null for a finished or canceled campaign; lists leave it out."
+      },
+      "CampaignRamp": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "step": {
+            "type": "integer",
+            "description": "The step the campaign releases at, from 1."
+          },
+          "steps": {
+            "type": "integer",
+            "description": "How many steps the ramp has; past the last one only the other limits apply."
+          },
+          "ceilingPerHour": {
+            "type": "integer",
+            "description": "Most recipients this step releases in its hour."
+          },
+          "startedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When this step's hour started: its first release. Null before it."
+          },
+          "released": {
+            "type": "integer",
+            "description": "Recipients released since this step's hour started."
+          }
+        },
+        "required": [
+          "step",
+          "steps",
+          "ceilingPerHour",
+          "startedAt",
+          "released"
+        ],
+        "description": "Where the campaign is on the ramp. A Hosted sender's first large campaigns release in hourly steps that grow (1,000 an hour at first), moving to the next step once an hour at this one went out and its delivery results are in and clean; more than 3% bounces or more than 0.08% complaints (at least 2) in a step pause the campaign. The first step not already proven by the workspace's largest clean marketing hour of the last 30 days is where it starts, so an established sender skips it. Null when no ramp applies (self-hosted, your own AWS account, simulated mail, an established sender, or past the last step). Transactional mail never waits for it."
       },
       "CreateCampaignInput": {
         "type": "object",
@@ -6667,15 +7036,378 @@
           },
           "unsubscribed": {
             "type": "integer"
+          },
+          "risky": {
+            "type": "integer",
+            "description": "Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible."
+          },
+          "riskyByReason": {
+            "type": "object",
+            "properties": {
+              "invalid": {
+                "type": "integer"
+              },
+              "disposable": {
+                "type": "integer"
+              },
+              "typo_domain": {
+                "type": "integer"
+              },
+              "role": {
+                "type": "integer"
+              },
+              "dead": {
+                "type": "integer"
+              },
+              "no_mail_domain": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role",
+              "dead",
+              "no_mail_domain"
+            ]
+          },
+          "readiness": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "ramp_recommended",
+                  "ramp_required"
+                ],
+                "description": "ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan \"recommended\"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise."
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why, in one or two plain sentences, when a ramp is recommended or required."
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "NEW_DOMAIN",
+                        "SIZE_JUMP",
+                        "NO_HISTORY",
+                        "RISKY_LIST",
+                        "NEVER_MAILED",
+                        "NO_DMARC",
+                        "BOUNCES",
+                        "COMPLAINTS"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                },
+                "description": "Every finding behind the verdict."
+              },
+              "domain": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "firstSeenAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When the From domain (or the domain it is under) was added to this workspace."
+                  },
+                  "ageDays": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "dmarc": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "reject",
+                      "quarantine",
+                      "none",
+                      "missing",
+                      "invalid",
+                      null
+                    ],
+                    "description": "The DMARC policy last observed; null when not checked yet."
+                  },
+                  "mailFrom": {
+                    "type": "string",
+                    "enum": [
+                      "verified",
+                      "pending",
+                      "failed",
+                      "not_configured"
+                    ],
+                    "description": "The custom MAIL FROM domain (aligned SPF)."
+                  },
+                  "linkHost": {
+                    "type": "string",
+                    "enum": [
+                      "not_configured"
+                    ],
+                    "description": "A link host of the domain's own for tracked links: not configurable yet."
+                  }
+                },
+                "required": [
+                  "name",
+                  "firstSeenAt",
+                  "ageDays",
+                  "dmarc",
+                  "mailFrom",
+                  "linkHost"
+                ]
+              },
+              "history": {
+                "type": "object",
+                "properties": {
+                  "workspace": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Every kind of mail the workspace sent; largestSend counts campaigns."
+                  },
+                  "domain": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Campaigns from this From domain."
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "domain"
+                ]
+              },
+              "list": {
+                "type": "object",
+                "properties": {
+                  "recipients": {
+                    "type": "integer"
+                  },
+                  "risky": {
+                    "type": "integer",
+                    "description": "Risky contacts the send skips."
+                  },
+                  "neverMailed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long."
+                  },
+                  "createdAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "lastSentAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When a campaign last went to this list."
+                  },
+                  "lastImport": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "contacts": {
+                        "type": "integer"
+                      },
+                      "consent": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The consent evidence it was imported with, if any."
+                      }
+                    },
+                    "required": [
+                      "at",
+                      "contacts",
+                      "consent"
+                    ]
+                  }
+                },
+                "required": [
+                  "recipients",
+                  "risky",
+                  "neverMailed",
+                  "createdAt",
+                  "lastSentAt",
+                  "lastImport"
+                ]
+              },
+              "sizeJump": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "This send ÷ the largest campaign its domain sent in the last 90 days; null without one."
+              },
+              "plan": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "batches": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "description": "Recipients per day, in order: one batch a day, the most engaged first and never-mailed last."
+                  },
+                  "seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "How long the plan takes from its start, the hourly ramp included."
+                  }
+                },
+                "required": [
+                  "batches",
+                  "seconds"
+                ],
+                "description": "The recommended daily batches; null when one day covers everyone."
+              },
+              "required": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "NEW_DOMAIN",
+                      "SIZE_JUMP"
+                    ]
+                  },
+                  "maxPerDay": {
+                    "type": "integer",
+                    "description": "The largest daily limit that counts as a ramp: the plan's first day."
+                  }
+                },
+                "required": [
+                  "by",
+                  "maxPerDay"
+                ]
+              }
+            },
+            "required": [
+              "verdict",
+              "summary",
+              "reasons",
+              "domain",
+              "history",
+              "list",
+              "sizeJump",
+              "plan",
+              "required"
+            ],
+            "description": "With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender."
           }
         },
         "required": [
           "matched",
           "eligible",
           "suppressed",
-          "unsubscribed"
+          "unsubscribed",
+          "risky",
+          "riskyByReason"
         ],
-        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
+        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
       },
       "CampaignPreviewImage": {
         "type": "object",
@@ -7016,6 +7748,381 @@
           },
           "simulated": {
             "type": "boolean"
+          },
+          "risky": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "byReason": {
+                "type": "object",
+                "properties": {
+                  "invalid": {
+                    "type": "integer"
+                  },
+                  "disposable": {
+                    "type": "integer"
+                  },
+                  "typo_domain": {
+                    "type": "integer"
+                  },
+                  "role": {
+                    "type": "integer"
+                  },
+                  "dead": {
+                    "type": "integer"
+                  },
+                  "no_mail_domain": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "invalid",
+                  "disposable",
+                  "typo_domain",
+                  "role",
+                  "dead",
+                  "no_mail_domain"
+                ]
+              }
+            },
+            "default": null,
+            "required": [
+              "total",
+              "byReason"
+            ],
+            "description": "Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch."
+          },
+          "readiness": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "ramp_recommended",
+                  "ramp_required"
+                ],
+                "description": "ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan \"recommended\"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise."
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Why, in one or two plain sentences, when a ramp is recommended or required."
+              },
+              "reasons": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "code": {
+                      "type": "string",
+                      "enum": [
+                        "NEW_DOMAIN",
+                        "SIZE_JUMP",
+                        "NO_HISTORY",
+                        "RISKY_LIST",
+                        "NEVER_MAILED",
+                        "NO_DMARC",
+                        "BOUNCES",
+                        "COMPLAINTS"
+                      ]
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "message"
+                  ]
+                },
+                "description": "Every finding behind the verdict."
+              },
+              "domain": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string"
+                  },
+                  "firstSeenAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When the From domain (or the domain it is under) was added to this workspace."
+                  },
+                  "ageDays": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ]
+                  },
+                  "dmarc": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "enum": [
+                      "reject",
+                      "quarantine",
+                      "none",
+                      "missing",
+                      "invalid",
+                      null
+                    ],
+                    "description": "The DMARC policy last observed; null when not checked yet."
+                  },
+                  "mailFrom": {
+                    "type": "string",
+                    "enum": [
+                      "verified",
+                      "pending",
+                      "failed",
+                      "not_configured"
+                    ],
+                    "description": "The custom MAIL FROM domain (aligned SPF)."
+                  },
+                  "linkHost": {
+                    "type": "string",
+                    "enum": [
+                      "not_configured"
+                    ],
+                    "description": "A link host of the domain's own for tracked links: not configurable yet."
+                  }
+                },
+                "required": [
+                  "name",
+                  "firstSeenAt",
+                  "ageDays",
+                  "dmarc",
+                  "mailFrom",
+                  "linkHost"
+                ]
+              },
+              "history": {
+                "type": "object",
+                "properties": {
+                  "workspace": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Every kind of mail the workspace sent; largestSend counts campaigns."
+                  },
+                  "domain": {
+                    "type": "object",
+                    "properties": {
+                      "largestSend": {
+                        "type": "integer",
+                        "description": "Most recipients SES accepted from one campaign in the last 90 days."
+                      },
+                      "sent": {
+                        "type": "integer",
+                        "description": "Recipients SES accepted in the last 30 days."
+                      },
+                      "bounceRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Hard bounces ÷ accepted over the last 30 days; null with nothing sent."
+                      },
+                      "complaintRate": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "description": "Complaints ÷ accepted over the last 30 days; null with nothing sent."
+                      }
+                    },
+                    "required": [
+                      "largestSend",
+                      "sent",
+                      "bounceRate",
+                      "complaintRate"
+                    ],
+                    "description": "Campaigns from this From domain."
+                  }
+                },
+                "required": [
+                  "workspace",
+                  "domain"
+                ]
+              },
+              "list": {
+                "type": "object",
+                "properties": {
+                  "recipients": {
+                    "type": "integer"
+                  },
+                  "risky": {
+                    "type": "integer",
+                    "description": "Risky contacts the send skips."
+                  },
+                  "neverMailed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long."
+                  },
+                  "createdAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "lastSentAt": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "When a campaign last went to this list."
+                  },
+                  "lastImport": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "at": {
+                        "type": "string"
+                      },
+                      "contacts": {
+                        "type": "integer"
+                      },
+                      "consent": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The consent evidence it was imported with, if any."
+                      }
+                    },
+                    "required": [
+                      "at",
+                      "contacts",
+                      "consent"
+                    ]
+                  }
+                },
+                "required": [
+                  "recipients",
+                  "risky",
+                  "neverMailed",
+                  "createdAt",
+                  "lastSentAt",
+                  "lastImport"
+                ]
+              },
+              "sizeJump": {
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "description": "This send ÷ the largest campaign its domain sent in the last 90 days; null without one."
+              },
+              "plan": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "batches": {
+                    "type": "array",
+                    "items": {
+                      "type": "integer"
+                    },
+                    "description": "Recipients per day, in order: one batch a day, the most engaged first and never-mailed last."
+                  },
+                  "seconds": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "How long the plan takes from its start, the hourly ramp included."
+                  }
+                },
+                "required": [
+                  "batches",
+                  "seconds"
+                ],
+                "description": "The recommended daily batches; null when one day covers everyone."
+              },
+              "required": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "properties": {
+                  "by": {
+                    "type": "string",
+                    "enum": [
+                      "NEW_DOMAIN",
+                      "SIZE_JUMP"
+                    ]
+                  },
+                  "maxPerDay": {
+                    "type": "integer",
+                    "description": "The largest daily limit that counts as a ramp: the plan's first day."
+                  }
+                },
+                "required": [
+                  "by",
+                  "maxPerDay"
+                ]
+              }
+            },
+            "default": null,
+            "required": [
+              "verdict",
+              "summary",
+              "reasons",
+              "domain",
+              "history",
+              "list",
+              "sizeJump",
+              "plan",
+              "required"
+            ],
+            "description": "The send review as of the launch (list.neverMailed is not counted then); null for a required notice."
           }
         },
         "required": [
@@ -7035,6 +8142,9 @@
           },
           "pacing": {
             "$ref": "#/components/schemas/CampaignPacing"
+          },
+          "consent": {
+            "$ref": "#/components/schemas/CampaignConsentConfirmation"
           },
           "confirmRequiredNotice": {
             "type": "boolean",
@@ -7071,9 +8181,39 @@
             "minimum": 0.05,
             "maximum": 1,
             "description": "Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate."
+          },
+          "plan": {
+            "type": "string",
+            "enum": [
+              "recommended"
+            ],
+            "description": "Send in the daily batches previewCampaignAudience recommends (readiness.plan), worked out again at launch: the most engaged contacts first, never-mailed last. Not with perDay."
           }
         },
         "additionalProperties": false
+      },
+      "CampaignConsentConfirmation": {
+        "type": "object",
+        "properties": {
+          "confirmed": {
+            "type": "boolean",
+            "enum": [
+              true
+            ]
+          },
+          "source": {
+            "type": "string",
+            "minLength": 10,
+            "maxLength": 500,
+            "description": "Where this list's consent comes from, for example \"Signed up at checkout on our site since 2023\"."
+          }
+        },
+        "required": [
+          "confirmed",
+          "source"
+        ],
+        "additionalProperties": false,
+        "description": "The sender confirms everyone on the list agreed to this mail, and where that consent comes from. Lets a send the review requires a ramp for (readiness.verdict ramp_required) go out without the plan. Stored with the campaign, with who and when, and in the workspace's Activity. An agent asks the person first."
       },
       "CampaignScheduleInput": {
         "type": "object",
@@ -7084,6 +8224,9 @@
           },
           "pacing": {
             "$ref": "#/components/schemas/CampaignPacing"
+          },
+          "consent": {
+            "$ref": "#/components/schemas/CampaignConsentConfirmation"
           },
           "confirmRequiredNotice": {
             "type": "boolean",
@@ -7183,12 +8326,29 @@
           "requiredNotices": {
             "type": "boolean",
             "description": "Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on."
+          },
+          "focus": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "enum": [
+                "marketing",
+                "newsletter",
+                "developer",
+                "agents"
+              ]
+            },
+            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped."
           }
         },
         "required": [
           "name",
           "postalAddress",
-          "requiredNotices"
+          "requiredNotices",
+          "focus"
         ]
       },
       "UpdateWorkspaceSettings": {
@@ -7207,6 +8367,23 @@
             "minLength": 1,
             "maxLength": 300,
             "description": "The workspace's postal address, as plain text: at most 300 characters on up to 6 lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it."
+          },
+          "focus": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string",
+              "enum": [
+                "marketing",
+                "newsletter",
+                "developer",
+                "agents"
+              ]
+            },
+            "maxItems": 4,
+            "description": "What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads."
           }
         },
         "example": {
@@ -7610,6 +8787,60 @@
               "message"
             ],
             "description": "Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear."
+          },
+          "builtIn": {
+            "type": "boolean",
+            "description": "Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN)."
+          },
+          "limits": {
+            "type": "object",
+            "properties": {
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "members"
+                ],
+                "description": "Who it sends to: anyone, or the verified addresses of the workspace’s members."
+              },
+              "perDay": {
+                "type": "integer",
+                "description": "Recipients in a rolling 24 hours."
+              },
+              "perMinute": {
+                "type": "integer",
+                "description": "Recipients in a minute."
+              },
+              "unsupported": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "from",
+                    "replyTo",
+                    "headers",
+                    "attachments",
+                    "template",
+                    "scheduledAt",
+                    "kind",
+                    "campaign"
+                  ]
+                },
+                "description": "Request fields a send from it can’t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign."
+              },
+              "summary": {
+                "type": "string",
+                "description": "The same, in one sentence."
+              }
+            },
+            "required": [
+              "scope",
+              "perDay",
+              "perMinute",
+              "unsupported",
+              "summary"
+            ],
+            "description": "Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains."
           }
         },
         "required": [
@@ -8495,6 +9726,40 @@
             }
           },
           "hourly": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "sent": {
+                  "type": "number"
+                },
+                "delivered": {
+                  "type": "number"
+                },
+                "bounced": {
+                  "type": "number"
+                },
+                "complained": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "date",
+                "count",
+                "sent",
+                "delivered",
+                "bounced",
+                "complained"
+              ]
+            }
+          },
+          "tenMinute": {
             "type": "array",
             "items": {
               "type": "object",
@@ -18120,6 +19385,57 @@
               "pending"
             ],
             "description": "Null unless listWorkspaceInvitations would answer: an owner or admin dashboard session on a hosted installation."
+          },
+          "progress": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "inbox": {
+                "type": "boolean",
+                "description": "An agent inbox exists."
+              },
+              "received": {
+                "type": "boolean",
+                "description": "Any email was received."
+              },
+              "contacts": {
+                "type": "boolean",
+                "description": "The audience has a contact."
+              },
+              "campaign": {
+                "type": "boolean",
+                "description": "A campaign exists, draft or not."
+              },
+              "campaignSent": {
+                "type": "boolean",
+                "description": "A campaign was launched (preparing, scheduled, sending, paused or done)."
+              },
+              "newsletter": {
+                "type": "boolean",
+                "description": "A newsletter exists."
+              },
+              "readers": {
+                "type": "boolean",
+                "description": "A newsletter has a reader (a member of its list)."
+              },
+              "issueSent": {
+                "type": "boolean",
+                "description": "A campaign to a newsletter was launched."
+              }
+            },
+            "required": [
+              "inbox",
+              "received",
+              "contacts",
+              "campaign",
+              "campaignSent",
+              "newsletter",
+              "readers",
+              "issueSent"
+            ],
+            "description": "The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace."
           }
         },
         "required": [
@@ -19501,6 +20817,22 @@
                     },
                     "connection": {
                       "$ref": "#/components/schemas/ConnectionSummary"
+                    },
+                    "focus": {
+                      "type": [
+                        "array",
+                        "null"
+                      ],
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "marketing",
+                          "newsletter",
+                          "developer",
+                          "agents"
+                        ]
+                      },
+                      "description": "A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped."
                     },
                     "workspaces": {
                       "type": [
@@ -21616,7 +22948,7 @@
         ],
         "security": [],
         "summary": "Exchange a setup token for the agent's API key",
-        "description": "For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED, and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.",
+        "description": "For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -21630,6 +22962,12 @@
                     "maxLength": 300,
                     "example": "nm_setup_00000000000000000000000000000000.0000000000000000000000000000000000000000000000000000000000000000",
                     "description": "The setup token from the prompt."
+                  },
+                  "client_name": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "example": "OpenCode",
+                    "description": "What the agent is, shown to the person as its claim and naming its key (\"OpenCode, set up <date>\")."
                   }
                 },
                 "required": [
@@ -21800,7 +23138,7 @@
                     "type": "string",
                     "maxLength": 100,
                     "example": "OpenCode",
-                    "description": "What the agent is, shown to the person as its claim."
+                    "description": "What the agent is, shown to the person as its claim and naming its key (\"OpenCode, set up <date>\")."
                   }
                 },
                 "additionalProperties": false
@@ -21946,7 +23284,7 @@
         ],
         "security": [],
         "summary": "Poll for the agent's API key",
-        "description": "With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. Retry-After gives the seconds to wait.",
+        "description": "With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. A poll after that gets 409 DEVICE_CODE_USED naming the key it gave (error.details: keyId, name, prefix, issuedAt, revokedAt), never the key again and never a second one: use the key you saved. Retry-After gives the seconds to wait.",
         "requestBody": {
           "required": true,
           "content": {
@@ -22726,6 +24064,19 @@
           {
             "schema": {
               "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "true: only contacts campaigns skip as risky (risk set and not allowed)."
+            },
+            "required": false,
+            "description": "true: only contacts campaigns skip as risky (risk set and not allowed).",
+            "name": "risky",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "minLength": 1,
               "maxLength": 120
             },
@@ -23301,6 +24652,10 @@
                       ]
                     },
                     "description": "Up to 50 key/value pairs, at most 16 KiB of JSON total."
+                  },
+                  "riskAllowed": {
+                    "type": "boolean",
+                    "description": "true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise)."
                   }
                 },
                 "additionalProperties": false
@@ -25092,6 +26447,19 @@
             "required": false,
             "name": "suppressed",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "true: only contacts campaigns skip as risky (risk set and not allowed)."
+            },
+            "required": false,
+            "description": "true: only contacts campaigns skip as risky (risk set and not allowed).",
+            "name": "risky",
+            "in": "query"
           }
         ],
         "responses": {
@@ -26581,13 +27949,18 @@
                     },
                     "unsubscribed": {
                       "type": "integer"
+                    },
+                    "risky": {
+                      "type": "integer",
+                      "description": "Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible."
                     }
                   },
                   "required": [
                     "matched",
                     "eligible",
                     "suppressed",
-                    "unsubscribed"
+                    "unsubscribed",
+                    "risky"
                   ]
                 }
               }
@@ -27001,6 +28374,9 @@
                             "type": "boolean",
                             "description": "false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count)."
                           },
+                          "risky": {
+                            "$ref": "#/components/schemas/RiskBreakdown"
+                          },
                           "errorsRetained": {
                             "type": "boolean",
                             "description": "false once per-row error details are no longer kept after the retention window (errors is then [])."
@@ -27019,6 +28395,7 @@
                           "status",
                           "imported",
                           "rowsRetained",
+                          "risky",
                           "errorsRetained",
                           "createdAt",
                           "updatedAt"
@@ -31467,7 +32844,7 @@
     "/v1/emails/send": {
       "post": {
         "operationId": "sendEmail",
-        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).",
+        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the outbound harm screen synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch). Marketing ramp: on Hosted sending, a workspace still ramping up (a new sender, exempt and first-party ones included) sends kind: marketing at most its ramp step's hourly ceiling (1,000, 2,500, 5,000, 10,000, 20,000, 40,000, 75,000, 150,000, 300,000 recipients an hour), shared with its campaigns. A send that would cross it is refused with nothing queued (a batch as a whole): retryable 429 RAMP_LIMIT_REACHED, with Retry-After (seconds until more room opens) and error.details[0] holding { step, steps, ceilingPerHour, usedThisHour, fitsNow, requested, stepOpensAt }. A scheduled marketing send is refused the same way when it is scheduled if it is larger than the step's whole ceiling, or if with the marketing already scheduled within 24 hours either side of its time it is more than the step sends in 24 hours (error.details[0] adds { scheduledBacklog, dailyBudget }); one that fits is held at its time until its hour has room (it stays scheduled, scheduledAt moving to when it tries again, with a dispatch_deferred event), never rejected for the ramp. While the workspace ramps and a campaign of it is stopped by the automatic pause, the list probe or the ramp's check (LIST_QUALITY, BOUNCE_RATE_HIGH, COMPLAINT_RATE_HIGH) and not resumed or canceled, marketing sends and schedules are refused with 409 RAMP_PAUSED (not retryable; error.details[0] holds { campaignId, pauseCode }): review and resume that campaign first. For a large list, send a campaign instead: campaigns are paced automatically. Transactional mail is never ramped or paused by it. Built-in domain (Hosted): every workspace has a subdomain of Nightmail's own domain (connection.builtinDomain in GET /v1/me) that sends until the workspace verifies a domain of its own: plain transactional email sent now, without attachments, custom headers, a stored template or a Reply-To elsewhere (422 BUILTIN_DOMAIN_UNSUPPORTED, once, listing every such field in error.details[].unsupported), to the recipients the installation allows (422 BUILTIN_DOMAIN_RECIPIENT), within a per-minute and a daily recipient cap (429 BUILTIN_DOMAIN_LIMIT), screened like a new sender's mail. Once a domain of its own verifies it answers 409 OWN_DOMAIN_VERIFIED.",
         "tags": [
           "Emails"
         ],
@@ -31643,7 +33020,7 @@
     "/v1/emails/batch": {
       "post": {
         "operationId": "sendEmailBatch",
-        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).",
+        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the outbound harm screen synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch). Marketing ramp: on Hosted sending, a workspace still ramping up (a new sender, exempt and first-party ones included) sends kind: marketing at most its ramp step's hourly ceiling (1,000, 2,500, 5,000, 10,000, 20,000, 40,000, 75,000, 150,000, 300,000 recipients an hour), shared with its campaigns. A send that would cross it is refused with nothing queued (a batch as a whole): retryable 429 RAMP_LIMIT_REACHED, with Retry-After (seconds until more room opens) and error.details[0] holding { step, steps, ceilingPerHour, usedThisHour, fitsNow, requested, stepOpensAt }. A scheduled marketing send is refused the same way when it is scheduled if it is larger than the step's whole ceiling, or if with the marketing already scheduled within 24 hours either side of its time it is more than the step sends in 24 hours (error.details[0] adds { scheduledBacklog, dailyBudget }); one that fits is held at its time until its hour has room (it stays scheduled, scheduledAt moving to when it tries again, with a dispatch_deferred event), never rejected for the ramp. While the workspace ramps and a campaign of it is stopped by the automatic pause, the list probe or the ramp's check (LIST_QUALITY, BOUNCE_RATE_HIGH, COMPLAINT_RATE_HIGH) and not resumed or canceled, marketing sends and schedules are refused with 409 RAMP_PAUSED (not retryable; error.details[0] holds { campaignId, pauseCode }): review and resume that campaign first. For a large list, send a campaign instead: campaigns are paced automatically. Transactional mail is never ramped or paused by it. Built-in domain (Hosted): every workspace has a subdomain of Nightmail's own domain (connection.builtinDomain in GET /v1/me) that sends until the workspace verifies a domain of its own: plain transactional email sent now, without attachments, custom headers, a stored template or a Reply-To elsewhere (422 BUILTIN_DOMAIN_UNSUPPORTED, once, listing every such field in error.details[].unsupported), to the recipients the installation allows (422 BUILTIN_DOMAIN_RECIPIENT), within a per-minute and a daily recipient cap (429 BUILTIN_DOMAIN_LIMIT), screened like a new sender's mail. Once a domain of its own verifies it answers 409 OWN_DOMAIN_VERIFIED.",
         "tags": [
           "Emails"
         ],
@@ -31980,7 +33357,7 @@
     "/v1/emails": {
       "get": {
         "operationId": "listEmails",
-        "description": "Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Sent emails, newest first. from and to (or since and until) are ISO 8601 times that bound when an email was created, not addresses: filter by sender or recipient address with search. Pages are also bounded by response size and may return fewer than limit emails; follow nextCursor while non-null. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Emails"
         ],
@@ -32079,29 +33456,55 @@
               "type": "string",
               "minLength": 3,
               "maxLength": 200,
-              "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED."
+              "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address."
             },
             "required": false,
-            "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.",
+            "description": "Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address.",
             "name": "search",
             "in": "query"
           },
           {
             "schema": {
               "type": "string",
-              "format": "date-time"
+              "format": "date-time",
+              "description": "The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them."
             },
             "required": false,
+            "description": "The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them.",
             "name": "from",
             "in": "query"
           },
           {
             "schema": {
               "type": "string",
-              "format": "date-time"
+              "format": "date-time",
+              "description": "The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them."
             },
             "required": false,
+            "description": "The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them.",
             "name": "to",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both."
+            },
+            "required": false,
+            "description": "The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both.",
+            "name": "since",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "date-time",
+              "description": "The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both."
+            },
+            "required": false,
+            "description": "The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both.",
+            "name": "until",
             "in": "query"
           }
         ],
@@ -35344,7 +36747,7 @@
     "/v1/campaigns/{id}/audience": {
       "get": {
         "operationId": "previewCampaignAudience",
-        "description": "Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.",
+        "description": "Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. With readiness=true it also reviews the send (CampaignReadiness): whether it is ready to go out as it is, why, and the daily batches it recommends; send it with pacing.plan \"recommended\" to follow them. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.",
         "tags": [
           "Campaigns"
         ],
@@ -35369,6 +36772,20 @@
             "required": true,
             "name": "id",
             "in": "path"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "description": "Also review the send (readiness)."
+            },
+            "required": false,
+            "description": "Also review the send (readiness).",
+            "name": "readiness",
+            "in": "query"
           }
         ],
         "responses": {
@@ -37776,7 +39193,7 @@
       },
       "patch": {
         "operationId": "updateWorkspaceSettings",
-        "description": "Change the workspace's name, its postal address, or both; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can't be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.",
+        "description": "Change the workspace's name, its postal address, its focus, or any of them; omitted fields keep their value. The postal address appears under the Unsubscribe link of every campaign email and marketing send, as US law (CAN-SPAM) requires: campaigns can't be sent or scheduled without one (422 POSTAL_ADDRESS_REQUIRED). null removes it. Owners and admins only.",
         "tags": [
           "Settings"
         ],
@@ -42433,7 +43850,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Metrics"
         ],
@@ -42492,7 +43909,8 @@
               "type": "string",
               "enum": [
                 "day",
-                "hour"
+                "hour",
+                "10m"
               ],
               "default": "day"
             },
@@ -69994,7 +71412,7 @@
           }
         ],
         "summary": "What this workspace has set up, in one read",
-        "description": "The newest domains, the number of active API keys, outbound webhooks and pending invitations, and whether any email exists. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.",
+        "description": "The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, and each focus's first steps. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.",
         "responses": {
           "200": {
             "description": "Success",

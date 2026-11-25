@@ -116,7 +116,7 @@ export const SetLimitTrigger = (props: ButtonProps) => <Button {...props}>Set li
 // phone's card shows the note, its status, page, type and age, with its selection checkbox at the end for the bulk menu.
 export const noteColumnDefs: SkeletonColumn[] = [
   { key: 'select', label: '', width: 40, card: 'end' },
-  { key: 'shot', label: 'Screenshot', width: 96, card: 'hide' },
+  { key: 'shot', label: 'Screenshot', width: 92, card: 'hide' },
   { key: 'note', label: 'Note', card: 'title' },
   { key: 'status', label: 'Status', width: 124, card: 'aside' },
   { key: 'page', label: 'Page', width: '20%', card: 'line' },
@@ -263,46 +263,117 @@ export function OperatorWorkspaceSkeleton({ actions }: { actions: boolean }) {
     <LoadingRegion label="Loading the workspace"><WorkspaceBodySkeleton /></LoadingRegion>
   </>
 }
-// Glass (/glass): groups of metric rows, each row a label, a trend and a figure. The layout is fixed here, rows and all
-// (a slot's label comes with the figures), so the route's placeholder, the page's loading state and every 30-second
-// refresh draw the same rows in the same places. glass.tsx fills them.
-export type GlassRowDef = { key: string; label?: string; spark?: true; meter?: true; grades?: true }
+// Glass (/glass): a live board for operators. On the left, fixed tiles (a big figure, its last 24 hours and its change
+// from the 24 hours before), the funnel, every SES pool region and groups of metric rows; on the right, the activity
+// feed in a column of its own (under everything on a narrow screen). Every block has its size here, rows and all, so the
+// route's placeholder, the page's loading state and each 5-second refresh draw the same boxes in the same places.
+// glass.tsx fills them.
+export type GlassRowDef = { key: string; label?: string; spark?: true; meter?: true; cells?: readonly string[] }
 export type GlassFill = { label?: ReactNode; hint?: ReactNode; spark?: readonly number[]; value: ReactNode; unit?: ReactNode; tone?: Tone; empty?: boolean
-  meter?: { value: number; max: number; mark?: number; tone?: Tone; label?: string }; grades?: { grade: string; count: ReactNode }[] }
+  meter?: { value: number; max: number; mark?: number; tone?: Tone; label?: string }; cells?: ReactNode[] }
+/** A tile: its figure, a hint under it, and in its foot a trend (`spark`, oldest first), parts of a whole (`parts`) or a share (`meter`). */
+export type GlassTileFill = { value: ReactNode; hint?: ReactNode; tone?: Tone; delta?: { text: string; tone?: Tone; title: string }
+  spark?: readonly number[]; parts?: { value: number; tone: Tone; label: string }[]; meter?: { value: number; max: number; tone?: Tone; label: string } }
+export type GlassRegionFill = { region: ReactNode; place: ReactNode; sending: ReactNode; receiving: ReactNode; rate: ReactNode; quota: ReactNode; share: ReactNode
+  meter?: { value: number; max: number; tone?: Tone; label: string }; checked: ReactNode; empty?: boolean }
+export type GlassBoardFill = { tile: (key: string) => GlassTileFill; funnel: (key: string) => { value: ReactNode; share?: ReactNode; meter: { value: number; max: number } }
+  regions: GlassRegionFill[]; total: GlassRegionFill; row: (group: string, row: string) => GlassFill }
+export const glassTiles = [
+  ['sent', 'Sent · 24 h'], ['minute', 'Per minute'], ['delivered', 'Delivered'], ['bounced', 'Bounced'], ['complained', 'Complained'],
+  ['signups', 'Sign-ups · 24 h'], ['places', 'Open places'], ['received', 'Received · 24 h'], ['queued', 'Queued'], ['ramp', 'On the ramp'],
+  ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support open'], ['screened', 'Screened · 24 h'],
+  ['classifiers', 'Classifiers agree'], ['api', 'API · 24 h'], ['errors', 'API errors'], ['latency', 'API latency'], ['health', 'Health'],
+] as const
+export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
+/** Region rows are kept for at least this many regions, so a page with fewer draws the same height. */
+export const GLASS_REGION_SLOTS = 2
+const STEP_SLOTS = ['OK', 'Notice', 'Warn', 'Restrict', 'Pause']
+const GRADE_SLOTS = ['A+', 'A', 'B', 'C', 'D', 'F', 'Warmup']
 const slots = (prefix: string, n: number, extra: Omit<GlassRowDef, 'key'> = {}) => Array.from({ length: n }, (_, i): GlassRowDef => ({ key: `${prefix}:${i}`, ...extra }))
 export const glassGroups: { key: string; title: string; to?: [href: string, label: string]; rows: GlassRowDef[] }[] = [
-  { key: 'sending', title: 'Sending now', to: ['/operator?view=health', 'Health'], rows: [{ key: 'minute', label: 'Per minute', spark: true }, { key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
-    { key: 'queued', label: 'Queued' }, { key: 'held', label: 'Held for screening' }, { key: 'api', label: 'Send API' }, ...slots('campaign', 2, { meter: true })] },
-  { key: 'delivery', title: 'Delivery · 24 h', to: ['/operator', 'Queue'], rows: [{ key: 'delivered', label: 'Delivered', spark: true }, { key: 'bounced', label: 'Bounced', spark: true, meter: true },
-    { key: 'complained', label: 'Complained', spark: true, meter: true }, { key: 'grades', grades: true }, { key: 'paused', label: 'Paused' }, { key: 'held', label: 'Marketing held' }] },
-  { key: 'system', title: 'System', to: ['/operator?view=health', 'Health'], rows: [{ key: 'health', label: 'Health' }, ...slots('alert', 3),
-    { key: 'rate', label: 'SES rate', meter: true }, { key: 'day', label: 'SES 24 h', meter: true }, { key: 'deploy', label: 'Deploy' }] },
-  { key: 'signups', title: 'Sign-ups', to: ['/operator?view=signups', 'Sign-ups'], rows: [{ key: 'today', label: 'Today', spark: true }, { key: 'week', label: '7 days' }, { key: 'open', label: 'Open places' }, { key: 'waiting', label: 'Waiting' }] },
-  { key: 'funnel', title: 'Funnel · 30 days', to: ['/operator?view=signups', 'Workspaces'], rows: [{ key: 'signedUp', label: 'Signed up', meter: true }, { key: 'domainAdded', label: 'Added a domain', meter: true },
-    { key: 'domainVerified', label: 'Verified it', meter: true }, { key: 'keyCreated', label: 'Created a key', meter: true }, { key: 'firstSend', label: 'Sent mail', meter: true }] },
+  { key: 'sending', title: 'Sending now', to: ['/operator?view=health', 'Health'], rows: [{ key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
+    { key: 'held', label: 'Held for screening' }, { key: 'api', label: 'Send API' }, ...slots('campaign', 2, { meter: true })] },
+  { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }, { key: 'paused', label: 'Paused' },
+    { key: 'held', label: 'Marketing held' }, { key: 'revoked', label: 'Built-in domains revoked' }, { key: 'parent', label: 'Built-in parent' }] },
+  { key: 'system', title: 'System', to: ['/operator?view=health', 'Health'], rows: [{ key: 'health', label: 'Health' }, ...slots('alert', 3), { key: 'deploy', label: 'Deploy' }, { key: 'classifiers', label: 'Classifier errors' }] },
   { key: 'money', title: 'Money', rows: [{ key: 'creditToday', label: 'Credit today' }, { key: 'creditMonth', label: 'Credit this month', spark: true }, { key: 'owed', label: 'Owed' }, { key: 'usage', label: 'Usage this month' }] },
-  { key: 'receiving', title: 'Receiving', to: ['/logs?view=received', 'Logs'], rows: [{ key: 'today', label: 'Today', spark: true }, { key: 'spam', label: 'Spam-flagged' }] },
-  { key: 'visitors', title: 'Visitors', rows: [{ key: 'views', label: 'Page views', spark: true }, { key: 'visitors', label: 'Visitors' }, ...slots('referrer', 3)] },
+  { key: 'visitors', title: 'Visitors', rows: [{ key: 'views', label: 'Page views today', spark: true }, ...slots('referrer', 3)] },
 ]
-const GRADE_SLOTS = ['A+', 'A', 'B', 'C', 'D', 'F', 'Warmup']
-/** The groups, filled by `fill`; without it, every figure is a placeholder of its own size. */
-export function GlassGroups({ fill }: { fill?: (group: string, row: string) => GlassFill }) {
-  return <div className="glass">{glassGroups.map(group => <section key={group.key} className="glass-group" aria-label={group.title}>
-    <SectionHeader title={group.title} actions={group.to && <Link className="ui-button ui-button--ghost ui-button--sm" to={group.to[0]}>{group.to[1]} <ArrowUpRight size={16} aria-hidden="true" /></Link>} />
-    {group.rows.map(def => {
-      const row = fill?.(group.key, def.key)
-      if (def.grades) return <div key={def.key} className="glass-grades" role="list" aria-label="Sender scores">{GRADE_SLOTS.map((grade, i) =>
-        <span key={grade} role="listitem"><span>{grade}</span><b>{row?.grades?.[i]?.count ?? <Skeleton width={16} height={12} />}</b></span>)}</div>
-      return <MetricRow key={def.key} className={row?.empty ? 'glass-empty' : undefined} label={row ? row.label ?? def.label : def.label ?? <Skeleton width={112} height={12} />} hint={row?.hint}
-        spark={def.spark && <Sparkline values={row?.spark ?? []} />} value={row ? row.value : <Skeleton width={56} height={14} />} unit={row?.unit} tone={row?.tone}
-        meter={def.meter && <Meter value={row?.meter?.value ?? 0} max={row?.meter?.max ?? 1} mark={row?.meter?.mark} tone={row?.meter?.tone} label={row?.meter?.label} />} />
-    })}
-  </section>)}</div>
+
+function GlassTile({ label, fill }: { label: string; fill?: GlassTileFill }) {
+  return <div className="glass-tile" role="group" aria-label={label}>
+    <div className="glass-tile__head"><span className="glass-tile__label">{label}</span>
+      {/* Laid out from the head's right edge and pulled back by its own width: a change that grows never moves a box. */}
+      <span className="glass-delta">{fill?.delta && <span className={`ui-tone--${fill.delta.tone ?? 'neutral'}`} title={fill.delta.title}>{fill.delta.text}</span>}</span></div>
+    <div className={fill?.tone && fill.tone !== 'neutral' ? `glass-tile__figure ui-tone--${fill.tone}` : 'glass-tile__figure'}>{fill ? fill.value : <Skeleton width={96} height={22} />}</div>
+    <div className="glass-tile__hint">{fill ? fill.hint : <Skeleton width={128} height={10} />}</div>
+    <div className="glass-tile__foot">{fill?.parts ? <span className="glass-parts" role="img" aria-label={fill.parts.map(p => `${p.label} ${p.value}`).join(', ')}>{fill.parts.map(p => <i key={p.label} className={`ui-tone--${p.tone}`} style={{ flexGrow: p.value }} />)}</span>
+      : fill?.meter ? <Meter value={fill.meter.value} max={fill.meter.max} tone={fill.meter.tone} label={fill.meter.label} />
+      : <Sparkline values={fill?.spark ?? []} />}</div>
+  </div>
 }
-/** When the figures are from: the clock, in a box as wide as its placeholder. */
-export const GlassAsOf = ({ at }: { at?: ReactNode }) => <span className="glass-asof">{at ?? <Skeleton width={96} height={14} />}</span>
+const regionSkeleton: GlassRegionFill = { region: <Skeleton width={72} height={12} />, place: '', sending: <Skeleton width={56} height={12} />, receiving: <Skeleton width={56} height={12} />, rate: <Skeleton width={40} height={12} />,
+  quota: <Skeleton width={96} height={12} />, share: '', checked: <Skeleton width={48} height={12} /> }
+function GlassRegionRow({ row, total = false }: { row: GlassRegionFill; total?: boolean }) {
+  return <div className={total ? 'glass-region glass-region--total' : row.empty ? 'glass-region glass-empty' : 'glass-region'} role="row">
+    <span role="cell" className="glass-region__name"><span className="glass-region__code">{row.region}</span><span className="glass-region__place">{row.place}</span></span>
+    <span role="cell" className="glass-region__sending">{row.sending}</span><span role="cell" className="glass-region__receiving">{row.receiving}</span>
+    <span role="cell" className="glass-region__rate">{row.rate}</span>
+    <span role="cell" className="glass-region__quota"><span className="glass-region__sent">{row.quota}</span><span className="glass-region__share">{row.share}</span>
+      <Meter value={row.meter?.value ?? 0} max={row.meter?.max ?? 1} tone={row.meter?.tone} label={row.meter?.label} /></span>
+    <span role="cell" className="glass-region__checked">{row.checked}</span>
+  </div>
+}
+const groupLink = (to?: [string, string]) => to && <Link className="ui-button ui-button--ghost ui-button--sm" to={to[0]}>{to[1]} <ArrowUpRight size={16} aria-hidden="true" /></Link>
+/** The board, filled by `fill`; without it, every figure is a placeholder of its own size. `feed`: the activity column's rows. */
+export function GlassBoard({ fill, feed, live }: { fill?: GlassBoardFill; feed?: ReactNode; live?: ReactNode }) {
+  const regions = fill ? [...fill.regions, ...Array.from({ length: Math.max(0, GLASS_REGION_SLOTS - fill.regions.length) }, (): GlassRegionFill => ({ region: '', place: '', sending: '', receiving: '', rate: '', quota: '', share: '', checked: '', empty: true }))]
+    : Array.from({ length: GLASS_REGION_SLOTS }, () => regionSkeleton)
+  return <div className="glass-board">
+    <div className="glass-main">
+      <section className="glass-tiles" aria-label="Now">{glassTiles.map(([key, label]) => <GlassTile key={key} label={label} fill={fill?.tile(key)} />)}</section>
+      <section className="glass-section" aria-label="Funnel · 30 days">
+        <SectionHeader title="Funnel · 30 days" actions={groupLink(['/operator?view=signups', 'Workspaces'])} />
+        <ol className="glass-funnel">{glassFunnel.map(([key, label]) => { const step = fill?.funnel(key); return <li key={key}>
+          <span className="glass-funnel__label">{label}</span>
+          <span className="glass-funnel__figure">{step ? step.value : <Skeleton width={48} height={16} />}<span className="glass-funnel__share">{step?.share}</span></span>
+          <Meter value={step?.meter.value ?? 0} max={step?.meter.max ?? 1} />
+        </li> })}</ol>
+      </section>
+      <section className="glass-section" aria-label="SES regions">
+        <SectionHeader title="SES regions" />
+        <div className="glass-regions" role="table" aria-label="SES regions">
+          <div className="glass-region glass-region--head" role="row">{['Region', 'Sending', 'Receiving', 'Max rate', 'Sent · 24 h of quota', 'Checked'].map(title => <span key={title} role="columnheader">{title}</span>)}</div>
+          {regions.map((row, i) => <GlassRegionRow key={i} row={row} />)}
+          <GlassRegionRow total row={fill?.total ?? { ...regionSkeleton, region: 'Total' }} />
+        </div>
+      </section>
+      <div className="glass">{glassGroups.map(group => <section key={group.key} className="glass-group" aria-label={group.title}>
+        <SectionHeader title={group.title} actions={groupLink(group.to)} />
+        {group.rows.map(def => {
+          const row = fill?.row(group.key, def.key)
+          if (def.cells) return <div key={def.key} className="glass-grades" role="list" aria-label={def.key === 'grades' ? 'Sender scores' : 'Standing steps'} style={{ gridTemplateColumns: `repeat(${def.cells.length}, minmax(0, 1fr))` }}>{def.cells.map((cell, i) =>
+            <span key={cell} role="listitem"><span>{cell}</span><b>{row?.cells?.[i] ?? <Skeleton width={16} height={12} />}</b></span>)}</div>
+          return <MetricRow key={def.key} className={row?.empty ? 'glass-empty' : undefined} label={row ? row.label ?? def.label : def.label ?? <Skeleton width={112} height={12} />} hint={row?.hint}
+            spark={def.spark && <Sparkline values={row?.spark ?? []} />} value={row ? row.value : <Skeleton width={56} height={14} />} unit={row?.unit} tone={row?.tone}
+            meter={def.meter && <Meter value={row?.meter?.value ?? 0} max={row?.meter?.max ?? 1} mark={row?.meter?.mark} tone={row?.meter?.tone} label={row?.meter?.label} />} />
+        })}
+      </section>)}</div>
+    </div>
+    <aside className="glass-feed" aria-label="Activity">
+      <div className="glass-feed__head"><h2 className="glass-feed__title">Activity</h2>{live}</div>
+      <div className="glass-feed__list">{feed ?? <ol className="glass-feed__rows" aria-hidden="true">{Array.from({ length: 10 }, (_, i) => <li key={i} className="glass-event" style={{ transform: `translateY(${i * GLASS_EVENT_HEIGHT}px)` }}>
+        <span className="glass-event__icon" /><span className="glass-event__text"><Skeleton width={160} height={12} /><Skeleton width={112} height={10} /></span><span className="glass-event__time"><Skeleton width={24} height={10} /></span></li>)}</ol>}</div>
+    </aside>
+  </div>
+}
+/** A feed row's height: rows are placed by a transform, so a new one slides the others down without a layout shift. */
+export const GLASS_EVENT_HEIGHT = 52
+/** Whether the figures are live: a dot and the time they are from, in a box as wide as its placeholder. */
+export const GlassAsOf = ({ at, state = 'live' }: { at?: ReactNode; state?: 'live' | 'stalled' }) => <span className="glass-asof" data-state={at ? state : undefined}>
+  <span className="glass-asof__dot" aria-hidden="true" />{at ?? <Skeleton width={96} height={14} />}</span>
 export function GlassSkeleton() {
-  return <><PageHeader title="Glass" actions={<GlassAsOf />} /><LoadingRegion label="Loading glass"><GlassGroups /></LoadingRegion></>
+  return <><PageHeader title="Glass" actions={<GlassAsOf />} /><LoadingRegion label="Loading glass"><GlassBoard /></LoadingRegion></>
 }
 
 // The route-level placeholder while the operator chunk loads.

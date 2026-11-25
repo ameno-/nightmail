@@ -4,7 +4,7 @@ import { enqueue, JobDeferred, retryDatabaseFailures } from './jobs.js';
 import { deliverNotice, evaluationFinished, noticeRecipients } from './account-notices.js';
 import { customerNotice, type NoticeInput } from './notices.js';
 import { queueTenantStatus, resumeHostedConnection, tenantStatusDrift, terminalColumns, terminalEvents, type HostedCaps } from './states.js';
-import { dailyLimit, ESTABLISHED, GOOD_STANDING, establishedBy, EVALUATION, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type TrackRecord, type Window } from './standing-model.js';
+import { dailyLimit, ESTABLISHED, GOOD_STANDING, establishedBy, EVALUATION, evaluated, FREEZE_FLOOR, GROWTH, moveScore, nextGrowth, nextStanding, noticeReasons, quality, stepRank, type DayEvidence, type GrowthHour, type DomainAuth, type Factor, type LadderInput, type Reason, type ScoreState, type Step, type TrackRecord, type Window } from './standing-model.js';
 import { DISPLAY_SCORE_ID_PREFIX, DISPLAY_SCORE_JOB } from './sender-score.js';
 import { productName } from './brand.js';
 import { checkSignInMail, standingAlert } from './operator-alerts.js';
@@ -228,7 +228,7 @@ const zero: Window = { accepted: 0, bounces: 0, complaints: 0, marketingAccepted
 async function candidates(runtime: Runtime, limit: number, only?: string) {
   const screened = Boolean(runtime.config.screen && runtime.config.hostedScreen);
   return (await runtime.db.execute<Candidate>(sql`WITH c AS (
-      SELECT s.* FROM sender_standing s WHERE ${only ? sql`s.workspace_id=${only}` : sql`(s.computed_at IS NULL OR s.computed_at<now()-interval '6 hours' OR s.step<>'ok' OR s.phase='seed' OR (s.phase='calibrating' AND s.calibrated_at IS NOT NULL)
+      SELECT s.* FROM sender_standing s WHERE ${only ? sql`s.workspace_id=${only}` : sql`(s.computed_at IS NULL OR s.computed_at<now()-interval '6 hours' OR s.step<>'ok' OR s.reasons<>'[]'::jsonb OR s.phase='seed' OR (s.phase='calibrating' AND s.calibrated_at IS NOT NULL)
         OR s.score IS DISTINCT FROM s.target OR s.evidence_at>s.computed_at OR s.release_until IS NOT NULL OR s.strike_until IS NOT NULL
         OR EXISTS (SELECT FROM hosted_usage_hourly u WHERE u.workspace_id=s.workspace_id AND u.hour>=date_trunc('hour',now(),'UTC')-interval '47 hours')
         OR EXISTS (SELECT FROM hosted_health_hourly h WHERE h.workspace_id=s.workspace_id AND h.hour>=date_trunc('hour',now(),'UTC')-interval '23 hours')
@@ -370,15 +370,19 @@ export async function refreshStanding(runtime: Runtime, options: { now?: Date; o
     if (limits.limit !== row.daily_limit) await runtime.db.execute(sql`WITH s AS (UPDATE sender_standing SET sequence=sequence+1 WHERE workspace_id=${row.workspace_id} RETURNING workspace_id,sequence,step)
       INSERT INTO standing_events(id,workspace_id,sequence,kind,from_step,to_step,actor,details)
       SELECT ${id('stev')},workspace_id,sequence,'limit',step,step,'{"kind":"system","via":"job"}'::jsonb,${JSON.stringify({ from: row.daily_limit, to: limits.limit, score: moved.score })}::jsonb FROM s`);
-    routine.push({ workspace_id: row.workspace_id, phase: moved.phase, first_recipients: moved.firstRecipients, calibrated_at: moved.calibratedAt, score: moved.score, day_score: moved.dayScore, score_day: moved.scoreDay,
+    // Keep the OK/Notice card current even when its step doesn't move. A below-line observation is
+    // display evidence, not a standing change or an alert; never replace a concurrent operator decision.
+    routine.push({ workspace_id: row.workspace_id, version: row.version, reasons: next.step === 'ok' ? noticeReasons(input.day, 'ok') : next.reasons,
+      phase: moved.phase, first_recipients: moved.firstRecipients, calibrated_at: moved.calibratedAt, score: moved.score, day_score: moved.dayScore, score_day: moved.scoreDay,
       target: q.target, quality: q.quality, volume: q.volume, factors: q.factors, band_limit: limits.band, daily_limit: limits.limit, clear_since: next.step === prev.step ? next.clearSince : null,
       strike_until: strikeCapped ? row.strike_until : null, step: next.step, growth_until: growth.until, growth_cap: growth.cap, growth_hour: growth.hour, growth_quality: growth.quality });
   }
-  if (routine.length) await runtime.db.execute(sql`WITH r AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(routine)}::jsonb) AS r(workspace_id text,phase text,first_recipients int,calibrated_at timestamptz,
+  if (routine.length) await runtime.db.execute(sql`WITH r AS (SELECT * FROM jsonb_to_recordset(${JSON.stringify(routine)}::jsonb) AS r(workspace_id text,version int,reasons jsonb,phase text,first_recipients int,calibrated_at timestamptz,
       score numeric,day_score numeric,score_day date,target numeric,quality numeric,volume double precision,factors jsonb,band_limit int,daily_limit int,clear_since timestamptz,strike_until timestamptz,step text,
       growth_until timestamptz,growth_cap int,growth_hour timestamptz,growth_quality numeric)),
     updated AS (UPDATE sender_standing s SET phase=r.phase,first_recipients=r.first_recipients,calibrated_at=r.calibrated_at,score=r.score,day_score=r.day_score,score_day=r.score_day,target=r.target,
       quality=r.quality,volume=r.volume,factors=r.factors,band_limit=r.band_limit,daily_limit=r.daily_limit,clear_since=CASE WHEN s.step=r.step THEN r.clear_since ELSE s.clear_since END,
+      reasons=CASE WHEN s.version=r.version AND s.step=r.step AND r.step IN ('ok','notice') THEN r.reasons ELSE s.reasons END,
       strike_until=r.strike_until,growth_until=r.growth_until,growth_cap=r.growth_cap,growth_hour=r.growth_hour,growth_quality=r.growth_quality,computed_at=now() FROM r WHERE s.workspace_id=r.workspace_id RETURNING s.*)
     INSERT INTO sender_score_daily(workspace_id,day,score,quality,target,daily_limit,step) SELECT workspace_id,(now() AT TIME ZONE 'UTC')::date,score,quality,target,daily_limit,step FROM updated
     ON CONFLICT(workspace_id,day) DO UPDATE SET score=excluded.score,quality=excluded.quality,target=excluded.target,daily_limit=excluded.daily_limit,step=excluded.step`);

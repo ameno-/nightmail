@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { matches, SHELL_COMPACT } from './media'
 
 // The fitted page size of each list is remembered, so the next session can warm that exact first page. A phone or tablet
@@ -12,43 +12,40 @@ function rememberPageSize(scope: string, size: number) {
   try { localStorage.setItem(sizeKey(scope), String(size)) } catch { /* Warming then skips this list. */ }
 }
 
-export function useAdaptivePageSize(minimum = 5, maximum = 20, scope?: string) {
+export function useAdaptivePageSize(minimum = 5, maximum = 20, scope?: string, onFirstFit?: (size: number) => void) {
   // The remembered size makes the first render ask for the page that was warmed (or cached) for it.
   const [pageSize, setPageSize] = useState(() => matches(SHELL_COMPACT) ? Math.max(minimum, Math.min(maximum, COMPACT_PAGE)) : (scope && rememberedPageSize(scope)) || minimum)
   const [measured, setMeasured] = useState(false)
-  const [table, setTable] = useState<HTMLDivElement | null>(null)
-  const tableRef = useCallback((node: HTMLDivElement | null) => setTable(node), [])
-
-  useLayoutEffect(() => {
+  const fitted = useRef(false)
+  // The node is in its final container when the ref attaches. A first-page read can use
+  // its actual size now, before another render builds all of that page's placeholders.
+  const tableRef = useCallback((table: HTMLDivElement | null) => {
     if (!table) return
-    const currentTable = table
-    const surface = currentTable.closest<HTMLElement>('.page-surface')
+    const surface = table.closest<HTMLElement>('.page-surface')
     if (!surface) { setMeasured(true); return }
-    const currentSurface = surface
-    function measure() {
-      if (matches(SHELL_COMPACT)) {
-        const size = Math.max(minimum, Math.min(maximum, COMPACT_PAGE))
-        setPageSize(size); setMeasured(true)
-        if (scope) rememberPageSize(scope, size)
-        return
+    const measure = () => {
+      let rows = COMPACT_PAGE
+      if (!matches(SHELL_COMPACT)) {
+        const style = getComputedStyle(surface)
+        const tableStyle = getComputedStyle(table)
+        const rowHeight = parseFloat(tableStyle.getPropertyValue('--table-row-height')) || parseFloat(style.getPropertyValue('--row-height')) || 38
+        const footerHeight = parseFloat(style.getPropertyValue('--row-height-lg')) || 64
+        const contentBottom = surface.getBoundingClientRect().bottom - parseFloat(style.paddingBottom)
+        const availableBody = contentBottom - table.getBoundingClientRect().top - 36 - footerHeight
+        rows = Math.floor(availableBody / rowHeight)
       }
-      const style = getComputedStyle(currentSurface)
-      const tableStyle = getComputedStyle(currentTable)
-      const rowHeight = parseFloat(tableStyle.getPropertyValue('--table-row-height')) || parseFloat(style.getPropertyValue('--row-height')) || 53
-      const footerHeight = parseFloat(style.getPropertyValue('--row-height-lg')) || 64
-      const contentBottom = currentSurface.getBoundingClientRect().bottom - parseFloat(style.paddingBottom)
-      const availableBody = contentBottom - currentTable.getBoundingClientRect().top - 36 - footerHeight
-      const size = Math.max(minimum, Math.min(maximum, Math.floor(availableBody / rowHeight)))
+      const size = Math.max(minimum, Math.min(maximum, rows))
+      if (!fitted.current) { fitted.current = true; onFirstFit?.(size) }
       setPageSize(size)
       setMeasured(true)
       if (scope) rememberPageSize(scope, size)
     }
     measure()
     const observer = new ResizeObserver(measure)
-    observer.observe(currentSurface)
+    observer.observe(surface)
     window.addEventListener('resize', measure)
     return () => { observer.disconnect(); window.removeEventListener('resize', measure) }
-  }, [maximum, minimum, scope, table])
+  }, [maximum, minimum, scope, onFirstFit])
 
   // Gate list queries on `measured` so mount requests the fitted page size once.
   return { pageSize, tableRef, measured }

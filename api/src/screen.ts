@@ -1,4 +1,4 @@
-import { ApiError, digest, type Runtime } from './core.js';
+import { ApiError, digest, type Config, type Runtime, type ScreenClassifier, type ScreenModel } from './core.js';
 import type { EmailSnapshot } from './db/sending.js';
 import { errorTypeOf, log } from './log.js';
 import { keepScreenCall, outbound } from './screen-calls.js';
@@ -7,9 +7,7 @@ import { unescapeCss, VISIBLE_WORDS } from './screened-html.js';
 import { formattedSender } from './sending.js';
 import { SEND_LIMITS } from './send-limits.js';
 
-// Opt-in content screen for live transactional mail (`screen: true`): asks Jev, TypeSafe AI's decision
-// model (directly or through OpenCode's inference gateway, per JEV_ENDPOINT), how likely a message is advertising smuggled into a transactional template (for example a
-// gambling ad set as a workspace name in an invitation). The dispatcher decides what to do with the score.
+// The outbound gate asks whether the mail would deceive or harm its recipient. Each model has its own cutoff.
 
 const MAX_BODY = 8000;
 // Link signals (every host a message links or loads, and link labels that name another host) repeat in each request.
@@ -28,22 +26,34 @@ const primaryBreakers = new Map<string, { failures: number; retryAt: number }>()
 const failoverEligible = (timing: CallTiming) =>
   timing.outcome === 'timeout' || timing.outcome === 'network' || timing.outcome === 'invalid' ||
   (timing.httpStatus !== undefined && (timing.httpStatus === 401 || timing.httpStatus === 402 || timing.httpStatus === 403 || timing.httpStatus === 429 || timing.httpStatus === 451 || timing.httpStatus >= 500));
-// 451 is visitor-country-specific at the primary edge: fail over to JevF for that request without tripping the global breaker.
+// 451 is visitor-country-specific at the primary edge: fail over for that request without tripping the global breaker.
 const tripsPrimaryBreaker = (timing: CallTiming) => failoverEligible(timing) && timing.httpStatus !== 451;
-// Bound concurrent failover requests per runtime so slow JevF calls don't exhaust the Worker's 6 outbound connections.
+// Bound concurrent failover requests per runtime so they don't exhaust the Worker's 6 outbound connections.
 const failoverSlots = new WeakMap<object, { active: number; waiting: (() => void)[] }>();
 const QUESTIONS = {
-  spam: {
+  harm: {
     type: 'noul',
-    instructions: 'For transactional mail, detect unsolicited advertising smuggled into a receipt, invitation or notification. For marketing, do not flag ordinary subscribed promotions: flag deceptive impersonation, credential theft, scams or unrelated malicious pitches.',
+    instructions: "You screen outgoing email for a sending platform. Flag only mail that would deceive or harm the person receiving it. Cold sales emails and promotions are allowed. Sign-in links, verification codes and account notices from the service the recipient uses are allowed. A notification that merely quotes someone else's message is allowed.",
     criteria: {
-      true: 'The message exists to advertise or lure the recipient to a third-party site, contact or offer unrelated to the sending service',
-      false: 'A genuine transactional message: invitation, receipt, code, notification or similar, even if a name in it is unusual',
+      true: 'The sender pretends to be a company, bank, courier, government body or news outlet that it is not; asks for passwords, card details, fees or payments under false pretences; promises money, prizes, investment returns or miracle cures that are not real; or sells something illegal such as stolen personal data',
+      false: 'The sender is honest about who it is and what it wants, including unsolicited sales pitches, marketing, receipts, codes and notifications',
     },
   },
 };
 
-export type ScreenResult = { spam: number; model: string; digest?: string };
+// `spam` is the historical field in stored verdicts and rejection events. Its value is the harm score.
+export type ScreenResult = { spam: number; model: string; threshold: number; digest?: string };
+/** A flagged window wins over a clean one, even if the clean model gave a higher raw score. */
+export function decisiveVerdict(a: ScreenResult, b: ScreenResult): ScreenResult {
+  const flaggedA = a.spam >= a.threshold, flaggedB = b.spam >= b.threshold;
+  if (flaggedA !== flaggedB) return flaggedA ? a : b;
+  return a.spam >= b.spam ? a : b;
+}
+// Verdicts for the old question, a different primary, or different cutoffs cannot be reused.
+function policyKey(settings: Config['screen']) {
+  const provider = (m?: ScreenModel) => m ? [m.endpoint, m.model, m.threshold] : null;
+  return ['harm-v1', settings?.primary, provider(settings?.jevf), provider(settings?.jev)];
+}
 // Bulk invitations repeat identical content, so one verdict serves every copy for an hour.
 // Insertion order is age order: the first key is always the oldest entry.
 const cache = new Map<string, { expires: number; result: ScreenResult }>();
@@ -382,8 +392,8 @@ async function body(snapshot: EmailSnapshot, limitBytes: number, scope: 'message
 // of the body (ms), how it ended (outcome: ok, timeout, network, http_<status> or invalid; phase says whether a timeout or
 // network error came before or after the headers), the request and response sizes, how many requests this isolate had in
 // flight when it started, where it came from (ScreenCall) and the classifier's own request ID and timing headers. Never
-// the message, its subject or addresses, the request body or the key. Failures are always logged; a campaign copy's
-// successful requests 1 in 10 (CAMPAIGN_SAMPLE, the line says sampleRate), since a campaign can make 50 a second. Each
+// the message, its subject or addresses, the request body or the key. Failures and failovers are always logged; a campaign copy's
+// successful primary requests 1 in 10 (CAMPAIGN_SAMPLE, the line says sampleRate), since a campaign can make 50 a second. Each
 // line kept is also kept as a content_screen_calls row (src/screen-calls.ts), written after the send, never before it.
 /** Where a classifier request came from, for its line: IDs and routing only. The screen writes back how the last request
  *  ended (outcome) and how long it took (ms), for the email's own record (src/dispatcher.ts DISPATCH_EMAIL). */
@@ -393,14 +403,14 @@ export type ScreenCall = { emailId?: string; workspaceId?: string; campaignId?: 
    *  to the screen_comparisons rows of the requests that judged it, at most an hour earlier. */
   digest?: string };
 /** How one request went, filled in by jevQuestions as it goes. Only assignments: recording never throws or waits. */
-type CallTiming = { classifier?: 'jev' | 'jevf'; failoverReason?: string; inFlight?: number; sesInFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
+type CallTiming = { classifier?: ScreenClassifier; model?: string; score?: number; threshold?: number; failoverReason?: string; inFlight?: number; sesInFlight?: number; requestBytes?: number; headersMs?: number; ms?: number; outcome?: string; phase?: 'headers' | 'body'; httpStatus?: number; responseBytes?: number;
   requestId?: string; cfRay?: string; serverTiming?: string; retryAfter?: string; errorType?: string; errorCode?: string; errorMessage?: string };
 const CAMPAIGN_SAMPLE = 0.1;
 let inFlight = 0;
 function failed(timing: CallTiming, started: number, phase: 'headers' | 'body', error: unknown) {
   try {
     const { name, cause, message } = error as { name?: unknown; cause?: { code?: unknown }; message?: unknown };
-    timing.ms = Date.now() - started; timing.phase = phase; timing.outcome = name === 'TimeoutError' ? 'timeout' : 'network'; timing.errorType = errorTypeOf(error);
+    timing.ms = Date.now() - started; timing.phase = phase; timing.outcome = name === 'TimeoutError' || name === 'AbortError' ? 'timeout' : 'network'; timing.errorType = errorTypeOf(error);
     // The runtime's own words for a failed connection ("Network connection lost.", undici's ECONNRESET), never text
     // that could carry a URL, an address or a header.
     if (typeof cause?.code === 'string' && /^[A-Z][A-Z0-9_]{1,40}$/.test(cause.code)) timing.errorCode = cause.code;
@@ -417,7 +427,7 @@ function responded(timing: CallTiming, started: number, response: Response) {
 }
 function logCall(timing: CallTiming, call: ScreenCall | undefined, window: number, windows: number, sample: number, at: number, db: object | undefined) {
   try {
-    const ok = timing.outcome === 'ok', sampleRate = ok && sample < 1 ? sample : 1;
+    const ok = timing.outcome === 'ok', sampleRate = ok && !timing.failoverReason ? sample : 1;
     if (call) { call.outcome = timing.outcome; call.ms = timing.ms; }
     if (sampleRate < 1 && Math.random() >= sampleRate) return;
     log(ok ? 'info' : 'warn', { code: 'CONTENT_SCREEN_CALL', emailId: call?.emailId, workspaceId: call?.workspaceId, campaignId: call?.campaignId, region: call?.region, shard: call?.shard,
@@ -461,29 +471,33 @@ export async function jevQuestions(endpoint:string,apiKey:string,model:string,st
 }
 /** One window, one verdict. Each actual request has its own deadline, campaign charge and record. */
 async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | undefined, window: number, windows: number, sample: number, shadow?: ShadowRef, charge?: () => Promise<void>): Promise<ScreenResult> {
-  const primary = runtime.config.screen!, backup = primary.failover;
-  const ask = async (settings: Pick<typeof primary, 'endpoint' | 'apiKey' | 'model'>, deadline: number, timing: CallTiming) => {
+  const policy = runtime.config.screen!, first = policy.primary, second = first === 'jevf' ? 'jev' : 'jevf';
+  const primary = policy[first]!, backup = policy[second];
+  const primaryDeadline = first === 'jevf' ? Math.min(DEADLINE_MS, policy.jevf!.deadlineMs) : DEADLINE_MS;
+  const ask = async (settings: ScreenModel, deadline: number, timing: CallTiming) => {
     if (charge) await charge();
     const at = Date.now(), { endpoint, apiKey, model } = settings;
-    let parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined;
+    let parsed: { model?: unknown; answers?: { harm?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined;
     try {
       parsed = await jevQuestions(endpoint,apiKey,model,state,QUESTIONS,deadline,timing) as typeof parsed;
-      const spam = parsed?.answers?.spam?.noul;
-      if (typeof spam !== 'number' || !Number.isFinite(spam) || spam<0 || spam>1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid spam score.', undefined, true); }
-      timing.outcome='ok';
-      return { spam, model: typeof parsed?.model === 'string' ? parsed.model : model };
+      const score = parsed?.answers?.harm?.noul;
+      if (typeof score !== 'number' || !Number.isFinite(score) || score < 0 || score > 1) { timing.outcome='invalid'; throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier returned no valid harm score.', undefined, true); }
+      timing.outcome = 'ok'; timing.score = score; timing.threshold = settings.threshold;
+      // Only a model identifier may enter verdicts or logs; an upstream can return arbitrary strings.
+      timing.model = typeof parsed?.model === 'string' && /^[a-zA-Z0-9._:/-]{1,100}$/.test(parsed.model) ? parsed.model : model;
+      return { spam: score, model: timing.model, threshold: settings.threshold };
     } catch (error) {
       // A body read can throw a raw stream error/AbortError. Wrap it as retryable outage for both primary and failover.
       if (!(error instanceof ApiError)) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'The content classifier could not be reached.', undefined, true);
       throw error;
     } finally {
       logCall(timing,call,window,windows,sample,at,runtime.db);
-      if (shadow && timing.classifier === 'jev' && !(backup && failoverEligible(timing))) shadowed(shadow,runtime.db,at,state,window,windows,timing,parsed,model);
+      if (shadow && first === 'jev' && !timing.failoverReason && !(backup && failoverEligible(timing))) shadowed(shadow,runtime.db,at,state,window,windows,timing,parsed?.usage?.input_tokens);
     }
   };
-  const timing: CallTiming = { classifier: 'jev' };
-  if (!backup) return ask(primary, DEADLINE_MS, timing);
-  const key = primary.endpoint + '\n' + primary.model;
+  const timing: CallTiming = { classifier: first };
+  if (!backup) return ask(primary, primaryDeadline, timing);
+  const key = first + '\n' + primary.endpoint + '\n' + primary.model;
   let breaker = primaryBreakers.get(key);
   if (!breaker) primaryBreakers.set(key, breaker = { failures: 0, retryAt: 0 });
   const now = Date.now();
@@ -492,7 +506,7 @@ async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | und
     if (breaker.retryAt) breaker.retryAt = now + PRIMARY_COOLDOWN_MS;
     const claim = breaker.retryAt;
     try {
-      const result = await ask(primary, DEADLINE_MS, timing);
+      const result = await ask(primary, primaryDeadline, timing);
       if (breaker.retryAt === claim) { breaker.failures = 0; breaker.retryAt = 0; }
       return result;
     } catch (error) {
@@ -506,27 +520,29 @@ async function evaluate(runtime: Runtime, state: unknown, call: ScreenCall | und
       if (!eligible) throw error;
     }
   }
+  // Jev as the fallback keeps the concurrency it had as the primary (its callers bound it, 4 each): a JevF outage or open
+  // breaker sends every screen here, and two slots would halve screening for as long as it lasts.
+  if (second === 'jev') return ask(backup, DEADLINE_MS, { classifier: second, failoverReason: timing.outcome ?? 'primary_breaker' });
   let slots = failoverSlots.get(runtime.db);
   if (!slots) failoverSlots.set(runtime.db, slots = { active: 0, waiting: [] });
-  if (slots.active < Math.min(2, backup.maxConcurrency)) slots.active++;
+  if (slots.active < Math.min(2, policy.jevf!.maxConcurrency)) slots.active++;
   else await new Promise<void>(resolve => slots.waiting.push(resolve));
   try {
-    return await ask(backup, backup.deadlineMs, { classifier: 'jevf', failoverReason: timing.outcome ?? 'primary_breaker' });
+    return await ask(backup, policy.jevf!.deadlineMs, { classifier: second, failoverReason: timing.outcome ?? 'primary_breaker' });
   } finally {
     const next = slots.waiting.shift(); if (next) next(); else slots.active--;
   }
 }
 /** What a request is kept with for the second classifier (src/screen-shadow.ts): only made when it is configured. */
-type ShadowRef = Pick<ShadowItem, 'kind' | 'digest' | 'threshold' | 'workspaceId' | 'emailId' | 'campaignId'>;
+type ShadowRef = Pick<ShadowItem, 'kind' | 'digest' | 'threshold' | 'jevfThreshold' | 'workspaceId' | 'emailId' | 'campaignId'>;
 // The request just made, kept to be repeated later with the same state and questions: how it ended and, answered, its
 // score, model and input tokens. Only assignments, after the request and its record: it never throws, waits or changes
 // what evaluate returns.
-function shadowed(ref: ShadowRef, db: object | undefined, at: number, state: unknown, window: number, windows: number, timing: CallTiming, parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null | undefined, model: string) {
+function shadowed(ref: ShadowRef, db: object | undefined, at: number, state: unknown, window: number, windows: number, timing: CallTiming, tokens: unknown) {
   try {
-    const answered = timing.outcome === 'ok', spam = parsed?.answers?.spam?.noul, tokens = parsed?.usage?.input_tokens;
     keepShadow(db, { ...ref, id: crypto.randomUUID(), at, window, windows, request: { state, questions: QUESTIONS },
-      jev: { outcome: timing.outcome ?? 'unknown', httpStatus: timing.httpStatus, ms: timing.ms, score: answered && typeof spam === 'number' ? spam : undefined,
-        model: answered ? (typeof parsed?.model === 'string' ? parsed.model : model) : undefined, inputTokens: typeof tokens === 'number' ? tokens : undefined } }, timing.requestBytes);
+      jev: { outcome: timing.outcome ?? 'unknown', httpStatus: timing.httpStatus, ms: timing.ms, score: timing.score,
+        model: timing.model, inputTokens: typeof tokens === 'number' ? tokens : undefined } }, timing.requestBytes);
   } catch { /* A record never changes the request's outcome. */ }
 }
 
@@ -535,16 +551,16 @@ function classifierState(snapshot: EmailSnapshot, required: boolean, textHtmlOve
   const sender=copy(formattedSender(snapshot.from, snapshot.fromName)), subject=copy(snapshot.subject), recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
   return (body: string) => ({email:{from:required?sender:sender.slice(0,100),kind:snapshot.kind,subject:required?subject:subject.slice(0,200),body},signals:{recipients,textHtmlOverlap}});
 }
-/** Spam probability for one snapshot, or null when the installation has no classifier configured. A campaign test has
+/** Harm verdict for one snapshot, or null when the installation has no classifier configured. A campaign test has
  *  the campaign limit. `call` names the email on each request's line and gets the last request's outcome back. */
 export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, required=false, call?: ScreenCall): Promise<ScreenResult | null> {
   const settings = runtime.config.screen;
   if (!settings) return null;
   const from = formattedSender(snapshot.from, snapshot.fromName);
   const recipients=snapshot.to.length+snapshot.cc.length+snapshot.bcc.length;
-  const key = await digest(JSON.stringify([runtime.config.workspaceId,settings.endpoint,settings.model,required,from,snapshot.kind,snapshot.subject,snapshot.text,snapshot.html,snapshot.raw,recipients]));
+  const key = await digest(JSON.stringify([runtime.config.workspaceId,policyKey(settings),required,from,snapshot.kind,snapshot.subject,snapshot.text,snapshot.html,snapshot.raw,recipients]));
   const now = Date.now();
-  const shadow: ShadowRef | undefined = runtime.config.shadow && { kind: snapshot.testCampaignId ? 'campaign_test' : 'email', digest: key, threshold: settings.threshold,
+  const shadow: ShadowRef | undefined = runtime.config.shadow && { kind: snapshot.testCampaignId ? 'campaign_test' : 'email', digest: key, threshold: settings.jev.threshold, jevfThreshold: runtime.config.shadow.threshold,
     workspaceId: call?.workspaceId ?? runtime.config.workspaceId, emailId: call?.emailId, campaignId: snapshot.testCampaignId ?? call?.campaignId };
   if (shadow && call) call.digest = key.slice(0, 32);
   const hit = cache.get(key);
@@ -565,9 +581,7 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
         results[w] = await evaluate(runtime, state(bodies[w]!), call, w, bodies.length, 1, shadow);
       }
     }));
-    let highest = results[0]!;
-    for (let i = 1; i < results.length; i++) if (results[i]!.spam > highest.spam) highest = results[i]!;
-    return { ...highest, digest: key };
+    return { ...results.reduce(decisiveVerdict), digest: key };
   });pending.set(key,lookup);
   try{const result=await lookup;cache.set(key,{expires:now+TTL_MS,result});
     while(cache.size>MAX_ENTRIES)cache.delete(cache.keys().next().value!);return result;
@@ -582,8 +596,8 @@ export async function screenSnapshot(runtime: Runtime, snapshot: EmailSnapshot, 
 export type CampaignScreen = {
   /** The review content it belongs to (sending_campaign_reviews.content_hash). */
   contentHash: string; probation: boolean;
-  /** The campaign's own copy, placeholders unresolved, screened first as an early refusal. */
-  template: { key: string; spam: number; model: string } | null;
+  /** The campaign's own copy, placeholders unresolved. Preparing reviews without a cutoff predate harm and are screened again. */
+  template: { key: string; spam: number; model: string; threshold?: number } | null;
   /** Recipients whose copies have verdicts, in send order, and how many of them were refused as spam. */
   screenedThrough: number; recipients: number; rejected: number;
   /** Classifier outages in a row, for the wait before the next attempt; whether the refused share paused it once. */
@@ -597,7 +611,7 @@ export type CampaignScreen = {
  */
 export async function copyKey(runtime: Runtime, snapshot: EmailSnapshot): Promise<string> {
   const settings = runtime.config.screen;
-  return digest(JSON.stringify([settings?.endpoint ?? null, settings?.model ?? null, snapshot.kind, snapshot.from, snapshot.fromName ?? null, snapshot.replyTo,
+  return digest(JSON.stringify([policyKey(settings), snapshot.kind, snapshot.from, snapshot.fromName ?? null, snapshot.replyTo,
     snapshot.subject, snapshot.html ?? null, snapshot.text ?? null, snapshot.raw ?? null, snapshot.headers, snapshot.attachments, snapshot.tracking]));
 }
 /** What the classifier is sent for one campaign copy, request by request: what screenSnapshot sends for that copy as
@@ -613,6 +627,6 @@ export async function screenInput(runtime: Runtime, snapshot: EmailSnapshot): Pr
 export async function screenWindow(runtime: Runtime, input: ScreenInput, window: number, call?: ScreenCall, key?: string, charge?: () => Promise<void>): Promise<ScreenResult> {
   const settings = runtime.config.screen;
   if (!settings) throw new ApiError(503, 'CONTENT_SCREEN_UNAVAILABLE', 'Hosted content screening is unavailable.', undefined, true);
-  const shadow: ShadowRef | undefined = runtime.config.shadow && key ? { kind: 'campaign_copy', digest: key, threshold: settings.threshold, workspaceId: call?.workspaceId, campaignId: call?.campaignId } : undefined;
+  const shadow: ShadowRef | undefined = runtime.config.shadow && key ? { kind: 'campaign_copy', digest: key, threshold: settings.jev.threshold, jevfThreshold: runtime.config.shadow.threshold, workspaceId: call?.workspaceId, campaignId: call?.campaignId } : undefined;
   return evaluate(runtime, input.requests[window], call, window, input.requests.length, CAMPAIGN_SAMPLE, shadow, charge);
 }

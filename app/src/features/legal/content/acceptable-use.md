@@ -92,7 +92,7 @@ Don't:
 
 Most problems are handled by Nightmail's automatic sender score. It moves through steps, from least to most serious:
 
-1. **Notice.** A note on your score card, for a first complaint or a few bounces. Nothing changes.
+1. **Notice.** A note on your score card when complaints or hard bounces reach the notice line. Nothing changes.
 2. **Warn.** We email owners and admins. Your daily limit is frozen: it can't rise, and without one you're limited to what was accepted for delivery in the last 24 hours (at least 10,000). It clears by itself after a day of good sending.
 3. **Restrict.** We hold your **marketing** mail and pause campaigns. Transactional mail (receipts, password resets) keeps flowing. You can resume from the dashboard after fixing the cause, at a reduced rate at first.
 4. **Pause.** **All sending stops.** Your inboxes, receiving and dashboard keep working. Queued mail waits 72 hours, then is canceled. Some pauses you can lift yourself; others need our review.
@@ -138,7 +138,7 @@ Evidence fades with a 30-day half-life. Opens are ignored, because mail privacy 
 
 ### When each step happens
 
-Nightmail checks every 10 minutes. Each line needs a count and a rate together.
+Nightmail checks every 10 minutes. Each feedback or screen line needs a count and a rate together. Notice starts at 0.01% complaints with at least 2, or 1% hard bounces with at least 3, in 24 hours.
 
 | Signal | Warn | Restrict | Pause |
 | --- | --- | --- | --- |

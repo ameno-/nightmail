@@ -85,8 +85,9 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 
 /* The reply box stays reachable at the bottom of long conversations; it grows when focused. */
 .mailbox-composer { position: sticky; bottom: 0; z-index: 1; display: grid; gap: var(--space-8); margin-top: auto; padding: var(--space-12) 0 var(--space-16); background: var(--color-surface); }
-.mailbox-composer textarea { min-height: 44px; height: 44px; resize: none; transition: height var(--motion-duration, 120ms), background var(--motion-duration) var(--ease-standard); }
-.mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; resize: vertical; }
+/* Collapsed, its one line sits centred like a field's; it settles to the textarea's own padding as it opens. */
+.mailbox-composer textarea { min-height: 44px; height: 44px; padding-block: calc((44px - var(--textarea-leading)) / 2); resize: none; transition: height var(--motion-duration, 120ms), padding var(--motion-duration, 120ms), background var(--motion-duration) var(--ease-standard); }
+.mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; padding-block: 8px; resize: vertical; }
 .mailbox-composer__to { font-size: var(--text-xs); color: var(--color-muted); overflow-wrap: anywhere; }
 .mailbox-composer__to.muted { margin: 0; }
 .inbound-composer__target { display: flex; align-items: center; gap: var(--space-4); min-height: 24px; }
@@ -126,7 +127,7 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .mailbox-nowrap { white-space: nowrap; }
 
 /* Pages: copy and toolbars sit on the shared 8/12px rhythm inside the page stack. */
-.page-surface > .stack.inbound-stack > .section--bordered { margin-top: calc(var(--space-24) - var(--page-gap)); }
+.page-surface > .stack.inbound-stack > .section--bordered { margin-top: calc(var(--space-16) - var(--page-gap)); }
 .inbound-stack > .data-toolbar { padding-bottom: 0; margin-bottom: calc(var(--space-12) - var(--page-gap)); }
 
 /* Address settings: one column. Aliases are plain rows on the canvas over one input whose domain is fixed. */
@@ -140,7 +141,7 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .alias-list .ui-icon-button { margin-inline-end: calc(-1 * var(--space-6)); }
 .alias-list + .alias-add { margin-top: var(--space-4); }
 .alias-add { display: flex; gap: var(--space-8); }
-.alias-input { display: flex; align-items: center; flex: 1; padding: 0 var(--space-8); font-family: var(--font-mono); cursor: text; }
+.alias-input { display: flex; align-items: center; flex: 1; font-family: var(--font-mono); cursor: text; }
 .alias-input:focus-within { background-color: var(--color-control-focus); }
 .alias-input[data-invalid] { background-color: var(--color-control-invalid); }
 .alias-input[data-invalid]:focus-within { background-color: var(--color-control-invalid-focus); }
@@ -162,6 +163,9 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 /* Receiving: shared search width and one-line clipping. */
 .receiving-search { width: 240px; }
 .inbox-clip { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Agent inboxes and their messages: the address or subject takes the slack, the figures keep their widths, so a narrow
+   window scrolls the table sideways before the first column gets too short. */
+.inbox-table .ui-table { min-width: 720px; }
 .receiving-clip { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .receiving-search { width: 100%; } }
 /* Route editor: the choices and the delete action. */
@@ -251,7 +255,8 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .rule-runs__order { grid-column: 1 / -1; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-sm); overflow-wrap: anywhere; }
 .rule-runs__order [data-self] { color: var(--color-text); }
 .rule-runs li > .ui-check-field { grid-column: 1 / -1; }
-.rule-shared textarea { font-family: var(--font-mono); font-size: var(--text-sm); }
+.rule-shared .ui-textarea { --textarea-leading: var(--leading-sm); font-family: var(--font-mono); font-size: var(--text-sm); }
+@media (pointer: coarse), (max-width: 899px) { .rule-shared .ui-textarea { --textarea-leading: 22px; font-size: 16px; } }
 @media (max-width: 640px) {
   .stack.rule-page { min-height: auto; }
   /* The header stays one row: a long name shortens, and Undo takes its room from the name only while there is something to undo. */

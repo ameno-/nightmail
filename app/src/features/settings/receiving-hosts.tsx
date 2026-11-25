@@ -54,7 +54,7 @@ export function ReceivingHosts({ domainId, domainName, hosts, actions, title = <
       { ...statusColumn, render: host => { const status = hostStatus[host.status], issue = host.issue
         return <StatusDot tone={issue?.blocking ? 'danger' : status.tone} title={issue ? `${receivingIssueTitle(issue.code, issue.host)}. ${issue.message}` : host.status === 'active' ? undefined : host.mx?.message}>{status.label}</StatusDot> } },
       { ...addressesColumn, render: host => <Link to={`/receiving?domain=${encodeURIComponent(host.name)}`}>{host.addressCount.toLocaleString('en-US')}</Link> },
-      { ...catchAllColumn, render: host => catchAllSetting.options[host.catchAll] },
+      { ...catchAllColumn, render: host => <span className="settings-cell" title={catchAllSetting.options[host.catchAll]}>{catchAllSetting.options[host.catchAll]}</span>, cardRender: host => catchAllSetting.options[host.catchAll] },
       { ...actionsColumn, render: host => <DropdownMenu label={`Actions for ${host.name}`} title={relativeHost(host.name, domainName)} items={menu(host)} /> },
     ]} />
     <Dialog open={adding} onOpenChange={next => { if (!add.isPending) setAdding(next) }} title="Add host" footer={<><Button disabled={add.isPending} onClick={() => setAdding(false)}>Cancel</Button><Button variant="primary" loading={add.isPending} type="submit" form="add-receiving-host">Add host</Button></>}>

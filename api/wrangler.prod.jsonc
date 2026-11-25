@@ -47,11 +47,14 @@
     "UI_NOTES_SUBJECTS": "https://account.anoma.ly 0YLDsWUOonmIl3RQqb3yHQ",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
     "DASHBOARD_ANALYTICS": "on",
-    // The domain setup reminder email (src/domain-setup.ts). Off: turning it on sends real email to customers.
+    // The domain setup reminder email (src/domain-setup.ts). On since 2026-11-24 (Ryan approved, Statusglass A89).
     // The DNS check and the dashboard's banner run either way.
-    "DOMAIN_SETUP_REMINDER": "off",
-    // The email to a new workspace with no domain an hour after sign-up (src/domain-setup.ts). Off for the same reason.
-    "NO_DOMAIN_REMINDER": "off",
+    "DOMAIN_SETUP_REMINDER": "on",
+    // The email to a new workspace with no domain an hour after sign-up (src/domain-setup.ts). On since 2026-11-24 (A89).
+    "NO_DOMAIN_REMINDER": "on",
+    // Built-in <name>-xx.nightmail.email domain for every workspace (src/builtin-domain.ts). On since 2026-11-25 (Ryan approved, Statusglass A112).
+    // Unset it to stop built-in sending and receiving at once (kill switch).
+    "NIGHTMAIL_BUILTIN_DOMAIN": "nightmail.email",
     // Abuse monitoring (src/abuse.ts) records from this instant on, monitor-only (NIGHTMAIL_ABUSE_ENFORCE stays unset).
     "NIGHTMAIL_ABUSE_MONITORING": "2026-11-21T15:30:00Z",
     "ACCOUNT_CLIENT_ID": "bane-production",

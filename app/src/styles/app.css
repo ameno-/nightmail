@@ -29,9 +29,9 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .sidebar-context > :is(.ui-select-trigger, select) { padding-inline: var(--sidebar-inset); }
 /* Four tight groups (Mail, Marketing, Infra, Workspace), each a mono label over 28px rows: a static 15px glyph, the
    page, and its G shortcut at the row's end. */
-.main-navigation { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-12); padding: var(--space-8) var(--space-8) var(--space-16); }
+.main-navigation { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-6) var(--space-8) var(--space-12); }
 .nav-group { display: flex; flex-direction: column; gap: 1px; }
-.nav-group__label { display: flex; align-items: center; height: 24px; padding: 0 var(--sidebar-inset); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); letter-spacing: var(--tracking-label); text-transform: uppercase; user-select: none; }
+.nav-group__label { display: flex; align-items: center; height: 20px; padding: 0 var(--sidebar-inset); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); letter-spacing: var(--tracking-label); text-transform: uppercase; user-select: none; }
 .main-navigation a { display: flex; align-items: center; gap: var(--space-8); height: 28px; padding-inline: var(--sidebar-inset); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-md); line-height: 18px; text-decoration: none; transition: color var(--motion-duration) var(--ease-standard), background var(--motion-duration) var(--ease-standard); }
 .main-navigation a > .ui-icon { --icon-size: 15px; color: var(--color-faint); transition: color var(--motion-duration) var(--ease-standard); }
 .main-navigation a > .ui-shortcut { opacity: .8; }
@@ -42,27 +42,15 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .main-navigation a.active > .ui-icon { color: var(--color-text); }
 .main-navigation__title, .more-sheet__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-navigation a[data-locked] > .ui-icon:last-child { --icon-size: 12px; color: var(--color-faint); }
-/* The footer: legal links, privacy mode, SES's quota (self-hosted), then the sender score as one 32px row at the bottom;
+/* The footer: legal links, privacy mode, SES's quota (self-hosted), then the sender score card (64px) at the bottom;
    set off from the navigation by space, its rows on the navigation's 8px gutter and inset. */
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-4); margin-top: auto; padding: var(--space-8); }
 .sidebar-footer > .legal-footer-links { padding: 0 var(--sidebar-inset); }
 .sidebar-footer > .privacy-toggle { min-height: 28px; padding: 0 var(--sidebar-inset); border-radius: var(--radius-sm); }
 .sidebar-footer > :is(.sidebar-setup, .sidebar-quota:not(:empty)) { padding: var(--space-8) var(--sidebar-inset); }
-.sidebar-score-slot { height: 56px; }
-.sidebar .sidebar-score-slot { height: 32px; }
-/* In the sidebar the score card is a readout row: SENDER SCORE on the left, 86 · B on the right, no dial. */
-.sidebar .sidebar-score-slot > .gauge-card--compact { height: 32px; gap: var(--space-8); padding: 0 var(--sidebar-inset); border-radius: var(--radius-sm); background: none; box-shadow: none; }
-@media (hover: hover) and (pointer: fine) { .sidebar .sidebar-score-slot > .gauge-card--compact:hover { background: var(--color-hover); } }
-.sidebar .sidebar-score-slot > .gauge-card--compact:focus-visible { background: var(--color-hover); }
-.sidebar .sidebar-score-slot .gauge-dial { display: none; }
-.sidebar .sidebar-score-slot .gauge-stack { flex-direction: row; align-items: center; justify-content: space-between; gap: var(--space-8); }
-.sidebar .sidebar-score-slot .gauge-eyebrow { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
-.sidebar .sidebar-score-slot .gauge-readout { align-items: center; gap: 0; height: 32px; line-height: 32px; }
-.sidebar .sidebar-score-slot .gauge-readout b { min-width: 0; font-size: var(--text-xs); line-height: 16px; letter-spacing: 0; }
-.sidebar .sidebar-score-slot .gauge-grade { font-size: var(--text-xs); line-height: 16px; font-weight: 400; }
-.sidebar .sidebar-score-slot .gauge-grade::before { content: '·'; margin: 0 var(--space-6); color: var(--color-faint); }
-.sidebar .sidebar-score-slot .gauge-alert { top: 13px; right: 6px; box-shadow: none; }
-.sidebar .sidebar-score-slot .gauge-skeleton { inset: 9px var(--sidebar-inset); border-radius: 3px; }
+/* The score card's place keeps its height from the first paint; while its code loads it is the card's neutral tile. */
+.sidebar-score-slot { height: 64px; }
+.sidebar-score-slot:empty { border-radius: var(--radius-md); background: var(--score-neutral); }
 /* The command bar, on the frame: where you are (workspace / page), the quick jumper in the middle (a solid field), then
    the search hint, the theme and Connect an agent. */
 .topbar { position: fixed; top: 0; right: 0; left: var(--sidebar-width); z-index: 15; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 380px) minmax(0, 1fr); align-items: center; gap: var(--space-16); height: var(--topbar-height); padding: 0 var(--space-12) 0 var(--space-16); background: var(--color-deep); }
@@ -128,7 +116,7 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .quota-meter::-webkit-meter-bar { background: var(--color-layer-2); border: 0; border-radius: 2px; height: 3px; }
 .quota-meter::-webkit-meter-optimum-value { background: var(--color-accent-data); }
 .quota-meter::-moz-meter-bar { background: var(--color-accent-data); }
-.page-surface { display: flex; flex-direction: column; margin: var(--topbar-height) 0 0 var(--sidebar-width); padding: var(--space-20) var(--space-24); height: calc(100dvh - var(--topbar-height)); min-height: 0; border-start-start-radius: var(--radius-lg); background: var(--color-surface); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
+.page-surface { display: flex; flex-direction: column; margin: var(--topbar-height) 0 0 var(--sidebar-width); padding: 14px var(--space-16); height: calc(100dvh - var(--topbar-height)); min-height: 0; border-start-start-radius: var(--radius-lg); background: var(--color-surface); position: relative; min-width: 0; overflow-y: auto; overflow-x: hidden; overscroll-behavior: contain; }
 /* Console pages (Overview, Logs, a sent email) run edge to edge from 900 px: each lays out its own strips and solid
    surfaces on the page's 16px gutter, and a notice above one sits on that gutter too, as a solid strip of its own. */
 .app-shell:not(.app-shell--compact) .page-surface:has(> :is(.ov-page, .logs-page, .email-detail)) { padding: 0; }
@@ -218,7 +206,7 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .chart-grid { stroke: var(--color-gridline); shape-rendering: crispEdges; }
 .chart-grid--base { stroke: var(--color-gridline); }
 .search-box { display: flex; align-items: center; position: relative; width: 392px; max-width: 100%; min-width: 220px; flex-shrink: 1; }
-.search-box > svg { position: absolute; left: var(--space-12); color: var(--color-muted); pointer-events: none; }
+.search-box > svg { position: absolute; left: 10px; color: var(--color-muted); pointer-events: none; }
 .search-box .ui-input { padding-left: var(--space-32); width: min(392px, 100%); }
 .search-box.search-box--list { width: 320px; flex-shrink: 0; }
 .logs-page { display: flex; flex: 1; min-height: 0; flex-direction: column; }
@@ -297,9 +285,6 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .received-attachments li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--space-8); align-items: center; }
 .received-attachments li > :nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .identifier { color: var(--color-text); }
-@media (max-width: 1200px) {
-  .page-surface { padding-inline: var(--space-24); }
-}
 /* A small laptop or a landscape tablet: a narrower sidebar leaves the page room for its tables. */
 @media (max-width: 1100px) and (min-width: 900px) {
   :root { --sidebar-width: 200px; }

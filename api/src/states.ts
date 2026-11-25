@@ -84,6 +84,8 @@ export type IdentityFacts = {
   imported?: true;
   /** Immutable operator-attested SES fingerprint. Only the operator can restore a revoked adoption. */
   adopted?: {arn:string;fingerprint:string};
+  /** The workspace's built-in domain (builtin-domain.ts): sent under its parent's identity, proven by it, never DNS-checked itself. */
+  builtin?: true;
   /** Hosted: when receiving was enabled (enableInboundDomain) and the check it queued hasn't observed the domain yet.
    * Every check that observes the domain writes its facts afresh, without it. */
   receivingRequested?: string;
@@ -335,9 +337,10 @@ export const startProvisioning = (id: string, account: string, roleArn: string, 
   WHERE id=${id} AND ((state IN ('awaiting_role','failed')) OR (state='provisioning' AND coalesce(lease_until,'-infinity')<=now())) AND (aws_account_id IS NULL OR aws_account_id=${account})`;
 export const finishProvisioning = (fence: SQL, to: 'ready' | 'failed' | 'awaiting_role') => sql`UPDATE provider_connections SET state=${to},lease_until=NULL WHERE state='provisioning' AND ${fence}`;
 export const notProvisioning = (pc: SQL = sql`pc`) => sql`NOT (${pc}.state='provisioning' AND coalesce(${pc}.lease_until,'-infinity')>now())`;
-/** Queues the one tenant job (retry-safe by id). The request never calls AWS: Hosted is instant and the job owns CreateTenant. */
-export const queueTenantJob = (source: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,jsonb_build_object('connectionId',id) FROM (${source}) c
-  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
+/** Queues the one tenant job (retry-safe by id). Hosted is instant: the request that creates a connection may make its
+ * tenant itself (startHostedMail), and then the job, due `afterSeconds` later, is the fallback. */
+export const queueTenantJob = (source: SQL, afterSeconds = 0) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,jsonb_build_object('connectionId',id),now()+make_interval(secs=>${afterSeconds}) FROM (${source}) c
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=excluded.available_at,lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
 export const setTenantState = (id: string, to: TenantState, account?: string) => sql`UPDATE provider_connections SET tenant_state=${to}${account && to==='ready' ? sql`,aws_account_id=${account}` : sql``} WHERE id=${id} AND tenant_state<>'ready'
   ${account ? sql`AND (aws_account_id IS NULL OR aws_account_id=${account})` : sql``}`;
 export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_state', extra: SQL = sql``) => sql`UPDATE provider_pool_regions SET ${sql.identifier(column)}='ready'${extra} WHERE ${fence}`;
@@ -467,10 +470,12 @@ export function moveCampaign(ref: CampaignRef | SQL, from: readonly CampaignStat
 }
 /** Cursor or setting changes that keep the state; fenced on it so a paused or canceled campaign is never advanced. */
 export const progressCampaign = (ref: CampaignRef, state: CampaignState, set: SQL) => sql`UPDATE sending_campaigns SET updated_at=now()${set} WHERE ${campaignRow(ref)} AND state=${state} RETURNING id`;
-export type CampaignLaunch = { reviewId: string; resolvedRegion?:string; actorKeyId: string; simulated: boolean; total: number; requestId: string | null; scheduledAt: string | null; pacePerDay: number | null; autoPause: boolean; rateShare: number | null };
+export type CampaignLaunch = { reviewId: string; resolvedRegion?:string; actorKeyId: string; simulated: boolean; total: number; requestId: string | null; scheduledAt: string | null; pacePerDay: number | null; autoPause: boolean; rateShare: number | null;
+  pacePlan?: number[] | null; rampRequiredCap?: number | null; consent?: { source: string; confirmedBy: string | null; confirmedAt: string } | null };
 /** draft, or failed with nothing released -> preparing with a fresh snapshot: every cursor and setting starts over; the error of a failed launch is cleared. */
 export const launchCampaign = (ref: CampaignRef, l: CampaignLaunch) => moveCampaign(ref, ['draft', 'failed'], 'preparing', sql`,review_id=${l.reviewId}${l.resolvedRegion ? sql`,draft=jsonb_set(draft,'{region}',to_jsonb(${l.resolvedRegion}::text))` : sql``},actor_key_id=${l.actorKeyId},simulated=${l.simulated},total=${l.total},prepared=0,expanded=0,canceled=0,error=NULL,request_id=${l.requestId},
-  scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL,probe_wait_until=NULL,probe_cleared_at=NULL,probe_skipped_at=NULL,quarantines=0`, editableRow);
+  scheduled_at=${l.scheduledAt}::timestamptz,pace_per_day=${l.pacePerDay},auto_pause=${l.autoPause},rate_share=${l.rateShare},window_started_at=NULL,window_expanded=0,paused_at=NULL,pause_reason=NULL,health_checked_at=NULL,waiting_reason=NULL,waiting_until=NULL,probe_wait_until=NULL,probe_cleared_at=NULL,probe_skipped_at=NULL,quarantines=0,ramp_step=NULL,ramp_window_started_at=NULL,ramp_from=0,
+  pace_plan=${l.pacePlan?.length ? sql`${sql.param(l.pacePlan)}::int[]` : sql`NULL`},window_index=0,ramp_required_cap=${l.rampRequiredCap ?? null}::int,consent=${l.consent ? JSON.stringify(l.consent) : null}::jsonb`, editableRow);
 /** A new revision: draft, or failed with nothing released -> draft with no snapshot; a failed launch's counters and error go with it. */
 export const reviseCampaign = (ref: CampaignRef, set: SQL) => sql`UPDATE sending_campaigns SET state='draft',updated_at=now(),review_id=NULL,error=NULL,total=0,prepared=0,expanded=0,canceled=0,scheduled_at=NULL${set} WHERE ${campaignRow(ref)} AND ${editableRow} RETURNING *`;
 type PauseReason = { code: string; message: string };
@@ -500,14 +505,19 @@ export const recordPrepared = (ref: CampaignRef, prepared: number, next: Running
 export const startSending = (ref: CampaignRef, due: { scheduledAt: string | null; reviewId: string | null }) =>
   moveCampaign(ref, ['scheduled'], 'sending', sql``, sql`scheduled_at IS NOT DISTINCT FROM ${due.scheduledAt}::timestamptz AND review_id IS NOT DISTINCT FROM ${due.reviewId}`);
 /** `skipped`: recipients passed over by a delivered-only release; they count as canceled. */
-export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null, skipped = 0, reason: 'hosted_daily_quota' | 'balance' = 'hosted_daily_quota') {
-  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},canceled=canceled+${skipped},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},waiting_reason=${hostedUntil ? reason : null},waiting_until=${hostedUntil}::timestamptz`);
+export function recordExpanded(ref: CampaignRef, expanded: number, windowStartedAt: string | null, windowExpanded: number, hostedUntil: string | null, skipped = 0, reason: 'hosted_daily_quota' | 'balance' = 'hosted_daily_quota', windowIndex?: number) {
+  return progressCampaign(ref, 'sending', sql`,expanded=${expanded},canceled=canceled+${skipped},window_started_at=${windowStartedAt}::timestamptz,window_expanded=${windowExpanded},${windowIndex === undefined ? sql`` : sql`window_index=${windowIndex},`}waiting_reason=${hostedUntil ? reason : null},waiting_until=${hostedUntil}::timestamptz`);
 }
 /** An owner resumed a failed list probe: release the rest only to contacts delivered before, and check health at once. */
 export const restrictToDelivered = (ref: CampaignRef) => sql`UPDATE sending_campaigns SET delivered_only=true,health_checked_at=NULL,updated_at=now() WHERE ${campaignRow(ref)} RETURNING id`;
-export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
+export const holdCampaign = (ref: CampaignRef, reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp', until: string) => progressCampaign(ref, 'sending', sql`,waiting_reason=${reason},waiting_until=${until}::timestamptz`);
+/** The campaign's place on the ramp (src/standing-model.ts RAMP): its step, and when that step's hour started at review ordinal `from` (null: past the last step). */
+export const setRamp = (ref: CampaignRef, step: number, startedAt: string | null, from: number) => progressCampaign(ref, 'sending', sql`,ramp_step=${step},ramp_window_started_at=${startedAt}::timestamptz,ramp_from=${from}`);
+/** A ramp step's batch paused the campaign: the next release, after a resume, starts a new hour on the same step. */
+export const restartRampWindow = (ref: CampaignRef) => sql`UPDATE sending_campaigns SET ramp_window_started_at=NULL,ramp_from=expanded,updated_at=now() WHERE ${campaignRow(ref)} AND state='paused' AND ramp_step IS NOT NULL RETURNING id`;
 export const noteHealthChecked = (ref: CampaignRef) => progressCampaign(ref, 'sending', sql`,health_checked_at=now()`);
-export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null }) => sql`UPDATE sending_campaigns SET updated_at=now(),pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
+/** `keepPlan`: a launch plan's daily batches stay (only autoPause or rateShare changed); a daily cap replaces them. */
+export const setCampaignPacing = (ref: CampaignRef, pacing: { pacePerDay: number | null; autoPause: boolean; rateShare: number | null; keepPlan?: boolean }) => sql`UPDATE sending_campaigns SET updated_at=now(),${pacing.keepPlan ? sql`` : sql`pace_plan=NULL,`}pace_per_day=${pacing.pacePerDay},auto_pause=${pacing.autoPause},rate_share=${pacing.rateShare},waiting_reason=NULL,waiting_until=NULL WHERE ${campaignRow(ref)} AND ${campaignActive(sql`sending_campaigns`)} RETURNING id`;
 /**
  * sending -> done once every recipient is released and no row is queued or attempting. The dispatcher runs it once
  * per draining batch over the campaigns it moved rows for (locking only campaign rows, after the row statements, so it

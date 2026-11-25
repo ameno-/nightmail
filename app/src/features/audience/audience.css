@@ -1,11 +1,22 @@
 .audience-page { display: flex; flex-direction: column; min-width: 0; min-height: 100%; }
 .audience-page > * { flex-shrink: 0; }
+/* A contact or a segment reads as label/value rows and a form: it keeps a readable width on a wide window. */
+/* The head of Audience reads as one block: the title, its sections a short step under it, then search and filters. */
+.audience-page .ui-page-header { margin-bottom: var(--space-8); }
 .audience-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A contact's row: the address, then its name muted on the same line. Tight, the name gives way well before the address. */
+.audience-contact { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; white-space: nowrap; }
+.audience-contact__email { display: flex; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.audience-contact__email > .private-address { min-width: 0; }
+.audience-contact__name { flex: 0 12 auto; min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; }
+.audience-contact__name::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
+/* Lists: the counts keep their widths, so a narrow window scrolls the table sideways before the name gets too short. */
+.audience-lists .ui-table { min-width: 800px; }
 .data-toolbar .ui-select-trigger.audience-status-filter { width: 170px; }
 .audience-summary > .ui-skeleton-line { width: auto; }
 .audience-page > .data-toolbar > .cluster { flex-wrap: wrap; }
 .ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
-.audience-page > .section { margin-block: var(--space-40) 0; }
+.audience-page > .section { margin-block: var(--space-32) 0; }
 .audience-page > .ui-alert { margin-top: var(--space-16); }
 .audience-summary { min-height: var(--space-20); gap: var(--space-8) var(--space-24); }
 .section > .audience-summary { margin-bottom: var(--space-12); }
@@ -28,7 +39,7 @@
 /* ListPicker: an input that searches lists by name, with the shared popover surface for its options. */
 .audience-list-picker { position: relative; min-width: 0; width: 100%; }
 .audience-list-picker > .ui-input { padding-right: var(--space-32); text-overflow: ellipsis; }
-.audience-list-picker > svg { position: absolute; right: var(--space-12); top: 50%; translate: 0 -50%; color: var(--color-muted); pointer-events: none; }
+.audience-list-picker > svg { position: absolute; right: 10px; top: 50%; translate: 0 -50%; color: var(--color-muted); pointer-events: none; }
 .data-toolbar .audience-list-filter, .audience-list-picker.audience-count-list { width: 220px; max-width: 100%; flex-shrink: 0; }
 .audience-list-options { position: absolute; inset-inline: 0; top: calc(100% + var(--space-4)); display: flex; flex-direction: column; min-width: 220px; max-height: min(280px, 40vh); }
 .audience-list-option { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); width: 100%; min-height: var(--control-height); padding: var(--space-4) var(--space-8); border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
@@ -67,7 +78,8 @@
 /* A nested group: its rule as one line on a solid well, and Edit as JSON beside it (the builder edits one level). */
 .audience-condition-group { --color-hover: var(--color-well-hover); grid-column: 1 / 4; display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); min-width: 0; min-height: var(--control-height); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); }
 .audience-condition-group > .ui-button { flex-shrink: 0; }
-.ui-textarea.audience-json { font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ui-textarea.audience-json { --textarea-leading: var(--leading-xs); font-family: var(--font-mono); font-size: var(--text-xs); }
+@media (pointer: coarse), (max-width: 899px) { .ui-textarea.audience-json { --textarea-leading: 22px; font-size: 16px; } }
 
 @media (max-width: 800px) {
   .audience-rule { grid-template-columns: minmax(0, 1fr) 34px; }

@@ -56,6 +56,7 @@ export async function rollupHour(runtime: Runtime, ms: number) {
       }
       if (row.type === 'click' && (row.public || row.name) && row.target) count('cta', { path: row.route, target: row.target }, row.vid);
       if (row.type === 'track' && row.ws && row.step && milestones.has(row.step)) first.set(row.ws + ':' + row.step,{ workspace:row.ws, step:row.step });
+      if (row.type === 'track' && row.step === 'focus_chosen' && row.name) count('focus', { focus: row.name }, row.vid);
     }
   }
   if (truncated) log('warn', { code: 'ANALYTICS_ROLLUP_TRUNCATED', hour, events: seen.size });

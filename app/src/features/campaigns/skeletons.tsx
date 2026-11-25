@@ -12,23 +12,24 @@ import { newsletterPath } from '../newsletters/shared'
 import './campaigns.css'
 import { CampaignBar, CampaignSteps } from './steps'
 
-// A campaign's card: its name and status, its subject, then recipients, delivery and last activity.
+// A campaign's card: its name and status, its subject, then recipients, delivery and last activity. In the table the
+// name (over its subject) takes the slack and the figures keep to their content.
 export const campaignColumns: SkeletonColumn[] = [
-  { key: 'name', label: 'Campaign', width: '35%', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div>, card: 'title' },
-  { key: 'status', label: 'Status', skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
+  { key: 'name', label: 'Campaign', skeleton: <div className="campaign-row-name"><SkeletonText width="68%" lineHeight={18} /><SkeletonText width="88%" lineHeight={18} /></div>, card: 'title' },
+  { key: 'status', label: 'Status', width: 128, skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
   { key: 'subject', label: 'Subject', card: 'line', table: false },
-  { key: 'recipients', label: 'Recipients', align: 'right', skeleton: <SkeletonText width={45} />, card: 'line' },
-  { key: 'delivered', label: 'Delivered', align: 'right', skeleton: <SkeletonText width={42} />, card: 'inline' },
-  { key: 'updated', label: 'Last activity · UTC', skeleton: <SkeletonText width="90%" />, card: 'inline' },
+  { key: 'recipients', label: 'Recipients', width: 104, align: 'right', skeleton: <SkeletonText width={45} />, card: 'line' },
+  { key: 'delivered', label: 'Delivered', width: 96, align: 'right', skeleton: <SkeletonText width={42} />, card: 'inline' },
+  { key: 'updated', label: 'Last activity · UTC', width: 168, skeleton: <SkeletonText width="90%" />, card: 'inline' },
   { key: 'archive', label: <span className="sr-only">Actions</span>, width: 48, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
 // A template's card: its name and status, its subject or purpose, when it changed, and Use template.
 export const templateColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Template', skeleton: campaignColumns[0].skeleton, card: 'title' },
-  { key: 'status', label: 'Status', width: 120, skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
+  { key: 'status', label: 'Status', width: 128, skeleton: <SkeletonText width={65} lineHeight={18} />, card: 'aside' },
   { key: 'about', label: 'About', card: 'line', table: false },
-  { key: 'updated', label: 'Updated · UTC', width: 190, skeleton: <SkeletonText width="90%" />, card: 'hide' },
+  { key: 'updated', label: 'Updated · UTC', width: 168, skeleton: <SkeletonText width="90%" />, card: 'hide' },
   { key: 'action', label: '', width: 150, align: 'right', skeleton: <span />, card: 'end' },
 ]
 
@@ -68,11 +69,11 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
   const [search] = useSearchParams(), issueOf = isNew ? search.get('newsletter') : null
   if (kind === 'list' || kind === 'templates') {
     const templates = kind === 'templates'
-    return <>
+    return <div className="campaigns-page">
       <CampaignsHeader actions={<>{!templates && canAdminister && <Button disabled>New newsletter</Button>}<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button></>} />
       <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
-      <TableSkeleton className="campaigns-table" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
-    </>
+      <TableSkeleton className="campaigns-table ui-table--two-line" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
+    </div>
   }
   if (kind === 'template') return <div className="campaign-compose-page template-compose-page">
     <PageHeader title="Edit template" backTo="/campaigns/templates" actions={<>{!phone && <span className="campaign-sync-status"><span className="campaign-sync-dot" /></span>}{phone ? <><Button variant="primary" disabled>Publish</Button><IconButton label="More actions" disabled><Icon icon={MoreHorizontal} /></IconButton></> : <><Button variant="ghost" disabled>Preview</Button><Button variant="ghost" disabled>Archive</Button><Button variant="secondary" disabled>Use template</Button><Button variant="primary" disabled>Publish</Button></>}</>} />

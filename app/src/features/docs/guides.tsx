@@ -7,6 +7,7 @@ import { CopyAction } from '../../components/motion'
 import { builtins, ctxFields, emailFields, endpointPayloads, RITUALS_PER_ADDRESS, type Field } from '../../../../api/src/ritual-schema'
 import { webhookSignatureGuide } from '../../../../api/src/webhook-signature-guide'
 import { agentSetupGuide } from '../../../../api/src/agent-setup-guide'
+import { builtinDomainGuide } from '../../../../api/src/builtin-limits'
 import { McpSetup } from './agent-setup'
 import { credentials } from './credentials'
 import { imapPorts, smtpPorts, useMailServers } from './mail-settings'
@@ -206,6 +207,14 @@ export const guides: Guide[] = [
       <p>{agentSetupGuide.text}</p>
       <Code label="agent setup">{agentSetupGuide.code}</Code>
       <p>Copy the prompt from <Link to="/docs#agent-prompt">the overview</Link> or Connect an agent in the sidebar; approve a code at <Link to="/connect">/connect</Link>. The agent’s key is listed in <Link to="/api-keys">API keys</Link>.</p>
+    </Section>,
+  },
+  {
+    // The same words as /docs.md and /llms.txt (api/src/builtin-limits.ts).
+    id: builtinDomainGuide.id, title: builtinDomainGuide.title, summary: builtinDomainGuide.summary,
+    body: () => <Section title="What it sends">
+      <p>{builtinDomainGuide.text}</p>
+      <p>Find it first in <Link to="/domains">Domains</Link>.</p>
     </Section>,
   },
   {

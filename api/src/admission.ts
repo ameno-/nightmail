@@ -10,6 +10,8 @@ import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import type { SendScope } from './send-scope.js';
 import { productName } from './brand.js';
+import { builtinPolicy, builtinRefusal } from './builtin-domain.js';
+import { RAMP } from './standing-model.js';
 
 /**
  * Send admission: one decision for every kind of send, made by send_admission (migration 323) in the statement or
@@ -22,33 +24,58 @@ import { productName } from './brand.js';
  */
 export type Stage = 'send' | 'launch' | 'reserve' | 'release' | 'prepare';
 /** One message as admission sees it. `invalid` and `oversize` are TypeScript's own findings, reported after every rule. */
-export type AdmissionMail = { host: string; region?: string; kind: 'transactional' | 'marketing'; attachments: string[]; bodyBytes: number; duplicate?: boolean; invalid?: boolean; oversize?: boolean };
+export type AdmissionMail = { host: string; region?: string; kind: 'transactional' | 'marketing'; attachments: string[]; bodyBytes: number; duplicate?: boolean; invalid?: boolean; oversize?: boolean;
+  /** A built-in domain's mail (builtin-domain.ts): every recipient, lowercased, for its send scope and caps. */
+  recipients?: string[] };
 export type AdmittedAsset = { id: string; size: number; contentId: string | null; contentType: string };
 export type Admitted = { allowed: true; mails: { region: string; binding: SendingBinding | null; connection: ReadyConnection | null }[]; billing: BillingGate | null; assets: AdmittedAsset[]; shared: boolean };
 export type Released = { allowed: true; hostedLeft: number | null; nextChangeAt: string | null; billing: { enforced: boolean; freeSentLeft: number; affordable: number; availableUc: string } | null };
-export type Refused = { allowed: false; code: string; item?: number; reason?: string | null; cap?: number; window?: 'hour' | 'day'; reserved?: boolean;
-  allowance?: HostedAllowance; incoming?: number; marketing?: number; regional?: boolean; failed?: boolean; host?: string; billing: BillingGate | null };
+export type Refused = { allowed: false; code: string; item?: number; reason?: string | null; cap?: number; window?: 'hour' | 'day' | 'minute'; reserved?: boolean; field?: string; resetAt?: string;
+  allowance?: HostedAllowance; incoming?: number; marketing?: number; regional?: boolean; failed?: boolean; host?: string; billing: BillingGate | null;
+  /** RAMP_LIMIT_REACHED (ramp_refusal, migration 501): the step (from 1) of `steps`, what the hour holds, how many more fit
+   * and Retry-After's seconds; for a send scheduled for later, the marketing scheduled within a day of it and a day's budget. */
+  step?: number; steps?: number; used?: number; fits?: number; retryAfter?: number; scheduled?: boolean; backlog?: number | null; budget?: number | null;
+  /** RAMP_PAUSED: the quarantined campaign and its pause code. */
+  campaignId?: string; pauseCode?: string };
 
 /** The installation's side of every decision: limits, sending mode and policy. */
 async function policy(runtime: Runtime) {
   const cfg = runtime.config, sim = isSimulatedSes(runtime), platform = platformPolicy(cfg);
   return { limits: SEND_LIMITS, simulated: sim, multiTenant: cfg.multiTenant, regional: regionalSending(runtime), trustedPool: !!cfg.trustedPool,
     requireDmarc: cfg.multiTenant && !!cfg.requireDmarcForBulk, platform: platform ? JSON.parse(platform) : null, platformWorkspace: cfg.platformDomainWorkspace ?? null,
-    caps: cfg.hostedSendCaps, headroom: cfg.dispatch.dailyHeadroomPercent, emailUc: RATES.emailUc.toString(),
+    caps: cfg.hostedSendCaps, headroom: cfg.dispatch.dailyHeadroomPercent, emailUc: RATES.emailUc.toString(), builtin: builtinPolicy(cfg),
     readiness: !cfg.multiTenant && !sim ? { fingerprint: await credentialFingerprint(cfg), target: discoveryTarget(cfg) } : null };
 }
+/** A campaign's pause codes that quarantine it: the automatic pause, the list probe and the ramp's check of a step. */
+export const QUARANTINE_CODES = ['LIST_QUALITY', 'BOUNCE_RATE_HIGH', 'COMPLAINT_RATE_HIGH'];
+/** What the database's ramp check (ramp_refusal and ramp_clean_hour, migration 501) is told of RAMP: each step's hourly
+ * ceiling, how much of one an hour must release to prove it, the clean, mature history that places a sender, and the
+ * quarantines that pause a workspace's marketing (RAMP_PAUSED). */
+export const RAMP_POLICY = { steps: RAMP.steps.map(s => s.ceilingPerHour), advance: RAMP.advance, paused: QUARANTINE_CODES,
+  history: { days: RAMP.historyDays, resolved: RAMP.check.resolved, bounceRate: RAMP.check.bounceRate, complaintRate: RAMP.check.complaintRate, complaints: RAMP.check.complaints } };
 /** Recipients a send charges against the Hosted limit (none when SES is simulated), how many of them are marketing, and
- * how many the balance is asked for (all of them: billing_gate prices simulated mail only when configured to). */
-export function charges(runtime: Runtime, mails: { recipients: number; marketing: boolean }[]) {
+ * how many the balance is asked for (all of them: billing_gate prices simulated mail only when configured to). Its
+ * `kind: "marketing"` recipients on a live Hosted installation also ask the ramp (`ramp`); bulk evidence charges
+ * transactional mail as marketing but never ramps it. */
+export function charges(runtime: Runtime, mails: { recipients: number; marketing: boolean; snapshot?: { kind?: string } }[]) {
   const sim = isSimulatedSes(runtime);
-  let cost = 0, marketing = 0, billable = 0;
-  for (const m of mails) { billable += m.recipients; if (!sim) { cost += m.recipients; if (m.marketing) marketing += m.recipients; } }
-  return { cost, marketing, billable };
+  let cost = 0, marketing = 0, billable = 0, ramped = 0;
+  for (const m of mails) { billable += m.recipients; if (!sim) { cost += m.recipients; if (m.marketing) marketing += m.recipients; if (m.snapshot?.kind === 'marketing') ramped += m.recipients; } }
+  return { cost, marketing, billable, ...(ramped > 0 && runtime.config.multiTenant ? { ramp: { ...RAMP_POLICY, recipients: ramped } } : {}) };
+}
+/** A send scheduled for later charges nothing now: its release admits it as a send made then. Its marketing recipients
+ * still ask the ramp (ramp_refusal) whether the workspace's marketing is paused, and whether they fit a whole hour of its
+ * step and, with what is already scheduled within a day of their time, a day of it. */
+export function scheduledCharges(runtime: Runtime, mails: Parameters<typeof charges>[1], scheduledAt: string) {
+  const { ramp } = charges(runtime, mails);
+  return { cost: 0, marketing: 0, billable: 0, scheduledAt, ...(ramp ? { ramp: { ...ramp, scheduled: true, at: scheduledAt } } : {}) };
 }
 export type AdmissionRequest = {
   /** take: the statement takes the send locks itself; a SendScope: the caller holds them (send-scope.ts); none: a check
    * outside the send locks, which locks only the sender claim it reads. */
   stage: Stage; locks: 'take' | 'none' | SendScope; mails?: (AdmissionMail & { from?: string; binding?: SendingBinding })[]; cost?: number; marketing?: number; billable?: number;
+  /** A send's `kind: "marketing"` recipients, for the ramp's hourly ceiling (charges). */
+  ramp?: typeof RAMP_POLICY & { recipients: number; scheduled?: boolean; at?: string };
   /** The idempotency claim, made first by a statement that admits by itself. */
   claim?: { path: string; key: string; hash: string; receipt: unknown };
   /** A campaign test admitted by itself: its row is locked first and must still be at the revision that was rendered. */
@@ -90,6 +117,23 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
       const resetAt = h.resetAt ? new Date(h.resetAt).toISOString() : undefined, retryable = incoming <= h.cap! && marketing <= h.marketingCap!;
       return new ApiError(429, d.code, `Hosted sending is limited to ${h.cap} recipients per rolling 24 hours; ${count(h.used)} are used.${d.reserved ? ` Marketing stops at ${h.marketingCap} to reserve transactional capacity.` : ''}${resetAt ? ` Rolling usage expires at ${resetAt}.` : ''}${!retryable ? ' This submission exceeds the available limit.' : ''}`, undefined, retryable, resetAt);
     }
+    case 'RAMP_LIMIT_REACHED': {
+      const opens = new Date(d.resetAt!).toISOString(), fits = d.fits ?? 0, asked = d.marketing ?? 0, ramping = `still ramping up (step ${d.step} of ${d.steps})`;
+      const campaign = 'For a large list, send a campaign instead: campaigns are paced automatically.';
+      const error = new ApiError(429, d.code, !d.scheduled
+        ? `This workspace is ${ramping}: it can send ${count(d.cap!)} marketing recipients an hour right now, and ${fits ? `${count(fits)} more fit` : 'no more fit'} this hour${asked > fits ? `; this request has ${count(asked)}` : ''}. More room opens at ${opens.slice(11, 16)} UTC. ${campaign}`
+        : asked > d.cap! ? `This workspace is ${ramping}: it can send ${count(d.cap!)} marketing recipients an hour, so a send of ${count(asked)} can't be scheduled while it ramps. ${campaign}`
+        : `This workspace already has as much marketing scheduled as it can send in a day while it is ${ramping}: ${count(d.budget!)} recipients in 24 hours, and ${count(d.backlog!)} are scheduled within a day of this send. ${campaign}`, undefined, true);
+      error.retryAfterSeconds = d.retryAfter;
+      error.details = [{ step: d.step, steps: d.steps, ceilingPerHour: d.cap, usedThisHour: d.used, fitsNow: fits, requested: asked, stepOpensAt: opens,
+        ...d.scheduled ? { scheduledBacklog: d.backlog, dailyBudget: d.budget } : {} }];
+      return error;
+    }
+    case 'RAMP_PAUSED': {
+      const error = new ApiError(409, d.code, `Marketing from this workspace is paused: campaign ${d.campaignId} was paused automatically (${d.pauseCode}). Review that campaign and resume it first, or cancel it. Transactional mail still sends.`);
+      error.details = [{ campaignId: d.campaignId, pauseCode: d.pauseCode }];
+      return error;
+    }
     case 'INVALID_SCHEDULE': return new ApiError(422, d.code, `Schedule between now and ${SEND_LIMITS.schedule.horizonSeconds / 86_400} days from now.`, 'scheduledAt');
     case 'SCHEDULED_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This workspace already has ${count(d.cap!)} scheduled emails waiting. Cancel some or wait for them to send.`, 'scheduledAt', true);
     case 'PENDING_EMAIL_LIMIT_EXCEEDED': return new ApiError(429, d.code, `This submission exceeds the outstanding email limit of ${d.cap} for this workspace. Wait for queued mail to dispatch before retrying.`, undefined, true);
@@ -116,6 +160,8 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
     case 'NOT_FOUND': return new ApiError(404, d.code, 'Campaign was not found.');
     case 'CAMPAIGN_ARCHIVED': return new ApiError(409, d.code, 'Restore this campaign before sending a test.');
     case 'CAMPAIGN_LOCKED': return new ApiError(409, d.code, 'The campaign changed while it was being sent; fetch it and try again.', undefined, true);
+    case 'BUILTIN_DOMAIN_RECIPIENT': case 'BUILTIN_DOMAIN_LIMIT': case 'BUILTIN_DOMAIN_UNSUPPORTED': case 'BUILTIN_DOMAIN_UNAVAILABLE': case 'BUILTIN_DOMAIN_REVOKED': case 'OWN_DOMAIN_VERIFIED':
+      return item(builtinRefusal(runtime.config, d));
     case 'INVALID_CONTENT': return local.invalid!(d.item!);
     case 'CONTENT_TOO_LARGE_TO_SCREEN': return local.oversize!(d.item!);
   }

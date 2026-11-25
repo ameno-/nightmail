@@ -2,10 +2,10 @@ import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router'
 import { useApiMutation } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
-import { ApiError, type ImportPreview } from '../../data/types'
+import { ApiError, type ImportPreview, type RiskBreakdown } from '../../data/types'
 import { Alert, Button, Checkbox, DataTable, Dialog, Field, Input, Select, fieldError, MutationError } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { evidenceRequired, ListPicker, nameTitle, number } from './shared'
+import { evidenceRequired, ListPicker, nameTitle, number, riskBreakdown } from './shared'
 import { AddressText } from '../../components/AddressText'
 import { csvRows } from './csv'
 
@@ -33,8 +33,18 @@ const utf8Bytes = (value: string) => { let bytes = value.length; for (let i = 0;
 type Issue = ImportPreview['errors'][number]
 type Part = { csv: string; rows: number[]; skipped: Issue[] }
 /** What the parts' previews found together: their IDs in order, the valid rows, the first ten of them and of the errors. */
-type Review = { ids: string[]; total: number; rows: ImportPreview['rows']; errors: Issue[]; errorCount: number }
-type Imported = { imported: number; subscribed: number; errors: Issue[]; errorCount: number }
+type Review = { ids: string[]; total: number; rows: ImportPreview['rows']; errors: Issue[]; errorCount: number; risky: RiskBreakdown | null }
+type Imported = { imported: number; subscribed: number; errors: Issue[]; errorCount: number; risky: RiskBreakdown | null }
+// The parts' risky counts together (list hygiene): null while no part reported any.
+function addRisky(sum: RiskBreakdown | null, part: RiskBreakdown | null | undefined): RiskBreakdown | null {
+  if (!part) return sum
+  const byReason = { ...part.byReason }
+  if (sum) for (const reason of Object.keys(byReason) as (keyof typeof byReason)[]) byReason[reason] += sum.byReason[reason] ?? 0
+  return { total: (sum?.total ?? 0) + part.total, byReason }
+}
+// "3,412 risky addresses" and "3,100 disposable, 290 mistyped, 22 role". Nothing when there are none.
+const riskyCount = (risky: RiskBreakdown | null) => risky?.total ? `${number(risky.total)} risky ${risky.total === 1 ? 'address' : 'addresses'}` : null
+const riskySkipped = 'They’re imported, but campaigns skip them.'
 
 // The mapping the API gets and the file's parts. Full name from first and last name is one more column holding "first
 // last" (a contact without either keeps no name).
@@ -135,7 +145,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   const review = useApiMutation(async (api, input: { mapping: Record<string, string>; listId?: string }) => {
     const signal = abortRef.current?.signal ?? new AbortController().signal
     const { mapping: selected, parts } = importParts(source.current, input.mapping)
-    const found: Review = { ids: [], total: 0, rows: [], errors: [], errorCount: 0 }
+    const found: Review = { ids: [], total: 0, rows: [], errors: [], errorCount: 0, risky: null }
     const note = (issues: Issue[]) => { found.errorCount += issues.length; found.errors = firstIssues([...found.errors, ...issues]) }
     let done = 0
     for (const part of parts) {
@@ -144,7 +154,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
       if (!part.csv) continue
       const answer = await withImportRetry(() => api.imports.preview({ csv: part.csv, mapping: selected, ...(input.listId ? { listId: input.listId } : {}) }, signal), signal, setProgress)
       const fileRow = (row: number) => part.rows[row - 2] ?? row
-      found.ids.push(answer.id); found.total += answer.rows.length
+      found.ids.push(answer.id); found.total += answer.rows.length; found.risky = addRisky(found.risky, answer.risky)
       found.rows.push(...answer.rows.slice(0, 10 - found.rows.length).map(item => ({ ...item, row: fileRow(item.row) })))
       note(onePerRow(answer.errors).map(issue => ({ ...issue, row: fileRow(issue.row) })))
       if (done < rowCount) setProgress(`Checked ${number(done)} of ${number(rowCount)} rows`)
@@ -155,7 +165,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   // If another concurrent upload evicted an uncommitted preview past the 50-preview cap (404), re-preview that part on the fly.
   const commit = useApiMutation(async (api, input: { ids: string[]; mapping: Record<string, string>; listId?: string; evidence?: string }) => {
     const signal = abortRef.current?.signal ?? new AbortController().signal
-    let imported = 0, subscribed = 0
+    let imported = 0, subscribed = 0, risky: RiskBreakdown | null = null
     let fallbackParts: { mapping: Record<string, string>; csvs: string[] } | null = null
     const getPartCsv = (index: number) => {
       if (!fallbackParts) {
@@ -185,10 +195,10 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
         committed.current.set(index, answer)
         setStarted(true)
       }
-      imported += answer.imported; subscribed += answer.subscribed ?? 0
+      imported += answer.imported; subscribed += answer.subscribed ?? 0; risky = addRisky(risky, answer.risky)
       if (index + 1 < input.ids.length) setProgress(`Imported part ${index + 1} of ${input.ids.length}`)
     }
-    return { imported, subscribed }
+    return { imported, subscribed, risky }
   }, undefined, false, invalidate.audienceBulk)
   function resetPreview() { setPreview(null); setProgress(''); setStarted(false); committed.current.clear(); review.reset(); commit.reset() }
   async function readFile(file?: File) {
@@ -234,11 +244,13 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
   const visibleError = (cause: unknown) => cause instanceof DOMException && cause.name === 'AbortError' ? null : cause
   const error = fileError || visibleError(review.error) || visibleError(commit.error)
   const unknownHref = listId ? `/audience/lists/${listId}?status=unknown` : '/audience?status=unknown'
+  const riskyHref = listId ? `/audience/lists/${listId}?status=risky` : '/audience?status=risky'
   if (result) {
-    const imported = result.imported, subscribed = result.subscribed ?? 0
+    const imported = result.imported, subscribed = result.subscribed ?? 0, risky = riskyCount(result.risky)
     return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Import complete" footer={<>{!consent && imported > 0 && <Link className="ui-button ui-button--secondary ui-button--md" to={unknownHref} onClick={onClose}>Review unknown contacts</Link>}<Button variant="primary" onClick={onClose}>Done</Button></>}><div className="stack audience-result">
       <p>{plural(imported, 'contact')} imported{consent ? ` · ${number(subscribed)} marked subscribed${subscribed < imported ? ` · ${number(imported - subscribed)} kept their earlier consent` : ''}` : ''}.</p>
       {!consent && imported > 0 && <p>They can’t receive campaigns until they consent. Once they do, choose Review unknown contacts, then Mark as subscribed.</p>}
+      {risky && <p>{risky}: {riskBreakdown(result.risky!.byReason, number)}. {riskySkipped} <Link to={riskyHref} onClick={onClose}>Review them</Link></p>}
       {result.errorCount > 0 && <RejectedRows errors={result.errors} count={result.errorCount} skipped />}
     </div></Dialog>
   }
@@ -257,6 +269,7 @@ export function ImportContactsDialog({ listId: initialListId = '', onClose }: { 
         <div className="cluster audience-review-bar"><Button size="sm" disabled={busy} onClick={resetPreview}>Change mapping</Button></div>
         {preview.rows.length > 0 && <DataTable className="audience-import-preview" rows={preview.rows} rowKey={row => String(row.row)} columns={[{ key: 'row', label: 'Row', width: '16%', card: 'aside', render: row => row.row, cardRender: row => `Row ${row.row}` }, { key: 'email', label: 'Email', width: '50%', card: 'title', render: row => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span> }, { key: 'name', label: 'Full name', width: '34%', card: 'line', render: row => <span className="audience-cell-text" title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : '—'}</span> }]} />}
         {preview.errorCount > 0 && <RejectedRows errors={preview.errors} count={preview.errorCount} />}
+        {riskyCount(preview.risky) && <Alert tone="warning" title={riskyCount(preview.risky)}>{riskBreakdown(preview.risky!.byReason, number)}. {riskySkipped}</Alert>}
       </>}
       <div className="audience-consent">
         {/* The consequence is in the label; opt-outs and suppressions stay, and the result says how many kept their consent. */}

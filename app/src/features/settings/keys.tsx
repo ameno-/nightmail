@@ -48,6 +48,8 @@ const rowName = (row: Row) => row.kind === 'key' ? row.key.name : row.kind === '
 // Everything about an API key is edited on its secret, an expired one's expiry included.
 const editable = (row: Row): row is Extract<Row, { kind: 'key' }> => row.kind === 'key' && !keyLocked(row.key)
 const revokeLabel = (row: Row) => row.kind === 'key' ? 'Revoke key' : row.kind === 'agent' ? (row.agent.own ? 'Revoke agent' : 'Revoke its tokens') : row.kind === 'token' ? 'Revoke token' : 'Revoke password'
+// An agent's key says which agent it is for, where its name doesn't already (a key named before it did, or renamed).
+const agentClient = (key: ApiKey) => key.agent?.client && !key.name.startsWith(key.agent.client) ? `${key.agent.client} · ` : ''
 const expiry = (token: AgentTokenSummary) => tokenState(token) ?? `Expires ${shortDateTime(token.expiresAt)} UTC`
 
 export function ApiKeysPage() {
@@ -143,7 +145,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     return { first: access.addressIds ? <>Addresses: <AddressList values={access.addressIds.map(address)} /></> : 'Every address', second: mailLabel(access.mail) }
   }
   const name = (row: Row): { first: ReactNode; second: ReactNode } => {
-    if (row.kind === 'key') return { first: row.key.name, second: `Created ${date(row.key.createdAt)}${row.key.expiresAt && !row.key.revokedAt ? ` · ${past(row.key.expiresAt) ? 'ended' : 'ends'} ${date(row.key.expiresAt)}` : ''}` }
+    if (row.kind === 'key') return { first: row.key.name, second: `${agentClient(row.key)}Created ${date(row.key.createdAt)}${row.key.expiresAt && !row.key.revokedAt ? ` · ${past(row.key.expiresAt) ? 'ended' : 'ends'} ${date(row.key.expiresAt)}` : ''}` }
     if (row.kind === 'agent') return { first: connectionTitle(row.agent), second: row.agent.own ? row.agent.clientId : <PrivateAddress value={row.agent.userEmail} /> }
     if (row.kind === 'token') return { first: row.token.purpose, second: expiry(row.token) }
     return { first: row.password.name, second: `Created ${date(row.password.createdAt)}` }
@@ -167,7 +169,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // Everything a row shows, in full: the table and the phone's cards clip long names, scopes and address lists.
   const details = (row: Row): [string, ReactNode][] => {
     const { first, second } = access(row)
-    if (row.kind === 'key') return [['Type', typeName.key], ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ['Expires', row.key.expiresAt ? `${past(row.key.expiresAt) ? 'Ended ' : ''}${shortDateTime(row.key.expiresAt)} UTC` : 'Never'], ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.lastChange ? [['Last changed', <>{date(row.key.lastChange.at)} · <Who actor={row.key.lastChange.actor} /></>] as [string, ReactNode]] : []), ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
+    if (row.kind === 'key') return [['Type', typeName.key], ...(row.key.agent ? [['Client', row.key.agent.client ? <><bdi>{row.key.agent.client}</bdi><span className="muted"> · as the agent named itself</span></> : <span className="muted">The agent didn’t name itself</span>] as [string, ReactNode]] : []), ['Access', first], [row.key.access.type === 'workspace' ? 'Domains' : 'Mail', second], ['Key prefix', <code>{row.key.prefix}</code>], ['Created', date(row.key.createdAt)], ['Expires', row.key.expiresAt ? `${past(row.key.expiresAt) ? 'Ended ' : ''}${shortDateTime(row.key.expiresAt)} UTC` : 'Never'], ['Last used', lastUsed(row.key.lastUsedAt)], ...(row.key.lastChange ? [['Last changed', <>{date(row.key.lastChange.at)} · <Who actor={row.key.lastChange.actor} /></>] as [string, ReactNode]] : []), ...(row.key.approval ? [['Agent approval', tiedTo(row.key.approval)] as [string, ReactNode]] : []), ...(row.key.revokedAt ? [['Revoked', date(row.key.revokedAt)] as [string, ReactNode]] : [])]
     if (row.kind === 'agent') return [['Type', typeName.agent], ['Access', first], ['Client', row.agent.clientId], ['Account', row.agent.own ? 'You' : <PrivateAddress value={row.agent.userEmail} />], ['Signed in', date(row.agent.createdAt)], ['Last used', lastUsed(row.agent.lastUsedAt)], ['Status', agentState(row.agent) ?? 'Active']]
     if (row.kind === 'token') return [['Type', typeName.token], ['Access', first], ['Domains', second], ['Expires', tokenState(row.token) ?? `${shortDateTime(row.token.expiresAt)} UTC`], ['Last used', lastUsed(row.token.lastUsedAt)]]
     return [['Type', typeName.app], ['Access', first], ['Inbox', second], ['Created', date(row.password.createdAt)]]
@@ -179,7 +181,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
-        {!listFailed && <DataTable className="keys-table keys-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
+        {!listFailed && <DataTable className="keys-table ui-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
           columns={[
             { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
             ...(type === 'all' ? [{ ...typeColumn, render: (row: Row) => typeName[row.kind] }] : []),

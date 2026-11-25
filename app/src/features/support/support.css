@@ -149,7 +149,7 @@ html:has(.support-overlay[data-open]) { overflow: hidden; }
    writes and the box is empty, Send turns into Stop. */
 .support-composer { position: relative; flex: none; padding: var(--space-4) var(--space-12) var(--space-12); }
 /* The box is a solid control fill a step off the panel: a stronger step on hover and while typing, never an outline. */
-.support-composer__box { display: flex; align-items: flex-end; gap: var(--space-8); padding: 4px 4px 4px 12px; border-radius: var(--radius-sm); background: var(--color-overlay-control, var(--color-control, var(--color-surface))); transition: background-color var(--motion-duration) var(--ease-standard); }
+.support-composer__box { display: flex; align-items: flex-end; gap: var(--space-8); padding: 4px 4px 4px 10px; border-radius: var(--radius-sm); background: var(--color-overlay-control, var(--color-control, var(--color-surface))); transition: background-color var(--motion-duration) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .support-composer__box:hover:not(:focus-within):not([data-disabled]) { background: var(--color-overlay-control-hover, var(--color-control-hover, var(--color-layer-2))); } }
 .support-composer__box:focus-within { background: var(--color-overlay-control-focus, var(--color-control-focus, var(--color-layer-2))); }
 .support-composer__box[data-disabled] { background: var(--color-well, var(--color-layer-2)); }

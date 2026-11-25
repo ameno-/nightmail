@@ -57,11 +57,12 @@ export function postgresConnection(connectionString: string | undefined) {
 export function nodeLogFacetLane(runtime:Runtime, connectionString:string|undefined) {
   let pool:Pool|undefined, worker:Runtime|undefined, stopping=false, closed:Promise<void>|undefined;
   const inflight=new Map<string,Promise<void>>(), again=new Set<string>();
+  const aggregates=new Map<string,Promise<void>>(), repeatAggregate=new Set<string>();
   const get=()=>{
     if(!worker) {
       pool=new Pool({...postgresConnection(connectionString),max:5,idleTimeoutMillis:30000,application_name:'logs-facet-background'});
       pool.on('error',()=>log('warn',{code:'LOG_FACET_POOL_ERROR'}));
-      worker={...runtime,db:drizzle(pool),startLogFacetFold:undefined};
+      worker={...runtime,db:drizzle(pool),startLogFacetFold:undefined,startLogFacetAggregate:undefined};
     }
     return worker;
   };
@@ -77,7 +78,22 @@ export function nodeLogFacetLane(runtime:Runtime, connectionString:string|undefi
       });
     inflight.set(slot,work);
   };
-  return {get,nudge,close:()=>{stopping=true;return closed??=(async()=>{await Promise.all(inflight.values());await pool?.end();})();}};
+  const aggregate=(workspace:string)=>{
+    if(stopping)return;
+    if(aggregates.has(workspace)){repeatAggregate.add(workspace);return;}
+    // The durable demand and runner survive a missed local hint; don't build an unbounded queue
+    // of promises or connections when many hosted dashboards navigate at once.
+    if(aggregates.size>=2)return;
+    const independent=get();
+    const work=import('../log-facet-aggregate-worker.js').then(async m=>{await m.runFacetAggregateTurn(independent.db,workspace);})
+      .catch(()=>log('warn',{code:'LOG_FACET_AGGREGATE_FAILED',workspaceId:workspace})).finally(()=>{
+        aggregates.delete(workspace);if(repeatAggregate.delete(workspace))aggregate(workspace);
+      });
+    aggregates.set(workspace,work);
+  };
+  return {get,nudge,aggregate,close:()=>{stopping=true;return closed??=(async()=>{
+    await Promise.all([...inflight.values(),...aggregates.values()]);await pool?.end();
+  })();}};
 }
 export function nodeRuntime(env: Record<string, string | undefined>): { runtime: Runtime; close: () => Promise<void> } {
   const pool = new Pool({ ...postgresConnection(env.DATABASE_URL), max: 10, idleTimeoutMillis: 30000 });

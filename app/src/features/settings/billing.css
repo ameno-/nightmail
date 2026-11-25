@@ -1,21 +1,51 @@
-/* Settings → Billing: the balance in large tabular figures with Add credit beside it, then rows like every settings row
-   (this month's usage, the free allowance, the card, auto-recharge) and the history table. Every block has a fixed
-   height, so values arriving never move what is below them. */
-/* The balance is the page's one solid block, above the plain rows, its figures centred in the block's fixed height. Its
-   only control is the primary Add credit, so no filled control sits on its fill. */
-.billing-balance { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-rows: 20px 44px; align-content: center; gap: var(--space-4) var(--space-16); height: 84px; margin-bottom: var(--space-8); padding-inline: var(--space-16); border-radius: var(--radius-sm); background: var(--color-layer-1); }
-.billing-balance__add { grid-area: 1 / 2 / -1 / 3; align-self: center; }
-/* This month: the counts, then what they cost. On a phone the cost sits over the counts, both at the right edge. It
-   fills the control, so its box is the same while the figures load and after. */
-.billing-month { display: flex; flex: 1; align-items: baseline; justify-content: flex-end; gap: var(--space-16); min-width: 0; }
-.billing-balance__label { display: flex; align-items: center; gap: var(--space-8); }
-.billing-balance__amount { display: flex; align-items: center; font-family: var(--font-mono); font-size: 36px; line-height: 44px; font-weight: 600; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
-/* The balance opens its details: the figure is the button, with a chevron that nudges on hover. */
-button.billing-balance__amount { justify-self: start; gap: var(--space-4); padding: 0; border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); cursor: pointer; }
-button.billing-balance__amount > svg { flex: none; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong), color var(--motion-duration); }
-@media (hover: hover) and (pointer: fine) { button.billing-balance__amount:hover > svg { color: var(--color-text); transform: translateX(2px); } }
-button.billing-balance__amount:focus-visible > svg { color: var(--color-text); }
-.billing-balance__amount--plan { font-family: var(--font-body); font-size: 30px; font-weight: var(--font-weight-bold); letter-spacing: -.01em; }
+/* Settings → Billing, read top down at the settings width (hosted.css): the summary (the page's one surface),
+   auto-recharge, this month's usage and the history. Every block has a fixed height, so values arriving never move what
+   is below them. */
+.billing { display: flex; flex-direction: column; gap: var(--space-24); }
+
+/* The summary: the plan and its state, one sentence, then three facts in columns: a muted label, the value one line
+   tall (figures in mono), a muted note. Add credit is its only filled control. */
+.billing-summary { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-20) var(--space-24); border-radius: var(--radius-lg); background: var(--color-card); }
+.billing-summary__head { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--control-height); }
+.billing-summary__plan { display: flex; align-items: center; gap: var(--space-12); min-width: 0; font-size: var(--text-lg); line-height: var(--leading-lg); font-weight: var(--font-weight-semibold); }
+.billing-summary__plan > span:first-child { white-space: nowrap; }
+.billing-summary__state { display: flex; min-width: 0; }
+.billing-summary__lead { margin: 0; color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.billing-summary__facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-16) var(--space-24); margin: var(--space-16) 0 0; }
+.billing-summary__facts > div { display: flex; flex-direction: column; min-width: 0; }
+.billing-summary__facts dt { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.billing-summary__facts dd { margin: 0; min-width: 0; }
+.billing-summary__facts .billing-summary__value { display: flex; align-items: center; height: max(var(--leading-xl), var(--control-height-sm)); margin-block: var(--space-4); font-size: var(--text-lg); line-height: var(--leading-xl); white-space: nowrap; }
+.billing-summary__value[data-money] { font-family: var(--font-mono); font-size: var(--text-xl); font-weight: var(--font-weight-semibold); font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.billing-summary__note { height: var(--leading-xs); overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-overflow: ellipsis; white-space: nowrap; }
+/* The balance is a button that opens its parts, with a chevron that nudges on hover. */
+.billing-summary__balance { position: relative; display: inline-flex; align-items: center; gap: var(--space-4); padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; letter-spacing: inherit; cursor: pointer; }
+.billing-summary__balance > svg { flex: none; color: var(--color-muted); transition: transform 160ms var(--ease-out-strong), color var(--motion-duration); }
+@media (hover: hover) and (pointer: fine) { .billing-summary__balance:hover > svg { color: var(--color-text); transform: translateX(2px); } }
+.billing-summary__balance:focus-visible > svg { color: var(--color-text); }
+.billing-summary__card { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.billing-summary__card > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.billing-summary__add-card.ui-button { margin-inline-start: calc(-1 * var(--button-pad-x)); }
+
+/* This month's usage: one row per meter, the label and its price in the settings rows' 200px label column, the count
+   and how it stands against the allowance over the bar beside it, the cost on the right; the total under them. Without charging the costs are
+   muted: they are what the usage would cost. */
+.billing-usage { display: flex; flex-direction: column; }
+.billing-meter { display: grid; grid-template-columns: 200px minmax(0, 1fr) 96px; grid-template-areas: "label figures cost" "terms bar cost"; grid-template-rows: var(--leading-md) var(--leading-xs); align-items: center; gap: var(--space-6) var(--space-16); padding-block: var(--space-12); }
+.billing-meter__label { grid-area: label; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.billing-meter__terms { grid-area: terms; min-width: 0; overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); text-overflow: ellipsis; white-space: nowrap; }
+/* The count and the cost are one line tall whether they hold a skeleton or a figure, so the figure arriving moves nothing. */
+.billing-meter__figures { grid-area: figures; display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); height: var(--leading-md); min-width: 0; font-size: var(--text-xs); white-space: nowrap; }
+.billing-meter__figures > :last-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.billing-meter__figures b { font-family: var(--font-mono); font-size: var(--text-md); font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; }
+.billing-meter__bar.ui-meter { grid-area: bar; height: 4px; border-radius: 2px; }
+.billing-meter__bar.ui-meter > i { border-radius: inherit; }
+.billing-meter__bar.ui-meter > b { top: -2px; }
+/* A cost fills its column, right-aligned, so a figure narrower than its skeleton keeps its box. */
+.billing-meter__cost, .billing-usage__cost { grid-area: cost; display: flex; align-items: center; justify-content: flex-end; width: 96px; height: var(--leading-md); font-family: var(--font-mono); font-size: var(--text-md); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.billing-usage:not([data-charged]) :is(.billing-meter__cost, .billing-usage__cost) { color: var(--color-muted); }
+.billing-usage__total { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); height: var(--row-height); }
+.billing-usage__total > :first-child { font-weight: var(--font-weight-medium); }
 /* The free allowance's meters, and the daily limit's row while there is one: it opens its steps, a short numbered ladder. */
 .usage-meter { display: inline-flex; align-items: center; gap: var(--space-12); }
 .usage-meter__count { min-width: 13ch; text-align: right; }
@@ -43,15 +73,15 @@ button.billing-balance__amount:focus-visible > svg { color: var(--color-text); }
 .usage-steps__body .muted { font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
 .usage-steps__badge { margin-left: var(--space-8); padding: 0; border-radius: 0; background: none; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .billing-section { display: flex; flex-direction: column; gap: var(--space-12); }
+.billing-section > .ui-section-header { margin-bottom: 0; }
 .billing-slot { display: inline-flex; vertical-align: middle; }
 
 /* A dollar input: the sign sits in the field's padding, so typing never shifts it. */
 .billing-dollars { position: relative; display: inline-flex; align-items: center; width: 112px; }
-.billing-dollars > span { position: absolute; left: var(--space-8); color: var(--color-muted); pointer-events: none; }
-.billing-dollars .ui-input { padding-left: 20px; text-align: right; font-variant-numeric: tabular-nums; }
+.billing-dollars > span { position: absolute; left: 10px; color: var(--color-muted); pointer-events: none; }
+.billing-dollars .ui-input { padding-left: 22px; text-align: right; font-variant-numeric: tabular-nums; }
 /* Two tabs never scroll, so the focus ring isn't clipped by the tab list's overflow. */
 .billing-section .ui-tabs { overflow: visible; }
-.billing-section > .ui-section-header { margin-bottom: calc(-1 * var(--space-4)); }
 .billing-recharge { justify-content: flex-end; gap: var(--space-12); }
 .billing-recharge__amounts { font-variant-numeric: tabular-nums; }
 
@@ -106,20 +136,23 @@ button.billing-balance__amount:focus-visible > svg { color: var(--color-text); }
   /* Values sit in a fixed column one control tall, so a skeleton and the value it becomes share one box; the label takes
      the rest and wraps, so no title or range is cut off. Rows with a field keep a narrow column. */
   .billing-rows .settings-row { grid-template-columns: minmax(0, 1fr) 208px; }
-  /* Two lines whatever has loaded, so the row is one height from its skeleton on. */
-  .billing-month { flex-direction: column-reverse; align-items: flex-end; justify-content: center; gap: 0; height: 44px; line-height: 22px; }
-  .billing-rows .settings-row__control:has(.billing-month) { height: 44px; }
   .usage-meter__track { width: 48px; }
   .billing-rows .settings-row:has(.billing-dollars) { grid-template-columns: minmax(0, 1fr) 112px; min-height: 60px; }
   .billing-recharge { gap: var(--space-8); }
   .billing-rows .settings-row__label > span { overflow: visible; white-space: normal; text-wrap: pretty; }
   .billing-rows .settings-row__control { justify-self: stretch; height: var(--control-height); }
-  .billing-balance__amount { font-size: 32px; }
+  /* The summary's facts two to a row (an odd last one takes the row); a meter's label and cost share a line over its
+     count, its bar and its price. */
+  .billing-summary { padding: var(--space-16); }
+  /* The state has a line of its own under the plan, kept while it waits on the summary (a low balance), so the word
+     arriving never rewraps the heading beside Add credit. */
+  .billing-summary__plan { flex-direction: column; align-items: flex-start; gap: 0; }
+  .billing-summary__state { min-height: 20px; } /* a status badge's height (ui.css .ui-status) */
+  .billing-summary__facts { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
+  .billing-summary__facts > div:last-child:nth-child(odd) { grid-column: 1 / -1; }
+  .billing-meter { grid-template-columns: minmax(0, 1fr) 96px; grid-template-areas: "label cost" "figures figures" "bar bar" "terms terms"; grid-template-rows: var(--leading-md) var(--leading-md) 8px var(--leading-xs); column-gap: var(--space-12); }
   .billing-dollars { width: 104px; }
   .billing-choice { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
-@media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, button.billing-balance__amount > svg, .usage-limit__title > svg { transition: none; } }
-@media (pointer: coarse), (max-width: 899px) {
-  .billing-rows .settings-score { position: relative; }
-  .billing-rows .settings-score::before { content: ''; position: absolute; inset: -12px -8px; }
-}
+@media (prefers-reduced-motion: reduce) { .billing-choice__item, .billing-method, .billing-summary__balance > svg, .usage-limit__title > svg { transition: none; } }
+@media (pointer: coarse), (max-width: 899px) { .billing-summary__balance::after { content: ''; position: absolute; inset: -8px -8px; } }

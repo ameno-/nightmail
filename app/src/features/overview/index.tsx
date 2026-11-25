@@ -1,7 +1,7 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useRegion, useWorkspaceAccess , useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
@@ -20,7 +20,10 @@ import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { setPanelHidden } from './panel'
 import { DomainSetupAlert } from '../settings/domain-setup-alert'
-import { NO_DOMAIN_SPACE, NoDomainCard, useNoDomainCard } from './no-domain'
+import { ONBOARDING_CARD_SPACE, OnboardingCard, cardActions, useOnboardingCard } from './onboarding-card'
+import { leadFocus } from '../../data/focus'
+import { useQueryClient } from '@tanstack/react-query'
+import { resourceOf } from '../../data/invalidation'
 
 // Overview: is sending healthy? An edge-to-edge console: a 44px control strip (the title, then the range, stream and
 // panel toggle), one hairline-divided strip of four figures across the page, each a link to that mail in Logs; then
@@ -58,12 +61,17 @@ export function OverviewPage() {
   const setup = useSetupSteps()
   const detail = useDetail(setup, Boolean(recent.data || recent.isError))
   const held = stacked && setup.loading
-  const noDomain = useNoDomainCard(setup.hasDomain)
-  // The card leads with Add domain, so the setup steps' own domain step doesn't offer it again beside it.
-  const rail = noDomain ? withoutDomainAction(setup) : setup
+  const card = useOnboardingCard(setup)
+  const client = useQueryClient()
+  // A test from the first-send card shows in Latest emails and the figures; the card keeps its confirmation for this visit.
+  const sentFromCard = () => void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
+  // The card leads with its own actions, so the setup steps don't offer them again beside it (the key stays there: the
+  // first-send card copies the agent prompt instead).
+  const lead = leadFocus(useSession()?.identity)
+  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : cardActions[lead]) : setup
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
-  const count = useLatestRowCount(noDomain ? NO_DOMAIN_SPACE : 0)
+  const count = useLatestRowCount(card ? ONBOARDING_CARD_SPACE[card] : 0)
   // A stream picked in the header scopes Latest emails too: its sent mail (received mail has no stream).
   const latestParams = latestRequest(regionId, stream)
   const latest = useApiDef(queries.logs(latestParams), { interval: 60_000, keepPrevious: sameRegion(regionId) })
@@ -76,7 +84,7 @@ export function OverviewPage() {
   const failed = query.isError && !data
   return <div className="ov-page">
     <PageHeader className="ov-strip" title="Overview" actions={<>{controls}<PanelToggle /></>} />
-    {noDomain && <div className="ov-lead"><NoDomainCard /></div>}
+    {card && (card === 'no-domain' || !held) && <div className="ov-lead"><OnboardingCard kind={card} domain={setup.verifiedDomain} onSent={sentFromCard} progress={setup.progress} /></div>}
     {stacked && setup.stuck && <div className="ov-lead"><DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} /></div>}
     {stacked && rail.steps && <div className="ov-lead"><SetupRail steps={rail.steps} current={rail.current} open={rail.open} /></div>}
     {stacked && setup.error ? <div className="ov-lead"><ErrorState error={setup.error} onRetry={setup.retry} /></div> : null}
@@ -99,9 +107,9 @@ export function OverviewPage() {
   </div>
 }
 
-function withoutDomainAction(setup: ReturnType<typeof useSetupSteps>) {
+function withoutActions(setup: ReturnType<typeof useSetupSteps>, keys: string[]) {
   if (!setup.steps) return setup
-  const same = new Map(setup.steps.map(step => [step, step.key === 'domain' ? { ...step, action: undefined } : step]))
+  const same = new Map(setup.steps.map(step => [step, keys.includes(step.key) ? { ...step, action: undefined } : step]))
   return { ...setup, steps: setup.steps.map(step => same.get(step)!), current: setup.current && same.get(setup.current), open: setup.open?.map(step => same.get(step)!) }
 }
 
@@ -183,9 +191,16 @@ function Gauge({ rate, limit, label }: { rate: number; limit: number; label: str
   const lit = rate > 0 ? Math.min(20, Math.max(1, Math.ceil(rate / limit * 20))) : 0
   return <span className="ov-gauge" data-zone={zone(rate, limit)} role="meter" aria-label={label} aria-valuemin={0} aria-valuemax={limit} aria-valuenow={rate} aria-valuetext={`${rateText(rate)} of a ${limitText(limit)} limit`}>{Array.from({ length: 20 }, (_, i) => <i key={i} data-on={i < lit || undefined} />)}</span>
 }
+// Group granular buckets (144–180 points) into up to 24 crisp bars for the KPI mini-sparkbars.
+function downsample(values: number[], bars = 24) {
+  if (values.length <= bars) return values
+  const out = new Array<number>(bars).fill(0)
+  for (let i = 0; i < values.length; i++) out[Math.min(bars - 1, Math.floor(i * bars / values.length))] += values[i]
+  return out
+}
 // SVG, so a range with another count of buckets redraws the columns instead of moving boxes.
-function Columns({ values: target, tone }: { values: number[]; tone: 'sent' | 'delivered' }) {
-  const values = useMorph(target, swap)
+function Columns({ values: raw, tone }: { values: number[]; tone: 'sent' | 'delivered' }) {
+  const values = useMorph(downsample(raw), swap)
   const max = Math.max(1, ...values), slot = 100 / Math.max(1, values.length)
   return <svg className={`ov-columns ov-columns--${tone}`} viewBox="0 0 100 26" preserveAspectRatio="none" shapeRendering="crispEdges" aria-hidden="true">
     {values.map((value, i) => { const h = value > 0 ? Math.max(5, value / max * 26) : 0; return h > 0 && <rect key={i} x={i * slot} width={slot * .78} y={26 - h} height={h} /> })}
@@ -245,44 +260,93 @@ function ReputationSummary({ report, regionId }: { report: SesDiscovery | undefi
   </Link>
 }
 
-// Three whole-number steps so every gridline label is a distinct integer.
-function niceMax(value: number) { const raw = Math.max(1, value) / 3, base = 10 ** Math.floor(Math.log10(raw)), step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => m * base).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw); return step * 3 }
-const HOUR = 3_600_000, DAY = 86_400_000
-const bucketOf = (points: ChartPoint[]) => points.length > 1 ? Date.parse(points[1].at) - Date.parse(points[0].at) : HOUR
-const clock = (at: string) => date(at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
-const day = (at: string) => date(at, { month: 'short', day: 'numeric', timeZone: 'UTC' })
-const bucketLabel = (points: ChartPoint[], i: number) => bucketOf(points) >= DAY ? day(points[i].at) : `${day(points[i].at)}, ${clock(points[i].at)} UTC`
-// Time ticks on whole steps (3 h, 6 h, a day…) at least minGap apart; midnight is labelled with its date.
-function ticks(points: ChartPoint[], plotWidth: number, minGap: number) {
-  if (points.length < 2) return points.length ? [0] : []
-  const bucket = bucketOf(points), slot = plotWidth / points.length
-  const steps = bucket >= DAY ? [1, 2, 3, 5, 7, 10, 15].map(d => d * DAY) : [1, 2, 3, 4, 6, 12, 24, 48].map(h => h * HOUR)
-  const step = steps.find(s => s / bucket * slot >= minGap) ?? steps[steps.length - 1]
-  return points.flatMap((point, i) => Date.parse(point.at) % step === 0 ? [i] : [])
+// Three whole-number steps with ~10% headroom so peaks breathe cleanly below the top gridline.
+// Light 3-bucket centered smoothing [0.25, 0.5, 0.25] for display only (tooltip always reads raw bucket counts).
+function smoothSeries(values: number[]) {
+  if (values.length < 4) return values
+  return values.map((v, i) => i === 0 ? 0.75 * v + 0.25 * values[1] : i === values.length - 1 ? 0.25 * values[i - 1] + 0.75 * v : 0.25 * values[i - 1] + 0.5 * v + 0.25 * values[i + 1])
 }
-const tickLabel = (points: ChartPoint[], i: number) => bucketOf(points) >= DAY || Date.parse(points[i].at) % DAY === 0 ? day(points[i].at) : clock(points[i].at)
-// Monotone cubic segments through the points (one "C" command per gap): the curve passes through every value without
-// overshooting a peak or dipping under zero, and a flat run stays flat.
-function monotone(xs: number[], ys: number[]) {
-  const slopes = ys.slice(1).map((y, i) => (y - ys[i]) / (xs[i + 1] - xs[i]))
-  const tangents = ys.map((_, i) => i === 0 ? slopes[0] ?? 0 : i === ys.length - 1 ? slopes[i - 1] : slopes[i - 1] * slopes[i] <= 0 ? 0 : 2 * slopes[i - 1] * slopes[i] / (slopes[i - 1] + slopes[i]))
-  return slopes.map((_, i) => { const third = (xs[i + 1] - xs[i]) / 3; return `C ${xs[i] + third} ${ys[i] + tangents[i] * third} ${xs[i + 1] - third} ${ys[i + 1] - tangents[i + 1] * third} ${xs[i + 1]} ${ys[i + 1]}` })
+function niceMax(value: number) {
+  const padded = Math.max(1, value) * 1.1
+  const raw = padded / 3, base = 10 ** Math.floor(Math.log10(raw))
+  const step = [1, 1.2, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map(m => Math.round(m * base * 1e6) / 1e6).find(m => m >= raw && Number.isInteger(m)) ?? Math.ceil(raw)
+  return step * 3
+}
+const axisNumber = (value: number, compact: boolean) => {
+  const v = Math.round(value)
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(v % 1_000_000 === 0 ? 0 : 1)}M`
+  if (v >= (compact ? 1_000 : 10_000)) return `${(v / 1_000).toFixed(v % 1_000 === 0 ? 0 : 1)}k`
+  return number(v)
+}
+const HOUR = 3_600_000, DAY = 86_400_000
+const bucketOf = (points: ChartPoint[]) => points.length > 1 ? Math.max(60_000, Date.parse(points[1].at) - Date.parse(points[0].at)) : HOUR
+const clock = (at: string | number) => date(typeof at === 'number' ? new Date(at).toISOString() : at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
+const day = (at: string | number) => date(typeof at === 'number' ? new Date(at).toISOString() : at, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+function bucketLabel(points: ChartPoint[], i: number, domainStart: number, domainEnd: number) {
+  const step = bucketOf(points), start = Math.max(domainStart, Date.parse(points[i].at)), end = Math.min(domainEnd, Date.parse(points[i].at) + step)
+  if (step >= DAY) return day(start)
+  return `${day(start)}, ${clock(start)}–${clock(end)} UTC`
+}
+// Time ticks on round UTC boundaries across the exact [domainStart, domainEnd] domain, plus "Now" at the right edge
+// when the final round tick leaves room.
+function domainTicks(domainStart: number, domainEnd: number, left: number, right: number, minGap: number) {
+  const span = Math.max(1, domainEnd - domainStart), plotWidth = Math.max(1, right - left)
+  const steps = span <= 2 * DAY ? [1, 2, 3, 4, 6, 12].map(h => h * HOUR)
+    : span <= 10 * DAY ? [12 * HOUR, DAY, 2 * DAY, 3 * DAY]
+    : [2, 3, 5, 7, 10].map(d => d * DAY)
+  const step = steps.find(s => (s / span) * plotWidth >= minGap) ?? steps[steps.length - 1]
+  const xOf = (ms: number) => left + ((ms - domainStart) / span) * plotWidth
+  const out: { key: string; x: number; text: string; anchor: 'start' | 'middle' | 'end' }[] = []
+  const first = Math.ceil(domainStart / step) * step
+  for (let ms = first; ms <= domainEnd; ms += step) {
+    const x = xOf(ms)
+    const text = step >= DAY || ms % DAY === 0 ? day(ms) : clock(ms)
+    const anchor = x - left < 24 ? 'start' : right - x < 24 ? 'end' : 'middle'
+    out.push({ key: String(ms), x, text, anchor })
+  }
+  const firstTick = out[0]
+  if (!firstTick || firstTick.x - left >= 52) {
+    out.unshift({ key: 'start', x: left, text: span <= 2 * DAY ? clock(domainStart) : day(domainStart), anchor: 'start' })
+  }
+  const last = out.at(-1)
+  if (!last || right - last.x >= 44) out.push({ key: 'now', x: right, text: 'Now', anchor: 'end' })
+  return out
+}
+// Fritsch–Carlson monotone cubic interpolation: clamping (alpha, beta) to alpha^2 + beta^2 <= 9 guarantees the curve
+// passes through every point with zero overshoot above peaks and zero dip below the baseline.
+function monotone(xs: number[], ys: number[], minY: number, maxY: number) {
+  const m = ys.length - 1
+  if (m <= 0) return []
+  const dx = Array.from({ length: m }, (_, i) => Math.max(1e-6, xs[i + 1] - xs[i]))
+  const slopes = Array.from({ length: m }, (_, i) => (ys[i + 1] - ys[i]) / dx[i])
+  const tangents = ys.map((_, i) => i === 0 ? slopes[0] : i === m ? slopes[m - 1]
+    : slopes[i - 1] * slopes[i] <= 0 ? 0 : 2 * slopes[i - 1] * slopes[i] / (slopes[i - 1] + slopes[i]))
+  for (let i = 0; i < m; i++) {
+    const s = slopes[i]
+    if (s === 0) { tangents[i] = 0; tangents[i + 1] = 0; continue }
+    const a = tangents[i] / s, b = tangents[i + 1] / s, mag = Math.hypot(a, b)
+    if (mag > 3) { const k = 3 / mag; tangents[i] = k * a * s; tangents[i + 1] = k * b * s }
+  }
+  const clamp = (y: number) => Math.max(minY, Math.min(maxY, y))
+  return slopes.map((_, i) => {
+    const third = dx[i] / 3
+    return `C ${(xs[i] + third).toFixed(2)} ${clamp(ys[i] + tangents[i] * third).toFixed(2)} ${(xs[i + 1] - third).toFixed(2)} ${clamp(ys[i + 1] - tangents[i + 1] * third).toFixed(2)} ${xs[i + 1].toFixed(2)} ${ys[i + 1].toFixed(2)}`
+  })
 }
 // keep(i) drops the segment from point i to i + 1: the complaints line only rises where there is one, and never runs
 // along the baseline in red between them.
-function Line({ xs, ys, tone, keep = () => true }: { xs: number[]; ys: number[]; tone: 'sent' | 'bounces' | 'complaints'; keep?: (i: number) => boolean }) {
+function Line({ xs, ys, minY, maxY, tone, keep = () => true }: { xs: number[]; ys: number[]; minY: number; maxY: number; tone: 'sent' | 'bounces' | 'complaints'; keep?: (i: number) => boolean }) {
   let path = '', end = -1
-  monotone(xs, ys).forEach((segment, i) => { if (!keep(i)) return; if (end !== i) path += `M ${xs[i]} ${ys[i]} `; path += segment + ' '; end = i + 1 })
+  monotone(xs, ys, minY, maxY).forEach((segment, i) => { if (!keep(i)) return; if (end !== i) path += `M ${xs[i].toFixed(2)} ${ys[i].toFixed(2)} `; path += segment + ' '; end = i + 1 })
   return path ? <path d={path} className={`ov-line ov-line--${tone}`} /> : null
 }
-// The activity chart: emails as a navy line over a flat wash on the left scale; bounces and complaints as counts on a
-// small scale of their own in the lower half of the plot, so a handful of bounces still has a shape. Their latest values
-// label the lines' ends; while a bucket is hovered (or tapped and dragged on a phone) that scale shows as a short right
-// axis instead, and one readout follows the crosshair. An hour over the bounce limit, or with any complaint, has a dot
-// on its line. The window's first and last buckets are only partly counted (it starts and ends mid-hour), so the lines
-// leave them out rather than dip; they stay in the figures and the readout. New counts over the same buckets morph.
+// The activity chart: spans the exact [periodStart, periodEnd] window end to end (left edge to right edge "Now"), with
+// missing buckets zero-filled so there are no gaps or cutoffs. Emails draw as a smooth monotone line with a subtle wash
+// scaled strictly to visible data; bounces and complaints appear as count-scaled baseline markers only in buckets where
+// they are > 0, and a hover crosshair + readout inspect exact raw bucket counts. New counts over the same buckets morph.
 function ActivityChart({ data }: { data: Overview }) {
   const target = data.points
+  const washId = useId()
   const [active, setActive] = useState<number | null>(null)
   // The buckets are one tab stop (the last one focused, else the newest); the arrow keys, Home and End step between them.
   const [stop, setStop] = useState<number | null>(null)
@@ -297,54 +361,72 @@ function ActivityChart({ data }: { data: Overview }) {
     return () => observer.disconnect()
   }, [])
   const n = target.length
-  const shown = useMorph([...target.map(p => p.sent), ...target.map(p => p.bounced), ...target.map(p => p.complaints), niceMax(Math.max(...target.map(p => p.sent))), niceMax(Math.max(3, ...target.map(p => Math.max(p.bounced, p.complaints))))], swap)
+  const step = bucketOf(target)
+  const rawSent = target.map(p => p.sent)
+  // Smooth 10-minute buckets (24h) lightly for display only; keep 1h/4h spikes exact and tooltip always raw.
+  const plotSent = step < HOUR ? smoothSeries(rawSent) : rawSent
+  const visibleSentMax = Math.max(0, ...plotSent)
+  const shown = useMorph([...plotSent, niceMax(visibleSentMax)], swap)
   if (!n) return <EmptyState title="No activity" />
-  const sent = shown.slice(0, n), bounced = shown.slice(n, 2 * n), complaints = shown.slice(2 * n, 3 * n), max = shown[3 * n], outcomeMax = shown[3 * n + 1]
-  const compact = width < 520, height = 135, top = 10, bottom = height - 22, left = compact ? 36 : 44, right = width - (compact ? 30 : 44)
-  const slot = (right - left) / n, xs = target.map((_, i) => left + (i + 0.5) * slot)
-  const ey = (value: number) => bottom - value / max * (bottom - top)
-  const band = (bottom - top) * .55, oy = (value: number) => bottom - value / outcomeMax * band
-  const firstPartial = n > 3 && Date.parse(data.periodStart) > Date.parse(target[0].at)
-  const lastPartial = n > 3 && Date.parse(data.periodEnd) < Date.parse(target[n - 1].at) + bucketOf(target)
-  const from = firstPartial ? 1 : 0, to = lastPartial ? n - 2 : n - 1, drawn = (i: number) => i >= from && i <= to
-  const span = (values: readonly number[]) => values.slice(from, to + 1)
-  const emailsY = sent.map(ey), bounceY = bounced.map(oy), complaintY = complaints.map(oy)
-  const marked = target.map((p, i) => ({ bounces: drawn(i) && hourRate(p.bounced, p.sent) >= BOUNCE_LINE, complaints: drawn(i) && p.complaints > 0 }))
-  // The end labels, kept 12px apart (thousands as 2.8k where a phone's gutter is narrow).
-  const endText = (value: number) => compact && value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : number(value)
-  const ends = ([['sent', emailsY[to], target[to].sent], ['bounces', bounceY[to], target[to].bounced], ['complaints', complaintY[to], target[to].complaints]] as const)
-    .map(([tone, y, value]) => ({ tone, y, text: endText(value) })).sort((a, b) => a.y - b.y)
-  for (let i = ends.length - 2; i >= 0; i--) ends[i].y = Math.min(ends[i].y, ends[i + 1].y - 12)
+  const sent = shown.slice(0, n), max = Math.max(1, shown[n])
+  const compact = width < 520, height = 135, top = 10, bottom = height - 22, left = compact ? 38 : 48, right = width - (compact ? 26 : 36)
+  const domainStart = Date.parse(data.periodStart), domainEnd = Math.max(domainStart + 1, Date.parse(data.periodEnd))
+  const spanMs = domainEnd - domainStart, plotWidth = Math.max(1, right - left)
+  const xOf = (ms: number) => left + ((ms - domainStart) / spanMs) * plotWidth
+  // Anchor first bucket to left edge (periodStart) and latest bucket to right edge (now); interior buckets sit at their
+  // exact proportional bucket center so round clock ticks align mathematically with the series.
+  const xs = n === 1 ? [right] : target.map((p, i) => i === 0 ? left : i === n - 1 ? right : Math.max(left + 0.01, Math.min(right - 0.01, xOf(Date.parse(p.at) + step / 2))))
+  const ey = (value: number) => bottom - Math.max(0, Math.min(1, value / max)) * (bottom - top)
+  const emailsY = sent.map(ey)
+  const pipRadius = (count: number, base: number, cap: number) => Math.min(cap, base + Math.log2(Math.max(1, count)) * 0.65)
+  const lastIdx = n - 1
+  const nearest = (clientX: number, boxLeft: number) => {
+    const x = clientX - boxLeft
+    let best = 0, dist = Math.abs(xs[0] - x)
+    for (let i = 1; i < n; i++) { const d = Math.abs(xs[i] - x); if (d < dist) { dist = d; best = i } }
+    return best
+  }
   // A phone scrubs with a finger: tap or drag sideways (touch-action keeps vertical scrolling for the page).
   const scrub = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.pointerType === 'mouse') return
     const box = event.currentTarget.getBoundingClientRect()
-    setActive(Math.max(0, Math.min(n - 1, Math.floor((event.clientX - box.left - left) / slot))))
+    setActive(nearest(event.clientX, box.left))
   }
-  const dot = (x: number, y: number, tone: string, key: string) => <circle key={key} cx={x} cy={y} r={3.5} className={`ov-dot ov-dot--${tone}`} />
+  const dot = (x: number, y: number, tone: string, key: string, r = 2.75) => <circle key={key} cx={x} cy={y} r={r} className={`ov-dot ov-dot--${tone}`} />
   const point = active === null ? undefined : target[active]
+  const washPath = n > 1 ? `M ${xs[0].toFixed(2)} ${bottom} L ${xs[0].toFixed(2)} ${emailsY[0].toFixed(2)} ${monotone(xs, emailsY, top, bottom).join(' ')} L ${xs[lastIdx].toFixed(2)} ${bottom} Z` : ''
   return <div ref={container} className="ov-activity" onMouseLeave={() => setActive(null)} onPointerDown={scrub} onPointerMove={scrub}>
-    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket on the left scale; bounces and complaints on their own scale">
-      {[0, 1, 2, 3].map(i => { const y = top + i * (bottom - top) / 3; return <g key={i}><line x1={left} x2={right} y1={y} y2={y} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} /><text x={left - 8} y={y + 3.5} textAnchor="end" className="chart-label">{number(Math.round(max * (1 - i / 3)))}</text></g> })}
-      <path d={`M ${xs[from]} ${bottom} L ${xs[from]} ${emailsY[from]} ${monotone(span(xs), span(emailsY)).join(' ')} L ${xs[to]} ${bottom} Z`} className="ov-wash" />
-      <Line xs={span(xs)} ys={span(emailsY)} tone="sent" />
-      <Line xs={span(xs)} ys={span(bounceY)} tone="bounces" />
-      <Line xs={span(xs)} ys={span(complaintY)} tone="complaints" keep={i => target[from + i].complaints > 0 || target[from + i + 1].complaints > 0} />
-      {marked.map((mark, i) => <g key={target[i].at}>{mark.bounces && dot(xs[i], bounceY[i], 'bounces', 'b')}{mark.complaints && dot(xs[i], complaintY[i], 'complaints', 'c')}</g>)}
-      {active === null
-        ? ends.map(end => <text key={end.tone} x={right + 8} y={end.y + 3.5} className={`chart-label ov-end ov-end--${end.tone}`}>{end.text}</text>)
-        : [0, 1, 2, 3].map(i => <text key={i} x={right + 8} y={oy(outcomeMax * (1 - i / 3)) + 3.5} className="chart-label ov-end ov-end--bounces">{number(Math.round(outcomeMax * (1 - i / 3)))}</text>)}
+    <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket; bounces and complaints marked on the baseline where present">
+      <defs>
+        <linearGradient id={washId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" className="ov-wash-stop ov-wash-stop--top" />
+          <stop offset="100%" className="ov-wash-stop ov-wash-stop--bot" />
+        </linearGradient>
+      </defs>
+      {[0, 1, 2, 3].map(i => { const y = top + i * (bottom - top) / 3; return <g key={i}><line x1={left} x2={right} y1={y} y2={y} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} /><text x={left - 8} y={y + 3.5} textAnchor="end" className="chart-label">{axisNumber(max * (1 - i / 3), compact)}</text></g> })}
+      {washPath && <path d={washPath} fill={`url(#${washId})`} className="ov-wash" />}
+      <Line xs={xs} ys={emailsY} minY={top} maxY={bottom} tone="sent" />
+      {target.map((p, i) => <g key={p.at}>
+        {p.bounced > 0 && dot(xs[i], bottom - 3.5, 'bounces', 'b', pipRadius(p.bounced, 2.3, 4.4))}
+        {p.complaints > 0 && dot(xs[i], p.bounced > 0 ? bottom - 11 : bottom - 3.5, 'complaints', 'c', pipRadius(p.complaints, 2.8, 4.8))}
+      </g>)}
+      {active === null && <text x={right + 8} y={emailsY[lastIdx] + 3.5} className="chart-label ov-end ov-end--sent">{axisNumber(target[lastIdx].sent, compact)}</text>}
       {active !== null && <g>
         <line x1={xs[active]} x2={xs[active]} y1={top} y2={bottom} className="ov-crosshair" />
-        {drawn(active) && <>{dot(xs[active], emailsY[active], 'sent', 'e')}{dot(xs[active], bounceY[active], 'bounces', 'b')}{target[active].complaints > 0 && dot(xs[active], complaintY[active], 'complaints', 'c')}</>}
+        {dot(xs[active], emailsY[active], 'sent', 'e', 3.25)}
+        {target[active].bounced > 0 && dot(xs[active], bottom - 3.5, 'bounces', 'b', Math.max(3.4, pipRadius(target[active].bounced, 2.3, 4.4)))}
+        {target[active].complaints > 0 && dot(xs[active], target[active].bounced > 0 ? bottom - 11 : bottom - 3.5, 'complaints', 'c', Math.max(3.6, pipRadius(target[active].complaints, 2.8, 4.8)))}
       </g>}
-      {ticks(target, right - left, compact ? 60 : 72).map(i => <text key={i} x={xs[i]} y={height - 6} textAnchor="middle" className="chart-label">{tickLabel(target, i)}</text>)}
-      {target.map((p, i) => <rect key={p.at} x={left + i * slot} y={0} width={slot} height={bottom} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? n - 1, n - 1) ? 0 : -1} role="button"
-        aria-label={`${bucketLabel(target, i)}: ${number(p.sent)} emails, ${p.sent ? percent(p.delivered / p.sent, 1) : '—'} delivered, ${p.bounced} bounced, ${p.complaints} complaints`}
-        onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)}
-        onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(n - 1, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? n - 1 : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />)}
+      {domainTicks(domainStart, domainEnd, left, right, compact ? 64 : 84).map(t => <text key={t.key} x={t.x} y={height - 6} textAnchor={t.anchor} className="chart-label">{t.text}</text>)}
+      {target.map((p, i) => {
+        const x0 = i === 0 ? left : (xs[i - 1] + xs[i]) / 2, x1 = i === lastIdx ? right : (xs[i] + xs[i + 1]) / 2
+        return <rect key={p.at} x={x0} y={0} width={Math.max(1, x1 - x0)} height={bottom} fill="transparent" data-point={i} tabIndex={i === Math.min(stop ?? lastIdx, lastIdx) ? 0 : -1} role="button"
+          aria-label={`${bucketLabel(target, i, domainStart, domainEnd)}: ${number(p.sent)} emails, ${p.sent ? percent(p.delivered / p.sent, 1) : '—'} delivered, ${p.bounced} bounced, ${p.complaints} complaints`}
+          onMouseEnter={() => setActive(i)} onFocus={() => { setActive(i); setStop(i) }} onBlur={() => setActive(null)}
+          onKeyDown={event => { const next = event.key === 'ArrowRight' ? Math.min(lastIdx, i + 1) : event.key === 'ArrowLeft' ? Math.max(0, i - 1) : event.key === 'Home' ? 0 : event.key === 'End' ? lastIdx : null; if (next === null) return; event.preventDefault(); event.currentTarget.parentElement?.querySelector<SVGElement>(`[data-point="${next}"]`)?.focus() }} />
+      })}
     </svg>
-    {point && active !== null && <Readout point={point} label={bucketLabel(target, active)} style={readoutAt(xs[active], width, compact ? 164 : 204)} />}
+    {point && active !== null && <Readout point={point} label={bucketLabel(target, active, domainStart, domainEnd)} style={readoutAt(xs[active], width, compact ? 176 : 220)} />}
   </div>
 }
 // One readout beside the crosshair, on the side with room for it and never past the plot's edges.

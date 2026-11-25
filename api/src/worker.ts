@@ -221,7 +221,12 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         visit: (name, credential, lookup, saved) => { const visit = roomVisit(env, rooms, name, credential, lookup, saved); if (ctx) ctx.waitUntil(visit); },
       },
       startLogFacetFold: ctx ? slot => afterwards(env,ctx,async independent => { await (await import('./log-facet-fold.js')).foldLogFacetSlot(independent,slot); }) : undefined,
-      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      startLogFacetAggregate: ctx ? workspace => afterwards(env,ctx,async independent => {
+        try { await (await import('./log-facet-aggregate-worker.js')).runFacetAggregateTurn(independent.db,workspace); }
+        catch { core.log('warn',{code:'LOG_FACET_AGGREGATE_FAILED',workspaceId:workspace}); }
+      }) : undefined,
+      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined,
+      detach: ctx ? detached => { const run = withRuntime(env, detached, 1, ctx); ctx.waitUntil(run.catch(() => {})); return run; } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
@@ -504,8 +509,10 @@ export default {
         const {dueLogFacetSlots,foldLogFacetSlot}=await import('./log-facet-fold.js');
         for (const slot of await dueLogFacetSlots(background.db)) afterwards(env,ctx,separate => foldLogFacetSlot(separate,slot));
       });
-      if (runtime.config.multiTenant) afterwards(env, ctx, async background => {
+      afterwards(env, ctx, async background => {
         try {
+          const {maintainFacetAggregates}=await import('./log-facet-aggregate-worker.js');
+          if(await maintainFacetAggregates(background.db,12_000,true)||!background.config.multiTenant)return;
           const [{ bootstrapLogFacet }, { foldLogFacetSlot }] = await Promise.all([
             import('./log-facet-bootstrap.js'), import('./log-facet-fold.js'),
           ]);
@@ -542,6 +549,8 @@ export default {
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
+      // A pool region nothing has sent through yet still gets its SES quota sampled (Glass, the customer share); never throws.
+      await (await core.wrapModuleLoad(() => import('./dispatcher.js'))).refreshPoolQuotas(runtime);
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       // Screen any pre-deploy or rollout-window rows held with screened=false outside the mail room before waking shards.
       try { await (await core.wrapModuleLoad(() => import('./sending.js'))).screenHeldMail(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }

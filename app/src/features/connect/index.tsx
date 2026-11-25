@@ -10,6 +10,7 @@ import { useSession } from '../../data/context'
 import { request } from '../../data/live'
 import { ApiError, errorText } from '../../data/types'
 import { productName } from '../../../../api/src/brand'
+import { agentKeyName } from '../../../../api/src/agent-key-name'
 import '../onboarding/onboarding.css'
 import './connect.css'
 
@@ -141,7 +142,7 @@ function Review({ request: agent, typed, onDecided, onAnother }: { request: Agen
     <section className="connect-grants onb-rise" style={rise(3)} aria-label="What the agent gets">
       <h2>Its own API key, which can:</h2>
       <ul>{grants.map(([can, text]) => <li key={text} data-can={can || undefined}>{can ? <Check size={14} strokeWidth={2.5} aria-hidden /> : <X size={14} strokeWidth={2.5} aria-hidden />}<span>{text}</span></li>)}</ul>
-      <p className="muted">It’s listed under API keys as “Agent (set up {new Date().toISOString().slice(0, 10)})”. Revoke it there any time.</p>
+      <p className="muted">It’s listed under API keys as “<bdi>{agentKeyName(agent.clientName)}</bdi>”. Revoke it there any time.</p>
     </section>
     {!typed && canApprove && <div className="onb-rise" style={rise(4)}><Checkbox checked={confirmed} onCheckedChange={setConfirmed} disabled={!!busy} label={`I started this agent, and it shows ${agent.userCode}`} /></div>}
     {!canApprove && <Alert tone="info">Only an owner or admin of a workspace can approve an agent. Ask one to open this link, or deny it.</Alert>}

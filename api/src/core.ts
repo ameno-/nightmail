@@ -75,6 +75,9 @@ export interface Storage {
   /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
   list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;
 }
+export type ScreenClassifier = 'jevf' | 'jev';
+export type ScreenModel = { apiKey: string; endpoint: string; model: string; threshold: number };
+type JevFModel = ScreenModel & { deadlineMs: number; maxConcurrency: number };
 export interface Config {
   /** Requests per minute per credential. */
   apiRateLimitPerMinute: number;
@@ -116,6 +119,9 @@ export interface Config {
   platformDomainWorkspace?: string;
   /** Hosted only: From for Nightmail's own owner notices (sender standing), on the platform workspace's domain. */
   notifyFrom?: string;
+  /** Hosted only: the parent domain of every workspace's built-in domain (src/builtin-domain.ts), and who those send to. */
+  builtinDomain?: string;
+  builtinScope: 'anyone' | 'members';
   /** Hosted only: the platform workspace's list of waitlist joins and sign-ups (src/signups.ts signupsList). */
   signupsListId?: string;
   /** Hosted only: the support platform's operator credential, its URL and the handoff signing key (src/support.ts). */
@@ -128,6 +134,10 @@ export interface Config {
   allowSesSandbox?: boolean;
   requireDmarcForBulk?: boolean;
   hostedScreen?: boolean;
+  /** NIGHTMAIL_HYGIENE_LISTS: the nightly sync of list hygiene's open lists (src/list-hygiene.ts). False: the vendored snapshot only. */
+  hygieneLists?: boolean;
+  /** NIGHTMAIL_HYGIENE_DNS: the DNS-over-HTTPS resolver list hygiene checks recipient domains with (src/mail-dns.ts). Null: no domain checks. */
+  hygieneDnsUrl?: string | null;
   /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
   abuseMonitoring?: { since: string };
   /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
@@ -169,11 +179,10 @@ export interface Config {
   // Subset of snsTopicArns that carries SES inbound receipt notifications for mailboxes.
   inboundTopicArns?: string[];
   reputationAlertUrl?: string;
-  // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
-  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number; failover?: Config['shadow'] };
-  // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
-  // JEVF_API_KEY (or without a screen), and then nothing of it runs.
-  shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };
+  // Outbound harm screening. Inbound Ritual questions always use the Jev entry.
+  screen?: { primary: ScreenClassifier; mode: 'reject' | 'flag'; jev: ScreenModel; jevf?: JevFModel };
+  // JevF comparisons run only with Jev primary; a successful JevF gate needs no second call.
+  shadow?: JevFModel;
   // Screened-text limits (src/screen.ts): one message, and one campaign screened once for all its recipients.
   screenLimits: { messageBytes: number; campaignBytes: number };
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };
@@ -189,8 +198,13 @@ export interface Runtime {
   placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
+  /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
+   * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
+  detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
   startLogFacetFold?: (slot: string) => void;
+  /** Coalesced off-request nudge for a workspace's incrementally certified Logs buckets. */
+  startLogFacetAggregate?: (workspaceId: string) => void;
   // Nudges the long-lived dispatcher for one account/region after queued mail commits. Dispatch
   // never depends on it: the dispatcher also polls and the scheduler pings it every minute.
   dispatch?: (region: string, accountId?: string, emails?: number, kind?: ReadyConnection['kind'], priority?: boolean, maxSendRate?: number) => Promise<void>;
@@ -242,6 +256,8 @@ export type SupportScope = { userId: string; contentWorkspaceId: string | null;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
   conversation: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; importLease?: import('./isolate-memory.js').MemoryLease; importLeaseTransferred?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+  /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
+  pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
@@ -249,7 +265,7 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 /** Who sent a request: its ID, and the client's address and user agent as the entry point (server.ts, worker.ts) set them. */
-export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null };
+export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null; onPollWait?: (ms: number) => void };
 // An in-process call (an MCP tool) is part of its outer request and keeps that request's ID, client and user agent.
 // It rides on the runtime under a private symbol, like the delegated actor, so no header can supply it.
 const outerRequest = Symbol('outerRequest');
@@ -258,7 +274,16 @@ const outerOf = (runtime: Runtime | undefined) => (runtime as (Runtime & { [oute
 /** A new request's ID: the outer request's for an in-process call. */
 export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.requestId ?? `req_${crypto.randomUUID().replaceAll('-', '')}`;
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
-  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null };
+  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null, onPollWait: ms => addPollWait(c, ms) };
+const addPollWait = (c: Ctx, ms: number) => c.set('pollWaitMs', (c.get('pollWaitMs') ?? 0) + ms);
+/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. */
+export async function waitForPollTick(c: Ctx, ms: number) {
+  const start = Date.now();
+  await new Promise(resolve => setTimeout(resolve, ms));
+  const elapsed = Math.max(0, Date.now() - start);
+  addPollWait(c, elapsed);
+  outerOf(c.env)?.onPollWait?.(elapsed);
+}
 /** One claimed delivery and what its endpoint needs to post it. `type` is the endpoint's (absent for sent-mail webhooks); url and encrypted_secret are a webhook's. */
 export type ClaimedWebhook = { type?: 'webhook' | 'slack' | 'discord' | 'forward'; routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobContext = { id: string; attempts: number; workspaceId: string;
@@ -381,8 +406,43 @@ export function requiredFor(method: string, path: string, need?: Permission | 'e
   return { permission, level: read ? 'read' : 'write' };
 }
 export const requiredOf = (c: Ctx, need?: Parameters<typeof requiredFor>[2]) => requiredFor(c.req.method, c.req.path, need);
-/** UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. */
-export const unrestrictedRequired = (message: string, need: Required) => denied('UNRESTRICTED_KEY_REQUIRED', message, { ...need, scope: 'workspace' });
+/**
+ * What a limited credential may do, as one sentence that names its limits: "This key can only send from acme.com." A
+ * refusal starts with it, so whoever reads it (often an integration that made a key in onboarding's Send only tab) knows
+ * which key they used, not only what it lacks.
+ */
+export function credentialLimits(a: Pick<Actor, 'permissions' | 'domains' | 'credential'>) {
+  const who = a.credential === 'agentToken' ? 'This agent token' : a.credential === 'mcp' ? 'This MCP connection' : 'This key';
+  const domains = a.domains.length <= 2 ? a.domains.join(' and ') : `${a.domains[0]}, ${a.domains[1]} and ${a.domains.length - 2} more`;
+  const from = a.domains.length ? ` from ${domains}` : '', send = a.permissions.includes('send'), read = a.permissions.includes('read');
+  if (a.permissions.includes('manage')) return `${who} is limited to the sender domain${a.domains.length > 1 ? 's' : ''} ${domains}.`;
+  if (send && read) return `${who} can only send${from} and read what was sent${from ? ' from there' : ''}.`;
+  if (send) return `${who} can only send${from}.`;
+  return `${who} can only read${from ? ` mail sent${from}` : ''}.`;
+}
+/** Where a full-access key comes from: the dashboard's Create key, or a full-access key itself. */
+export const FULL_ACCESS_KEY = 'create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys';
+// The workspace-wide areas a credential limited to sender domains is refused (UNRESTRICTED_KEY_REQUIRED), by path, as the
+// subject of "… need a full-access key". The first match names it.
+const RESTRICTED_AREAS: [RegExp, string][] = [
+  [/^\/v1\/inbound\/addresses(?:\/|$)/, 'Inbound addresses need'], [/^\/v1\/inbound\/domains(?:\/|$)/, 'Inbound domains need'],
+  [/^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/, 'Mail client passwords need'], [/^\/v1\/(?:inbound|inboxes)(?:\/|$)/, 'Received mail and inboxes need'],
+  [/^\/v1\/billing(?:\/|$)/, 'Billing needs'], [/^\/v1\/campaigns(?:\/|$)/, 'A campaign’s audience and delivery need'],
+  [/^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query)(?:\/|$)/, 'The workspace audience needs'], [/^\/v1\/newsletters(?:\/|$)/, 'Newsletters need'],
+  [/^\/v1\/(?:templates|template-assets)(?:\/|$)/, 'Templates need'], [/^\/v1\/webhooks(?:\/|$)/, 'Webhooks need'], [/^\/v1\/regions(?:\/|$)/, 'Region settings need'],
+  [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
+];
+export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]) => pattern.test(path))?.[1] ?? 'This needs';
+/**
+ * UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. The message says
+ * what the credential is, what the area needs and where to get it: "This key can only send from acme.com. Inbound
+ * addresses need a full-access key: create one in the dashboard under API keys → Create key → Full access, …".
+ */
+export const unrestrictedRequired = (a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
+  fullAccessRefusal('UNRESTRICTED_KEY_REQUIRED', a, area, { ...need, scope: 'workspace' }, note);
+/** A refusal, under `code`, of a credential that isn't full access, worded as unrestrictedRequired words it. */
+export const fullAccessRefusal = (code: string, a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
+  denied(code, `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, need);
 export class ModuleLoadError extends ApiError {
   constructor(cause?: unknown) {
     super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);
@@ -487,8 +547,18 @@ export function actor(c: Ctx, action: Permission | 'editContent' = 'read'): Acto
   // Dashboard roles include content editing. A scoped machine grant is still bounded by its
   // original permission contract: send alone does not delegate contact or template management.
   const permission = action === 'editContent' ? (c.env.config.multiTenant && value?.credential === 'dashboard' ? 'send' : 'manage') : action;
-  if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, requiredOf(c, action));
+  if (!value || (!value.permissions.includes('manage') && !value.permissions.includes(permission))) throw value?.credential === 'apiKey'
+    ? missingPermission(value, permission, requiredOf(c, action)) : denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, requiredOf(c, action));
   return value;
+}
+/**
+ * PERMISSION_DENIED for an API key that lacks a permission (onboarding's Send only key reading back what it sent, most
+ * often): what the key can do, then how to get one that can: the same key with the permission added (API keys → Edit
+ * keeps its secret, so nothing is redeployed), or a full-access key. denied() adds what the endpoint needs.
+ */
+export function missingPermission(a: Pick<Actor, 'permissions' | 'domains' | 'credential'>, permission: Permission, need: Required) {
+  const add = permission === 'manage' ? 'Make it Full access' : `Add ${permission === 'read' ? 'Read' : 'Send'} to it`;
+  return denied('PERMISSION_DENIED', `${credentialLimits(a)} ${add} in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${FULL_ACCESS_KEY}.`, need);
 }
 /**
  * The one rule for changes that outlive the credential making them: API keys, sending and receiving webhooks, endpoints,
@@ -519,7 +589,8 @@ export function receivingAdmin(c: Ctx, change?: string): Actor {
 /** Why receivingAdmin refuses this actor, or null. The MCP listing asks the same of receivingAdminRoute's operations. */
 export function receivingAdminRefusal(a: Actor | undefined, change?: string): ApiError | null {
   const permission = !change && a?.receivingConsent ? 'read' : 'manage', need: Required = { permission: 'receivingRules', level: change ? 'write' : 'read' };
-  if (!a || (!a.permissions.includes('manage') && !a.permissions.includes(permission))) return denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, need);
+  if (!a || (!a.permissions.includes('manage') && !a.permissions.includes(permission))) return a?.credential === 'apiKey' ? missingPermission(a, permission, need) : denied('PERMISSION_DENIED', `This operation requires ${permission} permission.`, need);
+  if (a.domains.length && a.credential === 'apiKey') return fullAccessRefusal('ADMIN_REQUIRED', a, 'Receiving configuration covers every address in the workspace, so it needs', { ...need, scope: 'workspace' });
   if (a.domains.length || a.role === 'member')
     return denied('ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', a.role === 'member' ? { ...need, person: 'admin' } : { ...need, scope: 'workspace' });
   if (!change) return null;
@@ -531,6 +602,10 @@ export function receivingAdminRefusal(a: Actor | undefined, change?: string): Ap
  *  its key through agent setup can't make itself, or anyone, another API key or agent token. */
 export function keyAdminRefusal(a: Actor): ApiError | null {
   const need: Required = { permission: 'configuration', level: 'write' };
+  // An API key that isn't full access (onboarding's Send only key, most often): say which key it is and where keys are made.
+  if (a.credential === 'apiKey' && (!a.permissions.includes('manage') || a.domains.length))
+    return denied('PERMISSION_DENIED', `${credentialLimits(a).slice(0, -1)}, so it can't ${KEY_CHANGE}. Create keys in the dashboard under API keys → Create key, or with a full-access key via POST /v1/api-keys.`,
+      a.permissions.includes('manage') ? { ...need, scope: 'workspace' } : need);
   if (!a.permissions.includes('manage')) return denied('PERMISSION_DENIED', 'This operation requires manage permission.', need);
   const temporary = lastingRefusal(a, KEY_CHANGE, need);
   if (temporary) return temporary;

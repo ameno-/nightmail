@@ -5,18 +5,18 @@ import './newsletters.css'
 // An issue's card: its subject, then when it was sent, to how many readers and how many opened it, on one line.
 const base: SkeletonColumn[] = [
   { key: 'subject', label: 'Issue', skeleton: <SkeletonText width="56%" />, card: 'title' },
-  { key: 'sent', label: 'Sent', width: 170, skeleton: <SkeletonText width={52} />, card: 'line' },
-  { key: 'recipients', label: 'Readers', width: 110, align: 'right', skeleton: <SkeletonText width={44} />, card: 'hide' },
+  { key: 'sent', label: 'Sent', width: 160, skeleton: <SkeletonText width={52} />, card: 'line' },
+  { key: 'recipients', label: 'Readers', width: 96, align: 'right', skeleton: <SkeletonText width={44} />, card: 'hide' },
 ]
 const engagement: SkeletonColumn[] = [
-  { key: 'opened', label: 'Opened', width: 100, align: 'right', skeleton: <SkeletonText width={30} />, card: 'hide' },
-  { key: 'clicked', label: 'Clicked', width: 100, align: 'right', skeleton: <SkeletonText width={30} />, card: 'hide' },
+  { key: 'opened', label: 'Opened', width: 88, align: 'right', skeleton: <SkeletonText width={30} />, card: 'hide' },
+  { key: 'clicked', label: 'Clicked', width: 88, align: 'right', skeleton: <SkeletonText width={30} />, card: 'hide' },
 ]
 /** Opens and clicks are columns only when an issue on the page has them. */
 export const issueColumns = (withEngagement: boolean) => withEngagement ? [...base, ...engagement] : base
 export const newsletterColumns: SkeletonColumn[] = [
   { key: 'name', label: 'Newsletter', skeleton: <SkeletonText width="40%" />, card: 'title' },
-  { key: 'from', label: 'From', width: '45%', skeleton: <SkeletonText width="60%" />, card: 'line' },
+  { key: 'from', label: 'From', width: '40%', skeleton: <SkeletonText width="60%" />, card: 'line' },
 ]
 
 export function ReadersSkeleton() {

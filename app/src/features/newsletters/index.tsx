@@ -114,7 +114,8 @@ function NewNewsletter() {
   const [pending, setPending] = useState(false), [errors, setErrors] = useState<{ name?: string; from?: string }>({})
   // First page of domains (API caps GET /v1/domains at 10) for autocomplete; submit walks remaining cursors if needed.
   const domains = useApiQuery(['domains', 'newsletter-sender'], (client, signal) => client.domains.list({ pageSize: 10, refresh: false }, signal))
-  const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified').map(domain => domain.name)
+  // The built-in domain sends no newsletters: issues are campaigns, which it refuses.
+  const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified' && !domain.builtIn).map(domain => domain.name)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const missing = { name: !name.trim() ? 'Enter a name.' : undefined, from: !sender.email ? 'Enter the address issues are sent from.' : undefined }
@@ -168,7 +169,7 @@ function NewslettersList() {
       <DataTable className="newsletters-table" loading={query.isPending} skeletonRows={4} rows={query.data ?? []} rowKey={row => row.id} rowHref={row => newsletterPath(row.id)}
         empty={<EmptyState title="No newsletters yet" />} columns={[
           { ...newsletterColumns[0]!, render: row => row.name },
-          { ...newsletterColumns[1]!, render: row => <SenderLines name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
+          { ...newsletterColumns[1]!, render: row => <SenderLines inline name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
         ]} />
       {(pagination.page > 1 || next) && <Pagination page={pagination.page} pageSize={100} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
     </>}

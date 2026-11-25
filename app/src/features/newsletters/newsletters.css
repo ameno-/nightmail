@@ -1,5 +1,5 @@
-/* A newsletter's page: its readers, how they are growing, and its issues. Its tables use the shared row height. */
-.ui-table-scroll.newsletter-issues, .ui-table-scroll.newsletters-table { --table-row-height: 53px; }
+/* A newsletter's page: its readers, how they are growing, and its issues. Its tables use the shared one-line row (the
+   sender's name and address share a line). */
 /* Readers: the count and the growth bars on one solid well (no edge line), its 88px content held in a fixed height so
    the well is as tall loading as loaded. Controls in it step off the well. */
 .newsletter-readers { --color-hover: var(--color-raised-hover); --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed); display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 440px); gap: var(--space-40); align-items: stretch; height: 112px; padding: var(--space-12) var(--space-16); border-radius: var(--radius-sm); background: var(--color-well); }

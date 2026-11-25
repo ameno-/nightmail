@@ -23,7 +23,7 @@ export const limitedAccess = <C extends string[] | undefined = undefined>(row: P
 export const limitedKeyView = (row: Row, createdInboxIds: string[] = []) => ({
   id: row.id, name: row.name, prefix: row.prefix, permissions: [] as ('read' | 'send' | 'manage')[], domains: [] as string[],
   access: limitedAccess(row, createdInboxIds), expiresAt: isoTime(row.expiresAt),
-  createdAt: isoTime(row.createdAt)!, lastUsedAt: isoTime(row.lastUsedAt), revokedAt: isoTime(row.revokedAt),
+  createdAt: isoTime(row.createdAt)!, lastUsedAt: isoTime(row.lastUsedAt), revokedAt: isoTime(row.revokedAt), agent: null,
 });
 
 /**

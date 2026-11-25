@@ -56,7 +56,7 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const source = useMemo<InsightSource>(() => ({ kind: 'email', id: email.id, html: hasHtml }), [email.id, hasHtml])
   const check = useSendability(source)
   // The email as its recipients saw it: its own fonts, styles and image sizes, and its remote images (tracking pixels removed).
-  const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: true, respectStyles: true, asSent: true })
+  const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: true, respectStyles: true, asSent: true, dark: true })
   // A poll that brings new events starts the line over from them.
   // A phone says why under its status line; its Details sheet then adds only the receiving server's reply.
   const compact = mode === 'stack'
@@ -72,7 +72,7 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
         {thread && mode === 'panel' && <ThreadRows items={items} part="before" open={open} />}
-        <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, error: original.error, html: email.html, text }}
+        <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, dark: original.darkDoc === undefined ? undefined : original.complete ? original.darkDoc : null, error: original.error, html: email.html, text }}
           fill={!compact} wide={!compact} compact={compact}
           toolbarEnd={mode === 'panel' && <ChecksToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />} />
         {thread && mode === 'panel' && <ThreadRows items={items} part="after" open={open} />}

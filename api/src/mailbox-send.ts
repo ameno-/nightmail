@@ -21,6 +21,7 @@ import { decodeBase64, MAX_JSON_ATTACHMENT_BYTES, mib, validateAttachment } from
 import { SEND_LIMITS } from './send-limits.js';
 import { withMemory } from './isolate-memory.js';
 import { productName } from './brand.js';
+import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
 
 /** An address or inbox has no hourly or daily send cap: the workspace's sending limits apply (standing, pacing, the
  * evaluation). Only the loop guards are per address. perHour and perDay are deprecated and shown as set (these values
@@ -47,6 +48,8 @@ export async function resolveAttachments(runtime:Runtime, mailbox:Pick<MailboxRo
   // Before any attachment is written outside PostgreSQL: the send admission decision, checking only, on the sender
   // in the mailbox domain's region. The send itself is decided again in its transaction.
   if(items.length && runtime.config.multiTenant){
+    // A built-in domain sends no attachments (send_admission refuses them too): say so before any file is stored.
+    if(isBuiltinHost(runtime.config,from.split('@')[1]!)) throw builtinRefusal(runtime.config,{code:'BUILTIN_DOMAIN_UNSUPPORTED',field:'attachments',host:from.split('@')[1]!.toLowerCase()});
     const region=regionalSending(runtime) ? sql`NULL::text` : sql`(SELECT region FROM mailbox_domains d WHERE d.id=${mailbox.domainId} AND d.workspace_id=${scope.workspaceId})`;
     const mail=sql`jsonb_build_object('mails',jsonb_build_array(jsonb_build_object('host',${from.split('@')[1]!.toLowerCase()}::text,'region',${region},'kind','transactional','attachments','[]'::jsonb,'bodyBytes',0)))`;
     const check=await admission(runtime,scope.workspaceId,actorJson({keyId:'',domains:[]}),{stage:'send',locks:'none'},mail);
@@ -247,7 +250,7 @@ export async function sendFromMailbox(runtime: Runtime, tx: DbExecutor, message:
   if (current.expiresAt && Date.parse(current.expiresAt) <= Date.now()) throw new ApiError(409, 'MAILBOX_EXPIRED', 'This temporary mailbox is no longer accepting new sends.');
   if(current.kind==='inbox'&&!message.protocolArchive){
     if(!message.threadId)throw new ApiError(422,'EPHEMERAL_REPLY_ONLY','An ephemeral inbox cannot start a thread.');
-    if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
+    if(!current.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Replies are off for this inbox: it was created without send: {"enabled": true}, and sandbox inboxes never send. Reply from an address or inbox that sends, or create one with send enabled.');
     if(!recipients.every(r=>locked.replyAuthors?.includes(r.toLowerCase())))throw new ApiError(403,'RECIPIENT_NOT_ALLOWED','Replies may go only to authors in this inbox and thread.');
   }
   await enforceLimits(tx, message);

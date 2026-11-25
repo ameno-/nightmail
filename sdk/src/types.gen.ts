@@ -182,12 +182,48 @@ export type ConnectionSummary = {
         marketingHeld: boolean;
     } | null;
     /**
-     * Domains claimed in this workspace and how many can send.
+     * Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.
      */
     domains?: {
         total: number;
         verified: number;
     };
+    /**
+     * Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).
+     */
+    sent?: boolean;
+    /**
+     * Whether this workspace has received any email (kept as long as its received mail is).
+     */
+    received?: boolean;
+    /**
+     * Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.
+     */
+    builtinDomain?: {
+        /**
+         * Its ID in listDomains, once it is set up on this connection.
+         */
+        id: string | null;
+        name: string;
+        /**
+         * ready: it sends now (in a new workspace's first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).
+         */
+        sending: 'ready' | 'pending' | 'closed' | 'off';
+        /**
+         * Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.
+         */
+        paused?: true;
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace's members.
+         */
+        scope: 'anyone' | 'members';
+        perDay: number;
+        perMinute: number;
+        /**
+         * Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.
+         */
+        used: number;
+    } | null;
     /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
      */
@@ -317,6 +353,15 @@ export type ApiKey = {
     expiresAt: string | null;
     approval: ApprovalTie;
     lastChange: ApiKeyLastChange;
+    /**
+     * A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key.
+     */
+    agent: {
+        /**
+         * What the agent said it is (client_name), its claim, never verified. Null when it didn't say.
+         */
+        client: string | null;
+    } | null;
 };
 
 export type CreateApiKey = {
@@ -517,7 +562,7 @@ export type AgentKey = {
     key: string;
     keyId: string;
     /**
-     * Agent (set up <date>), under API keys, where a person revokes it.
+     * "<client_name>, set up <date>" ("Agent, set up <date>" without one), under API keys, where a person revokes it.
      */
     name: string;
     workspaceId: string;
@@ -599,6 +644,24 @@ export type ContactRead = Contact & {
     listIds: Array<string>;
 };
 
+/**
+ * Why campaigns and marketing sends skip this contact, or null when nothing is wrong with the address. Flagged when the contact is created or imported, and again hourly for every contact. Transactional mail is never refused.
+ */
+export type ContactRisk = {
+    /**
+     * invalid: not a deliverable address. disposable: a public temporary inbox, or a domain whose mail servers serve them. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce). no_mail_domain: the domain can't receive mail (it doesn't exist, or has no mail server).
+     */
+    reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
+    /**
+     * For typo_domain, the address with the provider it most likely meant.
+     */
+    suggestion: string | null;
+    /**
+     * Its owner allowed it: campaigns and marketing sends reach it anyway.
+     */
+    allowed: boolean;
+} | null;
+
 export type Contact = {
     id: string;
     workspaceId: string;
@@ -610,6 +673,7 @@ export type Contact = {
     marketingConsent: 'unknown' | 'subscribed' | 'unsubscribed';
     suppressed: boolean;
     suppressionReason: string | null;
+    risk: ContactRisk;
     lastOpenAt: string | null;
     lastClickAt: string | null;
     observedSince: string | null;
@@ -900,6 +964,10 @@ export type AudienceImport = {
         properties: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.
+         */
+        risk?: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
     }>;
     errors: Array<{
         row: number;
@@ -911,6 +979,7 @@ export type AudienceImport = {
      * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
      */
     rowsRetained: boolean;
+    risky: RiskBreakdown;
     /**
      * false once per-row error details are no longer kept after the retention window (errors is then []).
      */
@@ -918,6 +987,21 @@ export type AudienceImport = {
     createdAt: string;
     updatedAt: string;
 };
+
+/**
+ * Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene.
+ */
+export type RiskBreakdown = {
+    total: number;
+    byReason: {
+        invalid: number;
+        disposable: number;
+        typo_domain: number;
+        role: number;
+        dead: number;
+        no_mail_domain: number;
+    };
+} | null;
 
 export type CommittedContactImport = AudienceImport & {
     /**
@@ -1259,6 +1343,10 @@ export type SingleEmailQueued = {
     simulated: boolean;
     screen?: EmailScreenSummary;
     /**
+     * Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.
+     */
+    warnings?: Array<RecipientWarning>;
+    /**
      * A scheduled send: when it goes (UTC).
      */
     scheduledAt?: string;
@@ -1279,7 +1367,16 @@ export type EmailScreenSummary = {
     status: 'passed' | 'skipped';
 };
 
+export type RecipientWarning = {
+    email: string;
+    risk: 'invalid' | 'disposable' | 'typo_domain' | 'role';
+    suggestion: string | null;
+};
+
 export type SendEmailInput = {
+    /**
+     * An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.
+     */
     from: string;
     fromName?: string;
     to: string | Array<string>;
@@ -1319,7 +1416,7 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
+     * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
     /**
@@ -1333,7 +1430,7 @@ export type SendEmailInput = {
      */
     replyMailboxId?: string;
     /**
-     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId.
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected), except Hosted marketing its ramp hour has no room for, which is held until there is (RAMP_LIMIT_REACHED in sendEmail's description). Not with replyAddressId.
      */
     scheduledAt?: string;
 };
@@ -1347,6 +1444,10 @@ export type EmailQueued = {
     status: 'queued';
     simulated: boolean;
     screen?: EmailScreenSummary;
+    /**
+     * Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.
+     */
+    warnings?: Array<RecipientWarning>;
 };
 
 export type SendEmailBatchInput = {
@@ -1357,6 +1458,9 @@ export type SendEmailBatchInput = {
 };
 
 export type BatchSendEmailItem = {
+    /**
+     * An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.
+     */
     from: string;
     fromName?: string;
     to: string | Array<string>;
@@ -1396,7 +1500,7 @@ export type BatchSendEmailItem = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
+     * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
 };
@@ -1677,6 +1781,7 @@ export type Campaign = {
         };
     };
     delivery: CampaignDelivery;
+    sendEstimate: CampaignSendEstimate;
 };
 
 /**
@@ -1775,7 +1880,22 @@ export type CampaignDelivery = {
          * When the next 24-hour window opens, when a daily cap is set.
          */
         nextWindowAt: string | null;
+        /**
+         * Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise.
+         */
+        plan: Array<number> | null;
+        /**
+         * With a plan: the batch the current window releases, from 1.
+         */
+        batch: number | null;
     };
+    /**
+     * The consent source confirmed at launch, if any.
+     */
+    consent: {
+        source: string;
+        confirmedAt: string;
+    } | null;
     pausedAt: string | null;
     pauseReason: {
         code: string;
@@ -1786,10 +1906,10 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp';
         until: string;
     } | null;
     /**
@@ -1799,6 +1919,55 @@ export type CampaignDelivery = {
         oldestMs: number;
         lane: 'routine' | 'priority';
     } | null;
+} | null;
+
+/**
+ * How long sending takes, for a draft or a campaign that has recipients left to release. Null for a finished or canceled campaign; lists leave it out.
+ */
+export type CampaignSendEstimate = {
+    /**
+     * Recipients still to release: for a draft, the last audience count (previewCampaignAudience; null before one); once launched, those not released yet.
+     */
+    recipients: number | null;
+    /**
+     * The region's send rate the campaign plans at, per second, before its rate share; null until the region's quota was read.
+     */
+    ratePerSecond: number | null;
+    ramp: CampaignRamp;
+    /**
+     * How long releasing the recipients left takes from when it starts (the campaign's last change, updatedAt, or scheduledAt): from the ramp, the daily cap (pacing.perDay), the rate share and the region's send rate. A draft is estimated without a daily cap at the full rate. An estimate: it assumes clean, prompt feedback and leaves out the list probe's wait, quota holds and other mail sharing the rate. Null when it cannot be told (no audience count or send rate yet).
+     */
+    seconds: number | null;
+    /**
+     * A launched campaign: when its last recipient is expected to be released, as of its last change (updatedAt or scheduledAt, plus seconds). Null for a draft, while paused or failed, or when it cannot be told.
+     */
+    finishAt: string | null;
+} | null;
+
+/**
+ * Where the campaign is on the ramp. A Hosted sender's first large campaigns release in hourly steps that grow (1,000 an hour at first), moving to the next step once an hour at this one went out and its delivery results are in and clean; more than 3% bounces or more than 0.08% complaints (at least 2) in a step pause the campaign. The first step not already proven by the workspace's largest clean marketing hour of the last 30 days is where it starts, so an established sender skips it. Null when no ramp applies (self-hosted, your own AWS account, simulated mail, an established sender, or past the last step). Transactional mail never waits for it.
+ */
+export type CampaignRamp = {
+    /**
+     * The step the campaign releases at, from 1.
+     */
+    step: number;
+    /**
+     * How many steps the ramp has; past the last one only the other limits apply.
+     */
+    steps: number;
+    /**
+     * Most recipients this step releases in its hour.
+     */
+    ceilingPerHour: number;
+    /**
+     * When this step's hour started: its first release. Null before it.
+     */
+    startedAt: string | null;
+    /**
+     * Recipients released since this step's hour started.
+     */
+    released: number;
 } | null;
 
 export type CreateCampaignInput = {
@@ -2061,13 +2230,157 @@ export type CampaignPreview = {
 };
 
 /**
- * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
+ * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
  */
 export type CampaignAudienceCounts = {
     matched: number;
     eligible: number;
     suppressed: number;
     unsubscribed: number;
+    /**
+     * Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible.
+     */
+    risky: number;
+    riskyByReason: {
+        invalid: number;
+        disposable: number;
+        typo_domain: number;
+        role: number;
+        dead: number;
+        no_mail_domain: number;
+    };
+    /**
+     * With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.
+     */
+    readiness?: {
+        /**
+         * ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.
+         */
+        verdict: 'ready' | 'ramp_recommended' | 'ramp_required';
+        /**
+         * Why, in one or two plain sentences, when a ramp is recommended or required.
+         */
+        summary: string | null;
+        /**
+         * Every finding behind the verdict.
+         */
+        reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        domain: {
+            name: string;
+            /**
+             * When the From domain (or the domain it is under) was added to this workspace.
+             */
+            firstSeenAt: string | null;
+            ageDays: number | null;
+            /**
+             * The DMARC policy last observed; null when not checked yet.
+             */
+            dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null;
+            /**
+             * The custom MAIL FROM domain (aligned SPF).
+             */
+            mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * A link host of the domain's own for tracked links: not configurable yet.
+             */
+            linkHost: 'not_configured';
+        };
+        history: {
+            /**
+             * Every kind of mail the workspace sent; largestSend counts campaigns.
+             */
+            workspace: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+            /**
+             * Campaigns from this From domain.
+             */
+            domain: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+        };
+        list: {
+            recipients: number;
+            /**
+             * Risky contacts the send skips.
+             */
+            risky: number;
+            /**
+             * Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.
+             */
+            neverMailed: number | null;
+            createdAt: string | null;
+            /**
+             * When a campaign last went to this list.
+             */
+            lastSentAt: string | null;
+            lastImport: {
+                at: string;
+                contacts: number;
+                /**
+                 * The consent evidence it was imported with, if any.
+                 */
+                consent: string | null;
+            } | null;
+        };
+        /**
+         * This send ÷ the largest campaign its domain sent in the last 90 days; null without one.
+         */
+        sizeJump: number | null;
+        /**
+         * The recommended daily batches; null when one day covers everyone.
+         */
+        plan: {
+            /**
+             * Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.
+             */
+            batches: Array<number>;
+            /**
+             * How long the plan takes from its start, the hourly ramp included.
+             */
+            seconds: number | null;
+        } | null;
+        required: {
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * The largest daily limit that counts as a ramp: the plan's first day.
+             */
+            maxPerDay: number;
+        } | null;
+    } | null;
 };
 
 export type CampaignPreviewImage = {
@@ -2172,11 +2485,158 @@ export type CampaignQueued = {
     queued: number;
     scheduledAt: string | null;
     simulated: boolean;
+    /**
+     * Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch.
+     */
+    risky?: {
+        total: number;
+        byReason: {
+            invalid: number;
+            disposable: number;
+            typo_domain: number;
+            role: number;
+            dead: number;
+            no_mail_domain: number;
+        };
+    } | null;
+    /**
+     * The send review as of the launch (list.neverMailed is not counted then); null for a required notice.
+     */
+    readiness?: {
+        /**
+         * ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.
+         */
+        verdict: 'ready' | 'ramp_recommended' | 'ramp_required';
+        /**
+         * Why, in one or two plain sentences, when a ramp is recommended or required.
+         */
+        summary: string | null;
+        /**
+         * Every finding behind the verdict.
+         */
+        reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        domain: {
+            name: string;
+            /**
+             * When the From domain (or the domain it is under) was added to this workspace.
+             */
+            firstSeenAt: string | null;
+            ageDays: number | null;
+            /**
+             * The DMARC policy last observed; null when not checked yet.
+             */
+            dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null;
+            /**
+             * The custom MAIL FROM domain (aligned SPF).
+             */
+            mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * A link host of the domain's own for tracked links: not configurable yet.
+             */
+            linkHost: 'not_configured';
+        };
+        history: {
+            /**
+             * Every kind of mail the workspace sent; largestSend counts campaigns.
+             */
+            workspace: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+            /**
+             * Campaigns from this From domain.
+             */
+            domain: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+        };
+        list: {
+            recipients: number;
+            /**
+             * Risky contacts the send skips.
+             */
+            risky: number;
+            /**
+             * Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.
+             */
+            neverMailed: number | null;
+            createdAt: string | null;
+            /**
+             * When a campaign last went to this list.
+             */
+            lastSentAt: string | null;
+            lastImport: {
+                at: string;
+                contacts: number;
+                /**
+                 * The consent evidence it was imported with, if any.
+                 */
+                consent: string | null;
+            } | null;
+        };
+        /**
+         * This send ÷ the largest campaign its domain sent in the last 90 days; null without one.
+         */
+        sizeJump: number | null;
+        /**
+         * The recommended daily batches; null when one day covers everyone.
+         */
+        plan: {
+            /**
+             * Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.
+             */
+            batches: Array<number>;
+            /**
+             * How long the plan takes from its start, the hourly ramp included.
+             */
+            seconds: number | null;
+        } | null;
+        required: {
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * The largest daily limit that counts as a ramp: the plan's first day.
+             */
+            maxPerDay: number;
+        } | null;
+    } | null;
 };
 
 export type CampaignSendInput = {
     revision: number;
     pacing?: CampaignPacing;
+    consent?: CampaignConsentConfirmation;
     /**
      * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
      */
@@ -2196,11 +2656,27 @@ export type CampaignPacing = {
      * Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.
      */
     rateShare?: number;
+    /**
+     * Send in the daily batches previewCampaignAudience recommends (readiness.plan), worked out again at launch: the most engaged contacts first, never-mailed last. Not with perDay.
+     */
+    plan?: 'recommended';
+};
+
+/**
+ * The sender confirms everyone on the list agreed to this mail, and where that consent comes from. Lets a send the review requires a ramp for (readiness.verdict ramp_required) go out without the plan. Stored with the campaign, with who and when, and in the workspace's Activity. An agent asks the person first.
+ */
+export type CampaignConsentConfirmation = {
+    confirmed: true;
+    /**
+     * Where this list's consent comes from, for example "Signed up at checkout on our site since 2023".
+     */
+    source: string;
 };
 
 export type CampaignScheduleInput = {
     revision: number;
     pacing?: CampaignPacing;
+    consent?: CampaignConsentConfirmation;
     /**
      * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
      */
@@ -2244,6 +2720,10 @@ export type WorkspaceSettings = {
      * Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.
      */
     requiredNotices: boolean;
+    /**
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
+     */
+    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
 };
 
 export type UpdateWorkspaceSettings = {
@@ -2252,6 +2732,10 @@ export type UpdateWorkspaceSettings = {
      * The workspace's postal address, as plain text: at most 300 characters on up to 6 lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it.
      */
     postalAddress?: string | null;
+    /**
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
+     */
+    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
 };
 
 export type SesAccount = {
@@ -2383,6 +2867,35 @@ export type DomainReadiness = {
          */
         suggestion?: string | null;
     } | null;
+    /**
+     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
+     */
+    builtIn?: boolean;
+    /**
+     * Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.
+     */
+    limits?: {
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace’s members.
+         */
+        scope: 'anyone' | 'members';
+        /**
+         * Recipients in a rolling 24 hours.
+         */
+        perDay: number;
+        /**
+         * Recipients in a minute.
+         */
+        perMinute: number;
+        /**
+         * Request fields a send from it can’t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign.
+         */
+        unsupported: Array<'from' | 'replyTo' | 'headers' | 'attachments' | 'template' | 'scheduledAt' | 'kind' | 'campaign'>;
+        /**
+         * The same, in one sentence.
+         */
+        summary: string;
+    };
 };
 
 export type CreateDomain = {
@@ -2610,6 +3123,14 @@ export type Metrics = {
         complained: number;
     }>;
     hourly?: Array<{
+        date: string;
+        count: number;
+        sent: number;
+        delivered: number;
+        bounced: number;
+        complained: number;
+    }>;
+    tenMinute?: Array<{
         date: string;
         count: number;
         sent: number;
@@ -5875,6 +6396,43 @@ export type OverviewSetup = {
          */
         pending: number;
     } | null;
+    /**
+     * The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace.
+     */
+    progress?: {
+        /**
+         * An agent inbox exists.
+         */
+        inbox: boolean;
+        /**
+         * Any email was received.
+         */
+        received: boolean;
+        /**
+         * The audience has a contact.
+         */
+        contacts: boolean;
+        /**
+         * A campaign exists, draft or not.
+         */
+        campaign: boolean;
+        /**
+         * A campaign was launched (preparing, scheduled, sending, paused or done).
+         */
+        campaignSent: boolean;
+        /**
+         * A newsletter exists.
+         */
+        newsletter: boolean;
+        /**
+         * A newsletter has a reader (a member of its list).
+         */
+        readers: boolean;
+        /**
+         * A campaign to a newsletter was launched.
+         */
+        issueSent: boolean;
+    } | null;
 };
 
 export type SupportHandoff = {
@@ -6403,6 +6961,10 @@ export type GetCurrentIdentityResponses = {
          */
         mcpScopes: Array<string>;
         connection: ConnectionSummary;
+        /**
+         * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
+         */
+        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents'> | null;
         /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
@@ -7136,6 +7698,10 @@ export type ExchangeAgentSetupTokenData = {
          * The setup token from the prompt.
          */
         token: string;
+        /**
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
+         */
+        client_name?: string;
     };
     path?: never;
     query?: never;
@@ -7203,7 +7769,7 @@ export type ExchangeAgentSetupTokenResponse = ExchangeAgentSetupTokenResponses[k
 export type StartAgentDeviceAuthorizationData = {
     body?: {
         /**
-         * What the agent is, shown to the person as its claim.
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
          */
         client_name?: string;
     };
@@ -7552,6 +8118,10 @@ export type ListContactsData = {
         email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
+        /**
+         * true: only contacts campaigns skip as risky (risk set and not allowed).
+         */
+        risky?: 'true';
         listId?: string;
     };
     url: '/v1/contacts';
@@ -7822,6 +8392,10 @@ export type UpdateContactData = {
         properties?: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).
+         */
+        riskAllowed?: boolean;
     };
     path: {
         id: string;
@@ -8385,6 +8959,10 @@ export type ListListMembersData = {
         email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
+        /**
+         * true: only contacts campaigns skip as risky (risk set and not allowed).
+         */
+        risky?: 'true';
     };
     url: '/v1/lists/{id}/members';
 };
@@ -8972,6 +9550,10 @@ export type PreviewSegmentResponses = {
         eligible: number;
         suppressed: number;
         unsubscribed: number;
+        /**
+         * Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible.
+         */
+        risky: number;
     };
 };
 
@@ -9047,6 +9629,7 @@ export type ListContactImportsResponses = {
              * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
              */
             rowsRetained: boolean;
+            risky: RiskBreakdown;
             /**
              * false once per-row error details are no longer kept after the retention window (errors is then []).
              */
@@ -10943,11 +11526,25 @@ export type ListEmailsData = {
         region?: string;
         kind?: 'transactional' | 'marketing';
         /**
-         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address.
          */
         search?: string;
+        /**
+         * The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them.
+         */
         from?: string;
+        /**
+         * The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them.
+         */
         to?: string;
+        /**
+         * The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both.
+         */
+        since?: string;
+        /**
+         * The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both.
+         */
+        until?: string;
     };
     url: '/v1/emails';
 };
@@ -12182,7 +12779,12 @@ export type PreviewCampaignAudienceData = {
     path: {
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Also review the send (readiness).
+         */
+        readiness?: 'true' | 'false';
+    };
     url: '/v1/campaigns/{id}/audience';
 };
 
@@ -14867,7 +15469,7 @@ export type GetMetricsData = {
         from?: string;
         to?: string;
         stream?: 'transactional' | 'marketing';
-        granularity?: 'day' | 'hour';
+        granularity?: 'day' | 'hour' | '10m';
         /**
          * Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).
          */

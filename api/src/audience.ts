@@ -1,6 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, eq, gt, inArray, isNull, sql, type SQL } from 'drizzle-orm';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
+import type { Database } from './core.js';
 import { actor, ApiError, AudienceSpec, budgetedRead, chargeBudget, databaseCodeOf, unrestrictedRequired, errors, id, IdParams, json, log, notFound, page, PageQuery, readLimit, readLimitNote, response, rowId, security, statementTimedOut, type Actor, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { productName } from './brand.js';
 export { AudienceSpec };
@@ -10,6 +11,8 @@ import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { RAMP } from './standing-model.js';
+import { bouncedElsewhere, classifyAddress, contactRisk, domainOf, domainRisks, hygieneLists, noRisks, peekHygieneLists, RiskBreakdown, RiskReason, RISKS, riskCounts, riskFor, skippedRisk, staticRiskSql, validAddress, type HygieneLists, type Risk, type RiskCounts } from './list-hygiene.js';
 
 export const CONTACT_PROPERTIES_MAX_KEYS = 50;
 export const CONTACT_PROPERTIES_MAX_BYTES = 16 * 1024;
@@ -43,13 +46,17 @@ const Email = mailAddress(z.string().trim()).transform(v => v.toLowerCase()).ope
 const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= CONTACT_PROPERTIES_MAX_KEYS, 'At most 50 properties are supported.');
 export const PropertiesInput = Properties.refine(v => propertiesByteLength(v) <= CONTACT_PROPERTIES_MAX_BYTES, 'Contact properties must total at most 16 KiB of JSON.').describe('Up to 50 key/value pairs, at most 16 KiB of JSON total.');
 export const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
-const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional() }).strict();
+const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional(), riskAllowed: z.boolean().optional().describe('true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).') }).strict();
 export function withAudienceReadMemory(c: Ctx, work: () => Promise<Response>): Promise<Response> {
   return withBoundedRead(c, () => work(), { route: 'audience.read' });
 }
 const Scope = { workspaceId: z.string() };
 const Dates = { createdAt: z.string(), updatedAt: z.string() };
-const Contact = z.object({ id: z.string(), ...Scope, email: z.string(), name: z.string().nullable(), properties: Properties, marketingConsent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean(), suppressionReason: z.string().nullable(), lastOpenAt: z.string().nullable(), lastClickAt: z.string().nullable(), observedSince: z.string().nullable(), openObservedSince: z.string().nullable(), clickObservedSince: z.string().nullable(), deletedAt: z.string().nullable(), ...Dates }).openapi('Contact');
+const ContactRisk = z.object({ reason: RiskReason, suggestion: z.string().nullable().describe('For typo_domain, the address with the provider it most likely meant.'), allowed: z.boolean().describe('Its owner allowed it: campaigns and marketing sends reach it anyway.') }).nullable()
+  .describe('Why campaigns and marketing sends skip this contact, or null when nothing is wrong with the address. Flagged when the contact is created or imported, and again hourly for every contact. Transactional mail is never refused.').openapi('ContactRisk');
+const Contact = z.object({ id: z.string(), ...Scope, email: z.string(), name: z.string().nullable(), properties: Properties, marketingConsent: z.enum(['unknown', 'subscribed', 'unsubscribed']), suppressed: z.boolean(), suppressionReason: z.string().nullable(), risk: ContactRisk, lastOpenAt: z.string().nullable(), lastClickAt: z.string().nullable(), observedSince: z.string().nullable(), openObservedSince: z.string().nullable(), clickObservedSince: z.string().nullable(), deletedAt: z.string().nullable(), ...Dates }).openapi('Contact');
+/** A contact row as the API shows it: its risk as reason, suggestion and allowance. */
+export function contactBody<T extends { email: string; risk: string | null; riskAllowed: boolean }>({ riskAllowed, ...row }: T) { return { ...row, risk: contactRisk({ email: row.email, risk: row.risk, riskAllowed }) }; }
 const ListInput = z.object({ name: z.string().trim().min(1).max(200), description: z.string().max(2000).default('') }).strict();
 const List = ListInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('ContactList');
 const ContactRead = Contact.extend({ listIds: z.array(z.string()).describe('Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.') }).openapi('ContactRead');
@@ -57,7 +64,7 @@ const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().in
 const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
 const ListQuery = SearchQuery.extend({ counts: z.enum(['true', 'false']).default('true').describe('false leaves member counts out (counts is null). Counts are kept as memberships, consent and suppression change, so reading them does not count members.') }).openapi('ListContactListsQuery');
-const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
+const ContactQuery = SearchQuery.extend({ email: Email.optional().describe('Exact, case-insensitive email match. Uses the unique email index; prefer it over search for one address.'), consent: z.enum(['unknown', 'subscribed', 'unsubscribed']).optional(), suppressed: z.enum(['true', 'false']).optional(), risky: z.enum(['true']).optional().describe('true: only contacts campaigns skip as risky (risk set and not allowed).'), listId: z.string().min(1).max(120).optional() }).openapi('ListContactsQuery');
 // A condition on any contact property, with the operators of its value's type (compilePropertyRule).
 const property = { field: z.literal('property'), key: z.string().min(1).max(80).describe('The property name, as in a contact\'s properties.') };
 const PropertyRule = z.union([
@@ -75,13 +82,15 @@ function ruleSize(rule: SegmentRule): number { return 'rules' in rule ? 1 + rule
 const Rule = ruleSchema.refine(v => ruleSize(v) <= 50, 'A segment supports at most 50 rules and three nested groups.').openapi('SegmentRule');
 const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: Rule }).strict();
 const Segment = SegmentInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('Segment');
-const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int() });
+const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int(), risky: z.number().int().describe('Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible.') });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
 const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), importId: z.string().nullable().describe('Committed import ID when source is import; null otherwise.'), occurredAt: z.string(), createdAt: z.string() });
 const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), source: z.string().trim().min(1).max(200).optional(), policyVersion: z.string().trim().min(1).max(120).optional(), evidence: z.string().trim().min(1).max(2000).optional(), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.').optional(), confirmResubscribe: z.boolean().default(false) }).strict();
-const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties });
+const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties, risk: RiskReason.optional().describe('What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.') });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
-const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), rowsRetained: z.boolean().describe('false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).'), errorsRetained: z.boolean().describe('false once per-row error details are no longer kept after the retention window (errors is then []).'), ...Dates }).openapi('AudienceImport');
+const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), rowsRetained: z.boolean().describe('false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).'), risky: RiskBreakdown.nullable().describe('Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene.'), errorsRetained: z.boolean().describe('false once per-row error details are no longer kept after the retention window (errors is then []).'), ...Dates }).openapi('AudienceImport');
+// How long a preview looks up domains it hasn't checked before (src/list-hygiene.ts domainRisks).
+const IMPORT_DNS_MS = 3_000;
 const IMPORT_MAX_BYTES = 5 * 1024 * 1024, IMPORT_MAX_ROWS = 50_000, IMPORT_OPEN_PREVIEW_CAP = 50, IMPORT_SAMPLE_CONTACT_IDS = 2000;
 export const IMPORT_PREVIEW_RATE_PER_MINUTE = 40;
 // Measured workerd isolate peaks (idle ~29 MB, 128 MB isolate cap, 64 MiB working budget):
@@ -94,9 +103,11 @@ export const IMPORT_GET_RESERVATION_BYTES = 24 * 1024 * 1024;
 export const IMPORT_COMMIT_RESERVATION_BYTES = 48 * 1024 * 1024;
 export const importPreviewReservationBytes = (bytes: number) => Math.min(SEND_LIMITS.isolateWorkingBytes, Math.max(0, bytes) * 8 + 2 * 1024 * 1024);
 function importNotFound(): never { throw new ApiError(404, 'NOT_FOUND', `Import was not found. A preview that was never committed is removed once the workspace has ${IMPORT_OPEN_PREVIEW_CAP} newer ones (or after 7 days). Preview the file again.`); }
-const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, rowsScrubbedAt: imports.rowsScrubbedAt, errorsScrubbedAt: imports.errorsScrubbedAt, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
+const importMetaColumns = { id: imports.id, workspaceId: imports.workspaceId, listId: imports.listId, status: imports.status, imported: imports.imported, rowsScrubbedAt: imports.rowsScrubbedAt, errorsScrubbedAt: imports.errorsScrubbedAt, riskSummary: imports.riskSummary, createdAt: imports.createdAt, updatedAt: imports.updatedAt };
 type ImportMeta = { [K in keyof typeof importMetaColumns]: (typeof imports.$inferSelect)[K] };
-const importSummary = ({ rowsScrubbedAt, errorsScrubbedAt, ...meta }: ImportMeta) => ({ ...meta, rowsRetained: rowsScrubbedAt === null, errorsRetained: errorsScrubbedAt === null });
+// Retained receipts only counted the reasons known when they were written. A receipt from before hygiene still has no summary.
+const receiptRisk = (stored: ImportMeta['riskSummary']) => stored ? { total: stored.total, byReason: { ...noRisks(), ...stored.byReason } } : null;
+const importSummary = ({ rowsScrubbedAt, errorsScrubbedAt, riskSummary, ...meta }: ImportMeta) => ({ ...meta, rowsRetained: rowsScrubbedAt === null, errorsRetained: errorsScrubbedAt === null, risky: receiptRisk(riskSummary) });
 const ImportCommit = z.object({ consent: z.object({ status: z.literal('subscribed'), evidence: z.string().trim().min(1).max(2000).describe('How these people agreed to marketing email, for example "Opted in at checkout". Stored with each consent record.'), policyVersion: z.string().trim().min(1).max(120).optional() }).strict().optional().describe('Records that everyone in this import agreed to receive marketing email. It changes only contacts with no consent decision yet: prior opt-outs stay unsubscribed and suppressed addresses stay suppressed. Omit it to import without consent.') }).strict().openapi('CommitContactImportInput');
 const CommittedImport = Import.extend({ subscribed: z.number().int().describe('Contacts this commit marked subscribed; 0 without consent or when the import was already committed.') }).openapi('CommittedContactImport');
 const ImportInput = z.object({ csv: z.string().min(1).max(IMPORT_MAX_BYTES), listId: z.string().min(1).max(120).optional(), mapping: z.object({ email: z.string().min(1).max(200), name: z.string().min(1).max(200).optional(), firstName: z.string().min(1).max(200).optional(), plan: z.string().min(1).max(200).optional(), country: z.string().min(1).max(200).optional() }).strict() }).strict();
@@ -135,7 +146,7 @@ async function trigramCandidates(db: DbExecutor, identity: Actor, search: string
 const wholeAddress = (search: string | undefined) => { const address = Email.safeParse(search); return address.success ? address.data : undefined; };
 function contactFilters(identity: Actor, query: z.infer<typeof ContactQuery>, candidates?: string[]) {
   const address = wholeAddress(query.search);
-  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : candidates ? sql`${contacts.id} = ANY(${sql.param(candidates)}::text[])` : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.listId ? inList(identity, query.listId) : undefined];
+  return [query.email ? eq(contacts.email, query.email) : undefined, address ? eq(contacts.email, address) : candidates ? sql`${contacts.id} = ANY(${sql.param(candidates)}::text[])` : query.search ? sql`(${searchText(contacts.email, query.search)} OR ${searchText(contacts.name, query.search)})` : undefined, query.consent ? eq(contacts.marketingConsent, query.consent) : undefined, query.suppressed !== undefined ? eq(contacts.suppressed, query.suppressed === 'true') : undefined, query.risky ? skippedRisk(sql`${contacts.risk}`, sql`${contacts.riskAllowed}`) : undefined, query.listId ? inList(identity, query.listId) : undefined];
 }
 async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof contacts.$inferSelect>, maxListsPerContact = CONTACT_LIST_IDS_PAGE_MAX) {
   if (!rows.length) return [];
@@ -153,21 +164,21 @@ async function readContacts(db: DbExecutor, identity: Actor, rows: Array<typeof 
     ) m`);
   const byContact = new Map<string, string[]>();
   for (const member of memberships) { const ids = byContact.get(member.contact_id) ?? []; ids.push(member.list_id); byContact.set(member.contact_id, ids); }
-  return rows.map(row => ({ ...row, listIds: byContact.get(row.id) ?? [] }));
+  return rows.map(row => ({ ...contactBody(row), listIds: byContact.get(row.id) ?? [] }));
 }
 // A list this size or smaller is read through its own memberships whatever the filter: at most this many contact probes.
 const SMALL_LIST = 5000;
 type ContactRow = typeof contacts.$inferSelect;
-type RawContactRow = { id: string; workspace_id: string; email: string; name: string | null; properties: Record<string, string | number | boolean | null>; marketing_consent: 'unknown' | 'subscribed' | 'unsubscribed'; suppressed: boolean; suppression_reason: string | null; last_open_at: string | null; last_click_at: string | null; observed_since: string | null; open_observed_since: string | null; click_observed_since: string | null; deleted_at: string | null; created_at: string; updated_at: string; candidate_count: number };
+type RawContactRow = { id: string; workspace_id: string; email: string; name: string | null; properties: Record<string, string | number | boolean | null>; marketing_consent: 'unknown' | 'subscribed' | 'unsubscribed'; suppressed: boolean; suppression_reason: string | null; risk: Risk | null; risk_allowed: boolean; last_open_at: string | null; last_click_at: string | null; observed_since: string | null; open_observed_since: string | null; click_observed_since: string | null; deleted_at: string | null; created_at: string; updated_at: string; candidate_count: number };
 function mapRawContact(r: RawContactRow): ContactRow {
-  return { id: r.id, workspaceId: r.workspace_id, email: r.email, name: r.name, properties: r.properties, marketingConsent: r.marketing_consent, suppressed: r.suppressed, suppressionReason: r.suppression_reason, lastOpenAt: r.last_open_at, lastClickAt: r.last_click_at, observedSince: r.observed_since, openObservedSince: r.open_observed_since, clickObservedSince: r.click_observed_since, deletedAt: r.deleted_at, createdAt: r.created_at, updatedAt: r.updated_at };
+  return { id: r.id, workspaceId: r.workspace_id, email: r.email, name: r.name, properties: r.properties, marketingConsent: r.marketing_consent, suppressed: r.suppressed, suppressionReason: r.suppression_reason, risk: r.risk, riskAllowed: r.risk_allowed, lastOpenAt: r.last_open_at, lastClickAt: r.last_click_at, observedSince: r.observed_since, openObservedSince: r.open_observed_since, clickObservedSince: r.click_observed_since, deletedAt: r.deleted_at, createdAt: r.created_at, updatedAt: r.updated_at };
 }
 /**
  * Fetches one page of active contacts in ID order while capping cumulative serialized bytes in SQL (always >= 1 row
  * if any match), preserving membership-ordered index scans for unfiltered or small lists.
  */
 async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infer<typeof ContactQuery>) {
-  const { listId } = query, filtered = !!query.search || !!query.consent || query.suppressed !== undefined;
+  const { listId } = query, filtered = !!query.search || !!query.consent || query.suppressed !== undefined || !!query.risky;
   const byMembership = !!listId && !query.email && !wholeAddress(query.search) && (!filtered
     || !(await db.execute(sql`SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} OFFSET ${SMALL_LIST} LIMIT 1`)).rows.length);
   // Bound both sides of the membership join so a merge can seek instead of scanning contacts up to the cursor.
@@ -175,14 +186,14 @@ async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infe
   const candidates = !byMembership && query.search ? await trigramCandidates(db, identity, query.search) : undefined;
   if (candidates?.length === 0) return { rows: [], hasMore: false };
   const candidateSql = byMembership
-    ? sql`SELECT ${contacts.id} AS id, ${contacts.workspaceId} AS workspace_id, ${contacts.email} AS email, ${contacts.name} AS name, ${contacts.properties} AS properties, ${contacts.marketingConsent} AS marketing_consent, ${contacts.suppressed} AS suppressed, ${contacts.suppressionReason} AS suppression_reason,
+    ? sql`SELECT ${contacts.id} AS id, ${contacts.workspaceId} AS workspace_id, ${contacts.email} AS email, ${contacts.name} AS name, ${contacts.properties} AS properties, ${contacts.marketingConsent} AS marketing_consent, ${contacts.suppressed} AS suppressed, ${contacts.suppressionReason} AS suppression_reason, ${contacts.risk} AS risk, ${contacts.riskAllowed} AS risk_allowed,
         ${contacts.lastOpenAt} AS last_open_at, ${contacts.lastClickAt} AS last_click_at, ${contacts.observedSince} AS observed_since, ${contacts.openObservedSince} AS open_observed_since, ${contacts.clickObservedSince} AS click_observed_since, ${contacts.deletedAt} AS deleted_at, ${contacts.createdAt} AS created_at, ${contacts.updatedAt} AS updated_at,
         (octet_length(${contacts.properties}::text) + octet_length(${contacts.email}) + coalesce(octet_length(${contacts.name}), 0) + 384) AS row_bytes
       FROM ${listMembers}
       JOIN ${contacts} ON ${contacts.workspaceId} = ${listMembers.workspaceId} AND ${contacts.id} = ${listMembers.contactId}
       WHERE ${and(scope(listMembers, identity), eq(listMembers.listId, listId!), isNull(contacts.deletedAt), ...contactFilters(identity, { ...query, listId: undefined }), membershipCursor)}
       ORDER BY ${listMembers.contactId} ASC LIMIT ${query.limit + 1}`
-    : sql`SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason,
+    : sql`SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason, risk, risk_allowed,
         last_open_at, last_click_at, observed_since, open_observed_since, click_observed_since, deleted_at, created_at, updated_at,
         (octet_length(properties::text) + octet_length(email) + coalesce(octet_length(name), 0) + 384) AS row_bytes
       FROM ${contacts}
@@ -193,7 +204,7 @@ async function boundedContactPage(db: DbExecutor, identity: Actor, query: z.infe
       SELECT *, row_number() OVER (ORDER BY id) AS rn, sum(row_bytes) OVER (ORDER BY id ROWS UNBOUNDED PRECEDING) AS cum_bytes
       FROM candidate
     )
-    SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason,
+    SELECT id, workspace_id, email, name, properties, marketing_consent, suppressed, suppression_reason, risk, risk_allowed,
       last_open_at::text, last_click_at::text, observed_since::text, open_observed_since::text, click_observed_since::text,
       deleted_at::text, created_at::text, updated_at::text,
       (SELECT count(*)::int FROM candidate) AS candidate_count
@@ -343,20 +354,21 @@ async function previewSegmentCounts(db: DbExecutor, identity: Actor, rule: Segme
   } else {
     fromSql = sql`${contacts} WHERE ${scope(contacts, identity)} AND ${isNull(contacts.deletedAt)} AND ${ruleSql}`;
   }
-  const { rows: [row] } = await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`
+  const { rows: [row] } = await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number; risky: number }>(sql`
     SELECT count(*)::int AS matched,
-      count(*) FILTER (WHERE NOT suppressed AND marketing_consent = 'subscribed')::int AS eligible,
+      count(*) FILTER (WHERE NOT suppressed AND marketing_consent = 'subscribed' AND NOT risky)::int AS eligible,
       count(*) FILTER (WHERE suppressed)::int AS suppressed,
-      count(*) FILTER (WHERE NOT suppressed AND marketing_consent <> 'subscribed')::int AS unsubscribed
-    FROM (SELECT ${contacts.suppressed} AS suppressed, ${contacts.marketingConsent} AS marketing_consent FROM ${fromSql} LIMIT 1001) bounded`);
+      count(*) FILTER (WHERE NOT suppressed AND marketing_consent <> 'subscribed')::int AS unsubscribed,
+      count(*) FILTER (WHERE NOT suppressed AND marketing_consent = 'subscribed' AND risky)::int AS risky
+    FROM (SELECT ${contacts.suppressed} AS suppressed, ${contacts.marketingConsent} AS marketing_consent, ${skippedRisk(sql`${contacts.risk}`, sql`${contacts.riskAllowed}`)} AS risky FROM ${fromSql} LIMIT 1001) bounded`);
   if (row!.matched > 1000) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'This preview supports at most 1000 matching contacts. Narrow the audience; no contacts were silently truncated.');
   return row!;
 }
 // One INSERT ... SELECT captures membership, consent and only referenced personalization values.
 // Keyset-paging the live audience across transactions would not be a review snapshot.
 // The audience's lists and segments, locked for share when the caller snapshots, and the matching conditions over contacts.
-async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean) {
-  if (identity.domains.length) throw unrestrictedRequired('Reading the workspace audience requires an unrestricted credential.', { permission: 'audience', level: 'read' });
+async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean, joined = false) {
+  if (identity.domains.length) throw unrestrictedRequired(identity, 'The workspace audience needs', { permission: 'audience', level: 'read' });
   const listIds = [...new Set([spec.listId, ...(spec.excludeListIds ?? [])])].sort();
   const segmentIds = [...new Set([...(spec.segmentId ? [spec.segmentId] : []), ...(spec.excludeSegmentIds ?? [])])].sort();
   const listQuery = db.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), inArray(lists.id, listIds))).orderBy(asc(lists.id));
@@ -366,45 +378,109 @@ async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer
   if (lockedSegments.length !== segmentIds.length) notFound('Segment');
   // Set-based membership (no OFFSET 0 fence) lets the planner hash-join millions of members instead of probing per contact.
   const member = (listId: string) => sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
-  const conditions = [member(spec.listId)];
+  // joined: the caller joins the list's memberships (memberJoin) for when each contact joined, instead of this test.
+  const conditions = joined ? [] : [member(spec.listId)];
   if (spec.segmentId) conditions.push(compileRule(lockedSegments.find(row => row.id === spec.segmentId)!.rule));
   for (const listId of spec.excludeListIds ?? []) conditions.push(sql`NOT (${member(listId)})`);
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule(lockedSegments.find(row => row.id === segmentId)!.rule)})`);
   return conditions;
 }
+/** The main list's memberships, joined to its contacts: `lm.created_at` is when each joined the list. */
+const memberJoin = (identity: Pick<Actor, 'workspaceId'>, listId: string) => sql`JOIN audience_list_members lm ON lm.workspace_id = ${contacts.workspaceId} AND lm.list_id = ${listId} AND lm.contact_id = ${contacts.id} AND lm.workspace_id = ${identity.workspaceId}`;
+/** When the list was last sent to: the capture of its latest real campaign that released anyone (null: never). */
+export async function listLastSent(db: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string): Promise<string | null> {
+  const [row] = (await db.execute<{ at: string | null }>(sql`SELECT max(coalesce(r.captured_at, c.updated_at))::text AS at FROM sending_campaigns c
+    LEFT JOIN sending_campaign_reviews r ON r.workspace_id = c.workspace_id AND r.id = c.review_id
+    WHERE c.workspace_id = ${identity.workspaceId} AND c.list_id = ${listId} AND c.expanded > 0 AND NOT c.simulated`)).rows;
+  return row?.at ?? null;
+}
+/** Engagement tiers for a campaign's order (RAMP.plan): 0 opened or clicked within engagedDays, 1 mailed before (any open
+ *  or click on record, or on the list when it was last sent to), 2 never mailed: joined since, with nothing on record. */
+const engagedAt = sql`greatest(${contacts.lastOpenAt}, ${contacts.lastClickAt})`;
+const neverMailed = (lastSent: string | null) => sql`(${contacts.observedSince} IS NULL AND ${lastSent === null ? sql`true` : sql`lm.created_at > ${lastSent}::timestamptz`})`;
+const tierSql = (lastSent: string | null) => sql`(CASE WHEN ${engagedAt} >= now() - make_interval(days => ${RAMP.plan.engagedDays}::int) THEN 0 WHEN ${neverMailed(lastSent)} THEN 2 ELSE 1 END)::smallint`;
+/** Of the audience a campaign would reach, how many were never mailed (tier 2); null when counting takes over a second. */
+export async function countNeverMailed(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice: boolean, lastSent: string | null): Promise<number | null> {
+  const conditions = await audienceConditions(db, identity, spec, false, true);
+  return (db as Database).transaction(async tx => {
+    await tx.execute(sql`SAVEPOINT never_mailed`);
+    try {
+      await tx.execute(sql`SET LOCAL statement_timeout = '1s'`);
+      await tx.execute(sql`SET LOCAL enable_nestloop = off`);
+      const [row] = (await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM ${contacts} ${memberJoin(identity, spec.listId)}
+        WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice)} AND ${neverMailed(lastSent)}`)).rows;
+      return row?.n ?? 0;
+    } catch (error) {
+      if (!statementTimedOut(error)) throw error;
+      return null;
+    } finally {
+      // The settings end with the savepoint, never leaking into the caller's transaction.
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT never_mailed`);
+      await tx.execute(sql`RELEASE SAVEPOINT never_mailed`);
+    }
+  });
+}
 // Who a campaign may reach: subscribers, or for a required notice everyone who is not suppressed (bounced, complained),
 // people who unsubscribed from marketing or never subscribed included.
-const reachable = (requiredNotice: boolean) => requiredNotice ? sql`NOT ${contacts.suppressed}` : sql`NOT ${contacts.suppressed} AND ${contacts.marketingConsent} = 'subscribed'`;
+// Contacts flagged as risky are skipped unless their owner allowed them (src/list-hygiene.ts), whatever the campaign.
+const consented = (requiredNotice: boolean) => requiredNotice ? sql`true` : sql`${contacts.marketingConsent} = 'subscribed'`;
+const skipped = skippedRisk(sql`${contacts.risk}`, sql`${contacts.riskAllowed}`);
+const reachable = (requiredNotice: boolean) => sql`NOT ${contacts.suppressed} AND ${consented(requiredNotice)} AND (${contacts.risk} IS NULL OR ${contacts.riskAllowed})`;
+/** Who campaigns skip as risky out of the reachable, by reason: counted aggregates named risky_<reason>. */
+const riskyColumns = (risk: SQL, risky: SQL = sql`true`) => sql.join(RISKS.map(r => sql`count(*) FILTER (WHERE ${risky} AND ${risk} = ${r})::int AS ${sql.identifier(`risky_${r}`)}`), sql`, `);
+type RiskyRow = { [K in `risky_${Risk}`]: number };
+const riskyOf = (row: RiskyRow) => riskCounts(RISKS.map(r => ({ risk: r, count: row[`risky_${r}`] })));
+export type AudienceCountsResult = { matched: number; eligible: number; suppressed: number; unsubscribed: number; risky: number; riskyByReason: RiskCounts };
 /** Read-only counts of the live audience (the dashboard's pre-send check); nothing is frozen or locked. */
-export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false) {
+export async function countCampaignAudience(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false): Promise<AudienceCountsResult> {
   const conditions = await audienceConditions(db, identity, spec, false);
-  const [row] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`SELECT count(*)::int AS matched,
+  const [row] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number } & RiskyRow>(sql`SELECT count(*)::int AS matched,
       count(*) FILTER (WHERE ${reachable(requiredNotice)})::int AS eligible,
       count(*) FILTER (WHERE ${contacts.suppressed})::int AS suppressed,
-      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${reachable(requiredNotice)}))::int AS unsubscribed
+      count(*) FILTER (WHERE NOT ${contacts.suppressed} AND NOT (${consented(requiredNotice)}))::int AS unsubscribed,
+      ${riskyColumns(sql`${contacts.risk}`, sql`NOT ${contacts.suppressed} AND ${consented(requiredNotice)} AND ${skipped}`)}
     FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)}`)).rows;
-  return row!;
+  const risky = riskyOf(row!);
+  return { matched: row!.matched, eligible: row!.eligible, suppressed: row!.suppressed, unsubscribed: row!.unsubscribed, risky: risky.total, riskyByReason: risky.byReason };
+}
+/** The list's members campaigns skip as risky, by reason: the workspace's flagged contacts (migration 498's partial index)
+ *  joined to the list's memberships by hash. Run it with nested loops off (riskyByHash): on statistics from before the
+ *  flags (an hourly pass changes a few percent of a table, too few for autovacuum to analyze it) the planner expects one
+ *  flagged contact and probes the memberships once per flagged contact, 12 s cold for 75,000 of a 2,000,000-member list on
+ *  the lab, against 0.26 s warm by hash (and a sequential read of the memberships cold). */
+const listRisky = (identity: Pick<Actor, 'workspaceId'>, listId: string, requiredNotice: boolean) => sql`(SELECT coalesce(jsonb_object_agg(risk, n), '{}'::jsonb) FROM (
+    SELECT c.risk, count(*)::int AS n FROM audience_contacts c
+    WHERE c.workspace_id = ${identity.workspaceId} AND c.risk IS NOT NULL AND NOT c.risk_allowed AND c.deleted_at IS NULL AND NOT c.suppressed
+      ${requiredNotice ? sql`` : sql`AND c.marketing_consent = 'subscribed'`}
+      AND EXISTS (SELECT 1 FROM audience_list_members m WHERE m.workspace_id = c.workspace_id AND m.list_id = ${listId} AND m.contact_id = c.id)
+    GROUP BY c.risk) r)`;
+const riskyFrom = (json: Record<string, number> | null) => riskCounts(Object.entries(json ?? {}).map(([risk, count]) => ({ risk, count })));
+async function riskyByHash<T>(db: DbExecutor, work: (db: DbExecutor) => Promise<T>, own: boolean) {
+  if (own && 'transaction' in db) return (db as Database).transaction(async tx => { await tx.execute(sql`SET LOCAL enable_nestloop = off`); return work(tx); });
+  await db.execute(sql`SET LOCAL enable_nestloop = off`);
+  try { return await work(db); } finally { await db.execute(sql`SET LOCAL enable_nestloop TO DEFAULT`); }
 }
 
 /** Display-only whole-list counts. The list tally includes every committed delta, not just its last fold. */
-export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false) {
+export async function countCampaignAudienceForDisplay(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice = false): Promise<AudienceCountsResult> {
   if (identity.domains.length || spec.segmentId || spec.excludeListIds?.length || spec.excludeSegmentIds?.length) {
     return countCampaignAudience(db, identity, spec, requiredNotice);
   }
   // Anchor to the scoped list so a missing or foreign list still returns 404, not the counts of an empty list.
-  const { rows: [row] } = await db.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number }>(sql`
+  const { rows: [row] } = await riskyByHash(db, db => db.execute<{ subscribed: number; unsubscribed: number; unknown: number; suppressed: number; risky: Record<string, number> | null }>(sql`
     SELECT coalesce(sum(c.subscribed), 0)::int AS subscribed, coalesce(sum(c.unsubscribed), 0)::int AS unsubscribed,
-      coalesce(sum(c.unknown), 0)::int AS unknown, coalesce(sum(c.suppressed), 0)::int AS suppressed
+      coalesce(sum(c.unknown), 0)::int AS unknown, coalesce(sum(c.suppressed), 0)::int AS suppressed, ${listRisky(identity, spec.listId, requiredNotice)} AS risky
     FROM audience_lists l LEFT JOIN audience_list_counts c ON c.workspace_id = l.workspace_id AND c.list_id = l.id
     WHERE l.workspace_id = ${identity.workspaceId} AND l.id = ${spec.listId}
-    GROUP BY l.id`);
+    GROUP BY l.id`), true);
   if (!row) return notFound('List');
-  const notSubscribed = row.unsubscribed + row.unknown;
+  const notSubscribed = row.unsubscribed + row.unknown, risky = riskyFrom(row.risky);
   return {
     matched: row.subscribed + notSubscribed + row.suppressed,
-    eligible: requiredNotice ? row.subscribed + notSubscribed : row.subscribed,
+    eligible: Math.max(0, (requiredNotice ? row.subscribed + notSubscribed : row.subscribed) - risky.total),
     suppressed: row.suppressed,
     unsubscribed: requiredNotice ? 0 : notSubscribed,
+    risky: risky.total, riskyByReason: risky.byReason,
   };
 }
 export const SYNC_CAPTURE_MAX_LIST_MEMBERS = 5_000;
@@ -422,6 +498,8 @@ export type SnapshotOptions = {
   staticStamp?: StaticStampSpec;
   sliceRows?: number;
   onProgress?: (progress: SnapshotProgress) => Promise<'continue' | 'abort'>;
+  /** How many of the first recipients are a uniform sample of the whole audience (the Hosted list probe's size). */
+  leading?: (eligible: number) => number;
 };
 
 /** O(SYNC_CAPTURE_MAX_LIST_MEMBERS) PK Index-Only Scan (~0.5 ms regardless of whether the list has 2M or 20M members). */
@@ -438,24 +516,31 @@ export async function isSmallAudienceList(db: DbExecutor, identity: Pick<Actor, 
  * 4. Only then 0.
  * Always validates list/segment existence before the savepoint so 404 errors remain synchronous.
  */
+/** At most how many subscribers a campaign to `listId` reaches (a segment of it or exclusions reach fewer): the list's
+ *  counts (audience_list_counts), 0 without them. Constant time: the launch's readiness bound when counting timed out. */
+export async function listSubscribedBound(db: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string) {
+  if (!(await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok) return 0;
+  const [row] = (await db.execute<{ n: number }>(sql`SELECT coalesce(sum(subscribed), 0)::int AS n FROM audience_list_counts WHERE workspace_id = ${identity.workspaceId} AND list_id = ${listId}`)).rows;
+  return Number(row?.n ?? 0);
+}
 export async function estimateCampaignAudience(
   db: DbExecutor,
   identity: Actor,
   spec: z.infer<typeof AudienceSpec>,
   requiredNotice: boolean,
   cachedEstimate: number | null,
-): Promise<{ queued: number; definitive?: 'empty' | 'over_limit' }> {
+): Promise<{ queued: number; definitive?: 'empty' | 'over_limit'; risky?: { total: number; byReason: RiskCounts }; approximate?: true }> {
   const conditions = await audienceConditions(db, identity, spec, true);
   if (!spec.segmentId && !spec.excludeListIds?.length && !spec.excludeSegmentIds?.length) {
     const hasTally = (await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok;
     if (hasTally) {
-      const [tally] = (await db.execute<{ subscribed: number; reachable: number }>(sql`
+      const [tally] = (await riskyByHash(db, db => db.execute<{ subscribed: number; reachable: number; risky: Record<string, number> | null }>(sql`
         SELECT coalesce(sum(subscribed), 0)::int AS subscribed,
-               coalesce(sum(subscribed + unsubscribed + unknown), 0)::int AS reachable
+               coalesce(sum(subscribed + unsubscribed + unknown), 0)::int AS reachable, ${listRisky(identity, spec.listId, requiredNotice)} AS risky
         FROM audience_list_counts
-        WHERE workspace_id = ${identity.workspaceId} AND list_id = ${spec.listId}`)).rows;
-      const expected = requiredNotice ? (tally?.reachable ?? 0) : (tally?.subscribed ?? 0);
-      if (expected > 0) return { queued: expected };
+        WHERE workspace_id = ${identity.workspaceId} AND list_id = ${spec.listId}`), false)).rows;
+      const risky = riskyFrom(tally?.risky ?? null), expected = (requiredNotice ? (tally?.reachable ?? 0) : (tally?.subscribed ?? 0)) - risky.total;
+      if (expected > 0) return { queued: expected, risky };
     }
   }
   await db.execute(sql`SAVEPOINT audience_estimate`);
@@ -474,7 +559,7 @@ export async function estimateCampaignAudience(
     return { queued: eligible };
   } catch (error) {
     if (!statementTimedOut(error)) throw error;
-    return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0 };
+    return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0, approximate: true };
   } finally {
     // Always roll back the read-only savepoint (even on success) so SET LOCAL statement_timeout=200ms and
     // enable_nestloop=off NEVER leak into the rest of the launch transaction.
@@ -483,12 +568,13 @@ export async function estimateCampaignAudience(
   }
 }
 
-type SnapshotCounts = { matched: number; eligible: number; suppressed: number; unsubscribed: number; bytes: string | number; captured: number; maxBytes?: number };
+type SnapshotCounts = { matched: number; eligible: number; suppressed: number; unsubscribed: number; risky: { total: number; byReason: RiskCounts }; bytes: string | number; captured: number; maxBytes?: number };
+export const emptyAudience = (requiredNotice: boolean, risky = 0) => new ApiError(422, 'EMPTY_AUDIENCE', `${requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.'}${risky ? ` ${risky.toLocaleString('en-US')} risky ${risky === 1 ? 'address is' : 'addresses are'} skipped: see Audience.` : ''}`);
 function checkedSnapshot(row: SnapshotCounts, requiredNotice: boolean) {
   if (row.matched > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   if (row.captured !== row.eligible || (row.maxBytes ?? 0) > SNAPSHOT_MAX_RECIPIENT_BYTES || Number(row.bytes) > SNAPSHOT_MAX_REVIEW_BYTES) throw new ApiError(413, 'CAMPAIGN_RECIPIENT_DATA_TOO_LARGE', 'Referenced personalization exceeds 1 GiB per review or 1 MiB per recipient.');
-  if (!row.eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
-  return { matched: row.matched, eligible: row.eligible, suppressed: row.suppressed, unsubscribed: row.unsubscribed, recipientBytes: Number(row.bytes) };
+  if (!row.eligible) throw emptyAudience(requiredNotice, row.risky.total);
+  return { matched: row.matched, eligible: row.eligible, suppressed: row.suppressed, unsubscribed: row.unsubscribed, risky: row.risky, recipientBytes: Number(row.bytes) };
 }
 // Flat SQL expressions avoid executing correlated jsonb_each/jsonb_object_agg and array_position subplans millions of times.
 function priorityRankSql(priority: z.infer<typeof AudienceSpec>['priority'], propsCol: SQL): SQL {
@@ -512,10 +598,16 @@ export async function snapshotCampaignAudience(
   requiredNotice = false,
   options?: SnapshotOptions,
 ) {
-  const conditions = await audienceConditions(db, identity, spec, true);
+  const conditions = await audienceConditions(db, identity, spec, true, true);
   const rankExpr = priorityRankSql(spec.priority, sql`${contacts.properties}`);
+  // The order (RAMP.plan): the most engaged first, never-mailed last, in the order they joined the list.
+  const lastSent = await listLastSent(db, identity, spec.listId);
+  const order = sql`${tierSql(lastSent)} AS tier, ${engagedAt} AS engaged, lm.created_at AS joined, hashtextextended(${contacts.id}, 0) AS h`;
   const counts = sql`count(*)::int AS matched,count(*) FILTER (WHERE eligible)::int AS eligible,
-    count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed)::int AS unsubscribed`;
+    count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed AND skipped_risk IS NULL)::int AS unsubscribed,
+    ${riskyColumns(sql`skipped_risk`)}`;
+  // The risk of a contact this capture skips for it alone: reachable but for its risk.
+  const skippedRiskSql = sql`CASE WHEN NOT ${contacts.suppressed} AND ${consented(requiredNotice)} AND ${skipped} THEN ${contacts.risk} END`;
   // The audience's contacts and list members are joined whole, by hash, whatever the statistics say. With stale ones
   // (tables autovacuum found empty, then a list imported before the next analyze) the planner expects one row on each
   // side and compares every contact with every member in a nested loop: minutes at 50,000 members, never done at
@@ -537,18 +629,28 @@ export async function snapshotCampaignAudience(
   await db.execute(sql`DROP TABLE IF EXISTS pg_temp.audience_snapshot, pg_temp.audience_ordered`);
   const staged = await wholeJoins(carriesEmail
     ? sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
-        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${contacts.email} AS email, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed
-        FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${contacts.email} AS email, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
+        FROM ${contacts} ${memberJoin(identity, spec.listId)} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`
     : sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
-        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed
-        FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`);
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
+        FROM ${contacts} ${memberJoin(identity, spec.listId)} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`);
   if ((staged.rowCount ?? 0) > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
-  const [{ matched, eligible, suppressed, unsubscribed }] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number }>(sql`SELECT ${counts} FROM audience_snapshot`)).rows;
-  if (!eligible) throw new ApiError(422, 'EMPTY_AUDIENCE', requiredNotice ? 'This campaign has no recipients who can receive email.' : 'This campaign has no eligible subscribed recipients.');
-  // Skinny sort hashed by ID so time-ordered UUIDv7 IDs keep the Hosted list probe uniform; drop audience_snapshot immediately.
+  const [snapshotRow] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number } & RiskyRow>(sql`SELECT ${counts} FROM audience_snapshot`)).rows;
+  const { matched, eligible, suppressed, unsubscribed } = snapshotRow!, risky = riskyOf(snapshotRow!);
+  if (!eligible) throw emptyAudience(requiredNotice, risky.total);
+  // The order. The first `leading` recipients (the Hosted list probe) are a uniform sample of the whole audience: the
+  // smallest ID hashes, so time-ordered UUIDv7 IDs and the engagement order below cannot make the probe look cleaner than
+  // the list (an engaged-first probe would hide the never-mailed tail it exists to catch). Then the explicit priority,
+  // the engagement tiers (most recently engaged first), and the order contacts joined the list. One sort, after a top-N
+  // pick of the sample's last hash; drop audience_snapshot immediately.
+  const lead = Math.min(eligible, Math.max(0, Math.floor(options?.leading?.(eligible) ?? 0)));
+  // (Named apart from h: ORDER BY h would sort by the text output column, not the hash.)
+  const [edge] = lead ? (await db.execute<{ edge_h: string; edge_id: string }>(sql`SELECT h::text AS edge_h, id AS edge_id FROM audience_snapshot WHERE eligible ORDER BY h, id OFFSET ${lead - 1} LIMIT 1`)).rows : [];
+  const sampled = edge ? sql`(h, id) <= (${edge.edge_h}::bigint, ${edge.edge_id}::text)` : sql`false`;
+  const ordering = sql`ORDER BY ${sampled} DESC, CASE WHEN ${sampled} THEN h END, rank, tier, engaged DESC NULLS LAST, joined, id`;
   await db.execute(carriesEmail
-    ? sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, id, email FROM audience_snapshot WHERE eligible`
-    : sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, id FROM audience_snapshot WHERE eligible`);
+    ? sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (${ordering}))::int AS ordinal, id, email FROM audience_snapshot WHERE eligible`
+    : sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (${ordering}))::int AS ordinal, id FROM audience_snapshot WHERE eligible`);
   await db.execute(sql`DROP TABLE pg_temp.audience_snapshot`);
   const multiSlice = eligible > sliceRows;
   if (multiSlice) {
@@ -634,7 +736,7 @@ export async function snapshotCampaignAudience(
     }
   }
   if (large) await db.execute(sql`SET LOCAL work_mem TO DEFAULT`);
-  return checkedSnapshot({ matched, eligible, suppressed, unsubscribed, captured, bytes: totalBytes, maxBytes }, requiredNotice);
+  return checkedSnapshot({ matched, eligible, suppressed, unsubscribed, risky, captured, bytes: totalBytes, maxBytes }, requiredNotice);
 }
 export async function isSuppressed(runtime: Runtime, identity: Actor, email: string): Promise<boolean> {
   const [row] = await runtime.db.select({ suppressed: contacts.suppressed }).from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email.trim().toLowerCase()))).limit(1);
@@ -649,7 +751,7 @@ export async function recordUnsubscribe(runtime: Runtime, workspaceId: string, e
   if (!normalized.success) throw new ApiError(422, 'INVALID_EMAIL', 'A valid email address is required.');
   return runtime.db.transaction(async tx => {
     const identity = { workspaceId };
-    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data }).onConflictDoNothing();
+    await tx.insert(contacts).values({ id: rowId('con'), ...identity, email: normalized.data, risk: staticRiskSql(normalized.data, workspaceId, peekHygieneLists()) as unknown as Risk }).onConflictDoNothing();
     const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, normalized.data))).limit(1).for('update');
     if (!contact) throw new ApiError(500, 'CONSENT_WRITE_FAILED', 'Unable to persist consent.');
     if (contact.marketingConsent === 'unsubscribed') return { contactId: contact.id, changed: false };
@@ -690,7 +792,7 @@ export async function upsertListContact(tx: DbExecutor, identity: Pick<Actor, 'w
   const { email, name, properties } = parsed.data;
   const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, listId))).limit(1).for('share');
   if (!list) return 'no_list';
-  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
+  const added = (await tx.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), email, name: name || null, properties, risk: staticRiskSql(email, identity.workspaceId, await hygieneLists(tx)) as unknown as Risk }).onConflictDoNothing().returning({ id: contacts.id })).length > 0;
   const [contact] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.email, email))).limit(1).for('update');
   if (!contact) throw new ApiError(500, 'CONTACT_WRITE_FAILED', 'Unable to persist the contact.', undefined, true);
   if (contact.deletedAt) return 'deleted';
@@ -781,20 +883,6 @@ function forEachCsvRow(text: string, onRow: (values: string[], rowIndex: number)
   if (yielded < 2) throw new ApiError(422, 'INVALID_CSV', 'Include a header and at least one contact row.');
   return yielded;
 }
-const FAST_EMAIL_RE = /^(?!\.)(?!.*\.\.)[a-z0-9_'+.\-]*[a-z0-9_+\-]@(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+(?:[a-z]{2,}|xn--[a-z0-9][a-z0-9-]*[a-z0-9])$/i;
-const FAST_ASCII_RE = /^[\x21-\x7e]+$/;
-function isFastValidEmail(email: string): boolean {
-  if (!email || email.length > 254 || !FAST_ASCII_RE.test(email) || !FAST_EMAIL_RE.test(email)) return false;
-  const at = email.indexOf('@');
-  if (at > 64) return false;
-  let start = at + 1;
-  for (;;) {
-    const dot = email.indexOf('.', start), end = dot < 0 ? email.length : dot;
-    if (end - start > 63) return false;
-    if (dot < 0) return true;
-    start = dot + 1;
-  }
-}
 class JsonArrayBuilder {
   private chunks: string[] = ['['];
   private pending: string[] = [];
@@ -811,11 +899,13 @@ class JsonArrayBuilder {
     return out;
   }
 }
-function previewImport(input: z.infer<typeof ImportInput>) {
+function previewImport(input: z.infer<typeof ImportInput>, hygiene: HygieneLists) {
   const mapping = Object.entries(input.mapping);
   let headerLen = 0, emailIdx = -1, nameIdx: number | undefined;
   let propCols: ReadonlyArray<readonly ['firstName' | 'plan' | 'country', number]> = [];
-  const rows = new JsonArrayBuilder(), failures = new JsonArrayBuilder(), seen = new Set<string>();
+  const rows = new JsonArrayBuilder(), failures = new JsonArrayBuilder(), seen = new Set<string>(), risky = { total: 0, byReason: noRisks() };
+  // Rows whose domain the DNS check decides (nothing the address says, or a role name a dead domain outranks), by domain.
+  const domains = new Map<string, { plain: number; role: number }>();
   forEachCsvRow(input.csv, (values, rowNum) => {
     if (rowNum === 1) {
       const headers = values.map(h => h.trim());
@@ -836,7 +926,7 @@ function previewImport(input: z.infer<typeof ImportInput>) {
     if (values.length !== headerLen) { failures.push(JSON.stringify({ row: rowNum, field: 'row', message: 'The row has a different number of columns than the header.' })); return; }
     const rawEmail = values[emailIdx]!.trim();
     const rawName = nameIdx !== undefined ? values[nameIdx]!.trim() : undefined;
-    let fastOk = isFastValidEmail(rawEmail) && (rawName === undefined || rawName.length <= 200);
+    let fastOk = validAddress(rawEmail) && (rawName === undefined || rawName.length <= 200);
     let propJson = '';
     if (fastOk) {
       for (let j = 0; j < propCols.length; j++) {
@@ -865,10 +955,14 @@ function previewImport(input: z.infer<typeof ImportInput>) {
     }
     if (seen.has(email)) { failures.push(JSON.stringify({ row: rowNum, field: 'email', message: 'Duplicate normalized email within this import.' })); return; }
     seen.add(email);
+    // The row keeps what its address says (list hygiene): commit stores it on a new contact.
+    const risk = classifyAddress(email, hygiene)?.risk;
+    if (risk) { risky.byReason[risk]++; risky.total++; rowJson = `${rowJson.slice(0, -1)},"risk":"${risk}"}`; }
+    if (!risk || risk === 'role') { const d = domainOf(email), n = domains.get(d) ?? { plain: 0, role: 0 }; n[risk ? 'role' : 'plain']++; domains.set(d, n); }
     rows.push(rowJson);
   });
   seen.clear();
-  return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count };
+  return { rowsJson: rows.finish(), errorsJson: failures.finish(), rowCount: rows.count, risky, domains };
 }
 export const importStream = { idleMs: MEMORY_LIMITS.streamIdleMs, maxMs: MEMORY_LIMITS.streamMaxMs };
 const importStreamBytes = (chars: number) => Math.min(12 * 1024 * 1024, Math.max(256 * 1024, Math.ceil(chars)));
@@ -881,7 +975,7 @@ function streamImportResponse(c: Ctx, meta: ImportMeta, rowsJson: string, errors
     rowsJson,
     `,"errors":`,
     errorsJson,
-    `,"imported":${meta.imported},"rowsRetained":${meta.rowsScrubbedAt === null},"errorsRetained":${meta.errorsScrubbedAt === null},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
+    `,"imported":${meta.imported},"rowsRetained":${meta.rowsScrubbedAt === null},"errorsRetained":${meta.errorsScrubbedAt === null},"risky":${JSON.stringify(receiptRisk(meta.riskSummary))},"createdAt":${JSON.stringify(meta.createdAt)},"updatedAt":${JSON.stringify(meta.updatedAt)}${subscribed !== undefined ? `,"subscribed":${subscribed}` : ''}}`,
   ];
   return streamTextPartsResponse(c, parts, status, { lease, idleMs: importStream.idleMs, maxMs: importStream.maxMs });
 }
@@ -903,28 +997,32 @@ export function registerAudience(app: App) {
     const identity = actor(c, 'editContent'), input = c.req.valid('json');
     let contact: typeof contacts.$inferSelect | undefined;
     try {
-      [contact] = await c.env.db.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), ...input }).onConflictDoNothing().returning();
+      [contact] = await c.env.db.insert(contacts).values({ id: rowId('con'), ...scopeValues(identity), ...input, risk: await riskFor(c.env, input.email, identity.workspaceId) as unknown as Risk }).onConflictDoNothing().returning();
     } catch (err) {
       if (isContactSizeCheckViolation(err)) throw new ApiError(422, 'VALIDATION_FAILED', 'Contact properties must total at most 16 KiB of JSON.', 'properties');
       throw err;
     }
     if (!contact) throw new ApiError(409, 'CONTACT_EXISTS', 'This address already has a contact or retained consent record. Use imports to restore a deleted contact without changing consent.');
-    return c.json(contact, 201);
+    return c.json(contactBody(contact), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ContactRead), ...errors } }), async c => {
     const identity = actor(c), row = await findContact(c.env.db, identity, c.req.valid('param').id);
     return c.json((await readContacts(c.env.db, identity, [row], CONTACT_LIST_IDS_SINGLE_MAX))[0]!, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
-    const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id; await findContact(c.env.db, identity, contactId);
+    const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json'), found = await findContact(c.env.db, identity, contactId);
+    // Sending to a risky address anyway is an owner's or admin's call (manage), not every member's who edits contacts.
+    if (input.riskAllowed !== undefined) actor(c, 'manage');
+    if (input.riskAllowed !== undefined && !found.risk) throw new ApiError(409, 'CONTACT_NOT_RISKY', 'This contact is not flagged as risky, so there is nothing to allow.', 'riskAllowed');
     let contact: typeof contacts.$inferSelect | undefined;
     try {
-      [contact] = await c.env.db.update(contacts).set({ ...c.req.valid('json'), updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).returning();
+      // The allowance is for the risk the caller saw: one the hourly pass changed meanwhile stays skipped.
+      [contact] = await c.env.db.update(contacts).set({ ...input, updatedAt: new Date().toISOString() }).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt), input.riskAllowed !== undefined ? eq(contacts.risk, found.risk!) : undefined)).returning();
     } catch (err) {
       if (isContactSizeCheckViolation(err)) throw new ApiError(422, 'VALIDATION_FAILED', 'Contact properties must total at most 16 KiB of JSON.', 'properties');
       throw err;
     }
-    return c.json(contact ?? notFound('Contact'), 200);
+    return c.json(contactBody(contact ?? notFound('Contact')), 200);
   });
   app.openapi(createRoute({ method: 'delete', path: '/v1/contacts/{id}', operationId: 'deleteContact', tags: ['Audience'], security, description: 'Remove contact profile and memberships, retaining minimal consent/suppression to prevent accidental re-enrollment.', request: { params: IdParams }, responses: { 200: response(Deleted), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id;
@@ -948,7 +1046,7 @@ export function registerAudience(app: App) {
         if (latest && Date.parse(occurredAt) <= Date.parse(latest.occurredAt)) throw new ApiError(409, 'STALE_CONSENT', 'Renewed consent must be newer than the prior consent decision.');
       }
       return recordConsent(tx, identity, existing, { status: input.status, source, policyVersion: input.policyVersion, evidence: input.evidence, occurredAt, actorKeyId: identity.keyId });
-    }); return c.json(contact, 200);
+    }); return c.json(contactBody(contact), 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}/consent', operationId: 'listContactConsentEvents', tags: ['Consent'], security, request: { params: IdParams, query: PageQuery }, responses: { 200: response(page(Audit)), ...errors } }), async c => {
     const identity = actor(c), contactId = c.req.valid('param').id, query = c.req.valid('query'); await findContact(c.env.db, identity, contactId);
@@ -1043,13 +1141,19 @@ export function registerAudience(app: App) {
     try {
       const built = await runInMemoryScope(reserveBytes, async () => {
         if (c.req.raw.signal?.aborted) return null;
-        const { rowsJson, errorsJson } = previewImport(input);
+        const hygiene = await hygieneLists(c.env.db), { rowsJson, errorsJson, risky, domains } = previewImport(input, hygiene);
+        // The domains' DNS verdicts (cached, else looked up for a few seconds; the rest are queued and the resolver flags
+        // their contacts once imported). The summary counts them; the commit stores what is known by then.
+        for (const [domain, risk] of await domainRisks(c.env, hygiene, domains.keys(), Date.now() + IMPORT_DNS_MS)) {
+          const n = domains.get(domain)!;
+          risky.byReason[risk] += n.plain + n.role; risky.byReason.role -= n.role; risky.total += n.plain;
+        }
         const newId = id('imp');
         const meta = await c.env.db.transaction(async tx => {
           // Transaction-scoped advisory lock (supported by Hyperdrive and PgBouncer transaction pooling) keeps the
           // newest IMPORT_OPEN_PREVIEW_CAP uncommitted previews per workspace even under concurrent previews.
           await tx.execute(sql`SELECT pg_advisory_xact_lock(275818, hashtext(${identity.workspaceId}))`);
-          const [row] = await tx.insert(imports).values({ id: newId, ...scopeValues(identity), listId: input.listId, rows: sql`${rowsJson}::jsonb` as unknown as never, errors: sql`${errorsJson}::jsonb` as unknown as never, createdAt: sql`clock_timestamp()` as unknown as string, updatedAt: sql`clock_timestamp()` as unknown as string }).returning(importMetaColumns);
+          const [row] = await tx.insert(imports).values({ id: newId, ...scopeValues(identity), listId: input.listId, riskSummary: risky, rows: sql`${rowsJson}::jsonb` as unknown as never, errors: sql`${errorsJson}::jsonb` as unknown as never, createdAt: sql`clock_timestamp()` as unknown as string, updatedAt: sql`clock_timestamp()` as unknown as string }).returning(importMetaColumns);
           await tx.execute(sql`DELETE FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId}
             AND id IN (SELECT id FROM audience_imports WHERE workspace_id = ${identity.workspaceId} AND status = 'preview' AND id <> ${newId} ORDER BY created_at DESC, id DESC OFFSET ${IMPORT_OPEN_PREVIEW_CAP - 1})`);
           return row!;
@@ -1116,9 +1220,11 @@ export function registerAudience(app: App) {
           }
           // A share lock keeps the list from being changed or deleted mid-commit.
           if (job.listId) { const [list] = await tx.select({ id: lists.id }).from(lists).where(and(scope(lists, identity), eq(lists.id, job.listId))).limit(1).for('share'); if (!list) notFound('List'); }
-          const now = new Date().toISOString();
+          // Domain verdicts count only while the checks are on (NIGHTMAIL_HYGIENE_DNS), as everywhere else.
+          const now = new Date().toISOString(), hygiene = await hygieneLists(tx), dnsOn = !!c.env.config.hygieneDnsUrl;
           let subscribed = 0;
           let sampleContactIds: string[] = [];
+          let riskSummary = riskyFrom(null);
           if (job.rowCount > 0) {
             // Statement 1: upsert contacts with time-ordered UUIDv7 IDs (row_id('con') format), check merged property
             // limits (<= 50) in SQL, and — when consent is attested — insert brand-new contacts directly as 'subscribed'
@@ -1127,17 +1233,26 @@ export function registerAudience(app: App) {
             // deleted contact) and audience_list_members never fire in the same statement and double-count.
             const initialConsent = consent ? 'subscribed' : 'unknown';
             const tsHex = Date.now().toString(16).padStart(12, '0');
-            const { rows: [step1] } = await tx.execute<{ bad_row: number | null; inserted_subscribed: number; jobs_enqueued: number; existing_unknown_ids: string[] | null; contact_ids: string[] | null; sample_ids: string[] | null }>(sql`
+            const { rows: [step1] } = await tx.execute<{ bad_row: number | null; inserted_subscribed: number; jobs_enqueued: number; existing_unknown_ids: string[] | null; contact_ids: string[] | null; sample_ids: string[] | null; risky: Record<string, number> | null }>(sql`
               WITH incoming AS (
-                SELECT (r->>'row')::int AS row_num, r->>'email' AS email, r->>'name' AS name, coalesce(r->'properties', '{}'::jsonb) AS properties
-                FROM audience_imports i, jsonb_array_elements(i.rows) r
+                SELECT (r->>'row')::int AS row_num, r->>'email' AS email, r->>'name' AS name, coalesce(r->'properties', '{}'::jsonb) AS properties, r->>'risk' AS risk,
+                  m.verdict AS domain_verdict, m.mx AS domain_mx
+                FROM audience_imports i CROSS JOIN LATERAL jsonb_array_elements(i.rows) r
+                  LEFT JOIN hygiene_mail_domains m ON m.domain = split_part(r->>'email', '@', 2)
                 WHERE i.workspace_id = ${identity.workspaceId} AND i.id = ${importId}
               ), upserted AS (
-                INSERT INTO audience_contacts AS c (id, workspace_id, email, name, properties, marketing_consent)
-                SELECT 'con_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, email, name, properties, ${initialConsent}
+                -- A new contact gets the risk its preview found, its domain's verdict as checked by now (a domain that can't
+                -- receive mail outranks a role name), else dead when the address bounced elsewhere; an existing contact keeps
+                -- its own (and its owner's allowance), unless it was deleted and comes back new.
+                INSERT INTO audience_contacts AS c (id, workspace_id, email, name, properties, marketing_consent, risk)
+                SELECT 'con_' || ${tsHex}::text || '7' || substr(replace(gen_random_uuid()::text, '-', ''), 14), ${identity.workspaceId}, email, name, properties, ${initialConsent},
+                  CASE WHEN risk IS NOT NULL AND risk <> 'role' THEN risk WHEN ${dnsOn} AND domain_verdict = 'no_mail' THEN 'no_mail_domain'
+                    WHEN ${dnsOn} AND domain_verdict = 'ok' AND domain_mx && ${sql.param([...hygiene.disposableMx])}::text[] THEN 'disposable' WHEN risk = 'role' THEN risk
+                    WHEN ${bouncedElsewhere(sql`incoming.email`, sql`${identity.workspaceId}::text`)} THEN 'dead' END
                 FROM incoming ORDER BY email
-                ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now}
-                RETURNING c.id, c.email, c.properties, (xmax = 0) AS inserted, c.marketing_consent
+                ON CONFLICT ON CONSTRAINT audience_contacts_email_scope DO UPDATE SET name = coalesce(excluded.name, c.name), properties = c.properties || excluded.properties, deleted_at = NULL, updated_at = ${now},
+                  risk = CASE WHEN c.deleted_at IS NULL THEN c.risk ELSE excluded.risk END, risk_allowed = c.risk_allowed AND c.deleted_at IS NULL
+                RETURNING c.id, c.email, c.properties, (xmax = 0) AS inserted, c.marketing_consent, c.risk, c.risk_allowed
               ), bad AS (
                 SELECT inc.row_num FROM upserted u JOIN incoming inc ON inc.email = u.email
                 WHERE (NOT u.inserted AND (SELECT count(*) FROM jsonb_object_keys(u.properties)) > ${CONTACT_PROPERTIES_MAX_KEYS})
@@ -1167,9 +1282,11 @@ export function registerAudience(app: App) {
                 ${consent ? sql`(SELECT count(*)::int FROM enqueued)` : sql`0`} AS jobs_enqueued,
                 ${consent ? sql`ARRAY(SELECT id FROM upserted WHERE NOT inserted AND marketing_consent = 'unknown' ORDER BY id)` : sql`NULL::text[]`} AS existing_unknown_ids,
                 ${job.listId ? sql`ARRAY(SELECT id FROM upserted)` : sql`NULL::text[]`} AS contact_ids,
-                ARRAY(SELECT id FROM upserted ORDER BY hashtextextended(id, 0) LIMIT ${IMPORT_SAMPLE_CONTACT_IDS}) AS sample_ids`);
+                ARRAY(SELECT id FROM upserted ORDER BY hashtextextended(id, 0) LIMIT ${IMPORT_SAMPLE_CONTACT_IDS}) AS sample_ids,
+                (SELECT jsonb_object_agg(risk, n) FROM (SELECT risk, count(*)::int AS n FROM upserted WHERE risk IS NOT NULL AND NOT risk_allowed GROUP BY risk) r) AS risky`);
             if (step1?.bad_row != null) throw new ApiError(422, 'IMPORT_PROPERTIES_INVALID', `Row ${step1.bad_row}: merged contact properties exceed the supported limits. No rows were imported.`, `rows.${step1.bad_row}.properties`);
             sampleContactIds = step1?.sample_ids ?? [];
+            riskSummary = riskyFrom(step1?.risky ?? null);
             subscribed += step1?.inserted_subscribed ?? 0;
             noteEnqueued(step1?.jobs_enqueued ?? 0);
             // Statement 2 (only when re-imported existing contacts had marketing_consent = 'unknown'): upgrade them
@@ -1213,7 +1330,7 @@ export function registerAudience(app: App) {
                 ON CONFLICT DO NOTHING`);
             }
           }
-          const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, sampleContactIds, consentLinkedAt: now, updatedAt: now }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
+          const [updated] = await tx.update(imports).set({ status: 'committed', imported: job.rowCount, sampleContactIds, riskSummary, consentLinkedAt: now, updatedAt: now }).where(and(scope(imports, identity), eq(imports.id, job.id))).returning({ ...importMetaColumns, rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` });
           return { meta: updated!, rowsText: updated!.rowsText, errorsText: updated!.errorsText, subscribed };
         });
       });

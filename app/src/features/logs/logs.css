@@ -138,7 +138,7 @@
 .page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
 /* Logs' body (facets.tsx): the filters beside the stream from 1440 px, where the subject still has room; narrower, the
    toolbar's pickers filter instead. The stream column needs a wider window still: Transactional reads in full or not at all. */
-.ui-split.logs-split { --facet-width: 196px; flex: 1; min-height: 0; }
+.ui-split.logs-split { --facet-width: 228px; flex: 1; min-height: 0; }
 .logs-split > .ui-split__main > :not(.logs-table) { flex-shrink: 0; }
 .logs-split .ui-facets { padding-top: 2px; }
 @media (max-width: 1439px) {
@@ -259,8 +259,7 @@
 .logs-bar .logs-controls .ui-tab[aria-selected='true']:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 .logs-bar__tools { display: flex; flex: 1; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; }
 .logs-search.search-box { flex: 1 1 280px; width: auto; min-width: 160px; max-width: 420px; }
-.logs-search.search-box .ui-input { width: 100%; padding-inline: 30px; }
-.logs-search.search-box > .ui-icon { position: absolute; left: 10px; color: var(--color-faint); pointer-events: none; }
+.logs-search.search-box .ui-input { width: 100%; padding-inline-end: 30px; }
 .logs-search > .ui-kbd { position: absolute; right: 5px; background: var(--color-kbd-inset); pointer-events: none; }
 .logs-bar .ui-select-trigger.logs-filter, .logs-bar .logs-filter { width: 140px; min-width: 0; }
 @media (max-width: 1279px) { .logs-export { width: var(--control-height); padding: 0; } .logs-export > span { display: none; } }
@@ -273,9 +272,10 @@
    light), 16px inside, 8px from the stream, no rule; its rows' hover and selection take the frame's solid steps. The
    stream: 32px rows on their quiet band under a sticky 28px head bar, its text 12px inside the bar. */
 .ui-split.logs-split { column-gap: var(--space-24); padding: var(--space-4) var(--space-16) var(--space-16); }
-.ui-split.logs-split > .ui-split__rail { padding: var(--space-4) 0; background: none; }
+.ui-split.logs-split > .ui-split__rail { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-4) 0; background: none; }
 .ui-split.logs-split > .ui-split__main { padding-left: 0; }
-.logs-split .ui-facets { gap: var(--space-16); padding-top: 0; }
+.logs-split .ui-facets { gap: var(--space-12); padding-top: 0; }
+.logs-split .ui-facet { height: 26px; }
 .logs-page .logs-table .ui-table thead th { position: sticky; top: 0; z-index: 2; }
 .logs-page .logs-table .ui-table :is(th, td):first-child, .ov-table .ui-table :is(th, td):first-child { padding-left: var(--space-12); }
 .logs-page .logs-table + .ui-pagination, .logs-page .ui-pagination { min-height: 40px; padding: var(--space-4) 0 0 var(--space-12); }
