@@ -69,7 +69,7 @@ Run these from `support/` with the stage's Cloudflare account. Ryan's work profi
    - create a second webhook (Nightmail format, `include: ["message"]`) to `https://support.nightmail.dev/hooks/bane-intake`. Its `whsec_…` is `BANE_INTAKE_WEBHOOK_SECRET`;
    - add a route for each address to its own inbox and the shared webhook, such as `abuse@nightmail.dev` → `["inbox:abuse", "webhook:<that webhook>"]` (an inbox is per address, so there's no single `inbox:intake`). The team reads full messages and non-image attachments in those inboxes;
    - `INTAKE_ADDRESSES` in the wrangler config lists them.
-6. **Secrets**, set with `wrangler secret put <NAME> --config wrangler.<stage>.jsonc` and never through CI:
+6. **Secrets**, managed by the operator, never by support CI. For changes to a serving Worker, supply new values with its code via `wrangler deploy --config wrangler.<stage>.jsonc --secrets-file <private-json-file>`. Delete an obsolete binding only after `wrangler deployments status --config wrangler.<stage>.jsonc --json` shows that upload at 100% traffic:
    - `CONSOLE_GATEWAY_KEY`: the Console service key (`models:request`, budgeted). Without it, chat turns refuse with "isn't fully set up" and emails wait in the inbox.
    - `SUPPORT_ROOT_SECRET`: 32+ random bytes as hex (`openssl rand -hex 32`). It's the root for the chat-token and confirm-link keys.
    - `BANE_INBOUND_WEBHOOK_SECRET` and `BANE_SUPPORT_INBOX_KEY`, from step 4.
