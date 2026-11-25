@@ -38298,7 +38298,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('POST',`/v1/contacts/${contact.id}/consent`,{status:'subscribed',source:'fixture',policyVersion:'v1',evidence:'Synthetic fixture.',occurredAt:new Date().toISOString()}));
       ok(await local('POST',`/v1/lists/${list.id}/members`,{contactIds:[contact.id]}));
       const draft=()=>local('POST','/v1/campaigns',{name:unique('link-hosts'),from:'news@example.com',subject:'Links',html:'<p>Read <a href="https://example.com/read">this</a>.</p>',audience:{listId:list.id}});
-      const marketing={from:'news@example.com',to:'reader@example.net',subject:'Links',html:'<p>Hello</p>',text:'Hello',kind:'marketing'};
+      const marketing={from:'news@example.com',to:contact.email,subject:'Links',html:'<p>Hello</p>',text:'Hello',kind:'marketing'};
       const own=new URL(PUBLIC_ORIGIN).host;
       // Each kind of mail as SES got it: the host of its unsubscribe link, from the header (campaign and marketing) or the
       // footer (a test, which is transactional), and nothing in its content, headers included, naming this installation.
