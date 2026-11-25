@@ -328,7 +328,7 @@ async function messagePage(db: DbExecutor, value: MailboxAccess, filter: Filter,
 
 export async function signedUrl(runtime: Runtime,wid:string, kind:'raw'|'att', region: string, bucket: string, key: string, filename?: string,pendingArchive?:string,client?:S3Client,inbox?:string) {
   if(!isS3Bucket(bucket)){
-    // Bane-signed links stream from the R2 binding; sandbox objects in local storage have none.
+    // Nightmail-signed links stream from the R2 binding; sandbox objects in local storage have none.
     if(bucket!==boundMailBucket(runtime))throw new ApiError(404,'MAILBOX_OBJECT_NOT_FOUND','The mail object was not found.');
     if(pendingArchive)await archiveMailboxFiles(runtime,wid,pendingArchive);
     return mailObjectUrl(runtime,wid,key,filename??'attachment',kind==='raw'?'message/rfc822':'application/octet-stream',inbox);

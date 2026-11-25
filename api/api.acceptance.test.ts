@@ -99,7 +99,7 @@ async function withinSession(client:{config:{credentials:()=>Promise<{sessionTok
   const [action,resource]=sessionCall(service,cmd,region,account),policy=JSON.parse((await client.config.credentials()).sessionToken!);
   assert.ok(iamAllows(policy.Statement,action,resource,{'aws:RequestedRegion':region,'ses:ApiVersion':'2'}),`${action} on ${resource} is outside its session policy`);
 }
-// The S3 calls Bane makes on one attachment object: ingest/archive PutObject, signed-link and
+// The S3 calls Nightmail makes on one attachment object: ingest/archive PutObject, signed-link and
 // reuse GetObject, and the orphan expiry tag (any other tag value must stay refused).
 function attachmentAccess(statements:IamStatement[],arn:string,account:string) {
   const base={'aws:RequestedRegion':'us-east-2','s3:ResourceAccount':account},tag=(kind:string)=>({...base,'s3:RequestObjectTag/bane-kind':kind,'s3:RequestObjectTagKeys':['bane-kind']});
@@ -120,7 +120,7 @@ async function hostedAttachmentAccess(key:string,account='905840579680') {
 // HTTP scenarios use the actual server. Explicitly labeled OIDC callback and SES
 // setup integrations use the normal app with mocked providers; no auth bypasses.
 const BASE = (process.env.API_BASE_URL ?? 'http://127.0.0.1:8787').replace(/\/$/, '');
-const BENCH = process.env.BANE_BENCH === '1';
+const BENCH = (process.env.NIGHTMAIL_BENCH ?? process.env.BANE_BENCH) === '1';
 test('email preview engine: Word-only lint, Gmail account modes, safe rewrites and byte clipping', async () => {
   const { emulate, lint, PreviewLimitError } = await import('./src/email-preview/index.js');
   const source = '<!doctype html><head><style>.card {border-radius:14px;color:#123456}</style></head><body><p class="card">Receipt</p><a href="https://example.com/read">Read</a><img src="https://example.com/pixel" alt="Logo"><!--[if mso]><p style="display:grid">Word only</p><![endif]--></body>';
@@ -710,7 +710,7 @@ test('ritual regex tests run on a bounded matcher: its state is charged as steps
   }
 });
 test('MCP: every API operation is a tool or a documented human step, and docs/mcp-coverage.md is generated',async()=>{
-  const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0.1.0'}});
+  const {createOpenApiApp}=await import('./src/app.js'),{buildMcpCatalog,coverageMarkdown,TOOLSETS}=await import('./src/mcp-catalog.js'),app=await createOpenApiApp();const catalog=buildMcpCatalog(app),spec=app.getOpenAPI31Document({openapi:'3.1.0',info:{title: 'Nightmail API',version:'0.1.0'}});
   const markdown=coverageMarkdown(catalog,spec as Json);assert.doesNotMatch(markdown,/UNCOVERED/);assert.equal(String(await readFile(new URL('../docs/mcp-coverage.md',import.meta.url))),markdown,'Run bun run mcp:coverage');
   // Tools that return received mail, or text derived from it, carry the untrusted-content notice.
   // So do an email's events and the webhook delivery log: a bounce's or a delay's diagnosticCode is the receiving server's text.
@@ -2296,7 +2296,7 @@ test('MCP profiles: one client signed in as two accounts gets two approvals that
   } finally { await db.query('ROLLBACK'); }
 });
 
-test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side revocation and single-use DPoP proof', async t => {
+test('MCP account resource validates issuer JWT, per-call workspaces, Nightmail-side revocation and single-use DPoP proof', async t => {
   const { drizzle } = await import('drizzle-orm/node-postgres');
   const { loadConfig } = await import('./src/config.js');
   const { authorizeResource, externalMcpGrant, protectedResourceMetadata } = await import('./src/oidc-resource.js');
@@ -2402,7 +2402,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal(deniedBody.jsonrpc,'2.0');assert.equal(deniedBody.error.code,-32000);assert.match(deniedBody.error.message,/Reconnect/);
     const bind=(id:string,body:object,cookie?:string,env?:typeof dashboard)=>call(`/v1/mcp-connections/${id}/workspace`,'POST',body,cookie,env);
     assert.equal((await bind(grants.rows[0].id,{workspaceId:'default'})).status,409,'A revoked approval has no default to set');
-    // The account service's tokens name their consent (jti <consent>.<random>). After a revocation in Bane, a new consent
+    // The account service's tokens name their consent (jti <consent>.<random>). After a revocation in Nightmail, a new consent
     // (the person connected the client again) starts the approval again under a new key, so nothing tied to the revoked
     // one comes back; the revoked consent's tokens, refreshed ones included, stay refused.
     const consented=(consent:string,iat:number,auth_time?:number,scope='bane:read')=>token({client_id:'fixture-consent',jti:`${consent}.${randomUUID()}`,iat,auth_time,scope});
@@ -2454,7 +2454,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     assert.equal(await acting('missing'+suffix),null,'No membership, no access');
     const listed=(await (await call('/v1/agents')).json() as {data:{id:string;workspaceId:string|null}[]}).data.find(g=>g.id===multiId);
     assert.deepEqual([listed?.id,listed?.workspaceId],[multiId,null]);
-    // The default can be set in Bane (or with the setDefaultWorkspace tool): only to one of the person's own workspaces.
+    // The default can be set in Nightmail (or with the setDefaultWorkspace tool): only to one of the person's own workspaces.
     assert.equal((await bind(multiId,{workspaceId:'missing'+suffix})).status,403);
     assert.equal((await bind(multiId,{workspaceId:'default',extra:true})).status,422);
     const otherUser=unique('acceptance-user'),otherToken=createHash('sha256').update(randomUUID()).digest('base64url'),dashboardIssuer=process.env.ACCOUNT_ISSUER??'https://account.anoma.ly';
@@ -6383,7 +6383,7 @@ describe('Hosted MCP OAuth and tools', () => {
         for(const name of ['listInboundAddresses','listInboundDomains','getInboundScanPolicy','listInboundWebhooks','listInboxes','revealWebhookSecret'])assert.ok(!receiving.has(name),name);
         assert.ok(receiving.has('getRouting')&&receiving.has('getRules')&&receiving.has('sendEmail'));
         const [{createApp,createOpenApiApp},{buildMcpCatalog},{dispatchAsActor},{getMcpGrantActor}]=await Promise.all([import('./src/app.js'),import('./src/mcp-catalog.js'),import('./src/auth.js'),import('./src/mcp-auth.js')]);
-        const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title:'Bane API',version:'0'}}) as Json,app=createApp();
+        const api=await createOpenApiApp(),spec=api.getOpenAPI31Document({openapi:'3.1.0',info:{title: 'Nightmail API',version:'0'}}) as Json,app=createApp();
         const grantActor=(await getMcpGrantActor(runtime,'mcp_'+consentId,runtime.config.workspaceId))!;assert.ok(grantActor);
         const dummy=(schema:Json|undefined)=>schema?.enum?.[0]??(schema?.format==='email'?'tear@example.com':[schema?.type].flat().includes('integer')?'1':String(schema?.pattern??'').includes('\\d')?'us-east-1':'tear-missing');
         let gets=0;
@@ -6564,7 +6564,7 @@ describe('Hosted MCP OAuth and tools', () => {
   });
 
   // The account service's token names a person, not a workspace: each MCP tool call names the workspace it acts in (or
-  // uses the connection's default), and Bane checks the person's membership and role there on that call.
+  // uses the connection's default), and Nightmail checks the person's membership and role there on that call.
   test('MCP tools act in the workspace each call names: every tool refuses a non-member workspace, defaults, role intersection', async t => {
     await simulatedSesFixture(t, async ({ db, request, runtime }) => {
       runtime.config.multiTenant = true;
@@ -8298,7 +8298,7 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.deepEqual([claims.jti, claims.aud, claims.workspace.id, claims.user.id, claims.shareContent, claims.requestIds], [handoff.id, 'bane-support', wid, manager!.userId, true, [createdRequest]]);
       ok(await send('POST', '/v1/contact-support', session(member), { shareContent: false }), 201);
 
-      // The support platform verifies the handoff it was given: Bane checks its own signature and the stored row.
+      // The support platform verifies the handoff it was given: Nightmail checks its own signature and the stored row.
       const checked = await platform.verifyHandoff(handoff.token);
       assert.ok(checked.ok); assert.deepEqual([checked.handoff.id, checked.handoff.userId, checked.handoff.workspace.id, checked.handoff.shareContent, checked.handoff.usedAt, checked.handoff.message], [handoff.id, manager!.userId, wid, true, null, 'Why did my key stop working?']);
       assert.deepEqual(await platform.verifyHandoff(`${header}.${payload}.${Buffer.from('forged').toString('base64url')}`), { ok: false, code: 'HANDOFF_INVALID' });
@@ -17849,7 +17849,7 @@ describe('Dashboard API capabilities', () => {
       const reader = ok(await local('POST', '/v1/api-keys', { name: 'Refusal reader', permissions: ['read'] }), 201); secrets.add(reader.secret);
       const execute = runtime.db.execute.bind(runtime.db);
       let fault: unknown = null;
-      // Built where it is thrown, as a driver's error is: a stack shows where an error was made, and the log keeps Bane's frames.
+      // Built where it is thrown, as a driver's error is: a stack shows where an error was made, and the log keeps Nightmail's frames.
       t.mock.method(runtime.db, 'execute', ((...args: Parameters<typeof execute>) => { if (fault) { const thrown = fault as Error; fault = null; throw new Error(thrown.message, { cause: thrown.cause }); } return execute(...args); }) as typeof execute);
       const refused = async (failure: unknown) => { fault = failure; logs.length = 0; return request('GET', '/v1/emails', reader.secret); };
       // So is a statement Postgres refused or cancelled, keeping nothing of it: a read-only cluster (PlanetScale's pg_readonly
@@ -19252,7 +19252,7 @@ describe('Billing: Stripe', () => {
     assert.equal(await stripe.getPayment(runtime.db, `ws_${randomUUID().replaceAll('-', '')}`, top.attemptId), null, 'Payments are read inside their workspace only.');
   });
 
-  test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Bane\'s are ignored', async t => {
+  test('Stripe webhook: a bad or stale signature and the other Stripe mode are refused; events that are not Nightmail\'s are ignored', async t => {
     const { runtime, db, deliver, send } = await stripeFixture(t);
     const object = { id: `cs_${randomUUID()}`, object: 'checkout.session', mode: 'payment', status: 'complete', payment_status: 'paid', metadata: {} };
     // Stale and future timestamps sit a minute past the 300 s tolerance and are taken when sent, so a slow request can't
@@ -19398,7 +19398,7 @@ describe('Billing: Stripe', () => {
     assert.deepEqual([(await account()).stripe_payment_method, (await account()).card_last4, (await account()).recharge_enabled], [null, null, false]);
   });
 
-  test('Reconciliation: lost answers are retried with the same keys and credited once; after 22 h Bane searches Stripe; a day-old recharge is canceled', async t => {
+  test('Reconciliation: lost answers are retried with the same keys and credited once; after 22 h Nightmail searches Stripe; a day-old recharge is canceled', async t => {
     const { runtime, fake, wid, account, attempt, ledger, enforcement, backdate, saveCard, recharge, stripe, jobs } = await stripeFixture(t);
     await saveCard();
     const warnings = t.mock.method(console, 'warn', () => {});
@@ -20137,7 +20137,7 @@ describe('Billing: API, MCP and notices', () => {
         // An operator refund: the audit row and the Idempotency-Key commit in the transaction that holds the refund
         // (same xmin as the refund_hold ledger row); a retry returns the refund, another body is refused, and a refusal
         // leaves no audit row.
-        await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+        await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Nightmail operator']);
         const refundPath = `/v1/operator/billing/${wid}/refunds`, refundBody = { attemptId: first.attemptId, amountCents: 1000, basis: 'billing_error', reason: 'Customer was charged for a top-up twice' };
         const refund = ok(await local('POST', refundPath, refundBody, 'live', { 'Idempotency-Key': 'refund-1' }));
         assert.match(refund.refundId, /^brf_/);
@@ -20209,7 +20209,7 @@ describe('Billing: API, MCP and notices', () => {
 
   test('OpenAPI and MCP: billing reads and a top-up link are tools; nothing that charges a card is, and the webhook and operator routes are hidden', async () => {
     const { createOpenApiApp } = await import('./src/app.js'), { buildMcpCatalog, DASHBOARD_MONEY } = await import('./src/mcp-catalog.js'), { resourceActions } = await import('./src/mcp-resources.js');
-    const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Bane API', version: '0.1.0' } }) as Json;
+    const app = await createOpenApiApp(), spec = app.getOpenAPI31Document({ openapi: '3.1.0', info: { title: 'Nightmail API', version: '0.1.0' } }) as Json;
     const ids = (path: string) => Object.values(spec.paths[path] ?? {}).map(o => (o as Json).operationId);
     assert.deepEqual([ids('/v1/billing'), ids('/v1/billing/usage'), ids('/v1/billing/ledger'), ids('/v1/billing/payments'), ids('/v1/billing/payments/{id}'), ids('/v1/billing/top-ups'), ids('/v1/billing/top-up-links'), ids('/v1/billing/auto-recharge'), ids('/v1/billing/payment-method').sort()],
       [['getBilling'], ['getBillingUsage'], ['listBillingLedger'], ['listBillingPayments'], ['getBillingPayment'], ['createBillingTopUp'], ['createBillingTopUpLink'], ['updateBillingAutoRecharge'], ['createBillingCardSetup', 'deleteBillingPaymentMethod']]);
@@ -20323,7 +20323,7 @@ describe('Billing: API, MCP and notices', () => {
       assert.deepEqual(ok(await local('GET', base)).decisions, { month: same ? 12 : 7, day: 7 });
       await db.query('ROLLBACK TO SAVEPOINT decisions');
       error(await local('POST', `${base}/credits`, { amountCents: 1000, reason: 'Goodwill after an outage' }, 'live', once('refused-3')), 403, 'OPERATOR_REQUIRED');
-      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Nightmail operator']);
 
       // A promotional credit: the ledger row and its audit row commit in the same (sub)transaction; a retry with the
       // same Idempotency-Key returns the first answer and posts nothing.
@@ -20381,7 +20381,7 @@ describe('Billing: API, MCP and notices', () => {
       error(await local('PUT', `${base}/free`, on), 403, 'OPERATOR_REQUIRED');
       error(await request('PUT', `/v1/operator/billing/people/${me}/free`, key.secret, on), 403, 'OPERATOR_REQUIRED');
       const { setOperator } = await import('./scripts/set-operator.js');
-      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Nightmail operator']);
       error(await local('PUT', `${base}/free`, { ...on, until: new Date(Date.now() - 1000).toISOString() }), 422, 'VALIDATION_FAILED');
 
       // The workspace flag: free until a date, audited with the change; customers see the free plan and no gate.
@@ -21654,7 +21654,7 @@ describe('Operational configuration and public event boundaries', () => {
         if (callbacks.length > 1) { response.writeHead(204); response.end(); return; }
       }
       if (request.url === '/certificate' || request.url === '/webhook') {
-        response.writeHead(302, { Location: '/redirect-target' }); response.end('Redirect refused by Bane.');
+        response.writeHead(302, { Location: '/redirect-target' }); response.end('Redirect refused by Nightmail.');
       } else { response.writeHead(200); response.end('The redirect target must never be requested.'); }
     });
     server.listen(0, '127.0.0.1');
@@ -21802,7 +21802,7 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
   const key = await keyFixture(t, { permissions: ['read', 'send'], domains: [from.split('@')[1]] });
   const queued = ok(await http('POST', '/v1/emails/send', key.secret, {
     from, to, region: process.env.SES_TEST_REGION ?? REGION,
-    subject: unique('Bane authorized live acceptance'), text: 'One explicitly authorized Bane acceptance email. Provider acceptance is not a delivery claim.', kind: 'transactional',
+    subject: unique('Nightmail authorized live acceptance'), text: 'One explicitly authorized Nightmail acceptance email. Provider acceptance is not a delivery claim.', kind: 'transactional',
   }, { 'Idempotency-Key': unique('authorized-live') }), 202);
   assert.equal(queued.environment, undefined);
   assert.equal(queued.simulated, false);
@@ -23104,7 +23104,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(sent.status >= 400 && sent.status < 500, diagnostic(sent));
       await seen(sent, { route: '/v1/emails/send', method: 'POST', code: sent.body.error.code, principal: 'dashboard', workspace: wid });
       await seen(await request('GET', `/v1/no-such-route/${encodeURIComponent(email)}`, reader.secret), { route: 'unmatched', status: 404, code: 'NOT_FOUND' });
-      // An unexpected failure: the request line plus one error line with Bane's own stack frames, never the message. A
+      // An unexpected failure: the request line plus one error line with Nightmail's own stack frames, never the message. A
       // message can span lines that look like frames, even like a frame in the Worker bundle (PR #131 review).
       const errorLine = (reply: Reply) => lines.map(line => JSON.parse(line) as Json).find(entry => entry.requestId === reply.headers.get('x-request-id') && entry.event !== 'request');
       const ownFrames = (stack: string) => stack.split('\n').every(frame => /^[\w$.<>[\]]+(?: \[as [\w$]+\])? \((?:worker\.js|(?:src|dist)\/[\w./-]+\.(?:ts|js)):\d+:\d+\)$/.test(frame));
@@ -23157,7 +23157,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   });
 
   // PR #131 recheck: an error's name and message are both caller-reachable text, and either can span lines that look
-  // exactly like frames. stackFrames reads frames only after the exact header text, and keeps Bane's own.
+  // exactly like frames. stackFrames reads frames only after the exact header text, and keeps Nightmail's own.
   test('stack frames: an error name or message that looks like frames is never logged as one, and error fields are logged only as allowlisted strings', async t => {
     const { stackFrames, errorTypeOf, databaseCodeOf, logError, log } = await import('./src/core.js');
     const real = '    at realHandler (worker.js:5:5)\n    at async Pool.query (/app/node_modules/pg/lib/client.js:9:9)\n    at async handler (/app/dist/app.js:7:3)';
@@ -23180,7 +23180,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(stackFrames(error), 'realHandler (worker.js:5:5)\nhandler (dist/app.js:7:3)', JSON.stringify({ name, message }));
       assert.equal(errorTypeOf(error), /^[A-Z][A-Za-z0-9]{0,40}$/.test(name) ? name : 'Error');
     }
-    // Formatted by V8 itself, from this file: no frame of Bane's, and none of the injected ones.
+    // Formatted by V8 itself, from this file: no frame of Nightmail's, and none of the injected ones.
     const lazy = Object.assign(new Error(`boom${fakeMessage}`), { name: `Error${fake}` });
     assert.equal(stackFrames(lazy), undefined);
     // Fails closed when the stack does not start with the current header, or has a line that is not a frame after it.
@@ -23571,7 +23571,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     // Every send is cleared at once, so nothing is left for a dispatcher.
     const send=async(w:string,from:string,status=202,code?:string)=>{const reply=await api(w,'POST','/v1/emails/send',{from,to:'success@simulator.amazonses.com',subject:'Platform',text:'Platform fixture.'});
       if(status!==202)return error(reply,status,code);const {id}=ok(reply,202);await db.query('DELETE FROM sending_emails WHERE id=$1',[id]);};
-    // The operator's hand-made Easy DKIM identity: Bane may associate it with a tenant, never create, change or delete it.
+    // The operator's hand-made Easy DKIM identity: Nightmail may associate it with a tenant, never create, change or delete it.
     const dkim=['platformdkima','platformdkimb','platformdkimc'],identity:Json={IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,Tags:[],
       DkimAttributes:{SigningEnabled:true,Status:'SUCCESS',SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:[...dkim]}};
     const children=new Map<string,Json>(),members=new Map<string,string>(),writes:string[]=[];let afterRuntimeRead:(()=>Promise<void>)|undefined;
@@ -25241,7 +25241,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ok(await choose(d, null)); await recheck(d); assert.equal(receiving(await read(d)).name, `mail.${d.name}`);
       });
 
-      await t.test("Bane's own names: MAIL FROM, ownership TXT and DKIM never carry the receiving MX", async () => {
+      await t.test("Nightmail's own names: MAIL FROM, ownership TXT and DKIM never carry the receiving MX", async () => {
         const name = `${unique('rx-mailfrom')}.example`, d = await claim(name, { mailFrom: `reply.${name}` });
         assert.equal(receiving(await read(d)).name, `inbound.${d.name}`, 'Record generation skips the custom MAIL FROM subdomain.');
         zone.set(`reply.${d.name}`, { mx: [`10 feedback-smtp.${REGION}.amazonses.com.`] });
@@ -25968,7 +25968,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t, async ({runtime,db,local,run}) => {
       const {applyDevE2eFixture,DEV_E2E_SEND_CAP}=await import('./scripts/dev-e2e-fixture.js');
       const wid=runtime.config.workspaceId, domain='e2e.bane.mx', account='111122223333', domainId='dom_'+randomUUID().replaceAll('-','');
-      const dev={STAGE:'dev',PUBLIC_URL:'https://dev.bane.mx',BANE_E2E_DOMAIN_ID:domainId};
+      const dev={STAGE:'dev',PUBLIC_URL:'https://dev.bane.mx',NIGHTMAIL_E2E_DOMAIN_ID:domainId};
       Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'}});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state) VALUES ($1,$2,$3,'ready')`,[REGION,account,`arn:aws:sns:${REGION}:${account}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,account]);
@@ -25979,7 +25979,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='set-dev-e2e-fixture-policy'`,[wid])).rows.map(r=>r.details);
       // Never production, never another workspace: a fixture without both verified claims is refused and unchanged.
       await assert.rejects(applyDevE2eFixture(db,{...dev,STAGE:'production',PUBLIC_URL:'https://bane.mx'}),/only to dev/);
-      await assert.rejects(applyDevE2eFixture(db,{...dev,BANE_E2E_DOMAIN_ID:undefined}),/BANE_E2E_DOMAIN_ID/);
+      await assert.rejects(applyDevE2eFixture(db,{...dev,NIGHTMAIL_E2E_DOMAIN_ID:undefined}),/NIGHTMAIL_E2E_DOMAIN_ID/);
       await assert.rejects(applyDevE2eFixture(db,dev),/No unique E2E fixture/);
       await claim('e2e-va.bane.mx');
       // Dev already had the 100k workspace override. Its live Ohio sandbox sample (1/s, 200/day, 100 used) holds
@@ -26838,7 +26838,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
-  test('MX: an operator lifts a bounce suppression in Bane and SES, scoped, audited and fenced, so a fixed sign-in address gets mail again', async t => {
+  test('MX: an operator lifts a bounce suppression in Nightmail and SES, scoped, audited and fenced, so a fixed sign-in address gets mail again', async t => {
     await simulatedSesFixture(t, async ({runtime,db,local}) => {
       const {liftSuppression}=await import('./scripts/lift-suppression.js'),{runDispatcher}=await import('./src/dispatcher.js');
       const wid=runtime.config.workspaceId, account='111122223333', domain='lift.example', to='New.Hire@Example.net';
@@ -26875,7 +26875,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const audits=async()=>(await db.query(`SELECT details FROM hosted_operator_audit WHERE workspace_id=$1 AND action='lift-suppression' ORDER BY at`,[wid])).rows.map(r=>r.details);
       const suppressed=async(rcpt=to)=>(await db.query('SELECT suppressed,suppression_reason FROM audience_contacts WHERE workspace_id=$1 AND email=$2',[wid,rcpt.toLowerCase()])).rows[0];
       const bounce=(rcpt:string)=>db.query(`INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason,suppressed_at) VALUES($1,$2,$3,true,'hard_bounce',now())`,[unique('con'),wid,rcpt.toLowerCase()]);
-      // A hard bounce of an earlier sign-in email: Bane, both tenants and the shared account list all hold it.
+      // A hard bounce of an earlier sign-in email: Nightmail, both tenants and the shared account list all hold it.
       await bounce(to); list(REGION,tenant).set(to,'BOUNCE'); list(second,trusted).set(to.toLowerCase(),'BOUNCE'); list(REGION).set(to,'BOUNCE');
       assert.equal(await send(to),'suppressed');
       await assert.rejects(liftSuppression(db,[wid,to],ses),/Usage:/);
@@ -26884,7 +26884,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await assert.rejects(lift(),/Nothing was changed/); accounts[later]=account;
       await assert.rejects(lift(),/shared by every workspace.*--account-level/);
       assert.deepEqual([removals,await audits(),await suppressed()],[[],[],{suppressed:true,suppression_reason:'hard_bounce'}]);
-      // A failure part-way is recorded with what was already removed, and Bane still suppresses the address.
+      // A failure part-way is recorded with what was already removed, and Nightmail still suppresses the address.
       failAt=3; await assert.rejects(lift(to,'--account-level'),/failed \(AccessDeniedException\); 2 earlier removal/); failAt=0;
       const [started,failed]=await audits();
       assert.deepEqual([started.status,started.plan.length,failed.status,failed.removed.length,failed.failed.error,failed.liftId===started.liftId],['started',3,'failed',2,'AccessDeniedException',true]);
@@ -26897,16 +26897,16 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(await send(to),'accepted'); assert.equal(tenants.at(-1),tenant);
       // A completed lift is not repeated: nothing more is read from or removed in SES, and nothing is recorded.
       await assert.rejects(lift(),/not suppressed/); assert.equal(removals.length,4); assert.equal((await audits()).length,4);
-      // Complaints stay, whether Bane or SES (even on the shared list, with --account-level) recorded them.
+      // Complaints stay, whether Nightmail or SES (even on the shared list, with --account-level) recorded them.
       const other=address(); await bounce(other); list(REGION).set(other,'COMPLAINT');
       await assert.rejects(lift(other,'--account-level'),/complaint on the account-level list.*Nothing was changed/);
       await db.query(`UPDATE audience_contacts SET suppression_reason='complaint' WHERE workspace_id=$1 AND email=$2`,[wid,other]);
       await assert.rejects(lift(other),/complaint suppression is not lifted/);
       // A complaint that arrives after the preflight read stops the lift before anything more is removed, and is kept:
-      // recorded in Bane before the row lock...
+      // recorded in Nightmail before the row lock...
       const late=address(),settled=removals.length; await bounce(late); list(REGION,tenant).set(late,'BOUNCE');
       inject=()=>db.query(`UPDATE audience_contacts SET suppression_reason='complaint',suppressed_at=clock_timestamp() WHERE workspace_id=$1 AND email=$2`,[wid,late]);
-      await assert.rejects(lift(late),/complaint was recorded in Bane.*nothing more was removed; 0 SES removal/);
+      await assert.rejects(lift(late),/complaint was recorded in Nightmail.*nothing more was removed; 0 SES removal/);
       assert.deepEqual([removals.length,list(REGION,tenant).get(late),await suppressed(late)],[settled,'BOUNCE',{suppressed:true,suppression_reason:'complaint'}]);
       assert.equal((await audits()).at(-1).status,'superseded');
       // ...in SES before the first delete...
@@ -29560,7 +29560,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
   test('hosted campaigns: one classifier request per distinct copy, however many recipients share it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('classifier', async t => {
-      // CI: 150 recipients over 12 first names (CI's disk-backed database makes every send slow). BANE_BENCH=1: 100,000 over 5,000.
+      // CI: 150 recipients over 12 first names (CI's disk-backed database makes every send slow). NIGHTMAIL_BENCH=1: 100,000 over 5,000.
       const recipients = BENCH ? 100_000 : 150, names = BENCH ? 5_000 : 12, acct = '112223330016';
       const { wid, screened } = await hostedScreenFixture(t, runtime, db, acct, 'scale.invalid');
       await db.query('UPDATE workspaces SET send_cap_override=$2 WHERE id=$1', [wid, 10 * recipients]); await gradedSender(db, wid, 10 * recipients);
@@ -30585,7 +30585,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(ok(await local('GET', '/v1/operator/workspaces')).data.filter((w: Json) => w.workspaceId === wid), [], 'A workspace in good standing is not in the queue.');
       assert.equal(ok(await local('GET', `/v1/operator/workspaces?q=${wid}`)).data[0].workspaceId, wid);
       error(await local('POST', `${base}/pause`, { reason: 'Confirmed abuse report' }), 403, 'OPERATOR_REQUIRED');
-      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Nightmail operator']);
       const page = ok(await local('GET', base));
       assert.deepEqual([page.standing.step, page.score.limit.daily, page.connection.paused, page.members[0].email], ['ok', 2000, false, AUTH_EMAIL]);
       const version = page.standing.version;
@@ -30775,7 +30775,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // A second list-quality quarantine needs an operator.
       await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"BOUNCE_RATE_HIGH","message":"x"}',quarantines=2 WHERE id=$1`, [c.id]);
       error(await local('POST', `${path}/resume`, {}), 409, 'QUARANTINE_REVIEW_REQUIRED');
-      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Bane operator']);
+      await (await import('./scripts/set-operator.js')).setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic Nightmail operator']);
       ok(await local('POST', `/v1/operator/campaigns/${c.id}/release`, { reason: 'Reviewed the list source with the customer' }));
       assert.equal((await view()).state, 'sending');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM hosted_operator_audit WHERE workspace_id=$1 AND action='operator-release-campaign'`, [wid])).rows[0].n, 1);
@@ -31326,7 +31326,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('AWS tenant status: an AWS or policy pause of a workspace tenant pauses the workspace; Bane\'s own switch and enables are timeline only', async t => {
+  test('AWS tenant status: an AWS or policy pause of a workspace tenant pauses the workspace; Nightmail\'s own switch and enables are timeline only', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', topicArn = `arn:aws:sns:${REGION}:${pool}:bane-feedback`;
       const { ingestFeedbackBatch } = await import('./src/operations.js');
@@ -31367,7 +31367,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await pause(), null); assert.equal((await db.query(`SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1`, [wid])).rows[0].n, 0);
       liveStatus = 'DISABLED';
       assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'CUSTOMER_MANAGED', 'shaped non-manual reason')]), [{ ok: true }]);
-      assert.equal(await pause(), null, 'Bane\'s own switch is not an AWS pause.');
+      assert.equal(await pause(), null, 'Nightmail\'s own switch is not an AWS pause.');
       assert.deepEqual(await ingestFeedbackBatch(runtime, [item('DISABLED', 'AWS_SES', 'Trust and Safety review.')]), [{ ok: true }]);
       assert.match((await pause()).reason, /AWS paused this workspace’s SES tenant/);
       assert.deepEqual((await db.query(`SELECT payload FROM jobs WHERE workspace_id=$1 AND type='reputation.alert'`, [wid])).rows.map(r => [r.payload.code, r.payload.tenant, r.payload.exempt]), [['SES_TENANT_PAUSED', arn, false]], 'The operators are alerted.');
@@ -38096,7 +38096,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const prefix='arn:aws:sns:us-east-2:111122223333:',queue='bane-inbound-dead-letters',pager=prefix+'oncall';
     assert.deepEqual(receivingAlarm('111122223333',queue,pager),{name:queue,namespace:'AWS/SQS',metricName:'ApproximateNumberOfMessagesVisible',dimensions:{QueueName:queue},statistic:'Maximum',period:60,evaluationPeriods:1,comparisonOperator:'GreaterThanThreshold',threshold:0,treatMissingData:'notBreaching',alarmActions:[pager]});
     for(const bad of [prefix+'bane-inbound',pager.replace('us-east-2','us-east-1'),pager.replace('111122223333','444455556666')])assert.throws(()=>receivingAlarm('111122223333',queue,bad));
-    // SES feedback dead letters (Mythos 5.1 N-M3): Virginia's alarm pages a Virginia topic, never a Bane feedback topic.
+    // SES feedback dead letters (Mythos 5.1 N-M3): Virginia's alarm pages a Virginia topic, never a Nightmail feedback topic.
     const {deadLetterAlarm}=await import(new URL('../infra/pulumi/receiving-alarm.ts',import.meta.url).href),va='arn:aws:sns:us-east-1:111122223333:';
     assert.deepEqual(deadLetterAlarm('111122223333','us-east-1','bane-trusted-feedback-dead-letters','q',va+'oncall').alarmActions,[va+'oncall']);
     for(const bad of [pager,va+'bane-trusted-feedback',prefix+'bane-feedback'])assert.throws(()=>deadLetterAlarm('111122223333',bad===prefix+'bane-feedback'?'us-east-2':'us-east-1','x','q',bad));
@@ -38336,7 +38336,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       } finally { runtime.webhookFetch = transport; }
       const replyPath = `${base}/threads/${detail.threadId}/reply`, idem = { ...agent, 'Idempotency-Key': 'answer-selected' };
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'unauthorized',from:'sales@example.com' },agent),403,'FROM_NOT_ALLOWED');
-      // Headers are denylisted, not X- only: structural headers Bane/SES own are refused, everything else passes through.
+      // Headers are denylisted, not X- only: structural headers Nightmail/SES own are refused, everything else passes through.
       for (const name of ['X-SeS-CONFIGURATION-SET','From','content-type','In-Reply-To','List-Unsubscribe','Auto-Submitted','Resent-From','ARC-Seal','Authentication-Results','DomainKey-Signature','Feedback-ID']) error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no provider overrides',headers:[{name,value:'override'}] },agent),422);
       error(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'no injection',headers:[{name:'Precedence',value:'bulk\r\nBcc: victim@example.net'}] },agent),422);
       const reply = await (await queryBudget(t,db))('inbound-reply',async()=>ok(await post(replyPath,{ addressId:box.id,replyToMessageId:selected.id,text:'Answering the second one',replyAll:true,headers:[{name:'Precedence',value:'bulk'},{name:'X-Ticket',value:'42'}] },idem),202));
@@ -38424,7 +38424,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const received = (await announced()).filter(payload => payload.messageId === passed[0].id);
       assert.equal(received.length,1); assert.equal(received[0].data.dmarc,'PASS'); assert.equal((await announced()).length,before + 1);
       // Custom headers: reserved names and malformed Message-IDs are refused, replies keep their own threading,
-      // and a new conversation can cite a thread Bane never received.
+      // and a new conversation can cite a thread Nightmail never received.
       const plain = { from:publicAddress,to:'customer@example.net',subject:'Headers',text:'Header check' };
       error(await post('/v1/emails/send',{ ...plain,headers:[{name:'from',value:'ceo@example.com'}] }),422);
       error(await post('/v1/emails/send',{ ...plain,headers:[{name:'X-SES-Configuration-Set',value:'other'}] }),422);
