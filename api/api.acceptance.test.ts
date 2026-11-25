@@ -41509,6 +41509,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await run('email.dispatch');
         assert.ok(readable(input(tested.id)).includes(`<img src="${onLinkDomain}" alt="logo" width="100"`));
         assert.equal((await fetch(new Request(onLinkDomain))).status, 200);
+        // The link domain is every customer's, so it isn't an image host: an inline picture no launched campaign or campaign
+        // test carried answers 404 there, though the workspace has linked there, and still answers on its own origin.
+        const loose = Buffer.from(png); loose.write('Loose', png.length - 40, 'latin1');
+        const unused = ok(await local('POST', '/v1/attachments', { filename: 'unused.png', content: loose.toString('base64'), contentType: 'image/png', disposition: 'inline', contentId: 'unused' }), 201);
+        const unusedSum: string = (await db.query('SELECT checksum FROM sending_attachments WHERE id=$1', [unused.id])).rows[0].checksum;
+        const unusedPath = `/i/${unused.id.slice('attachment_'.length)}${unusedSum.slice(0, 32)}.png`;
+        assert.equal((await fetch(new Request(`https://${linkDomain}${unusedPath}`))).status, 404);
+        assert.equal((await get(unusedPath)).status, 200);
+        // A paused workspace (the standing ladder's pause here; an operator's pause or the abuse path the same way) gets none
+        // of its pictures there, while its recipients can still unsubscribe there.
+        const unsubscribe = new RegExp(`https://${linkDomain.replaceAll('.', '\\.')}/unsubscribe/u_[0-9a-f]{64}`).exec(body)![0];
+        await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,band_limit,daily_limit,step,computed_at,evidence_at) VALUES($1,'graded',100,40,40,40,100,100,'pause',now(),now())
+          ON CONFLICT(workspace_id) DO UPDATE SET step='pause'`, [wid]);
+        try {
+          assert.equal((await fetch(new Request(onLinkDomain))).status, 404);
+          assert.equal((await fetch(new Request(unsubscribe, { headers: { accept: 'text/html' } }))).status, 200);
+        } finally { await db.query("UPDATE sender_standing SET step='ok' WHERE workspace_id=$1", [wid]); }
+        assert.equal((await fetch(new Request(onLinkDomain))).status, 200);
       } finally { runtime.config.linkHost = undefined; }
       // Hosted, its own domain never serves them, even as one of its own origins.
       const hostedBefore = { multiTenant: runtime.config.multiTenant, previousOrigins: runtime.config.previousOrigins };

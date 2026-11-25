@@ -1,7 +1,7 @@
 import { timingSafeEqual } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { ApiError, type App } from './core.js';
-import { servesWorkspace } from './link-domains.js';
+import { mayLink, servesWorkspace } from './link-domains.js';
 import { servedDomains } from './brand.js';
 
 // Campaign mail links its inline pictures instead of carrying them. Each is served at <link origin>/i/<name>, on the same
@@ -81,6 +81,16 @@ export function registerLinkedImages(app: App) {
       sql`SELECT workspace_id, storage_key, checksum, content_type, size, disposition FROM sending_attachments WHERE id = ${`attachment_${id}`}`);
     if (!row || row.disposition !== 'inline' || extensionOf(row.content_type) !== extension || row.size > LINKED_IMAGE_BYTES || row.checksum.length !== 64
       || !timingSafeEqual(Buffer.from(row.checksum.slice(0, 32)), Buffer.from(hash)) || !await servesWorkspace(c.env, c.req.url, row.workspace_id)) throw missing();
+    // The link domain is every customer's, so one can't make it an image host: there it serves only a picture a launched
+    // campaign (its review) or a campaign's test carried, and none of a paused workspace's (an operator's pause or the abuse
+    // path, or the standing ladder's pause step; its unsubscribe links keep answering). The colo keeps a copy an hour, so
+    // either takes effect within it (src/worker.ts).
+    if (new URL(c.req.url).hostname.toLowerCase() === c.env.config.linkHost) {
+      const { rows: [allowed] } = await c.env.db.execute<{ ok: boolean }>(sql`SELECT ${mayLink(row.workspace_id)} AND EXISTS (SELECT 1 FROM sending_attachment_links l
+        WHERE l.workspace_id=${row.workspace_id} AND l.attachment_id=${`attachment_${id}`} AND (l.owner_type='review' OR l.owner_type='email' AND EXISTS (SELECT 1 FROM sending_emails e
+          WHERE e.workspace_id=l.workspace_id AND e.id=l.owner_id AND (e.campaign_id IS NOT NULL OR e.snapshot->>'testCampaignId' IS NOT NULL)))) AS ok`);
+      if (!allowed?.ok) throw missing();
+    }
     const etag = `"${row.checksum}"`, headers: Record<string, string> = {
       'Content-Type': EXTENSION_TYPES.get(extension)!, 'Cache-Control': 'public, max-age=31536000, immutable', ETag: etag,
       'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline',
