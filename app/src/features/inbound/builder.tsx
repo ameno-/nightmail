@@ -26,7 +26,7 @@ import { Flow, FlowFork, FlowItem, FlowStage, isSplit, splitOf } from './flow'
 import { FlowPanel } from './panel'
 import { receivingDomains, useOverview, type Overview, type OverviewRule, type RouteEntry, type Target } from './overview'
 import { Match, TargetIcon } from './parts'
-import { AwaitingConfirm, discordUrl, slackUrl, targetProblem, urlHint } from './ritual-connections'
+import { AwaitingConfirm, ForwardSenderOffer, discordUrl, forwardSenderNeeded, slackUrl, targetProblem, urlHint } from './ritual-connections'
 import { catchAllNote, outcomes } from './concepts'
 import { RuleLine } from './recipes'
 
@@ -226,6 +226,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [busy, setBusy] = useState(false)
   const [waiting, setWaiting] = useState<string | null>(null)
   const [conflict, setConflict] = useState(false)
+  // The address made to send a forward's confirmation from, when the workspace had none (ForwardSenderOffer).
+  const [forwardFrom, setForwardFrom] = useState<string | null>(null)
   // Another provider receives mail at the new address's host today: creating it waits for consent to move that mail.
   const [moveHost, setMoveHost] = useState<{ host: string; domainId: string; message: string } | null>(null)
   const [leaving, setLeaving] = useState<(() => void) | null>(null)
@@ -378,7 +380,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       } else if (!thing) {
         // A forward is made first: its recipient confirms by email before a route or rule can use it.
         const post = (body: Record<string, unknown>) => request<{ id: string; name: string; status: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body), scope })
-        const body = { type, name: names[side]!, address: value, ...(from ? { from } : {}) }
+        const sender = forwardFrom ?? from
+        const body = { type, name: names[side]!, address: value, ...(sender ? { from: sender } : {}) }
         let created: { id: string; name: string; status: string }
         try { created = await post({ ...body, preverify: true }) } catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
         thing = { id: created.id, name: created.name }
@@ -550,7 +553,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     {replacing && <Alert tone="warning">Its mail also goes to {base!.also.map((t, i) => <span key={`${t.type}:${t.id}`}>{i > 0 && (i === base!.also.length - 1 ? ' and ' : ', ')}{targetWord(t, saved?.id)}</span>)}. Saving stops that.</Alert>}
     {conflict && <><Alert tone="warning">Its flow changed since you opened it. Nothing was saved.</Alert><div className="cluster"><Button size="sm" onClick={() => void startOver()}>Show the saved flow</Button></div></>}
     {waiting && <AwaitingConfirm address={waiting} />}
-    {problem !== null && <Alert tone="danger">{errorText(problem)}</Alert>}
+    {problem !== null && !forwardSenderNeeded(problem) && <Alert tone="danger">{errorText(problem)}</Alert>}
+    <ForwardSenderOffer error={problem} onCreated={box => { setForwardFrom(box.id); setProblem(null); return save({ preventDefault() {} } as FormEvent) }} />
   </form>
   else body = receivingSetup ? <div className="stack"><ReceivingSetupNote setup={receivingSetup} />{entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div> : null}</div>
     : entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div>

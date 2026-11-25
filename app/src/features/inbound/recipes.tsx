@@ -22,7 +22,7 @@ import { ritualRecipes } from '../../../../api/src/ritual-schema'
 import { concepts } from './concepts'
 import { useLiveVersion } from './live'
 import { ago, firstOverview, useOverview, type Overview, type OverviewEndpoint, type OverviewRule } from './overview'
-import { AwaitingConfirm, CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
+import { AwaitingConfirm, CreatedEndpointDialog, ForwardSenderOffer, discordUrl, forwardSenderNeeded, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
 import { AskAgentLink } from './ritual-agent'
 import type { Condition } from './builder'
 import { addressOption, idempotencyFor, openBuilder, rulePath, splitBuilderPath } from './shared'
@@ -321,6 +321,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
     setTargets(current => { const kept = current.filter(t => targetsList.some(o => o.value === t)); return kept.length === current.length ? current : kept.length ? kept : firstAddress ? [firstAddress] : [] })
   }, [addressesComplete, addresses]) // eslint-disable-line react-hooks/exhaustive-deps
   const [secret, setSecret] = useState<(Endpoint & { secret?: string }) | null>(null)
+  // The address made to send a forward's confirmation from, when none could (ForwardSenderOffer).
+  const [forwardFrom, setForwardFrom] = useState<string | null>(null)
   const [attempt] = useState({ key: '', body: '' })
 
   const taken = new Set(endpoints.map(e => e.name).concat(overview.endpoints.map(e => e.name)))
@@ -351,7 +353,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
     let created: Endpoint & { secret?: string }
     if (type === 'forward') {
       // On a domain this workspace verified, no confirmation email is needed; anywhere else the recipient agrees first.
-      const body = { type, name, address: url, ...(targets[0] ? { from: targets[0] } : {}) }
+      const sender = forwardFrom ?? targets[0]
+      const body = { type, name, address: url, ...(sender ? { from: sender } : {}) }
       try { created = await post({ ...body, preverify: true }) }
       catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
     } else created = await post({ type, name, url })
@@ -435,7 +438,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
         </Field>
       })}
       {waiting && <AwaitingConfirm address={waiting.target} />}
-      {general && <Alert tone="danger">{general}</Alert>}
+      {general && !forwardSenderNeeded(error) && <Alert tone="danger">{general}</Alert>}
+      <ForwardSenderOffer error={error} onCreated={box => { setForwardFrom(box.id); setError(null); refetchAddresses(); return save() }} />
       <div className="recipe-form__actions">
         <Link className="ui-button ui-button--ghost ui-button--md" to={back}>Cancel</Link>
         <Button variant="primary" type="submit" loading={busy} disabled={!!waiting}>Save</Button>

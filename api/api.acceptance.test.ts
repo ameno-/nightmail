@@ -24824,6 +24824,45 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('forwards: with no permanent address to send the confirmation from, the 422 names the address to create and the calls (forward@ on its own domain); created, the forward goes out from it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      Object.assign(runtime.config, { multiTenant: true });
+      const account = (await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,receiving_state,inbound_bucket) VALUES ($1,'111122223333',$2,'ready','ready','fixture')
+        ON CONFLICT (region) DO UPDATE SET receiving_state='ready',inbound_bucket=coalesce(provider_pool_regions.inbound_bucket,'fixture') RETURNING aws_account_id`, [REGION, `arn:aws:sns:${REGION}:111122223333:receiving-fixture`])).rows[0].aws_account_id;
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready') ON CONFLICT DO NOTHING`, [wid, REGION, account]);
+      const networkGuard = globalThis.fetch;
+      t.after(() => { globalThis.fetch = networkGuard; });
+      globalThis.fetch = async (input: RequestInfo | URL) => { assert.equal(new URL(String(input)).hostname, 'cloudflare-dns.com'); return Response.json({ Status: 3 }); };
+      // Whatever addresses the fixture workspace starts with are gone: like ws_73c67cd4, it has no permanent address.
+      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1", [wid]);
+      const name = `${unique('fwd')}.example`, tokens = ['tokena', 'tokenb', 'tokenc'];
+      const identity = { proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { SigningEnabled: true, Status: 'SUCCESS', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' } } };
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,ever_proven,identity,receiving_proved_at,receiving_identity_at)
+        VALUES ($1,$2,$2,'verified','off',true,$3,now(),now())`, [name, wid, JSON.stringify(identity)]);
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [unique('dom'), wid, name, REGION]);
+      const forward = (extra: Json = {}) => local('POST', '/v1/endpoints', { type: 'forward', name: 'team', address: 'team@outside.example', ...extra });
+
+      const refused = error(await forward(), 422, 'FORWARD_SENDER_REQUIRED');
+      const suggested = `forward@${name}`;
+      assert.equal(refused.field, 'from');
+      assert.deepEqual(refused.details, [{ suggestedFrom: suggested }]);
+      assert.ok(refused.message.startsWith('Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and this workspace has none yet.'), refused.message);
+      assert.ok(refused.message.includes(`POST /v1/inbound/addresses and {"address":"${suggested}"}, then send this again with "from":"${suggested}".`), refused.message);
+      // A from that isn't one of its addresses says so, with the same fix.
+      assert.match(error(await forward({ from: `nobody@${name}` }), 422, 'FORWARD_SENDER_REQUIRED').message, new RegExp(`^nobody@${name.replace(/\./g, '\\.')} isn’t one of this workspace’s addresses\\.`));
+
+      // The suggested call works as written, and the forward then goes out from the new address.
+      const box = ok(await local('POST', '/v1/inbound/addresses', { address: suggested }), 201);
+      const made = ok(await forward({ from: suggested }), 201);
+      assert.equal(made.status, 'pending');
+      assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'team'])).rows[0].request_from, box.address);
+      // The next suggestion skips the address now taken.
+      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1 AND id=$2", [wid, box.id]);
+      assert.deepEqual(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'team-2', address: 'other@outside.example' }), 422, 'FORWARD_SENDER_REQUIRED').details, [{ suggestedFrom: `forward-2@${name}` }]);
+    });
+  });
+
   test('MX receiving hosts: DNS conflicts are checked when a host is suggested or chosen and in the hourly recheck', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const [{ operationJobs }, { baneRecordUse, receivingCandidates }] = await Promise.all([import('./src/operations.js'), import('./src/receiving-host.js')]);
