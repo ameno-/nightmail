@@ -43,15 +43,22 @@ try {
   const facetLane=nodeLogFacetLane(runtime,process.env.DATABASE_URL), facetRuntime=facetLane.get();
   const startFacet=facetLane.nudge;
   runtime.startLogFacetFold=startFacet;
+  runtime.startLogFacetAggregate=facetLane.aggregate;
   const facets = (async () => {
     let bootstrap: Promise<void> | undefined, lastBootstrap = 0;
     while (!stopped) {
       try { for (const slot of await dueLogFacetSlots(facetRuntime.db)) startFacet(slot); }
       catch { log('warn', { code: 'LOG_FACET_TICK_FAILED' }); }
-      if (runtime.config.multiTenant && !bootstrap && Date.now() - lastBootstrap >= LOG_FACET_BOOTSTRAP_TICK_MS) {
-        lastBootstrap = Date.now();
-        bootstrap = bootstrapLogFacet(facetRuntime).then(ticket => { if (ticket) startFacet(ticket.slot); })
-          .catch(() => log('warn', { code: 'LOG_FACET_BOOTSTRAP_FAILED' })).finally(() => { bootstrap = undefined; });
+      if(!bootstrap){
+        const upkeep=Date.now()-lastBootstrap>=LOG_FACET_BOOTSTRAP_TICK_MS;
+        if(upkeep)lastBootstrap=Date.now();
+        bootstrap=(async()=>{
+          const {maintainFacetAggregates}=await import('./log-facet-aggregate-worker.js');
+          const active=await maintainFacetAggregates(facetRuntime.db,350,upkeep);
+          if(!active&&upkeep&&runtime.config.multiTenant){
+            const ticket=await bootstrapLogFacet(facetRuntime);if(ticket)startFacet(ticket.slot);
+          }
+        })().catch(()=>log('warn',{code:'LOG_FACET_BOOTSTRAP_FAILED'})).finally(()=>{bootstrap=undefined;});
       }
       await setTimeout(LOG_FACET_TICK_MS);
     }

@@ -52,9 +52,27 @@ function ruler(element: Element): Ruler {
 }
 
 /** The width of `text` in `element`'s font. */
-export function measuredWidth(element: Element, text: string) {
+function measuredWidth(element: Element, text: string) {
   const { advances, other } = ruler(element)
   return textWidth(text, character => { let advance = advances.get(character); if (advance === undefined) advances.set(character, advance = other(character)); return advance })
 }
-/** Calls back when widths measured before may have changed. */
-export function onRulerChange(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener) } }
+const pending = new Map<HTMLElement, string>()
+let scheduled = false
+/** Read every newly mounted address's font before changing any box. One pre-paint
+ * batch preserves the exact same width masked or revealed without a layout per cell. */
+export function reserveTextWidth(element: HTMLElement, text: string) {
+  const reserve = () => {
+    pending.set(element, text)
+    if (scheduled) return
+    scheduled = true
+    queueMicrotask(() => {
+      scheduled = false
+      const widths = Array.from(pending, ([box, value]) => [box, measuredWidth(box, value)] as const)
+      pending.clear()
+      for (const [box, width] of widths) box.style.inlineSize = `${width}px`
+    })
+  }
+  listeners.add(reserve)
+  reserve()
+  return () => { listeners.delete(reserve); pending.delete(element) }
+}

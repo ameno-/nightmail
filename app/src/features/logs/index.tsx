@@ -1,8 +1,9 @@
-import { Fragment, useEffect, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router'
 import { Download, Paperclip, Search, X } from 'lucide-react'
 import { useApiDef, useApiQuery, useLogsVisibility, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
+import { usePrefetchQueries } from '../../data/prefetch'
 import type { LogDirection, LogEntry, ReceivedEmailDetail, TimeRange } from '../../data/types'
 import { Alert, Button, CopyButton, DataTable, EmptyState, ErrorState, Icon, Input, PaginationSkeleton, PageHeader, Pagination, SectionHeader, Select, Sheet, StatusBadge, Tabs } from '../../components/ui'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
@@ -84,14 +85,19 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   }, { replace: true })
   const clearCampaign = () => update({ campaign: null })
   const [draft, type] = useSearchDraft(search, value => update({ q: value }))
-  const {pageSize, tableRef, measured} = useAdaptivePageSize(5, 100, 'logs')
+  const filtersForRows = useMemo(() => ({ ...(campaignId ? { campaignId } : { regionId }), direction, search: searched,
+    status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, from }),
+  [campaignId, regionId, direction, searched, status, stream, from])
+  const rowsForSize = useCallback((pageSize: number) => queries.logs({ ...filtersForRows, page, pageSize }, visibility), [filtersForRows, page, visibility])
+  const prefetch = usePrefetchQueries()
+  const firstFit = useCallback((size: number) => { if (visibility !== null) void prefetch([rowsForSize(size)]) }, [visibility, prefetch, rowsForSize])
+  const { pageSize, tableRef, measured } = useAdaptivePageSize(5, 100, 'logs', firstFit)
   // A new page size (the window resized) starts from the first page; the size settling on mount keeps the URL's page.
   const fitted = useRef<number | null>(null)
   useEffect(() => { if (!measured) return; if (fitted.current !== null && fitted.current !== pageSize) update({ page: null }); fitted.current = pageSize }, [pageSize, measured]) // eslint-disable-line react-hooks/exhaustive-deps
   // Status and stream follow the direction: a status the new direction doesn't list leaves, and streams are sent mail only.
   const setDirection = (value: LogDirection) => update({ view: value, status: logStatuses(value, { campaign: false, canAdminister }).includes(status) ? status : null, stream: value === 'received' ? null : stream })
-  const params = { ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: status === 'all' ? undefined : status, stream: stream === 'all' ? undefined : stream, from, page, pageSize }
-  const query = useApiDef(queries.logs(params, visibility),
+  const query = useApiDef(rowsForSize(pageSize),
     { interval: 30_000, enabled: measured && visibility !== null, keepPrevious: previous => previous[2] === visibility })
   // A page the session has no cursor for (a reload, or the window's page size changed) comes back as page 1: say so in the URL too.
   const served = query.data && !query.isPlaceholderData ? query.data.page : undefined
@@ -108,7 +114,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const railed = useMediaQuery('(min-width: 1440px)')
   const rowsReady = measured && Boolean(query.data) && !query.isPlaceholderData && !query.isError && !(campaignOnly && campaign.isPending)
   const { cut, authorizationLost, view } = useLogFacets({
-    filters: { ...(campaignId ? { campaignId } : { regionId }), direction, search: searched, status: params.status, stream: params.stream, from },
+    filters: filtersForRows,
     range, scope: visibility, visibility: canAdminister ? 'admin' : 'member', railed, blank, rowsReady, rowError: query.error,
   })
   // A facet response can learn about a demotion before /v1/me does. Hide privileged rows and controls immediately.
