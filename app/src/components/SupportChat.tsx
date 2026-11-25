@@ -1,13 +1,13 @@
 import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
-import { ChevronDown, MessageCircleQuestionMark, X } from 'lucide-react'
+import { MessageCircleQuestionMark, X } from 'lucide-react'
 import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
 import { Button, IconButton } from './ui'
 import { NightmailMark } from './NightmailLogo'
 import { productName } from '../../../api/src/brand'
 
-// The support chat's Help button and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
+// The support chat's Help controls and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
 // page is idle (hover, focus or press warms it sooner); the conversation and its transport start when Help opens.
 //
 // Where it runs: ?support=demo (kept for the browser session; ?support=off clears it) get the
@@ -79,15 +79,16 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
     setOpen: (next: boolean) => { if (next) setUsed(true); setOpen(next) } }
 }
 
-// Help: on a desktop a small raised button in the page's bottom-right corner (floating), whose icon turns into a chevron
-// while the chat is open above it; in the top bar on a phone or tablet.
-export function SupportTrigger({ chat, floating = false }: { chat: SupportChat; floating?: boolean }) {
+// What makes a control the chat's Help: it toggles the panel, warms its code first, and a dot marks a reply that arrived
+// while the chat was closed. The sidebar's Help row (AppShell) on a desktop; the top bar's button on a phone or tablet.
+export function supportTriggerProps(chat: SupportChat) {
+  return { id: 'support-trigger', className: 'support-trigger', 'aria-haspopup': 'dialog' as const, 'aria-expanded': chat.open, 'aria-controls': chat.used ? 'support-panel' : undefined,
+    'aria-description': chat.unread && !chat.open ? 'New reply' : undefined, 'data-unread': chat.unread || undefined,
+    onPointerEnter: chat.preload, onFocus: chat.preload, onPointerDown: chat.preload, onClick: () => chat.setOpen(!chat.open) }
+}
+export function SupportTrigger({ chat }: { chat: SupportChat }) {
   const label = chat.open ? 'Close help' : chat.unread ? 'Help (new reply)' : 'Help'
-  return <IconButton id="support-trigger" className={floating ? 'support-trigger support-launcher' : 'support-trigger'} variant={floating ? 'secondary' : 'ghost'} size="sm" label={label}
-    aria-haspopup="dialog" aria-expanded={chat.open} aria-controls={chat.used ? 'support-panel' : undefined} data-unread={chat.unread || undefined}
-    onPointerEnter={chat.preload} onFocus={chat.preload} onPointerDown={chat.preload} onClick={() => chat.setOpen(!chat.open)}>
-    {floating ? <span className="support-launcher__icons" aria-hidden="true"><MessageCircleQuestionMark size={16} /><ChevronDown size={16} /></span> : <MessageCircleQuestionMark size={16} />}
-  </IconButton>
+  return <IconButton {...supportTriggerProps(chat)} aria-description={undefined} variant="ghost" size="sm" label={label}><MessageCircleQuestionMark size={16} /></IconButton>
 }
 
 export function SupportHost({ chat }: { chat: SupportChat }) {

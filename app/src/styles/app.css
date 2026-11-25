@@ -32,19 +32,26 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .main-navigation { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-8); padding: var(--space-6) var(--space-8) var(--space-12); }
 .nav-group { display: flex; flex-direction: column; gap: var(--space-2); }
 .nav-group__label { display: flex; align-items: center; height: 20px; padding: 0 var(--sidebar-inset); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); letter-spacing: var(--tracking-label); text-transform: uppercase; user-select: none; }
-.main-navigation a { display: flex; align-items: center; gap: var(--space-8); height: 28px; padding-inline: var(--sidebar-inset); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-md); line-height: 18px; text-decoration: none; transition: color var(--motion-duration) var(--ease-standard), background var(--motion-duration) var(--ease-standard); }
-.main-navigation a > .ui-icon { --icon-size: 15px; color: var(--color-faint); transition: color var(--motion-duration) var(--ease-standard); }
+/* The footer's Connect your agent and Help (.sidebar-action) are rows of the same kind. */
+:is(.main-navigation a, .sidebar-action) { display: flex; align-items: center; gap: var(--space-8); height: 28px; padding-inline: var(--sidebar-inset); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-md); line-height: 18px; text-decoration: none; transition: color var(--motion-duration) var(--ease-standard), background var(--motion-duration) var(--ease-standard); }
+:is(.main-navigation a, .sidebar-action) > .ui-icon { --icon-size: 15px; color: var(--color-faint); transition: color var(--motion-duration) var(--ease-standard); }
 .main-navigation a > .ui-shortcut { opacity: .8; }
-@media (hover: hover) and (pointer: fine) { .main-navigation a:hover { color: var(--color-text); background: var(--color-hover); } .main-navigation a:hover > .ui-icon { color: var(--color-muted); } }
-.main-navigation a:focus-visible { color: var(--color-text); background: var(--color-hover); text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { :is(.main-navigation a, .sidebar-action):hover { color: var(--color-text); background: var(--color-hover); } :is(.main-navigation a, .sidebar-action):hover > .ui-icon { color: var(--color-muted); } }
+:is(.main-navigation a, .sidebar-action):focus-visible { color: var(--color-text); background: var(--color-hover); text-decoration: none; }
 /* The page you're on: a neutral fill, the brighter text and glyph. */
 .main-navigation a.active { color: var(--color-text); background: var(--color-active-bg); font-weight: var(--font-weight-medium); }
 .main-navigation a.active > .ui-icon { color: var(--color-text); }
-.main-navigation__title, .more-sheet__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.main-navigation__title, .sidebar-action__title, .more-sheet__title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .main-navigation a[data-locked] > .ui-icon:last-child { --icon-size: 12px; color: var(--color-faint); }
-/* The footer: legal links, privacy mode, SES's quota (self-hosted), then the sender score card (64px) at the bottom;
-   set off from the navigation by space, its rows on the navigation's 8px gutter and inset. */
+/* The footer: Connect your agent and Help, legal links, privacy mode, SES's quota (self-hosted), then the sender score
+   card (64px) at the bottom; set off from the navigation by space, its rows on the navigation's 8px gutter and inset.
+   Every row is there from the first paint (none waits on data), so nothing above the card moves. */
 .sidebar-footer { flex-shrink: 0; display: flex; flex-direction: column; gap: var(--space-4); margin-top: auto; padding: var(--space-8); }
+.sidebar-actions { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-8); }
+.sidebar-action { width: 100%; border: 0; background: none; font-family: inherit; font-weight: inherit; text-align: left; cursor: pointer; }
+/* Help while the chat is open: the navigation's current-page fill. */
+.sidebar-action[aria-expanded='true'] { color: var(--color-text); background: var(--color-active-bg); }
+.sidebar-action[aria-expanded='true'] > .ui-icon { color: var(--color-text); }
 .sidebar-footer > .legal-footer-links { padding: 0 var(--sidebar-inset); }
 .sidebar-footer > .privacy-toggle { min-height: 28px; padding: 0 var(--sidebar-inset); border-radius: var(--radius-sm); }
 .sidebar-footer > :is(.sidebar-setup, .sidebar-quota:not(:empty)) { padding: var(--space-8) var(--sidebar-inset); }
@@ -52,7 +59,7 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .sidebar-score-slot { height: 64px; }
 .sidebar-score-slot:empty { border-radius: var(--radius-md); background: var(--score-neutral); }
 /* The command bar, on the frame: where you are (workspace / page), the quick jumper in the middle (a solid field), then
-   the search hint, the theme and Connect an agent. */
+   the search hint and the theme. */
 .topbar { position: fixed; top: 0; right: 0; left: var(--sidebar-width); z-index: 15; display: grid; grid-template-columns: minmax(0, 1fr) minmax(220px, 380px) minmax(0, 1fr); align-items: center; gap: var(--space-16); height: var(--topbar-height); padding: 0 var(--space-12) 0 var(--space-16); background: var(--color-deep); }
 .topbar__crumbs { display: flex; align-items: center; gap: var(--space-8); min-width: 0; font-size: var(--text-md); line-height: 18px; white-space: nowrap; }
 .topbar__workspace { min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; }
@@ -67,7 +74,7 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 .command-trigger:active { background: var(--color-control-pressed); }
 .topbar__end { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-4); min-width: 0; }
 .topbar__hint { display: inline-flex; align-items: center; gap: var(--space-6); margin-right: var(--space-8); color: var(--color-faint); font-size: var(--text-xs); white-space: nowrap; }
-.topbar :is(.theme-toggle, .topbar__connect) { width: 28px; height: 28px; }
+.topbar .theme-toggle { width: 28px; height: 28px; }
 @media (max-width: 1100px) { .topbar { grid-template-columns: minmax(0, 1fr) minmax(200px, 300px) auto; } .topbar__hint { display: none; } }
 /* The quick jumper (components/CommandMenu.tsx): a field, the pages with their shortcuts, and the keys that drive it. */
 .ui-dialog.command-menu { width: min(560px, calc(100vw - 32px)); }
@@ -337,7 +344,7 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .tab-bar__item:is(.active, [data-active]) .tab-bar__icon::before { opacity: 1; transform: none; }
 .tab-bar__item:active .tab-bar__icon { transform: scale(.92); }
 .tab-bar__item:focus-visible { background: var(--color-hover); color: var(--color-text); text-decoration: none; }
-/* More: the rest of the pages, then the sidebar's footer (sender score, SES quota). */
+/* More: the rest of the pages, then Connect your agent, Help and Sign out, then the sidebar's footer (sender score, SES quota). */
 .more-sheet__links { display: flex; flex-direction: column; margin: 0 calc(-1 * var(--focus-reach)); }
 .more-sheet__link:focus-visible { background: var(--color-hover); text-decoration: none; }
 .more-sheet__link { display: flex; align-items: center; gap: var(--space-12); min-height: 52px; padding-inline: calc(var(--space-8) - var(--focus-reach)); border-radius: var(--radius-sm); color: var(--color-text); font-size: var(--text-lg); text-decoration: none; transition: background-color 120ms ease; }
@@ -345,6 +352,7 @@ body:has(.app-shell--compact) .ui-toasts { --toast-offset: 56px; }
 .more-sheet__link:active { background: var(--color-pressed); transition-duration: 0ms; }
 .more-sheet__link.active { background: var(--color-active-bg); font-weight: var(--font-weight-bold); }
 button.more-sheet__link { width: calc(100% + 2 * var(--focus-reach)); margin: 0; border: 0; background: none; font: inherit; font-size: var(--text-lg); text-align: left; cursor: pointer; }
+.more-sheet__actions { margin-top: var(--space-8); }
 .more-sheet__icon { display: grid; place-items: center; width: 28px; color: var(--color-muted); }
 .more-sheet__icon svg { width: 20px; height: 20px; stroke-width: 1.6; }
 .more-sheet__footer { display: flex; flex-direction: column; gap: var(--space-12); margin-top: var(--space-16); padding-top: var(--space-8); }
@@ -396,6 +404,8 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 .account-avatar--md { width: 28px; height: 28px; font-size: var(--text-xs); }
 .account-menu { display: flex; flex-direction: column; width: 288px; max-height: min(480px, var(--radix-dropdown-menu-content-available-height)); }
 .account-menu__group + .account-menu__group { margin-top: var(--space-8); }
+/* Add account and Sign out stay below the list, in view however many accounts and workspaces it holds. */
+.account-menu__actions { flex: none; margin-top: var(--space-8); }
 .account-menu__account { min-height: 44px; }
 .account-menu__account[aria-current] { cursor: default; }
 .account-menu__who { display: flex; flex: 1; flex-direction: column; min-width: 0; }
@@ -422,29 +432,17 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 /* The open menu has focus as a whole; an address in it shows only while its own row is pointed at or highlighted. */
 .account-menu:focus-visible .private-address__rest, .account-sheet :focus-visible .private-address__rest { filter: blur(4px); }
 .account-menu [data-highlighted] .private-address__rest, .account-menu .private-address:hover .private-address__rest { filter: blur(0); }
-/* Help (components/SupportChat.tsx). On a desktop: a small raised button in the page's bottom-right corner, with the
-   chat docked above it. Every page keeps its last line (pagination, a reply box) above the button, and notices rise
-   above it, or to the left of the open chat. On a phone or tablet: in the top bar. A dot marks a reply that arrived
-   while the chat was closed. */
+/* Help (components/SupportChat.tsx): a row at the foot of the sidebar on a desktop, with the chat docked in the page's
+   bottom-right corner (notices move to its left while it is open); in the top bar on a phone or tablet. A dot marks a
+   reply that arrived while the chat was closed. --launcher-size and --launcher-inset place the corner's floating controls
+   (the chat, UI notes' tray). */
 :root { --launcher-size: 32px; --launcher-inset: calc(var(--page-inset) + var(--space-16)); }
-.app-shell--support .page-surface { padding-bottom: calc(var(--space-16) + var(--launcher-size) + var(--space-8)); }
-/* It floats over any surface, so it takes a fill a clear step off all of them. */
-.ui-button.support-launcher { position: fixed; right: var(--launcher-inset); bottom: var(--launcher-inset); z-index: 41; width: var(--launcher-size); height: var(--launcher-size); padding: 0; border-radius: var(--radius-sm); background: var(--color-layer-2); color: var(--color-muted); }
-/* Full-bleed pages keep their last row's controls clear of the Help button instead of padding the page. */
-.app-shell--support .logs-page .ui-pagination { padding-right: calc(var(--launcher-size) + 2 * var(--space-16)); }
-.ui-button.support-launcher[aria-expanded='true'], .ui-button.support-launcher:focus-visible { color: var(--color-text); }
-@media (hover: hover) and (pointer: fine) { .ui-button.support-launcher:hover { background: var(--color-layer-3); color: var(--color-text); transition-duration: 0ms; } }
-.ui-button.support-launcher:focus-visible { background: var(--color-layer-3); }
-.support-launcher__icons { display: inline-grid; place-items: center; }
-.support-launcher__icons > svg { grid-area: 1 / 1; transition: opacity 140ms ease-out, transform 240ms var(--ease-out-strong); }
-.support-launcher__icons > svg:last-child, [aria-expanded='true'] > .support-launcher__icons > svg:first-child { opacity: 0; transform: scale(.6) rotate(-45deg); }
-[aria-expanded='true'] > .support-launcher__icons > svg:last-child { opacity: 1; transform: none; }
-body:has(.support-launcher) .ui-toasts { right: var(--launcher-inset); bottom: calc(var(--launcher-inset) + var(--launcher-size) + var(--space-12)); }
-body:has(.support-launcher[aria-expanded='true']) .ui-toasts { right: calc(var(--launcher-inset) + min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) + var(--space-12)); }
+body:has(.app-shell:not(.app-shell--compact) #support-panel[data-open]) .ui-toasts { right: calc(var(--launcher-inset) + min(400px, 100vw - var(--sidebar-width) - 2 * var(--launcher-inset)) + var(--space-12)); }
 .support-trigger { position: relative; }
-.support-trigger:not(.support-launcher)[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
+.support-trigger:not(.sidebar-action)[aria-expanded='true'] { background: var(--color-layer-2); color: var(--color-text); }
 .support-trigger::before { content: ''; position: absolute; top: 3px; right: 5px; width: 6px; height: 6px; border-radius: 50%; background: var(--color-text); box-shadow: 0 0 0 2px var(--color-deep); opacity: 0; transform: scale(.4); transition: opacity 160ms ease-out, transform 240ms var(--ease-out-strong); pointer-events: none; }
-.support-launcher::before { top: -2px; right: -2px; box-shadow: 0 0 0 2px var(--color-surface); }
+/* In the sidebar's row the dot sits at the row's end, where the navigation's shortcuts are. */
+.sidebar-action.support-trigger::before { position: static; flex: none; order: 1; box-shadow: none; }
 .support-trigger[data-unread]::before { opacity: 1; transform: none; }
 .mobile-bar .support-trigger { flex: none; width: 44px; height: 44px; margin-right: calc(-1 * var(--space-8)); }
 .mobile-bar .support-trigger::before { top: 11px; right: 11px; }
@@ -455,4 +453,3 @@ body:has(.support-launcher[aria-expanded='true']) .ui-toasts { right: calc(var(-
 .support-panel--error .support-panel__heading h2 { margin: 0; font-size: var(--text-md); line-height: 20px; font-weight: var(--font-weight-bold); }
 .support-error { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); padding: var(--space-16); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .support-error p { margin: 0; }
-@media (prefers-reduced-motion: reduce) { .support-launcher__icons > svg { transform: none !important; transition: opacity 150ms ease-out !important; } }
