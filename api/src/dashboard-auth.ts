@@ -1,11 +1,12 @@
 import {createRoute,z} from '@hono/zod-openapi';
 import {and,asc,eq,isNotNull,sql} from 'drizzle-orm';
 import type {BillingAccountRow} from './billing/state.js';
+import {uiNotesAllowedQuery} from './operator-identity.js';
 import {lists} from './db/audience.js';
-import {ApiError,denied,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
+import {ApiError,denied,digest,errors,isSimulatedSes,response,security,timed,type App,type Runtime} from './core.js';
 import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,requireDashboardOrigin,settleDefaultAccount} from './account-login.js';
-import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
-import {ConnectionSummary,connectionSummary,HOSTED_STARTING_SECONDS} from './provider-connections.js';
+import {Workspace,WorkspaceRole,sessionMembershipsQuery,type SessionMembershipRow} from './workspaces.js';
+import {ConnectionSummary,connectionSummaryQuery,connectionSummaryOf,type ConnectionSummaryRow,HOSTED_STARTING_SECONDS} from './provider-connections.js';
 import { clientIpHeader, productName, requestedScopes } from './brand.js';
 import { MAIL_PORTS } from './mail-servers.js';
 import { WORKSPACE_FOCUS } from './workspace-focus.js';
@@ -50,25 +51,23 @@ export function registerDashboardAuth(app: App) {
     // At most four rows through the newsletters partial index, only for a credential that can read lists.
     const sidebarSource=readsLists?sql`FROM ${lists} WHERE ${and(eq(lists.workspaceId,identity.workspaceId),isNotNull(lists.newsletterFrom))}
       ORDER BY ${asc(lists.createdAt)}, ${asc(lists.id)} LIMIT 4`:null;
-    const [connection,session,standaloneNewsletters]=await Promise.all([hosted?connectionSummary(c.env,identity.workspaceId):null,
-      dashboardUserId?sessionMemberships(c.env.db,dashboardUserId,identity.workspaceId):null,
-      sidebarSource && !dashboardUserId?c.env.db.execute<Newsletter>(sql`SELECT ${lists.id}, ${lists.name} ${sidebarSource}`).then(({rows})=>rows):null]);
-    // Staff UI notes: an operator in UI_NOTES_SUBJECTS only (operator-identity.ts); no query when the list is empty.
-    const [uiNotes,billingAndNewsletters,byo]=await Promise.all([
-      session?.operator==='operator' && identity.staff && userId ? import('./operator-identity.js').then(({uiNotesAllowed})=>uiNotesAllowed(c.env.db,c.env.config.uiNotesSubjects,userId)) : false,
-      // Keep billing behind the session check, adding the sidebar to its statement only when lists are readable.
-      session?import('./billing/state.js').then(async({billingAccountQuery,billingSummary,readBilling})=>{
-        const view={amounts:false,received:false};
-        const [b,newsletters]=sidebarSource?await c.env.db.execute<BillingAccountRow & {newsletters:Newsletter[]}>(sql`
-          SELECT billing.*, to_json(ARRAY(SELECT json_build_object('id', ${lists.id}, 'name', ${lists.name}) ${sidebarSource})) AS newsletters
-          FROM (${billingAccountQuery(identity.workspaceId)}) billing`).then(({rows:[row]})=>[billingSummary(row!,view),row!.newsletters] as const)
-          :[await readBilling(c.env.db,identity.workspaceId,view),null] as const;
-        return {billing:{enforcement:b.enforcement,free:b.mode==='exempt',...b.state},newsletters};
-      }):null,
-      session?import('./byo-pilot.js').then(({byoEnabled})=>byoEnabled(c.env,identity.workspaceId)):false]);
-    const billing=billingAndNewsletters?.billing??null, newsletters=billingAndNewsletters?.newsletters??standaloneNewsletters;
+    // The live credential check has already selected the workspace. Read its first frame in one snapshot:
+    // Promise.all on the Worker's one-connection pool only queues more round trips.
+    const wid=identity.workspaceId, subjects=c.env.config.uiNotesSubjects;
+    const billingModule=dashboardUserId ? await import('./billing/state.js') : null;
+    type Frame = { connection: ConnectionSummaryRow | null; session: SessionMembershipRow | null; billing: BillingAccountRow | null; newsletters: Newsletter[] | null; ui_notes: boolean };
+    const row = hosted || sidebarSource ? (await timed(c,'me-db',()=>c.env.db.execute<Frame>(sql`SELECT
+      ${hosted ? sql`(SELECT row_to_json(v) FROM (${connectionSummaryQuery(c.env,wid)}) v)` : sql`NULL`} AS connection,
+      ${dashboardUserId ? sql`(SELECT row_to_json(s) FROM (${sessionMembershipsQuery(dashboardUserId,wid)}) s)` : sql`NULL`} AS session,
+      ${billingModule ? sql`(SELECT row_to_json(b) FROM (${billingModule.billingAccountQuery(wid)}) b)` : sql`NULL`} AS billing,
+      ${sidebarSource ? sql`to_json(ARRAY(SELECT json_build_object('id', ${lists.id}, 'name', ${lists.name}) ${sidebarSource}))` : sql`NULL`} AS newsletters,
+      ${dashboardUserId && identity.staff && subjects?.length ? uiNotesAllowedQuery(subjects,dashboardUserId) : sql`false`} AS ui_notes`))).rows[0] : undefined;
+    const connection=connectionSummaryOf(c.env,row?.connection), session=row?.session;
+    const b=billingModule && row?.billing ? billingModule.billingSummary(row.billing,{amounts:false,received:false}) : null;
+    const billing=b ? {enforcement:b.enforcement,free:b.mode==='exempt',...b.state} : null;
+    const newsletters=row?.newsletters??null, uiNotes=row?.ui_notes===true, byo=!!c.env.config.byoV2 && session?.byo===true;
     // A sign-up writes its Hosted mail after answering (startHostedMailAfter): /v1/me never waits for it, it says so.
     const hostedSetup=hosted && c.env.config.builtinDomain && session && (session.ageSeconds??Infinity)<HOSTED_STARTING_SECONDS && (!connection || (connection.kind==='shared' && !connection.builtinDomain)) ? 'starting' as const : null;
-    return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(c.env.config),connection,hostedSetup,focus:session?.focus??null,workspaces:session?.workspaces??null,operator:identity.staff?session?.operator??null:null,staffSignIn:!!session?.operator&&!identity.staff,uiNotes,canCreateWorkspace:identity.credential==='dashboard'&&(!hosted||identity.staff===true),byo,presence:Boolean(c.env.campaignRooms),analytics:c.env.config.dashboardAnalytics===true,billing,newsletters,mailServers:c.env.config.mailServers??null},200);
+    return c.json({id:userId??identity.keyId,workspaceId:identity.workspaceId,role:WorkspaceRole.nullable().parse(identity.role??null),multiTenant:hosted,simulated:isSimulatedSes(c.env),email:identity.email??null,name:identity.name??null,permissions:identity.permissions,domains:identity.domains,origin,host:new URL(origin).host,mcpScopes:requestedScopes(c.env.config),connection,hostedSetup,focus:session?.focus??null,workspaces:session?.workspaces.map(w=>Workspace.parse(w))??null,operator:identity.staff?session?.operator??null:null,staffSignIn:!!session?.operator&&!identity.staff,uiNotes,canCreateWorkspace:identity.credential==='dashboard'&&(!hosted||identity.staff===true),byo,presence:Boolean(c.env.campaignRooms),analytics:c.env.config.dashboardAnalytics===true,billing,newsletters,mailServers:c.env.config.mailServers??null},200);
   });
 }

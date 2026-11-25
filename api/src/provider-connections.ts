@@ -96,15 +96,18 @@ function view(runtime: Runtime, row: Row) {
 async function get(runtime: Runtime, wid: string) {
   return (await runtime.db.execute<Row>(sql`SELECT c.*, (SELECT count(*)::int FROM domain_claims dc WHERE dc.connection_id=c.id AND dc.identity @> '{"imported":true}') AS imported_domains FROM provider_connections c WHERE workspace_id=${wid}`)).rows[0];
 }
-export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
-  // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
+export type ConnectionSummaryRow = Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; received: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null};
+export function connectionSummaryQuery(runtime: Runtime, wid: string) {
+  // Read the same allowance admission enforces, without taking its row locks.
   const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; received: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off'; paused?: true; used: number } | null}>(sql`
+  return sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
-      EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
-      EXISTS (SELECT FROM mail_messages m WHERE m.workspace_id=c.workspace_id AND m.direction='inbound') AS received,
+      -- Ordered scalar probes keep the workspace indexes even for a workspace with no mail. EXISTS can
+      -- discard ordering and choose a low-startup-cost sequential scan of every other workspace's mail.
+      coalesce((SELECT true FROM sending_emails e WHERE e.workspace_id=${wid} ORDER BY e.created_at DESC,e.id DESC LIMIT 1),false) AS sent,
+      coalesce((SELECT true FROM mail_messages m WHERE m.workspace_id=${wid} AND m.direction='inbound' ORDER BY m.received_at DESC,m.id DESC LIMIT 1),false) AS received,
       ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR tripped.at IS NOT NULL THEN 'off'
             WHEN dc.sending_state='verified' OR ${builtinSettingUp(sql`dc`, runtime.config.builtinDomain!)} THEN 'ready' ELSE 'pending' END,
           -- Its recipients in the rolling 24 hours, as send_admission counts them against its daily cap; read only while it can
@@ -116,8 +119,11 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
         LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL
         LEFT JOIN LATERAL (SELECT p.tripped_at AS at FROM builtin_parent p WHERE p.name=${runtime.config.builtinDomain} AND p.tripped_at IS NOT NULL) tripped ON true WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
-    FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
+    FROM provider_connections c WHERE c.workspace_id=${wid}`;
+}
+export function connectionSummaryOf(runtime: Runtime, row: ConnectionSummaryRow | null | undefined): z.infer<typeof ConnectionSummary> | null {
   if (!row) return null;
+  const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
   const iso = (value: string | null | undefined) => value ? new Date(value).toISOString() : null;
   const allowance = row.allowance;
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
@@ -126,6 +132,9 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
     domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, received: row.received, ...(row.attention ? { attention: row.attention } : {}),
     // Sending from the built-in domain closes once a domain of the workspace's own verifies (send_admission).
     ...(builtin ? { builtinDomain: row.builtin ? { ...row.builtin, sending: row.builtin.sending !== 'off' && row.verified_domains > 0 ? 'closed' : row.builtin.sending, scope: builtin, ...SEND_LIMITS.builtin[builtin] } : null } : {}) };
+}
+export async function connectionSummary(runtime: Runtime, wid: string) {
+  return connectionSummaryOf(runtime,(await runtime.db.execute<ConnectionSummaryRow>(connectionSummaryQuery(runtime,wid))).rows[0]);
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
