@@ -29792,7 +29792,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await due(s1, receipt);
       let w = await waits(s1);
       assert.deepEqual([w.status, w.error_code, w.held, w.payload.heldBy], ['scheduled', null, ['RAMP_LIMIT_REACHED'], 'RAMP_LIMIT_REACHED']);
-      assert.ok(Math.abs(w.scheduled_at.getTime() - Math.max(next.getTime(), Date.now())) < 5_000, 'It tries again when the next hour opens.');
+      const retry = w.scheduled_at.getTime() - Math.max(next.getTime(), Date.now());
+      assert.ok(retry > -5_000 && retry < 10 * 60_000 + 5_000, 'It tries again within ten minutes of the next hour opening (spread, not all at once).');
       assert.ok(Math.abs(Date.parse(w.payload.heldSince) - Date.now()) < 60_000);
       const shown = ok(await local('GET', `/v1/emails/${s1}`));
       assert.deepEqual([shown.status, shown.scheduled, Date.parse(shown.scheduledAt), shown.errorCode], ['queued', true, w.scheduled_at.getTime(), null], 'It reads as waiting for its time, not as an error.');

@@ -164,10 +164,12 @@ $$;
 -- Whether `ramp`->>'recipients' more marketing recipients may go now, on a Hosted live workspace: NULL when they may,
 -- else the refusal. `ramp`: src/admission.ts RAMP_POLICY and the request's recipients (`scheduled` and `at` for a send
 -- scheduled for later).
--- 1. RAMP_PAUSED: a campaign of the workspace that the automatic pause, the list probe or the ramp's check stopped
---    (`ramp`->'paused' codes) and that its owner hasn't resumed or canceled pauses the workspace's marketing.
--- 2. The step: the furthest a ramping campaign of the workspace is on (src/sending.ts releaseStep places and moves them),
+-- 1. The step: the furthest a ramping campaign of the workspace is on (src/sending.ts releaseStep places and moves them),
 --    else where its clean history starts it (src/standing-model.ts rampStart). Past the last step: NULL.
+-- 2. RAMP_PAUSED, while it ramps: a campaign of the workspace that the automatic pause, the list probe or the ramp's check
+--    stopped (`ramp`->'paused' codes) and that its owner hasn't resumed or canceled pauses the workspace's marketing. An
+--    established sender's quarantine stays the campaign's own (its standing judges the workspace); a bad hour makes the
+--    whole history unclean, which puts the workspace back on the ramp and this pause.
 -- 3. RAMP_LIMIT_REACHED. Sent now, the recipients fit in what the hour has left: this clock hour's API marketing
 --    (hosted_usage_hourly.api_marketing) and what its ramping campaigns released in their current hours, as releaseStep
 --    counts them. Scheduled for later, they fit a whole hour of the step, and with the marketing already scheduled within
@@ -180,15 +182,15 @@ DECLARE
   this_hour timestamptz := date_trunc('hour',now(),'UTC'); r_step int; best int; ceiling_now bigint; api_used bigint; held bigint; room bigint; opens timestamptz;
   paused_id text; paused_code text; due_at timestamptz; backlog bigint; budget bigint;
 BEGIN
-  SELECT id,pause_reason->>'code' INTO paused_id,paused_code FROM sending_campaigns WHERE workspace_id=wid AND state='paused'
-    AND pause_reason->>'code' IN (SELECT jsonb_array_elements_text(ramp->'paused')) ORDER BY paused_at DESC,id LIMIT 1;
-  IF paused_id IS NOT NULL THEN RETURN jsonb_build_object('code','RAMP_PAUSED','campaignId',paused_id,'pauseCode',paused_code); END IF;
   SELECT max(ramp_step) INTO r_step FROM sending_campaigns WHERE workspace_id=wid AND state='sending' AND NOT simulated AND ramp_step<n_steps;
   IF r_step IS NULL THEN
     best := ramp_clean_hour(wid,ramp->'history');
     r_step := (SELECT count(*) FROM jsonb_array_elements_text(ramp->'steps') s(v) WHERE v::numeric*(ramp->>'advance')::numeric<=best);
   END IF;
   IF r_step>=n_steps THEN RETURN NULL; END IF;
+  SELECT id,pause_reason->>'code' INTO paused_id,paused_code FROM sending_campaigns WHERE workspace_id=wid AND state='paused'
+    AND pause_reason->>'code' IN (SELECT jsonb_array_elements_text(ramp->'paused')) ORDER BY paused_at DESC,id LIMIT 1;
+  IF paused_id IS NOT NULL THEN RETURN jsonb_build_object('code','RAMP_PAUSED','campaignId',paused_id,'pauseCode',paused_code); END IF;
   ceiling_now := (ramp->'steps'->>r_step)::bigint;
   api_used := coalesce((SELECT api_marketing FROM hosted_usage_hourly WHERE workspace_id=wid AND hour=this_hour),0);
   held := api_used+(SELECT coalesce(sum(greatest(expanded-ramp_from,0)),0) FROM sending_campaigns WHERE workspace_id=wid AND state='sending' AND NOT simulated
