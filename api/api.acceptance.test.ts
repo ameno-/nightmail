@@ -32640,11 +32640,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Signed as a whole: its own bytes go to SES as raw content.
       const signed = Buffer.from([...top('Signed'), 'Content-Type: multipart/signed; protocol="application/pgp-signature"; micalg=pgp-sha256; boundary=s', '', '--s', 'Content-Type: text/plain', '', 'Signed text.',
         '--s', 'Content-Type: application/pgp-signature; name="signature.asc"', '', '-----BEGIN PGP SIGNATURE-----', 'fixture', '-----END PGP SIGNATURE-----', '--s--', ''].join('\r\n'));
-      const sealed = await stream(signed, ['reader@example.net']);
+      const withBlind = Buffer.from(signed.toString().replace('Subject: Signed', 'Bcc: hidden@example.net\r\nSubject: Signed'));
+      const sealed = await stream(withBlind, ['reader@example.net', 'hidden@example.net']);
       assert.equal(sealed.status, 200, JSON.stringify(sealed.body));
       await run('email.dispatch');
       const input = (id: string) => sent.find(s => s.EmailTags.some((tag: Json) => tag.Name === 'bane_email_id' && tag.Value === id))!;
       assert.ok(Buffer.from(input(large.body.id).Content.Simple.Attachments[0].RawContent).equals(file), 'The file reaches SES byte for byte.');
+      assert.deepEqual(input(sealed.body.id).Destination.BccAddresses, ['hidden@example.net']);
       assert.equal(input(sealed.body.id).Content.Simple, undefined);
       assert.ok(Buffer.from(input(sealed.body.id).Content.Raw.Data).equals(signed), 'The signed message reaches SES as written.');
       for (const e of await emails('Many')) assert.ok(input(e.id), 'Both parts of the envelope are sent.');
