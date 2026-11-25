@@ -29290,7 +29290,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`UPDATE domain_claims SET identity='{"builtin":true}' WHERE name=$1`, [builtin]);
       await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE name=ANY($1)`, [[own, builtin]]);
       await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total) VALUES ($1,$2,$3,'draft',0)`, [campaign, wid, JSON.stringify({ name: 'Glass launch' })]);
-      await db.query(`UPDATE sending_campaigns SET state='sending',total=1500 WHERE id=$1`, [campaign]);
+      await db.query(`UPDATE sending_campaigns SET state='sending',total=1500,review_id='synthetic-review' WHERE id=$1`, [campaign]);
       await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"BOUNCE_RATE","message":"Bounces"}' WHERE id=$1`, [campaign]);
       await db.query(`INSERT INTO health_alerts(key,kind,severity,value,unit,words,since) VALUES ('jobs-behind:glass.fixture','jobs-behind','critical',600,'seconds','\`glass.fixture\`: 3 due, oldest 10 min.',now()-interval '10 years')`);
       // Received mail, one of it spam.
