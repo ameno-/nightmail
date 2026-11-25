@@ -2,7 +2,7 @@ import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type En
 
 // Nightmail vs Postmark (/compare/postmark): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Postmark's own pages on CHECKED: the plans and their overage in the script its pricing page draws them from.
-const CHECKED = '2026-11-24'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const POSTMARK = 'https://postmarkapp.com/pricing'
@@ -48,6 +48,7 @@ const sizes: Entry['sizes'] = [10_000, 125_000, 1_500_000]
 export const postmark: Entry = {
   slug: 'postmark',
   vendor: 'Postmark',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,

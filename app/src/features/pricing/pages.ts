@@ -11,7 +11,7 @@ const card = (slug: string, alt: string, shown: string[]) => ({ file: `og/${slug
 const opening = COMPARISONS.find(c => c.slug === 'mailchimp')!.sizes[1]!, bill = nightmailBill(opening.sent, opening.received).text
 function boardCard(c: Comparison) {
   const u = c.sizes[1]!, ours = nightmailBill(u.sent, u.received).text, theirs = money(theirPrice(c.offer, u)!.cents)
-  const at = c.offer.unit === 'contacts' ? `${formatCount(u.contacts)} contacts` : `${formatCount(u.sent)} emails`
+  const at = c.offer.unit === 'contacts' ? `${formatCount(u.contacts)} contacts` : c.offer.unit === 'inboxes' ? `${formatCount(u.inboxes ?? 0)} inboxes` : `${formatCount(u.sent)} emails`
   return card(`compare-${c.slug}`, `The Nightmail vs ${c.offer.vendor} board under the headline “${claim(c).replaceAll('\u00a0', ' ')}”: a month at ${at}, Nightmail ${ours} and ${c.offer.vendor} ${theirs}.`, [ours, theirs])
 }
 

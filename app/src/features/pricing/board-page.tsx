@@ -1,7 +1,8 @@
 // The price pages' own module (index.tsx loads it for /pricing and /compare/*): the scene and the stylesheets it needs
 // (its own, and the homepage's machines' and end band's), so no other page loads them. Here, not in
 // board.tsx, the page gets its way in: the homepage's own button (home/start.tsx), Get started for a visitor, which
-// signs in as the homepage's does and opens Overview, or Open dashboard for someone signed in. (board.tsx stays free of
+// signs in as the homepage's does and opens Overview (with the comparison's focus: ?focus=agents and so on), or Open
+// dashboard for someone signed in. (board.tsx stays free of
 // the session and the dashboard's prefetching, so the pre-merge check can render it.)
 import { useSession } from '../../data/context'
 import type { HomeStart } from '../home'
@@ -17,7 +18,7 @@ export { BoardEnd } from './scene'
 export function PriceScene({ comparison, frame }: { comparison?: Comparison | null; frame?: string | null }) {
   const session = useSession()
   const start: HomeStart = session?.identity ? { signedIn: true }
-    : { signedIn: false, onSignIn: () => session?.signIn(), onSignInIntent: event => session?.signInIntent(event), busy: session?.signingIn ?? false }
+    : { signedIn: false, onSignIn: () => session?.signIn(undefined, comparison?.focus), onSignInIntent: event => session?.signInIntent(event, comparison?.focus), busy: session?.signingIn ?? false }
   const full = useSignupsFull(!start.signedIn)
   const way: Start = { signedIn: start.signedIn, full, button: className => <StartButton start={start} className={className} /> }
   return <Scene comparison={comparison} start={way} frame={frame} />

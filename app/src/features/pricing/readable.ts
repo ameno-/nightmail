@@ -2,7 +2,7 @@
 import { productName, publicOrigin } from '../../../../api/src/brand.ts'
 import { COMPARISONS, OFFERS } from './compare/index.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
-import { PANEL_IDS, PANELS } from './panels.ts'
+import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
 import { billMath, claim, dayOf, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
 
 // What the public pages say, for readers that aren't browsers (app/price-pages.ts writes each file): a Markdown twin of
@@ -33,24 +33,28 @@ const comparisonLinks = (except?: string) => COMPARISONS.filter(c => c.slug !== 
 /** A comparison's page in Markdown: its headline, the board at every size its fader reaches, the rows with their
  *  sources, Also in the box, the terms and the page's small print. */
 export function comparisonMarkdown(c: Comparison): string {
-  const byContacts = c.offer.unit === 'contacts', vendor = c.offer.vendor
+  const unit = c.offer.unit, vendor = c.offer.vendor
+  // The size, then the emails it means: sent to the contacts, or received and sent by the inboxes.
+  const sizeCells = (size: number, u: Usage) => unit === 'contacts' ? [formatCount(size), formatCount(u.sent)] : unit === 'inboxes' ? [formatCount(size), formatCount(u.received), formatCount(u.sent)] : [formatCount(size)]
+  const sizeHead = unit === 'contacts' ? ['Contacts', 'Emails a month'] : unit === 'inboxes' ? ['Inboxes', 'Received a month', 'Sent a month'] : ['Emails a month']
   const rows = c.steps.map(size => {
     const u = c.use(size), ours = nightmailBill(u.sent, u.received), theirs = theirPrice(c.offer, u)!
-    return [...byContacts ? [formatCount(size), formatCount(u.sent)] : [formatCount(size)], ours.text, money(theirs.cents), theirs.plan]
+    return [...sizeCells(size, u), ours.text, money(theirs.cents), theirs.plan]
   })
-  const head = [...byContacts ? ['Contacts', 'Emails a month'] : ['Emails a month'], productName, vendor, `${vendor} plan`]
+  const head = [...sizeHead, productName, vendor, `${vendor} plan`]
   return [
     `# ${c.title}`,
     `> ${claim(c).replaceAll('\u00a0', ' ')}. ${c.lead}`,
     `Canonical page: ${url(c.path)}`,
     `## A month at each size`,
     `${c.assume} Monthly billing, no promotions. ${vendor}’s prices checked ${dayOf(c.offer.checked)} on [${host(c.offer.pricing)}](${c.offer.pricing}).`,
-    table(head, rows, byContacts ? [0, 1, 2, 3] : [0, 1, 2]),
+    table(head, rows, sizeHead.map((_, i) => i).concat([sizeHead.length, sizeHead.length + 1])),
     `${productName} charges ${nightmail.perThousand} per 1,000 emails after ${free} free a month.`,
     `## What ${productName} has that ${vendor} charges for or lacks`,
     c.rows.map(row => `- ${row.text}${row.source ? ` ([${host(row.source.url)}](${row.source.url}), checked ${dayOf(row.source.checked)})` : ''}`).join('\n'),
     `## Also in the box`,
     c.panels.map(id => `- **${PANELS[id].title}** ${PANELS[id].line}`).join('\n'),
+    FIRST_STEP[c.focus],
     ...c.faq?.length ? [`## Questions`, c.faq.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
     `## ${productName}’s pricing terms`,
     terms(),

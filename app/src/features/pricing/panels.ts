@@ -1,3 +1,4 @@
+import type { WorkspaceFocus } from '../../../../api/src/workspace-focus.ts'
 import { nightmail, type PanelId } from './prices.ts'
 
 /** "Also in the box", under a comparison's board: each panel's words, which features.tsx sets under its display and the
@@ -11,6 +12,18 @@ export const PANELS: Record<PanelId, { title: string; line: string }> = {
   receive: { title: 'Receive mail, and reply.', line: 'Inboxes at no charge, with IMAP and SMTP for mail apps.' },
   agent: { title: 'Inboxes for your agents.', line: 'Agents read and answer email over MCP.' },
   route: { title: 'Route it. Keep the record.', line: 'Rules forward mail to Slack, Discord or a webhook.' },
-  domain: { title: 'Your own domain.', line: 'DKIM, SPF and DMARC, each record checked.' },
+  domain: { title: 'A domain from day one.', line: 'Start on a nightmail.email domain, then add yours, each record checked.' },
+  ready: { title: 'Ready before it sends.', line: 'Each campaign’s review checks the domain and the list. Big first sends ramp.' },
+  hygiene: { title: 'A cleaner list.', line: 'Typos, temporary and dead addresses are flagged, and campaigns skip them.' },
 }
 export const PANEL_IDS = Object.keys(PANELS) as PanelId[]
+
+/** A comparison's first step for its reader, by its focus (prices.ts, Entry.focus), under its last Get started: only what
+ *  a new workspace has or does as shipped (a Hosted workspace's built-in domain and its inbox: api/src/builtin-domain.ts;
+ *  contact import: features/audience/import.tsx). */
+export const FIRST_STEP: Record<WorkspaceFocus, string> = {
+  agents: 'Every workspace comes with an inbox at its own nightmail.email address.',
+  developer: 'Every workspace comes with a nightmail.email domain that sends at once, with no DNS to set up.',
+  newsletter: 'Start by importing your list.',
+  marketing: 'Start by importing your contacts.',
+}

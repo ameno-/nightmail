@@ -3,7 +3,7 @@ import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type En
 // Nightmail vs Mailgun (/compare/mailgun): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailgun's own pages on CHECKED: the plans on its pricing page (pricing.md is its text), and each plan's overage in its
 // help centre.
-const CHECKED = '2026-11-24'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const MAILGUN = 'https://www.mailgun.com/pricing/'
@@ -42,6 +42,7 @@ const sizes: Entry['sizes'] = [10_000, 100_000, 1_000_000]
 export const mailgun: Entry = {
   slug: 'mailgun',
   vendor: 'Mailgun',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,
