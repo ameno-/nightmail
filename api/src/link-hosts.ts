@@ -1,8 +1,8 @@
 /**
- * Customers' link hosts (src/link-domains.ts): each sending domain's links.<domain>, a CNAME into this installation's
- * Cloudflare for SaaS zone, which Cloudflare routes to the Worker (a `*\/*` route on that zone). Such a host answers the
- * links in customer mail and nothing else: no dashboard, API, docs or redirect to this installation's own domain on a
- * name customer mail carries. No imports, so the Worker decides before it loads the API.
+ * Link hosts (src/link-domains.ts): the link domain (links.nightmailedge.com, Hosted) and customers' own links.<domain>
+ * (custom hostnames, when on), names of the link zone, which Cloudflare routes to the Worker (a `*\/*` route on that zone).
+ * Such a host answers the links in customer mail and nothing else: no dashboard, API, docs or redirect to this
+ * installation's own domain on a name customer mail carries. No imports, so the Worker decides before it loads the API.
  */
 /** The label of a domain's link host. */
 export const LINK_LABEL = 'links';
