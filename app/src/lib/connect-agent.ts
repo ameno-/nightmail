@@ -1,6 +1,6 @@
 import { useSyncExternalStore } from 'react'
 
-// Opens Connect an agent from the shell (the sidebar, the account menu on a phone or tablet, More), with one dialog the
+// Opens Connect an agent from the shell (the sidebar's Connect your agent, More on a phone or tablet), with one dialog the
 // shell mounts once it is first opened. Kept outside the dialog's chunk so callers stay small.
 let open = false
 const listeners = new Set<() => void>()

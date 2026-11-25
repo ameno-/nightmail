@@ -29,8 +29,8 @@ const OPENING = 'Hey, what’s up? How can we help?'
 /** The status line while an answer is being worked on and no step is running. */
 const WORKING = 'Working on it…'
 
-// The support chat (hosted): Nightmail's AI support agent in a panel docked at the bottom left on a desktop, where it grows
-// out of the Help button and leaves the page readable beside it, and a sheet above the tab bar on a phone. It is not
+// The support chat (hosted): Nightmail's AI support agent in a panel docked in the page's bottom-right corner on a desktop,
+// opened from the sidebar's Help, which leaves the page readable beside it, and a sheet above the tab bar on a phone. It is not
 // modal: on a desktop the page stays usable while the agent works, and the conversation carries on across pages.
 export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 'demo' | 'live'; open: boolean; onClose: () => void; onUnread: (unread: boolean) => void; resume: string | null }) {
   const identity = useSession()?.identity ?? null
@@ -68,7 +68,7 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   }, [state.hello?.conversationId, state.hello?.contentAccess, store])
   useEffect(() => { onUnread(state.unread) }, [state.unread])
   // Opening moves focus in (to the message box, or the panel itself on a touch screen, so the keyboard doesn't jump up);
-  // closing with focus inside returns it to the Help button.
+  // closing with focus inside returns it to Help.
   useEffect(() => {
     const el = panel.current
     if (!el) return

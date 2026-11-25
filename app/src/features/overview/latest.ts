@@ -5,15 +5,13 @@ import { matches, PHONE, SHELL_COMPACT } from '../../lib/media'
 // skeleton and the page agree before anything loads. The fixed parts are overview.css's heights: the command bar (44),
 // the control strip (44), the figures' wells (82), the 8px gap under them, the activity band (172), the list's header
 // (32), the table head (30: its 28px bar and the split under it, ui.css) and the page's 16px bottom gutter. A notice
-// above the strip (standing, billing, notice) takes its own height. The list runs to the window's bottom beside the
-// rail; in one column it clears the Help button (styles/app.css, 56px). The compact shell (tablets and phones) scrolls the document, so it keeps seven, and a phone five.
+// above the strip (standing, billing, notice) takes its own height. The list runs to the window's bottom. The compact shell (tablets and phones) scrolls the document, so it keeps seven, and a phone five.
 const ROW = 32, FIXED = 44 + 44 + 82 + 8 + 172 + 32 + 30
 /** `above`: anything else over the figures (the no-domain card), in pixels with its spacing. */
 export function latestRowCount(above = 0) {
   if (typeof window === 'undefined' || matches(SHELL_COMPACT)) return typeof window !== 'undefined' && matches(PHONE) ? 5 : 7
-  const inset = matches('(max-width: 960px)') && document.querySelector('.app-shell--support') ? 56 : 0
   const banners = [...document.querySelectorAll<HTMLElement>('.page-surface > :is(.standing-banner, .page-notice)')].reduce((sum, el) => { const style = getComputedStyle(el); return sum + el.offsetHeight + parseFloat(style.marginTop) + parseFloat(style.marginBottom) }, 0)
-  return Math.min(50, Math.max(7, Math.floor((window.innerHeight - FIXED - inset - banners - above) / ROW)))
+  return Math.min(50, Math.max(7, Math.floor((window.innerHeight - FIXED - banners - above) / ROW)))
 }
 
 // The count for this visit, read once on mount and again only after the window has been resized (debounced), so it
