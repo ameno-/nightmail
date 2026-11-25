@@ -166,7 +166,7 @@ export const workspaceResource: Tool = { name: 'workspaces', description: 'Your 
  * Who an /mcp request authenticated as: an account sign-in (it acts in any of the person's workspaces), a workspace
  * API key or agent token (its own workspace, with its own permissions), or a key limited to addresses or an inbox.
  */
-type Principal = { connection: McpConnection } | { key: Actor; bearer: string } | { inbox: MailboxAccess };
+type Principal = { connection: McpConnection } | { key: Actor; bearer: string } | { inbox: MailboxAccess; bearer?: string };
 
 /**
  * The one access policy of every workspace credential, for listings and calls: the operations REST authorizes for
@@ -294,11 +294,14 @@ async function serve(app: App, request: Request, runtime: Runtime, principal: Pr
     async get(on, path, query, workspace, signal) {
       const url = new URL(path, base.origin);
       for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+      // An event stream outlives its /mcp request: each read authenticates a key or inbox key again, as REST does, so a
+      // revoked or ended key stops it at its next read even while mail keeps arriving (a sign-in is checked in eventsActor).
+      const bearer = key?.bearer ?? ('inbox' in principal ? principal.bearer : undefined);
       const headers = new Headers({ Accept: 'application/json' });
-      if (key) headers.set('Authorization', `Bearer ${key.bearer}`);
+      if (bearer) headers.set('Authorization', `Bearer ${bearer}`);
       const internal = new Request(url, { method: 'GET', headers, redirect: 'manual', signal });
       setResponseByteLimit(internal, MCP_REST_RESPONSE_LIMIT);
-      const response = key ? await app.fetch(internal, withOuterRequest(on, origin)) : inbox ? await dispatchAsMailboxAccess(app, internal, on, inbox, origin)
+      const response = bearer ? await app.fetch(internal, withOuterRequest(on, origin)) : inbox ? await dispatchAsMailboxAccess(app, internal, on, inbox, origin)
         : await dispatchAsActor(app, internal, on, await eventsActor(workspace, on), origin);
       const text = await boundedText(response, MCP_REST_RESPONSE_LIMIT);
       let body: unknown = null;
@@ -592,7 +595,7 @@ export function registerMcp(app: App): void {
     const bearer = c.req.header('authorization')?.match(/^Bearer (\S+)$/i)?.[1];
     const inboxKey = bearer && /^(?:nm|bane)_mbx_[0-9a-f]{64}$/i.test(bearer) ? bearer : undefined; // bane_: remove after rename cleanup
     const response = preflight ? new Response(null, { status: 204 })
-      : inboxKey ? await handler({ inbox: await (await import('./mailbox.js')).authorizeInboxKey(c, inboxKey) })
+      : inboxKey ? await handler({ inbox: await (await import('./mailbox.js')).authorizeInboxKey(c, inboxKey), bearer: inboxKey })
       : bearer && workspaceBearer(bearer) ? await handler({ key: await bearerActor(c, bearer), bearer })
       : await withMcpAuthorization(c.env, c.req.raw, connection => handler({ connection }));
     // Authorization and the protocol SDK answer with their own responses, which never reach onError: name the failure
