@@ -22678,7 +22678,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         return entry.path;
       };
       // An agent guessing: method plus template, never the address or ID it put in the path.
-      assert.equal(await logged('/v1/inboxes/mbx_9c67eea843964aefac3d404ad409eaab/reply-all?to=someone@private.example'), '/v1/inboxes/{mbx_id}/reply-all');
+      assert.equal(await logged('/v1/mailboxes/mbx_9c67eea843964aefac3d404ad409eaab/reply-all/someone%40private.example?to=someone@private.example'), '/v1/mailboxes/{mbx_id}/reply-all/{email}');
       assert.ok(!JSON.stringify(lines).includes('private.example') && !JSON.stringify(lines).includes('9c67eea843964aefac3d404ad409eaab'));
       // A burst past the limit still writes its request lines, without the path.
       const paths: unknown[] = [];
