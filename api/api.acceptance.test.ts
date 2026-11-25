@@ -2389,18 +2389,27 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     // The account service's tokens name their consent (jti <consent>.<random>). After a revocation in Bane, a new consent
     // (the person connected the client again) starts the approval again under a new key, so nothing tied to the revoked
     // one comes back; the revoked consent's tokens, refreshed ones included, stay refused.
-    let tick=2;
-    const consented=(consent:string)=>token({client_id:'fixture-consent',jti:`${consent}.${randomUUID()}`,iat:now+tick++});
+    const consented=(consent:string,iat:number,auth_time?:number,scope='bane:read')=>token({client_id:'fixture-consent',jti:`${consent}.${randomUUID()}`,iat,auth_time,scope});
     const keyOf=async(access:string)=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${access}`}}),async a=>Response.json(a.keyId));return r.status===200?await r.json() as string:r.status;};
-    const firstKey=await keyOf(consented('consent-first'));
+    const first=consented('consent-first',now-10,now-20,'bane:manage'), firstKey=await keyOf(first);
     assert.equal(typeof firstKey,'string');
+    assert.equal(await keyOf(consented('consent-second',now-5,now-15)),firstKey);
     assert.equal((await call(`/v1/agents/${firstKey}/revoke`,'POST')).status,200);
-    assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent stays refused');
-    const secondKey=await keyOf(consented('consent-second'));
-    assert.equal(typeof secondKey,'string');assert.notEqual(secondKey,firstKey,'A new consent starts the approval under a new key');
-    assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent never takes over the new approval');
-    assert.equal(await keyOf(consented('consent-second')),secondKey);
-    assert.deepEqual((await db.query('SELECT id,revoked,revoked_issuer_grants FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,[{id:secondKey,revoked:false,revoked_issuer_grants:['consent-first']}]);
+    const {cutoff}= (await db.query<{cutoff:number}>('SELECT floor(extract(epoch FROM updated_at))::int AS cutoff FROM nightmail_resource_grants WHERE id=$1',[firstKey])).rows[0]!;
+    const fresh=cutoff+1, clock=t.mock.method(Date,'now',()=>1000*(fresh+10));
+    try {
+      const refreshed=consented('consent-first',fresh+5,now-20,'bane:manage');
+      for (const access of [first,refreshed,consented('consent-second',fresh+5,now-15),consented('consent-unseen',fresh+5,cutoff),
+        consented('consent-no-marker',fresh+5),consented('consent-invalid',fresh+5,fresh+6)]) assert.equal(await keyOf(access),403);
+      const next=consented('consent-reconnect',fresh,fresh), nextKey=await keyOf(next);
+      assert.equal(typeof nextKey,'string');assert.notEqual(nextKey,firstKey,'Post-revocation sign-in and consent start a new approval');
+      assert.equal(await keyOf(first),403);assert.equal(await keyOf(refreshed),403);
+      assert.equal(await keyOf(consented('consent-unseen',fresh+5,now-10)),403);
+      assert.equal(await keyOf(consented('consent-no-marker',fresh+5)),403);
+      assert.equal(await keyOf(consented('consent-reconnect',fresh+2,fresh)),nextKey);
+      assert.deepEqual((await db.query('SELECT id,revoked,permissions,issuer_grant FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,
+        [{id:nextKey,revoked:false,permissions:['read'],issuer_grant:'consent-reconnect'}]);
+    } finally { clock.mock.restore(); }
     // Several workspaces: the connection works at once. A call acts in the workspace it names (or the default), with the
     // token's scopes intersected with the person's role there: members read and send, owners and admins also manage and
     // reach the receiving tools. Members count on hosted installations.
@@ -2412,6 +2421,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     }
     await db.query('UPDATE nightmail_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-admin'+suffix]);
     type Seen={default:{id:string;source:string}|null;workspaces:[string,string,string[]][]};
+    let tick=2;
     const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++,scope:'bane:read bane:manage'});
     const connection=async()=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({default:a.defaultWorkspace,workspaces:a.workspaces.map(w=>[w.id,w.role,w.permissions])}));
       assert.equal(r.status,200);const seen=await r.json() as Seen;return {...seen,workspaces:seen.workspaces.filter(w=>w[0].endsWith(suffix))};};

@@ -37,10 +37,11 @@ export function clientLabel(name: string | null | undefined) {
 }
 /** Revokes the person's own approval: its agent tokens and everything it created end with it. False if not theirs. */
 async function revokeApproval(c:Ctx,user:string,id:string){
-  // Blocks the tokens of the account service's consents this approval had; a new sign-in there brings it back.
-  const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE nightmail_resource_grants SET revoked=true,updated_at=now(),
+  // While revoked, updated_at is the cutoff for all issuer consents. Use the wall clock after any row-lock wait.
+  const changed=await c.env.db.execute(sql`WITH revoked AS (UPDATE nightmail_resource_grants SET revoked=true,updated_at=clock_timestamp(),
       revoked_issuer_grants=CASE WHEN issuer_grant IS NULL OR issuer_grant=ANY(revoked_issuer_grants) THEN revoked_issuer_grants ELSE revoked_issuer_grants||issuer_grant END
-      WHERE user_id=${user} AND id=${id} RETURNING id,grant_key,client_id,permissions,workspace_id),
+      WHERE id=(SELECT id FROM nightmail_resource_grants WHERE user_id=${user} AND id=${id} FOR UPDATE)
+      RETURNING id,grant_key,client_id,permissions,workspace_id),
     agents AS (UPDATE agent_tokens SET revoked_at=now() WHERE revoked_at IS NULL AND grant_id IN (SELECT id FROM revoked)),
     removed AS (DELETE FROM mail_grant_objects WHERE grant_id IN (SELECT grant_key FROM revoked)),
     audit AS (${auditInsert(auditContext(c),{action:'mcp_connection.revoke',workspaceId:sql`coalesce(revoked.workspace_id,${c.get('actor').workspaceId})`,userId:user,
