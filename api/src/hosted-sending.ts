@@ -46,7 +46,7 @@ export const BULK = { recipients: 10, copies: 10 } as const;
 /**
  * A campaign test is the campaign's copy sent as transactional mail, outside its audience's consent, the marketing ramp,
  * holds and pacing, and the campaign's own screening. On Hosted sending one goes only to an address the workspace has
- * proven is its own (a member's verified email, an address at one of its verified domains or their subdomains, which
+ * proven is its own (a member's verified email, an address at one of its currently verified domains or their subdomains, which
  * holds its receiving addresses and inboxes there, or the SES mailbox simulator), and a workspace sends at most
  * `perHour` in a clock hour. Anyone else gets the campaign itself.
  */
