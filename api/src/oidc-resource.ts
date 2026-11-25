@@ -169,7 +169,7 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
     const methods = acceptedMethods(runtime.config.accountRequiredAcr);
     const message = error === 'insufficient_user_authentication' ? methods ? `${productName} requires ${methods} sign-in. Reconnect this MCP client and choose ${methods} at Anomaly account.` : 'Reconnect this MCP client using the sign-in method this installation requires.'
       : status === 401 ? 'Reconnect and authorize this MCP client at the account service.' : `This client has no active ${productName} approval for the requested access.`;
-    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${message}", resource_metadata="${metadata}", scope="${requestedScopes(runtime.config).join(' ')}"${extra}` }});
+    return Response.json({jsonrpc:'2.0', error:{code:-32000, message:detail ?? message}, id:null}, {status, headers: { 'cache-control':'no-store', 'www-authenticate':`${scheme} error="${error}", error_description="${detail ?? message}", resource_metadata="${metadata}", scope="${requestedScopes(runtime.config).join(' ')}"${extra}` }});
   }
   const auth = request.headers.get('authorization');
   if (!auth || auth.length > 16384 || (request.headers.get('dpop')?.length ?? 0) > 8192) return denied(401);
@@ -212,10 +212,14 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   // A revoked row's updated_at is the cutoff. Carry it in the revocation history on reconnect, before later
   // activity can overwrite updated_at. '@' cannot start an issuer grant ID. For rows already reconnected by an
   // older build, created_at is the time of that reconnect: a conservative cutoff when the revoke time is lost.
-  const eligible = sql`NOT coalesce(${consent}::text=ANY(g.revoked_issuer_grants), false) AND ${authTime}::bigint > CASE
+  // A row an older build already reconnected keeps working with the consent it reconnected with (issuer_grant): that
+  // build accepted it after the revocation, and refusing it would sign out every such connection at deploy. Any other
+  // consent needs a sign-in after the reconnect.
+  const eligible = sql`NOT coalesce(${consent}::text=ANY(g.revoked_issuer_grants), false) AND (${authTime}::bigint > CASE
     WHEN g.revoked THEN floor(extract(epoch FROM g.updated_at))
     WHEN starts_with(g.revoked_issuer_grants[1], '@') THEN substr(g.revoked_issuer_grants[1], 2)::bigint
-    WHEN cardinality(g.revoked_issuer_grants)>0 THEN floor(extract(epoch FROM g.created_at)) ELSE -1 END`;
+    WHEN cardinality(g.revoked_issuer_grants)>0 THEN floor(extract(epoch FROM g.created_at)) ELSE -1 END
+    OR (NOT g.revoked AND cardinality(g.revoked_issuer_grants)>0 AND NOT starts_with(g.revoked_issuer_grants[1], '@') AND ${consent}::text=g.issuer_grant))`;
   // `?profile=` on the MCP URL is only a label for that entry, shown in Nightmail; it never selects or authorizes anything.
   const profile = profileLabel(new URL(request.url).searchParams.get('profile'));
   // Revoked in Nightmail, an approval refuses the tokens of the consents it had. A token of a new consent (the person
@@ -248,7 +252,9 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
         AND (last_used_at IS NULL OR last_used_at<now()-interval '1 minute') FOR NO KEY UPDATE SKIP LOCKED))
     SELECT id, revoked OR NOT (${eligible}) AS blocked
     FROM nightmail_resource_grants g WHERE user_id=${userId} AND client_id=${claims.client_id}`);
-  if (!approval || approval.blocked) return denied(403, undefined, '', 'Sign in again at the account service, then reconnect this MCP client.');
+  // Revoked in Nightmail: only a sign-in after the revocation reconnects (auth_time). The account service reuses an
+  // existing session for a new consent, so its older sign-in stays refused: the message (header too) says what to do.
+  if (!approval || approval.blocked) return denied(403, undefined, '', `This connection was revoked in ${productName}. Sign out of Anomaly account (or sign in again there), then reconnect this MCP client.`);
   const keyId = approval.id;
   // The presented token's own scopes: a token older than the approval's newest may carry fewer.
   const connection = await mcpConnection(runtime, keyId, allowed);

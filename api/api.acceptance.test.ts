@@ -2409,6 +2409,11 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
       assert.equal(await keyOf(consented('consent-reconnect',fresh+2,fresh)),nextKey);
       assert.deepEqual((await db.query('SELECT id,revoked,permissions,issuer_grant FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,
         [{id:nextKey,revoked:false,permissions:['read'],issuer_grant:'consent-reconnect'}]);
+      // A row an older build reconnected (a history without the '@' cutoff) keeps its reconnecting consent; others need a newer sign-in.
+      await db.query("UPDATE nightmail_resource_grants SET revoked_issuer_grants=ARRAY['consent-first'],issuer_grant='consent-legacy',created_at=to_timestamp($2) WHERE id=$1",[nextKey,fresh+3]);
+      assert.equal(await keyOf(consented('consent-legacy',fresh+6,now-30)),nextKey,'The consent an older build reconnected with keeps working');
+      assert.equal(await keyOf(consented('consent-other',fresh+6,now-30)),403);
+      assert.equal(await keyOf(consented('consent-other',fresh+6,fresh+4)),nextKey);
     } finally { clock.mock.restore(); }
     // Several workspaces: the connection works at once. A call acts in the workspace it names (or the default), with the
     // token's scopes intersected with the person's role there: members read and send, owners and admins also manage and
