@@ -36,16 +36,13 @@
 .settings-facts dd :is(.ui-input, .ui-button, .ui-select-trigger, select) { font-family: var(--font-body); font-size: var(--text-sm); }
 .settings-facts dd > .ui-status { vertical-align: top; }
 .settings-group { scroll-margin-top: var(--space-24); }
-.ui-table-scroll.settings-webhooks-table { --table-row-height: 53px; }
 /* Domains: one line per cell at the shared row height; a long name or host ends in an ellipsis, whole in its title. */
-.ui-table-scroll.domains-table { --table-row-height: 53px; }
-.domains-table .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+:is(.domains-table, .receiving-hosts) .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .domain-setup-link { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); }
 @media (hover: hover) and (pointer: fine) { .domain-setup-link:hover { color: var(--color-text); text-decoration-color: currentColor; } }
 .domain-setup-link:focus-visible { color: var(--color-text); text-decoration-color: currentColor; }
 .settings-cell, .settings-webhook-events { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-card-end { flex: none; width: 44px; height: 44px; }
-.settings-cell.settings-cell--two { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; white-space: normal; overflow-wrap: anywhere; }
 .settings-webhook-name { display: flex; flex-direction: column; min-width: 0; }
 .settings-webhook-name > * { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-fact-wide { grid-column: 1 / -1; }
@@ -131,7 +128,7 @@
 .settings-key-domain-options .ui-check-field { flex-shrink: 0; }
 .settings-key-domain-options .ui-check-field label { overflow-wrap: anywhere; }
 .ui-select-trigger.settings-default-region { width: 320px; max-width: 100%; }
-.settings-region-link { display: flex; align-items: center; width: 100%; min-height: 40px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
+.settings-region-link { display: flex; align-items: center; width: 100%; min-height: var(--control-height); padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; text-decoration: underline; text-underline-offset: 4px; text-decoration-color: transparent; }
 .settings-region-link:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
 .domain-group-title { display: grid; gap: var(--space-4); min-width: 0; flex: 1 1 280px; }
 .ui-section-header:has(> .domain-group-title) { flex-wrap: wrap; }
@@ -176,17 +173,19 @@
 .webhook-fields > .ui-field { min-height: calc(var(--control-height) + 48px); }
 .settings-row-actions { justify-content: flex-end; flex-wrap: nowrap; }
 
-.page-surface > .settings-page.stack { gap: var(--space-24); }
-.page-surface > .settings-page.stack > .ui-page-header { margin-bottom: calc(var(--page-gap) - var(--space-24)); }
+.page-surface > .settings-page.stack { gap: var(--space-16); }
+.page-surface > .settings-page.stack > .ui-page-header { margin-bottom: calc(var(--page-gap) - var(--space-16)); }
+/* A webhook's page is fields and label/value rows: it keeps a readable width on a wide window. The self-hosted Sending
+   page (settings-ses) keeps the full width for its region tables. */
+.page-surface > .settings-page.stack:not(.settings-ses) { width: 100%; max-width: var(--measure); }
 /* Sections part by space alone. */
-.settings-rule { padding-top: var(--space-24); }
+.settings-rule { padding-top: var(--space-16); }
 .settings-ses .settings-discovery-section { gap: var(--space-12); }
 .settings-ses .settings-report { display: flex; flex-direction: column; gap: var(--space-24); margin-top: var(--space-12); }
 .settings-ses .settings-report > * + * { padding-top: var(--space-24); }
 .settings-ses .settings-report > .settings-aws-details { padding-top: var(--space-16); }
 
-/* Settings → Activity: one line per cell (From is client · network), ending in an ellipsis, so every row stays 53px. */
-.ui-table-scroll.activity-table { --table-row-height: 53px; }
+/* Settings → Activity: one line per cell (From is client · network), ending in an ellipsis, so every row stays one line. */
 .activity-filter.ui-select-trigger { width: 200px; max-width: 100%; }
 .activity-cell { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-table td[data-col='when'] { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }

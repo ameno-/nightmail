@@ -164,7 +164,7 @@ export function DnsRecordTable({ domain, rows }: { domain: string; rows: RecordR
   // A row says its status only while it isn't done; once every row is, the Status column goes (the header says Verified).
   const done = rows.every(row => row.status.tone === 'success')
   const menu = (row: RecordRow, items: MenuItem[]) => <DropdownMenu label={`Actions for ${row.purpose} ${row.record.type} record`} title={`${row.record.type} ${relativeHost(row.record.name, domain)}`} items={items} />
-  return <DataTable className="domain-records" rows={rows} rowKey={row => row.record.id} columns={[
+  return <DataTable className="domain-records ui-table--two-line" rows={rows} rowKey={row => row.record.id} columns={[
     { ...purpose, render: row => row.purpose, cardRender: row => <>{titles.get(row)} <span className="domain-record-type">{row.record.type}</span></> },
     { ...type, render: row => row.record.type },
     { ...name, render: ({ record }) => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: ({ record }) => <code>{breakable(relativeHost(record.name, domain))}</code> },

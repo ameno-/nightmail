@@ -101,7 +101,7 @@ const everything = ['read', 'send', 'manage']
 /**
  * Your agents signed in as you, polled while the dialog is open: the waiting row shows until you have one, and one that
  * connects (or calls) meanwhile is marked Connected. Each names the workspace its calls use when they name none, and what it can do
- * in this one: what its sign-in approved, within your role here (members read and send). Rows are the tables' 53px,
+ * in this one: what its sign-in approved, within your role here (members read and send). Rows are 53px, like settings rows,
  * and the dialog's height is fixed, so the list loading or growing moves nothing.
  */
 function ConnectedAgents({ onLeave }: { onLeave: () => void }) {

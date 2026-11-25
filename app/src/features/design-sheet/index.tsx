@@ -117,10 +117,10 @@ const rowActions = (domain: Domain): MenuItem[] => [
   { label: `Remove ${domain.name}`, icon: <Icon icon={Trash2} />, destructive: true, onSelect: () => {} },
 ]
 const domainColumns: Column<Domain>[] = [
-  { key: 'name', label: 'Domain', width: '38%', render: row => <span className="ds-cell-strong">{row.name}</span>, card: 'title' },
-  { key: 'status', label: 'Status', width: '20%', render: row => <StatusBadge status={row.status} />, card: 'aside' },
-  { key: 'region', label: 'Region', width: '18%', render: row => <span className="ui-mono ds-cell-mono">{row.region}</span>, card: 'line' },
-  { key: 'added', label: 'Added', render: row => <time className="ui-mono ds-cell-mono" dateTime={row.added}>{row.added}</time>, card: 'inline' },
+  { key: 'name', label: 'Domain', render: row => <span className="ds-cell-strong">{row.name}</span>, card: 'title' },
+  { key: 'status', label: 'Status', width: 128, render: row => <StatusBadge status={row.status} />, card: 'aside' },
+  { key: 'region', label: 'Region', width: 120, render: row => <span className="ui-mono ds-cell-mono">{row.region}</span>, card: 'line' },
+  { key: 'added', label: 'Added', width: 124, render: row => <time className="ui-mono ds-cell-mono" dateTime={row.added}>{row.added}</time>, card: 'inline' },
   { key: 'actions', label: '', width: 56, align: 'right', render: row => <DropdownMenu label={`Actions for ${row.name}`} items={rowActions(row)} />, card: 'end' },
 ]
 

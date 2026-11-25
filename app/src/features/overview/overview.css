@@ -2,7 +2,9 @@
    8px apart, then the main column (the 172px activity band over the latest emails) beside a 296px inspector rail on a
    calm surface of its own. Everything sits on the page's 16px gutter and parts by surface and space, never by a line
    (latest.ts adds up these heights). Every async block has a fixed height, matched by its skeleton. */
-.ov-page { display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; }
+/* Past 1600 px the console stops widening (left-aligned on the page): the wells and the chart keep their proportions
+   instead of stretching thin across a very wide window. Heights don't change, so latest.ts's sums still hold. */
+.ov-page { display: flex; flex: 1; flex-direction: column; width: 100%; max-width: 1600px; min-width: 0; min-height: 0; }
 .ov-page > .ui-loading-layout { display: flex; flex: 1; flex-direction: column; min-height: 0; }
 /* A group's label: tracked mono capitals, faint. */
 .ov-label { margin: 0; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }

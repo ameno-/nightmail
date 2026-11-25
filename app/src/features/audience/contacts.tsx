@@ -17,7 +17,7 @@ import { AddressText } from '../../components/AddressText'
 // Search, consent status, list and page live in the URL (q, status, list, page), so Back from a contact, a reload or a
 // shared link shows the same contacts. Each change replaces the entry: Back leaves the page instead of undoing typing.
 export function ContactsPage() {
-  const { pageSize, tableRef } = useAdaptivePageSize(5, 20, 'contacts')
+  const { pageSize, tableRef } = useAdaptivePageSize(5, 100, 'contacts')
   const [params, setParams] = useSearchParams()
   const search = params.get('q') ?? '', status = statusOptions.some(option => option.value === params.get('status')) ? params.get('status')! : '', listId = params.get('list') ?? ''
   const page = Math.max(1, Number.parseInt(params.get('page') ?? '1', 10) || 1)
@@ -97,7 +97,7 @@ function ContactDetails({ contact }: { contact: Contact }) {
   }
   const subscribing = consentInput.status === 'subscribed'
   const verb = !subscribing ? 'Unsubscribe' : contact.status === 'unsubscribed' ? 'Resubscribe' : 'Subscribe'
-  return <div className="audience-page">
+  return <div className="audience-page audience-page--measure">
     <PageHeader title={contact.name ? <AddressText text={contact.name} /> : <PrivateAddress value={contact.email} />} backTo="/audience" actions={<><Button disabled={contact.status === 'suppressed' || status.isPending} title={contact.status === 'suppressed' ? 'Consent can’t change while the address is suppressed.' : undefined} onClick={() => { status.reset(); setConsentInput(initialConsent()); setConfirm(true) }}>{consentAction(contact.status)}</Button><Button variant="primary" onClick={() => setEdit(true)}>Edit contact</Button></>} />
     {/* Consent is the badge here (and the suppression reason when there is one), not a second Status row below. */}
     <div className="audience-summary cluster">{contact.name && <PrivateAddress value={contact.email} />}<span title={consentTitle(contact.status)}><StatusBadge status={contact.status} /></span>{contact.suppressionReason && <span>{suppressionText(contact.suppressionReason)}</span>}</div>
@@ -126,5 +126,5 @@ function ContactActivity({ email }: { email: string }) {
 function ConsentHistory({ id }: { id: string }) {
   const pagination = useCursorPagination(), cursor = pagination.cursor
   const query = useApiQuery(['consent-history', id, cursor], api => api.consentHistory(id, cursor))
-  return <section className="section"><SectionHeader title="Consent history" />{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable loading={query.isPending} skeletonRows={1} rows={query.data?.items ?? []} rowKey={row => row.id} empty={<EmptyState title="No consent recorded yet" />} columns={[{ ...consentColumns[0], render: row => row.status === 'subscribed' ? 'Subscribed' : 'Unsubscribed' }, { ...consentColumns[1], render: row => consentSources[row.source] ?? row.source, cardRender: row => { const source = consentSources[row.source] ?? row.source; return row.policyVersion ? `${source} · Policy ${row.policyVersion}` : source } }, { ...consentColumns[2], render: row => row.evidence || '—', cardRender: row => row.evidence || null }, { ...consentColumns[3], render: row => row.policyVersion || '—' }, { ...consentColumns[4], render: row => date(row.occurredAt) }]} />{query.data && <Pagination page={pagination.page} pageSize={20} nextCursor={query.data.nextCursor} onPageChange={next => pagination.onPageChange(next, query.data?.nextCursor)} />}</>}</section>
+  return <section className="section"><SectionHeader title="Consent history" />{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable loading={query.isPending} skeletonRows={1} rows={query.data?.items ?? []} rowKey={row => row.id} empty={<EmptyState title="No consent recorded yet" />} columns={[{ ...consentColumns[0], render: row => row.status === 'subscribed' ? 'Subscribed' : 'Unsubscribed' }, { ...consentColumns[1], render: row => consentSources[row.source] ?? row.source, cardRender: row => { const source = consentSources[row.source] ?? row.source; return row.policyVersion ? `${source} · Policy ${row.policyVersion}` : source } }, { ...consentColumns[2], render: row => row.evidence ? <span className="audience-cell-text" title={row.evidence}>{row.evidence}</span> : '—', cardRender: row => row.evidence || null }, { ...consentColumns[3], render: row => row.policyVersion || '—' }, { ...consentColumns[4], render: row => date(row.occurredAt) }]} />{query.data && <Pagination page={pagination.page} pageSize={20} nextCursor={query.data.nextCursor} onPageChange={next => pagination.onPageChange(next, query.data?.nextCursor)} />}</>}</section>
 }

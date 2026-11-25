@@ -6,7 +6,6 @@
 .rcv-tab { gap: var(--space-12); }
 .rcv-cell { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .rcv-cell > .rcv-icon { align-self: flex-start; margin-top: 3px; }
-.rcv-table { --table-row-height: 53px; }
 /* Routes beside their kinds (the facet rail); counts, times and rule names in mono. */
 .rcv-split > .ui-split__main { gap: var(--space-12); }
 .rcv-split .rcv-toolbar { justify-content: flex-end; }
@@ -225,7 +224,7 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .routing-choices .settings-cell-stack > * { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field { min-width: 0; max-width: 100%; }
 .routing-choices .ui-check-field > label { flex: 1 1 0; min-width: 0; }
-/* Destinations wrap between destinations to at most two lines, at a line height that keeps the row's 53 px. */
+/* Destinations wrap between destinations to at most two lines, at a line height that keeps the two-line row's 52 px. */
 .rcv-to { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; min-width: 0; overflow: hidden; white-space: normal; line-height: 18px; }
 .rcv-to > .rcv-targets, .rcv-card-to .rcv-targets { display: inline; }
 :is(.rcv-to, .rcv-card-to) .rcv-target { display: inline; margin-right: var(--space-12); }

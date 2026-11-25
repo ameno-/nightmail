@@ -10,18 +10,24 @@
 .settings-rail a[aria-current='page'] { color: var(--color-text); background: var(--color-active-bg); font-weight: var(--font-weight-bold); }
 .settings-rail a[data-locked] { justify-content: space-between; gap: var(--space-4); }
 .settings-rail a[data-locked] svg { color: var(--color-faint); }
-.hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; padding-top: 52px; animation: section-enter 120ms ease-out both; }
-.hosted-settings__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-12)); }
+.hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; padding-top: 52px; animation: section-enter 120ms ease-out both; }
+/* Label/value rows and short tables keep a readable width, left-aligned, so a label and its value are never a window
+   apart. The activity log and Billing's own layout take the whole panel. */
+.hosted-settings__content:not([data-section='activity'], [data-section='billing']) { max-width: var(--measure); }
+.hosted-settings__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-8)); }
 .settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-8); }
-.hosted-settings__content > .settings-actions { margin-bottom: calc(-1 * var(--space-12)); }
+.hosted-settings__content > .settings-actions { margin-bottom: calc(-1 * var(--space-4)); }
 .hosted-settings__content .settings-rule { padding-top: 0; }
 .hosted-settings__content .section { margin-block: 0; }
-.hosted-settings__content .ui-table-scroll { --table-row-height: 53px; }
+/* Billing's history tables keep the rows they had (a payment over its card or decline note): Billing owns its layout. */
+.hosted-settings__content .ui-table-scroll.billing-table { --table-row-height: 53px; }
 
-/* An address in a setting, a table cell or a fact keeps to its own box: masked it is cut at the edge, so it never runs
-   into the next column or past the row; revealed it wraps (two lines fit a 53px row). */
-:is(.settings-row__control, .settings-people td, .settings-facts dd, .mcp-approval__who) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
-:is(.settings-row__control, .settings-people td, .settings-facts dd, .mcp-approval__who) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; word-break: break-all; }
+/* An address in a setting or a fact keeps to its own box: masked it is cut at the edge, so it never runs past the row;
+   revealed it wraps (two lines fit a 53px settings row). In a table cell (members, invitations) it stays on its line,
+   cut with an ellipsis, like every table cell's address (ui.css), so revealing it never changes the row's height. */
+:is(.settings-row__control, .settings-facts dd, .mcp-approval__who) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+:is(.settings-row__control, .settings-facts dd, .mcp-approval__who) .private-address[data-revealed] > .private-address__value { overflow: visible; white-space: normal; word-break: break-all; }
+.settings-people td .private-address[data-revealed] > .private-address__value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Rows: 53px each, label left and control right, straight on the page's surface: no fill and no rule, so a field or a
    button in a row is the only solid step. Alignment and the fixed rhythm part them. */

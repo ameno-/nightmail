@@ -169,7 +169,10 @@
      their own, from --focus-width and --color-focus. --focus-reach is the room a scroll area keeps at its edges. */
   --focus-width: 2px;
   --focus-reach: 4px;
-  --row-height: 53px;
+  /* Table rows: one line of text or one control (DataTable). A table whose cells stack two lines (a name over its
+     caption) takes the two-line row (ui.css, .ui-table--two-line). */
+  --row-height: 38px;
+  --row-height-two-line: 52px;
   --row-height-lg: 44px;
   /* Event timelines (delivery waterfall, facts): one mono line. */
   --row-height-dense: 28px;
@@ -184,7 +187,12 @@
   --sidebar-gutter: var(--space-8);
   --sidebar-inset: var(--space-8);
   --page-inset: 0px;
-  --page-gap: var(--space-16);
+  --page-gap: var(--space-12);
+  /* Readable widths on a wide window, left-aligned in the page: forms and label/value pages (settings, a contact, a
+     webhook), and detail pages whose main content is a wrapping table or a transcript beside a panel (a domain's
+     records, a support conversation). Tables and logs keep the full width. */
+  --measure: 920px;
+  --measure-wide: 1280px;
   /* Colour, fill and border changes on controls, links, rows and tabs. */
   --motion-duration: 150ms;
   --ease-standard: cubic-bezier(.4, 0, .2, 1);

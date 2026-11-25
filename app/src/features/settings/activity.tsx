@@ -13,7 +13,7 @@ import { settingsColumns } from './skeletons'
 import { productName } from '../../../../api/src/brand'
 
 // Settings → Activity (hosted, owners and admins): what happened in this workspace, newest first, 50 at a time.
-// Rows are one line each (53px); a row opens its details (before → after, reason, request ID). The section takes the
+// Rows are one line each (the shared one-line row); a row opens its details (before → after, reason, request ID). The section takes the
 // panel's full width, so values show whole on a desktop; a cell that still runs out of room ends in an ellipsis and
 // shows all of it on hover. An address is never put in that tooltip: it stays masked until it is revealed itself.
 const credential: Partial<Record<AuditEntry['actor']['type'], string>> = { api_key: 'API key', mcp_grant: 'Agent', agent_token: 'Agent token', inbox_key: 'API key', app_password: 'App password' }

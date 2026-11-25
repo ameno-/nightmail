@@ -126,7 +126,7 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .mailbox-nowrap { white-space: nowrap; }
 
 /* Pages: copy and toolbars sit on the shared 8/12px rhythm inside the page stack. */
-.page-surface > .stack.inbound-stack > .section--bordered { margin-top: calc(var(--space-24) - var(--page-gap)); }
+.page-surface > .stack.inbound-stack > .section--bordered { margin-top: calc(var(--space-16) - var(--page-gap)); }
 .inbound-stack > .data-toolbar { padding-bottom: 0; margin-bottom: calc(var(--space-12) - var(--page-gap)); }
 
 /* Address settings: one column. Aliases are plain rows on the canvas over one input whose domain is fixed. */
@@ -162,6 +162,9 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 /* Receiving: shared search width and one-line clipping. */
 .receiving-search { width: 240px; }
 .inbox-clip { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Agent inboxes and their messages: the address or subject takes the slack, the figures keep their widths, so a narrow
+   window scrolls the table sideways before the first column gets too short. */
+.inbox-table .ui-table { min-width: 720px; }
 .receiving-clip { max-width: 100%; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 @media (max-width: 720px) { .receiving-search { width: 100%; } }
 /* Route editor: the choices and the delete action. */

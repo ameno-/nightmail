@@ -135,19 +135,19 @@ function AddressesTab({ overview, fetching, filters, setFilter, page, onPage, on
     </div>
     <div className="rcv-browse" data-docked={(docked && showPanel) || undefined}>
       <div className="rcv-browse__list">
-        <DataTable className="rcv-table" rows={rows} rowKey={r => r.id} selectedId={docked ? selected?.id : undefined} rowLabel={r => r.match}
+        <DataTable className="rcv-table ui-table--two-line" rows={rows} rowKey={r => r.id} selectedId={docked ? selected?.id : undefined} rowLabel={r => r.match}
           onRowClick={overview.manage ? r => choose(r) : r => { const to = mailOf(r); if (to) navigate(to) }} loading={false} minRows={Math.min(8, rows.length)}
           empty={docked && lookup ? <EmptyState title="No address yet" /> : <EmptyState title={empty} action={!filters.q && filters.kind === 'address' && canAdminister ? <Button onClick={() => onCreate()}>New address</Button> : undefined} />}
           columns={[
             // One line per address: what it receives, the rules that process it (beside the list, the panel says it),
             // where it is delivered, and its last mail. A card: the address and its new mail, what it is, where it goes.
-            { key: 'match', label: 'Address', width: docked ? '44%' : '33%', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
+            { key: 'match', label: 'Address', card: 'title', render: r => <div className="rcv-cell"><RouteIcon entry={r} /><div className="settings-cell-stack"><Match value={r.match} host={!filters.domain} /><span className="muted receiving-clip" title={noteTitle(r)}>{note(r)}</span></div></div>,
               cardRender: r => <span className="rcv-cell"><RouteIcon entry={r} /><Match value={r.match} host={!filters.domain} /></span> },
             { key: 'note', label: 'Kind', table: false, card: 'line', render: r => note(r) },
             // Rules in plain words; an address without one says how to add one, on a phone too.
-            ...(docked ? [] : [{ key: 'rules', label: 'Rules', width: '19%', card: 'hide' as const, render: (r: RouteEntry) => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} endpoints={overview.endpoints} /> : addRule(r) ?? <span className="muted">—</span> }]),
+            ...(docked ? [] : [{ key: 'rules', label: 'Rules', width: '20%', card: 'hide' as const, render: (r: RouteEntry) => r.rules.length ? <RulesSummary keys={r.rules} rules={overview.rules} endpoints={overview.endpoints} /> : addRule(r) ?? <span className="muted">—</span> }]),
             { key: 'to', label: 'Destinations', width: docked ? '38%' : '30%', card: 'line', render: r => <span className="rcv-to" title={targetsTitle(r)}><Targets {...shownTargets(r, overview)} ownId={r.address?.id} max={2} /></span>, cardRender: r => <span className="rcv-card-to"><Targets {...shownTargets(r, overview)} ownId={r.address?.id} max={2} />{!r.rules.length && addRule(r) && <><span aria-hidden="true">·</span>{addRule(r)}</>}</span> },
-            { key: 'last', label: 'Last mail', align: 'right', card: 'aside', render: r => <LastMail entry={r} /> },
+            { key: 'last', label: 'Last mail', width: 136, align: 'right', card: 'aside', render: r => <LastMail entry={r} /> },
           ]} />
         <div className="rcv-foot" data-busy={fetching || undefined}>
           <Pagination page={page} pageSize={PAGE} total={kindCount(overview.counts, filters.kind)} nextCursor={overview.routes.nextCursor} onPageChange={onPage} />
@@ -215,16 +215,16 @@ function DestinationsTab({ overview, refresh }: { overview: Overview; refresh: (
       {/* With none yet, the empty list's own button is the one. */}
       {!none && <div className="cluster"><Button onClick={() => setCreating(true)}>New destination</Button></div>}
     </div>
-    {list.error && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <DataTable className="rcv-table" rows={none ? [] : list.data?.data ?? []} rowKey={e => e.id} rowHref={webhookPage}
+    {list.error && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <DataTable className="rcv-table ui-table--two-line" rows={none ? [] : list.data?.data ?? []} rowKey={e => e.id} rowHref={webhookPage}
       loading={!none && !list.data} skeletonRows={expected} minRows={none ? 0 : Math.min(expected, list.data?.data.length ?? expected)}
       empty={address ? <EmptyState title="No webhook gets this address’s mail" /> : <EmptyState title="No destinations yet" action={<Button onClick={() => setCreating(true)}>New destination</Button>} />}
       columns={[
         // Its name, then what it is and where it points: "crm · Webhook · ••••/crm". Never the code that calls it.
-        { key: 'name', label: 'Destination', width: '40%', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.name}>{e.name}</span><span className="muted receiving-clip"><DestinationTarget e={e} /></span></div></div>,
+        { key: 'name', label: 'Destination', card: 'title', render: e => <div className="rcv-cell"><TargetIcon type={e.type} /><div className="settings-cell-stack"><span className="receiving-clip" title={e.name}>{e.name}</span><span className="muted receiving-clip"><DestinationTarget e={e} /></span></div></div>,
           cardRender: e => <span className="rcv-cell"><TargetIcon type={e.type} />{e.name}</span> },
         { key: 'target', label: 'Target', table: false, card: 'line', render: e => <DestinationTarget e={e} /> },
-        { key: 'used', label: 'Used by', width: '34%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
-        { key: 'status', label: 'Status', width: '16%', card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
+        { key: 'used', label: 'Used by', width: '30%', card: 'line', render: e => used(e) || <span className="muted">Nothing yet</span> },
+        { key: 'status', label: 'Status', width: 128, card: 'aside', render: e => <StatusBadge status={endpointStatusLabel[e.status]} tone={endpointStatusTone[e.status]} /> },
         { key: 'actions', label: '', width: 52, align: 'right', render: e => e.source === 'inbound_webhook' ? <DropdownMenu label={`Actions for ${e.name}`} items={[{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }]} /> : <DropdownMenu label={`Actions for ${e.name}`} items={[
           ...(e.type === 'webhook' ? [{ label: 'Open', onSelect: () => navigate(webhookPage(e)!) }] : []),
           { label: 'Edit', onSelect: () => { setEditing(e); setEditOpen(true) } },

@@ -168,7 +168,7 @@ function NewslettersList() {
       <DataTable className="newsletters-table" loading={query.isPending} skeletonRows={4} rows={query.data ?? []} rowKey={row => row.id} rowHref={row => newsletterPath(row.id)}
         empty={<EmptyState title="No newsletters yet" />} columns={[
           { ...newsletterColumns[0]!, render: row => row.name },
-          { ...newsletterColumns[1]!, render: row => <SenderLines name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
+          { ...newsletterColumns[1]!, render: row => <SenderLines inline name={row.fromName ?? ''} address={row.from} />, cardRender: row => <PrivateAddress value={row.from} /> },
         ]} />
       {(pagination.page > 1 || next) && <Pagination page={pagination.page} pageSize={100} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
     </>}
