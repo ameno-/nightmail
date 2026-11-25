@@ -169,12 +169,15 @@ const sum = (rows: BuiltinReputation[]): BuiltinReputation => rows.reduce((a, r)
 export function breakerDecision(rows: WorkspaceReputation[]) {
   const counted = sum(rows), lines = LINES.filter(line => crossed(counted, line));
   if (!lines.length) return null;
-  const worstFor = (line: BuiltinLine) => rows.reduce((w, r) => r[line] > w[line] || (r[line] === w[line] && r.workspaceId < w.workspaceId) ? r : w);
+  const worstFor = (line: BuiltinLine, among = rows) => among.reduce((w, r) => r[line] > w[line] || (r[line] === w[line] && r.workspaceId < w.workspaceId) ? r : w);
   for (const line of lines) {
     const worst = worstFor(line);
     if (crossed(sum(rows.filter(r => r !== worst)), line)) return { action: 'trip', line, counted, worst: worst.workspaceId } as const;
   }
-  return { action: 'alert', line: lines[0]!, counted, worst: worstFor(lines[0]!) } as const;
+  // The card names the worst workspace that can still send: once the worst is revoked, the next one (a partner it split its
+  // mail with) is named, rather than nothing until the revoked one's mail leaves the window.
+  const line = lines[0]!, sending = rows.filter(r => !r.revoked && r[line] > 0);
+  return { action: 'alert', line, counted, worst: sending.length ? worstFor(line, sending) : null } as const;
 }
 /**
  * Each workspace's built-in mail in the breaker's window, revoked domains included (their mail signed as the parent too),
@@ -224,8 +227,8 @@ export async function builtinBreaker(runtime: Runtime) {
   const windowHours = BUILTIN_BREAKER.windowHours;
   if (decision.action === 'alert') {
     const { worst, line, counted } = decision;
-    // A revoked workspace needs nothing more; its mail still counts toward the parent's.
-    if (worst.revoked) return false;
+    // Only revoked workspaces left behind the line: nothing more to do; their mail still counts toward the parent's.
+    if (!worst) return false;
     const payload = { code: 'BUILTIN_WORKSPACE_OVER_LINE', parent, line, ...counted, windowHours, workspace: { recipients: worst.recipients, bounces: worst.bounces, complaints: worst.complaints } };
     const { rowCount } = await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload)
       VALUES('builtin-breaker-worst:'||${parent}::text||':'||${worst.workspaceId}::text||':'||${line}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${worst.workspaceId},${JSON.stringify(payload)}::jsonb)
