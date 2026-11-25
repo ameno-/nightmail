@@ -154,9 +154,11 @@ const pages = ids => [
   ['Newsletters', '/newsletters', { user: 'ivy', from: '/campaigns' }],
   ['Template', `/campaigns/templates/${ids.template}`, { from: '/campaigns/templates', row: 'Receipt', leave: true }],
   ['Audience', '/audience', { from: '/overview' }],
+  ['Audience · risky', '/audience?status=risky', { from: '/audience' }],
   ['Contact', `/audience/contacts/${ids.contact}`, { from: '/audience' }],
   ['Lists', '/audience/lists', { from: '/audience' }],
   ['List', `/audience/lists/${ids.list}`, { from: '/audience/lists' }],
+  ['List · risky', `/audience/lists/${ids.list}?status=risky`, { from: `/audience/lists/${ids.list}` }],
   ['Segments', '/audience/segments', { from: '/audience' }],
   ['Segment', `/audience/segments/${ids.segment}`, { from: '/audience/segments', row: 'Pro plan' }],
   // Property rules: the name beside the field, a day with its zone, and a presence check without a value.

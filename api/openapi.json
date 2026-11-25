@@ -543,7 +543,14 @@
                   "closed",
                   "off"
                 ],
-                "description": "ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: turned off by the operator."
+                "description": "ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused)."
+              },
+              "paused": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving."
               },
               "scope": {
                 "type": "string",
@@ -1671,6 +1678,42 @@
           }
         ]
       },
+      "ContactRisk": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "reason": {
+            "type": "string",
+            "enum": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role",
+              "dead"
+            ],
+            "description": "invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce)."
+          },
+          "suggestion": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For typo_domain, the address with the provider it most likely meant."
+          },
+          "allowed": {
+            "type": "boolean",
+            "description": "Its owner allowed it: campaigns and marketing sends reach it anyway."
+          }
+        },
+        "required": [
+          "reason",
+          "suggestion",
+          "allowed"
+        ],
+        "description": "Why campaigns and marketing sends skip this contact, or null when nothing is wrong with the address. Flagged when the contact is created or imported, and again hourly for every contact. Transactional mail is never refused."
+      },
       "Contact": {
         "type": "object",
         "properties": {
@@ -1726,6 +1769,9 @@
               "null"
             ]
           },
+          "risk": {
+            "$ref": "#/components/schemas/ContactRisk"
+          },
           "lastOpenAt": {
             "type": [
               "string",
@@ -1778,6 +1824,7 @@
           "marketingConsent",
           "suppressed",
           "suppressionReason",
+          "risk",
           "lastOpenAt",
           "lastClickAt",
           "observedSince",
@@ -2993,6 +3040,17 @@
                       }
                     ]
                   }
+                },
+                "risk": {
+                  "type": "string",
+                  "enum": [
+                    "invalid",
+                    "disposable",
+                    "typo_domain",
+                    "role",
+                    "dead"
+                  ],
+                  "description": "What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it."
                 }
               },
               "required": [
@@ -3031,6 +3089,9 @@
             "type": "boolean",
             "description": "false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count)."
           },
+          "risky": {
+            "$ref": "#/components/schemas/RiskBreakdown"
+          },
           "errorsRetained": {
             "type": "boolean",
             "description": "false once per-row error details are no longer kept after the retention window (errors is then [])."
@@ -3051,10 +3112,54 @@
           "errors",
           "imported",
           "rowsRetained",
+          "risky",
           "errorsRetained",
           "createdAt",
           "updatedAt"
         ]
+      },
+      "RiskBreakdown": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer"
+          },
+          "byReason": {
+            "type": "object",
+            "properties": {
+              "invalid": {
+                "type": "integer"
+              },
+              "disposable": {
+                "type": "integer"
+              },
+              "typo_domain": {
+                "type": "integer"
+              },
+              "role": {
+                "type": "integer"
+              },
+              "dead": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role",
+              "dead"
+            ]
+          }
+        },
+        "required": [
+          "total",
+          "byReason"
+        ],
+        "description": "Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene."
       },
       "CommittedContactImport": {
         "allOf": [
@@ -4184,6 +4289,13 @@
           "screen": {
             "$ref": "#/components/schemas/EmailScreenSummary"
           },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientWarning"
+            },
+            "description": "Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts."
+          },
           "scheduledAt": {
             "type": "string",
             "description": "A scheduled send: when it goes (UTC)."
@@ -4222,6 +4334,34 @@
           "status"
         ],
         "description": "Content-screen outcome recorded at accept time when screening applies."
+      },
+      "RecipientWarning": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role"
+            ]
+          },
+          "suggestion": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "email",
+          "risk",
+          "suggestion"
+        ]
       },
       "SendEmailInput": {
         "type": "object",
@@ -4437,6 +4577,13 @@
           },
           "screen": {
             "$ref": "#/components/schemas/EmailScreenSummary"
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientWarning"
+            },
+            "description": "Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts."
           }
         },
         "required": [
@@ -6724,15 +6871,48 @@
           },
           "unsubscribed": {
             "type": "integer"
+          },
+          "risky": {
+            "type": "integer",
+            "description": "Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible."
+          },
+          "riskyByReason": {
+            "type": "object",
+            "properties": {
+              "invalid": {
+                "type": "integer"
+              },
+              "disposable": {
+                "type": "integer"
+              },
+              "typo_domain": {
+                "type": "integer"
+              },
+              "role": {
+                "type": "integer"
+              },
+              "dead": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "invalid",
+              "disposable",
+              "typo_domain",
+              "role",
+              "dead"
+            ]
           }
         },
         "required": [
           "matched",
           "eligible",
           "suppressed",
-          "unsubscribed"
+          "unsubscribed",
+          "risky",
+          "riskyByReason"
         ],
-        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
+        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
       },
       "CampaignPreviewImage": {
         "type": "object",
@@ -7073,6 +7253,50 @@
           },
           "simulated": {
             "type": "boolean"
+          },
+          "risky": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "total": {
+                "type": "integer"
+              },
+              "byReason": {
+                "type": "object",
+                "properties": {
+                  "invalid": {
+                    "type": "integer"
+                  },
+                  "disposable": {
+                    "type": "integer"
+                  },
+                  "typo_domain": {
+                    "type": "integer"
+                  },
+                  "role": {
+                    "type": "integer"
+                  },
+                  "dead": {
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "invalid",
+                  "disposable",
+                  "typo_domain",
+                  "role",
+                  "dead"
+                ]
+              }
+            },
+            "default": null,
+            "required": [
+              "total",
+              "byReason"
+            ],
+            "description": "Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch."
           }
         },
         "required": [
@@ -22787,6 +23011,19 @@
           {
             "schema": {
               "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "true: only contacts campaigns skip as risky (risk set and not allowed)."
+            },
+            "required": false,
+            "description": "true: only contacts campaigns skip as risky (risk set and not allowed).",
+            "name": "risky",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
               "minLength": 1,
               "maxLength": 120
             },
@@ -23362,6 +23599,10 @@
                       ]
                     },
                     "description": "Up to 50 key/value pairs, at most 16 KiB of JSON total."
+                  },
+                  "riskAllowed": {
+                    "type": "boolean",
+                    "description": "true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise)."
                   }
                 },
                 "additionalProperties": false
@@ -25153,6 +25394,19 @@
             "required": false,
             "name": "suppressed",
             "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true"
+              ],
+              "description": "true: only contacts campaigns skip as risky (risk set and not allowed)."
+            },
+            "required": false,
+            "description": "true: only contacts campaigns skip as risky (risk set and not allowed).",
+            "name": "risky",
+            "in": "query"
           }
         ],
         "responses": {
@@ -26642,13 +26896,18 @@
                     },
                     "unsubscribed": {
                       "type": "integer"
+                    },
+                    "risky": {
+                      "type": "integer",
+                      "description": "Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible."
                     }
                   },
                   "required": [
                     "matched",
                     "eligible",
                     "suppressed",
-                    "unsubscribed"
+                    "unsubscribed",
+                    "risky"
                   ]
                 }
               }
@@ -27062,6 +27321,9 @@
                             "type": "boolean",
                             "description": "false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count)."
                           },
+                          "risky": {
+                            "$ref": "#/components/schemas/RiskBreakdown"
+                          },
                           "errorsRetained": {
                             "type": "boolean",
                             "description": "false once per-row error details are no longer kept after the retention window (errors is then [])."
@@ -27080,6 +27342,7 @@
                           "status",
                           "imported",
                           "rowsRetained",
+                          "risky",
                           "errorsRetained",
                           "createdAt",
                           "updatedAt"

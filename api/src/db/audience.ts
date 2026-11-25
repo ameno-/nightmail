@@ -1,10 +1,13 @@
 import { sql } from 'drizzle-orm';
 import { bigint, boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique } from 'drizzle-orm/pg-core';
+import type { Risk, RiskCounts } from '../list-hygiene.js';
+/** An import's risky rows: at preview what the addresses say, after commit what its contacts are (dead included). */
+export type RiskSummary = { total: number; byReason: RiskCounts };
 
 export type PropertyRule = { field: 'property'; key: string } & ({ type: 'string'; operator: 'eq' | 'neq' | 'contains'; value: string } | { type: 'number'; operator: 'eq' | 'lt' | 'gt'; value: number }
   | { type: 'date'; operator: 'before' | 'after' | 'on'; value: string } | { type: 'string' | 'number' | 'date'; operator: 'set' | 'notSet' });
 export type SegmentRule = { field: 'email' | 'firstName' | 'plan' | 'country'; operator: 'eq' | 'neq' | 'contains'; value: string } | { field: 'lastOpenAt' | 'lastClickAt'; operator: 'within' | 'inactive'; days: number } | PropertyRule | { operator: 'and' | 'or'; rules: SegmentRule[] };
-export type ImportRow = { row: number; email: string; name?: string; properties: Record<string, string | number | boolean | null> };
+export type ImportRow = { row: number; email: string; name?: string; properties: Record<string, string | number | boolean | null>; risk?: Risk };
 export type ImportError = { row: number; field: string; message: string };
 // Both SES feedback paths use the same precedence. Never downgrade an operator/complaint
 // suppression to one a reply could bypass, or a delivery bounce to validation alone.
@@ -27,6 +30,8 @@ export const contacts = pgTable('audience_contacts', {
   observedSince: timestamp('observed_since', { withTimezone: true, mode: 'string' }),
   openObservedSince: timestamp('open_observed_since', { withTimezone: true, mode: 'string' }), clickObservedSince: timestamp('click_observed_since', { withTimezone: true, mode: 'string' }),
   deletedAt: timestamp('deleted_at', { withTimezone: true, mode: 'string' }), ...dates(),
+  // List hygiene (src/list-hygiene.ts, migration 497): why campaigns skip it, unless its owner allowed it.
+  risk: text('risk').$type<Risk>(), riskAllowed: boolean('risk_allowed').notNull().default(false),
 }, t => [unique('audience_contacts_email_scope').on(t.workspaceId, t.email), index('audience_contacts_page').on(t.workspaceId, t.id)]);
 /** A large newsletter's readers as its background count stored them (src/newsletters.ts readersJob). */
 export type StoredNewsletterReaders = { count: number; since: string; daily: number[]; countedAt: string; members: number };
@@ -40,6 +45,6 @@ export const listCounts = pgTable('audience_list_counts', { id: bigint('id', { m
   subscribed: integer('subscribed').notNull().default(0), unsubscribed: integer('unsubscribed').notNull().default(0), unknown: integer('unknown').notNull().default(0), suppressed: integer('suppressed').notNull().default(0),
 }, t => [index('audience_list_counts_list').on(t.workspaceId, t.listId)]);
 export const segments = pgTable('audience_segments', { id: text('id').primaryKey(), ...scope(), name: text('name').notNull(), rule: jsonb('rule').$type<SegmentRule>().notNull(), ...dates() }, t => [index('audience_segments_page').on(t.workspaceId, t.id)]);
-export const imports = pgTable('audience_imports', { id: text('id').primaryKey(), ...scope(), listId: text('list_id'), status: text('status').$type<'preview' | 'committed'>().notNull().default('preview'), rows: jsonb('rows').$type<ImportRow[]>().notNull(), errors: jsonb('errors').$type<ImportError[]>().notNull(), imported: integer('imported').notNull().default(0), sampleContactIds: text('sample_contact_ids').array(), consentLinkedAt: timestamp('consent_linked_at', { withTimezone: true, mode: 'string' }), rowsScrubbedAt: timestamp('rows_scrubbed_at', { withTimezone: true, mode: 'string' }), errorsScrubbedAt: timestamp('errors_scrubbed_at', { withTimezone: true, mode: 'string' }), ...dates() }, t => [index('audience_imports_page').on(t.workspaceId, t.id)]);
+export const imports = pgTable('audience_imports', { id: text('id').primaryKey(), ...scope(), listId: text('list_id'), status: text('status').$type<'preview' | 'committed'>().notNull().default('preview'), rows: jsonb('rows').$type<ImportRow[]>().notNull(), errors: jsonb('errors').$type<ImportError[]>().notNull(), imported: integer('imported').notNull().default(0), sampleContactIds: text('sample_contact_ids').array(), riskSummary: jsonb('risk_summary').$type<RiskSummary>(), consentLinkedAt: timestamp('consent_linked_at', { withTimezone: true, mode: 'string' }), rowsScrubbedAt: timestamp('rows_scrubbed_at', { withTimezone: true, mode: 'string' }), errorsScrubbedAt: timestamp('errors_scrubbed_at', { withTimezone: true, mode: 'string' }), ...dates() }, t => [index('audience_imports_page').on(t.workspaceId, t.id)]);
 export const audiencePlans = pgTable('audience_operation_plans', { id: text('id').primaryKey(), ...scope(), actorKeyId: text('actor_key_id').notNull(), statement: text('statement').notNull(), operation: jsonb('operation').$type<AudienceOperation>().notNull(), matched: integer('matched').notNull(), expiresAt: timestamp('expires_at', { withTimezone: true, mode: 'string' }).notNull(), appliedAt: timestamp('applied_at', { withTimezone: true, mode: 'string' }), createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() }, t => [index('audience_plans_scope').on(t.workspaceId, t.id), index('audience_plans_expiry').on(t.expiresAt)]);
 export const consentAudit = pgTable('audience_consent_audit', { id: text('id').primaryKey(), ...scope(), contactId: text('contact_id').notNull(), email: text('email').notNull(), status: text('status').$type<'subscribed' | 'unsubscribed'>().notNull(), source: text('source').notNull(), policyVersion: text('policy_version'), evidence: text('evidence'), actorKeyId: text('actor_key_id'), importId: text('import_id'), occurredAt: timestamp('occurred_at', { withTimezone: true, mode: 'string' }).notNull(), createdAt: timestamp('created_at', { withTimezone: true, mode: 'string' }).notNull().defaultNow() }, t => [index('audience_consent_page').on(t.workspaceId, t.contactId, t.id)]);

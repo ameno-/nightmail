@@ -114,6 +114,8 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   if (payload.code === 'SES_IDENTITY_QUOTA_EXHAUSTED') return postSlack(url, { text: `SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.` });
   if (payload.code === 'HOSTED_EXEMPT_OVER_LINE') return postSlack(url, { text: exemptAlertText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl) });
   if (payload.code === 'SES_TENANT_PAUSED') return postSlack(url, { text: tenantPausedText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl) });
+  if (payload.code === 'BUILTIN_PARENT_TRIPPED') return postSlack(url, { text: builtinTrippedText(payload) });
+  if (payload.code === 'BUILTIN_WORKSPACE_OVER_LINE') return postSlack(url, { text: builtinWorkspaceText(payload, job.workspaceId, runtime.config.publicUrl) });
   const { region, metric, level, previous, value } = payload;
   if (typeof region !== 'string' || !(metric === 'bounceRate' || metric === 'complaintRate') || !LEVELS.includes(level as Level) || !LEVELS.includes(previous as Level) || typeof value !== 'number') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid reputation alert job.');
   await postSlack(url, { text: reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl }) });
@@ -141,6 +143,24 @@ const operatorPage = (publicUrl: string, wid: unknown) => `${publicUrl.replace(/
 export function tenantPausedText(p: Record<string, unknown>, publicUrl: string) {
   return `:rotating_light: *AWS paused an SES tenant*${p.exempt ? ' of a first-party (exempt) workspace' : ''} · ${String(p.workspaceId ?? '')}\n`
     + `${String(p.tenant ?? '')}: ${String(p.cause ?? 'no cause given')}. ${productName} paused the workspace to match; only an operator resumes it, after AWS reinstates the tenant.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in ${productName}>`;
+}
+const builtinCount = (v: unknown) => Number(v ?? 0).toLocaleString('en-US');
+const builtinShare = (part: unknown, whole: unknown) => `${percent(Number(part ?? 0) / Math.max(1, Number(whole ?? 0)))} (${builtinCount(part)} of ${builtinCount(whole)})`;
+const builtinLine = (line: unknown) => line === 'complaints' ? 'spam complaints' : 'permanent bounces';
+/** The built-in domains' circuit breaker tripped (builtin-domain.ts builtinBreaker): every one stopped sending until a person resets it. */
+export function builtinTrippedText(p: Record<string, unknown>) {
+  return `:rotating_light: *Built-in domains stopped sending: too many ${builtinLine(p.line)}* · ${String(p.parent ?? '')}\n`
+    + `Permanent bounces ${builtinShare(p.bounces, p.recipients)}, complaints ${builtinShare(p.complaints, p.recipients)} over the last ${builtinCount(p.windowHours)} hours, still over the line without the workspace with the most (${String(p.worst ?? '')}); SES warns at 5% and 0.1%. `
+    + `Sending is paused for ${builtinCount(p.paused)} built-in ${Number(p.paused) === 1 ? 'domain' : 'domains'} and their queued mail is canceled; receiving continues. It stays paused until an operator finds the cause (revoke the senders behind it) and runs `
+    + '`node --import tsx scripts/builtin-domain.ts reset-breaker --apply --reason "…"`.';
+}
+/** One workspace's built-in mail alone puts all built-in mail over a line: the breaker didn't trip, a person decides about it. */
+export function builtinWorkspaceText(p: Record<string, unknown>, workspaceId: string, publicUrl: string) {
+  const w = (p.workspace ?? {}) as Record<string, unknown>, line = p.line === 'complaints' ? 'complaints' : 'bounces';
+  return `:warning: *One workspace puts built-in mail over the line: too many ${builtinLine(p.line)}* · ${workspaceId}\n`
+    + `It has ${builtinCount(w[line])} of the ${builtinCount(p[line])} ${builtinLine(p.line)} on ${builtinCount(w.recipients)} of ${builtinCount(p.recipients)} recipients of all built-in mail in the last ${builtinCount(p.windowHours)} hours. `
+    + `Without it, built-in mail is under SES's 5% and 0.1%, so built-in domains keep sending. If it's abuse, revoke its built-in domain: `
+    + `\`node --import tsx scripts/builtin-domain.ts revoke ${workspaceId} --apply --reason "…"\`\n<${operatorPage(publicUrl, workspaceId)}|Open it in ${productName}>`;
 }
 // A storage hiccup or a timed-out post retries like other background work instead of losing the alert on its first failure.
 export const reputationAlertJobs = { [JOB]: retryDatabaseFailures(deliver) };
