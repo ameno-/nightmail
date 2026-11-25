@@ -7,6 +7,7 @@ import { productName } from './brand.js';
 export { AudienceSpec };
 import { contacts, consentAudit, imports, listCounts, listMembers, lists, segments, type PropertyRule, type SegmentRule } from './db/audience.js';
 import { enqueue, noteEnqueued } from './jobs.js';
+import { ContactTopic, contactTopicStates, recordTopicChoices } from './topics.js';
 import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-memory.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
@@ -60,6 +61,7 @@ export function contactBody<T extends { email: string; risk: string | null; risk
 const ListInput = z.object({ name: z.string().trim().min(1).max(200), description: z.string().max(2000).default('') }).strict();
 const List = ListInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('ContactList');
 const ContactRead = Contact.extend({ listIds: z.array(z.string()).describe('Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.') }).openapi('ContactRead');
+const ContactDetail = ContactRead.extend({ topics: z.array(ContactTopic).describe('Every topic of the workspace, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.') }).openapi('ContactDetail');
 const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().int(), unsubscribed: z.number().int(), unknown: z.number().int(), suppressed: z.number().int() }).describe('Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.');
 const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
@@ -84,8 +86,8 @@ const SegmentInput = z.object({ name: z.string().trim().min(1).max(200), rule: R
 const Segment = SegmentInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('Segment');
 const Counts = z.object({ matched: z.number().int(), eligible: z.number().int(), suppressed: z.number().int(), unsubscribed: z.number().int(), risky: z.number().int().describe('Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible.') });
 const Deleted = z.object({ id: z.string(), deleted: z.literal(true) });
-const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), importId: z.string().nullable().describe('Committed import ID when source is import; null otherwise.'), occurredAt: z.string(), createdAt: z.string() });
-const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), source: z.string().trim().min(1).max(200).optional(), policyVersion: z.string().trim().min(1).max(120).optional(), evidence: z.string().trim().min(1).max(2000).optional(), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.').optional(), confirmResubscribe: z.boolean().default(false) }).strict();
+const Audit = z.object({ id: z.string(), ...Scope, contactId: z.string(), email: z.string(), status: z.enum(['subscribed', 'unsubscribed']), source: z.string(), policyVersion: z.string().nullable(), evidence: z.string().nullable(), actorKeyId: z.string().nullable(), importId: z.string().nullable().describe('Committed import ID when source is import; null otherwise.'), topicId: z.string().nullable().describe('The topic this decision is about (updateContactConsent with topicId, or an unsubscribe from mail with a topic); null for marketing as a whole.'), occurredAt: z.string(), createdAt: z.string() });
+const ConsentInput = z.object({ status: z.enum(['subscribed', 'unsubscribed']), topicId: z.string().min(1).max(120).optional().describe('A topic (listTopics): the decision is about that kind of mail only, and marketing consent stays as it is. Without it, the decision is about all marketing.'), source: z.string().trim().min(1).max(200).optional(), policyVersion: z.string().trim().min(1).max(120).optional(), evidence: z.string().trim().min(1).max(2000).optional(), occurredAt: z.string().datetime({ offset: true }).refine(v => Date.parse(v) <= Date.now() + 60000, 'Consent cannot occur in the future.').optional(), confirmResubscribe: z.boolean().default(false) }).strict();
 const ImportRowSchema = z.object({ row: z.number().int(), email: z.string(), name: z.string().optional(), properties: Properties, risk: RiskReason.optional().describe('What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.') });
 const ImportErrorSchema = z.object({ row: z.number().int(), field: z.string(), message: z.string() });
 const Import = z.object({ id: z.string(), ...Scope, listId: z.string().nullable(), status: z.enum(['preview', 'committed']), rows: z.array(ImportRowSchema), errors: z.array(ImportErrorSchema), imported: z.number().int(), rowsRetained: z.boolean().describe('false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).'), risky: RiskBreakdown.nullable().describe('Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene.'), errorsRetained: z.boolean().describe('false once per-row error details are no longer kept after the retention window (errors is then []).'), ...Dates }).openapi('AudienceImport');
@@ -1005,9 +1007,10 @@ export function registerAudience(app: App) {
     if (!contact) throw new ApiError(409, 'CONTACT_EXISTS', 'This address already has a contact or retained consent record. Use imports to restore a deleted contact without changing consent.');
     return c.json(contactBody(contact), 201);
   });
-  app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ContactRead), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/contacts/{id}', operationId: 'getContact', tags: ['Audience'], security, request: { params: IdParams }, responses: { 200: response(ContactDetail), ...errors } }), async c => {
     const identity = actor(c), row = await findContact(c.env.db, identity, c.req.valid('param').id);
-    return c.json((await readContacts(c.env.db, identity, [row], CONTACT_LIST_IDS_SINGLE_MAX))[0]!, 200);
+    const [[contact], states] = await Promise.all([readContacts(c.env.db, identity, [row], CONTACT_LIST_IDS_SINGLE_MAX), contactTopicStates(c.env.db, identity.workspaceId, row.id)]);
+    return c.json({ ...contact!, topics: states.map(({ description: _, ...topic }) => topic) }, 200);
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json'), found = await findContact(c.env.db, identity, contactId);
@@ -1033,16 +1036,20 @@ export function registerAudience(app: App) {
     });
     return c.json({ id: contactId, deleted: true as const }, 200);
   });
-  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: `Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; ${productName} records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.`, request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'post', path: '/v1/contacts/{id}/consent', operationId: 'updateContactConsent', tags: ['Consent'], security, description: `Set marketing subscription status, or with topicId the contact's choice about one topic (its sends reach a contact only while marketing consent is subscribed too; each topic change is a contact.subscription_changed event with topicId). Source, policy version, evidence and occurrence time are optional audit context; ${productName} records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.`, request: { params: IdParams, body: json(ConsentInput) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json');
     const occurredAt = input.occurredAt ?? new Date().toISOString();
     const source = input.source ?? (identity.credential === 'dashboard' ? 'dashboard' : identity.credential === 'mcp' ? 'mcp' : identity.credential === 'agentToken' ? 'agent-token' : 'api');
     const contact = await c.env.db.transaction(async tx => {
       const [existing] = await tx.select().from(contacts).where(and(scope(contacts, identity), eq(contacts.id, contactId), isNull(contacts.deletedAt))).limit(1).for('update');
       if (!existing) return notFound('Contact');
+      if (input.topicId) {
+        await recordTopicChoices(tx, identity.workspaceId, existing, [{ topicId: input.topicId, subscribed: input.status === 'subscribed' }], { source, policyVersion: input.policyVersion, evidence: input.evidence, occurredAt, actorKeyId: identity.keyId }, input.confirmResubscribe);
+        return existing;
+      }
       if (existing.marketingConsent === 'unsubscribed' && input.status === 'subscribed' && !input.confirmResubscribe) throw new ApiError(409, 'RESUBSCRIBE_CONFIRMATION_REQUIRED', 'Explicitly confirm renewed verifiable consent to replace a prior opt-out.', 'confirmResubscribe');
       if (input.status === 'subscribed') {
-        const [latest] = await tx.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId))).orderBy(sql`${consentAudit.occurredAt} DESC`).limit(1);
+        const [latest] = await tx.select().from(consentAudit).where(and(scope(consentAudit, identity), eq(consentAudit.contactId, contactId), isNull(consentAudit.topicId))).orderBy(sql`${consentAudit.occurredAt} DESC`).limit(1);
         if (latest && Date.parse(occurredAt) <= Date.parse(latest.occurredAt)) throw new ApiError(409, 'STALE_CONSENT', 'Renewed consent must be newer than the prior consent decision.');
       }
       return recordConsent(tx, identity, existing, { status: input.status, source, policyVersion: input.policyVersion, evidence: input.evidence, occurredAt, actorKeyId: identity.keyId });

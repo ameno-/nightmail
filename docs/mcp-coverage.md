@@ -57,6 +57,9 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `listContactImports` | `imports` · `list` · sending |
 | `getContactImport` | `imports` · `get` · sending |
 | `commitContactImport` | `imports` · `commit` · sending |
+| `listTopics` | `lists` · `topics` · sending |
+| `createTopic` | `lists` · `createTopic` · sending |
+| `updateTopic` | `lists` · `updateTopic` · sending |
 | `queryAudience` | `audience` · `query` · sending |
 | `planAudienceMutation` | `audience` · `plan` · sending |
 | `applyAudiencePlan` | `audience` · `apply` · sending |

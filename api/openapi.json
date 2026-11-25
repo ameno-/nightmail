@@ -1867,6 +1867,61 @@
           "updatedAt"
         ]
       },
+      "ContactDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ContactRead"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "topics": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ContactTopic"
+                },
+                "description": "Every topic of the workspace, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId."
+              }
+            },
+            "required": [
+              "topics"
+            ]
+          }
+        ]
+      },
+      "ContactTopic": {
+        "type": "object",
+        "properties": {
+          "topicId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "subscribed": {
+            "type": "boolean",
+            "description": "Whether sends with this topic reach the contact, as far as the topic goes: the contact’s own choice, or the topic’s default without one. Mail is still sent only while the contact is subscribed to marketing and not suppressed."
+          },
+          "chosen": {
+            "type": "boolean",
+            "description": "true when a choice about this topic was recorded for the contact; false when subscribed is the topic’s default."
+          },
+          "updatedAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "When the choice was last recorded; null without one."
+          }
+        },
+        "required": [
+          "topicId",
+          "name",
+          "subscribed",
+          "chosen",
+          "updatedAt"
+        ]
+      },
       "ContactListRead": {
         "type": "object",
         "properties": {
@@ -3250,6 +3305,48 @@
           }
         },
         "additionalProperties": false
+      },
+      "Topic": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workspaceId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "subscribedByDefault": {
+            "type": "boolean"
+          },
+          "archivedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "name",
+          "description",
+          "subscribedByDefault",
+          "archivedAt",
+          "createdAt",
+          "updatedAt"
+        ]
       },
       "AudienceQueryResult": {
         "type": "object",
@@ -24706,7 +24803,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ContactRead"
+                  "$ref": "#/components/schemas/ContactDetail"
                 }
               }
             }
@@ -25228,7 +25325,7 @@
             "secureDashboardSession": []
           }
         ],
-        "description": "Set marketing subscription status. Source, policy version, evidence and occurrence time are optional audit context; Nightmail records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.",
+        "description": "Set marketing subscription status, or with topicId the contact's choice about one topic (its sends reach a contact only while marketing consent is subscribed too; each topic change is a contact.subscription_changed event with topicId). Source, policy version, evidence and occurrence time are optional audit context; Nightmail records the actor and current time when omitted. Does not lift delivery suppression. Profile edits cannot establish consent; an import can only when its commit attests consent.",
         "parameters": [
           {
             "schema": {
@@ -25254,6 +25351,12 @@
                       "subscribed",
                       "unsubscribed"
                     ]
+                  },
+                  "topicId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 120,
+                    "description": "A topic (listTopics): the decision is about that kind of mail only, and marketing consent stays as it is. Without it, the decision is about all marketing."
                   },
                   "source": {
                     "type": "string",
@@ -25526,6 +25629,13 @@
                             ],
                             "description": "Committed import ID when source is import; null otherwise."
                           },
+                          "topicId": {
+                            "type": [
+                              "string",
+                              "null"
+                            ],
+                            "description": "The topic this decision is about (updateContactConsent with topicId, or an unsubscribe from mail with a topic); null for marketing as a whole."
+                          },
                           "occurredAt": {
                             "type": "string"
                           },
@@ -25544,6 +25654,7 @@
                           "evidence",
                           "actorKeyId",
                           "importId",
+                          "topicId",
                           "occurredAt",
                           "createdAt"
                         ]
@@ -29109,6 +29220,583 @@
             "lang": "Shell",
             "label": "cURL",
             "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/contact-imports/resource_123/commit' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
+          }
+        ]
+      }
+    },
+    "/v1/topics": {
+      "get": {
+        "operationId": "listTopics",
+        "tags": [
+          "Audience"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "The workspace’s topics, oldest first: the kinds of marketing mail it sends. A marketing send or campaign may name one, and its one-click unsubscribe then opts the person out of that topic only. A contact’s choices are on getContact (topics) and set with updateContactConsent (topicId).",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "maxLength": 200
+            },
+            "required": false,
+            "name": "cursor",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "default": 25
+            },
+            "required": false,
+            "name": "limit",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false",
+              "description": "true lists the archived topics instead."
+            },
+            "required": false,
+            "description": "true lists the archived topics instead.",
+            "name": "archived",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Topic"
+                      }
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  },
+                  "required": [
+                    "data",
+                    "nextCursor"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "read",
+          "scope": "workspace",
+          "text": "Needs Audience & content: read on the whole workspace."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { listTopics } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await listTopics({\n  client,\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request GET \\\n  --url 'https://nightmail.dev/v1/topics' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\""
+          }
+        ]
+      },
+      "post": {
+        "operationId": "createTopic",
+        "tags": [
+          "Audience"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Make a topic, a kind of marketing mail recipients can opt out of on its own (up to 100 that aren’t archived). Recipients see its name and description on the preference page. subscribedByDefault is fixed once made.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100,
+                    "description": "Shown to recipients on the preference page, e.g. \"Product updates\". Unique among the workspace’s topics that aren’t archived, ignoring case."
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 300,
+                    "default": "",
+                    "description": "One line under the name on the preference page."
+                  },
+                  "subscribedByDefault": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "What a contact who never chose gets: true sends the topic to everyone subscribed to marketing until they opt out of it; false only to those who opted in. Fixed when the topic is made."
+                  }
+                },
+                "required": [
+                  "name"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Topic"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { createTopic } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await createTopic({\n  client,\n  body: {\n    \"name\": \"Example\",\n    \"description\": \"\",\n    \"subscribedByDefault\": true\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/topics' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"name\": \"Example\",\n  \"description\": \"\",\n  \"subscribedByDefault\": true\n}'"
+          }
+        ]
+      }
+    },
+    "/v1/topics/{id}": {
+      "patch": {
+        "operationId": "updateTopic",
+        "tags": [
+          "Audience"
+        ],
+        "security": [
+          {
+            "bearerAuth": []
+          },
+          {
+            "dashboardSession": []
+          },
+          {
+            "secureDashboardSession": []
+          }
+        ],
+        "description": "Rename a topic, change its description, or archive it (archived) or bring it back. Who gets it by default is fixed when it is made.",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            },
+            "required": true,
+            "name": "id",
+            "in": "path"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 100
+                  },
+                  "description": {
+                    "type": "string",
+                    "maxLength": 300
+                  },
+                  "archived": {
+                    "type": "boolean",
+                    "description": "true archives the topic: it leaves the topic list and the preference page, and new sends can’t name it, while sends already launched with it keep skipping the people who opted out of it. false brings it back, with every choice made about it."
+                  }
+                },
+                "additionalProperties": false,
+                "description": "subscribedByDefault is fixed when the topic is made: it can’t change who gets the topic without their choice."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Topic"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Request failed; use error.code and requestId to diagnose.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        },
+        "x-nightmail-permission": {
+          "permission": "audience",
+          "level": "write",
+          "scope": "workspace",
+          "person": "admin",
+          "text": "Needs Audience & content: write on the whole workspace. A person needs to be an owner or admin."
+        },
+        "x-codeSamples": [
+          {
+            "lang": "TypeScript",
+            "label": "TypeScript SDK",
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { updateTopic } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await updateTopic({\n  client,\n  path: {\n    \"id\": \"resource_123\"\n  },\n  body: {},\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+          },
+          {
+            "lang": "Shell",
+            "label": "cURL",
+            "source": "curl --request PATCH \\\n  --url 'https://nightmail.dev/v1/topics/resource_123' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{}'"
           }
         ]
       }

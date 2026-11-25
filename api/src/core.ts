@@ -406,7 +406,7 @@ const PERMISSION_ROUTES: [PermissionName, RegExp][] = [
   ['sentMail', /^\w+ \/v1\/(?:emails|events|logs|metrics|sender-score|usage|overview|attachments)(?:\/|$)|^\w+ \/v1\/campaigns\/[^/]+\/stats$/],
   ['receivedMail', /^\w+ \/v1\/(?:inbound\/(?:messages|threads|events)|inboxes\/[^/]+\/(?:messages|folders|changes|simulate))(?:\/|$)/],
   ['inboxes', /^\w+ \/v1\/(?:inboxes|inbound\/(?:addresses|retired))(?:\/|$)/],
-  ['audience', /^\w+ \/v1\/(?:contacts|lists|newsletters|segments|contact-imports|audience-query|templates|template-assets|campaign-content-guide|campaigns)(?:\/|$)/],
+  ['audience', /^\w+ \/v1\/(?:contacts|lists|newsletters|segments|topics|contact-imports|audience-query|templates|template-assets|campaign-content-guide|campaigns)(?:\/|$)/],
   ['receivingRules', /^\w+ \/v1\/(?:routing|rules|endpoints|inbox-connections|inbound\/(?:endpoints|policy|domains|overview))(?:\/|$)|^\w+ \/v1\/domains\/[^/]+\/receiving-host$/],
 ];
 /**
@@ -451,7 +451,7 @@ const RESTRICTED_AREAS: [RegExp, string][] = [
   [/^\/v1\/inbound\/addresses(?:\/|$)/, 'Inbound addresses need'], [/^\/v1\/inbound\/domains(?:\/|$)/, 'Inbound domains need'],
   [/^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/, 'Mail client passwords need'], [/^\/v1\/(?:inbound|inboxes)(?:\/|$)/, 'Received mail and inboxes need'],
   [/^\/v1\/billing(?:\/|$)/, 'Billing needs'], [/^\/v1\/campaigns(?:\/|$)/, 'A campaign’s audience and delivery need'],
-  [/^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query)(?:\/|$)/, 'The workspace audience needs'], [/^\/v1\/newsletters(?:\/|$)/, 'Newsletters need'],
+  [/^\/v1\/(?:contacts|lists|segments|topics|contact-imports|audience-query)(?:\/|$)/, 'The workspace audience needs'], [/^\/v1\/newsletters(?:\/|$)/, 'Newsletters need'],
   [/^\/v1\/(?:templates|template-assets)(?:\/|$)/, 'Templates need'], [/^\/v1\/webhooks(?:\/|$)/, 'Webhooks need'], [/^\/v1\/regions(?:\/|$)/, 'Region settings need'],
   [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
 ];
@@ -687,7 +687,7 @@ export const ownerRoute = (method: string, path: string) => {
 };
 /** UNRESTRICTED_KEY_REQUIRED (app.ts): a sender-domain credential is refused these workspace-wide areas. Audience records
  *  have no sender domain, and a campaign's audience and delivery act on the workspace audience (a draft stays editable). */
-export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|newsletters|segments|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
+export const unrestrictedRoute = (path: string) => /^\/v1\/(?:contacts|lists|newsletters|segments|topics|contact-imports|audience-query|settings|webhooks|metrics|sender-score|usage|billing|regions|app-passwords)(?:\/|$)/.test(path)
   || !['state', 'preview', 'preview-image', 'archive', undefined].includes(/^\/v1\/campaigns\/[^/]+\/([^/]+)$/.exec(path)?.[1]);
 // The routes of the guards above that handlers call, for the MCP listing (each verified against REST's answers for reads).
 /** receivingAdmin's routes: routing, rules, endpoints, inbox connections and an address's flow (its route and rule

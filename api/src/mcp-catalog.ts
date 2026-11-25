@@ -278,7 +278,7 @@ const DESCRIPTIONS: Record<string, string> = {
 };
 const PATH_IDS: Record<string, string> = {
   'mcp-connections': 'connectionId', agents: 'agentId', 'agent-tokens': 'tokenId', 'api-keys': 'keyId', keys: 'keyId',
-  contacts: 'contactId', lists: 'listId', newsletters: 'newsletterId', segments: 'segmentId', 'contact-imports': 'importId', templates: 'templateId', 'template-assets': 'assetId',
+  contacts: 'contactId', lists: 'listId', newsletters: 'newsletterId', segments: 'segmentId', topics: 'topicId', 'contact-imports': 'importId', templates: 'templateId', 'template-assets': 'assetId',
   emails: 'emailId', payments: 'paymentId', attachments: 'attachmentId', campaigns: 'campaignId', domains: 'domainId', webhooks: 'webhookId', routes: 'routeId', inboxes: 'inboxId',
 };
 

@@ -53,6 +53,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
   } },
   lists: { label: 'Contact lists', actions: {
     list: 'listContactLists', get: 'getContactList', create: 'createContactList', update: 'updateContactList', delete: 'deleteContactList', members: 'listListMembers', addMembers: 'addListMembers', removeMember: 'removeListMember',
+    topics: 'listTopics', createTopic: 'createTopic', updateTopic: 'updateTopic',
   } },
   newsletters: { label: 'Newsletters: a contact list with a sender. Its issues are ordinary campaigns to that list (campaigns create with audience.listId); there are no issue actions', actions: {
     list: 'listNewsletters', get: 'getNewsletter', create: 'createNewsletter', update: 'updateNewsletter', delete: 'deleteNewsletter',

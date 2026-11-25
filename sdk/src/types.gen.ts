@@ -690,6 +690,30 @@ export type Contact = {
     updatedAt: string;
 };
 
+export type ContactDetail = ContactRead & {
+    /**
+     * Every topic of the workspace, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.
+     */
+    topics: Array<ContactTopic>;
+};
+
+export type ContactTopic = {
+    topicId: string;
+    name: string;
+    /**
+     * Whether sends with this topic reach the contact, as far as the topic goes: the contact’s own choice, or the topic’s default without one. Mail is still sent only while the contact is subscribed to marketing and not suppressed.
+     */
+    subscribed: boolean;
+    /**
+     * true when a choice about this topic was recorded for the contact; false when subscribed is the topic’s default.
+     */
+    chosen: boolean;
+    /**
+     * When the choice was last recorded; null without one.
+     */
+    updatedAt: string | null;
+};
+
 export type ContactListRead = {
     name: string;
     description?: string;
@@ -1028,6 +1052,17 @@ export type CommitContactImportInput = {
         evidence: string;
         policyVersion?: string;
     };
+};
+
+export type Topic = {
+    id: string;
+    workspaceId: string;
+    name: string;
+    description: string;
+    subscribedByDefault: boolean;
+    archivedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
 };
 
 export type AudienceQueryResult = {
@@ -8509,7 +8544,7 @@ export type GetContactResponses = {
     /**
      * Success
      */
-    200: ContactRead;
+    200: ContactDetail;
 };
 
 export type GetContactResponse = GetContactResponses[keyof GetContactResponses];
@@ -8665,6 +8700,10 @@ export type ListContactConsentEventsResponses = {
              * Committed import ID when source is import; null otherwise.
              */
             importId: string | null;
+            /**
+             * The topic this decision is about (updateContactConsent with topicId, or an unsubscribe from mail with a topic); null for marketing as a whole.
+             */
+            topicId: string | null;
             occurredAt: string;
             createdAt: string;
         }>;
@@ -8677,6 +8716,10 @@ export type ListContactConsentEventsResponse = ListContactConsentEventsResponses
 export type UpdateContactConsentData = {
     body: {
         status: 'subscribed' | 'unsubscribed';
+        /**
+         * A topic (listTopics): the decision is about that kind of mail only, and marketing consent stays as it is. Without it, the decision is about all marketing.
+         */
+        topicId?: string;
         source?: string;
         policyVersion?: string;
         evidence?: string;
@@ -9970,6 +10013,224 @@ export type CommitContactImportResponses = {
 };
 
 export type CommitContactImportResponse = CommitContactImportResponses[keyof CommitContactImportResponses];
+
+export type ListTopicsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        /**
+         * true lists the archived topics instead.
+         */
+        archived?: 'true' | 'false';
+    };
+    url: '/v1/topics';
+};
+
+export type ListTopicsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListTopicsError = ListTopicsErrors[keyof ListTopicsErrors];
+
+export type ListTopicsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<Topic>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListTopicsResponse = ListTopicsResponses[keyof ListTopicsResponses];
+
+export type CreateTopicData = {
+    body: {
+        /**
+         * Shown to recipients on the preference page, e.g. "Product updates". Unique among the workspace’s topics that aren’t archived, ignoring case.
+         */
+        name: string;
+        /**
+         * One line under the name on the preference page.
+         */
+        description?: string;
+        /**
+         * What a contact who never chose gets: true sends the topic to everyone subscribed to marketing until they opt out of it; false only to those who opted in. Fixed when the topic is made.
+         */
+        subscribedByDefault?: boolean;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/topics';
+};
+
+export type CreateTopicErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateTopicError = CreateTopicErrors[keyof CreateTopicErrors];
+
+export type CreateTopicResponses = {
+    /**
+     * Success
+     */
+    201: Topic;
+};
+
+export type CreateTopicResponse = CreateTopicResponses[keyof CreateTopicResponses];
+
+export type UpdateTopicData = {
+    /**
+     * subscribedByDefault is fixed when the topic is made: it can’t change who gets the topic without their choice.
+     */
+    body: {
+        name?: string;
+        description?: string;
+        /**
+         * true archives the topic: it leaves the topic list and the preference page, and new sends can’t name it, while sends already launched with it keep skipping the people who opted out of it. false brings it back, with every choice made about it.
+         */
+        archived?: boolean;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/topics/{id}';
+};
+
+export type UpdateTopicErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateTopicError = UpdateTopicErrors[keyof UpdateTopicErrors];
+
+export type UpdateTopicResponses = {
+    /**
+     * Success
+     */
+    200: Topic;
+};
+
+export type UpdateTopicResponse = UpdateTopicResponses[keyof UpdateTopicResponses];
 
 export type QueryAudienceData = {
     body: {

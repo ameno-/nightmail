@@ -11335,6 +11335,58 @@ describe('Contacts and explicit consent', () => {
     error(await http('POST', '/v1/contacts', key.secret, { email }), 409, 'CONTACT_EXISTS');
   });
 
+  test('topics: owners and admins make and archive them, a contact\u2019s choices about them are its consent with a topic, kept in the consent history and events', async t => {
+    const key = await keyFixture(t), reader = await keyFixture(t, { permissions: ['read'] }), db = await fixtureDatabase(t);
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, body), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const name = unique('Product updates');
+    error(await http('POST', '/v1/topics', reader.secret, { name }), 403, 'PERMISSION_DENIED');
+    const updates = await topic({ name, description: 'What we shipped' }), events = await topic({ name: unique('Events'), subscribedByDefault: false });
+    assert.deepEqual([updates.subscribedByDefault, updates.description, updates.archivedAt, events.subscribedByDefault, events.description], [true, 'What we shipped', null, false, '']);
+    error(await http('POST', '/v1/topics', key.secret, { name: name.toUpperCase() }), 409, 'TOPIC_EXISTS');
+    error(await http('PATCH', `/v1/topics/${updates.id}`, key.secret, { subscribedByDefault: false }), 422);
+    error(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { name }), 409, 'TOPIC_EXISTS');
+    error(await http('PATCH', `/v1/topics/${events.id}`, reader.secret, { description: 'Theirs' }), 403, 'PERMISSION_DENIED');
+    assert.equal(ok(await http('PATCH', `/v1/topics/${updates.id}`, key.secret, { description: 'Releases' })).description, 'Releases');
+    const listed = (await allPages('/v1/topics', reader.secret)).map(row => row.id);
+    assert.deepEqual(listed.filter(id => [updates.id, events.id].includes(id)), [updates.id, events.id], 'Topics list oldest first.');
+    const states = async () => Object.fromEntries(ok(await http('GET', `/v1/contacts/${contact.id}`, reader.secret)).topics.filter((row: Json) => [updates.id, events.id].includes(row.topicId)).map((row: Json) => [row.topicId, [row.subscribed, row.chosen]]));
+    assert.deepEqual(await states(), { [updates.id]: [true, false], [events.id]: [false, false] }, 'Without a choice each topic has its default.');
+    const choose = (topicId: string, status: 'subscribed' | 'unsubscribed', extra: Json = {}, bearer = key.secret) => http('POST', `/v1/contacts/${contact.id}/consent`, bearer, { status, topicId, ...extra });
+    assert.equal(ok(await choose(updates.id, 'unsubscribed', { evidence: 'Preference form' })).marketingConsent, 'unknown', 'A topic choice never changes marketing consent.');
+    ok(await choose(events.id, 'subscribed', { evidence: 'Preference form' }));
+    assert.deepEqual(await states(), { [updates.id]: [false, true], [events.id]: [true, true] });
+    const audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, reader.secret));
+    assert.deepEqual(audit.map((row: Json) => [row.topicId, row.status, row.source, row.evidence]), [[updates.id, 'unsubscribed', 'api', 'Preference form'], [events.id, 'subscribed', 'api', 'Preference form']]);
+    // The same choice again changes nothing: no consent record, no event.
+    ok(await choose(events.id, 'subscribed'));
+    assert.equal(page(await http('GET', `/v1/contacts/${contact.id}/consent`, reader.secret)).length, 2);
+    error(await choose(updates.id, 'subscribed'), 409, 'RESUBSCRIBE_CONFIRMATION_REQUIRED');
+    error(await choose('top_missing', 'subscribed'), 422, 'TOPIC_NOT_FOUND');
+    error(await choose(events.id, 'unsubscribed', {}, reader.secret), 403, 'PERMISSION_DENIED');
+    ok(await choose(updates.id, 'subscribed', { confirmResubscribe: true }));
+    assert.deepEqual((await states())[updates.id], [true, true]);
+    // A global subscription isn't stale because a topic decision came after the last global one.
+    assert.equal(ok(await consent(key.secret, contact.id, 'subscribed')).marketingConsent, 'subscribed');
+    const published = async () => (await db.query(`SELECT data->>'topicId' AS topic, data->>'status' AS status FROM operation_events WHERE type = 'contact.subscription_changed' AND data->>'contactId' = $1 AND data ? 'topicId' ORDER BY id`, [contact.id])).rows;
+    for (const deadline = Date.now() + 10_000; (await published()).length < 3 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual((await published()).map(row => [row.topic, row.status]), [[updates.id, 'unsubscribed'], [events.id, 'subscribed'], [updates.id, 'subscribed']], 'Each change is a contact.subscription_changed event with its topic.');
+    // An archived topic leaves the topic list and a contact's topics, takes no new choice, keeps the ones made, and comes back.
+    const archived = ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: true }));
+    assert.ok(archived.archivedAt);
+    assert.ok(!(await allPages('/v1/topics', reader.secret)).some(row => row.id === events.id));
+    assert.ok((await allPages('/v1/topics?archived=true', reader.secret)).some(row => row.id === events.id));
+    assert.equal((await states())[events.id], undefined);
+    error(await choose(events.id, 'unsubscribed'), 422, 'TOPIC_NOT_FOUND');
+    assert.equal((await db.query('SELECT subscribed FROM audience_contact_topics WHERE contact_id = $1 AND topic_id = $2', [contact.id, events.id])).rows[0]?.subscribed, true);
+    // Its name is free while it is archived; it can't come back while another topic has it.
+    const other = await topic({ name: events.name });
+    error(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: false }), 409, 'TOPIC_EXISTS');
+    ok(await http('PATCH', `/v1/topics/${other.id}`, key.secret, { archived: true }));
+    assert.equal(ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: false })).archivedAt, null);
+    assert.deepEqual((await states())[events.id], [true, true]);
+  });
+
   test('two keys in a workspace share one contact and consent history', async t => {
     const first = await keyFixture(t), second = await keyFixture(t);
     const contact = await resource(t, first.secret, '/v1/contacts', { email: address() });
