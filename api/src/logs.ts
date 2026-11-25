@@ -246,19 +246,25 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
       if (found instanceof Response) return found;
       if (found) return c.json(found,200);
     }
-    let aggregate=false;
+    let aggregate=false,seeding=false;
     if(mode==='refresh' && period && c.env.startLogFacetAggregate){
-      const {captureFacetSignature}=await import('./log-facet-aggregate-retention.js');
-      const installed=await withBoundedRead(c,()=>budgetedRead(c.env.db,db=>captureFacetSignature(db),readLimit(COUNTS_READ)),opts);
-      if(installed instanceof Response)return installed;
-      aggregate=installed!==null;
+      const {facetAggregateState}=await import('./log-facet-aggregate-view.js');
+      const state=await withBoundedRead(c,()=>budgetedRead(c.env.db,db=>facetAggregateState(db,scope.a.workspaceId),readLimit(COUNTS_READ)),opts);
+      if(state instanceof Response)return state;
+      aggregate=state==='seeded';seeding=state==='seeding';
     }
     if(!aggregate){
       const rolling = period ? Math.floor(Date.now() / 60_000) * 60_000 - { '24h': 1, '7d': 7, '30d': 30 }[period] * 86_400_000 : fromMs;
       const sized = await withBoundedRead(c, () => budgetedRead(c.env.db,
         db => logFacetSourceRows(db, scope.a.workspaceId, new Date(Math.min(fromMs, rolling)).toISOString(), q.region ?? null), readLimit(COUNTS_READ)), opts);
       if (sized instanceof Response) return sized;
-      if (sized > LOG_FACET_MAX_SOURCE_ROWS) throw readLimit(COUNTS_READ).refusal();
+      // Until this workspace's buckets are seeded (after install, or a new generation after a gap or a
+      // source rewrite), the source fold keeps serving a window it can size. Only a larger one waits.
+      if (seeding && sized <= LOG_FACET_MAX_SOURCE_ROWS) {
+        await (await import('./log-facet-aggregate-view.js')).wakeFacetAggregate(c.env.db,scope.a.workspaceId);
+        c.env.startLogFacetAggregate?.(scope.a.workspaceId);
+      } else if (seeding) aggregate=true;
+      else if (sized > LOG_FACET_MAX_SOURCE_ROWS) throw readLimit(COUNTS_READ).refusal();
     }
     const end = performance.now() + LOG_FACET_WAIT_MS;
     if (signal.aborted) return new Response(null, { status: 499 });

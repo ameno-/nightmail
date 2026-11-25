@@ -17275,6 +17275,15 @@ describe('Sealed Logs facets', () => {
     };
     await seedSent(db,wid,from,'transactional','delivered');await seedInbound(db,wid,from);
     const initial=await get(href('last'));assert.equal(initial.status,200);assert.equal((await initial.json() as Json).counts,null);
+    // Until its buckets are seeded, a window the source fold can size keeps the legacy fold, and the backfill is woken.
+    let folds=0;const cold=new AbortController();runtime.startLogFacetFold=()=>{folds++;cold.abort();};
+    const seeding=await app.fetch(new Request(PUBLIC_ORIGIN+href('refresh'),{headers:{cookie:person.cookie,'x-nightmail-workspace':wid},signal:cold.signal}),runtime);
+    assert.equal(seeding.status,499);assert.equal(folds,1);
+    assert.equal((await db.query('SELECT 1 FROM log_facet_wakes WHERE workspace_id=$1',[wid])).rowCount,1);
+    assert.equal((await db.query('SELECT 1 FROM log_facet_demands WHERE workspace_id=$1',[wid])).rowCount,0);
+    await db.query("DELETE FROM jobs WHERE workspace_id=$1 AND type='logs.facetFold'",[wid]);
+    runtime.startLogFacetFold=()=>assert.fail('an aggregate dashboard must not enroll a legacy source scan');
+    for(let i=0;i<16;i++)if((await runFacetAggregateTurn(drizzle(wp),wid))?.ready)break;
     const owner=await fresh();assert.equal(owner.visibility,'admin');assert.equal(owner.from,from);assert.match(owner.asOf,/\.\d{6}Z$/);
     const live=await get('/v1/logs?counts=true&limit=1&region='+encodeURIComponent(region)+'&from='+encodeURIComponent(from));
     assert.deepEqual(owner.counts,(await live.json() as Json).counts);assert.equal(owner.counts.status.spam,1);

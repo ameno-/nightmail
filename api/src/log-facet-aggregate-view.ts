@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import type { DbExecutor } from './core.js';
 import { parseLogFacetCut, type LogFacetCut, type LogFacetPeriod } from './log-facet-source.js';
-import { facetGenerationIntact } from './log-facet-aggregate-retention.js';
+import { captureFacetSignature, facetGenerationIntact } from './log-facet-aggregate-retention.js';
 
 const hours:Record<LogFacetPeriod,number>={'24h':24,'7d':168,'30d':720};
 const iso=(ms:number)=>new Date(ms).toISOString();
@@ -13,6 +13,17 @@ type AggregateBands={from:string;cut:LogFacetCut;rolling:{from:string;cut:LogFac
 const empty=(asOf:string):LogFacetCut=>({asOf,sent:[],admin:{total:0,spam:0},member:{total:0}});
 export async function hasFacetRegistry(db:DbExecutor) {
   return (await db.execute<{ready:boolean}>(sql`SELECT to_regclass('log_facet_rolling') IS NOT NULL AS ready`)).rows[0]?.ready===true;
+}
+/** 'off' without the complete capture; 'seeded' once the current intact generation has read its source history. */
+export async function facetAggregateState(db:DbExecutor,workspace:string):Promise<'off'|'seeding'|'seeded'> {
+  const signature=await captureFacetSignature(db);if(signature===null)return 'off';
+  const {rows:[r]}=await db.execute<{seeded:boolean}>(sql`SELECT c.sent_done AND p.seeded AS seeded FROM log_facet_coverage c
+    JOIN log_facet_generations g USING(workspace_id,generation) JOIN log_facet_inbound_progress p USING(workspace_id,generation)
+    WHERE c.workspace_id=${workspace} AND g.capture_signature=${signature} AND ${facetGenerationIntact(workspace)}`);
+  return r?.seeded===true?'seeded':'seeding';
+}
+export async function wakeFacetAggregate(db:DbExecutor,workspace:string) {
+  await db.execute(sql`INSERT INTO log_facet_wakes(workspace_id) VALUES(${workspace}) ON CONFLICT(workspace_id) DO NOTHING`);
 }
 export async function readArchivedBucketFacet(db:DbExecutor,workspace:string,region:string|null,period:LogFacetPeriod) {
   const {rows:[r]}=await db.execute<{cut:LogFacetCut;stamp:string;from:string}>(sql`SELECT cut,${utcFacetStamp(sql`as_of`)} AS stamp,
