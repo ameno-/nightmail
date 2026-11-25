@@ -363,8 +363,10 @@ const SETUP_JOB_RECENT_MINUTES = 10;
 export async function awaitBuiltinSetup(runtime: Runtime, wid: string, waitMs = SETUP_WAIT_MS) {
   const parent = runtime.config.builtinDomain;
   if (!runtime.config.multiTenant || !parent) return;
-  let woken = false, host = '';
-  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 200))) {
+  // Checked after 200 ms, then less often, at most once a second: a held send reads the database about 20 times in its
+  // 20 s, not 100, however many are held at once.
+  let woken = false, host = '', pause = 200;
+  for (const deadline = Date.now() + waitMs; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, Math.max(0, Math.min(pause, deadline - Date.now())))), pause = Math.min(1000, pause * 2)) {
     const { rows: [row] } = await runtime.db.execute<{ name: string; pending: boolean; waiting: boolean; parent_ok: boolean }>(sql`SELECT b.name,dc.sending_state='pending' AS pending,
       EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND p.ok) AS parent_ok,
       (${builtinSettingUp(sql`dc`, parent)} OR (dc.sending_state='pending' AND EXISTS (SELECT FROM jobs j WHERE j.id='domain.builtin:'||dc.workspace_id AND j.status IN ('pending','running')
