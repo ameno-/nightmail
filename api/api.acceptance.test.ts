@@ -1,6 +1,6 @@
 import { after, before, describe, test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac, createPublicKey, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature } from 'node:crypto';
+import { createHash, createHmac, createPublicKey, generateKeyPairSync, hkdfSync, randomUUID, sign, verify as verifySignature, X509Certificate } from 'node:crypto';
 import pg from 'pg';
 import { readFile } from 'node:fs/promises';
 import { SnsCertificateState } from './src/operations.js';
@@ -32896,7 +32896,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query('SELECT inbox_seed_folders($1)',[box]);
       runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
       const key=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey, pem=await selfSignedPem(key);
-      t.mock.method(globalThis,'fetch',async (u:RequestInfo|URL)=>{assert.equal(String(u),certUrl);return new Response(pem);});
+      const cert=new X509Certificate(pem);
+      runtime.snsCertificateState!.candidates.set(certUrl,{cert,expiresAt:Date.parse(cert.validTo)});
       const raw=Buffer.from(`From: sender@example.invalid\r\nTo: ${addr}\r\nSubject: receipt wake\r\n\r\nFixture`);
       t.mock.method(S3Client.prototype,'send',async (cmd:any)=>{
         if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:raw.length,ETag:'"fixture"'};
@@ -32917,8 +32918,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         {sendBatch:async (items:unknown[])=>{priority+=items.length;}} as never);
       const feedbackCount=BENCH?1000:8;
       const report=(i:number)=>notify(feedback,{eventType:i%2?'Bounce':'Complaint',mail:{messageId:unique('provider'),sendingAccountId:acct}});
-      await report(0); // The first signed callback fills the certificate cache before the burst.
-      for(let i=1;i<feedbackCount;i+=8)await Promise.all(Array.from({length:Math.min(8,feedbackCount-i)},(_,j)=>report(i+j)));
+      for(let i=0;i<feedbackCount;i+=8)await Promise.all(Array.from({length:Math.min(8,feedbackCount-i)},(_,j)=>report(i+j)));
       assert.deepEqual([priority,starts.length,hints.length],[feedbackCount,0,0]);
       const receipts=Array.from({length:BENCH?20:3},()=>unique('receipt'));
       const incoming=(mid:string)=>({notificationType:'Received',mail:{messageId:mid,source:'sender@example.invalid'},
