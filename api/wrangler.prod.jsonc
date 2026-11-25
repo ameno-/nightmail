@@ -33,6 +33,10 @@
     // deploy without it).
     "NIGHTMAIL_LINK_SAAS_ZONE_ID": "7b0d7306312182f66e12368f93efbb96",
     "NIGHTMAIL_LINK_SAAS_TARGET": "cname.nightmailedge.com",
+    // While the zone's custom hostname quota is full, campaign and marketing mail from a domain whose own link host waits
+    // links here, within guardrails (src/link-domains.ts LINK_FALLBACK). A name of the zone, served by the */* route.
+    // Remove it to refuse that mail instead, saying link hosts are at capacity.
+    "NIGHTMAIL_LINK_FALLBACK_HOST": "links.nightmailedge.com",
     // Mail apps connect to imap.nightmail.dev and smtp.nightmail.dev (the gateway certificate names both). Shown only
     // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.production.yaml).
     "MAILGW_PUBLIC_DOMAIN": "nightmail.dev",

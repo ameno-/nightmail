@@ -3,6 +3,7 @@ import { ApiError, log, type Config, type DbExecutor, type Runtime } from './cor
 import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
 import { LINK_LABEL } from './link-hosts.js';
 import { cname, fqdn } from './public-dns.js';
+import { GOOD_STANDING, RAMP } from './standing-model.js';
 
 /**
  * Where the links Nightmail puts in customer mail live: the unsubscribe link (footer, text part and List-Unsubscribe),
@@ -13,8 +14,14 @@ import { cname, fqdn } from './public-dns.js';
  * installation's target (config.linkHosts.target, cname.nightmailedge.com on Hosted), which is a name in its Cloudflare for
  * SaaS zone. Once public DNS shows the CNAME, the domain's check makes it a custom hostname of that zone (checkLinkHost),
  * and once Cloudflare has issued its certificate, the host is active: mail from the domain links there, served by the
- * Worker on the customer's own name. Hosted refuses campaign and marketing mail from a domain whose link host isn't
- * active (LINK_RECORD_REQUIRED); a self-hosted installation links on its own origin, PUBLIC_URL, instead.
+ * Worker on the customer's own name. With link hosts on, Hosted refuses campaign and marketing mail from a domain whose
+ * link host isn't active (LINK_RECORD_REQUIRED), and self-hosted links on its own origin, PUBLIC_URL, until it is. An
+ * installation without them (NIGHTMAIL_LINK_SAAS_* unset: self-hosted, or Hosted dev, which has no Cloudflare for SaaS
+ * zone of its own) links on PUBLIC_URL, as before link hosts, and has no link records.
+ *
+ * While the zone's custom hostname quota is full, a domain whose CNAME is in place but whose own host isn't active yet
+ * links on the shared fallback host (config.linkHosts.fallbackHost, links.nightmailedge.com; never this installation's own
+ * domain) instead of being refused, within guardrails (linkChoice), and moves to its own host as soon as it is active.
  */
 export const linkHostName = (domain: string) => `${LINK_LABEL}.${domain}`;
 export const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
@@ -27,60 +34,118 @@ export function builtinLinkRefusal(config: Config, host: string, purpose: LinkPu
     ? new ApiError(422, 'BUILTIN_DOMAIN_UNSUPPORTED', 'The built-in domain has no link host for the stop link every forwarded message carries, so it can\u2019t forward. Verify a domain of your own for that.', 'from')
     : builtinRefusal(config, { code: 'BUILTIN_DOMAIN_UNSUPPORTED', field: purpose === 'marketing' ? 'kind' : 'campaign', host });
 }
-export function linkRecordRequired(config: Config, domain: string, field = 'from') {
-  return new ApiError(409, 'LINK_RECORD_REQUIRED', config.linkHosts
-    ? `Campaign and marketing mail from ${domain} needs the domain's link record, which carries its unsubscribe link: add a CNAME at ${linkHostName(domain)} pointing to ${config.linkHosts.target}, then check the domain.`
-    : 'Campaign and marketing mail carries an unsubscribe link on the sending domain\u2019s link host, and this installation has none set up, so it can\u2019t send that mail yet.', field);
+export function linkRecordRequired(target: string, domain: string, field = 'from') {
+  return new ApiError(409, 'LINK_RECORD_REQUIRED', `Campaign and marketing mail from ${domain} needs the domain's link record, which carries its unsubscribe link: add a CNAME at ${linkHostName(domain)} pointing to ${target}, then check the domain.`, field);
+}
+/** The domain's link record is in place and its host isn't active yet, with no shared host to use meanwhile. */
+function linkHostWaiting(domain: string, full: boolean) {
+  return new ApiError(409, 'LINK_RECORD_REQUIRED', `Campaign and marketing mail from ${domain} links on its link host, ${linkHostName(domain)}, which isn\u2019t set up yet: ${full
+    ? 'link hosts are at capacity right now, and it is set up automatically when there is room'
+    : 'its certificate is issued once the domain is verified, usually within a few minutes'}. The CNAME is in place: nothing to change in DNS.`, 'from');
+}
+/** Today's allowance on the shared link host is used up (LINK_FALLBACK.dailyRecipients). */
+export function linkFallbackSpent(domain: string) {
+  return new ApiError(409, 'LINK_RECORD_REQUIRED', `Campaign and marketing mail from ${domain} links on a shared host until ${linkHostName(domain)} is set up, and today\u2019s allowance there (${LINK_FALLBACK.dailyRecipients.toLocaleString('en-US')} recipients) is used up. It resets at midnight UTC, or as soon as ${linkHostName(domain)} is active.`, 'from');
 }
 
-/** The origin of the links in mail from `from` (an address or a domain): the active link host of its domain (or of the
- *  workspace's domain it is under), else PUBLIC_URL when self-hosted. Hosted without one: LINK_RECORD_REQUIRED. */
-export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, purpose: LinkPurpose = 'campaign'): Promise<string> {
+/**
+ * The shared fallback link host's guardrails. Only a workspace in good standing past the new-sender checks uses it: graded,
+ * a score of GOOD_STANDING or more at step ok, out of the growth pace, and no paused connection (an operator's pause or
+ * the abuse path takes it off at once, as every use asks again). Its campaign and marketing recipients linked there are
+ * capped a UTC day at the ramp's first daily batch (RAMP.plan.firstBatch), counted in link_fallback_days.
+ */
+export const LINK_FALLBACK = { dailyRecipients: RAMP.plan.firstBatch } as const;
+const fallbackDay = sql`(now() AT TIME ZONE 'UTC')::date`;
+const fallbackEligible = (workspaceId: string) => sql`(coalesce((SELECT s.phase='graded' AND s.score>=${GOOD_STANDING} AND s.step='ok' AND (s.growth_until IS NULL OR s.growth_until<=now())
+    FROM sender_standing s WHERE s.workspace_id=${workspaceId}),false)
+  AND NOT EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=${workspaceId} AND pc.paused_at IS NOT NULL))`;
+/** Where a message's links go: `fallback` when on the shared host, with how many more campaign and marketing recipients
+ *  the workspace may link there today (`left`, reserved with reserveFallback by whoever sends them). */
+export type LinkChoice = { origin: string; fallback?: { host: string; left: number } };
+/**
+ * Counts `recipients` against today's fallback allowance, all or none: false when they don't fit. Each use is a row of
+ * the workspace's (zero recipients for a forward's stop link), which is what lets the shared host serve its links
+ * afterwards (servesWorkspace), even once the fallback is off. Logged for Glass's activity feed (src/glass.ts).
+ */
+export async function reserveFallback(db: DbExecutor, workspaceId: string, host: string, recipients: number) {
+  const { rows: [row] } = await db.execute<{ recipients: number }>(sql`INSERT INTO link_fallback_days AS f(workspace_id, host, day, recipients)
+    SELECT ${workspaceId}, ${host}, ${fallbackDay}, ${recipients}::int WHERE ${recipients}::int <= ${LINK_FALLBACK.dailyRecipients}
+    ON CONFLICT (workspace_id, host, day) DO UPDATE SET recipients=f.recipients+excluded.recipients WHERE f.recipients+excluded.recipients <= ${LINK_FALLBACK.dailyRecipients}
+    RETURNING f.recipients`);
+  if (row) log('info', { code: 'LINK_FALLBACK_USED', workspaceId, recipients, today: row.recipients });
+  else log('warn', { code: 'LINK_FALLBACK_SPENT', workspaceId, recipients });
+  return !!row;
+}
+/** Hosted, a domain with no active link host: the shared host when its CNAME is in place (its own is waiting for room or
+ *  its certificate) and the workspace passes the guardrails; otherwise refused, saying what it waits for. */
+async function fallbackChoice(runtime: Runtime, db: DbExecutor, workspaceId: string, domain: string): Promise<LinkChoice> {
+  const saas = runtime.config.linkHosts!, host = saas.fallbackHost;
+  const { rows: [state] } = await db.execute<{ dns: string | null; full: boolean; eligible: boolean; used: number }>(sql`SELECT h.public_dns->>'state' AS dns,
+      h.custom_hostname_id IS NULL AND (h.quota_full_at IS NOT NULL OR EXISTS (SELECT 1 FROM link_hosts q WHERE q.quota_full_at > now() - ${QUOTA_BACKOFF}::interval)) AS full,
+      ${fallbackEligible(workspaceId)} AS eligible,
+      coalesce((SELECT sum(f.recipients) FROM link_fallback_days f WHERE f.workspace_id=${workspaceId} AND f.day=${fallbackDay}),0)::int AS used
+    FROM (SELECT 1) one LEFT JOIN link_hosts h ON h.workspace_id=${workspaceId} AND h.domain=${domain}`);
+  if (state?.dns !== 'found') throw linkRecordRequired(saas.target, domain);
+  if (!host || !state.eligible) throw linkHostWaiting(domain, state.full);
+  return { origin: `https://${host}`, fallback: { host, left: LINK_FALLBACK.dailyRecipients - Number(state.used) } };
+}
+
+/** The origin of the links in mail from `from` (an address or a domain): without link hosts, PUBLIC_URL; with them, the
+ *  active link host of its domain (or of the workspace's domain it is under), else PUBLIC_URL when self-hosted. Hosted
+ *  without one: the shared fallback host within its guardrails (fallbackChoice), else LINK_RECORD_REQUIRED. Doesn't count
+ *  the fallback's allowance: a caller sending on it reserves its recipients (reserveFallback). */
+export const linkOrigin = async (runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, purpose: LinkPurpose = 'campaign') =>
+  (await linkChoice(runtime, db, workspaceId, from, purpose)).origin;
+export async function linkChoice(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, purpose: LinkPurpose = 'campaign'): Promise<LinkChoice> {
   const sender = domainOf(from), config = runtime.config;
+  if (!config.linkHosts) return { origin: config.publicUrl.replace(/\/$/, '') };
   // A built-in domain has no DNS of its own to publish a link record in.
   if (isBuiltinHost(config, sender)) throw builtinLinkRefusal(config, sender, purpose);
-  // Self-hosted without link hosts links on its own origin, with nothing to look up. Hosted always looks: only a check
-  // with link hosts on makes an active one, so without them it refuses.
-  if (!config.multiTenant && !config.linkHosts) return config.publicUrl.replace(/\/$/, '');
   // The workspace's domains the sender is, or is under (its link hosts', and its domains' that have none yet), longest first.
   const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname
     FROM (SELECT domain AS name FROM link_hosts WHERE workspace_id=${workspaceId} UNION SELECT name FROM operation_domains WHERE workspace_id=${workspaceId}) d
     LEFT JOIN link_hosts h ON h.workspace_id=${workspaceId} AND h.domain=d.name AND h.status='active'
     WHERE d.name=${sender} OR right(${sender},length(d.name)+1)='.'||d.name ORDER BY length(d.name) DESC`);
   const active = rows.find(row => row.hostname);
-  if (active) return `https://${active.hostname}`;
-  if (config.multiTenant) throw linkRecordRequired(config, rows[0]?.name ?? sender);
-  return config.publicUrl.replace(/\/$/, '');
+  if (active) return { origin: `https://${active.hostname}` };
+  if (!config.multiTenant) return { origin: config.publicUrl.replace(/\/$/, '') };
+  const choice = await fallbackChoice(runtime, db, workspaceId, rows[0]?.name ?? sender);
+  // A forward's stop link counts no recipients, but its use lets the shared host serve the link.
+  if (purpose === 'forward' && choice.fallback) await reserveFallback(db, workspaceId, choice.fallback.host, 0);
+  return choice;
 }
-/** linkOrigin for several marketing messages: one lookup per sender domain. */
-export function linkOrigins(runtime: Runtime, db: DbExecutor, workspaceId: string) {
-  const known = new Map<string, Promise<string>>();
+/** linkChoice for several marketing messages: one lookup per sender domain. */
+export function linkChoices(runtime: Runtime, db: DbExecutor, workspaceId: string) {
+  const known = new Map<string, Promise<LinkChoice>>();
   return (from: string) => {
     const domain = domainOf(from);
-    let origin = known.get(domain);
-    if (!origin) { origin = linkOrigin(runtime, db, workspaceId, domain, 'marketing'); known.set(domain, origin); }
-    return origin;
+    let choice = known.get(domain);
+    if (!choice) { choice = linkChoice(runtime, db, workspaceId, domain, 'marketing'); known.set(domain, choice); }
+    return choice;
   };
 }
 /** The link origin a campaign read found with it (`found`, its active link host's or its launch's), else what is left
- *  without a lookup: refused on Hosted, the installation's own origin when self-hosted. */
+ *  without a lookup: with link hosts, refused on Hosted; otherwise the installation's own origin. */
 export function foundLinkOrigin(config: Config, from: string, found: string | null | undefined) {
   if (found) return found;
+  if (!config.linkHosts) return config.publicUrl.replace(/\/$/, '');
   const sender = domainOf(from);
   if (isBuiltinHost(config, sender)) throw builtinLinkRefusal(config, sender, 'campaign');
-  if (config.multiTenant) throw linkRecordRequired(config, sender);
+  if (config.multiTenant) throw linkRecordRequired(config.linkHosts.target, sender);
   return config.publicUrl.replace(/\/$/, '');
 }
 
 /**
  * Whether a link page (unsubscribe, forwarding) may answer on the request's host for a link of `workspaceId`: this
- * installation's own origin (links sent before link hosts), or that workspace's own active link host. So links.a.com never
- * serves workspace B's links.
+ * installation's own origin (links sent before link hosts), that workspace's own active link host, or the shared fallback
+ * host if the workspace linked on it. So links.a.com never serves workspace B's links.
  */
 export async function servesWorkspace(runtime: Pick<Runtime, 'config' | 'db'>, requestUrl: string, workspaceId: string) {
   const host = new URL(requestUrl).hostname.toLowerCase().replace(/\.$/, ''), config = runtime.config;
   if (!config.linkHosts || [config.publicUrl, ...config.previousOrigins ?? []].some(origin => new URL(origin).hostname === host)) return true;
-  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts WHERE workspace_id=${workspaceId} AND hostname=${host} AND status='active'`)).rowCount;
+  // The shared fallback host serves the links of the workspaces that used it, even once it is off for new mail.
+  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts WHERE workspace_id=${workspaceId} AND hostname=${host} AND status='active'
+    UNION ALL SELECT 1 FROM link_fallback_days WHERE workspace_id=${workspaceId} AND host=${host} LIMIT 1`)).rowCount;
 }
 
 // ----- Custom hostnames (Cloudflare for SaaS) ---------------------------------------------------------------------
@@ -211,12 +276,18 @@ export async function withLinkRecords<T extends Readable>(runtime: Runtime, work
   if (!saas || !reports.length) return reports;
   const { rows } = await runtime.db.execute<{ domain: string; status: 'pending' | 'active'; detail: string | null; public_dns: Seen | null }>(sql`SELECT domain, status, detail, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=ANY(${sql.param(reports.map(report => report.name))}::text[])`);
   const found = new Map(rows.map(row => [row.domain, row]));
+  // A domain whose CNAME is in place while its own host waits links on the shared host meanwhile, if the workspace may.
+  const waiting = rows.some(row => row.status !== 'active' && row.public_dns?.state === 'found');
+  const shared = waiting && !!saas.fallbackHost && runtime.config.multiTenant
+    && !!(await runtime.db.execute<{ ok: boolean }>(sql`SELECT ${fallbackEligible(workspaceId)} AS ok`)).rows[0]?.ok;
   for (const report of reports) {
     // A built-in domain has no DNS of its own; a report that has its link record already keeps it.
     if (isBuiltinHost(runtime.config, report.name) || report.dns.some(record => record.purpose === 'links')) continue;
     const row = found.get(report.name), active = row?.status === 'active', at = report.dns.findLastIndex(record => record.purpose === 'sending') + 1;
     const record: T['dns'][number] = { name: linkHostName(report.name), type: 'CNAME', value: saas.target, purpose: 'links', status: active ? 'verified' : 'pending',
-      ...active ? {} : { note: row?.detail ?? `Campaign and marketing mail from ${report.name} carries its unsubscribe link on this host, and is refused until it verifies. If the domain's DNS is on Cloudflare, set the record to DNS only.`, ...row?.public_dns ? { publicDns: row.public_dns } : {} } };
+      ...active ? {} : { note: shared && row?.public_dns?.state === 'found'
+        ? `${row.detail ?? 'The CNAME is in place.'} Until it is set up, links in campaign and marketing mail from ${report.name} use a shared link host.`.slice(0, 500)
+        : row?.detail ?? `Campaign and marketing mail from ${report.name} carries its unsubscribe link on this host, and is refused until it verifies. If the domain's DNS is on Cloudflare, set the record to DNS only.`, ...row?.public_dns ? { publicDns: row.public_dns } : {} } };
     report.dns.splice(at, 0, record);
   }
   return reports;

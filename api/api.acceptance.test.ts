@@ -928,11 +928,6 @@ before(async () => {
   // Drive the real job handlers directly on an isolated, entirely loopback
   // harness. Never start an extra worker on a remote API/database or live SES.
   const loopback=(url:string)=>['localhost','127.0.0.1','[::1]'].includes(new URL(url).hostname);
-  // Hosted refuses campaign and marketing mail from a domain without an active link host (src/link-domains.ts): every
-  // domain a scenario adds gets one, as if its links CNAME had been checked. The link host scenario removes its own.
-  await authDb.query(`CREATE OR REPLACE FUNCTION acceptance_link_host() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
-      INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES (NEW.workspace_id,lower(NEW.name),'links.'||lower(NEW.name),'active') ON CONFLICT DO NOTHING; RETURN NEW; END $$`);
-  for (const table of ['operation_domains', 'domain_claims']) await authDb.query(`CREATE OR REPLACE TRIGGER acceptance_link_host AFTER INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION acceptance_link_host()`);
   if (identity.simulated && LOCAL_API && String(process.env.ENABLE_LIVE_SES)==='false' && loopback(FIXTURE_DATABASE_URL!) && process.env.S3_ENDPOINT && loopback(process.env.S3_ENDPOINT)) {
     const {nodeRuntime}=await import('./src/adapters/node.js');
     fixtureWorker=nodeRuntime({...process.env,DATABASE_URL:FIXTURE_DATABASE_URL,ENABLE_LIVE_SES:'false',SIMULATED_SES_LATENCY_MS:'0',SIMULATED_SES_DELIVERY_DELAY_MS:'0'});
@@ -941,7 +936,6 @@ before(async () => {
 after(async () => {
   await fixtureWorker?.close();
   if (authDb) {
-    for (const table of ['operation_domains', 'domain_claims']) await authDb.query(`DROP TRIGGER IF EXISTS acceptance_link_host ON ${table}`);
     try { if (manager) await authDb.query('DELETE FROM nightmail_users WHERE id = $1', [manager.userId]); }
     finally { await authDb.end(); }
   }
@@ -18949,7 +18943,7 @@ async function stripeFixture(t: TestContext) {
     import('./src/app.js'), import('./src/adapters/node.js'), import('node:async_hooks'), import('./src/billing/stripe.js'), import('./src/billing/stripe-jobs.js'),
   ]);
   const db = await fixtureDatabase(t);
-  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false', 
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false',
     ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
     STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: STRIPE_TEST_WEBHOOK_SECRET, STRIPE_API_BASE: STRIPE_TEST_BASE,
     S3_BUCKET: 'synthetic-billing-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
@@ -21748,7 +21742,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
     ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
-    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', 
+    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false',
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
   const runtime = instance.runtime;
@@ -40685,7 +40679,6 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await hosts(),[own,own,own]);
       // The domain's link record, after its sending records: missing, then found while Cloudflare issues the certificate.
       const domainId=unique('dom');await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[domainId,wid,'example.com',REGION]);
-      await db.query("DELETE FROM link_hosts WHERE workspace_id=$1 AND domain='example.com'",[wid]); // The fixture's trigger made it active.
       // Self-hosted domain reads ask SES (mocked above); mail stays simulated.
       const live=async(method:string,path:string)=>{Object.assign(runtime.config,{liveEnabled:true,aws:{accessKeyId:'synthetic-fixture',secretAccessKey:'synthetic-fixture'}});
         try{return ok(await local(method,path));}finally{runtime.config.liveEnabled=false;}};
@@ -40742,11 +40735,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
       await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[unique('dom'),wid,domain,REGION]);
+      await db.query("INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES ($1,$2,'links.'||$2,'active')",[wid,domain]);
       await gradedSender(db,wid,10000);
       const list=ok(await local('POST','/v1/lists',{name:unique('legacy-links')}),201);
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'legacy-'||n||'@example.net','subscribed' FROM generate_series(1,3)n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`,[wid,list.id]);
-      // Launched with the link host the fixture's trigger made active, then frozen as a review from before link hosts is: no
+      // Launched with its link host active, then frozen as a review from before link hosts is: no
       // link origin, and the sending domain's link host not active.
       const c=ok(await local('POST','/v1/campaigns',{name:'Legacy links',from,subject:'Legacy',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201),path=`/v1/campaigns/${c.id}`;
       ok(await local('POST',`${path}/send`,{revision:c.revision}),202);
@@ -40818,6 +40812,89 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await checkLinkHost(runtime,wid,'full2.example');
         assert.deepEqual(posted,['links.full.example','links.full2.example'],'After the hour, the next check asks again.');
       } finally { globalThis.fetch=prior; await db.query('UPDATE link_hosts SET quota_full_at=NULL WHERE quota_full_at IS NOT NULL'); }
+    });
+  });
+
+  test('link hosts: while a domain waits for its own, a workspace in good standing links campaign and marketing mail on the shared host within its daily allowance, then moves to its own',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run,fetch:page})=>{
+      const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:Json[]=[];
+      t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){if(cmd instanceof SendEmailCommand)delivered.push(cmd.input);return (send as any).call(this,cmd,...rest);});
+      const {linkChoice,withLinkRecords,LINK_FALLBACK}=await import('./src/link-domains.js'),{readActivity}=await import('./src/glass.js');
+      const wid=runtime.config.workspaceId,pool='111122223333',domain='fallback-links.example',from=`news@${domain}`,shared='links.fallback-fixture.example';
+      const saas={zoneId:'0'.repeat(32),token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'};
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'},linkHosts:{...saas,fallbackHost:shared}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[unique('dom'),wid,domain,REGION]);
+      await gradedSender(db,wid,10000);
+      // The domain's CNAME is in place and Cloudflare refused its custom hostname for want of room (1405).
+      const capacity='The CNAME is in place. Link hosts are at capacity right now; this one is set up automatically when there is room, with nothing to do on your side.';
+      await db.query(`INSERT INTO link_hosts(workspace_id,domain,hostname,status,detail,public_dns,quota_full_at) VALUES ($1,$2,'links.'||$2,'pending',$3,$4::jsonb,now())`,[wid,domain,capacity,JSON.stringify({state:'found',values:[],checkedAt:new Date().toISOString()})]);
+      const list=ok(await local('POST','/v1/lists',{name:unique('fallback-links')}),201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'fallback-'||n||'@example.net','subscribed' FROM generate_series(1,3)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`,[wid,list.id]);
+      const used=async()=>Number((await db.query('SELECT coalesce(sum(recipients),0)::int AS n FROM link_fallback_days WHERE workspace_id=$1 AND host=$2',[wid,shared])).rows[0].n);
+      // Each message as SES got it: the host of its footer's unsubscribe link, which List-Unsubscribe matches, and nothing naming this installation.
+      const hostsOf=(mail:Json[])=>mail.map(input=>{
+        const content=input.Content.Simple,all=JSON.stringify(input.Content),own=new URL(PUBLIC_ORIGIN).host;
+        assert.ok(!all.includes(own)&&!all.includes('nightmail.dev'),all);
+        const footer=/https:\/\/([^/\s"]+)\/unsubscribe\/u_[0-9a-f]{64}/.exec(content.Body.Text.Data)!;
+        assert.equal(content.Headers.find((h:Json)=>h.Name==='List-Unsubscribe').Value,`<${footer[0]}>`);
+        return footer[1];
+      });
+      const launch=async()=>{const c=ok(await local('POST','/v1/campaigns',{name:unique('fallback-links'),from,subject:'Shared',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+        ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);return c;};
+      // The domain page says so, in plain words.
+      const [report]=await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]);
+      assert.equal(report.dns[0].note,`${capacity} Until it is set up, links in campaign and marketing mail from ${domain} use a shared link host.`);
+      // A campaign: its review freezes no link host, its release reserves its recipients, and every copy links on the shared host.
+      const first=await launch();
+      assert.equal((await db.query("SELECT draft ? 'linkOrigin' AS frozen FROM sending_campaign_reviews WHERE campaign_id=$1",[first.id])).rows[0].frozen,false);
+      await run('campaign.run');await run('email.dispatch');
+      assert.deepEqual(hostsOf(delivered.splice(0)),[shared,shared,shared]);
+      assert.equal(await used(),3);
+      // Marketing mail too, counted the same way.
+      ok(await local('POST','/v1/emails/send',{from,to:'fallback-1@example.net',subject:'Shared',html:'<p>Hello</p>',text:'Hello',kind:'marketing'}),202);
+      await run('email.dispatch');
+      const [marketing]=delivered.splice(0);assert.deepEqual(hostsOf([marketing]),[shared]);assert.equal(await used(),4);
+      // The shared host serves the links of the workspaces that linked there, and only theirs.
+      const link=/https:\/\/[^\s"]+\/unsubscribe\/u_[0-9a-f]{64}/.exec(marketing.Content.Simple.Body.Text.Data)![0];
+      assert.equal((await page(new Request(link,{headers:{accept:'text/html'}}))).status,200);
+      const foreign=`u_${'e'.repeat(64)}`;
+      await db.query("INSERT INTO operation_unsubscribe_tokens(token_hash,workspace_id,email) VALUES (encode(sha256(convert_to($1,'UTF8')),'hex'),'ws_link_never_shared','someone@example.net')",[foreign]);
+      assert.equal((await page(new Request(`https://${shared}/unsubscribe/${foreign}`,{headers:{accept:'text/html'}}))).status,404);
+      // Glass's activity feed shows the workspace on the shared host today.
+      assert.ok((await readActivity(runtime)).events.some(e=>e.kind==='link_fallback'&&e.workspace?.id===wid&&e.subject===shared&&e.detail==='4'));
+      // Today's allowance used up: marketing mail is refused, saying so, and a campaign waits for the next UTC day, releasing no one.
+      await db.query('UPDATE link_fallback_days SET recipients=$3 WHERE workspace_id=$1 AND host=$2',[wid,shared,LINK_FALLBACK.dailyRecipients]);
+      assert.match(error(await local('POST','/v1/emails/send',{from,to:'fallback-2@example.net',subject:'Shared',html:'<p>Hello</p>',text:'Hello',kind:'marketing'}),409,'LINK_RECORD_REQUIRED').message,/allowance there \(10,000 recipients\) is used up/);
+      const second=await launch();await run('campaign.run');
+      const held=ok(await local('GET',`/v1/campaigns/${second.id}`));
+      assert.deepEqual([held.delivery.expanded,held.delivery.waiting.reason,new Date(held.delivery.waiting.until).toISOString().slice(11)],[0,'link_record','00:00:00.000Z']);
+      await db.query('UPDATE link_fallback_days SET recipients=4 WHERE workspace_id=$1 AND host=$2',[wid,shared]);
+      // Off the guardrails, it waits for its own host, saying why: below good standing, a paused connection (an operator's
+      // pause or the abuse path), or the fallback turned off.
+      const waits=/links\.fallback-links\.example, which isn’t set up yet: link hosts are at capacity right now/;
+      await db.query("UPDATE sender_standing SET step='warn' WHERE workspace_id=$1",[wid]);
+      await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:waits});
+      await db.query("UPDATE sender_standing SET step='ok' WHERE workspace_id=$1",[wid]);
+      await db.query('UPDATE provider_connections SET paused_at=now() WHERE id=$1',[wid]);
+      await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:waits});
+      await db.query('UPDATE provider_connections SET paused_at=NULL WHERE id=$1',[wid]);
+      runtime.config.linkHosts=saas;
+      await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:waits});
+      runtime.config.linkHosts={...saas,fallbackHost:shared};
+      assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),{origin:`https://${shared}`,fallback:{host:shared,left:LINK_FALLBACK.dailyRecipients-4}});
+      // A domain whose CNAME isn't in place gets no shared host: it still needs its record.
+      await db.query("UPDATE link_hosts SET public_dns=jsonb_set(public_dns,'{state}','\"missing\"') WHERE workspace_id=$1 AND domain=$2",[wid,domain]);
+      await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:/add a CNAME at links\.fallback-links\.example/});
+      // Its own host active: the waiting campaign moves to it, from its next copy on.
+      await db.query("UPDATE link_hosts SET status='active',public_dns=jsonb_set(public_dns,'{state}','\"found\"') WHERE workspace_id=$1 AND domain=$2",[wid,domain]);
+      await db.query("UPDATE jobs SET available_at=now() WHERE id=$1",[`campaign.run:${second.id}`]);
+      await run('campaign.run');await run('email.dispatch');
+      assert.deepEqual(hostsOf(delivered.splice(0)),[`links.${domain}`,`links.${domain}`,`links.${domain}`]);
+      assert.equal(await used(),4,'Its own host counts nothing against the allowance.');
     });
   });
 

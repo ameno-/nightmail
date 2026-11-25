@@ -31,7 +31,7 @@ import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { foundLinkOrigin, linkOrigin, linkOrigins } from './link-domains.js';
+import { domainOf, foundLinkOrigin, linkChoice, linkChoices, linkFallbackSpent, linkOrigin, reserveFallback } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -1851,10 +1851,13 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   // without one is not refused: its caller writes the whole message and may include the address itself.
   const marketing = mails.some(m => m.kind === 'marketing'), db = call.db ?? call.runtime.db;
   const address = marketing ? await workspacePostalAddress(call.runtime, db, a.workspaceId) : null;
-  // Its unsubscribe link goes on the sending domain's link host (src/link-domains.ts): on Hosted without one, the send is refused.
-  const origin = marketing ? linkOrigins(call.runtime, db, a.workspaceId) : undefined;
-  const origins = origin ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? origin(m.from).catch(error => { throw atItem(error, batch ? i : undefined); }) : undefined)) : [];
-  const out = await directMessages(call.runtime, mails, batch, address, origins);
+  // Its unsubscribe link goes on the sending domain's link host (src/link-domains.ts): on Hosted without one, the shared
+  // fallback host within its guardrails, whose daily allowance these recipients count against, else the send is refused.
+  const choose = marketing ? linkChoices(call.runtime, db, a.workspaceId) : undefined;
+  const choices = choose ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? choose(m.from).catch(error => { throw atItem(error, batch ? i : undefined); }) : undefined)) : [];
+  const shared = choices.flatMap((choice, i) => choice?.fallback ? [{ host: choice.fallback.host, from: mails[i]!.from, recipients: hostedCost(mails[i]!.to, mails[i]!.cc, mails[i]!.bcc) }] : []);
+  if (shared.length && !(await reserveFallback(db, a.workspaceId, shared[0]!.host, shared.reduce((n, s) => n + s.recipients, 0)))) throw linkFallbackSpent(domainOf(shared[0]!.from));
+  const out = await directMessages(call.runtime, mails, batch, address, choices.map(choice => choice?.origin));
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   if (platformTestTo) for (const m of out) m.platformTestTo = platformTestTo;
   // A reply by header joins the conversation it answers only when its sender can read that message.
@@ -2097,7 +2100,11 @@ async function campaignWithFooter(runtime: Runtime, a: Actor, campaignId: string
       (SELECT 'https://'||h.hostname FROM link_hosts h WHERE h.workspace_id=${a.workspaceId} AND h.status='active' AND (h.domain=${sender} OR right(${sender},length(h.domain)+1)='.'||h.domain) ORDER BY length(h.domain) DESC LIMIT 1))` })
     .from(campaigns).where(campaignWhere(a, campaignId));
   if (!found) return notFound('Campaign');
-  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice, ...found.link ? { linkOrigin: found.link } : {} } };
+  // Without one, the shared fallback host its copies would link on now, if it may (src/link-domains.ts): its tests and
+  // previews show it. Nothing is reserved: a test is transactional, and its copies reserve as they are released.
+  const link = found.link ?? (runtime.config.linkHosts?.fallbackHost && !found.row.draft.requiredNotice
+    ? (await linkChoice(runtime, runtime.db, a.workspaceId, found.row.draft.from).catch(() => null))?.origin : undefined);
+  return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice, ...link ? { linkOrigin: link } : {} } };
 }
 const displayAudience = (runtime: Runtime, a: Actor, draft: CampaignDraft, spec: z.infer<typeof AudienceSpec>) =>
   wrapModuleLoad(() => import('./audience.js')).then(m => m.countCampaignAudienceForDisplay(runtime.db, a, spec, draft.requiredNotice === true));
@@ -2920,8 +2927,10 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   if (!postalAddress) throw postalAddressRequired();
   // The host of the links Nightmail adds (src/link-domains.ts), frozen in the review like the postal address, so every
   // copy of this launch links the same one. Refused here, after the sender's own checks, when the sending domain has no
-  // active link host on Hosted. A required notice has no unsubscribe link.
-  const links = draft.requiredNotice ? undefined : await linkOrigin(runtime, db, a.workspaceId, row.draft.from);
+  // active link host on Hosted and may not use the shared one. The shared one is never frozen: each copy asks when it is
+  // made, so the campaign moves to the domain's own host as soon as it is active. A required notice has no unsubscribe link.
+  const choice = draft.requiredNotice ? undefined : await linkChoice(runtime, db, a.workspaceId, row.draft.from);
+  const links = choice && !choice.fallback ? choice.origin : undefined;
   const reviewId = id('review'), propertyKeys = placeholderKeys(draft, rendered);
   const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
   const smallList = await audienceMod.isSmallAudienceList(db, a, draft.audience.listId);
@@ -4072,12 +4081,17 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     await runtime.db.execute(holdCampaign(ref, reason, until));
     throw new JobDeferred(until, payload);
   };
-  // A campaign launched before link hosts froze none: it waits, without releasing anyone, until its sending domain's link
-  // host is active (src/link-domains.ts). The check that makes it active wakes the run (wakeLinkRecordHolds); otherwise
-  // it looks again every 15 minutes, as the background link check does.
+  // A campaign whose review froze no link host (launched before link hosts, or on the shared fallback host) asks each
+  // release (src/link-domains.ts). With none to use, it waits without releasing anyone until its sending domain's link
+  // host is active: the check that makes it active wakes the run (wakeLinkRecordHolds); otherwise it looks again every 15
+  // minutes, as the background link check does. On the shared host, it releases at most what is left of the workspace's
+  // allowance there today (reserved with the release), and waits for the next UTC day once it is used up.
+  let fallback: { host: string; left: number } | undefined;
   if (!row.reviewDraft!.linkOrigin && !row.reviewDraft!.requiredNotice) {
-    const missing = await linkOrigin(runtime, runtime.db, a.workspaceId, row.reviewDraft!.from).then(() => false, error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return true; throw error; });
-    if (missing) return hold('link_record', new Date(nowMs + LINK_RECORD_RECHECK_MS).toISOString());
+    const choice = await linkChoice(runtime, runtime.db, a.workspaceId, row.reviewDraft!.from).catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return null; throw error; });
+    if (!choice) return hold('link_record', new Date(nowMs + LINK_RECORD_RECHECK_MS).toISOString());
+    fallback = choice.fallback;
+    if (fallback && fallback.left <= 0) return hold('link_record', new Date(Math.ceil((nowMs + 1) / DAY_MS) * DAY_MS).toISOString());
   }
   // A stale/nonexistent sample is not an unlimited allowance. When a known quota (or a
   // previously held campaign) needs a new sample, use the dispatcher's elected cache refresher.
@@ -4259,7 +4273,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (sesAllowance <= 0) return sesCapacity <= shareCapacity ? 'ses_daily_quota' as const : 'hosted_daily_quota' as const;
     const cBuf = campaignBuffer(buffer!.rate), wBuf = workspaceBuffer(buffer!.rate);
     const bufRoom = Math.min(cBuf - buffer!.campaign, wBuf - buffer!.total);
-    const demand = Math.min(CAMPAIGN_EXPAND_ROWS, campaign.total - campaign.expanded, paceLeft, sesAllowance, rateAllowance, probeLeft, screened, rampLeft);
+    const demand = Math.min(CAMPAIGN_EXPAND_ROWS, campaign.total - campaign.expanded, paceLeft, sesAllowance, rateAllowance, probeLeft, screened, rampLeft, fallback?.left ?? Number.POSITIVE_INFINITY);
     const txMinRelease = Math.min(demand, Math.floor(cBuf / 4));
     const capacity = Math.min(demand, bufRoom);
     if (capacity <= 0 || (buffer!.campaign > 0 && bufRoom < txMinRelease)) {
@@ -4312,6 +4326,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     // The review owns its assets. Only one variable-size bind per release page; no
     // per-recipient headers, base content, asset IDs, or denormalized attachment links.
     const prepared=recipients.map(r=>({id:rowId('email'),ordinal:r.ordinal,address:r.recipient.email,subject:r.subject??draft.subject}));
+    // On the shared link host: the release counts against today's allowance there, or waits a minute to look again (a
+    // marketing send or another campaign took what was left since this step read it).
+    if (fallback && prepared.length && !(await reserveFallback(db, a.workspaceId, fallback.host, prepared.length))) throw new JobDeferred(new Date(Date.now() + 60_000).toISOString(), payload);
     const tpl = row.reviewScreen?.template;
     const stub={kind:'marketing',deferredCampaign:true,...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
     if (prepared.length) await db.execute(sql`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,scheduled_at)

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router'
-import { BadgeCheck, CirclePause, Globe, Megaphone, Send, ShieldAlert, ShieldCheck, TriangleAlert, UserPlus, ZapOff, type LucideIcon } from 'lucide-react'
+import { BadgeCheck, CirclePause, Globe, Link2, Megaphone, Send, ShieldAlert, ShieldCheck, TriangleAlert, UserPlus, ZapOff, type LucideIcon } from 'lucide-react'
 import { ErrorState, PageHeader, StatusBadge, Tooltip, type Tone } from '../../components/ui'
 import { useTween } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -163,7 +163,7 @@ function board(g: Glass): GlassBoardFill {
 const FEED = 50
 const methods: Record<string, string> = { google: 'Google', github: 'GitHub', email: 'Email link', password: 'Password' }
 const icons: Record<GlassEvent['kind'], LucideIcon> = { signup: UserPlus, first_send: Send, domain_verified: BadgeCheck, builtin_ready: Globe, campaign_launched: Megaphone, campaign_paused: CirclePause,
-  standing: ShieldAlert, breaker: ZapOff, alert: TriangleAlert }
+  standing: ShieldAlert, breaker: ZapOff, alert: TriangleAlert, link_fallback: Link2 }
 const stepNames: Record<string, string> = { ok: 'back to OK', notice: 'on notice', warn: 'warned', restrict: 'restricted', pause: 'paused' }
 function eventText(e: GlassEvent): [ReactNode, ReactNode] {
   const who = <b>{e.workspace?.name ?? 'A new account'}</b>
@@ -179,6 +179,7 @@ function eventText(e: GlassEvent): [ReactNode, ReactNode] {
     case 'standing': { const [from, to] = (e.detail ?? '').split('>'); return [<>{who} {stepNames[to ?? ''] ?? to}</>, [`was ${from === 'ok' ? 'OK' : stepNames[from ?? '']?.replace('back to ', '') ?? from}`, e.subject].filter(Boolean).join(' · ')] }
     case 'breaker': return [<><b>Built-in domains</b> stopped</>, `${e.subject} breaker tripped`]
     case 'alert': return [<b>{e.subject}</b>, e.detail]
+    case 'link_fallback': return [<>{who} linked on the shared host</>, [e.subject, e.detail && `${plural(Number(e.detail), 'recipient')} today`].filter(Boolean).join(' · ')]
   }
 }
 const order = (a: GlassEvent, b: GlassEvent) => a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0

@@ -21,6 +21,19 @@ CREATE TABLE link_hosts (
 );
 CREATE INDEX link_hosts_custom_hostname ON link_hosts(custom_hostname_id) WHERE custom_hostname_id IS NOT NULL;
 CREATE INDEX link_hosts_quota_full ON link_hosts(quota_full_at) WHERE quota_full_at IS NOT NULL;
+-- The shared fallback link host's use (src/link-domains.ts reserveFallback): while the custom hostname quota is full, a
+-- domain whose own host waits links campaign and marketing mail on the shared host, at most LINK_FALLBACK.dailyRecipients
+-- a workspace a UTC day. One row a workspace, host and day of use (recipients 0 for forwards' stop links); kept, as a
+-- workspace's row is what lets the host keep serving the links it sent there. first_at puts the use in Glass's activity.
+CREATE TABLE link_fallback_days (
+  workspace_id text NOT NULL,
+  host text NOT NULL CHECK (host = lower(host) AND length(host) <= 253),
+  day date NOT NULL,
+  recipients int NOT NULL DEFAULT 0 CHECK (recipients >= 0),
+  first_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (workspace_id, host, day)
+);
+CREATE INDEX link_fallback_days_first ON link_fallback_days(first_at);
 
 -- A campaign launched before link hosts waits for its sending domain's link record instead of failing its recipients
 -- (src/sending.ts releaseStep): waiting_reason 'link_record', beside migration 500's 'ramp'. Same lock_timeout retry as 430.
