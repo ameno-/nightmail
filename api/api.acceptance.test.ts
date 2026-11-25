@@ -7780,16 +7780,24 @@ describe('Hosted MCP OAuth and tools', () => {
       for (let i = 0; i < 2; i++) ids.push(ok(await local('POST', '/v1/emails/send', mail()), 202).id);
       await db.query('UPDATE sending_emails SET actor_key_id=$1 WHERE id=ANY($2)', [grant, ids]);
       // The grant is revoked right after the first group's claim, before the second group is claimed.
-      const query = db.query as (...args: unknown[]) => Promise<unknown>; let claims = 0;
+      const query = db.query as (...args: unknown[]) => Promise<pg.QueryResult>; const claims: string[] = [];
       t.mock.method(db, 'query', async function (this: pg.Client, ...args: unknown[]) {
         const result = await query.apply(this, args);
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
-        if (text.includes('mcp_allowed boolean') && ++claims === 1) await query.call(this, 'UPDATE nightmail_resource_grants SET revoked=true WHERE id=$1', [grant]);
+        if (text.includes('mcp_allowed boolean')) {
+          // The regional dispatcher can also claim mail left by other scenarios. Revoke only after this grant's first claim.
+          const own = result.rows.filter(row => ids.includes(row.id));
+          if (own.length) {
+            assert.equal(own.length, 1, 'One claim group per email.');
+            claims.push(own[0]!.id);
+            if (claims.length === 1) await query.call(this, 'UPDATE nightmail_resource_grants SET revoked=true WHERE id=$1', [grant]);
+          }
+        }
         return result;
       } as typeof db.query);
       await runDispatcher(runtime, { region: REGION, sendConcurrency: 1 });
-      assert.equal(claims, 2, 'One claim group per email.');
-      const rows = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=ANY($1)', [ids])).rows.map(row => `${row.status}:${row.error_code}`).sort();
+      assert.deepEqual([...claims].sort(), [...ids].sort(), 'Each grant-owned email was claimed exactly once.');
+      const rows = (await db.query('SELECT status,error_code FROM sending_emails WHERE id=ANY($1) ORDER BY array_position($1::text[], id)', [claims])).rows.map(row => `${row.status}:${row.error_code}`);
       assert.deepEqual(rows, ['accepted:null', 'canceled:ORIGIN_KEY_REVOKED']);
     });
   });
@@ -9215,7 +9223,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
       // Support actions (src/support-actions.ts). Shop has an owner, an admin and a member, a sending and two inbound
       // webhooks with deliveries, a received message and a campaign that is releasing recipients.
-      const boss = await sessionFixture(t), deputy = await sessionFixture(t), clerk = await sessionFixture(t), shop = unique('shop-ws');
+      const boss = await sessionFixture(t), deputy = await sessionFixture(t), clerk = await sessionFixture(t), shop = unique('shop-ws-7a1f');
       await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1)', [shop]);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'admin'),($6,$2,$7,'member')`,
         [unique('mem'), shop, boss.userId, unique('mem'), deputy.userId, unique('mem'), clerk.userId]);
@@ -9261,7 +9269,7 @@ describe('Hosted MCP OAuth and tools', () => {
         // In plain words: the webhook by its name and site (never its URL), when the delivery was, and how it ended.
         const minute = '[A-Z][a-z]{2} \\d{1,2}, \\d\\d:\\d\\d UTC', quoted = (value: string) => JSON.stringify(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         assert.match(proposed.summary, new RegExp(`^Retry the email\\.delivered delivery from ${minute} to your sending webhook "Order events" at "example\\.com", in the workspace ${quoted(shop)}\\. It failed after 3 attempts\\.$`));
-        assert.doesNotMatch(proposed.summary, new RegExp(`${failed}|hooks\\.|7a1f`), 'No delivery ID, and nothing of the URL but its site.');
+        assert.doesNotMatch(proposed.summary.replace(JSON.stringify(shop), ''), new RegExp(`${failed}|hooks\\.|7a1f`), 'Outside the required workspace ID: no delivery ID, and nothing of the URL but its site.');
         assert.equal(Date.parse(proposed.expiresAt) - Date.parse(proposed.createdAt), 24 * 3_600_000);
         assert.deepEqual((await db.query('SELECT conversation_id, user_id, workspace_id FROM support_actions WHERE id = $1', [proposed.id])).rows[0], { conversation_id: id, user_id: boss.userId, workspace_id: shop });
         assert.equal((await propose(id, retry, 200)).id, proposed.id, 'Proposing the same change again answers the open proposal.');
@@ -29482,8 +29490,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     // With it: each message's request goes to the second classifier under its key's model, and its row is written.
     const first = batch(3); await worker.queue(first, env('jevf-fixture-key'));
     assert.deepEqual([first.state, calls], [{ acked: 1, retried: 0 }, 3]);
-    assert.deepEqual(asked.map(body => JSON.parse(body)), Array(3).fill({ model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { harm: {} } }));
-    assert.deepEqual((await stored()).map(row => [row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged, row.jevf_model]), Array(3).fill([0.9, true, 'ok', 0.2, false, 'jevf']));
+    assert.equal(asked.length, 3);
+    for (const body of asked) assert.deepEqual(JSON.parse(body), { model: 'jevf', state: { email: { subject: 'Private subject', body: 'Private body' } }, questions: { harm: {} } });
+    const firstRows = await stored(); assert.equal(firstRows.length, 3);
+    for (const row of firstRows) assert.deepEqual([row.jev_score, row.jev_flagged, row.jevf_outcome, row.jevf_score, row.jevf_flagged, row.jevf_model], [0.9, true, 'ok', 0.2, false, 'jevf']);
     // The same messages delivered again: no request, no second row. A message delivered again that never had a row: lost.
     await worker.queue({ ...first, messages: first.messages.map(message => ({ ...message, attempts: 2 })) }, env('jevf-fixture-key'));
     const again = batch(1, 2); await worker.queue(again, env('jevf-fixture-key'));
@@ -42598,7 +42608,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const done = await view(), again = await view(), exact = nonzero(await truth());
       assert.equal(done.state, 'done');
       assert.equal(exact.total, tail);
-      assert.deepEqual([nonzero(done.counts), nonzero(again.counts)], [exact, exact], 'A finished campaign reports exact counts immediately.');
+      for (const poll of [done, again]) assert.deepEqual(nonzero(poll.counts), exact, 'A finished campaign reports exact counts immediately.');
       assert.equal(counted(), 0, 'A finished campaign reads tallies without scanning sending_emails.');
       // Unused window variable check preserved for reference: fallback uses CAMPAIGN_PROGRESS_CACHE_SECONDS.
       assert.ok(window > 0);
