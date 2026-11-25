@@ -543,7 +543,14 @@
                   "closed",
                   "off"
                 ],
-                "description": "ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: turned off by the operator."
+                "description": "ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused)."
+              },
+              "paused": {
+                "type": "boolean",
+                "enum": [
+                  true
+                ],
+                "description": "Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving."
               },
               "scope": {
                 "type": "string",
