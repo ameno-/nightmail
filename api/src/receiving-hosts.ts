@@ -8,7 +8,7 @@ import { queueReconcile } from './mailbox-setup.js';
 import { reservedPlatformName } from './domain-claims.js';
 import { derivedReadiness, dnsUnavailable, hostedDomain, recheckJob, type HostedDomain } from './operations.js';
 import { establishedHost, inspectReceivingHost, type ReceivingIssue } from './receiving-host.js';
-import { claimProjection, hostGraceStart } from './states.js';
+import { claimProjection, claimSends, hostGraceStart } from './states.js';
 import { productName } from './brand.js';
 
 // A domain receives on a set of hosts: its root and any of its subdomains, at once, each added and removed on its own.
@@ -219,6 +219,32 @@ export async function addHost(c: Ctx, domain: Domain, input: AddInput) {
   const row = await hostedDomain(c.env.db, domain.workspaceId, domain.id);
   if (!row) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Connect ${domain.name} to a sending connection before adding receiving hosts.`);
   return addHosted(c, domain.workspaceId, row, input);
+}
+/**
+ * Hosted: an address created at a host that doesn't receive mail yet, on one of the workspace's own verified domains (the
+ * domain itself or a subdomain of it), turns receiving on at that host first, exactly as adding the host does: the same
+ * DNS checks, the same check queued. Nothing is moved without consent: a host whose mail another provider receives today
+ * is refused, as is a domain that isn't verified, and every refusal names the call that fixes it and the MX record to
+ * publish. `mayAddHosts`: the caller may make lasting host changes (not a temporary agent token). Returns the domain's ID.
+ */
+export async function receiveForAddress(c: Ctx, wid: string, host: string, address: string, mayAddHosts: boolean) {
+  const { rows: [own] } = await c.env.db.execute<{ id: string; name: string; sends: boolean }>(sql`SELECT d.id,d.name,${claimSends()} AS sends FROM operation_domains d
+    JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
+    WHERE d.workspace_id=${wid} AND (d.name=${host} OR right(${host},length(d.name)+1)='.'||d.name) ORDER BY length(d.name) DESC LIMIT 1`);
+  if (!own) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `${host} isn’t on one of this workspace’s domains. Add the domain with POST /v1/domains and publish its DNS records, then create ${address}.`, 'address');
+  if (!own.sends) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `${own.name} isn’t verified yet. Publish the DNS records GET /v1/domains/${own.id} lists; once it verifies, create ${address} again.`, 'address');
+  const row = await hostedDomain(c.env.db, wid, own.id);
+  if (!row) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `Connect ${own.name} to a sending connection before creating addresses on it.`, 'address');
+  const mx = `${host} MX 10 ${derivedReadiness(row).dns.find(r => r.purpose === 'receiving')?.value ?? expectedMx(host, row.region).value}`;
+  const call = (confirm: boolean) => `POST /v1/inbound/domains/${own.id}/hosts with {"name":"${host}"${confirm ? ',"confirm":true' : ''}}`;
+  if (!mayAddHosts) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `${host} doesn’t receive mail yet. An owner or admin can turn it on with ${call(false)} and publish ${mx}; then create ${address}.`, 'address');
+  try { await addHosted(c, wid, row, { name: host }); }
+  catch (error) {
+    if (!(error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE')) throw error;
+    const why = error.message.replace(/^Move mail for \S+\? /, '').replace(/ Send confirm: true to choose it anyway\.$/, '');
+    throw new ApiError(409, 'RECEIVING_HOST_IN_USE', `${address} wasn’t created: receiving at ${host} would take its mail from another provider. ${why} To move it here anyway, call ${call(true)}, publish ${mx}, then create ${address} again.`, 'address');
+  }
+  return own.id;
 }
 /** chooseReceivingHost once the domain receives somewhere: the chosen host is added beside the others. */
 export const addChosenHost = (c: Ctx, wid: string, row: HostedDomain, host: string, confirm: boolean) => addHosted(c, wid, row, { name: host, confirm });

@@ -1,6 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link } from 'react-router'
-import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, Field, Input, MutationError, StatusDot, fieldError, type Tone } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, Field, Input, MutationError, StatusDot, fieldError, type Tone } from '../../components/ui'
 import { useApiMutation, useApiQuery } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { request } from '../../data/live'
@@ -8,7 +8,7 @@ import { ApiError, type ReceivingHost } from '../../data/types'
 import { catchAllSetting } from '../inbound/concepts'
 import { receivingIssueTitle } from './receiving-issue-title'
 import { settingsColumns } from './skeletons'
-import { relativeHost } from './domain-records'
+import { isSubdomainName, relativeHost, rootMxWarning } from './domain-records'
 
 const hostStatus: Record<ReceivingHost['status'], { label: string; tone: Tone }> = {
   pending: { label: 'Waiting for MX', tone: 'warning' }, active: { label: 'Receiving', tone: 'success' }, mixed: { label: 'Receiving, MX shared', tone: 'warning' },
@@ -61,6 +61,9 @@ export function ReceivingHosts({ domainId, domainName, hosts, actions, title = <
       <form id="add-receiving-host" className="stack" onSubmit={submit} noValidate>
         <MutationError error={fieldError(add.error, 'name') ? null : add.error} />
         <Field label="Host" htmlFor="receiving-host-name" error={fieldError(add.error, 'name')}><Input id="receiving-host-name" autoFocus required value={name} onChange={event => setName(event.target.value)} disabled={add.isPending} placeholder={`inbox.${domainName}`} /></Field>
+        {/* The domain itself is a host like any other: offered here once it isn't one, with what its MX record takes over. */}
+        {name.trim().toLowerCase() === domainName ? <Alert tone={isSubdomainName(domainName) ? 'info' : 'warning'}>{rootMxWarning(domainName)}</Alert>
+          : !hosts.some(host => host.name === domainName) && <div className="cluster"><Button size="sm" onClick={() => setName(domainName)} disabled={add.isPending}>Use {domainName} itself</Button></div>}
       </form>
     </Dialog>
     <ConfirmDialog open={!!moveMail} onOpenChange={next => { if (!next) setMoveMail(null) }} title={`Move mail for ${moveMail?.name ?? domainName}?`}

@@ -24556,6 +24556,106 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     } finally { await db.query('ROLLBACK'); }
   });
 
+  test('MX receiving: an address on a verified own domain turns receiving on at its host and names the MX record; a host another provider receives for, an unverified domain or a domain outside the workspace is refused with the call that fixes it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const wid = runtime.config.workspaceId;
+      Object.assign(runtime.config, { multiTenant: true });
+      const account = (await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,receiving_state) VALUES ($1,'111122223333',$2,'ready','ready')
+        ON CONFLICT (region) DO UPDATE SET receiving_state='ready' RETURNING aws_account_id`, [REGION, `arn:aws:sns:${REGION}:111122223333:receiving-fixture`])).rows[0].aws_account_id;
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready') ON CONFLICT DO NOTHING`, [wid, REGION, account]);
+      // Public DNS: no MX anywhere, except the hosts set here.
+      const mx = new Map<string, string[]>();
+      const networkGuard = globalThis.fetch;
+      t.after(() => { globalThis.fetch = networkGuard; });
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const name = url.searchParams.get('name')!, records = url.searchParams.get('type') === 'MX' ? mx.get(name) : undefined;
+        return Response.json(records ? { Status: 0, Answer: records.map(data => ({ name, type: 15, data })) } : { Status: 3 });
+      };
+      const tokens = ['tokena', 'tokenb', 'tokenc'];
+      const claim = async (label: string, verified: boolean) => {
+        const name = `${unique(label)}.example`, identity = { proven: verified, mx: null, note: null, ses: { VerificationStatus: verified ? 'SUCCESS' : 'PENDING', VerifiedForSendingStatus: verified,
+          DkimAttributes: { SigningEnabled: true, Status: verified ? 'SUCCESS' : 'PENDING', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' } } };
+        await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,ever_proven,identity,receiving_proved_at,receiving_identity_at)
+          VALUES ($1,$2,$2,$3,'off',$4,$5,now(),now())`, [name, wid, verified ? 'verified' : 'pending', verified, JSON.stringify(identity)]);
+        const id = unique('dom');
+        await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [id, wid, name, REGION]);
+        return { id, name };
+      };
+      const create = (address: string) => local('POST', '/v1/inbound/addresses', { address });
+      const hosts = async (domainId: string) => (await db.query('SELECT receiving_host AS host,status FROM mailbox_domains WHERE workspace_id=$1 AND domain_id=$2 ORDER BY created_at', [wid, domainId])).rows;
+      const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+      // A verified domain that has never received: the first address turns receiving on at its host, and says which MX to publish.
+      const own = await claim('rx-own', true);
+      assert.deepEqual(await hosts(own.id), []);
+      const first = ok(await create(`hello@${own.name}`), 201);
+      assert.equal(first.address, `hello@${own.name}`);
+      assert.deepEqual([first.receiving.domainId, first.receiving.host, first.receiving.turnedOn], [own.id, own.name, true]);
+      assert.deepEqual(first.receiving.dns.map((r: Json) => [r.type, r.name, r.priority]), [['MX', own.name, 10]]);
+      assert.match(first.receiving.dns[0].value, /^inbound-smtp\./);
+      assert.deepEqual(await hosts(own.id), [{ host: own.name, status: 'waiting_for_mx' }]);
+      // Another address there: receiving was already on, so nothing more is turned on, and the MX is still to publish.
+      const second = ok(await create(`sales@${own.name}`), 201);
+      assert.deepEqual([second.receiving.host, second.receiving.turnedOn], [own.name, false]);
+      // A subdomain of it receives beside the domain.
+      const sub = ok(await create(`support@help.${own.name}`), 201);
+      assert.deepEqual([sub.receiving.host, sub.receiving.turnedOn], [`help.${own.name}`, true]);
+      assert.deepEqual((await hosts(own.id)).map((h: Json) => h.host), [own.name, `help.${own.name}`]);
+      // A read of an address carries no receiving block: it belongs to the create.
+      assert.equal(ok(await local('GET', `/v1/inbound/addresses/${first.id}`)).receiving, undefined);
+
+      // A host whose mail another provider receives today is never taken without consent: refused, nothing made, and the
+      // answer names the call that moves it and the record to publish.
+      mx.set(`busy.${own.name}`, ['10 mx.other.example.']);
+      const busy = error(await create(`team@busy.${own.name}`), 409, 'RECEIVING_HOST_IN_USE');
+      assert.match(busy.message, new RegExp(escape(`POST /v1/inbound/domains/${own.id}/hosts with {"name":"busy.${own.name}","confirm":true}`)));
+      assert.match(busy.message, new RegExp(`busy\\.${escape(own.name)} MX 10 inbound-smtp\\.`));
+      assert.match(busy.message, /mx\.other\.example receives mail/);
+      assert.equal((await hosts(own.id)).some((h: Json) => h.host === `busy.${own.name}`), false);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND address=$2', [wid, `team@busy.${own.name}`])).rows[0].n, 0);
+
+      // An unverified domain, and a domain that isn't the workspace's: refused, each naming its fix.
+      const pending = await claim('rx-pending', false);
+      assert.match(error(await create(`hello@${pending.name}`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, new RegExp(`isn’t verified yet\\. Publish the DNS records GET /v1/domains/${pending.id} lists`));
+      assert.match(error(await create(`hello@${unique('elsewhere')}.example`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, /isn’t on one of this workspace’s domains\. Add the domain with POST \/v1\/domains/);
+      assert.deepEqual(await hosts(pending.id), []);
+
+      // updateInboundDomain on a domain that has never received names how to turn receiving on; acceptSubdomains, hosted,
+      // names the hosts call instead.
+      assert.match(error(await local('PATCH', `/v1/inbound/domains/${pending.id}`, { catchAll: 'store' }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message,
+        new RegExp(`doesn’t receive mail yet, so it has no catch-all to change\\. Turn receiving on with POST /v1/inbound/domains/${pending.id}/enable`));
+      assert.match(error(await local('PATCH', `/v1/inbound/domains/${own.id}`, { acceptSubdomains: true }), 409, 'HOSTED_RECEIVING_MANAGED').message, new RegExp(escape(`POST /v1/inbound/domains/${own.id}/hosts`)));
+      assert.equal(ok(await local('PATCH', `/v1/inbound/domains/${own.id}`, { catchAll: 'store' })).catchAll, 'store');
+
+      // The overview lists every host a domain receives at, so the address builder takes an address at any of them: even
+      // when the domain's first host was removed and only a host added beside it still receives (the shape that turned
+      // addresses away in production).
+      const listed = async () => ok(await local('GET', '/v1/inbound/overview')).domains.find((d: Json) => d.id === own.id);
+      assert.deepEqual(await listed(), { id: own.id, name: own.name, domain: own.name, hosts: [own.name, `help.${own.name}`], status: 'waiting_for_mx', catchAll: 'store' });
+      await db.query("UPDATE mailbox_domains SET status='disabled' WHERE workspace_id=$1 AND domain_id=$2 AND parent_id IS NULL", [wid, own.id]);
+      assert.deepEqual(await listed(), { id: own.id, name: `help.${own.name}`, domain: own.name, hosts: [`help.${own.name}`], status: 'waiting_for_mx', catchAll: 'store' });
+      assert.equal(ok(await create(`more@help.${own.name}`), 201).address, `more@help.${own.name}`);
+
+      // The reported case: receiving was set up at reply.<domain>, the owner removed that host and wants the domain itself.
+      // Creating an address there turns it on at the domain and names its MX; the removed host stays removed (its 409
+      // names the call that adds it back), and the overview shows the domain receiving at its own name.
+      const sub2 = await claim('rx-moved', true), hostsPath = `/v1/inbound/domains/${sub2.id}/hosts`;
+      ok(await local('POST', `/v1/inbound/domains/${sub2.id}/enable`, {}), 202);
+      const reply = ok(await local('GET', hostsPath)).data.find((h: Json) => h.name === `reply.${sub2.name}`);
+      assert.ok(reply, 'Receiving starts at reply.<domain>.');
+      assert.equal(ok(await local('DELETE', `${hostsPath}/${reply.id}`)).status, 'removed');
+      const removedNow = ok(await local('GET', '/v1/inbound/overview')).domains.find((d: Json) => d.id === sub2.id);
+      assert.deepEqual([removedNow.status, removedNow.hosts], ['disabled', []]);
+      const hermes = ok(await create(`hermes@${sub2.name}`), 201);
+      assert.deepEqual([hermes.receiving.host, hermes.receiving.turnedOn, hermes.receiving.dns[0].name], [sub2.name, true, sub2.name]);
+      const movedNow = ok(await local('GET', '/v1/inbound/overview')).domains.find((d: Json) => d.id === sub2.id);
+      assert.deepEqual([movedNow.name, movedNow.status, movedNow.hosts], [sub2.name, 'waiting_for_mx', [sub2.name]]);
+      assert.deepEqual([ok(await local('GET', `/v1/inbound/domains/${sub2.id}`)).name, ok(await local('GET', `/v1/inbound/domains/${sub2.id}`)).status], [sub2.name, 'waiting_for_mx']);
+      assert.match(error(await create(`late@reply.${sub2.name}`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, new RegExp(escape(`Add it back with POST ${hostsPath} and {"name":"reply.${sub2.name}"}`)));
+    });
+  });
+
   test('MX receiving hosts: DNS conflicts are checked when a host is suggested or chosen and in the hourly recheck', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const [{ operationJobs }, { baneRecordUse, receivingCandidates }] = await Promise.all([import('./src/operations.js'), import('./src/receiving-host.js')]);

@@ -4878,6 +4878,35 @@ export type InboundAddress = {
     kind: 'address' | 'inbox';
 };
 
+export type CreatedInboundAddress = InboundAddress & {
+    /**
+     * Present while the host doesn’t route mail here yet: hosted, an address on your own verified domain turns receiving on at its host if it was off.
+     */
+    receiving?: {
+        /**
+         * The domain the address is on (receiving hosts: /v1/inbound/domains/{id}/hosts).
+         */
+        domainId: string;
+        /**
+         * Where the address receives.
+         */
+        host: string;
+        /**
+         * Whether creating the address turned receiving on at this host (it didn’t receive mail before).
+         */
+        turnedOn: boolean;
+        /**
+         * The MX record to publish at the host, if it isn’t already: mail arrives once it is.
+         */
+        dns: Array<{
+            type: 'MX';
+            name: string;
+            value: string;
+            priority: number;
+        }>;
+    };
+};
+
 export type CreateInboundAddress = {
     /**
      * Stable key you choose (lowercase letters, digits, hyphens). Config files refer to inbox:<key>, webhook:<key> and forward:<name>.
@@ -5666,6 +5695,14 @@ export type InboundOverviewDomain = {
      * Receiving host: the domain, or the subdomain it receives at.
      */
     name: string;
+    /**
+     * The domain itself. Hosted, an address on it or any of its subdomains turns receiving on there (createInboundAddress).
+     */
+    domain: string;
+    /**
+     * Every host the domain receives at, or is being set up to (name is its first); addresses can be created at each.
+     */
+    hosts: Array<string>;
     status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
     catchAll: 'create_address' | 'store';
 };
@@ -22216,7 +22253,7 @@ export type CreateInboundAddressResponses = {
     /**
      * Success
      */
-    201: InboundAddress;
+    201: CreatedInboundAddress;
 };
 
 export type CreateInboundAddressResponse = CreateInboundAddressResponses[keyof CreateInboundAddressResponses];
