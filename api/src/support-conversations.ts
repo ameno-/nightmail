@@ -228,7 +228,9 @@ export function registerSupportConversations(app: App) {
 
     if (body.evidence.kind === 'handoff') {
       const checked = await verifyHandoffToken(c.env.config, body.evidence.token);
-      if (!checked.ok) throw checked.code === 'SUPPORT_NOT_CONFIGURED' ? new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set NIGHTMAIL_SUPPORT_SIGNING_KEY to sign and check handoffs.')
+      // A support channel this installation hasn't set up is a 404, not a server error: nothing failed, and the support
+      // platform holds such work as blocked by configuration (support/src/work.ts) either way.
+      if (!checked.ok) throw checked.code === 'SUPPORT_NOT_CONFIGURED' ? new ApiError(404, 'SUPPORT_NOT_CONFIGURED', 'Support chat is not set up here: set NIGHTMAIL_SUPPORT_SIGNING_KEY to sign and check handoffs.')
         : new ApiError(422, checked.code, checked.code === 'HANDOFF_EXPIRED' ? 'The handoff expired. The customer can contact support again.' : 'The handoff is not one this installation signed.', 'evidence.token');
       const claims = checked.claims;
       const result = await c.env.db.transaction(async tx => {
@@ -264,7 +266,7 @@ export function registerSupportConversations(app: App) {
     }
 
     const addressIds = c.env.config.support?.addressIds ?? [];
-    if (!addressIds.length) throw new ApiError(503, 'SUPPORT_NOT_CONFIGURED', 'Set NIGHTMAIL_SUPPORT_ADDRESS_IDS to the support addresses before registering email conversations.');
+    if (!addressIds.length) throw new ApiError(404, 'SUPPORT_NOT_CONFIGURED', 'Email support is not set up here: set NIGHTMAIL_SUPPORT_ADDRESS_IDS to the support addresses.');
     const evidence = await emailEvidence(c.env.db, addressIds, body.evidence.messageId);
     if (!evidence) throw new ApiError(404, 'NOT_FOUND', 'Message was not found at a support address.');
     const messageId = body.evidence.messageId, details = { channel: 'email', message: messageId, dkimAligned: evidence.evidence.dkimAligned };

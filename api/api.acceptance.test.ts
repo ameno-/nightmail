@@ -8274,7 +8274,7 @@ describe('Hosted MCP OAuth and tools', () => {
         error(await send('POST', '/v1/operator/support/conversations', session(owner, acme), { conversationId: conversation(), evidence: { kind: 'email', messageId: await mail(owner.email) } }), 403, 'OPERATOR_REQUIRED');
         const configured = runtime.config.support!.addressIds;
         runtime.config.support!.addressIds = [];
-        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email) }), 503, 'SUPPORT_NOT_CONFIGURED');
+        error(await register(conversation(), { kind: 'email', messageId: await mail(owner.email) }), 404, 'SUPPORT_NOT_CONFIGURED');
         runtime.config.support!.addressIds = configured;
       });
 
@@ -29979,6 +29979,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([apiHour(after).requests - apiHour(before).requests, apiHour(after).errors4xx - apiHour(before).errors4xx, apiHour(after).errors5xx - apiHour(before).errors5xx], [10, 3, 1]);
       assert.ok(after.api.p50Ms !== null && after.api.p95Ms !== null && after.api.p50Ms <= after.api.p95Ms);
       assert.equal(after.builtin.ready - before.builtin.ready, 1);
+      // A support channel that isn't set up is said on the board, not an error (its registrations answer 404 SUPPORT_NOT_CONFIGURED).
+      const support = runtime.config.support;
+      runtime.config.support = { ...support, addressIds: [] };
+      assert.equal((await readGlass(runtime)).support.configured.email, false);
+      runtime.config.support = { ...support, addressIds: [`mbx_${'0'.repeat(32)}`] };
+      assert.equal((await readGlass(runtime)).support.configured.email, true);
+      runtime.config.support = support;
       assert.deepEqual(Object.keys(after.sending.previous), ['accepted', 'marketing', 'delivered', 'bounced', 'complained']);
       // The minute tick samples the quiet region's quota (the simulated SES's), and leaves the fresh one alone.
       const { refreshPoolQuotas } = await import('./src/dispatcher.js');
