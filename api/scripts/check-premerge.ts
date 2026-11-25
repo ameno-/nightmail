@@ -374,6 +374,87 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   }
 }
 
+// 11. Job handlers. Every job type enqueued into the jobs table and every key exported from a job-handler map must
+// resolve through dispatch.ts resolveJobHandler(), so a missing branch never fails jobs with JOB_HANDLER_MISSING.
+{
+  const before = failed;
+  const { resolveJobHandler } = await import('../src/dispatch.js');
+  const types = new Map<string, string>();
+  const record = (type: string, where: string) => { if (!types.has(type)) types.set(type, where); };
+  const walkFiles = (dir: URL, rel: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) walkFiles(new URL(entry.name + '/', dir), `${rel}${entry.name}/`);
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+        const file = `${rel}${entry.name}`, text = readFileSync(new URL(entry.name, dir), 'utf8');
+        const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+        const consts = new Map<string, string>();
+        const evalStr = (node: ts.Node): string | null => {
+          if (ts.isStringLiteralLike(node)) return node.text;
+          if (ts.isIdentifier(node)) return consts.get(node.text) ?? null;
+          return null;
+        };
+        const collectConsts = (node: ts.Node) => {
+          if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isStringLiteralLike(node.initializer)) consts.set(node.name.text, node.initializer.text);
+          ts.forEachChild(node, collectConsts);
+        };
+        collectConsts(sf);
+        const visit = (node: ts.Node) => {
+          if (ts.isCallExpression(node)) {
+            const callee = node.expression.getText(sf);
+            if (callee === 'enqueue' || callee.endsWith('.enqueue')) {
+              const arg = node.arguments[1];
+              if (arg && ts.isObjectLiteralExpression(arg)) {
+                const prop = arg.properties.find(p => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'type') as ts.PropertyAssignment | undefined;
+                const val = prop && evalStr(prop.initializer);
+                if (val) record(val, file);
+              }
+            }
+          }
+          if (ts.isTaggedTemplateExpression(node) && node.tag.getText(sf) === 'sql') {
+            // Inspect only each INSERT INTO jobs(...) statement up to its ON CONFLICT / RETURNING / CTE end,
+            // ignoring sibling CTEs (audit events, webhook events) and state-marker rows inserted as completed.
+            const raw = node.template.getText(sf);
+            for (const ins of raw.matchAll(/INSERT\s+INTO\s+jobs\s*\(([^)]+)\)\s*([\s\S]*?)(?=\bON\s+CONFLICT\b|\bRETURNING\b|\)\s*,\s*[a-z_]+\s+AS\s*\(|`$)/gi)) {
+              const cols = ins[1]!.split(',').map(c => c.trim().toLowerCase());
+              const body = ins[2]!;
+              if (cols.includes('status') && /'completed'/.test(body)) continue;
+              for (const m of body.matchAll(/'([a-z][a-z0-9]*\.[a-zA-Z0-9_]+)'/g)) {
+                const candidate = m[1]!;
+                if (!/^(?:public|pg_catalog)\./.test(candidate)) record(candidate, file);
+              }
+            }
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(sf);
+      }
+    }
+  };
+  walkFiles(new URL('src/', api), 'api/src/');
+  const registries = await Promise.all([
+    import('../src/sending.js').then(m => ['api/src/sending.ts', m.jobHandlers] as const),
+    import('../src/operations.js').then(m => ['api/src/operations.ts', m.operationJobs] as const),
+    import('../src/ses-regions.js').then(m => ['api/src/ses-regions.ts', m.sesRegionJobs] as const),
+    import('../src/reputation-alerts.js').then(m => ['api/src/reputation-alerts.ts', m.reputationAlertJobs] as const),
+    import('../src/operator-alerts.js').then(m => ['api/src/operator-alerts.ts', m.operatorAlertJobs] as const),
+    import('../src/mailbox-events.js').then(m => ['api/src/mailbox-events.ts', m.mailboxEventJobs] as const),
+    import('../src/mailbox-setup.js').then(m => ['api/src/mailbox-setup.ts', m.mailboxSetupJobs] as const),
+    import('../src/mailbox-ingest.js').then(m => ['api/src/mailbox-ingest.ts', m.mailboxIngestJobs] as const),
+    import('../src/standing.js').then(m => ['api/src/standing.ts', m.standingJobs] as const),
+    import('../src/newsletters.js').then(m => ['api/src/newsletters.ts', m.newsletterJobs] as const),
+    import('../src/billing/jobs.js').then(m => ['api/src/billing/jobs.ts', m.billingJobs] as const),
+    import('../src/account-notices.js').then(m => ['api/src/account-notices.ts', m.accountNoticeJobs] as const),
+    import('../src/signups.js').then(m => ['api/src/signups.ts', m.signupJobs] as const),
+    import('../src/byo-regional.js').then(m => ['api/src/byo-regional.ts', m.regionalByoJobs] as const),
+  ]);
+  for (const [file, map] of registries) for (const type of Object.keys(map)) record(type, file);
+  for (const [type, file] of [...types.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const handler = await resolveJobHandler(type);
+    if (typeof handler !== 'function') fail('Job handlers', `Job type '${type}' (from ${file}) has no handler in api/src/dispatch.ts resolveJobHandler(). Add a route for it there.`, 'api/src/dispatch.ts');
+  }
+  if (failed === before) console.log(`Job handlers: all ${types.size} enqueued and registered job types resolve through dispatch.ts.`);
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;

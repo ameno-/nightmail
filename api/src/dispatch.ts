@@ -26,7 +26,7 @@ export const deleteAttachment: JobHandler = async (runtime, payload, job) => {
   });
   if (!deleted) log('warn', { code: 'ATTACHMENT_DELETE_KEPT', workspaceId: job.workspaceId, message: 'A row references the object; it was not deleted.' });
 };
-function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
+export function resolveJobHandler(type: string): Promise<JobHandler | undefined> {
   return wrapModuleLoad(async () => {
     if (type === 'maintenance.deleteAttachment') return deleteAttachment;
     if (type === 'maintenance.senderDisplayScore' || type === 'maintenance.discoverSenderDisplayScore') {
