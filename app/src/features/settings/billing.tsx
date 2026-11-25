@@ -8,7 +8,7 @@ import { queries } from '../../data/queries'
 import { request } from '../../data/live'
 import { ApiError, errorText, type Identity } from '../../data/types'
 import type { Usage } from '../../data/usage'
-import { balanceState, billingApi, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, priceUc, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
+import { billingApi, billingStatus, cardBrand, centsUsd, declineText, fullDay, monthDay, parseDollars, priceUc, total, usd, type AutoRechargeInput, type BillingSummary, type LedgerEntry, type Payment } from '../../data/billing'
 import { useCursorPagination } from '../../lib/pagination'
 import { date, number } from '../../lib/format'
 import './billing.css'
@@ -80,7 +80,7 @@ type Fact = { label: string; value: ReactNode; note?: ReactNode; money?: boolean
 // It is the page's one surface; its only filled control is Add credit.
 function Summary({ summary: b, usage, state, admin, onAdd, onBalance }: { summary: BillingSummary | undefined; usage: Usage | undefined; state: Identity['billing']; admin: boolean; onAdd: () => void; onBalance: () => void }) {
   const free = state?.free === true, enforced = state?.enforcement === 'enforce'
-  const badge = free ? { label: 'Not charged', tone: 'neutral' as const } : !enforced ? { label: 'Not charged yet', tone: 'neutral' as const } : state ? balanceState({ mode: 'prepaid', state }) : null
+  const badge = billingStatus(state, b)
   const lead = free ? 'This workspace is on a free plan: its usage is measured but never charged.'
     : !enforced ? 'Billing hasn’t started: usage is measured, and nothing is taken from the balance yet.'
     : 'Usage beyond the free allowances is taken from the balance every hour.'
@@ -102,7 +102,7 @@ function Summary({ summary: b, usage, state, admin, onAdd, onBalance }: { summar
   ]
   return <section className="billing-summary" aria-labelledby="billing-plan">
     <div className="billing-summary__head">
-      <h2 id="billing-plan" className="billing-summary__plan">{free ? 'Free plan' : 'Pay as you go'}{badge && <StatusBadge status={badge.label} tone={badge.tone} />}</h2>
+      <h2 id="billing-plan" className="billing-summary__plan"><span>{free ? 'Free plan' : 'Pay as you go'}</span><span className="billing-summary__state">{badge && <StatusBadge status={badge.label} tone={badge.tone} />}</span></h2>
       {admin && !free && <Button variant="primary" disabled={!b?.balance} onClick={onAdd}>Add credit</Button>}
     </div>
     <p className="billing-summary__lead">{lead}</p>
@@ -145,9 +145,9 @@ function UsageSection({ summary: b, usage, failed, admin, charged }: { summary: 
   return <section className="billing-section" aria-labelledby="billing-usage-title">
     <SectionHeader title={<span id="billing-usage-title">Usage this month</span>} actions={<Link to="/legal/terms#prices" className="billing-link" title="Pricing">Pricing<ArrowUpRight size={12} aria-hidden="true" /></Link>} />
     <div className="billing-usage" data-charged={charged || undefined}>
-      <UsageMeter label="Sent" terms={`${number(RATES.freeSentEmails)} free, then ${PRICE}`} used={counts?.billedSent} free={RATES.freeSentEmails} unit="sent" cost={sentCost} unavailable={unavailable} />
-      {admin && <UsageMeter label="Received" terms={`${number(RATES.freeReceivedEmails)} free, then ${PRICE}`} used={counts?.billedReceived ?? undefined} free={RATES.freeReceivedEmails} unit="received" cost={receivedCost} unavailable={unavailable} />}
-      <UsageMeter label="Stored past 90 days" terms={`${gigabytes(freeBytes)} free, then ${usd(RATES.storageUcPerGbMonth)} per GB a month`} used={aged ?? undefined} free={freeBytes} format={gigabytes} cost={storageCost} />
+      <UsageMeter label="Sent" terms={`${PRICE} beyond free`} used={counts?.billedSent} free={RATES.freeSentEmails} unit="sent" cost={sentCost} unavailable={unavailable} />
+      {admin && <UsageMeter label="Received" terms={`${PRICE} beyond free`} used={counts?.billedReceived ?? undefined} free={RATES.freeReceivedEmails} unit="received" cost={receivedCost} unavailable={unavailable} />}
+      <UsageMeter label="Stored past 90 days" terms={`${usd(RATES.storageUcPerGbMonth)} per GB a month beyond free`} used={aged ?? undefined} free={freeBytes} format={gigabytes} cost={storageCost} />
       <div className="billing-usage__total">
         <span>{charged ? 'Total this month' : 'Total at list price'}</span>
         <span className="billing-usage__cost">{total !== null ? usd(total) : unavailable && !admin ? '—' : <Skeleton width={64} height={16} />}</span>

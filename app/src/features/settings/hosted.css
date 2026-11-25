@@ -11,9 +11,9 @@
 .settings-rail a[data-locked] { justify-content: space-between; gap: var(--space-4); }
 .settings-rail a[data-locked] svg { color: var(--color-faint); }
 .hosted-settings__content { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; padding-top: 52px; animation: section-enter 120ms ease-out both; }
-/* Label/value rows and short tables keep a readable width, left-aligned, so a label and its value are never a window
-   apart. The activity log and Billing's own layout take the whole panel. */
-.hosted-settings__content:not([data-section='activity'], [data-section='billing']) { max-width: var(--measure); }
+/* Label/value rows, short tables and Billing keep a readable width, left-aligned, so a label and its value are never a
+   window apart. The activity log takes the whole panel. */
+.hosted-settings__content:not([data-section='activity']) { max-width: var(--measure); }
 .hosted-settings__content > .ui-section-header { margin-bottom: calc(-1 * var(--space-8)); }
 .settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: var(--space-8); }
 .hosted-settings__content > .settings-actions { margin-bottom: calc(-1 * var(--space-4)); }
@@ -37,13 +37,14 @@
 .settings-row__label > span { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row__label .muted { font-size: var(--text-xs); line-height: var(--leading-xs); }
 .settings-row__control { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-8); min-width: 0; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-/* Above a phone, every settings page but Billing (whose rows lay themselves out, billing.css) is a two-column form: a
-   200px label, then the value or control left-aligned right beside it, with any action (Copy, Edit) right after it, so a
-   label and its value are never a panel apart. Rows keep their 53px, so nothing in them moves as values load. Kept at a
-   single class's weight (:where), so a row that stacks on a tablet (.settings-mcp, below) still does. */
+/* Above a phone, every settings page is a two-column form: a 200px label, then the value or control left-aligned right
+   beside it, with any action (Copy, Edit) right after it, so a label and its value are never a panel apart. A row that
+   opens its detail (Billing's daily limit, a <details> whose summary is the row) lines up the same. Rows keep their 53px,
+   so nothing in them moves as values load. Kept at a single class's weight (:where), so a row that stacks on a tablet
+   (.settings-mcp, below) still does. */
 @media (min-width: 641px) {
-  :where(.settings-rows:not(.billing-rows)) > .settings-row { grid-template-columns: 200px minmax(0, 1fr); gap: var(--space-16); }
-  :where(.settings-rows:not(.billing-rows)) > .settings-row > .settings-row__control { justify-content: flex-start; text-align: left; }
+  :where(.settings-rows) > .settings-row, :where(.settings-rows > details) > .settings-row { grid-template-columns: 200px minmax(0, 1fr); gap: var(--space-16); }
+  :where(.settings-rows) > .settings-row > .settings-row__control, :where(.settings-rows > details) > .settings-row > .settings-row__control { justify-content: flex-start; text-align: left; }
 }
 .settings-inline { flex-wrap: nowrap; }
 .settings-version .ui-button[aria-hidden='true'] { display: none; }

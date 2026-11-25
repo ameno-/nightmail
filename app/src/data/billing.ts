@@ -76,12 +76,21 @@ const DECLINES: Record<string, string> = {
 }
 export const declineText = (code: string) => DECLINES[code] ?? 'The last charge failed'
 
-/** The one-word state of the balance, for Settings → Billing. */
-export function balanceState(b: Pick<BillingSummary, 'mode' | 'state'>): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } {
-  if (b.mode === 'exempt') return { label: 'Free plan', tone: 'success' }
-  if (b.state.receiving === 'held') return { label: 'Receiving held', tone: 'danger' }
-  if (b.state.sending === 'paused') return { label: 'Sending paused', tone: 'danger' }
-  if (b.state.sending === 'low') return { label: 'Low', tone: 'warning' }
+/** The session's billing state (GET /v1/me), which every dashboard page has on its first frame. */
+export type SessionBilling = Pick<BillingState, 'sending' | 'receiving'> & { enforcement: Enforcement; free?: boolean }
+/** Under a tenth of a free allowance left this month. */
+const nearlyUsed = (allowance: FreeAllowance | null) => allowance !== null && allowance.left * 10 <= allowance.limit
+/** Where a workspace's billing stands, in a word, for Settings → Billing: why it isn't charged, or how the balance is.
+ *  A balance near $0 (sending "low") is only Low once usage is past, or nearly past, a free allowance: a workspace that
+ *  is still inside both owes nothing, so it is on its Free allowance. That needs this month's allowances, so until the
+ *  summary arrives a low balance shows no word rather than one that changes. */
+export function billingStatus(state: SessionBilling | null | undefined, summary: Pick<BillingSummary, 'free'> | undefined): { label: string; tone: 'success' | 'warning' | 'danger' | 'neutral' } | null {
+  if (!state) return null
+  if (state.free) return { label: 'Not charged', tone: 'neutral' }
+  if (state.enforcement !== 'enforce') return { label: 'Not charged yet', tone: 'neutral' }
+  if (state.receiving === 'held') return { label: 'Receiving held', tone: 'danger' }
+  if (state.sending === 'paused') return { label: 'Sending paused', tone: 'danger' }
+  if (state.sending === 'low') return !summary ? null : nearlyUsed(summary.free.sent) || nearlyUsed(summary.free.received) ? { label: 'Low', tone: 'warning' } : { label: 'Free allowance', tone: 'neutral' }
   return { label: 'Funded', tone: 'success' }
 }
 export const monthDay = (iso: string) => new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })
