@@ -300,6 +300,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
       return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, ...platformRuntime(conversation) }), SUPPORT_POOL, this.ctx);
     }, config);
   }
+  async verifyWake(token: string, conversationId: string) { return (await this.platform()).verifyWake(token, conversationId); }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
   async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
   async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }

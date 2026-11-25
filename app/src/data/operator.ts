@@ -101,7 +101,7 @@ export interface Deliverability {
     vdm: CheckState & { error: string | null; since: string; until: string; previousSince: string; providers: { provider: MailProvider | 'all'; current: VdmCounts; previous: VdmCounts }[] } }[]
   blocklist: (CheckState & { domain: string })[]
   postmaster: (CheckState & { domain: string; url: string; error: string | null; spamRatio: { current: number | null; previous: number | null }
-    latest: { day: string; reputation: string | null; spamRatio: number | null; spf: number | null; dkim: number | null; dmarc: number | null } | null })[]
+    latest: { day: string; spamRatio: number | null; spf: number | null; dkim: number | null; dmarc: number | null; deliveryErrorRatio: number | null } | null })[]
   standing: { grades: Record<GlassGrade, number>; calibrating: number; steps: Record<StandingStep, number> }
   top: Record<'complaints' | 'bounces', { workspaceId: string; accepted: number; bounced: number; complained: number }[]>
 }

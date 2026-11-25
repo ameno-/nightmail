@@ -58,8 +58,19 @@ const PROTECTED = new Set(`paypal apple icloud google gmail microsoft outlook of
 // "Nightmail Support" or "Security Team" must not become nightmail-support-k7.<parent> or security-k7.<parent>.
 const IMPERSONATING = new Set(`nightmail bane opensend anomaly opencode security secure verify verification login signin password postmaster
   noreply donotreply admin administrator abuse hostmaster webmaster`.split(/\s+/).filter(Boolean));
-const protectedParts = [...PROTECTED, ...IMPERSONATING].map(labelSkeleton);
+// Short or common words that also occur inside ordinary ones (groups, first, olive, purchase, laws, badminton, designing):
+// these count only as a whole word, or one spelled across words or digits ("U P S", "Up5", "Ch4se"). Every other word
+// counts anywhere in the squashed name ("PaypalBilling", "MyGoogleDesk", "NightmailSupport").
+const WHOLE_WORDS = new Set(`ups irs aws live meta citi bank banking bane chase apple zelle slack zoom stripe secure signin login admin`.split(/\s+/));
+const protectedParts = [...PROTECTED, ...IMPERSONATING].filter(word => !WHOLE_WORDS.has(word)).map(labelSkeleton);
 const compact = (name: string) => labelSkeleton(name.replace(/[^\p{L}\p{N}]/gu, ''));
+/** A name's words: split at anything but letters and digits, at case changes ("MyGmailDesk", "UPSDelivery") and between letters and digits. */
+const tokens = (name: string) => name.normalize('NFKC').match(/\p{Lu}+(?!\p{Ll})|\p{Lu}\p{Ll}*|\p{Ll}+|\p{N}+|[\p{Lo}\p{Lt}\p{Lm}]+/gu) ?? [];
+/** Whether some run of adjacent words, folded like a label, is one of the whole words. */
+const wholeWord = (words: string[]) => words.some((_, i) => {
+  for (let j = i, run = ''; j < words.length && run.length < 8; j++) if (WHOLE_WORDS.has(labelSkeleton(run += words[j]))) return true;
+  return false;
+});
 const FILLER = /^(?:workspace|workspaces|team|org|inc|llc|ltd|co)$/;
 /** The base a workspace name falls back to. */
 export const BUILTIN_FALLBACK = 'mail';
@@ -72,7 +83,7 @@ export function builtinBase(name: string) {
   const words = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/['’]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
   const kept = words.filter((word, i) => i === 0 || !FILLER.test(word));
   const original = compact(name.normalize('NFKC')), label = compact(kept.join(''));
-  if (protectedParts.some(part => original.includes(part) || label.includes(part))) return BUILTIN_FALLBACK;
+  if (protectedParts.some(part => original.includes(part) || label.includes(part)) || wholeWord(tokens(name)) || wholeWord(kept)) return BUILTIN_FALLBACK;
   let base = '';
   for (const word of kept) {
     const next = base ? `${base}-${word}` : word;

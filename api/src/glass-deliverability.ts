@@ -52,7 +52,7 @@ const Board = z.object({
       providers: z.array(z.object({ provider: z.union([z.enum(PROVIDER_NAMES), z.literal('all')]), current: Vdm, previous: Vdm })) }) })),
   blocklist: z.array(Check.extend({ domain: z.string() })).describe('Spamhaus DBL through NIGHTMAIL_PLACEMENT_DBL_ZONE: listed, clear, unknown or unconfigured.'),
   postmaster: z.array(Check.extend({ domain: z.string(), url: z.string(), error: z.string().nullable(),
-    latest: z.object({ day: z.string(), reputation: z.string().nullable().describe('HIGH, MEDIUM, LOW or BAD.'), spamRatio: z.number().nullable(), spf: z.number().nullable(), dkim: z.number().nullable(), dmarc: z.number().nullable() }).nullable()
+    latest: z.object({ day: z.string(), spamRatio: z.number().nullable(), spf: z.number().nullable(), dkim: z.number().nullable(), dmarc: z.number().nullable(), deliveryErrorRatio: z.number().nullable() }).nullable()
       .describe('Google\u2019s latest day for the domain: published a day or two late, and only for a day with enough mail to Gmail.'),
     spamRatio: z.object({ current: z.number().nullable(), previous: z.number().nullable() }).describe('Gmail users\u2019 spam reports over mail delivered, the mean of the period\u2019s published days.') }))
     .describe('Gmail Postmaster Tools for each platform domain. status null: not connected (NIGHTMAIL_POSTMASTER_CREDENTIALS unset).'),
@@ -89,7 +89,7 @@ type Raw = {
   pool: { region: string; sending: boolean }[];
   vdm: { region: string; isp: string; metric: string; current: boolean; value: number }[];
   vdm_days: { since: string; until: string; prev: string };
-  postmaster: { domain: string; day: string; current: boolean; reputation: string | null; spam_ratio: number | null; spf_ratio: number | null; dkim_ratio: number | null; dmarc_ratio: number | null }[];
+  postmaster: { domain: string; day: string; current: boolean; spam_ratio: number | null; spf_ratio: number | null; dkim_ratio: number | null; dmarc_ratio: number | null; error_ratio: number | null }[];
 };
 
 export async function readDeliverability(runtime: Pick<Runtime, 'db' | 'config'>, window: DeliverabilityWindow): Promise<DeliverabilityBoard> {
@@ -114,7 +114,7 @@ export async function readDeliverability(runtime: Pick<Runtime, 'db' | 'config'>
       (SELECT coalesce(json_agg(v),'[]') FROM (SELECT region,isp,metric,day>win.today-${days}::int AS current,sum(value) AS value FROM deliverability_vdm_daily,win
         WHERE day>win.today-${days * 2}::int AND day<=win.today GROUP BY 1,2,3,4) v) AS vdm,
       (SELECT json_build_object('since',(today-${days - 1}::int)::text,'until',today::text,'prev',(today-${days * 2 - 1}::int)::text) FROM win) AS vdm_days,
-      (SELECT coalesce(json_agg(p ORDER BY p.domain,p.day),'[]') FROM (SELECT domain,day::text AS day,day>win.today-${days}::int AS current,reputation,spam_ratio,spf_ratio,dkim_ratio,dmarc_ratio
+      (SELECT coalesce(json_agg(p ORDER BY p.domain,p.day),'[]') FROM (SELECT domain,day::text AS day,day>win.today-${days}::int AS current,spam_ratio,spf_ratio,dkim_ratio,dmarc_ratio,(delivery_errors->>'rate')::float8 AS error_ratio
         FROM deliverability_postmaster_daily,win WHERE day>win.today-${Math.max(days * 2, 14)}::int AND day<=win.today) p) AS postmaster`);
   return shape(r!, window, unit, runtime.config);
 }
@@ -168,7 +168,7 @@ function shape(r: Raw, window: DeliverabilityWindow, unit: 'hour' | 'day', confi
       const c = check('postmaster', domain), days = r.postmaster.filter(p => p.domain === domain), last = days.at(-1);
       const mean = (list: typeof days) => { const known = list.filter(p => p.spam_ratio !== null); return known.length ? known.reduce((n, p) => n + Number(p.spam_ratio), 0) / known.length : null; };
       return { domain, url: 'https://postmaster.google.com/', status: c?.status ?? null, checkedAt: c?.checked_at ?? null, error: detail(c, 'error'),
-        latest: last ? { day: last.day, reputation: last.reputation, spamRatio: last.spam_ratio, spf: last.spf_ratio, dkim: last.dkim_ratio, dmarc: last.dmarc_ratio } : null,
+        latest: last ? { day: last.day, spamRatio: last.spam_ratio, spf: last.spf_ratio, dkim: last.dkim_ratio, dmarc: last.dmarc_ratio, deliveryErrorRatio: last.error_ratio } : null,
         spamRatio: { current: mean(days.filter(p => p.current)), previous: mean(days.filter(p => !p.current)) } };
     }),
     standing: { grades: Object.fromEntries(GRADES.map(grade => [grade, Number(r.grades[grade] ?? 0)])) as Record<Grade, number>, calibrating: Number(r.grades.calibrating ?? 0),
@@ -226,7 +226,8 @@ export async function refreshDeliverabilitySources(runtime: Runtime, { fetch: ge
         status = 'error'; detail = { error: errorName(error) };
         logError(error, { code: 'DELIVERABILITY_SOURCE_FAILED', kind: row.kind, subject: row.subject }, 'warn');
       }
-      await runtime.db.execute(sql`UPDATE deliverability_checks SET status=${status},detail=${detail ? JSON.stringify(detail) : null}::jsonb,checked_at=now() WHERE kind=${row.kind} AND subject=${row.subject}`);
+      // A failed check is tried again in 15 minutes rather than at its next time (a deploy, a revoked grant put right).
+      await runtime.db.execute(sql`UPDATE deliverability_checks SET status=${status},detail=${detail ? JSON.stringify(detail) : null}::jsonb,checked_at=now()${status === 'error' ? sql`,next_at=least(next_at,now()+interval '15 minutes')` : sql``} WHERE kind=${row.kind} AND subject=${row.subject}`);
     }
   } catch (error) { logError(error, { code: 'DELIVERABILITY_SOURCE_FAILED' }, 'warn'); }
 }
@@ -255,8 +256,10 @@ async function readVdm(runtime: Runtime, ses: import('@aws-sdk/client-sesv2').SE
   return { days: new Set(rows.map(r => r.day)).size, ...failed.size ? { error: [...failed].sort().join(',') } : {} };
 }
 
-// Gmail Postmaster Tools (v1): an access token from the stored grant, then the domain's daily traffic stats.
-const POSTMASTER_API = 'https://gmailpostmastertools.googleapis.com/v1';
+// Gmail Postmaster Tools (v2; v1 is retired): an access token from the stored grant (postmaster.traffic.readonly), then the
+// domain's daily statistics. v2 has no domain reputation: Gmail's spam rate is the figure, beside SPF, DKIM and DMARC
+// pass rates and the delivery error rate, each a share of the day's mail (0 to 1).
+const POSTMASTER_API = 'https://gmailpostmastertools.googleapis.com/v2';
 const googleError = (status: number, body: { error?: string | { status?: string } }) => Object.assign(new Error('Google refused the request'),
   { name: (typeof body.error === 'string' ? body.error : body.error?.status) ?? `HTTP_${status}` });
 async function postmasterToken(grant: NonNullable<Runtime['config']['postmaster']>, get: typeof fetch) {
@@ -266,30 +269,34 @@ async function postmasterToken(grant: NonNullable<Runtime['config']['postmaster'
   if (!res.ok || !body.access_token) throw googleError(res.status, body);
   return body.access_token;
 }
-type TrafficStats = { name?: string; domainReputation?: string; userReportedSpamRatio?: number; spfSuccessRatio?: number; dkimSuccessRatio?: number; dmarcSuccessRatio?: number; deliveryErrors?: unknown[] };
+const POSTMASTER_METRICS = [['spam', 'SPAM_RATE'], ['spf', 'AUTH_SUCCESS_RATE', 'auth_type = "spf"'], ['dkim', 'AUTH_SUCCESS_RATE', 'auth_type = "dkim"'],
+  ['dmarc', 'AUTH_SUCCESS_RATE', 'auth_type = "dmarc"'], ['errors', 'DELIVERY_ERROR_RATE']] as const;
+type DomainStat = { metric?: string; date?: { year: number; month: number; day: number }; value?: { floatValue?: number; doubleValue?: number } };
 /** The last 60 days Google has for a domain, upserted by day (a day Google revises is written again). */
 async function readPostmaster(runtime: Runtime, domain: string, token: string, get: typeof fetch) {
-  const today = new Date(), end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)), start = new Date(end.getTime() - 60 * 86_400_000);
-  const date = (prefix: string, d: Date) => [[`${prefix}.year`, String(d.getUTCFullYear())], [`${prefix}.month`, String(d.getUTCMonth() + 1)], [`${prefix}.day`, String(d.getUTCDate())]];
-  const stats: TrafficStats[] = [];
+  const day = (d: Date) => ({ year: d.getUTCFullYear(), month: d.getUTCMonth() + 1, day: d.getUTCDate() });
+  const query = { metricDefinitions: POSTMASTER_METRICS.map(([name, standardMetric, filter]) => ({ name, baseMetric: { standardMetric }, ...filter ? { filter } : {} })),
+    aggregationGranularity: 'DAILY', pageSize: 200, timeQuery: { dateRanges: { dateRanges: [{ start: day(new Date(Date.now() - 59 * 86_400_000)), end: day(new Date()) }] } } };
+  const stats: DomainStat[] = [];
   let page: string | undefined;
   for (let i = 0; i < 5; i++) {
-    const query = new URLSearchParams([...date('startDate', start), ...date('endDate', end), ['pageSize', '100'], ...page ? [['pageToken', page]] : []]);
-    const res = await get(`${POSTMASTER_API}/domains/${encodeURIComponent(domain)}/trafficStats?${query}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
-    const body = await res.json().catch(() => ({})) as { trafficStats?: TrafficStats[]; nextPageToken?: string; error?: { status?: string } };
+    const res = await get(`${POSTMASTER_API}/domains/${encodeURIComponent(domain)}/domainStats:query`, { method: 'POST', signal: AbortSignal.timeout(10_000),
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify({ ...query, ...page ? { pageToken: page } : {} }) });
+    const body = await res.json().catch(() => ({})) as { domainStats?: DomainStat[]; nextPageToken?: string; error?: { status?: string } };
     if (!res.ok) throw googleError(res.status, body);
-    stats.push(...body.trafficStats ?? []);
+    stats.push(...body.domainStats ?? []);
     if (!(page = body.nextPageToken)) break;
   }
-  const ratio = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null;
-  const rows = stats.flatMap(t => {
-    const day = /\/trafficStats\/(\d{4})(\d{2})(\d{2})$/.exec(t.name ?? '');
-    return day ? [{ day: `${day[1]}-${day[2]}-${day[3]}`, reputation: t.domainReputation && t.domainReputation !== 'REPUTATION_CATEGORY_UNSPECIFIED' ? t.domainReputation : null,
-      spam: ratio(t.userReportedSpamRatio), spf: ratio(t.spfSuccessRatio), dkim: ratio(t.dkimSuccessRatio), dmarc: ratio(t.dmarcSuccessRatio), errors: Array.isArray(t.deliveryErrors) ? t.deliveryErrors.slice(0, 20) : [] }] : [];
-  });
-  if (rows.length) await runtime.db.execute(sql`INSERT INTO deliverability_postmaster_daily AS p (domain,day,reputation,spam_ratio,spf_ratio,dkim_ratio,dmarc_ratio,delivery_errors)
-    SELECT ${domain},r.day::date,r.reputation,r.spam,r.spf,r.dkim,r.dmarc,r.errors FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) r(day text,reputation text,spam float8,spf float8,dkim float8,dmarc float8,errors jsonb)
-    ON CONFLICT (domain,day) DO UPDATE SET reputation=excluded.reputation,spam_ratio=excluded.spam_ratio,spf_ratio=excluded.spf_ratio,dkim_ratio=excluded.dkim_ratio,
+  const days = new Map<string, Record<string, number | null>>();
+  for (const s of stats) {
+    if (!s.date || !s.metric) continue;
+    const at = `${s.date.year}-${String(s.date.month).padStart(2, '0')}-${String(s.date.day).padStart(2, '0')}`, value = s.value?.floatValue ?? s.value?.doubleValue;
+    days.set(at, { ...days.get(at), [s.metric]: typeof value === 'number' && Number.isFinite(value) ? value : null });
+  }
+  const rows = [...days].map(([at, v]) => ({ day: at, spam: v.spam ?? null, spf: v.spf ?? null, dkim: v.dkim ?? null, dmarc: v.dmarc ?? null, errors: v.errors === undefined || v.errors === null ? null : { rate: v.errors } }));
+  if (rows.length) await runtime.db.execute(sql`INSERT INTO deliverability_postmaster_daily AS p (domain,day,spam_ratio,spf_ratio,dkim_ratio,dmarc_ratio,delivery_errors)
+    SELECT ${domain},r.day::date,r.spam,r.spf,r.dkim,r.dmarc,r.errors FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) r(day text,spam float8,spf float8,dkim float8,dmarc float8,errors jsonb)
+    ON CONFLICT (domain,day) DO UPDATE SET spam_ratio=excluded.spam_ratio,spf_ratio=excluded.spf_ratio,dkim_ratio=excluded.dkim_ratio,
       dmarc_ratio=excluded.dmarc_ratio,delivery_errors=excluded.delivery_errors,fetched_at=now()`);
   return { days: rows.length };
 }

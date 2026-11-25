@@ -60,6 +60,7 @@ export type SupportAction = {
 
 /** The methods of Nightmail's SupportPlatform entrypoint, as this Worker calls them over RPC. */
 export interface SupportPlatform {
+  verifyWake(token: string, conversationId: string): Promise<boolean>;
   verifyHandoff(token: string): Promise<HandoffCheck>;
   /** Nightmail checks the evidence itself and decides who the conversation is for (201 new, 200 repeated). */
   registerConversation(body: { conversationId: string; evidence: ConversationEvidence }): Promise<PlatformReply<RegisteredConversation>>;

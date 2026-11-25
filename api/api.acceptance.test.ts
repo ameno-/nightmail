@@ -968,6 +968,42 @@ test('OIDC migration links only connected subjects; nobody is adopted by email',
   }
 });
 
+test('optional Worker secrets disable only their feature on a partial rollout; core auth and live SES stay fail-closed', async t => {
+  const {loadConfig} = await import('./src/config.js'), {createApp} = await import('./src/app.js'), {drizzle} = await import('drizzle-orm/node-postgres');
+  const base = {PUBLIC_URL:PUBLIC_ORIGIN, BANE_ROOT_SECRET:AUTH_SECRET, MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID:'fixture', ACCOUNT_CLIENT_PRIVATE_KEY:'unused-in-session-fixture'};
+  const zone = 'a'.repeat(32), token = 'fixture-private-value-never-log', lines:string[]=[];
+  t.mock.method(console,'error',(line:string)=>{lines.push(line);});
+  const app=createApp(), db=drizzle(await fixtureDatabase(t));
+  // The old version after token deletion, and the reverse transition with an inherited token on new code.
+  for (const link of [{NIGHTMAIL_LINK_SAAS_ZONE_ID:zone},{NIGHTMAIL_LINK_SAAS_TOKEN:token}]) {
+    const config=loadConfig({...base,...link,NIGHTMAIL_LINK_HOST:'links.example.net',NIGHTMAIL_POSTMASTER_CREDENTIALS:token,
+      NIGHTMAIL_SUPPORT_URL:'https://support.example.org',NIGHTMAIL_SUPPORT_SIGNING_KEY:token,CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:'bad',
+      ANALYTICS_PUSH_SECRET:token,DOMAIN_NS_CHECK:'typo',NIGHTMAIL_PLACEMENT_SHADOW:'typo',STRIPE_SECRET_KEY:'not-a-key',STRIPE_WEBHOOK_SECRET:'whsec_fixture',DOMAIN_CONNECT_KEY_ID:'_dck1'});
+    assert.deepEqual([config.linkHosts,config.linkHost,config.postmaster,config.support?.url,config.support?.signingKey,
+      config.observability,config.analyticsPush,config.billing?.stripe,config.domainConnect],[undefined,'links.example.net',undefined,undefined,undefined,undefined,undefined,undefined,undefined]);
+    assert.deepEqual([config.domainNsCheck,config.placementShadow],[false,false]);
+    const runtime={config,db,snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){return null;}}};
+    assert.equal((await app.fetch(new Request(PUBLIC_ORIGIN+'/health'),runtime)).status,200);
+    const me=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me'),runtime); assert.deepEqual([me.status,(await me.json() as Json).error?.code],[401,'AUTH_REQUIRED']);
+  }
+  const errors=lines.map(line=>JSON.parse(line)).filter(line=>line.code==='OPTIONAL_FEATURE_DISABLED');
+  for (const feature of ['linkHosts','postmaster','supportChat','supportLogs','analyticsPush','stripe','domainConnect']) {
+    assert.ok(errors.some(e=>e.feature===feature && e.level==='error'), feature);
+    assert.equal(errors.filter(e=>e.feature===feature).length,1,feature+' is logged once');
+  }
+  assert.ok(!lines.join('').includes(token));
+  const invalidBuiltin=loadConfig({...base,PUBLIC_URL:'https://app.example.org',NIGHTMAIL_BUILTIN_DOMAIN:'example.org'});
+  assert.equal(invalidBuiltin.builtinDomain,undefined,'An overlapping built-in parent uses its existing off switch.');
+  const badScope=loadConfig({...base,NIGHTMAIL_BUILTIN_DOMAIN:'mail.example.org',NIGHTMAIL_BUILTIN_SEND_SCOPE:'typo',NIGHTMAIL_HYGIENE_DNS:'invalid',NIGHTMAIL_HYGIENE_LISTS:'invalid'});
+  assert.deepEqual([badScope.builtinDomain,badScope.builtinScope,badScope.hygieneDnsUrl,badScope.hygieneLists],[undefined,'members',null,false]);
+  const healthy=loadConfig({...base,NIGHTMAIL_LINK_SAAS_ZONE_ID:zone,NIGHTMAIL_LINK_SAAS_TOKEN:token,
+    NIGHTMAIL_POSTMASTER_CREDENTIALS:JSON.stringify({clientId:'id',clientSecret:token,refreshToken:'refresh'}),
+    CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:zone,CF_OBSERVABILITY_SCRIPT:'nightmail-dev'});
+  assert.deepEqual([healthy.linkHosts?.zoneId,healthy.postmaster?.clientId,healthy.observability?.script],[zone,'id','nightmail-dev']);
+  for(const bad of [{BANE_ROOT_SECRET:'short'},{ACCOUNT_CLIENT_PRIVATE_KEY:''},{ACCOUNT_REQUIRED_ACR:''},{AWS_RUNTIME_CREDENTIALS:'{}'},{ENABLE_LIVE_SES:'true'}])
+    assert.throws(()=>loadConfig({...base,...bad,NIGHTMAIL_POSTMASTER_CREDENTIALS:'bad'}),{code:'CONFIG_INVALID'});
+});
+
 test('OIDC dashboard callback verifies the token, consumes bound state once and creates a revocable session', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
@@ -3873,7 +3909,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const pem=privateKey.export({type:'pkcs1',format:'pem'}).toString().replaceAll('\n','\\n');
           for(const invalid of [{DOMAIN_CONNECT_KEY_ID:'_dck1'},{DOMAIN_CONNECT_PRIVATE_KEY:pem},
             ...['invalid-pem',generateKeyPairSync('rsa',{modulusLength:1024}).privateKey.export({type:'pkcs1',format:'pem'}),generateKeyPairSync('ec',{namedCurve:'prime256v1'}).privateKey.export({type:'pkcs8',format:'pem'})].map(k=>({DOMAIN_CONNECT_KEY_ID:'_dck1',DOMAIN_CONNECT_PRIVATE_KEY:k.toString()}))]) {
-            assert.throws(()=>loadConfig({...env,...invalid}),{code:'CONFIG_INVALID'});
+            assert.equal(loadConfig({...env,...invalid}).domainConnect, undefined);
           }
           runtime.config.domainConnect=loadConfig({...env,DOMAIN_CONNECT_PRIVATE_KEY:pem,DOMAIN_CONNECT_KEY_ID:'_dck1'}).domainConnect;
           const {getDashboardActor}=await import('./src/dashboard-auth.js');
@@ -4316,6 +4352,20 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
               ok(await local('DELETE',`/v1/domains/${reclaimed.id}`,undefined,a.cookie));
               ok(await local('DELETE',`/v1/domains/${recent.id}`,undefined,b.cookie));
             });
+            await it.test('Hourly expiry keeps a proven name whose ownership TXT is gone while SES still verifies its tagged identity, and frees it once that fails too',async()=>{
+              const {expireDomainClaims}=await import('./src/operations.js'),{sql}=await import('drizzle-orm');
+              const identity=identities.get(`${platform}:${domain}`)!,links=[...associations];
+              const lapse=()=>pool.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '62 days',receiving_proof_missed_at=now()-interval '31 days' WHERE name=$1",[domain]);
+              const restarted=async()=>(await pool.query("SELECT receiving_proof_missed_at>now()-interval '1 hour' AS restarted FROM domain_claims WHERE name=$1",[domain])).rows;
+              answer='';await lapse();await expireDomainClaims(runtime,Date.now()+5000);
+              assert.deepEqual(await restarted(),[{restarted:true}]);assert.ok(identities.has(`${platform}:${domain}`));
+              identity.VerificationStatus='TEMPORARY_FAILURE';await lapse();await expireDomainClaims(runtime,Date.now()+5000);
+              assert.deepEqual(await restarted(),[{restarted:false}],'An SES status that could not read DNS is no answer either way.');
+              identity.VerificationStatus='FAILED';const abort=new Error('rollback the release');
+              await assert.rejects(runtime.db.transaction(async tx=>{await expireDomainClaims({...runtime,db:tx},Date.now()+5000);
+                assert.equal((await tx.execute(sql`SELECT 1 FROM domain_claims WHERE name=${domain}`)).rowCount,0);throw abort;}),e=>e===abort);
+              identity.VerificationStatus='SUCCESS';identities.set(`${platform}:${domain}`,identity);associations.clear();for(const link of links)associations.add(link);
+            });
             assert.equal(await probe(custom),0);await mxCheck();assert.equal(await probe(custom),0,'Hourly MX alone cannot re-authorize lost ownership.');
             answer=proof.value;await pace();await check();assert.deepEqual(await claimState(),steady);
             activeMx.delete(mx.name);await mxCheck();await mxCheck();assert.equal(ok(await local('GET',detail,undefined,b.cookie)).receiving,'verified');
@@ -4391,7 +4441,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const verify=()=>operationJobs['domain.verify']!(runtime,contender.payload,{id:contender.id,attempts:1,workspaceId:b.org.id});
           await assert.rejects(verify(),JobDeferred);
           assert.deepEqual((await pool.query('SELECT workspace_id,ever_proven FROM domain_claims WHERE name=$1',[race])).rows,[{workspace_id:b.org.id,ever_proven:true}]);
-          for(const name of [race,`child.${race}`]) error(await add(a.cookie,name),409,'DOMAIN_CLAIMED');
+          for(const name of [race,`child.${race}`]) assert.match(error(await add(a.cookie,name),409,'DOMAIN_CLAIMED').message,/If the domain is yours, remove .*_nightmail\..*DKIM CNAME.*released about 30 days after both are gone.*support@/);
           await pace();await assert.rejects(verify(),JobDeferred);
           assert.equal(identities.get(`${platform}:${race}`)?.Tags?.some((tag:Json)=>tag.Value===answer),true);
           ok(await local('DELETE',`/v1/domains/${second.id}`,undefined,b.cookie));
@@ -9708,7 +9758,10 @@ describe('Hosted MCP OAuth and tools', () => {
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init);
         if (new URL(request.url).origin !== 'https://support.example.com') return previous(input, init);
-        wakes.push({ method: request.method, url: request.url, headers: [...request.headers.keys()], body: await request.text() });
+        const body = await request.text(), { conversationId } = JSON.parse(body), token = request.headers.get('authorization')?.slice(7) ?? '';
+        assert.ok(await platform.verifyWake(token, conversationId));
+        assert.equal(await platform.verifyWake(token, conversation()), false);
+        wakes.push({ method: request.method, url: request.url, headers: [...request.headers.keys()], body });
         return new Response(null, { status: 202 });
       };
       try {
@@ -9797,7 +9850,7 @@ describe('Hosted MCP OAuth and tools', () => {
           const listed = ok(await send('GET', `${inbox}?view=paused`, session(reader))).data.find((c: Json) => c.id === chatId);
           assert.deepEqual([listed.pausedBy.kind, listed.pausedBy.userId, listed.queuedReplies, listed.lastAuthor, listed.needsReply], ['staff', operator.userId, 1, 'staff', false]);
           // The wake names the conversation and nothing else.
-          assert.deepEqual(wakes, [1, 2].map(() => ({ method: 'POST', url: 'https://support.example.com/hooks/nightmail-wake', headers: ['content-type'], body: JSON.stringify({ conversationId: chatId }) })));
+          assert.deepEqual(wakes, [1, 2].map(() => ({ method: 'POST', url: 'https://support.example.com/hooks/nightmail-wake', headers: ['authorization', 'content-type'], body: JSON.stringify({ conversationId: chatId }) })));
           assert.deepEqual((await db.query(`SELECT user_id, actor_id, internal, summary->>'message' AS message FROM audit_events WHERE action = 'support.reply' AND target_id = $1`, [chatId])).rows,
             [{ user_id: owner.userId, actor_id: operator.userId, internal: true, message: queued.id }]);
           // The outbox: one conversation's after its wake, or every one; marked sent once.
@@ -24065,6 +24118,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         ['ryans','acme-corp','cafe-creme','mail','mail','mail','mail','mail','the-very-long-name','mail','mail','mail','mail','mail','mail']);
       assert.deepEqual(['MyGoogleDesk', 'Pay Pal Tools', 'Nіghtmail Desk', 'G00gle Team', 'Cloud Studio'].map(builtin.builtinBase),
         ['mail', 'mail', 'mail', 'mail', 'cloud-studio']);
+      // Ordinary names keep their label: a short brand word counts only on its own, also spelled across words or digits.
+      assert.deepEqual(['First Round Capital', 'Groups Inc', 'Delivery Hero', 'Purchase Co', 'Olive Garden'].map(builtin.builtinBase),
+        ['first-round-capital', 'groups', 'delivery-hero', 'purchase', 'olive-garden']);
+      const lookalikes = ['UPS Delivery', 'UPSDelivery', 'U P S Billing', 'Up5 Tracking', 'AWS Billing', 'MetaSupport', 'Ch4se Alerts', 'IRS Refunds', 'AppleBilling', 'MyGmailDesk', 'SecureLogin', 'Sign In Help', 'L\u0456ve Support'];
+      assert.deepEqual(lookalikes.map(builtin.builtinBase), lookalikes.map(() => 'mail'));
       const labels=new Set<string>();
       for (let i=0;i<40;i++) {const w=unique('ws-acme');await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)',[w,'Acme']);labels.add((await builtin.allocateBuiltinDomain(runtime.db,runtime.config,w,'Acme'))!);}
       assert.equal(labels.size,40,'Every workspace gets its own label.');
@@ -29480,6 +29538,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // without it takes. (A call starts only when its own run has ended, so the run after is the one it could delay.)
       // The calls are held until the run has been timed, then answered.
       const timed = { off: [] as number[], hanging: [] as number[] };
+      // The hanging-call deadline was exercised above. For this ordering check only, drive the held
+      // requests by the release below: descheduling the test must not expire a primed request mid-round.
+      const deadline = AbortSignal.timeout.bind(AbortSignal);
+      t.mock.method(AbortSignal, 'timeout', (ms: number) => mode === 'held' && ms === 30_000 ? new AbortController().signal : deadline(ms));
       // Each is the second of two rounds, and the two take turns going first.
       for (let i = 0; i < 4; i++) for (const arm of i % 2 ? ['hanging', 'off'] as const : ['off', 'hanging'] as const) {
         if (arm === 'off') { use('off'); await round(); const without = await round(); timed.off.push(without.ms); assert.deepEqual(without.seen, baseline.seen); continue; }
@@ -30047,7 +30109,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const hosted = { MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' };
       assert.deepEqual([settings({ NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T00:00:00Z' }).abuseMonitoring, settings(hosted).abuseMonitoring, settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T01:00:00+01:00' }).abuseMonitoring],
         [undefined, undefined, { since: '2026-11-23T00:00:00.000Z' }]);
-      assert.throws(() => settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: 'true' }), { code: 'CONFIG_INVALID' });
+      assert.equal(settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: 'true' }).abuseMonitoring, undefined);
       assert.deepEqual([settings(hosted).abuseEnforce, settings({ ...hosted, NIGHTMAIL_ABUSE_ENFORCE: 'true' }).abuseEnforce], [false, true]);
       const wrangler = async (file: string, key: string) => new RegExp(`^\\s*"${key}"\\s*:`, 'm').test(await readFile(new URL(file, import.meta.url), 'utf8'));
       assert.deepEqual([await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.dev.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_ENFORCE')], [true, true, false], 'Monitoring is on in production, monitor-only.');
@@ -30477,7 +30539,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ...extra });
       assert.deepEqual([settings({}).abuseSlackWebhookUrl, settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T0/B0/fixture' }).abuseSlackWebhookUrl, loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ABUSE_SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T0/B0/fixture' }).abuseSlackWebhookUrl],
         [undefined, 'https://hooks.slack.com/services/T0/B0/fixture', undefined]);
-      assert.throws(() => settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://example.com/hook' }), { code: 'CONFIG_INVALID' });
+      assert.equal(settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://example.com/hook' }).abuseSlackWebhookUrl, undefined);
       assert.deepEqual([runtime.config.abuseSlackWebhookUrl, /ABUSE_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8'))], [undefined, false], 'Unset here and in production.');
 
       // Two accounts on one mailbox: watch, no alert. The same card on both workspaces: review, one alert.
@@ -30830,7 +30892,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(day.top.complaints.length <= 10 && day.top.complaints.every(w => Object.keys(w).join() === 'workspaceId,accepted,bounced,complained'));
 
       // Amazon's view: GetAccount every 10 minutes, VDM hourly, each elected once; DBL unconfigured without a DQS zone.
-      // Gmail Postmaster Tools through the stored OAuth grant: a token, then the domain's days (Google's answers stubbed).
+      // Gmail Postmaster Tools (v2) through the stored OAuth grant: a token, then the domain's days (Google's answers stubbed).
       const builtin = runtime.config.builtinDomain;
       runtime.config.builtinDomain = 'deliverability.example';
       // The link domain every customer's campaign links share: its zone's DBL listing is checked with the platform's own.
@@ -30843,17 +30905,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const google = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input instanceof Request ? input.url : input);
         if (url === 'https://oauth2.googleapis.com/token') { asked.push(`token:${new URLSearchParams(String(init?.body)).get('refresh_token')}`); return Response.json({ access_token: 'access', expires_in: 3600 }); }
-        if (url.startsWith('https://gmailpostmastertools.googleapis.com/v1/domains/deliverability.example/trafficStats?')) {
-          asked.push(`stats:${new Headers(init?.headers).get('authorization')}`);
-          return Response.json({ trafficStats: [
-            { name: `domains/deliverability.example/trafficStats/${yesterday}`, domainReputation: 'MEDIUM', userReportedSpamRatio: 0.002, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 0.98 },
-            { name: `domains/deliverability.example/trafficStats/${today}`, domainReputation: 'HIGH', userReportedSpamRatio: 0.0004, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 1 },
-          ] });
+        if (url === 'https://gmailpostmastertools.googleapis.com/v2/domains/deliverability.example/domainStats:query' && init?.method === 'POST') {
+          const query = JSON.parse(String(init.body));
+          asked.push(`stats:${new Headers(init.headers).get('authorization')}:${query.aggregationGranularity}:${query.metricDefinitions.map((m: Json) => m.name).join(',')}`);
+          const day = (at: string) => ({ year: Number(at.slice(0, 4)), month: Number(at.slice(4, 6)), day: Number(at.slice(6)) });
+          const stat = (at: string, metric: string, floatValue: number) => ({ name: `domains/deliverability.example/domainStats/x.${at}`, metric, date: day(at), value: { floatValue } });
+          return Response.json({ domainStats: [stat(yesterday, 'spam', 0.002), stat(yesterday, 'dmarc', 0.98), stat(today, 'spam', 0.0004), stat(today, 'spf', 1), stat(today, 'dkim', 1), stat(today, 'dmarc', 1), stat(today, 'errors', 0)] });
         }
         throw new Error(`Unexpected request: ${url}`);
       };
       await refreshDeliverabilitySources(runtime, { fetch: google as typeof fetch });
-      assert.deepEqual(asked, ['token:refresh', 'stats:Bearer access']);
+      assert.deepEqual(asked, ['token:refresh', 'stats:Bearer access:DAILY:spam,spf,dkim,dmarc,errors']);
       const checks = (await db.query(`SELECT kind,status,detail,checked_at FROM deliverability_checks WHERE subject=$1 ORDER BY kind`, [region])).rows;
       assert.deepEqual(checks.map((c: Json) => [c.kind, c.status, c.detail]), [
         ['ses', 'ok', { enforcement: 'HEALTHY', sendingEnabled: true, productionAccess: true, vdm: true, engagement: true }],
@@ -30871,7 +30933,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([board.blocklist.find(b => b.domain === 'linkzone.example')?.status, board.postmaster.some(p => p.domain === 'linkzone.example')], ['unconfigured', false], 'It sends no mail: no Postmaster Tools for it.');
       const postmaster = board.postmaster.find(p => p.domain === 'deliverability.example')!;
       assert.deepEqual([postmaster.status, postmaster.url, postmaster.latest, Math.round(postmaster.spamRatio.current! * 1e6) / 1e6], ['ok', 'https://postmaster.google.com/',
-        { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, reputation: 'HIGH', spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1 }, 0.0012]);
+        { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1, deliveryErrorRatio: 0 }, 0.0012]);
       runtime.config.builtinDomain = builtin;
 
       // The route: the same figures for an operator, cached; a window that isn't one is refused.
@@ -31931,6 +31993,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'paused', workspace: 'www.evil.example' }).subject, 'Sending is paused for your workspace');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain is no longer verified');
       assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_unverified', workspace: 'W', domain: { id: 'dom_1', name: 'Mail.Example' } }).subject, 'mail.example is no longer verified');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_released', workspace: 'W', domain: { name: 'Mail.Example' } }).subject, 'mail.example was released from W');
+      assert.equal(written(PUBLIC_ORIGIN, { kind: 'domain_released', workspace: 'W', domain: { name: 'Mail.Example\r\nBcc: x@y.example' } }).subject, 'A domain was released from W');
       // An address every workspace together has mailed five times in a day is not mailed a sixth.
       await db.query(`UPDATE api_request_budgets SET used=$1 WHERE workspace_id='global' AND key_id LIKE 'invitation-email:%'`, [INVITATION_EMAILS.addressDay]);
       const sixth = (await db.query(`SELECT id FROM workspace_invitations WHERE workspace_id=$1 AND email='named-0@elsewhere.example' AND status='pending'`, [wid])).rows[0].id;
@@ -32109,6 +32173,40 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // The HTML part says what the text part says, paragraph for paragraph.
         for (const line of email.text.split('\n\n').slice(0, 2)) assert.ok(email.html.includes(line.replaceAll('&', '&amp;').replaceAll('"', '&quot;')), line);
       }
+    });
+  });
+
+  test('domain ownership: an absent proof has a grace period and is checked again before releasing the name', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { expireDomainClaims } = await import('./src/operations.js');
+      const name = 'renew.example', wid = runtime.config.workspaceId;
+      const { token } = (await db.query("INSERT INTO domain_claims(workspace_id,name,ever_proven,created_at) VALUES($1,$2,true,now()-interval '31 days') RETURNING token", [wid,name])).rows[0];
+      let response = 'absent';
+      // Replaced by hand and put back before the scenario ends: a second t.mock of fetch would leave the scenario's
+      // network guard in place for the tests after this one.
+      const networkGuard = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        return Response.json({Status: response === 'unavailable' ? 2 : 0, Answer: response === 'present' ? [{name:url.searchParams.get('name'), type:16, data:token}] : []});
+      };
+      try {
+        const sweep = () => expireDomainClaims(runtime, Date.now() + 5000);
+        const age = () => db.query("UPDATE domain_claims SET receiving_proof_missed_at=now()-interval '31 days' WHERE token=$1",[token]);
+        const blocks = async () => (await db.query("SELECT exclusive_domain_overlap('other',$1) AS held", ['child.'+name])).rows[0].held;
+        assert.equal(await sweep(), 0); assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
+        await age(); response = 'unavailable'; assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
+        response = 'present'; assert.equal(await sweep(), 0);
+        const missed = async () => (await db.query('SELECT receiving_proof_missed_at FROM domain_claims WHERE token=$1',[token])).rows[0].receiving_proof_missed_at;
+        assert.equal(await missed(), null);
+        // A proof seen in the last week is not looked at again; after a week a miss starts the grace period.
+        response = 'absent'; await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '6 days' WHERE token=$1",[token]);
+        await sweep(); assert.equal(await missed(), null);
+        await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '8 days' WHERE token=$1",[token]);
+        await sweep(); assert.notEqual(await missed(), null);
+        await age(); assert.equal(await sweep(), 1); assert.equal(await blocks(), false);
+        // Its owners and admins are told, once (the release is the claim's last moment).
+        assert.deepEqual((await db.query("SELECT data->>'name' AS name FROM account_notices WHERE workspace_id=$1 AND kind='domain_released'",[wid])).rows, [{name}]);
+      } finally { globalThis.fetch = networkGuard; }
     });
   });
 
@@ -35237,11 +35335,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { nodeRuntime } = await import('./src/adapters/node.js');
       const { jobHandlers } = await import('./src/sending.js');
       const { processJobs } = await import('./src/jobs.js');
-      const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: FIXTURE_DATABASE_URL });
+      // The background worker uses separate connections for capture and its progress write.
+      // Give all of them the same private queue, containing only this campaign's real job.
+      const schema = 'capture_queue_' + randomUUID().replaceAll('-', ''), url = new URL(FIXTURE_DATABASE_URL!);
+      await g.query(`CREATE SCHEMA ${schema}; CREATE TABLE ${schema}.jobs (LIKE public.jobs INCLUDING ALL); CREATE TABLE ${schema}.job_schedule (LIKE public.job_schedule INCLUDING ALL)`);
+      url.searchParams.set('options', `-c search_path=${schema},public`);
+      const { runtime, close } = nodeRuntime({ ...process.env, DATABASE_URL: url.href });
       try {
         Object.assign(runtime.config, { multiTenant: false, liveEnabled: false });
         const { rows: [cRow] } = await g.query('SELECT workspace_id, review_id FROM sending_campaigns WHERE id=$1', [c.id]);
-        await g.query("UPDATE jobs SET available_at = clock_timestamp() WHERE workspace_id=$1 AND id=$2", [cRow.workspace_id, 'campaign.run:' + c.id]);
+        const jobId = 'campaign.run:' + c.id;
+        assert.equal((await g.query(`INSERT INTO ${schema}.jobs SELECT * FROM public.jobs WHERE workspace_id=$1 AND id=$2 AND status='pending'`, [cRow.workspace_id, jobId])).rowCount, 1);
+        await g.query(`UPDATE ${schema}.jobs SET available_at = clock_timestamp() WHERE id=$1`, [jobId]);
         await stale();
         await processJobs(runtime, jobHandlers, 2, 1, 15_000);
         const capMs = Date.now() - capStart;
@@ -35253,7 +35358,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(after.total, Math.floor(members/every));
         assert.equal(after.prepared, Math.floor(members/every));
         assert.ok(capMs < 10_000, `Deferred ${name} capture took ${capMs} ms.`);
-      } finally { await close(); }
+      } finally { await close(); await g.query(`DROP SCHEMA ${schema} CASCADE`); }
     }
   });
 
@@ -40247,7 +40352,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://alerts.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ...extra });
       assert.deepEqual([settings({}).operatorSlackWebhookUrl, settings({ OPERATOR_SLACK_WEBHOOK_URL: OPERATOR_HOOK }).operatorSlackWebhookUrl,
         loadConfig({ PUBLIC_URL: 'https://alerts.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), OPERATOR_SLACK_WEBHOOK_URL: OPERATOR_HOOK }).operatorSlackWebhookUrl], [undefined, OPERATOR_HOOK, undefined]);
-      assert.throws(() => settings({ OPERATOR_SLACK_WEBHOOK_URL: 'https://example.com/hook' }), { code: 'CONFIG_INVALID' });
+      assert.equal(settings({ OPERATOR_SLACK_WEBHOOK_URL: 'https://example.com/hook' }).operatorSlackWebhookUrl, undefined);
       assert.equal(/OPERATOR_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8')), false);
 
       const f = await hostedHoldFixture(runtime, db), wid = f.wid;
@@ -40871,7 +40976,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const tag = unique('r').slice(-8), slowRoute = `GET /v1/fixture-${tag}/:id`, failing = `POST /v1/fixture-${tag}`, workspace = `ws_${tag}`, code = `FIXTURE_${tag.toUpperCase()}_FAILED`;
-      counters.resetCounters();
+      // Health lists only the eight busiest-by-latency non-alerting routes. Don't let an unrelated
+      // API process's samples displace our 3 ms route. Exercise both the minute and hour rollups.
+      await db.query('CREATE TEMP TABLE health_minutes (LIKE public.health_minutes INCLUDING ALL) ON COMMIT DROP; CREATE TEMP TABLE health_hours (LIKE public.health_hours INCLUDING ALL) ON COMMIT DROP');
+      counters.resetCounters(); t.after(counters.resetCounters);
       const errorLines = t.mock.method(console, 'error', () => {});
       const batch = () => {
         for (let i = 0; i < 38; i++) counters.countRequest({ route: `/v1/fixture-${tag}/:id`, method: 'GET', status: 200, durationMs: 20, workspace });
@@ -45001,15 +45109,15 @@ test('Database disk alert: a PlanetScale storage event with the derived Authoriz
   // changed after signing, gets the same 404. Hosted only, like the Slack webhook.
   const signedRuntime = runtime({ PLANETSCALE_WEBHOOK_SECRET: signing }), sign256 = (body: string, key = signing) => createHmac('sha256', key).update(body).digest('hex');
   assert.deepEqual([signedRuntime.config.planetscaleWebhookSecret, loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: signing }).planetscaleWebhookSecret], [signing, undefined]);
-  // A secret too short or too long to be PlanetScale's never stops the installation: it is left unused, as if unset,
-  // and said once, without its value.
+  // An invalid configured signer closes the webhook, not the API, and is reported once without its value.
   const warned: string[] = [];
-  await t.test('a signing secret of the wrong length is ignored with one warning', st => {
-    st.mock.method(console, 'warn', (line: string) => { warned.push(line); });
-    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [undefined, undefined, undefined, undefined]);
+  await t.test('a signing secret of the wrong length closes the webhook with one error', st => {
+    st.mock.method(console, 'error', (line: string) => { warned.push(line); });
+    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [null, null, null, null]);
     assert.equal(loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: 'too-short-fixture' }).planetscaleWebhookSecret, undefined, 'Self-hosted, it is never read.');
   });
-  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['PLANETSCALE_WEBHOOK_SECRET_IGNORED']);
+  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['OPTIONAL_FEATURE_DISABLED']);
+  assert.deepEqual(await deliver(storageEvent(86), { authorization: setup.authorization }, runtime({ PLANETSCALE_WEBHOOK_SECRET: 'invalid' })), [404, 'NOT_FOUND']);
   assert.ok(!warned[0]!.includes('too-short-fixture') && !warned[0]!.includes('x'.repeat(31)));
   const body = JSON.stringify(storageEvent(86));
   for (const signature of [undefined, sign256(body, 'e'.repeat(64)), sign256(body.replace('86', '87')), sign256(body).slice(1)])
