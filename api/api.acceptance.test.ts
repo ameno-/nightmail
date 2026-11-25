@@ -16607,6 +16607,10 @@ describe('Dashboard API capabilities', () => {
     assert.equal(formattedSender('sender@example.com', 'security\u24D0paypal.com'), 'sender@example.com');
     assert.equal(formattedSender('sender@example.com', 'securitya\u20DDpaypal.com'), 'sender@example.com');
     assert.equal(formattedSender('sender@example.com', 'Support \u202Emoc.elpmaxe'), 'sender@example.com');
+    const encodedName = (text: string) => `=?utf-8?B?${Buffer.from(text).toString('base64')}?=`;
+    assert.equal(formattedSender('sender@example.com', encodedName('Acme Billing')), '"Acme Billing" <sender@example.com>');
+    assert.equal(formattedSender('sender@example.com', encodedName('billing@example.com')), 'sender@example.com');
+    error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: encodedName('billing@example.com') })), 422, 'VALIDATION_FAILED');
     assert.equal(formattedSender('sender@example.com', 'Acme Billing'), '"Acme Billing" <sender@example.com>');
     const template = await resource(t, key.secret, '/v1/templates', { name: unique('display-name') });
     error(await http('PATCH', `/v1/templates/${template.id}`, key.secret, { revision: template.revision, draft: { ...template.draft, fromName: 'billing\uFF20example.com' } }), 422, 'VALIDATION_FAILED');
