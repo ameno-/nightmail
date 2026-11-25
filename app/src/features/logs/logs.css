@@ -112,30 +112,41 @@
 /* The ID's copy button makes its row taller: its label sits level with the ID, not above it. */
 .email-fact-list dt:has(+ .email-fact-list__id) { align-self: center; }
 .email-fact-list__id .identifier { min-width: 0; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; }
-/* A phone: the email from edge to edge, and the status line without the stream (the Details sheet names it). */
+/* A phone: the email from edge to edge, and the status line without the stream (the Details sheet names it). In a dark
+   dashboard a light email keeps the page's margins and its corners instead: a sheet on the page, not a white band
+   across the screen (the email itself is never recoloured). */
 @media (max-width: 640px) {
   .email-status__stream { display: none; }
   .email-detail .ev-canvas { margin-inline: calc(-1 * var(--bleed, 0px)); }
   .email-detail .ev-canvas :is(.email-frame, .email-source, .email-text) { border-radius: 0; }
+  :root[data-theme='dark'] .email-detail .ev-canvas { margin-inline: 0; }
+  :root[data-theme='dark'] .email-detail .ev-canvas :is(.email-frame, .email-source, .email-text) { border-radius: var(--radius-sm); }
 }
 
-/* Received mail: metadata, notices, body and identifiers on one 24px rhythm, apart by space alone. */
-.page-surface .email-metadata { padding-bottom: 0; }
-.page-surface .email-detail-page > .ui-alert { margin-top: var(--space-24); }
-.page-surface .email-detail-page > .ui-alert + .ui-alert { margin-top: var(--space-12); }
-.page-surface .email-detail-grid { margin-top: var(--space-8); padding-block: var(--space-24); }
-.page-surface .delivery-timeline > .ui-section-header { min-height: var(--control-height); }
-.page-surface .delivery-timeline li:first-child { padding-top: 0; }
-.page-surface .received-details { gap: 0; }
-.page-surface .received-group { margin-top: var(--space-24); }
-.page-surface .message-identifiers { padding-top: var(--space-24); }
-/* The back button stays beside the first line of a long subject, and the status stays on that line's row. */
-.page-surface .email-detail-page > .ui-page-header { flex-wrap: nowrap; align-items: flex-start; }
-.page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex: 1 1 0; flex-wrap: nowrap; align-items: flex-start; min-width: 0; max-width: none; }
-.page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; align-items: center; min-height: var(--control-height); }
-.page-surface .email-detail-page > .ui-page-header h1 { --title-line: var(--leading-title); min-width: 0; padding-block: calc((var(--control-height) - var(--title-line)) / 2); line-height: var(--title-line); overflow-wrap: anywhere; }
+/* Received mail (received-detail.tsx), in a sent email's layout: its notices (spam, a body too large or too complex) under
+   the facts; in the details column its checks, a row each like the delivery's steps, its details and its attachments. */
+.email-detail__notices { display: flex; flex: none; flex-direction: column; gap: var(--space-8); margin-bottom: var(--space-12); }
+.email-detail__section { display: flex; flex-direction: column; gap: var(--space-8); }
+.email-detail__section > .ss__title { display: flex; align-items: center; min-height: var(--control-height); margin: 0; }
+.received-checks { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.received-checks > li { display: grid; grid-template-columns: 6px minmax(0, 1fr) auto; align-items: center; column-gap: var(--space-12); padding-block: var(--space-4); }
+.received-checks__verdict { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); }
+.received-facts { display: grid; gap: var(--space-8); margin: 0; }
+.received-facts > div { display: grid; grid-template-columns: 88px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
+.received-facts dt { color: var(--color-muted); font-size: var(--text-xs); }
+.received-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.received-facts__id { display: flex; align-items: center; gap: var(--space-4); min-width: 0; }
+.received-facts__id .identifier { min-width: 0; overflow: hidden; font-size: var(--text-xs); text-overflow: ellipsis; white-space: nowrap; }
+.received-attachments { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+.received-attachments li { display: grid; grid-template-columns: 14px minmax(0, 1fr) auto; gap: var(--space-8); align-items: center; }
+.received-attachments li > svg { color: var(--color-muted); }
+.received-attachments li > :nth-child(2) { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.email-bar .email-bar__download { flex: none; }
+.email-detail-sheet__download { align-self: flex-start; }
+/* A phone: the attachments follow the message. */
+.email-detail[data-mode='stack'] .received-attachments-section { margin-top: var(--space-16); }
 /* The surface is a fixed-height flex column; headers, notices and toolbars keep their height when content overflows. */
-.page-surface .email-detail-page > :not(.email-detail-grid), .page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
+.page-surface .logs-page > :not(.logs-table, .logs-split) { flex-shrink: 0; }
 /* Logs' body (facets.tsx): the filters beside the stream from 1440 px, where the subject still has room; narrower, the
    toolbar's pickers filter instead. The stream column needs a wider window still: Transactional reads in full or not at all. */
 .ui-split.logs-split { --facet-width: 228px; flex: 1; min-height: 0; }
@@ -151,15 +162,6 @@
    leave an empty column at the table's end. */
 @media (max-width: 1759px) { .logs-page .logs-table :is(th, td)[data-col='stream'] { width: 0 !important; padding: 0 !important; visibility: hidden; } }
 
-@media (max-width: 850px) {
-  .page-surface .email-detail-page { min-height: auto; }
-  .page-surface .email-detail-grid { row-gap: var(--space-24); }
-  .page-surface .delivery-timeline { padding-left: 0; padding-top: var(--space-20); }
-  .page-surface .email-metadata { gap: var(--space-8); }
-  .email-metadata > div { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; }
-  .email-metadata dt { margin: 0; }
-}
-
 /* Tablet: the table drops its stream column to fit without scrolling sideways. */
 @media (max-width: 1100px) {
   .page-surface .logs-page .logs-table .ui-table { min-width: 720px; }
@@ -170,21 +172,6 @@
 .ui-cards.logs-table .ui-card__segment:empty { display: none; }
 .ui-cards.logs-table .ui-card__segment:not(:last-child) { flex: none; }
 .ui-cards.logs-table .ui-card__segment:last-child { flex: 1 1 0; }
-/* Phone: a message's facts are label · value rows, its status sits under the title, and the body and its timeline stack. */
-@media (max-width: 640px) {
-  .page-surface .email-detail-page > .ui-page-header { flex-wrap: wrap; }
-  .page-surface .email-detail-page > .ui-page-header > .cluster:first-child { flex-basis: 100%; }
-  .page-surface .email-detail-page > .ui-page-header > .cluster:last-child:not(:first-child) { min-height: 0; }
-  .page-surface .email-detail-grid { margin-top: var(--space-20); padding-block: var(--space-16); }
-  .email-detail-grid .ui-email-preview, .plain-text-preview, .message-source { min-height: 320px; }
-  /* A plain-text message is as tall as its text: two lines don't push the details below the first screen. */
-  .email-detail-grid .plain-text-preview { flex: none; min-height: 0; }
-  .page-surface .email-detail-grid { min-height: 0; }
-  .email-detail-grid .ui-tabs { padding-bottom: var(--space-8); }
-  .page-surface .message-identifiers { flex-direction: column; align-items: flex-start; gap: var(--space-8); }
-  .message-identifiers .identifier { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .message-identifiers > .cluster { flex-wrap: nowrap; max-width: 100%; white-space: nowrap; }
-}
 /* Long campaign names truncate, so the filter row keeps one height and Export stays on it. */
 .logs-campaign-chip { display: inline-block; max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 /* Addresses in rows and cards give way to what follows them (the "+2" of more recipients) instead of pushing it out of the cell. */
@@ -206,7 +193,7 @@
 .thread-line { display: flex; flex: none; flex-direction: column; gap: var(--space-8); }
 .thread-line__title { display: flex; align-items: center; gap: var(--space-6); min-height: var(--control-height); margin: 0; }
 /* Section titles beside an email: quiet sentence-case labels over their data. */
-:is(.email-detail, .email-detail-page) :is(.ss__title, .thread-line__title) { display: flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); font-weight: 400; }
+.email-detail :is(.ss__title, .thread-line__title) { display: flex; align-items: center; gap: var(--space-8); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); font-weight: 400; }
 .email-detail .thread__count { color: var(--color-faint); }
 .thread-line__steps { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
 .thread-line__step { position: relative; }
@@ -223,10 +210,6 @@
 .thread-line__entry[data-focused] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.thread-line__entry:hover { background: var(--color-hover); } }
 .email-detail-sheet .thread-line__steps { margin-inline: var(--space-8); }
-.page-surface .received-details > .thread-line { margin-bottom: var(--space-24); }
-/* The received details scroll on their own: the steps keep inside their right edge. */
-.received-details .thread-line__step { display: block; padding: 0; }
-.received-details .thread-line__entry { margin-right: 0; }
 .thread-chip { position: relative; display: inline-flex; flex: none; align-items: center; gap: var(--space-4); height: 28px; margin-left: auto; padding: 0 var(--space-8) 0 var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-layer-2); color: var(--color-text); font: inherit; white-space: nowrap; }
 .thread-chip::before { content: ''; position: absolute; inset: -8px -4px; }
 .thread-chip > svg { color: var(--color-muted); }
@@ -327,6 +310,8 @@
 /* Between 900 and 1199 px the delivery runs as one line under the facts, on the canvas, its text level with theirs. */
 .email-detail[data-mode='panel'] > .delivery { min-height: 36px; margin: 0; padding: var(--space-4) var(--space-28); font-size: var(--text-xs); }
 @media (min-width: 900px) {
+  /* A received message's notices, on the page's 16px gutter between the facts and the preview. */
+  .email-detail__notices { margin: var(--space-8) var(--space-16) 0; }
   /* The 8px between the preview and the inspector is the inspector's own margin, so a hidden panel leaves no gap and the
      matte's right edge stays level with the facts strip's. */
   .email-detail__body { gap: 0; padding: var(--space-8) var(--space-16) var(--space-16); }

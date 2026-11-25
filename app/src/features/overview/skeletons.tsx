@@ -5,7 +5,7 @@ import { label } from '../../lib/format'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { Icon, IconButton, LoadingRegion, PageHeader, SectionHeader, Select, Skeleton, StatusBadge, TableSkeleton, Tabs, type Column, type SkeletonColumn } from '../../components/ui'
 import type { LogEntry } from '../../data/types'
-import { logColumnDefs, logColumns } from '../logs/rows'
+import { LogParty, logColumnDefs, logColumns } from '../logs/rows'
 import { useLatestRowCount } from './latest'
 import { setPanelHidden, usePanelHidden } from './panel'
 import '../score/score.css'
@@ -28,7 +28,7 @@ export const factTitles = ['Emails', 'Delivered', 'Bounced', 'Complaints'] as co
 const logColumn = (key: string) => logColumns.find(column => column.key === key)!
 export const latestColumnDefs: SkeletonColumn[] = logColumnDefs.map(column => column.key === 'direction' || column.key === 'from' || column.key === 'stream' ? { ...column, table: false as const }
   : column.key === 'status' ? { ...column, width: 160 } : column.key === 'to' ? { ...column, key: 'contact', label: 'To · from', width: 180 } : column)
-export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => ({ ...logColumn(column.key === 'contact' ? 'to' : column.key), ...column, render: column.key === 'contact' ? (row: LogEntry) => (row.direction === 'sent' ? logColumn('to') : logColumn('from')).render(row) : logColumn(column.key).render }))
+export const latestColumns: Column<LogEntry>[] = latestColumnDefs.map(column => ({ ...logColumn(column.key === 'contact' ? 'to' : column.key), ...column, render: column.key === 'contact' ? (row: LogEntry) => <LogParty row={row} /> : logColumn(column.key).render }))
 
 // Hides or shows the inspector rail beside the main column (panel.ts). It closes the control strip, here and in the
 // route skeleton alike, and is not there where the rail stacks under the main column (overview.css).
