@@ -1,6 +1,6 @@
 import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
-import { ApiError, getSes, isSimulatedSes, rowId, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, databaseConflict, getSes, isSimulatedSes, rowId, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, transientDatabaseError, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
 import { approvedOriginUser, checkedDispatchAttachments, customerCredits, formattedSender, inlineMessage, LINK_RECORD_RECHECK_MS, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
@@ -899,10 +899,10 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
   for (let attempt=0; ; attempt++) {
     try { readyJobs = (await runtime.db.execute<{webhooks:number}>(statement)).rows[0]!.webhooks; break; }
     catch (error) {
-      const pg = error as {code?:string;cause?:{code?:string}};
-      if (!['40P01','40001'].includes(pg.cause?.code ?? pg.code ?? '')) throw error;
+      const conflict = databaseConflict(error), transient = !conflict && transientDatabaseError(error);
+      if (!conflict && !transient) throw error;
       if (attempt>=3) {
-        if (outcomes.length===1) throw error;
+        if (!conflict || outcomes.length===1) throw error;
         // A repeatedly contended mixed write must not strand its neighbors. Keep one
         // writer per run, and attempt the second half even if the first cannot settle.
         const mid=Math.ceil(outcomes.length/2);
@@ -910,7 +910,8 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
         finally { await recordOutcomes(runtime,outcomes.slice(mid)); }
         return;
       }
-      await sleep((10+Math.random()*20)*2**attempt);
+      const baseMs = transient ? 100 : 10;
+      await sleep((baseMs + Math.random() * baseMs) * 2 ** attempt);
     }
   }
   if (readyJobs > 0) try { await runtime.wake?.(readyJobs, 'webhook'); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Webhook jobs remain durable.' }); }
@@ -1171,7 +1172,7 @@ async function recordBatch(base: Runtime,lane: Lane,outcomes: Outcome[]) {
   await lane.phase('record', () => recordOutcomes(base,outcomes));
   for (const outcome of outcomes) {
     logEmail(lane, outcome.mail, outcome.trace, outcome.type === 'dispatch_deferred' ? 'deferred' : outcome.type, outcome.errorCode ?? (typeof outcome.data.code === 'string' ? outcome.data.code : undefined));
-    if(outcome.type==='acceptance_unknown' || outcome.type==='provider_throttled' || outcome.errorCode==='SES_TENANT_SENDING_PAUSED') log(outcome.type==='acceptance_unknown'?'error':'warn',{code:outcome.errorCode,region:outcome.mail.region,stream:outcome.mail.snapshot.kind});
+    if(outcome.type==='acceptance_unknown' || outcome.type==='provider_throttled' || outcome.errorCode==='SES_TENANT_SENDING_PAUSED') log(outcome.type==='acceptance_unknown' || outcome.errorCode==='SES_ACCOUNT_SENDING_PAUSED' || outcome.errorCode==='SES_CREDENTIALS_INVALID' ? 'error' : 'warn',{code:outcome.errorCode,region:outcome.mail.region,stream:outcome.mail.snapshot.kind});
     if (outcome.type === 'accepted') lane.counters.sent++; else if (requeued(outcome)) lane.counters.deferred++; else lane.counters.skipped++;
     if (outcome.mail.campaignId && !requeued(outcome)) lane.finishing.set(outcome.mail.campaignId, { workspace_id: outcome.mail.workspaceId, campaign_id: outcome.mail.campaignId });
   }
