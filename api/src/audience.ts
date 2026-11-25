@@ -1116,7 +1116,7 @@ export function registerAudience(app: App) {
     }) as never;
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/contact-imports', operationId: 'previewContactImport', tags: ['Audience'], security, description: `Persist a preview before commit. Feature limit: 5 MiB UTF-8 CSV, 50,000 rows, 100 columns per import; preview and commit a larger file in parts of that size (the dashboard does this for files up to 1,000,000 rows and 100 MiB). Map headers explicitly. Valid rows can commit alongside a retained row-error report. Imports never lift suppression; consent changes only when the commit attests it. Each workspace keeps at most ${IMPORT_OPEN_PREVIEW_CAP} uncommitted previews (oldest evicted) and allows ${IMPORT_PREVIEW_RATE_PER_MINUTE} previews per minute.`, request: { body: json(ImportInput) }, responses: { 201: response(Import), ...errors } }), async c => {
-    const identity = actor(c, 'editContent'), input = c.req.valid('json');
+    const input = c.req.valid('json'), identity = actor(c, input.listId ? 'manage' : 'editContent');
     if (input.listId) await findList(c.env.db, identity, input.listId);
     if (!await chargeBudget(c.env, identity.workspaceId, 'imports:preview', IMPORT_PREVIEW_RATE_PER_MINUTE)) {
       c.header('Retry-After', '60');
@@ -1214,6 +1214,7 @@ export function registerAudience(app: App) {
             throw new ApiError(503, 'IMPORT_COMMIT_BUSY', 'Another contact import is committing in this workspace; retry when it finishes.', undefined, true);
           const [job] = await tx.select({ ...importMetaColumns, rowCount: sql<number>`jsonb_array_length(${imports.rows})::int` }).from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1).for('update');
           if (!job) importNotFound();
+          if (job.listId) actor(c, 'manage');
           if (job.status === 'committed') {
             const [full] = await tx.select({ rowsText: sql<string>`${imports.rows}::text`, errorsText: sql<string>`${imports.errors}::text` }).from(imports).where(and(scope(imports, identity), eq(imports.id, importId))).limit(1);
             return { meta: job, rowsText: full!.rowsText, errorsText: full!.errorsText, subscribed: 0 };
