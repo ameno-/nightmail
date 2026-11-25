@@ -1,10 +1,12 @@
 import { ConnectAgentButton, ConnectAgentDialog, McpKeySetup } from '../docs/connect-agent'
 import { useEffect, useState, type FormEvent } from 'react'
+import { flushSync } from 'react-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router'
 import { request } from '../../data/live'
 import { Alert, Button, Checkbox, ConfirmDialog, DropdownMenu, CopyButton, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, Select, SkeletonText, StatusBadge, type Tone, fieldError, MutationError } from '../../components/ui'
 import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
-import { invalidate } from '../../data/invalidation'
+import { cancelOwnQueries, forgetResource, inboxForget, invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import type { ApiKey, CreatedInbox, Inbox, InboxInput, InboxMessage, InboxStatus, MailboxDomain } from '../../data/types'
 import { date, fileSize, number } from '../../lib/format'
@@ -200,10 +202,14 @@ function InboxDetail({ id }: { id: string }) {
   const [revoking, setRevoking] = useState<ApiKey | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const pagination = useCursorPagination()
-  const inbox = useApiQuery(['agent-inbox', id], (api, signal) => api.inboxes.get(id, signal), { interval: 15_000 })
+  const client = useQueryClient()
+  // Set when Delete is confirmed, before the DELETE goes out: the inbox's reads below stop (no poll), so nothing asks for
+  // it once it is gone. Cleared again if the delete fails. (data/invalidation.ts forgetResource)
+  const [deleted, setDeleted] = useState(false)
+  const inbox = useApiQuery(['agent-inbox', id], (api, signal) => api.inboxes.get(id, signal), { interval: 15_000, enabled: !deleted })
   const [folder,setFolder]=useState('')
-  const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000})
-  const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000 })
+  const folders=useApiQuery(['agent-inbox-folders',id],(api,signal)=>api.inboxes.folders(id,signal),{interval:15_000,enabled:!deleted})
+  const messages = useApiQuery(['agent-inbox-messages', id, folder, pagination.cursor ?? null], (api, signal) => api.inboxes.messages(id, { after: pagination.cursor,folder:folder||undefined }, signal), { interval: 15_000, enabled: !deleted })
   // The inbox's keys from the API key list (no server inboxId filter yet): check up to 3 pages (300 active keys),
   // and link to API keys when more exist.
   const keys = useApiQuery(['keys', 'inbox', id], async (api, signal) => {
@@ -212,7 +218,14 @@ function InboxDetail({ id }: { id: string }) {
     do { const page = await api.keys.list(signal, cursor, false); data.push(...page.filter(key => keyFor(key, id))); cursor = page.nextCursor ?? undefined } while (cursor && ++pages < 3)
     return { data, complete: !cursor }
   }, { enabled: canAdminister })
-  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, invalidate.agentInboxes, id)
+  const remove = useApiMutation((api, _: void) => api.inboxes.remove(id), 'Inbox deleted', false, false, id)
+  async function deleteInbox() {
+    flushSync(() => { setDeleted(true); setSelected(null) })
+    void cancelOwnQueries(client, id, inboxForget).catch(() => {})
+    try { await remove.mutateAsync() } catch (error) { setDeleted(false); throw error }
+    navigate(route)
+    void forgetResource(client, id, inboxForget).catch(() => {})
+  }
   const revoke = useApiMutation((api, keyId: string) => api.keys.revoke(keyId), 'API key revoked', false, invalidate.apiKeys)
   // A sandbox only gets mail this way (simulateInboxMessage): a sign-up code to read, as an agent or test would.
   const simulate = useApiMutation((_api, _: void) => request(`/v1/inboxes/${encodeURIComponent(id)}/simulate`, { method: 'POST', body: { from: 'hello@example.com', subject: 'Your sign-up code', text: 'Your code is 482913. It expires in 10 minutes.' } }), 'Test mail sent', false, invalidate.agentInboxSimulate, id)
@@ -282,6 +295,6 @@ function InboxDetail({ id }: { id: string }) {
     {selected && <MessageDialog inboxId={id} messageId={selected} onClose={() => setSelected(null)} />}
     {b && <EditInboxDialog inbox={b} open={editing} onOpenChange={setEditing} />}
     <ConfirmDialog open={revoking !== null} onOpenChange={value => { if (!value) setRevoking(null) }} title={`Revoke ${revoking?.name ?? 'this key'}?`} description="Agents using it lose access to this inbox right away. The inbox and its mail stay." confirmLabel="Revoke key" danger pending={revoke.isPending} onConfirm={async () => { if (revoking) await revoke.mutateAsync(revoking.id) }} />
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this inbox?" description={<>{b ? <PrivateAddress value={b.address} /> : 'This inbox'} stops receiving now. Its real address returns to normal domain routing. Keys created with the inbox stop working, and its messages are erased within the hour.</>} confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate(route) }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this inbox?" description={<>{b ? <PrivateAddress value={b.address} /> : 'This inbox'} stops receiving now. Its real address returns to normal domain routing. Keys created with the inbox stop working, and its messages are erased within the hour.</>} confirmLabel="Delete inbox" danger pending={remove.isPending} onConfirm={deleteInbox} />
   </div>
 }
