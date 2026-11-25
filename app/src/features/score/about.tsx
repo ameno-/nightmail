@@ -4,6 +4,8 @@ import type { SenderScore, SenderScoreFactor } from '../../data/types'
 import { closeScoreAbout, useScoreAbout } from '../../lib/score-about'
 import { number, relativeTime } from '../../lib/format'
 import { EVALUATION, GOOD_STANDING, GRADE_BANDS } from '../../../../api/src/standing-model'
+import { useSession } from '../../data/context'
+import { sendsFromBuiltin } from '../settings/builtin-domain'
 
 const percent = (digits: number) => (value: number) => `${Number((value * 100).toFixed(digits))}%`
 // Engagement is the marketing unsubscribe rate.
@@ -44,7 +46,9 @@ export function ScoreAbout({ report, error, onRetry }: { report: SenderScore | u
   const low = days.length ? Math.min(...days.map(day => day.score)) - 4 : 0, high = days.length ? Math.max(...days.map(day => day.score)) : 1
   const move = report && scoreMove(report)
   const limit = report?.limit
-  const limitLine = !limit ? null : [limit.source === 'calibrating' ? `Evaluation: first ${number(EVALUATION.recipients)} recipients, once` : limit.daily === null ? 'No daily limit' : `Daily limit ${number(limit.daily)}${limit.source === 'override' ? ' (override)' : ''}`,
+  // Sending from the built-in domain, its cap is the one that applies (it is lower than the evaluation's).
+  const builtin = useSession()?.identity?.connection?.builtinDomain
+  const limitLine = !limit ? null : sendsFromBuiltin(builtin) ? `Built-in domain: ${number(builtin.perDay)} recipients a day · ${number(builtin.perMinute)} a minute` : [limit.source === 'calibrating' ? `Evaluation: first ${number(EVALUATION.recipients)} recipients, once` : limit.daily === null ? 'No daily limit' : `Daily limit ${number(limit.daily)}${limit.source === 'override' ? ' (override)' : ''}`,
     limit.growth ? `growing: up to ${number(limit.growth.hourly)} this hour` : null,
     graded && limit.next ? limit.next.unlimited ? `none from ${limit.next.atScore}` : `next ${number(limit.next.limit)} at ${limit.next.atScore}` : null, `${number(limit.perMinute)} a minute`, limit.transactionalReserve ? `${number(limit.transactionalReserve)} kept for receipts` : null].filter(Boolean).join(' · ')
   return <Dialog open={open} onOpenChange={next => { if (!next) closeScoreAbout() }} className="score-about" title="Sender score"

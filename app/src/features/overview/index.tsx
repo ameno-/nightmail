@@ -64,8 +64,9 @@ export function OverviewPage() {
   const client = useQueryClient()
   // A test from the first-send card shows in Latest emails and the figures; the card keeps its confirmation for this visit.
   const sentFromCard = () => void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
-  // The card leads with its own actions, so the setup steps don't offer them again beside it.
-  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : ['key', 'send']) : setup
+  // The card leads with its own actions, so the setup steps don't offer them again beside it (the key stays there: the
+  // first-send card copies the agent prompt instead).
+  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : ['send']) : setup
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
   const count = useLatestRowCount(card ? ONBOARDING_CARD_SPACE[card] : 0)
@@ -275,17 +276,18 @@ function monotone(xs: number[], ys: number[]) {
 }
 // keep(i) drops the segment from point i to i + 1: the complaints line only rises where there is one, and never runs
 // along the baseline in red between them.
-function Line({ xs, ys, tone, keep = () => true }: { xs: number[]; ys: number[]; tone: 'sent' | 'bounces' | 'complaints'; keep?: (i: number) => boolean }) {
+function Line({ xs, ys, tone, keep = () => true, partial = false }: { xs: number[]; ys: number[]; tone: 'sent' | 'bounces' | 'complaints'; keep?: (i: number) => boolean; partial?: boolean }) {
   let path = '', end = -1
   monotone(xs, ys).forEach((segment, i) => { if (!keep(i)) return; if (end !== i) path += `M ${xs[i]} ${ys[i]} `; path += segment + ' '; end = i + 1 })
-  return path ? <path d={path} className={`ov-line ov-line--${tone}`} /> : null
+  return path ? <path d={path} className={`ov-line ov-line--${tone}${partial ? ' ov-line--partial' : ''}`} /> : null
 }
 // The activity chart: emails as a navy line over a flat wash on the left scale; bounces and complaints as counts on a
 // small scale of their own in the lower half of the plot, so a handful of bounces still has a shape. Their latest values
 // label the lines' ends; while a bucket is hovered (or tapped and dragged on a phone) that scale shows as a short right
 // axis instead, and one readout follows the crosshair. An hour over the bounce limit, or with any complaint, has a dot
-// on its line. The window's first and last buckets are only partly counted (it starts and ends mid-hour), so the lines
-// leave them out rather than dip; they stay in the figures and the readout. New counts over the same buckets morph.
+// on its line. The window's first bucket is only partly counted (it starts mid-hour), so the lines leave it out rather
+// than dip; it stays in the figures and the readout. The last is the hour (or day) under way: dashed, with what it has so
+// far, so a new email shows as soon as the figures count it. New counts over the same buckets morph.
 function ActivityChart({ data }: { data: Overview }) {
   const target = data.points
   const [active, setActive] = useState<number | null>(null)
@@ -311,9 +313,11 @@ function ActivityChart({ data }: { data: Overview }) {
   const band = (bottom - top) * .55, oy = (value: number) => bottom - value / outcomeMax * band
   const firstPartial = n > 3 && Date.parse(data.periodStart) > Date.parse(target[0].at)
   const lastPartial = n > 3 && Date.parse(data.periodEnd) < Date.parse(target[n - 1].at) + bucketOf(target)
-  const from = firstPartial ? 1 : 0, to = lastPartial ? n - 2 : n - 1, drawn = (i: number) => i >= from && i <= to
-  const span = (values: readonly number[]) => values.slice(from, to + 1)
+  // The last bucket, still under way, is drawn dashed from the last whole one: the newest mail shows at once.
+  const from = firstPartial ? 1 : 0, to = n - 1, whole = lastPartial ? n - 2 : to, drawn = (i: number) => i >= from
+  const span = (values: readonly number[], end = to) => values.slice(from, end + 1), tail = (values: readonly number[]) => values.slice(whole, to + 1)
   const emailsY = sent.map(ey), bounceY = bounced.map(oy), complaintY = complaints.map(oy)
+  const complained = (i: number) => target[i].complaints > 0 || target[i + 1].complaints > 0
   const marked = target.map((p, i) => ({ bounces: drawn(i) && hourRate(p.bounced, p.sent) >= BOUNCE_LINE, complaints: drawn(i) && p.complaints > 0 }))
   // The end labels, kept 12px apart (thousands as 2.8k where a phone's gutter is narrow).
   const endText = (value: number) => compact && value >= 1000 ? `${(value / 1000).toFixed(1).replace(/\.0$/, '')}k` : number(value)
@@ -332,9 +336,14 @@ function ActivityChart({ data }: { data: Overview }) {
     <svg viewBox={`0 0 ${width} ${height}`} role="group" aria-label="Emails per bucket on the left scale; bounces and complaints on their own scale">
       {[0, 1, 2, 3].map(i => { const y = top + i * (bottom - top) / 3; return <g key={i}><line x1={left} x2={right} y1={y} y2={y} className={i === 3 ? 'chart-grid chart-grid--base' : 'chart-grid'} /><text x={left - 8} y={y + 3.5} textAnchor="end" className="chart-label">{number(Math.round(max * (1 - i / 3)))}</text></g> })}
       <path d={`M ${xs[from]} ${bottom} L ${xs[from]} ${emailsY[from]} ${monotone(span(xs), span(emailsY)).join(' ')} L ${xs[to]} ${bottom} Z`} className="ov-wash" />
-      <Line xs={span(xs)} ys={span(emailsY)} tone="sent" />
-      <Line xs={span(xs)} ys={span(bounceY)} tone="bounces" />
-      <Line xs={span(xs)} ys={span(complaintY)} tone="complaints" keep={i => target[from + i].complaints > 0 || target[from + i + 1].complaints > 0} />
+      <Line xs={span(xs, whole)} ys={span(emailsY, whole)} tone="sent" />
+      <Line xs={span(xs, whole)} ys={span(bounceY, whole)} tone="bounces" />
+      <Line xs={span(xs, whole)} ys={span(complaintY, whole)} tone="complaints" keep={i => complained(from + i)} />
+      {whole < to && <>
+        <Line xs={tail(xs)} ys={tail(emailsY)} tone="sent" partial />
+        <Line xs={tail(xs)} ys={tail(bounceY)} tone="bounces" partial />
+        <Line xs={tail(xs)} ys={tail(complaintY)} tone="complaints" keep={() => complained(whole)} partial />
+      </>}
       {marked.map((mark, i) => <g key={target[i].at}>{mark.bounces && dot(xs[i], bounceY[i], 'bounces', 'b')}{mark.complaints && dot(xs[i], complaintY[i], 'complaints', 'c')}</g>)}
       {active === null
         ? ends.map(end => <text key={end.tone} x={right + 8} y={end.y + 3.5} className={`chart-label ov-end ov-end--${end.tone}`}>{end.text}</text>)

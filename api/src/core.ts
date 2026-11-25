@@ -192,6 +192,9 @@ export interface Runtime {
   placementEdge?: { probesPerJob:number };
   wake?: (readyJobs?: number, immediate?: 'webhook'|'ingest') => Promise<void>;
   deferNudge?: (work: (runtime: Runtime) => Promise<void>) => void;
+  /** Starts work now on a database connection of its own that outlives the request (the Worker's waitUntil), for work
+   * the request starts but doesn't wait for (startHostedMail). Absent where the request's own pool outlives it (Node). */
+  detach?: (work: (runtime: Runtime) => Promise<void>) => Promise<void>;
   /** Starts a sealed Logs fold on a separate worker connection. The caller never runs it on its HTTP pool. */
   startLogFacetFold?: (slot: string) => void;
   /** Coalesced off-request nudge for a workspace's incrementally certified Logs buckets. */

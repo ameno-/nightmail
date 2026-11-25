@@ -352,13 +352,13 @@ async function domain(db, workspaceId, conn, name, { receiving = false, mailFrom
 }
 
 // A workspace's built-in domain as its Hosted connection leaves it (create_builtin_claim, migration 495): sending, receiving
-// on its own name with no DNS of its own, and its default inbox's catch-all.
-async function builtin(db, workspaceId, conn, label) {
+// on its own name with no DNS of its own, and its default inbox's catch-all. `pending`: not associated with its tenant yet.
+async function builtin(db, workspaceId, conn, label, { pending = false } = {}) {
   const name = `${label}.nightmail.email`, id = 'dom_builtin_' + workspaceId, mdom = 'mdom_builtin_' + workspaceId;
   await db.query('INSERT INTO builtin_domains(workspace_id,label,name) VALUES($1,$2,$3)', [workspaceId, label, name]);
-  const identity = { builtin: true, proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
-  await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES($1,$2,$3,'verified','active',$2,$4::jsonb,now(),now())",
-    [workspaceId, name, conn, JSON.stringify(identity)]);
+  const identity = { builtin: true, proven: true, mx: null, note: null, ses: pending ? { VerificationStatus: 'PENDING' } : { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
+  await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES($1,$2,$3,$5,'active',$2,$4::jsonb,now(),now())",
+    [workspaceId, name, conn, JSON.stringify(identity), pending ? 'pending' : 'verified']);
   await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
   await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at) VALUES($1,$2,$3,$4,$5,$4,'active','store',now()-interval '1 day')", [mdom, workspaceId, id, name, REGION]);
   return { id, name };
@@ -941,6 +941,9 @@ export async function seed(fx) {
   // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its domain step.
   await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
   await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
+  // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
+  await fx.signIn('ula', 'ula@ulmus.example', 'Ula Berg', { id: 'ws_builtin_pending', name: 'Ulmus' });
+  await builtin(db, 'ws_builtin_pending', await hosted(db, 'ws_builtin_pending'), 'ulmus-r8', { pending: true });
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');

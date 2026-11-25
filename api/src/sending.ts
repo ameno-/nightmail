@@ -42,7 +42,7 @@ import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
-import { assertBuiltinInput, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { assertBuiltinInput, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
 import { estimateFinish, judgeReadiness, RAMP, RAMP_HOUR_MS, rampPlan, rampStart, READINESS_REASONS, type RampAt, type ReadinessReason } from './standing-model.js';
 
 type HtmlParser = typeof import('parse5').parse;
@@ -1758,9 +1758,10 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
   }
 }
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
-async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false) {
+async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false, screen = true) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   for (const [i, m] of mails.entries()) assertBuiltinInput(call.runtime.config, m, batch ? i : undefined);
+  if (mails.some(m => isBuiltinHost(call.runtime.config, m.from.split('@')[1]!))) await awaitBuiltinSetup(call.runtime, a.workspaceId);
   // Marketing mail's footer carries the workspace's postal address when it has one. Unlike a campaign, a marketing send
   // without one is not refused: its caller writes the whole message and may include the address itself.
   const address = mails.some(m => m.kind === 'marketing') ? await workspacePostalAddress(call.runtime, call.db ?? call.runtime.db, a.workspaceId) : null;
@@ -1768,11 +1769,11 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   // A reply by header joins the conversation it answers only when its sender can read that message.
   await joinReplies(call.db ?? call.runtime.db, actorMailAccess(a), out.map(m => m.snapshot));
-  const needsPrep = out.some(m => m.template) || mayScreenAtAccept(call.runtime, out);
+  const screened = screen && mayScreenAtAccept(call.runtime, out), needsPrep = out.some(m => m.template) || screened;
   if (!needsPrep) return admitSends(call, input, out, { actor: a }, { batch, scheduledAt });
   return claimedSend(call, a, input, async () => {
     if (out.some(m => m.template)) await renderTemplates(call.runtime, a, out, batch);
-    if (mayScreenAtAccept(call.runtime, out)) await prepareFrontDoor(call.runtime, a, out, batch, scheduledAt);
+    if (screened) await prepareFrontDoor(call.runtime, a, out, batch, scheduledAt);
     return { out };
   }, { batch, scheduledAt });
 }
@@ -2111,10 +2112,12 @@ async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: 
   }
 }
 
-/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only. */
+/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only.
+ * Its words are the platform's, never the workspace's, so the spam screen (a classifier call, most of the send's time) has
+ * nothing to judge and is skipped; every other check of a send applies. */
 export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
   const from = `hello@${domain}`;
-  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` })));
+  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` }), undefined, false, false));
 }
 
 export function registerSending(app: App) {

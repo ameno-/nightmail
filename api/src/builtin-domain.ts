@@ -6,7 +6,7 @@ import { SEND_LIMITS } from './send-limits.js';
 import { productName } from './brand.js';
 import { claimTenantName } from './ses-setup.js';
 import { tagKey, hasTags } from './resource-tags.js';
-import { releasedClaimCleanup } from './domain-claims.js';
+import { builtinSettingUp, releasedClaimCleanup } from './domain-claims.js';
 import type { IdentityFacts } from './states.js';
 import type { ReadyConnection } from './provider-credentials.js';
 
@@ -114,7 +114,7 @@ async function storedParent(db: DbExecutor, parent: string) {
   return (await db.execute<ParentRow>(sql`SELECT ok,ses,problem,checked_at FROM builtin_parent WHERE name=${parent}`)).rows[0] ?? null;
 }
 const parentArn = (account: string, parent: string) => `arn:aws:ses:${BUILTIN_REGION}:${account}:identity/${parent}`;
-type SharedConnection = ReadyConnection & { tenant_state: string; pool_tenant_name: string | null; managed_tenant: boolean };
+type SharedConnection = ReadyConnection & { tenant_state: string; pool_tenant_name: string | null; managed_tenant: boolean; created_at: string };
 async function client(runtime: Runtime, connection: SharedConnection) {
   return getSes({ ...runtime, config: { ...runtime.config, regions: [BUILTIN_REGION] } }, BUILTIN_REGION, connection);
 }
@@ -303,10 +303,12 @@ async function ensureCatchAll(runtime: Runtime, wid: string, name: string) {
 
 /**
  * The workspace's built-in domain as a domain of its own, once it has a ready shared connection in Ohio: its claim,
- * receiving host, default inbox and catch-all route. Simulated, it sends at once; otherwise the domain.builtin job
- * verifies it. Null while there is nothing to create it on (no label yet, revoked, or no ready connection).
+ * receiving host, default inbox and catch-all route. Simulated, it sends at once; otherwise setUpBuiltinDomain verifies it,
+ * in the request that starts Hosted mail (startHostedMail) or the domain.builtin job queued here, which waits
+ * `jobAfterSeconds` while that request does it. Null while there is nothing to create it on (no label yet, revoked, or no
+ * ready connection).
  */
-export async function ensureBuiltinDomain(runtime: Runtime, wid: string) {
+export async function ensureBuiltinDomain(runtime: Runtime, wid: string, jobAfterSeconds = 0) {
   const config = runtime.config;
   if (!config.multiTenant || !config.builtinDomain) return null;
   const simulated = isSimulatedSes(runtime), parent = simulated ? null : await storedParent(runtime.db, config.builtinDomain);
@@ -316,21 +318,44 @@ export async function ensureBuiltinDomain(runtime: Runtime, wid: string) {
   if (row.fresh) {
     try { await ensureCatchAll(runtime, wid, row.name); }
     catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'BUILTIN_CATCH_ALL_FAILED', workspaceId: wid }); }
-    if (!simulated) await runtime.db.execute(queueBuiltinJob(wid));
+    if (!simulated) await runtime.db.execute(queueBuiltinJob(wid, jobAfterSeconds));
   }
   return row;
 }
-/** The workspace's domain.builtin job: verifies its domain (or, revoked, removes the parent from its tenant). */
-export const queueBuiltinJob = (wid: string) => sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('domain.builtin:'||${wid}::text,'domain.builtin',${wid},'{}'::jsonb)
-  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload='{}'::jsonb WHERE jobs.status IN ('completed','failed')`;
+/** The workspace's domain.builtin job: verifies its domain (or, revoked, removes the parent from its tenant). Queued by the
+ * request that sets the domain up itself (startHostedMail), it waits `afterSeconds` and is marked `inline`: the domain
+ * counts as ready meanwhile (builtinSettingUp). */
+export const queueBuiltinJob = (wid: string, afterSeconds = 0) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at) VALUES('domain.builtin:'||${wid}::text,'domain.builtin',${wid},
+    ${afterSeconds > 0 ? '{"inline":true}' : '{}'}::jsonb,now()+make_interval(secs=>${afterSeconds}))
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed')`;
 
+/** How long a send from a built-in domain still being set up waits for it, at most. */
+const SETUP_WAIT_MS = 8000;
 /**
- * domain.builtin: makes sure the workspace's built-in domain exists, then associates the parent identity with the
- * workspace's SES tenant and marks the domain verified. A revoked domain's association is removed instead. Waits (without
- * using attempts) for the tenant, and for the parent identity while it isn't verified.
+ * A send from the workspace's built-in domain while the request that made the workspace still sets it up
+ * (builtinSettingUp, about 5 s): onboarding shows the domain ready, so the send waits for its setup here instead of being
+ * refused, then admission decides as for any send (its checks are unchanged). Returns at once for any other domain.
  */
-export const builtinDomainJob: JobHandler = async (runtime, payload, job) => {
-  const config = runtime.config, parent = config.builtinDomain, wid = job.workspaceId;
+export async function awaitBuiltinSetup(runtime: Runtime, wid: string) {
+  const parent = runtime.config.builtinDomain;
+  if (!runtime.config.multiTenant || !parent) return;
+  for (const deadline = Date.now() + SETUP_WAIT_MS; Date.now() < deadline; await new Promise(resolve => setTimeout(resolve, 200))) {
+    const { rows: [row] } = await runtime.db.execute<{ waiting: boolean }>(sql`SELECT ${builtinSettingUp(sql`dc`, parent)} AS waiting FROM builtin_domains b
+      JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin' WHERE b.workspace_id=${wid} AND b.revoked_at IS NULL`);
+    if (!row?.waiting) return;
+  }
+}
+/** domain.builtin: setUpBuiltinDomain for the job's workspace. */
+export const builtinDomainJob: JobHandler = (runtime, payload, job) => setUpBuiltinDomain(runtime, job.workspaceId, payload);
+/**
+ * Makes sure the workspace's built-in domain exists, then associates the parent identity with the workspace's SES tenant
+ * and marks the domain verified. A revoked domain's association is removed instead. The domain.builtin job runs it, and so
+ * does the request that starts Hosted mail (startHostedMail), so both keep every check below: the kill switch, the
+ * revoke race and the breaker. Throws JobDeferred to wait (without using attempts) for the tenant, the control-plane pace
+ * or the parent identity while it isn't verified (counted in the job's `payload`, BUILTIN_PARENT_RETRY).
+ */
+export async function setUpBuiltinDomain(runtime: Runtime, wid: string, payload: Record<string, unknown> = {}) {
+  const config = runtime.config, parent = config.builtinDomain;
   if (!config.multiTenant || !parent) return;
   const wait = (ms: number): never => { throw new JobDeferred(new Date(Date.now() + ms).toISOString()); };
   const { rows: [state] } = await runtime.db.execute<{ name: string; revoked: boolean; connection: SharedConnection | null; sending: string | null }>(sql`SELECT b.name,b.revoked_at IS NOT NULL AS revoked,
@@ -343,7 +368,9 @@ export const builtinDomainJob: JobHandler = async (runtime, payload, job) => {
   if (simulated || !connection.aws_account_id) return;
   assertSharedAccount(runtime, connection);
   if (!state.revoked && state.sending === 'verified') return;
-  if (connection.tenant_state !== 'ready') wait(300_000);
+  // A new connection's tenant is made within seconds, so it is looked at again in 5 s (production waited 5 minutes for a
+  // tenant that was ready 4 s later); an older one that still isn't ready, in 5 minutes.
+  if (connection.tenant_state !== 'ready') wait(Date.parse(connection.created_at) > Date.now() - 600_000 ? 5_000 : 300_000);
   // One SES control-plane call at a time across workers, as domain verification paces them.
   if (!(await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before) VALUES ('domain.verify:platform',clock_timestamp()+interval '1 second') ON CONFLICT(workspace_id)
     DO UPDATE SET wake_not_before=excluded.wake_not_before WHERE job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`)).rowCount) wait(1000 + Math.random() * 1000);
@@ -377,7 +404,7 @@ export const builtinDomainJob: JobHandler = async (runtime, payload, job) => {
     logError(e, { code: 'BUILTIN_DOMAIN_SES_FAILED', workspaceId: wid });
     throw new ApiError(503, 'BUILTIN_DOMAIN_SES_FAILED', 'The built-in domain could not be set up in SES; it will be retried.', undefined, true);
   }
-};
+}
 
 /**
  * Every five minutes (from domainSetupTick, which is elected): the parent identity's check (hourly), labels for

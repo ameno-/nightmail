@@ -15,10 +15,13 @@ import './setup.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { resourceOf } from '../../data/invalidation'
 import { setupGap, type SetupGap } from '../settings/domain-setup-alert'
+import { builtinLimitText, sendsFromBuiltin } from '../settings/builtin-domain'
 import type { Domain } from '../../data/types'
 
 // The hosted limit as GET /v1/me reports it, refreshed with the overview so usage stays current.
 export function useSendingLimit() { return useSendingLimitRead().limit }
+// The built-in domain, from the same read, while the workspace sends from it: its daily cap is then the one that applies.
+export function useBuiltinSending() { return useSendingLimitRead().builtin }
 // Whether the limit is still being read, so Overview's detail column can wait for it instead of growing a row.
 export function useSendingLimitPending() { return useSendingLimitRead().pending }
 function useSendingLimitRead() {
@@ -28,7 +31,8 @@ function useSendingLimitRead() {
   // An identity without the limit (the connection cache keeps only a summary) is not a seed: the limit is read.
   const live = useQuery({ queryKey: ['nightmail', 'sending-limit', identity?.workspaceId], enabled: hosted, refetchInterval: query => query.state.status === 'error' ? false : 60_000, refetchIntervalInBackground: false,
     initialData: identity?.connection?.sendingLimit !== undefined ? identity ?? undefined : undefined, staleTime: 60_000, queryFn: ({ signal }) => request<Identity>('/v1/me', { signal }) })
-  return { limit: hosted ? (live.data ?? identity)?.connection?.sendingLimit ?? null : null, pending: hosted && live.isPending }
+  const connection = hosted ? (live.data ?? identity)?.connection : null, builtin = connection?.builtinDomain
+  return { limit: connection?.sendingLimit ?? null, pending: hosted && live.isPending, builtin: sendsFromBuiltin(builtin) ? builtin : null }
 }
 
 // The limit is the evaluation, once rather than a day: no score yet and no override, or no standing stored before the first send.
@@ -45,13 +49,30 @@ export function limitSummary(limit: SendingLimit, evaluating = false) {
 // would say the same fact twice. The row opens how sending limits work; the next band and the per-minute rate are in
 // the sender score's explainer.
 export function DailyLimit({ report }: { report: SenderScore | undefined }) {
-  const limit = useSendingLimit()
+  const limit = useSendingLimit(), builtin = useBuiltinSending()
   const [explaining, setExplaining] = useState(false)
+  const notes = limitNotes(report)
+  const guide = <Dialog open={explaining} onOpenChange={setExplaining} title="How limits work" className="limits-dialog">
+    {builtin && <p className="limits-dialog__builtin">{builtinLimitText(builtin)}</p>}
+    <SendingLimitsGuide limit={report?.limit} compact />
+    <Link className="limits-dialog__docs" to="/docs#sending-limits">Open in the docs</Link>
+  </Dialog>
+  // Sending from the built-in domain: its own cap, which is lower than any other until a domain of the workspace's own verifies.
+  if (builtin) {
+    const used = builtin.used ?? 0, left = Math.max(0, builtin.perDay - used), text = `${number(left)} of ${number(builtin.perDay)} left`
+    return <section className="daily-limit" aria-label="Daily limit">
+      <button type="button" className="limit-row" onClick={() => setExplaining(true)} title={`${number(used)} of ${number(builtin.perDay)} recipients from ${builtin.name} in the last 24 hours. Your own domain lifts it.`} aria-label={`Daily limit: ${text}, from your built-in domain. How limits work`}>
+        <span className="limit-row__text"><span className="limit-row__label">Daily limit<Info size={12} aria-hidden="true" /></span><span className="muted">{text}</span></span>
+        <span className="limit-row__track" data-full={used / Math.max(1, builtin.perDay) >= 0.9 || undefined}><i style={{ width: `${Math.min(1, used / Math.max(1, builtin.perDay)) * 100}%` }} /></span>
+      </button>
+      {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}
+      {guide}
+    </section>
+  }
   if (!limit) return null
   const cap = limit.cap, share = cap === null ? 0 : Math.min(1, limit.used / Math.max(1, cap)), left = cap === null ? 0 : Math.max(0, cap - limit.used)
   // No daily limit, but a new sender's growth pace: say what it allows this hour.
   const growth = cap === null ? report?.limit?.growth ?? null : null
-  const notes = limitNotes(report)
   if (cap === null && !growth && !notes.length) return null
   // The evaluation is its first recipients, once, not a day; the label stays while the score that says so loads.
   const evaluating = cap !== null && inEvaluation(report)
@@ -62,10 +83,7 @@ export function DailyLimit({ report }: { report: SenderScore | undefined }) {
       {cap !== null && <span className="limit-row__track" data-full={share >= 0.9 || undefined}><i style={{ width: `${share * 100}%` }} /></span>}
     </button>}
     {notes.map(note => <p key={note.text} className="limit-row__note" data-tone={note.tone}>{note.tone && <span aria-hidden="true" />}{note.text}</p>)}
-    <Dialog open={explaining} onOpenChange={setExplaining} title="How limits work" className="limits-dialog">
-      <SendingLimitsGuide limit={report?.limit} compact />
-      <Link className="limits-dialog__docs" to="/docs#sending-limits">Open in the docs</Link>
-    </Dialog>
+    {guide}
   </section>
 }
 
@@ -95,22 +113,24 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   if (setup.isPending) return { loading: true, steps: null }
   if (setup.error) return { loading: false, steps: null, error: setup.error, retry: () => void setup.refetch() }
   if (!setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
-  // The built-in domain (no DNS of its own) isn't the domain this step asks for, but it can send the first email meanwhile.
+  // The built-in domain (no DNS of its own) has no records to wait on or a stuck banner, and it can send the first email.
   const all = setup.data.domains, items = all.filter(domain => !domain.builtIn), keyed = setup.data.apiKeys.active > 0
   const hasDomain = items.length > 0
   const stuck = items.flatMap(domain => { const gap = setupGap(domain); return gap ? [{ domain, gap }] : [] })[0] ?? null
   const verified = items.find(domain => domain.status === 'verified') ?? all.find(domain => domain.builtIn && domain.status === 'verified')
   const ownVerified = verified && !verified.builtIn
-  // The setup read carries the ten newest domains; an older verified one still counts (the session's domain summary).
-  const domainDone = !!ownVerified || (identity?.connection?.domains?.verified ?? 0) > 0
+  // The setup read carries the ten newest domains; an older verified one still counts (the session's domain summary). So
+  // does the built-in domain once it sends: the first email needs no domain of the workspace's own (Overview's card asks
+  // for one to lift its cap).
+  const domainDone = !!ownVerified || (identity?.connection?.domains?.verified ?? 0) > 0 || all.some(domain => domain.builtIn && domain.status === 'verified')
   const pending = items.find(domain => domain.status !== 'verified')
   const sent = setup.data.emails.any || !!testId
   // What Overview's onboarding card reads (onboarding-card.tsx): whether any email exists, and the domain to send from.
-  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: ownVerified ? verified : undefined }
+  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: ownVerified ? verified : all.find(domain => domain.builtIn) }
   if (domainDone && keyed && sent && !testId) return { loading: false, steps: null, ...known }
   const steps: SetupStep[] = [
     { key: 'domain', done: domainDone, title: 'Verify a domain',
-      action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains'}>{pending ? 'View records' : 'Add domain'}</Link> },
+      action: !domainDone && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> },
     { key: 'key', done: keyed, title: 'Create an API key',
       action: !keyed && <Link className={`ui-button ui-button--${domainDone ? 'primary' : 'secondary'} ui-button--md`} to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
     // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.

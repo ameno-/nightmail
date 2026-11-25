@@ -1,7 +1,7 @@
 import * as oidc from 'oauth4webapi';
 import { sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { ApiError, digest, log, type Actor, type Ctx, type DbExecutor, type Runtime } from './core.js';
+import { ApiError, digest, log, logError, wrapModuleLoad, type Actor, type Ctx, type DbExecutor, type Runtime } from './core.js';
 import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { acceptedMethods, githubVerifiedAddress, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
@@ -214,7 +214,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
   // Google-hosted mailbox (provenMailbox).
   const mailbox = runtime.config.multiTenant ? provenMailbox(claims.acr, upstream, emailAtLogin) : emailAtLogin;
   const session = oidc.generateRandomState();
-  let admitted = 'signed_in', slot = 0, userId = '', signedUp = false;
+  let admitted = 'signed_in', slot = 0, userId = '', signedUp = false, created: string | null = null;
   try {
     await runtime.db.transaction(async db => {
       await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${JSON.stringify([claims.iss,claims.sub])},83062))`);
@@ -251,7 +251,9 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
         if (signup) { await recordSignup(db, userId, signup, typeof claims.name === 'string' ? claims.name : null); signedUp = true; }
         if (runtime.config.multiTenant) {
-          if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff || !!signup,runtime.config.regions[0]!,invitation,runtime.config)) throw new NotAdmitted('invitation');
+          const onboarded = await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff || !!signup,runtime.config.regions[0]!,invitation,runtime.config);
+          if (!onboarded) throw new NotAdmitted('invitation');
+          if (typeof onboarded === 'string') created = onboarded;
         } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
           await db.execute(sql`INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES(${crypto.randomUUID()},${userId},'default','owner')`);
         }
@@ -294,16 +296,27 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
     }
     throw loginFailed();
   }
+  // A new workspace with a built-in domain gets its Hosted connection and domain now, and its SES setup starts in the
+  // background, so the domain is ready when onboarding opens (startHostedMail). Never fails the sign-in: onboarding
+  // starts Hosted mail itself if this couldn't.
+  const hosted = created && runtime.config.multiTenant && runtime.config.builtinDomain ? wrapModuleLoad(() => import('./provider-connections.js'))
+    .then(m => m.startHostedMail(runtime, created!, { actor: { type: 'member', id: userId, userId, via: 'dashboard' }, requestId: null, ipNetwork: null, userAgent: null }, undefined, true))
+    .catch(e => { logError(e, { code: 'HOSTED_MAIL_START_FAILED', workspaceId: created }); }) : null;
   await recordAttempt(runtime, claims, upstream, address, admitted, { email: emailAtLogin, network });
   // A sign-up is told to the operators (operator-alerts.ts) once it has committed, so the card can't block or fail it.
-  // So is a sign-up that left ten or fewer places open, or none (signupPlacesAlert: once per level).
+  // So is a sign-up that left ten or fewer places open, or none (signupPlacesAlert: once per level). After the answer
+  // where the Worker can (deferNudge): Slack's latency is no part of the sign-up's.
   if (signedUp && runtime.config.operatorSlackWebhookUrl) {
-    const alerts = await import('./operator-alerts.js');
-    await readPlaces(runtime.db).then(places => alerts.alertNewSignup(runtime, runtime.db, userId, places)).catch(() => false);
-    await alerts.signupPlacesAlert(runtime);
+    const tell = async (rt: Runtime) => {
+      const alerts = await import('./operator-alerts.js');
+      await readPlaces(rt.db).then(places => alerts.alertNewSignup(rt, rt.db, userId, places)).catch(() => false);
+      await alerts.signupPlacesAlert(rt);
+    };
+    if (runtime.deferNudge) runtime.deferNudge(tell); else await tell(runtime);
   }
   // Admitted with a verified address: nothing is left to tell it at launch.
   if (emailAtLogin && runtime.config.multiTenant) await runtime.db.execute(sql`DELETE FROM nightmail_waitlist WHERE email=lower(${emailAtLogin})`).catch(() => {});
+  await hosted;
   return {session, slot, userId, returnUrl:returnUrl.href};
 }
 
