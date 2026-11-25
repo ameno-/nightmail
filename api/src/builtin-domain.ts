@@ -1,3 +1,4 @@
+import { labelSkeleton } from './label-skeleton.js';
 import { sql } from 'drizzle-orm';
 import type { GetEmailIdentityCommandOutput, SESv2Client } from '@aws-sdk/client-sesv2';
 import { ApiError, assertSharedAccount, getSes, id, isSimulatedSes, log, logError, ModuleLoadError, type Config, type Ctx, type DbExecutor, type JobHandler, type Runtime } from './core.js';
@@ -57,7 +58,8 @@ const PROTECTED = new Set(`paypal apple icloud google gmail microsoft outlook of
 // "Nightmail Support" or "Security Team" must not become nightmail-support-k7.<parent> or security-k7.<parent>.
 const IMPERSONATING = new Set(`nightmail bane opensend anomaly opencode security secure verify verification login signin password postmaster
   noreply donotreply admin administrator abuse hostmaster webmaster`.split(/\s+/).filter(Boolean));
-const IMPERSONATING_PHRASE = /(?:^|-)(?:no-reply|do-not-reply|sign-in|log-in)(?:-|$)/;
+const protectedParts = [...PROTECTED, ...IMPERSONATING].map(labelSkeleton);
+const compact = (name: string) => labelSkeleton(name.replace(/[^\p{L}\p{N}]/gu, ''));
 const FILLER = /^(?:workspace|workspaces|team|org|inc|llc|ltd|co)$/;
 /** The base a workspace name falls back to. */
 export const BUILTIN_FALLBACK = 'mail';
@@ -69,7 +71,8 @@ export const reservedBuiltinLabel = (label: string) => RESERVED.has(label);
 export function builtinBase(name: string) {
   const words = name.normalize('NFKD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/['’]/g, '').split(/[^a-z0-9]+/).filter(Boolean);
   const kept = words.filter((word, i) => i === 0 || !FILLER.test(word));
-  if (kept.some(word => PROTECTED.has(word) || IMPERSONATING.has(word)) || IMPERSONATING_PHRASE.test(kept.join('-'))) return BUILTIN_FALLBACK;
+  const original = compact(name.normalize('NFKC')), label = compact(kept.join(''));
+  if (protectedParts.some(part => original.includes(part) || label.includes(part))) return BUILTIN_FALLBACK;
   let base = '';
   for (const word of kept) {
     const next = base ? `${base}-${word}` : word;

@@ -23911,6 +23911,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.deepEqual(["Ryan's workspace",'Acme Corp','Café Crème Inc','PayPal Security','Support','xn--fixture','12345','A','The Very Long Workspace Name For Testing',
         'Nightmail Support','Security Team','Acme no-reply','Login Verification','Postmaster Team','Secure Pay'].map(builtin.builtinBase),
         ['ryans','acme-corp','cafe-creme','mail','mail','mail','mail','mail','the-very-long-name','mail','mail','mail','mail','mail','mail']);
+      assert.deepEqual(['MyGoogleDesk', 'Pay Pal Tools', 'Nіghtmail Desk', 'G00gle Team', 'Cloud Studio'].map(builtin.builtinBase),
+        ['mail', 'mail', 'mail', 'mail', 'cloud-studio']);
       const labels=new Set<string>();
       for (let i=0;i<40;i++) {const w=unique('ws-acme');await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)',[w,'Acme']);labels.add((await builtin.allocateBuiltinDomain(runtime.db,runtime.config,w,'Acme'))!);}
       assert.equal(labels.size,40,'Every workspace gets its own label.');
