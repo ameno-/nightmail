@@ -8656,6 +8656,24 @@
                     "null"
                   ],
                   "properties": {
+                    "parking": {
+                      "type": "object",
+                      "properties": {
+                        "owner": {
+                          "type": "string",
+                          "description": "The registrar or host, e.g. Porkbun."
+                        },
+                        "target": {
+                          "type": "string",
+                          "description": "What its record points to, e.g. pixie.porkbun.com."
+                        }
+                      },
+                      "required": [
+                        "owner",
+                        "target"
+                      ],
+                      "description": "With wildcard: the answer is a registrar’s parking or forwarding record."
+                    },
                     "wildcard": {
                       "type": "string",
                       "description": "With missing on a CNAME: a wildcard record (e.g. *.example.com) answers this name with an address instead, as it does a random name beside it. Add the CNAME exactly: the specific record wins over the wildcard."

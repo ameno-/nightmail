@@ -93,7 +93,7 @@ export type NoticeInput =
   | Workspace & { kind: 'domain_unverified'; domain: { id: string; name: string } }
   /** missing: of the domain's `total` sending records, the ones public DNS lacks or has with another value. host: where its DNS is hosted, when known. */
   /** noDns: nobody serves DNS for the domain, so the email asks to check its name instead of listing records. */
-  | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; noDns?: boolean; /** A wildcard (*.domain) answering its missing CNAMEs with an address. */ wildcard?: string; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
+  | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; noDns?: boolean; /** A wildcard (*.domain), and the parking host it points to, answering its missing CNAMEs. */ wildcard?: string; parking?: { owner: string; target: string }; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
   /** builtin: the workspace's built-in domain while it sends (builtin-domain.ts), with who it sends to and its daily cap. */
   | Workspace & { kind: 'no_domain'; builtin?: { name: string; scope: 'anyone' | 'members'; perDay: number } | null }
   | Workspace & { kind: 'evaluation_finished'; limited: boolean }
@@ -174,7 +174,7 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
         why: `${productName} sends this once for each domain, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, records,
         link: provider && n.host?.url ? { label: `Open ${provider} DNS`, url: n.host.url } : undefined, lines: [
           `${host ? `${host} was` : 'A domain was'} added over an hour ago, but ${gap}.`,
-          ...(n.wildcard && /^\*\.[a-z0-9.-]+$/.test(n.wildcard) ? [wildcardMessage(n.wildcard, provider)] : []),
+          ...(n.wildcard && /^\*\.[a-z0-9.-]+$/.test(n.wildcard) ? [wildcardMessage({ wildcard: n.wildcard, ...(n.parking && /^[A-Za-z ]{1,30}$/.test(n.parking.owner) && /^[a-z0-9.:-]{1,253}$/.test(n.parking.target) ? { parking: n.parking } : {}) }, provider)] : []),
           `Mail from addresses at ${name} can’t be sent until they are published.${n.releasesAt ? ` If the ownership record is still missing on ${moment(n.releasesAt)}, the domain is released.` : ''}`,
           provider ? `Its DNS is hosted at ${provider}. Add ${records.length === 1 ? 'this record' : 'these records'} there:` : `Add ${records.length === 1 ? 'this record' : 'these records'} where its DNS is hosted:`] });
     }
