@@ -174,6 +174,8 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
 .campaign-pacing-summary { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; font-size: var(--text-xs); }
 .campaign-pacing-fields { display: flex; flex-direction: column; gap: var(--space-12); }
 .campaign-pacing-options .ui-field .ui-input { max-width: 240px; }
+/* Review's send estimate: one line's height before the audience is counted, so the stage doesn't move when it arrives. */
+.campaign-send-estimate { min-height: 20px; }
 .template-picker-dialog { width: min(560px, calc(100vw - 32px)); }
 /* Templates to start from: 53px rows parted by their rhythm and a solid fill under the pointer, no rules. The fill
    reaches 8px into the dialog's gutter, so names stay level with the title. */

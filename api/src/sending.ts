@@ -15,7 +15,7 @@ import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
 import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
-import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
+import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restartRampWindow, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, setRamp, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
 import { ADMISSION_MS, roomName } from './campaign-room-protocol.js';
 import type { CampaignScreen } from './screen.js';
@@ -43,6 +43,7 @@ import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Byt
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
 import { assertBuiltinInput, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { estimateFinish, GROWTH, RAMP, RAMP_HOUR_MS, rampStart, type RampAt } from './standing-model.js';
 
 type HtmlParser = typeof import('parse5').parse;
 const loadParse5 = lazyModule((): Promise<HtmlParser> => import('parse5').then(m => m.parse));
@@ -78,6 +79,12 @@ const AUTO_PAUSE = { bounceRate: 0.02, bounceMinimum: 1000, complaintRate: 0.000
 // the queue and ten more minutes for their feedback; more than 3% bounces or two complaints quarantine the campaign.
 export const PROBE = { share: 0.1, min: 100, max: 500, waitMs: 10 * 60_000, bounceRate: 0.03, complaints: 2 };
 export const probeSize = (total: number) => Math.min(total, Math.max(PROBE.min, Math.min(PROBE.max, Math.ceil(total * PROBE.share))));
+// The campaign ramp's check of each step's batch (src/standing-model.ts RAMP). Its feedback is mature once nothing of it is
+// still queued and 90% of what SES accepted has a delivery result (the growth pace's line), or an hour after the step's
+// hour ended; until then release waits, looking again every minute. Then more than 3% hard bounces of at least 100
+// accepted (the list probe's line and size), or more than 0.08% complaints counting at least 2 (the automatic pause's rate
+// and the probe's count, so 1 complaint in 300 is not enough), pause the campaign as the automatic pause does.
+const RAMP_CHECK = { resolved: GROWTH.resolved, maxWaitMs: 60 * 60_000, retryMs: 60_000, bounceRate: PROBE.bounceRate, bounceMinimum: PROBE.min, complaintRate: AUTO_PAUSE.complaintRate, complaints: PROBE.complaints } as const;
 // Campaigns stop releasing recipients while SES's remaining 24-hour quota is within this reserve, which
 // stays available for transactional mail. The quota itself is read from SES, never configured.
 export const sesDailyReserve = (max24: number, percent: number) => Math.ceil(max24 * percent / 100);
@@ -233,7 +240,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.'),
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step.'),
   feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
   if (!row.reviewId) return null;
@@ -243,7 +250,17 @@ function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'
     pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null,
     feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null });
 }
-const Campaign = z.object({ id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review.'), revision: z.number().int(), draft: CampaignDraftView, sourceTemplateId: z.string().nullable(), sourceTemplateRevision: z.number().int().nullable(), state: CampaignStateValue, scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts, delivery: Delivery.nullable() }).openapi('Campaign');
+const CampaignRamp = z.object({ step: z.number().int().describe('The step the campaign releases at, from 1.'), steps: z.number().int().describe('How many steps the ramp has; past the last one only the other limits apply.'), ceilingPerHour: z.number().int().describe('Most recipients this step releases in its hour.'),
+  startedAt: z.string().nullable().describe('When this step\'s hour started: its first release. Null before it.'), released: z.number().int().describe('Recipients released since this step\'s hour started.') })
+  .describe('Where the campaign is on the ramp. A Hosted sender\'s first large campaigns release in hourly steps that grow (1,000 an hour at first), moving to the next step once an hour at this one went out and its delivery results are in and clean; more than 3% bounces or more than 0.08% complaints (at least 2) in a step pause the campaign. The first step not already proven by the workspace\'s largest clean marketing hour of the last 30 days is where it starts, so an established sender skips it. Null when no ramp applies (self-hosted, your own AWS account, simulated mail, an established sender, or past the last step). Transactional mail never waits for it.').openapi('CampaignRamp');
+const SendEstimate = z.object({
+  recipients: z.number().int().nullable().describe('Recipients still to release: for a draft, the last audience count (previewCampaignAudience; null before one); once launched, those not released yet.'),
+  ratePerSecond: z.number().nullable().describe('The region\'s send rate the campaign plans at, per second, before its rate share; null until the region\'s quota was read.'),
+  ramp: CampaignRamp.nullable(),
+  seconds: z.number().int().nullable().describe('How long releasing the recipients left takes from when it starts (the campaign\'s last change, updatedAt, or scheduledAt): from the ramp, the daily cap (pacing.perDay), the rate share and the region\'s send rate. A draft is estimated without a daily cap at the full rate. An estimate: it assumes clean, prompt feedback and leaves out the list probe\'s wait, quota holds and other mail sharing the rate. Null when it cannot be told (no audience count or send rate yet).'),
+  finishAt: z.string().nullable().describe('A launched campaign: when its last recipient is expected to be released, as of its last change (updatedAt or scheduledAt, plus seconds). Null for a draft, while paused or failed, or when it cannot be told.'),
+}).describe('How long sending takes, for a draft or a campaign that has recipients left to release. Null for a finished or canceled campaign; lists leave it out.').openapi('CampaignSendEstimate');
+const Campaign = z.object({ id: z.string(), url: z.string().url().describe('Dashboard URL for opening this campaign. Drafts open in the editor; launched campaigns open in review.'), revision: z.number().int(), draft: CampaignDraftView, sourceTemplateId: z.string().nullable(), sourceTemplateRevision: z.number().int().nullable(), state: CampaignStateValue, scheduledAt: z.string().nullable(), archivedAt: z.string().nullable(), createdAt: z.string(), updatedAt: z.string(), counts: CampaignCounts, delivery: Delivery.nullable(), sendEstimate: SendEstimate.nullable() }).openapi('Campaign');
 const CampaignRate = z.object({ value: z.number().nonnegative().nullable().describe('Fraction, not percent. Both counts exclude simulated emails. Null when the denominator is zero or engagement tracking is disabled. Not clamped: delayed feedback can temporarily make outcomes exceed the denominator.'), numerator: z.number().int().nonnegative(), denominator: z.number().int().nonnegative() });
 const CampaignStats = z.object({
   id: z.string(), name: z.string(), state: CampaignStateValue, tracking: z.boolean(), counts: CampaignCounts, delivery: Delivery.nullable(),
@@ -437,7 +454,7 @@ const CampaignState = Campaign.pick({ id: true, revision: true, updatedAt: true,
 const CampaignDraftSummary = CampaignDraftView.pick({ name: true, region: true, from: true, fromName: true, subject: true, previewText: true }).extend({ audience: AudienceSpec.pick({ listId: true, segmentId: true }).partial({ listId: true }).default({}) }).strict().openapi('CampaignDraftSummary');
 const CampaignListStats = z.object({ tracking: z.boolean(), accepted: z.number().int(), delivered: z.number().int(), opened: z.number().int(), clicked: z.number().int(), computedAt: z.string().describe('When the count was taken.') })
   .describe('The campaign\u2019s last stored count: the totals getCampaignStats reported when it was taken (computedAt). Null when it has none. Listing never counts emails or events; listing with listId starts a count for finished campaigns whose figures are missing or stale, so they appear on a later read.').openapi('CampaignListStats');
-const CampaignSummary = Campaign.omit({ draft: true }).extend({ draft: CampaignDraftSummary, stats: CampaignListStats.nullable() }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
+const CampaignSummary = Campaign.omit({ draft: true, sendEstimate: true }).extend({ draft: CampaignDraftSummary, stats: CampaignListStats.nullable() }).describe('Campaign list metadata only. Fetch GET /v1/campaigns/{id} for the complete draft before editing or sending. Content, defaults, attachments and audience exclusions are intentionally omitted.').openapi('CampaignSummary');
 // The filters' statuses: the published ones, and scheduled for sends still waiting (they read queued, with scheduled true).
 export const EmailStatusFilter = z.enum([...Status.options, 'scheduled']);
 // A literal substring search of sent mail (sending_log_text ILIKE): the trigram index answers terms of 3 characters or
@@ -529,8 +546,10 @@ export const CAMPAIGN_PROGRESS_CACHE_SECONDS = 20;
 export const CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS = 10_000;
 const CAMPAIGN_PROGRESS_SCOPE = `while a campaign of at least ${CAMPAIGN_PROGRESS_CACHE_MIN_RECIPIENTS.toLocaleString('en-US')} recipients is preparing, scheduled, sending or paused`;
 const CAMPAIGN_PROGRESS_NOTE = `For every credential, counts may be up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds old ${CAMPAIGN_PROGRESS_SCOPE}; state and delivery are always current. Counts are exact for smaller campaigns, once a campaign is done, canceled or failed, and in the campaign that pause, resume and other changes return.`;
+// A list read (read without detail) carries no send estimate; getCampaign and the responses about one campaign do.
 async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, rows: T[], read?: { origin: string; detail?: boolean }, db: DbExecutor = runtime.db) {
   if (!rows.length) return [];
+  const estimates = !read || read.detail ? await sendEstimates(runtime, db, a, rows) : null;
   let grouped: { campaignId: string | null; status: EmailStatus; count: number }[];
   if (a.domains.length) {
     grouped = [];
@@ -557,8 +576,41 @@ async function campaignViews<T extends CampaignRow>(runtime: Runtime, a: Actor, 
   return rows.map(row => {
     const counts = emptyCounts();
     for (const item of grouped) if (item.campaignId === row.id) { counts.byStatus[item.status] = Number(item.count); counts.total += Number(item.count); }
-    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row, lag) };
+    return { ...row, url: campaignUrl(runtime, row), counts, delivery: deliveryView(row, lag), ...estimates ? { sendEstimate: estimates.get(row.id) ?? null } : {} };
   });
+}
+/**
+ * Campaign.sendEstimate for each row: a draft (or a failed launch that released nobody) from its last audience count,
+ * without pacing; a launched campaign from what it has left, its pacing and where it is on the ramp. One statement for
+ * the region's planned rate and whether the ramp applies, and one more for the workspace's history while the campaign
+ * has not taken its place on the ramp yet (its first release decides it).
+ */
+async function sendEstimates(runtime: Runtime, db: DbExecutor, a: Actor, rows: CampaignRow[]) {
+  const estimates = new Map<string, z.infer<typeof SendEstimate> | null>();
+  for (const row of rows) {
+    const editable = campaignEditable(row), held = !editable && (row.state === 'paused' || row.state === 'failed');
+    if (!editable && !held && !(CAMPAIGN_RUNNING as readonly string[]).includes(row.state)) { estimates.set(row.id, null); continue; }
+    const region = (row.draft as Pick<CampaignDraft, 'region'>).region;
+    const [info] = (await db.execute<{ rate: number; hosted: boolean }>(sql`SELECT coalesce((SELECT max_send_rate FROM ${limitsTable(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${region}),0)::float8 AS rate,
+      ${runtime.config.multiTenant ? sharedConnection(a.workspaceId) : sql`false`} AS hosted`)).rows;
+    const rate = Number(info?.rate ?? 0);
+    let ramp: RampAt | null = null;
+    if (info?.hosted && !(editable ? isSimulatedSes(runtime) : row.simulated)) {
+      const decided = editable ? null : row.rampStep;
+      const step = decided ?? rampStart(await rampHistory(db, a.workspaceId));
+      const startedAt = decided !== null && row.rampWindowStartedAt ? Date.parse(row.rampWindowStartedAt) : null;
+      if (step < RAMP.steps.length) ramp = { step, startedAt, released: startedAt === null ? 0 : Math.max(0, row.expanded - row.rampFrom) };
+    }
+    const recipients = editable ? row.audienceEstimate : Math.max(0, row.total - row.expanded);
+    // As of the campaign's last change (a draft's as a duration), so reading it twice gives the same answer.
+    const scheduled = row.scheduledAt && row.expanded === 0 ? Date.parse(row.scheduledAt) : NaN, start = editable ? 0 : Math.max(Date.parse(row.updatedAt), scheduled || 0);
+    const finish = recipients === null ? null : estimateFinish({ recipients, start, ratePerSecond: rate,
+      ...editable ? {} : { rateShare: row.rateShare, perDay: row.pacePerDay, day: { startedAt: row.windowStartedAt ? Date.parse(row.windowStartedAt) : null, released: row.windowExpanded } }, ramp });
+    estimates.set(row.id, SendEstimate.parse({ recipients, ratePerSecond: rate > 0 ? rate : null, seconds: finish === null ? null : Math.round((finish - start) / 1000),
+      finishAt: finish === null || editable || held ? null : new Date(finish).toISOString(),
+      ramp: ramp && { step: ramp.step + 1, steps: RAMP.steps.length, ceilingPerHour: RAMP.steps[ramp.step]!.ceilingPerHour, startedAt: ramp.startedAt === null ? null : new Date(ramp.startedAt).toISOString(), released: ramp.released } }));
+  }
+  return estimates;
 }
 // Per-statement limits of the reads a dashboard repeats (budgetedRead): a list walk or aggregate gets 5 seconds; the
 // campaign detail's status counts, polled every few seconds while it sends and read through one campaign's index, get 3.
@@ -2204,7 +2256,8 @@ export function registerSending(app: App) {
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
       return { ...row!, counts: emptyCounts() };
     }, { replayed: campaignReplay(a) });
-    return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result), delivery: null }), 201);
+    const sendEstimate = (await sendEstimates(c.env, c.env.db, a, [result])).get(result.id) ?? null;
+    return c.json(Campaign.parse({ ...result, archivedAt: result.archivedAt ?? null, url: campaignUrl(c.env, result), delivery: null, sendEstimate }), 201);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns', operationId: 'listCampaigns', description: `Returns bounded campaign metadata summaries. Fetch an individual campaign for its full editable draft; list drafts omit bodies, defaults, attachments and audience exclusions. Dashboard list counts may be cached for up to 60 seconds; API credentials get exact list counts. getCampaign may reuse counts for up to ${CAMPAIGN_PROGRESS_CACHE_SECONDS} seconds ${CAMPAIGN_PROGRESS_SCOPE}. A newsletter's issues are the campaigns to its list: filter with listId.`, tags: ['Campaigns'], security, request: { query: CampaignQuery }, responses: { 200: response(page(CampaignSummary)), ...errors } }), async c => {
     const a = actor(c), q = c.req.valid('query'), binding = await pageBinding(a, 'campaigns', q), cursor = readCursor(q.cursor, binding);
@@ -3091,6 +3144,44 @@ async function campaignHealth(db: DbExecutor, a: Actor, campaignId: string, host
   return null;
 }
 /**
+ * The workspace's largest clean, mature hour of real marketing mail in the last RAMP.historyDays days, as SES accepted it
+ * (sending_metrics_hourly, by the hour the mail was released; hours holding simulated mail are left out): where its
+ * campaigns start on the ramp (src/standing-model.ts rampStart). Mature: 90% of it delivered or bounced. Clean: within the
+ * ramp's bounce and complaint lines (RAMP_CHECK), and so is the whole window, else nothing counts. The hour still running
+ * never counts.
+ */
+async function rampHistory(db: DbExecutor, workspaceId: string) {
+  const clean = (a: SQL, b: SQL, c: SQL) => sql`${b}<=${a}*${RAMP_CHECK.bounceRate}::float8 AND (${c}<${RAMP_CHECK.complaints}::int OR ${c}<=${a}*${RAMP_CHECK.complaintRate}::float8)`;
+  const [found] = (await db.execute<{ best: number }>(sql`WITH hours AS (
+      SELECT hour,sum(accepted)::float8 AS a,sum(delivered)::float8 AS d,sum(bounced)::float8 AS b,sum(complained)::float8 AS c FROM sending_metrics_hourly
+      WHERE workspace_id=${workspaceId} AND kind='marketing' AND hour>=now()-make_interval(days=>${RAMP.historyDays}::int) AND hour<date_trunc('hour',now(),'UTC')
+      GROUP BY hour HAVING sum(simulated)=0 AND sum(accepted)>0)
+    SELECT CASE WHEN ${clean(sql`coalesce(sum(a),0)`, sql`coalesce(sum(b),0)`, sql`coalesce(sum(c),0)`)}
+      THEN coalesce(max(a) FILTER (WHERE d+b>=a*${RAMP_CHECK.resolved}::float8 AND ${clean(sql`a`, sql`b`, sql`c`)}),0) ELSE 0 END::int AS best FROM hours`)).rows;
+  return Number(found?.best ?? 0);
+}
+/** What a ramp step's hour released (review ordinals after `from`, through the cursor) and the feedback it has so far. */
+async function rampBatch(db: DbExecutor, a: Actor, row: Pick<RunRow, 'reviewId' | 'expanded'>, from: number) {
+  const [batch] = (await db.execute<{ released: number; waiting: number; accepted: number; resolved: number; bounced: number; complained: number }>(sql`SELECT count(*)::int AS released,
+      count(*) FILTER (WHERE status IN ('queued','attempting'))::int AS waiting,
+      count(*) FILTER (WHERE status<>'suppressed' AND (provider_id IS NOT NULL OR status IN ('accepted','sent','delivered','bounced','complained','delayed') OR event_outcomes & 1 <> 0))::int AS accepted,
+      count(*) FILTER (WHERE status IN ('delivered','bounced','complained') OR event_outcomes & 6 <> 0)::int AS resolved,
+      count(*) FILTER (WHERE status='bounced' OR event_outcomes & 4 <> 0)::int AS bounced,
+      count(*) FILTER (WHERE status='complained' OR event_outcomes & 8 <> 0)::int AS complained
+    FROM sending_emails WHERE review_id=${row.reviewId} AND review_ordinal>${from} AND review_ordinal<=${row.expanded} AND workspace_id=${a.workspaceId}`)).rows;
+  return batch!;
+}
+/** A ramp step's batch over the ramp's lines (RAMP_CHECK): the automatic pause's codes, with what the ramp is in the message. */
+function rampHealth(batch: Awaited<ReturnType<typeof rampBatch>>, step: number): { code: string; message: string } | null {
+  const percent = (part: number) => `${(100 * part / batch.accepted).toFixed(2)}%`, n = (value: number) => value.toLocaleString('en-US');
+  const about = `A new sender's large campaign goes out in hourly steps that grow, and each step is checked before the next: this was step ${step + 1} of ${RAMP.steps.length}, up to ${n(RAMP.steps[step]!.ceilingPerHour)} an hour.`;
+  if (batch.accepted >= RAMP_CHECK.bounceMinimum && batch.bounced > batch.accepted * RAMP_CHECK.bounceRate)
+    return { code: 'BOUNCE_RATE_HIGH', message: `Paused automatically while ramping up: ${n(batch.bounced)} of the last step's ${n(batch.accepted)} accepted emails bounced (${percent(batch.bounced)}; the line is ${RAMP_CHECK.bounceRate * 100}%). ${about} Bounced addresses were suppressed. Review the list, then resume.` };
+  if (batch.complained >= RAMP_CHECK.complaints && batch.complained > batch.accepted * RAMP_CHECK.complaintRate)
+    return { code: 'COMPLAINT_RATE_HIGH', message: `Paused automatically while ramping up: ${n(batch.complained)} of the last step's ${n(batch.accepted)} accepted emails were marked as spam (${percent(batch.complained)}; the line is ${RAMP_CHECK.complaintRate * 100}%). ${about} Review the audience, then resume.` };
+  return null;
+}
+/**
  * Whether a sender in good standing may skip this campaign's list probe: an earlier campaign delivered to these
  * recipients, by address, and their feedback is in and clean. It reads every one of this launch's frozen recipients,
  * whatever list or segment they came from, against what one of the workspace's last three campaigns finished in the last
@@ -3665,7 +3756,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND campaign_id IS NOT NULL AND status IN ('queued','attempting') LIMIT ${limits.total}) e) AS total,
     (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND campaign_id=${row.id} AND status IN ('queued','attempting') LIMIT ${limits.campaign}) c) AS campaign`)).rows;
   // Record why releasing is held (shown on the campaign), then wait in place.
-  const hold = async (reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'feedback_lag', until: string): Promise<never> => {
+  const hold = async (reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'feedback_lag' | 'ramp', until: string): Promise<never> => {
     await runtime.db.execute(holdCampaign(ref, reason, until));
     throw new JobDeferred(until, payload);
   };
@@ -3703,14 +3794,16 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // Automatic pause: checked at most every 30 minutes while releasing, so always before a new daily window
   // opens; a resume restarts the 30 minutes so a deliberate resume is not immediately re-paused.
   const hosted = runtime.config.multiTenant && row.account?.kind === 'shared';
-  const quarantine = async (unhealthy: { code: string; message: string }) => {
+  // `rampStep`: a ramp step's batch paused it. That batch is done with: a resume starts a new hour on the same step.
+  const quarantine = async (unhealthy: { code: string; message: string }, rampStep?: number) => {
     const paused = await runtime.db.transaction(async tx => {
       const moved = await tx.execute(hosted ? quarantineCampaign(ref, unhealthy) : pauseCampaign(ref, unhealthy));
+      if (moved.rows.length && rampStep !== undefined) await tx.execute(restartRampWindow(ref));
       if (moved.rows.length && hosted) await (await wrapModuleLoad(() => import('./standing.js'))).applyChange(tx, { workspaceId: a.workspaceId, actor: { kind: 'system', via: 'job' }, kind: 'quarantine',
         details: { campaignId: row.id, campaignName: row.draft.name ?? row.id, code: unhealthy.code, message: unhealthy.message } });
       return moved;
     });
-    if (paused.rows.length) log('warn', { code: 'CAMPAIGN_AUTO_PAUSED', campaignId: row.id, reason: unhealthy.code });
+    if (paused.rows.length) log('warn', { code: 'CAMPAIGN_AUTO_PAUSED', campaignId: row.id, reason: unhealthy.code, ...rampStep === undefined ? {} : { rampStep: rampStep + 1 } });
     return 'done' as const;
   };
   // The list probe: release only the probe, wait for its feedback, then check it before releasing the rest. A sender in
@@ -3758,6 +3851,33 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   }
   // Daily pacing: at most pacePerDay recipients per rolling 24-hour window.
   if (row.pacePerDay !== null && row.windowStartedAt && !rolling && row.windowExpanded >= row.pacePerDay) await hold('pacing_window', new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString());
+  // The ramp (src/standing-model.ts RAMP): Hosted live campaigns, exempt workspaces too. Its first release places it, from
+  // the workspace's history. A step's hour releases at most its ceiling; once the hour is over, its batch is checked when
+  // its feedback is mature (RAMP_CHECK) and the campaign moves on, stays on the step for another hour or pauses.
+  let rampLeft = Number.POSITIVE_INFINITY;
+  if (hosted && !row.simulated) {
+    let step = row.rampStep ?? rampStart(await rampHistory(runtime.db, a.workspaceId)), from = row.rampFrom;
+    let opened = row.rampStep !== null && row.rampWindowStartedAt ? Date.parse(row.rampWindowStartedAt) : null;
+    if (row.rampStep === null) log('info', { code: 'CAMPAIGN_RAMP_PLACED', campaignId: row.id, step: step + 1, steps: RAMP.steps.length });
+    if (step < RAMP.steps.length && opened !== null && dbNow >= opened + RAMP_HOUR_MS) {
+      const batch = row.expanded > from ? await rampBatch(runtime.db, a, row, from) : null;
+      if (batch?.released) {
+        if (batch.waiting > 0) return hold('ramp', new Date(dbNow + Math.max(RAMP_CHECK.retryMs, drainDelayMs(batch.waiting, row.rate))).toISOString());
+        if (batch.resolved < batch.accepted * RAMP_CHECK.resolved && dbNow < opened + RAMP_HOUR_MS + RAMP_CHECK.maxWaitMs) return hold('ramp', new Date(dbNow + RAMP_CHECK.retryMs).toISOString());
+        const unhealthy = rampHealth(batch, step);
+        if (unhealthy) return quarantine(unhealthy, step);
+        if (batch.released >= RAMP.steps[step]!.ceilingPerHour * RAMP.advance) step++;
+      }
+      opened = null;
+    }
+    if (step < RAMP.steps.length && opened === null) { opened = dbNow; from = row.expanded; }
+    const startedAt = step < RAMP.steps.length ? new Date(opened!).toISOString() : null;
+    if (step !== row.rampStep || from !== row.rampFrom || startedAt !== (row.rampWindowStartedAt && new Date(row.rampWindowStartedAt).toISOString())) await runtime.db.execute(setRamp(ref, step, startedAt, from));
+    if (step < RAMP.steps.length) {
+      rampLeft = RAMP.steps[step]!.ceilingPerHour - (row.expanded - from);
+      if (rampLeft <= 0) return hold('ramp', new Date(opened! + RAMP_HOUR_MS).toISOString());
+    }
+  }
   // SES 24-hour quota (cached from GetAccount about every minute): keep a reserve for transactional mail.
   let rateAllowance = Number.POSITIVE_INFINITY, shareRate = 0;
   // Rate share: release at most rateShare of the regional send rate, measured from the previous release.
@@ -3808,7 +3928,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     if (sesAllowance <= 0) return sesCapacity <= shareCapacity ? 'ses_daily_quota' as const : 'hosted_daily_quota' as const;
     const cBuf = campaignBuffer(buffer!.rate), wBuf = workspaceBuffer(buffer!.rate);
     const bufRoom = Math.min(cBuf - buffer!.campaign, wBuf - buffer!.total);
-    const demand = Math.min(CAMPAIGN_EXPAND_ROWS, campaign.total - campaign.expanded, paceLeft, sesAllowance, rateAllowance, probeLeft, screened);
+    const demand = Math.min(CAMPAIGN_EXPAND_ROWS, campaign.total - campaign.expanded, paceLeft, sesAllowance, rateAllowance, probeLeft, screened, rampLeft);
     const txMinRelease = Math.min(demand, Math.floor(cBuf / 4));
     const capacity = Math.min(demand, bufRoom);
     if (capacity <= 0 || (buffer!.campaign > 0 && bufRoom < txMinRelease)) {

@@ -113,6 +113,10 @@ A campaign over 10,000 recipients is always probed. This is decided once, before
 
 Every campaign, probed or not, still pauses at more than 2% bounces after 1,000 accepted or more than 0.08% complaints after 2,000.
 
+## Campaign ramp
+
+A Hosted sender's first large campaigns **ramp**: they release in hourly steps of 1,000, 2,500, 5,000, 10,000, 20,000, 40,000, 75,000, 150,000 and 300,000 recipients (`RAMP` in `api/src/standing-model.ts`), then at their other limits only. It applies to every Hosted workspace, exempt and first-party ones included, and only to campaigns: transactional mail never waits for it. Each step lasts at least an hour. Then, once its batch has left the queue and 90% of what SES accepted has a delivery result (or an hour after the step ended), the batch is checked: more than 3% hard bounces of at least 100 accepted, or more than 0.08% complaints counting at least 2, pause the campaign as a quarantine (`BOUNCE_RATE_HIGH` or `COMPLAINT_RATE_HIGH`, the message says which ramp step); a resume starts that step's hour again. A clean batch that released at least half its step's ceiling moves the campaign to the next step. Release waits meanwhile with `delivery.waiting.reason` `ramp`. Where a sender starts depends on its largest clean, mature hour of marketing mail in the last 30 days: every step that hour would have proven is skipped, so a sender with a clean hour of 150,000 or more skips the ramp. `sendEstimate` on `GET /v1/campaigns/{id}` shows the campaign's step and when its last recipient should go out.
+
 ## Content screen: how much text
 
 Hosted mail is screened for smuggled advertising and scams before it is delivered. The screen reads the HTML's text (with its `alt` and `title` text, form values and what its style sheets draw), then the text part, then any raw MIME, each in full, and the hosts the message links to or loads from. It reads long mail in overlapping windows of about 5 to 8 KB, every window with the message's link hosts, so a 64 KiB message is read whole in at most 14 classifier requests and a 128 KiB campaign copy in at most 28.

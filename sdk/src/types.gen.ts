@@ -1763,6 +1763,7 @@ export type Campaign = {
         };
     };
     delivery: CampaignDelivery;
+    sendEstimate: CampaignSendEstimate;
 };
 
 /**
@@ -1872,10 +1873,10 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp';
         until: string;
     } | null;
     /**
@@ -1885,6 +1886,55 @@ export type CampaignDelivery = {
         oldestMs: number;
         lane: 'routine' | 'priority';
     } | null;
+} | null;
+
+/**
+ * How long sending takes, for a draft or a campaign that has recipients left to release. Null for a finished or canceled campaign; lists leave it out.
+ */
+export type CampaignSendEstimate = {
+    /**
+     * Recipients still to release: for a draft, the last audience count (previewCampaignAudience; null before one); once launched, those not released yet.
+     */
+    recipients: number | null;
+    /**
+     * The region's send rate the campaign plans at, per second, before its rate share; null until the region's quota was read.
+     */
+    ratePerSecond: number | null;
+    ramp: CampaignRamp;
+    /**
+     * How long releasing the recipients left takes from when it starts (the campaign's last change, updatedAt, or scheduledAt): from the ramp, the daily cap (pacing.perDay), the rate share and the region's send rate. A draft is estimated without a daily cap at the full rate. An estimate: it assumes clean, prompt feedback and leaves out the list probe's wait, quota holds and other mail sharing the rate. Null when it cannot be told (no audience count or send rate yet).
+     */
+    seconds: number | null;
+    /**
+     * A launched campaign: when its last recipient is expected to be released, as of its last change (updatedAt or scheduledAt, plus seconds). Null for a draft, while paused or failed, or when it cannot be told.
+     */
+    finishAt: string | null;
+} | null;
+
+/**
+ * Where the campaign is on the ramp. A Hosted sender's first large campaigns release in hourly steps that grow (1,000 an hour at first), moving to the next step once an hour at this one went out and its delivery results are in and clean; more than 3% bounces or more than 0.08% complaints (at least 2) in a step pause the campaign. The first step not already proven by the workspace's largest clean marketing hour of the last 30 days is where it starts, so an established sender skips it. Null when no ramp applies (self-hosted, your own AWS account, simulated mail, an established sender, or past the last step). Transactional mail never waits for it.
+ */
+export type CampaignRamp = {
+    /**
+     * The step the campaign releases at, from 1.
+     */
+    step: number;
+    /**
+     * How many steps the ramp has; past the last one only the other limits apply.
+     */
+    steps: number;
+    /**
+     * Most recipients this step releases in its hour.
+     */
+    ceilingPerHour: number;
+    /**
+     * When this step's hour started: its first release. Null before it.
+     */
+    startedAt: string | null;
+    /**
+     * Recipients released since this step's hour started.
+     */
+    released: number;
 } | null;
 
 export type CreateCampaignInput = {

@@ -371,3 +371,75 @@ export function nextGrowth(prev: Growth, o: { graduated: boolean; established?: 
   if (!clean) return { ...prev, hour: o.hour };
   return { ...prev, hour: o.hour, quality: o.quality, cap: Math.max(prev.cap, GROWTH.factor * e.distinct) };
 }
+
+// ---------- the campaign ramp ----------
+/**
+ * The campaign ramp: a Hosted sender's first large campaigns go out in hourly steps that grow, as an SES or ESP warm-up
+ * schedule grows a new sender's volume, compressed from days to hours because Hosted mail leaves shared IPs that are
+ * already warm: what is new is the sender's domain, its links and its list. The release loop enforces it per campaign
+ * (src/sending.ts releaseStep), for marketing only and for every Hosted workspace, exempt and first-party ones included
+ * (exemptions waive billing and limits, never bounce and complaint monitoring). Transactional mail never waits for it.
+ *  - steps: the hourly ceiling of each step, in order. Each step lasts at least an hour from its first release.
+ *  - advance: a step is proven by a clean hour that released at least this share of its ceiling. When a step's hour is
+ *    over and its batch's feedback is mature, a bad batch pauses the campaign (src/sending.ts RAMP_CHECK); a clean one
+ *    moves to the next step if it proved this one, or starts another hour on it. Past the last step only the campaign's
+ *    other limits apply.
+ *  - historyDays: where a sender starts. Its largest clean, mature hour of real marketing mail in this many days proves
+ *    every step it would have (the same advance rule), and it starts at the first step not proven: with no history at the
+ *    first, and with a clean hour of half the last ceiling or more it skips the ramp (an established sender).
+ * A sender with no history reaches the last step in nine clean hours, having released at most about 600,000 recipients.
+ */
+export const RAMP = {
+  steps: [
+    { ceilingPerHour: 1_000 },
+    { ceilingPerHour: 2_500 },
+    { ceilingPerHour: 5_000 },
+    { ceilingPerHour: 10_000 },
+    { ceilingPerHour: 20_000 },
+    { ceilingPerHour: 40_000 },
+    { ceilingPerHour: 75_000 },
+    { ceilingPerHour: 150_000 },
+    { ceilingPerHour: 300_000 },
+  ],
+  advance: 0.5,
+  historyDays: 30,
+} as const;
+export const RAMP_HOUR_MS = 3_600_000;
+/** The step (an index into RAMP.steps) a sender whose largest clean marketing hour is `cleanHour` starts at; RAMP.steps.length skips the ramp. */
+export function rampStart(cleanHour: number) {
+  const step = RAMP.steps.findIndex(s => cleanHour < s.ceilingPerHour * RAMP.advance);
+  return step < 0 ? RAMP.steps.length : step;
+}
+/** Where a campaign is on the ramp: `step` indexes RAMP.steps; the step's hour started at `startedAt` (ms, null before its first release) and released `released` since. */
+export type RampAt = { step: number; startedAt: number | null; released: number };
+/**
+ * When a campaign releases its last recipient (ms), or null when it cannot be told (no known send rate, or over 100,000
+ * windows away). It releases at `ratePerSecond` × `rateShare` from `start`, at most `perDay` in each 24-hour window
+ * (the current one opened at `day.startedAt` with `day.released` already out) and at most the ramp step's ceiling in
+ * each of its hours, moving on as RAMP.advance says. An estimate: it assumes clean, immediate feedback and leaves out the
+ * list probe's wait, quota holds and other mail sharing the rate.
+ */
+export function estimateFinish(o: { recipients: number; start: number; ratePerSecond: number; rateShare?: number | null; perDay?: number | null; day?: { startedAt: number | null; released: number } | null; ramp?: RampAt | null }): number | null {
+  const perMs = o.ratePerSecond * (o.rateShare ?? 1) / 1000, perDay = o.perDay ?? null;
+  if (!(perMs > 0) || !Number.isFinite(o.recipients)) return null;
+  let left = Math.max(0, o.recipients), t = o.start;
+  let step = o.ramp ? o.ramp.step : RAMP.steps.length, hourStart = o.ramp?.startedAt ?? null, hourUsed = o.ramp?.released ?? 0;
+  let dayStart = o.day?.startedAt ?? null, dayUsed = o.day?.released ?? 0;
+  for (let i = 0; i < 100_000 && left > 1e-6; i++) {
+    const ramping = step < RAMP.steps.length;
+    if (ramping && hourStart !== null && t >= hourStart + RAMP_HOUR_MS) {
+      if (hourUsed >= RAMP.steps[step]!.ceilingPerHour * RAMP.advance) step++;
+      hourStart = null; hourUsed = 0;
+      continue;
+    }
+    if (ramping && hourStart === null) hourStart = t;
+    if (perDay !== null && (dayStart === null || t >= dayStart + 86_400_000)) { dayStart = t; dayUsed = 0; }
+    const hourLeft = ramping ? RAMP.steps[step]!.ceilingPerHour - hourUsed : Infinity, dayLeft = perDay === null ? Infinity : perDay - dayUsed;
+    if (hourLeft <= 0 || dayLeft <= 0) { t = Math.max(hourLeft <= 0 ? hourStart! + RAMP_HOUR_MS : t, dayLeft <= 0 ? dayStart! + 86_400_000 : t); continue; }
+    const n = Math.min(left, hourLeft, dayLeft);
+    const end = Math.min(t + n / perMs, ramping ? hourStart! + RAMP_HOUR_MS : Infinity, perDay !== null ? dayStart! + 86_400_000 : Infinity);
+    const sent = Math.min(n, (end - t) * perMs);
+    left -= sent; hourUsed += sent; dayUsed += sent; t = end;
+  }
+  return left > 1e-6 ? null : Math.round(t);
+}

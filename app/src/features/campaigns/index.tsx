@@ -22,7 +22,7 @@ import { Checks, checksCount, checksSummary, LOW_SENDABILITY } from '../../compo
 import { date, label, number, percent } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
 import { riskBreakdown } from '../audience/consent'
-import { CampaignPacing, CampaignProgress, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
+import { CampaignPacing, CampaignProgress, SendEstimateLine, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 import { CampaignBar, CampaignSteps } from './steps'
 import { productName } from '../../../../api/src/brand'
@@ -1114,6 +1114,7 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
               {!multiTenant && <Checkbox label="Pause automatically on high bounces or complaints" checked={pace.autoPause} disabled={sendMutation.isPending} onCheckedChange={autoPause => setPace({ ...pace, autoPause })} />}
             </div>}
           </div>
+          <SendEstimateLine campaign={campaign} recipients={audience.data?.eligible ?? null} start={scheduledAt ? Date.parse(scheduledAt) : Date.now()} perDay={pace.limit && !paceError ? perDay : null} rateShare={shareError ? 1 : sharePercent / 100} />
         </ReviewStage>
       </div>
       {dialogs}
