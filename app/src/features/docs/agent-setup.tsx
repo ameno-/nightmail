@@ -13,6 +13,7 @@ import { mcpServerUrl } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { apiKeyEnv, productName, productSlug, sdkPackage, secretPrefixes } from '../../../../api/src/brand'
 import { builtinLimitsText } from '../../../../api/src/builtin-limits'
+import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_RULES_TEXT } from '../../../../api/src/attachment-limits'
 
 function receivingMx(domain: Domain) {
   const record = recordsFor(domain, 'receiving').find(row => row.type === 'MX')
@@ -45,6 +46,8 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index; each tag links its full Markdown reference).`,
     `- Install the TypeScript SDK: npm i ${sdkPackage}. Create the client with createClient from '${sdkPackage}/client' (baseUrl ${origin}) and call it from server code only.`,
     `- Auth: bearer API key from the ${apiKeyEnv} environment variable. Never hardcode it or ship it to a browser.`,
+    // The attachment rules up front, so the agent doesn't find them one refused upload or send at a time.
+    `- Attachments: ${ATTACHMENT_LIMITS_TEXT} ${ATTACHMENT_RULES_TEXT} A refusal names every attachment problem at once, in error.details.`,
   ]
   if (domain === undefined) {
     lines.push(`- Sending domain: use a verified domain from Domains in the ${productName} dashboard. Ask me which one before sending.`)

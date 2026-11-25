@@ -1406,6 +1406,9 @@ export type SendEmailInput = {
             [key: string]: unknown;
         };
     };
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     /**
@@ -1490,6 +1493,9 @@ export type BatchSendEmailItem = {
             [key: string]: unknown;
         };
     };
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     /**
@@ -1802,6 +1808,9 @@ export type CampaignDraft = {
      */
     regionPinned?: boolean;
     subject?: string | '';
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -1988,6 +1997,9 @@ export type CreateCampaignInput = {
      */
     regionPinned?: boolean;
     subject?: string | '';
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -2426,6 +2438,9 @@ export type CampaignUpdateInput = {
          */
         regionPinned?: boolean;
         subject?: string | '';
+        /**
+         * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+         */
         attachments?: Array<string>;
         tracking?: boolean;
         audience?: {
