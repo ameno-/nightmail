@@ -59,7 +59,7 @@ async function assetRows(db: DbExecutor, workspaceId: string, ids: string[], loc
 async function replaceLinks(db: DbExecutor, workspaceId: string, templateId: string, stage: 'draft' | 'published', ids: string[]) { await assetRows(db, workspaceId, ids, true); await db.delete(templateAssetLinks).where(and(eq(templateAssetLinks.workspaceId, workspaceId), eq(templateAssetLinks.templateId, templateId), eq(templateAssetLinks.stage, stage))); if (ids.length) await db.insert(templateAssetLinks).values(ids.map(assetId => ({ workspaceId, templateId, assetId, stage }))); }
 async function checksum(bytes: Uint8Array) { return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)), byte => byte.toString(16).padStart(2, '0')).join(''); }
 // A template asset is an uploaded file like an attachment: it counts against the workspace's stored-file cap, reserved
-// before its object is written (migration 513 counts template_assets in sending_asset_usage).
+// before its object is written (migration 514 counts template_assets in sending_asset_usage).
 async function saveAsset(runtime: Runtime, identity: Actor, metadata: AttachmentMetadataInput, bytes: Uint8Array) {
   const input = validateAttachment(metadata, bytes, MAX_ASSET_BYTES), assetId = id('tasset'), storageKey = `${identity.workspaceId}/templates/assets/${assetId}`, hash = await checksum(bytes);
   const upload = uploadReservation(runtime, identity.workspaceId, assetId, storageKey, bytes, input.contentType);
