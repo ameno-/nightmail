@@ -2855,6 +2855,16 @@ export type DomainReadiness = {
         url: string | null;
     } | null;
     /**
+     * Set when adding the domain (one bounded NS lookup), by Check now and by the background check: the domain has no DNS at all. Never set when DNS couldn’t be read. Fix the name (add the right domain and delete this one) or register the domain.
+     */
+    dnsIssue?: {
+        /**
+         * no_dns: no nameservers serve this domain: it is unregistered, lapsed or mistyped, so its records can’t be published and it can’t verify.
+         */
+        code: 'no_dns';
+        message: string;
+    } | null;
+    /**
      * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
      */
     releasesAt?: string | null;

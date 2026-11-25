@@ -8722,6 +8722,29 @@
             ],
             "description": "Where this domain’s DNS is hosted, from its zone’s NS records, alongside publicDns: null when the provider is not one Nightmail recognizes."
           },
+          "dnsIssue": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "no_dns"
+                ],
+                "description": "no_dns: no nameservers serve this domain: it is unregistered, lapsed or mistyped, so its records can’t be published and it can’t verify."
+              },
+              "message": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "code",
+              "message"
+            ],
+            "description": "Set when adding the domain (one bounded NS lookup), by Check now and by the background check: the domain has no DNS at all. Never set when DNS couldn’t be read. Fix the name (add the right domain and delete this one) or register the domain."
+          },
           "releasesAt": {
             "type": [
               "string",

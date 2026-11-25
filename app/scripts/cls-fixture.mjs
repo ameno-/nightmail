@@ -367,17 +367,18 @@ async function builtin(db, workspaceId, conn, label, { pending = false } = {}) {
 // A domain added two hours ago whose records never went live, as the background DNS check (api/src/domain-setup.ts) left
 // it: the TXT and one DKIM CNAME missing at Cloudflare. Its page and Overview show the setup banner.
 // `correct`: its ownership is proven and every DKIM CNAME is in public DNS, but SES hasn't looked again yet.
-async function stuck(db, workspaceId, conn, name, { correct = false } = {}) {
+// `noDns`: nobody serves DNS for it (a typo): every record missing and the check's noDns, so its page says to check the name.
+async function stuck(db, workspaceId, conn, name, { correct = false, noDns = false } = {}) {
   const id = 'dom_' + name.replace(/\W/g, '_'), tokens = [0, 1, 2].map(i => `${name.replace(/\W/g, '').slice(0, 10)}${i}p4w8v6dkim`);
   const identity = { ses: { VerificationStatus: 'PENDING', VerifiedForSendingStatus: false, DkimAttributes: { Status: 'PENDING', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com', Tokens: tokens } }, proven: correct, mx: null, note: null };
   const { rows: [{ token }] } = await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,identity,ever_proven,created_at) VALUES($1,$2,$3,'pending','off',$4::jsonb,$5,now()-interval '2 hours') RETURNING token",
     [workspaceId, name, conn, JSON.stringify(identity), correct]);
   await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
   const checkedAt = ago(6), seen = state => ({ state, values: [], checkedAt });
-  const records = [...tokens.map((t, i) => ({ type: 'CNAME', name: `${t}._domainkey.${name}`, value: `${t}.dkim.amazonses.com`, publicDns: seen(i === 2 && !correct ? 'missing' : 'found') })),
+  const records = [...tokens.map((t, i) => ({ type: 'CNAME', name: `${t}._domainkey.${name}`, value: `${t}.dkim.amazonses.com`, publicDns: seen(noDns || (i === 2 && !correct) ? 'missing' : 'found') })),
     ...correct ? [] : [{ type: 'TXT', name: `_nightmail.${name}`, value: token, publicDns: seen('missing') }]];
-  const host = { name: 'Cloudflare', zone: name, url: `https://dash.cloudflare.com/?to=/:account/${name}/dns/records` };
-  await db.query('UPDATE domain_claims SET setup_check=$3::jsonb WHERE workspace_id=$1 AND name=$2', [workspaceId, name, JSON.stringify({ checkedAt, host, records })]);
+  const host = noDns ? null : { name: 'Cloudflare', zone: name, url: `https://dash.cloudflare.com/?to=/:account/${name}/dns/records` };
+  await db.query('UPDATE domain_claims SET setup_check=$3::jsonb WHERE workspace_id=$1 AND name=$2', [workspaceId, name, JSON.stringify({ checkedAt, host, ...noDns ? { noDns: true } : {}, records })]);
   return { id };
 }
 
@@ -928,6 +929,8 @@ export async function seed(fx) {
   await domain(db, 'ws_fresh', freshConn, 'lumenlabs.example');
   const stuckDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenmail.example');
   const correctDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpost.example', { correct: true });
+  // Lists after lumenmail.example, so Overview's setup banner stays that one's.
+  const noDnsDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenaml.example', { noDns: true });
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
   // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
@@ -1033,7 +1036,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }
