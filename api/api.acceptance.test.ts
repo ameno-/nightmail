@@ -3456,7 +3456,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
     cleanup(t, async () => { ok(await http('DELETE', `/v1/contacts/${contact.id}`, MANAGER), [200, 404]); });
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).id, contact.id);
     ok(await http('POST', `/v1/api-keys/${key.id}/revoke`, MANAGER), [200, 204]);
-    error(await http('GET', '/v1/me', key.secret, undefined, headers), 401, 'AUTH_INVALID');
+    assert.match(error(await http('GET', '/v1/me', key.secret, undefined, headers), 401, 'KEY_REVOKED').message, /; use another key, or create one in the dashboard under API keys → Create key\.$/);
   });
 
   test('cookie-authenticated unsafe requests require the canonical Origin and leave no rejected writes', async () => {
@@ -4835,7 +4835,7 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
     });
   }
   const mint = async (request: typeof http, headers: Record<string, string>) => { const made = ok(await request('POST', '/v1/agent/setup-tokens', undefined, undefined, headers), 201); secrets.add(made.token); return made; };
-  const exchange = (request: typeof http, token: string) => request('POST', '/v1/agent/setup', undefined, { token });
+  const exchange = (request: typeof http, token: string, client?: string) => request('POST', '/v1/agent/setup', undefined, client === undefined ? { token } : { token, client_name: client });
 
   test('a copied prompt\'s setup token becomes one lasting key, made by the person who copied it, that never administers keys or billing', async t => {
     await hosted(t, async ({ db, request, w, owner, as }) => {
@@ -4851,13 +4851,13 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.deepEqual([stored.kind, stored.workspace_id, stored.user_id, stored.status], ['prompt', w, owner.userId, 'pending']);
       assert.equal(ok(await request('GET', `/v1/agent/setup-tokens/${minted.id}`, undefined, undefined, as(owner))).status, 'waiting');
 
-      // The agent needs nothing but the token.
-      const agent = ok(await exchange(request, minted.token), 201);
+      // The agent needs nothing but the token; the name it gives names its key.
+      const agent = ok(await exchange(request, minted.token, 'Claude Code'), 201);
       secrets.add(agent.key);
       assert.match(agent.key, /^nm_[0-9a-f]{64}$/);
       assert.deepEqual([agent.workspaceId, agent.workspaceName], [w, w]);
       assert.match(agent.nextStep, new RegExp(`workspace "${w}"`));
-      assert.match(agent.name, /^Agent \(set up \d{4}-\d{2}-\d{2}\)$/);
+      assert.match(agent.name, /^Claude Code, set up \d{4}-\d{2}-\d{2}$/);
       assert.deepEqual(agent.permissions, ['read', 'send', 'manage']);
       assert.equal(agent.baseUrl, PUBLIC_ORIGIN);
       assert.deepEqual(agent.mcp, { url: `${PUBLIC_ORIGIN}/mcp`, config: { url: `${PUBLIC_ORIGIN}/mcp`, headers: { Authorization: 'Bearer ${NIGHTMAIL_API_KEY}' } } });
@@ -4866,7 +4866,10 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.deepEqual([status.status, status.keyId, status.keyName], ['connected', agent.keyId, agent.name]);
       assert.ok(status.connectedAt);
       const listed = page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id === agent.keyId);
-      assert.deepEqual([listed?.name, listed?.permissions, listed?.domains, listed?.expiresAt, listed?.revokedAt], [agent.name, ['read', 'send', 'manage'], [], null, null]);
+      assert.deepEqual([listed?.name, listed?.permissions, listed?.domains, listed?.expiresAt, listed?.revokedAt, listed?.agent], [agent.name, ['read', 'send', 'manage'], [], null, null, { client: 'Claude Code' }]);
+      const plain = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('agent-setup'), permissions: ['send'] }), 201);
+      secrets.add(plain.secret);
+      assert.deepEqual([plain.agent, page(await request('GET', '/v1/api-keys?limit=100', MANAGER)).find(key => key.id === plain.id)?.agent], [null, null], 'Any other key has no agent');
       // The audit trail names the person who set the agent up, and how.
       assert.equal(listed?.lastChange.action, 'api_key.create');
       const { rows: [created] } = await db.query("SELECT actor_type, actor_id, user_id, via, summary FROM audit_events WHERE workspace_id=$1 AND action='api_key.create' AND target_id=$2", [w, agent.keyId]);
@@ -4897,11 +4900,19 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.ok(tools.includes('createInbox') && tools.includes('sendEmail'), tools.join());
       for (const name of ['createApiKey', 'listApiKeys', 'revokeApiKey', 'getBilling', 'createBillingTopUpLink', 'createInboxConnection', 'createInboxAppPassword']) assert.ok(!tools.includes(name), name);
 
-      // The token works once.
-      error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED');
-      // Revoking the key ends it, like any key.
+      // The token works once. Asked again (an agent that dropped the response), it names the key it gave: never the key
+      // again, nor a second one.
+      const again = error(await exchange(request, minted.token, 'Claude Code'), 409, 'SETUP_TOKEN_USED');
+      assert.deepEqual(again.details, [{ keyId: agent.keyId, name: agent.name, prefix: agent.key.slice(0, 11), issuedAt: status.connectedAt, revokedAt: null }]);
+      assert.ok(again.message.includes(`"${agent.name}" (${agent.key.slice(0, 11)}…)`) && again.message.includes('use the key you saved'), again.message);
+      assert.ok(!JSON.stringify(again).includes(agent.key));
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE agent_setup_id=$1', [minted.id])).rows[0].n, 1);
+      // Revoking the key ends it, like any key, and its requests say so: when, how, and to run setup again.
       ok(await request('POST', `/v1/api-keys/${agent.keyId}/revoke`, MANAGER));
-      error(await request('GET', '/v1/me', agent.key), 401, 'AUTH_INVALID');
+      const { rows: [revocation] } = await db.query("SELECT via FROM audit_events WHERE workspace_id=$1 AND action='api_key.revoke' AND target_id=$2", [w, agent.keyId]);
+      assert.match(error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED').message,
+        new RegExp(`^This key was revoked on \\d{4}-\\d{2}-\\d{2} at \\d{2}:\\d{2}:\\d{2} UTC ${({ dashboard: 'from the dashboard', api: 'with an API key' } as Json)[revocation.via]}; get a new one by running setup again`));
+      assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again\.$/);
     });
   });
 
@@ -4992,17 +5003,41 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       const agent = ok(await poll(), 201);
       secrets.add(agent.key);
       assert.deepEqual([agent.workspaceId, agent.workspaceName, agent.permissions], [theirs, theirs, ['read', 'send', 'manage']]);
+      assert.match(agent.name, /^OpenCode agent, set up \d{4}-\d{2}-\d{2}$/);
       assert.equal(ok(await request('GET', '/v1/me', agent.key)).workspaceId, theirs);
       error(await request('GET', '/v1/api-keys', agent.key), 403, 'PERMISSION_DENIED');
-      // Once.
+      assert.deepEqual(page(await request('GET', '/v1/api-keys?limit=100', undefined, undefined, as(member, theirs))).find(key => key.id === agent.keyId)?.agent, { client: 'OpenCode agent' });
+      // Once. A poll after that (an agent that dropped the response, or a second poller) names the key it gave, the same
+      // every time, and never sends the key again or makes another: the agent goes on with the key it saved.
       await waited();
-      error(await poll(), 409, 'DEVICE_CODE_USED');
+      const used = error(await poll(), 409, 'DEVICE_CODE_USED');
+      assert.deepEqual(used.details, [{ keyId: agent.keyId, name: agent.name, prefix: agent.key.slice(0, 11), issuedAt: used.details?.[0]?.issuedAt, revokedAt: null }]);
+      assert.ok(Math.abs(Date.parse(used.details[0].issuedAt) - Date.now()) < 60_000);
+      assert.ok(used.message.includes(`"${agent.name}" (${agent.key.slice(0, 11)}…)`) && used.message.includes('use the key you saved'), used.message);
+      assert.ok(!JSON.stringify(used).includes(agent.key) && !JSON.stringify(used).includes(theirs), 'Neither the key nor its workspace');
+      const repeat = error(await poll(), 409, 'DEVICE_CODE_USED');
+      assert.deepEqual([repeat.message, repeat.details], [used.message, used.details]);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [theirs])).rows[0].n, 1, 'No second key');
       assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: started.user_code }, as(owner))).status, 'used');
       // Approved and made by the member who approved it, in their workspace.
       const { rows: trail } = await db.query("SELECT action, actor_id, workspace_id, summary FROM audit_events WHERE (target_id=$1 OR target_id=(SELECT id FROM agent_setups WHERE key_id=$1)) ORDER BY at, action", [agent.keyId]);
       assert.deepEqual(trail.map(row => [row.action, row.actor_id, row.workspace_id]).sort(), [['agent_setup.approve', member.userId, theirs], ['api_key.create', member.userId, theirs]]);
       assert.equal(trail.find(row => row.action === 'api_key.create').summary.after.client, 'OpenCode agent');
       assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n, 0);
+      // Revoked in the dashboard (a production agent kept polling with one): its requests, a send included, say when and
+      // how to get another key, and name nothing else. Sent to another workspace it says the same; a secret that names
+      // no key learns nothing.
+      ok(await request('POST', `/v1/api-keys/${agent.keyId}/revoke`, undefined, undefined, as(member, theirs)));
+      const revoked = error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED');
+      assert.match(revoked.message, /^This key was revoked on \d{4}-\d{2}-\d{2} at \d{2}:\d{2}:\d{2} UTC from the dashboard; get a new one by running setup again: a fresh agent prompt from the person, or a device code \(POST \/v1\/agent\/device\)\.$/);
+      assert.ok(Math.abs(Date.parse(revoked.details[0].revokedAt) - Date.now()) < 60_000);
+      for (const named of [theirs, agent.keyId, agent.name, member.userId]) assert.ok(!JSON.stringify(revoked).includes(named), named);
+      const elsewhere = error(await request('GET', '/v1/me', agent.key, undefined, { 'x-nightmail-workspace': w }), 401, 'KEY_REVOKED');
+      assert.deepEqual([elsewhere.message, elsewhere.details], [revoked.message, revoked.details]);
+      assert.equal(error(await request('POST', '/v1/emails/send', agent.key, mail(), { 'idempotency-key': unique('agent-setup') }), 401, 'KEY_REVOKED').message, revoked.message);
+      assert.equal(error(await request('GET', '/v1/me', `nm_${'7'.repeat(64)}`), 401, 'AUTH_INVALID').message, 'The API key is invalid or has been revoked.');
+      // Its device code says the key it gave was revoked: start again.
+      assert.match(error(await poll(), 409, 'DEVICE_CODE_USED').message, /, and it has since been revoked\. Start again with POST \/v1\/agent\/device\.$/);
       // An approver who lost their role by the agent's poll: no key.
       const again = ok(await request('POST', '/v1/agent/device', undefined, {}));
       ok(await request('POST', '/v1/agent/device/approve', undefined, { userCode: again.user_code }, as(member, theirs)));
@@ -6296,7 +6331,8 @@ describe('Hosted MCP OAuth and tools', () => {
       const payload = JSON.parse(Buffer.from(readAgent.token.slice('nm_agent_'.length).split('.')[0], 'base64url').toString());
       const expired = await createAgentToken(runtime.config, { id: payload.id, grant: payload.grant, permissions: payload.permissions, domains: payload.domains, expiresAt: new Date(Date.now() - 1000).toISOString() });
       secrets.add(expired);
-      for (const bearer of [full.secret, agent.token, expired]) error(await send(bearer, 'tools/list'), 401, 'AUTH_INVALID');
+      error(await send(full.secret, 'tools/list'), 401, 'KEY_REVOKED');
+      for (const bearer of [agent.token, expired]) error(await send(bearer, 'tools/list'), 401, 'AUTH_INVALID');
       // An agent token ends with its approval.
       ok(await send(readAgent.token, 'tools/list'));
       ok(await request('POST', `/v1/agents/${payload.grant}/revoke`, MANAGER));

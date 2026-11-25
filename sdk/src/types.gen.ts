@@ -353,6 +353,15 @@ export type ApiKey = {
     expiresAt: string | null;
     approval: ApprovalTie;
     lastChange: ApiKeyLastChange;
+    /**
+     * A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key.
+     */
+    agent: {
+        /**
+         * What the agent said it is (client_name), its claim, never verified. Null when it didn't say.
+         */
+        client: string | null;
+    } | null;
 };
 
 export type CreateApiKey = {
@@ -553,7 +562,7 @@ export type AgentKey = {
     key: string;
     keyId: string;
     /**
-     * Agent (set up <date>), under API keys, where a person revokes it.
+     * "<client_name>, set up <date>" ("Agent, set up <date>" without one), under API keys, where a person revokes it.
      */
     name: string;
     workspaceId: string;
@@ -7689,6 +7698,10 @@ export type ExchangeAgentSetupTokenData = {
          * The setup token from the prompt.
          */
         token: string;
+        /**
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
+         */
+        client_name?: string;
     };
     path?: never;
     query?: never;
@@ -7756,7 +7769,7 @@ export type ExchangeAgentSetupTokenResponse = ExchangeAgentSetupTokenResponses[k
 export type StartAgentDeviceAuthorizationData = {
     body?: {
         /**
-         * What the agent is, shown to the person as its claim.
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
          */
         client_name?: string;
     };

@@ -78,6 +78,7 @@
 .agent-setup-status > p { grid-area: 1 / 1; display: flex; align-items: flex-start; gap: var(--space-8); min-width: 0; margin: 0; text-wrap: pretty; }
 .agent-setup-status > p:not([data-active]) { visibility: hidden; }
 .agent-setup-status > p[data-state='connected'] { color: var(--color-success); }
+.agent-setup-status__key { display: inline-block; max-width: 24ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 .agent-setup-status > p[data-state='connected'][data-active] { animation: ui-appear 240ms ease-out; }
 .agent-setup-status strong { font-weight: var(--font-weight-bold); }
 .agent-setup-status__mark { display: inline-grid; place-items: center; width: 14px; height: var(--leading-sm); flex-shrink: 0; }

@@ -5,7 +5,7 @@ import { ApiError, actor, agentTokenMintRefusal, denied, digest, requiredOf, err
 import type { Actor, App, AppEnv, Ctx, DbExecutor, MailboxAccess, RequestOrigin, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
-import { AuditEntry, auditContext, auditInsert, keyTrail, LastChange, lastChanges, recordAudit } from './audit.js';
+import { AuditEntry, auditContext, auditInsert, keyTrail, LastChange, lastChanges, recordAudit, type AuditVia } from './audit.js';
 import { secretPrefixes, shownPrefix } from './brand.js';
 import { idempotencyGate, idempotent, IdempotencyHeaders, idempotentRequest, validIdempotencyKey } from './idempotency.js';
 import { approvalField, approvalTie, approvalTies, tiedNextStep } from './approval-ties.js';
@@ -96,7 +96,7 @@ function keyUnchanged(c: Ctx) {
   if (a?.credential === 'apiKey') return async () => {
     const { rows: [now] } = await c.env.db.execute<{ permissions: string[]; domains: string[] }>(sql`SELECT permissions, domains FROM api_keys
       WHERE id = ${a.keyId} AND workspace_id = ${a.workspaceId} AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())`);
-    if (!now) throw new ApiError(401, 'AUTH_INVALID', 'The API key was revoked or has expired.');
+    if (!now) throw await keyRefusal(c.env.db, sql`k.id = ${a.keyId} AND k.workspace_id = ${a.workspaceId}`);
     return same(now.permissions, a.permissions) && same(now.domains, a.domains);
   };
   return null;
@@ -119,17 +119,47 @@ const AGENT_TOKEN = /^(?:nm|bane|os)_agent_/;
 export const API_KEY = /^(?:nm_|bane_|os_(?:live_)?)[0-9a-f]{64}$/i;
 /** A workspace API key or agent token (not an inbox key, not an account-service token): what bearerActor takes. */
 export const workspaceBearer = (token: string) => /^(?:nm|bane|os)_(?!mbx_)/.test(token);
-/** The key a secret names, if it works now. `ended`: an expired key too, flagged, so its refusal can say when it ended
- *  (charge it with NOT credential.ended, so the refused request is never charged). */
+/** How a revoked key was revoked: its newest revocation's `via` (audit_events_key_target), read only for a revoked key. */
+const revokedVia = sql`CASE WHEN k.revoked_at IS NOT NULL THEN (SELECT a.via FROM audit_events a WHERE a.workspace_id = k.workspace_id AND a.target_type = 'api_key'
+  AND a.target_id = k.id AND a.action = 'api_key.revoke' ORDER BY a.at DESC, a.id DESC LIMIT 1) END`;
+/** The key a secret names, if it works now. `ended`: a revoked or expired key too, flagged, so its refusal can say when
+ *  and how it ended in the same statement (charge it with NOT credential.ended, so the refused request is never charged). */
 const apiKeyRow = (c: Ctx, hash: string, ended = false) => sql`
   SELECT k.id, k.workspace_id, k.id AS key_id, k.permissions, k.domains, g.grant_id, k.agent_setup_id IS NOT NULL AS agent_setup,
-    ${ended ? sql`k.expires_at::text AS expires_at, coalesce(k.expires_at <= now(), false) AS ended,` : sql``} ${c.env.config.apiRateLimitPerMinute}::int AS max_requests
+    ${ended ? sql`k.expires_at::text AS expires_at, k.revoked_at::text AS revoked_at, ${revokedVia} AS revoked_via,
+      (k.revoked_at IS NOT NULL OR coalesce(k.expires_at <= now(), false)) AS ended,` : sql``} ${c.env.config.apiRateLimitPerMinute}::int AS max_requests
   FROM api_keys k LEFT JOIN mail_grant_objects g ON g.workspace_id=k.workspace_id AND g.kind='api_key' AND g.resource=k.id
-  WHERE k.hash = ${hash} AND k.revoked_at IS NULL ${ended ? sql`` : sql`AND (k.expires_at IS NULL OR k.expires_at > now())`}`;
+  WHERE k.hash = ${hash} ${ended ? sql`` : sql`AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at > now())`}`;
 /** A key past its expiry is refused like a revoked one, saying when it ended: a later expiry brings it back, same secret. */
 export const keyExpired = (at: string, inbox = false) => new ApiError(401, 'AUTH_INVALID', inbox
   ? `This API key ended at ${new Date(at).toISOString()}: its inbox ended or its expiry passed. While the inbox is active, a later expiry (API keys → Edit, or updateApiKey) brings it back with the same secret.`
   : `This API key expired at ${new Date(at).toISOString()}. A later expiry or none (API keys → Edit, or updateApiKey with expiresAt) brings it back with the same secret.`);
+const revokedFrom: Partial<Record<AuditVia, string>> = { dashboard: ' from the dashboard', api: ' with an API key', mcp: ' over MCP' };
+/**
+ * The 401 for a revoked workspace API key: KEY_REVOKED, saying when and where it was revoked and how to get another. Only
+ * a request holding the key's whole secret (or one it authenticated) gets here, and the answer names nothing but that
+ * key's own end: never its workspace, name or ID, nor who revoked it. An agent that kept polling with a key a person
+ * revoked (a production agent did, on bare AUTH_INVALID) then knows to run setup again rather than retry.
+ */
+function keyRevoked(revokedAt: string, via: AuditVia | null, agent: boolean) {
+  const at = new Date(revokedAt).toISOString(), again = agent
+    ? 'get a new one by running setup again: a fresh agent prompt from the person, or a device code (POST /v1/agent/device).'
+    : 'use another key, or create one in the dashboard under API keys → Create key.';
+  const refusal = new ApiError(401, 'KEY_REVOKED', `This key was revoked on ${at.slice(0, 10)} at ${at.slice(11, 19)} UTC${via ? revokedFrom[via] ?? '' : ''}; ${again}`);
+  refusal.details = [{ revokedAt: at }];
+  return refusal;
+}
+const unknownKey = () => new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+/**
+ * The 401 for a key a request had authenticated with, that stopped working before a later statement read it again (the
+ * send fast path, a long poll), found by `which`: keyRevoked, keyExpired, or AUTH_INVALID if it is gone.
+ */
+export async function keyRefusal(db: DbExecutor, which: SQL) {
+  const { rows: [key] } = await db.execute<{ revoked_at: string | null; expires_at: string | null; agent: boolean; via: AuditVia | null }>(sql`
+    SELECT k.revoked_at::text, k.expires_at::text, k.agent_setup_id IS NOT NULL AS agent, ${revokedVia} AS via
+    FROM api_keys k WHERE ${which} AND (k.revoked_at IS NOT NULL OR k.expires_at <= now())`);
+  return !key ? unknownKey() : key.revoked_at ? keyRevoked(key.revoked_at, key.via, key.agent) : keyExpired(key.expires_at!);
+}
 
 /**
  * The actor a workspace API key or agent token acts as, checked now: revoked, expired and over-budget credentials and
@@ -159,8 +189,11 @@ export async function bearerActor(c: Ctx, token: string): Promise<Actor> {
   // A send's duplicate that reaches another isolate (a cold fingerprint) must not wait on the budget row either.
   const idem = c.req.method==='POST' && ['/v1/emails/send','/v1/emails/batch'].includes(c.req.path) ? c.req.header('Idempotency-Key') : undefined;
   const gate = idem!==undefined && validIdempotencyKey(idem) ? idempotencyGate(c.req.path,idem) : undefined;
-  const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null; agent_setup: boolean; expires_at: string | null; ended: boolean }>(c, apiKeys, apiKeyRow(c, hash, true), sql`NOT credential.ended${gate ? sql` AND ${gate}` : sql``}`));
-  if (!key) throw new ApiError(401, 'AUTH_INVALID', 'The API key is invalid or has been revoked.');
+  const key = await timed(c, 'budget-db', () => chargeCredential<Pick<Actor, 'permissions' | 'domains'> & { id: string; workspace_id: string; grant_id:string|null; agent_setup: boolean; expires_at: string | null;
+    revoked_at: string | null; revoked_via: AuditVia | null; ended: boolean }>(c, apiKeys, apiKeyRow(c, hash, true), sql`NOT credential.ended${gate ? sql` AND ${gate}` : sql``}`));
+  // One statement either way: an unknown secret costs what a working one does.
+  if (!key) throw unknownKey();
+  if (key.revoked_at) throw keyRevoked(key.revoked_at, key.revoked_via, key.agent_setup);
   if (key.ended) throw keyExpired(key.expires_at!);
   let grant:Actor|null=null;
   if (key.grant_id) {
@@ -186,7 +219,9 @@ export const authenticate: MiddlewareHandler<AppEnv> = async (c, next) => {
       const hash = await digest(token);
       if((verifiedFingerprints.get(hash)??0)>Date.now()) {
         const {tryAtomicKeyAdmission}=await wrapModuleLoad(()=>import('./sending.js'));
-        const response=await tryAtomicKeyAdmission(c,charge=>credentialCtes(apiKeys,sql`${apiKeyRow(c, hash)} AND g.grant_id IS NULL`,charge));
+        // The statement found no working key: revoked or expired since this isolate verified it, refused as bearerActor would.
+        const response=await tryAtomicKeyAdmission(c,charge=>credentialCtes(apiKeys,sql`${apiKeyRow(c, hash)} AND g.grant_id IS NULL`,charge))
+          .catch(async (failure: unknown) => { throw failure instanceof ApiError && failure.code === 'AUTH_INVALID' ? await keyRefusal(c.env.db, sql`k.hash = ${hash}`) : failure; });
         if(response){rememberFingerprint(hash);return response;}
       }
     }
@@ -224,6 +259,8 @@ const KeySchema = z.object({ id: z.string(), name: z.string(),
   access: KeyAccess, expiresAt: z.string().nullable().describe('When the key stops working: the expiry set on it, or for an inbox key its inbox\'s end if that is sooner. Null: it never expires. updateApiKey changes it on the same secret.'),
   approval: approvalField,
   lastChange: LastChange.nullable().describe('The newest entry in its history (listApiKeyChanges): when it was created, changed or revoked, and by whom. Null when none is kept (after a year).'),
+  agent: z.object({ client: z.string().nullable().describe('What the agent said it is (client_name), its claim, never verified. Null when it didn\'t say.') }).nullable()
+    .describe('A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key.'),
 }).openapi('ApiKey');
 export const AgentTokenRecord = z.object({ id: z.string(), grantId: z.string(), permissions: z.array(z.enum(['read', 'send', 'manage'])), domains: z.array(z.string()), purpose: z.string(), expiresAt: z.string(), createdAt: z.string(), lastUsedAt: z.string().nullable(), revokedAt: z.string().nullable() }).openapi('AgentTokenRecord');
 const KeyAccessInput = z.discriminatedUnion('type', [
@@ -271,7 +308,8 @@ const workspaceAccess = { type: 'workspace' as const, addressIds: null, inboxId:
 export const createdInboxes = (workspaceId: SQL, keyId: SQL) => sql`to_jsonb(ARRAY(SELECT b.id FROM mailboxes b WHERE b.workspace_id=${workspaceId} AND b.created_by=${keyId}
   AND b.kind='inbox' AND b.delete_after>now() ORDER BY b.id LIMIT 1000))`;
 const keyView = (key: typeof apiKeys.$inferSelect) => ({ id: key.id, name: key.name, permissions: key.permissions, domains: key.domains, prefix: key.prefix,
-  createdAt: isoTime(key.createdAt)!, lastUsedAt: isoTime(key.lastUsedAt), revokedAt: isoTime(key.revokedAt), access: workspaceAccess, expiresAt: isoTime(key.expiresAt) });
+  createdAt: isoTime(key.createdAt)!, lastUsedAt: isoTime(key.lastUsedAt), revokedAt: isoTime(key.revokedAt), access: workspaceAccess, expiresAt: isoTime(key.expiresAt),
+  agent: key.agentSetupId ? { client: key.agentClient } : null });
 /** expiresAt as asked: unchanged (undefined), never (null), or a time to come. Ending a key now is revoking it. */
 export function askedExpiry(value: string | null | undefined, field = 'expiresAt') {
   if (value == null) return value;
@@ -449,18 +487,19 @@ export function registerAuth(app: App) {
     const auth = manageKeys(c); const q = c.req.valid('query'), w = auth.workspaceId, active = q.includeRevoked === 'false', after = q.cursor ? sql`AND id > ${q.cursor}` : sql``;
     // One cursor over both tables. A limited key has no workspace permissions or domains: its access says what it may do.
     const { rows } = await c.env.db.execute<{ id: string; name: string; prefix: string; permissions: ('read' | 'send' | 'manage')[]; domains: string[]; created_at: string; last_used_at: string | null; revoked_at: string | null;
-      expires_at: string | null; address_ids: string[] | null; inbox_id: string | null; mail: ('read' | 'send' | 'modify' | 'create')[]; created_inbox_ids: string[]; limited: boolean }>(sql`
-      SELECT * FROM (SELECT id, name, prefix, permissions, domains, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, NULL::jsonb AS address_ids, NULL::text AS inbox_id, '[]'::jsonb AS mail, '[]'::jsonb AS created_inbox_ids, false AS limited
+      expires_at: string | null; address_ids: string[] | null; inbox_id: string | null; mail: ('read' | 'send' | 'modify' | 'create')[]; created_inbox_ids: string[]; limited: boolean; agent: { client: string | null } | null }>(sql`
+      SELECT * FROM (SELECT id, name, prefix, permissions, domains, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, NULL::jsonb AS address_ids, NULL::text AS inbox_id, '[]'::jsonb AS mail, '[]'::jsonb AS created_inbox_ids, false AS limited,
+            CASE WHEN agent_setup_id IS NULL THEN NULL ELSE jsonb_build_object('client', agent_client) END AS agent
           FROM api_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())` : sql``} ${after}
         UNION ALL SELECT id, name, prefix, '[]'::jsonb, '[]'::jsonb, created_at::text, last_used_at::text, revoked_at::text, expires_at::text, mailbox_ids, inbox_id, permissions,
-            CASE WHEN permissions ? 'create' THEN ${createdInboxes(sql`mailbox_keys.workspace_id`, sql`mailbox_keys.id`)} ELSE '[]'::jsonb END, true
+            CASE WHEN permissions ? 'create' THEN ${createdInboxes(sql`mailbox_keys.workspace_id`, sql`mailbox_keys.id`)} ELSE '[]'::jsonb END, true, NULL::jsonb
           FROM mailbox_keys WHERE workspace_id = ${w} ${active ? sql`AND revoked_at IS NULL AND (expires_at IS NULL OR expires_at > now())` : sql``} ${after}) k
       ORDER BY id LIMIT ${q.limit + 1}`);
     const shown = rows.slice(0, q.limit), ids = shown.map(r => r.id), [ties, changes] = await Promise.all([approvalTies(c.env, w, ['api_key', 'key'], ids), lastChanges(c.env.db, w, ids)]);
     const data = shown.map(r => ({ id: r.id, name: r.name, permissions: r.permissions, domains: r.domains, prefix: r.prefix,
       createdAt: isoTime(r.created_at)!, lastUsedAt: isoTime(r.last_used_at), revokedAt: isoTime(r.revoked_at), expiresAt: isoTime(r.expires_at),
       access: r.limited ? { type: r.inbox_id ? 'inbox' as const : 'addresses' as const, addressIds: r.address_ids, inboxId: r.inbox_id, mail: r.mail, createdInboxIds: r.created_inbox_ids } : workspaceAccess,
-      approval: ties.get(r.id) ?? null, lastChange: changes.get(r.id) ?? null }));
+      approval: ties.get(r.id) ?? null, lastChange: changes.get(r.id) ?? null, agent: r.agent }));
     return c.json({ data, nextCursor: rows.length > q.limit ? rows[q.limit - 1]!.id : null }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/api-keys/{id}/changes', operationId: 'listApiKeyChanges', tags: ['ApiKeys'], security,
