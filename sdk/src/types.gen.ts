@@ -6817,8 +6817,6 @@ export type FeedbackReceipt = {
      * The support ticket it was filed as.
      */
     ticketId: string;
-    severity: 'low' | 'medium' | 'high' | 'critical';
-    kind: 'bug' | 'friction' | 'feature' | 'docs' | 'other';
     /**
      * How many values that looked like keys, tokens or passwords were removed from message and context.
      */
@@ -6827,14 +6825,6 @@ export type FeedbackReceipt = {
 };
 
 export type FeedbackRequest = {
-    /**
-     * low: a confusing message or an extra step. medium: needed a workaround. high: a task done only partly or the long way. critical: blocked, wrong data, or a security worry.
-     */
-    severity: 'low' | 'medium' | 'high' | 'critical';
-    /**
-     * bug: something behaved wrongly. friction: it worked but took more than it should. feature: something missing. docs: documentation or an error message was wrong or unclear. other: anything else.
-     */
-    kind: 'bug' | 'friction' | 'feature' | 'docs' | 'other';
     /**
      * What happened and what would have made it easier. Plain text. Anything that looks like a key, token or password is removed before it is stored.
      */

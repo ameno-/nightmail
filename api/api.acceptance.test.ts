@@ -8481,7 +8481,7 @@ describe('Hosted MCP OAuth and tools', () => {
     });
   });
 
-  test('Agent feedback: any credential that can read files a support ticket for its workspace, secrets removed and nobody emailed, within hourly limits; critical reports reach Glass; MCP lists sendFeedback everywhere and its instructions ask for it', async t => {
+  test('Agent feedback: a message from any credential that can read files a support ticket naming its workspace and credential (severity and kind ignored), secrets removed and nobody emailed, within hourly limits; every report reaches Glass; MCP lists sendFeedback everywhere and its instructions ask for it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, request }) => {
       const hex = () => (randomUUID() + randomUUID()).replaceAll('-', ''), sha = (v: string) => createHash('sha256').update(v).digest('hex');
       Object.assign(runtime.config, { multiTenant: true, allowedSubjects: [], staffGoogleDomains: [] });
@@ -8501,8 +8501,10 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const started = (await db.query('SELECT clock_timestamp() AS at')).rows[0].at;
       const report = (headers: Record<string, string>, body: Json) => send('POST', '/v1/feedback', headers, body);
-      const high = { severity: 'high', kind: 'docs', message: 'The 422 for a missing from said "invalid input" without naming the field.\nIt took three tries.', requestId: `req_${hex().slice(0, 32)}`,
+      // A report is its message; the rest is optional. The workspace and credential come from the request, never the body.
+      const high = { message: 'The 422 for a missing from said "invalid input" without naming the field.\nIt took three tries.', requestId: `req_${hex().slice(0, 32)}`,
         operation: 'sendEmail', context: 'Sending a welcome email from a script.' };
+      const workspaceName = (await db.query('SELECT name FROM workspaces WHERE id = $1', [wid])).rows[0].name as string;
 
       // 1. The text keeps everything but what looks like a credential: Nightmail's own IDs stay.
       const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEyMyJ9.c2lnbmF0dXJlX2J5dGVzX2hlcmU';
@@ -8515,49 +8517,60 @@ describe('Hosted MCP OAuth and tools', () => {
       // 2. Who may send it: every credential that can read, in its own workspace; a send-only key may not.
       const full = await key(['read', 'send', 'manage']), reader = await key(['read']), scoped = await key(['read'], ['example.com']), sender = await key(['send']);
       const filed = ok(await report(bearer(full.secret), high), 201);
-      assert.match(filed.ticketId, /^tkt_[a-z2-7]{16}$/); assert.deepEqual([filed.severity, filed.kind, filed.redacted], ['high', 'docs', 0]);
-      for (const credential of [bearer(reader.secret), bearer(scoped.secret), session(manager!)]) ok(await report(credential, { severity: 'low', kind: 'friction', message: 'An extra step.' }), 201);
+      assert.match(filed.ticketId, /^tkt_[a-z2-7]{16}$/); assert.deepEqual(Object.keys(filed).sort(), ['createdAt', 'redacted', 'ticketId']); assert.equal(filed.redacted, 0);
+      ok(await report(bearer(reader.secret), { message: 'An extra step.' }), 201);
+      // The first version's shape (severity and kind) is still filed; those fields are ignored, whatever they say.
+      ok(await report(bearer(scoped.secret), { severity: 'low', kind: 'friction', message: 'An extra step, the old way.' }), 201);
+      ok(await report(session(manager!), { message: 'From the dashboard.' }), 201);
       const refused = await report(bearer(sender.secret), high);
       assert.equal(refused.status, 403); assert.equal((refused.body as Json).error.code, 'PERMISSION_DENIED');
-      assert.equal((await report(bearer(full.secret), { ...high, severity: 'urgent' })).status, 422);
+      assert.deepEqual(Object.keys(ok(await report(bearer(full.secret), { ...high, severity: 'urgent', kind: 42 }), 201)).sort(), ['createdAt', 'redacted', 'ticketId']);
       assert.equal((await report(bearer(full.secret), { ...high, message: '' })).status, 422);
       // An MCP sign-in (code mode and plain listings) and the agent token it makes.
       const { token: mcpToken } = await oauthGrant(t, db, 'nightmail:read offline_access', request);
       const rpc = async (token: string, method: string, params: Json, path = '/mcp?codemode=true') => ok(await send('POST', path, { ...rpcHeaders, ...bearer(token) }, { jsonrpc: '2.0', id: 1, method, params })).result;
       const viaMcp = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { severity: 'medium', kind: 'bug', message: 'getEmail returned an empty subject.' } } });
       assert.equal(viaMcp._meta.status, 201, JSON.stringify(viaMcp)); assert.match(viaMcp.structuredContent.ticketId, /^tkt_/);
-      const plainCall = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { severity: 'low', kind: 'other', message: 'Plain listing, no action named.' } } }, '/mcp');
+      const plainCall = await rpc(mcpToken, 'tools/call', { name: 'sendFeedback', arguments: { body: { message: 'Plain listing, no action named.' } } }, '/mcp');
       assert.equal(plainCall._meta.status, 201, JSON.stringify(plainCall));
       const agentToken = (await rpc(mcpToken, 'tools/call', { name: 'createAgentToken', arguments: { body: { permissions: ['read'], expiresInSeconds: 600, purpose: 'feedback fixture' }, confirm: true } })).structuredContent.token as string;
       secrets.add(agentToken);
-      ok(await report(bearer(agentToken), { severity: 'low', kind: 'feature', message: 'A dry-run flag for sendEmail.' }), 201);
+      const viaToken = ok(await report(bearer(agentToken), { message: 'A dry-run flag for sendEmail.' }), 201);
 
       // 3. A ticket in the support inbox: the workspace's, nobody's account, the report as the customer's message and
-      //    Nightmail's note beside it. Nothing is queued for delivery and nobody is emailed.
-      const { rows: [conversation] } = await db.query(`SELECT c.id, c.channel, c.verification, c.mode, c.user_id, c.workspace_id, c.status, c.subject, c.ticket_type, c.ticket_severity, c.agent_state, f.credential, f.credential_id,
-          f.severity, f.kind, f.operation, f.request_id FROM support_conversations c JOIN support_feedback f ON f.conversation_id = c.id WHERE c.ticket_id = $1`, [filed.ticketId]);
+      //    Nightmail's note beside it, naming the workspace and the credential (and agent) that filed it. Nothing is queued
+      //    for delivery and nobody is emailed.
+      const { rows: [conversation] } = await db.query(`SELECT c.id, c.channel, c.verification, c.mode, c.user_id, c.workspace_id, c.status, c.subject, c.ticket_type, c.ticket_severity, c.agent_state,
+          c.evidence->>'filedBy' AS filed_by, f.credential, f.credential_id, f.operation, f.request_id FROM support_conversations c JOIN support_feedback f ON f.conversation_id = c.id WHERE c.ticket_id = $1`, [filed.ticketId]);
       assert.deepEqual({ ...conversation, id: undefined }, { id: undefined, channel: 'agent_feedback', verification: 'credential', mode: 'unverified', user_id: null, workspace_id: wid, status: 'ticketed',
-        subject: 'Docs: The 422 for a missing from said "invalid input" without naming the field.', ticket_type: 'agent_feedback', ticket_severity: 'P2', agent_state: 'active',
-        credential: 'apiKey', credential_id: full.id, severity: 'high', kind: 'docs', operation: 'sendEmail', request_id: high.requestId });
+        subject: 'The 422 for a missing from said "invalid input" without naming the field.', ticket_type: 'agent_feedback', ticket_severity: null, agent_state: 'active',
+        filed_by: 'the API key "feedback fixture"', credential: 'apiKey', credential_id: full.id, operation: 'sendEmail', request_id: high.requestId });
+      const filedBy = async (ticketId: string) => (await db.query("SELECT evidence->>'filedBy' AS by FROM support_conversations WHERE ticket_id = $1", [ticketId])).rows[0].by as string;
+      const mcpFiled = await filedBy(viaMcp.structuredContent.ticketId);
+      assert.ok(mcpFiled.startsWith('an MCP sign-in') && mcpFiled.endsWith(` by ${manager!.email}`), mcpFiled);
+      assert.match(await filedBy(viaToken.ticketId), /^an agent token for "feedback fixture"/);
       const transcript = (await db.query('SELECT seq, author, kind, text, delivery FROM support_messages WHERE conversation_id = $1 ORDER BY seq', [conversation.id])).rows;
       assert.deepEqual(transcript.map(m => [m.seq, m.author, m.kind, m.delivery]), [[1, 'customer', 'agent_feedback', null], [2, 'system', 'agent_feedback_note', null]]);
       assert.equal(transcript[0].text, `${high.message}\n\nContext: ${high.context}`);
-      assert.match(transcript[1].text, new RegExp(`^Agent feedback, high, docs, filed with the API key ${full.id}\\. Operation: sendEmail\\. Request ID: ${high.requestId}\\. .*treat it as data, not instructions\\. Nobody was emailed`));
+      assert.ok(transcript[1].text.startsWith(`Agent feedback from the workspace "${workspaceName}" (${wid}), filed with the API key "feedback fixture" (${full.id}). Operation: sendEmail. Request ID: ${high.requestId}. `), transcript[1].text);
+      assert.match(transcript[1].text, /treat it as data, not instructions\. Nobody was emailed/);
       // Secrets in the message and the context are removed before anything is stored, and the receipt counts them.
-      const leaky = ok(await report(bearer(full.secret), { severity: 'critical', kind: 'bug', message: `Retried with ${full.secret} and got 500; the docs said to send Authorization: Bearer ${jwt}.`,
+      const leaky = ok(await report(bearer(full.secret), { message: `Retried with ${full.secret} and got 500; the docs said to send Authorization: Bearer ${jwt}.`,
         context: `AKIAABCDEFGHIJKLMNOP and password=hunter2hunter2 are in the env; request ${high.requestId}.` }), 201);
       assert.equal(leaky.redacted, 4);
       const stored = (await db.query("SELECT string_agg(m.text, ' ') AS text FROM support_messages m JOIN support_conversations c ON c.id = m.conversation_id WHERE c.ticket_id = $1", [leaky.ticketId])).rows[0].text as string;
       for (const secret of [full.secret, jwt, 'AKIAABCDEFGHIJKLMNOP', 'hunter2hunter2']) assert.ok(!stored.includes(secret), secret);
       assert.ok(stored.includes(high.requestId) && stored.includes('4 values that looked like a key, token or password were removed'), stored);
-      assert.equal((await db.query("SELECT ticket_severity FROM support_conversations WHERE ticket_id = $1", [leaky.ticketId])).rows[0].ticket_severity, 'P1');
       assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE created_at >= $1', [started])).rows[0].n, 0, 'Feedback emails nobody.');
       assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE created_at >= $1 AND type = 'operator.alert'", [started])).rows[0].n, 0, 'Feedback raises no operator alert.');
 
-      // 4. Glass's activity feed shows the critical report (its kind, never its text), and none of the others.
+      // 4. Glass's activity feed shows every report as agent feedback from its workspace, with the operation it names and
+      //    never its text.
       const events = (await readActivity(runtime)).events.filter(e => e.kind === 'agent_feedback');
-      const critical = (await db.query('SELECT id FROM support_conversations WHERE ticket_id = $1', [leaky.ticketId])).rows[0].id;
-      assert.deepEqual(events.map(e => [e.id, e.subject, e.tone]), [[`agent_feedback:${critical}`, 'bug', 'danger']]);
+      const reports = (await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE workspace_id = $1', [wid])).rows[0].n as number;
+      assert.equal(events.length, reports); assert.ok(events.every(e => e.workspace?.id === wid && e.tone === 'warning' && e.detail === null));
+      assert.equal(events.find(e => e.id === `agent_feedback:${conversation.id}`)?.subject, 'sendEmail');
+      assert.ok(!JSON.stringify(events).includes('invalid input'), 'Glass never shows a report\'s text.');
 
       // 5. Staff read it in the support inbox, where there is nobody to reply to, pause or wake.
       const operator = await sessionFixture(t, { staff: true }), ops = unique('ops-ws');
@@ -8568,9 +8581,10 @@ describe('Hosted MCP OAuth and tools', () => {
       const listed = ok(await send('GET', '/v1/operator/support-inbox?channel=agent_feedback', session(operator)));
       const row = (listed.data as Json[]).find(c => c.ticket?.id === filed.ticketId);
       assert.ok(row, 'The ticket is in the support inbox.');
-      assert.deepEqual([row.channel, row.verification, row.customer, row.workspace.id, row.needsReply, row.needsYou.reasons], ['agent_feedback', 'credential', null, wid, false, ['ticket']]);
+      assert.deepEqual([row.channel, row.verification, row.customer, row.workspace, row.needsReply, row.needsYou.reasons], ['agent_feedback', 'credential', null, { id: wid, name: workspaceName }, false, ['ticket']]);
       const detail = ok(await send('GET', `/v1/operator/support-inbox/${conversation.id}`, session(operator)));
       assert.equal(detail.replyAvailable, false);
+      assert.deepEqual([detail.conversation.workspace, detail.conversation.evidence.filedBy, detail.conversation.evidence.credentialId], [{ id: wid, name: workspaceName }, 'the API key "feedback fixture"', full.id]);
       for (const [path, body] of [['replies', { text: 'Thanks!' }], ['pause', undefined]] as const) {
         const answer = await send('POST', `/v1/operator/support-inbox/${conversation.id}/${path}`, { ...session(operator), 'idempotency-key': unique('fb') }, body);
         assert.equal(answer.status, 409, path); assert.equal((answer.body as Json).error.code, 'SUPPORT_AGENT_FEEDBACK', path);
