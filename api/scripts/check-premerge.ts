@@ -349,7 +349,8 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     for (const { id, html } of out.boards) {
       const page = text(html), where = `Nightmail vs ${id}`
       checkFigures(where, html, 1)
-      for (const f of figures(html)) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
+      // The emails a month beside each figure: sent, or (a comparison of inboxes) received and sent.
+      for (const f of figures(html)) if (!page.includes(f.received ? `${n(f.received)} received and ${n(f.sent)} sent a month` : `${n(f.sent)} emails a month`)) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
       for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)

@@ -2,13 +2,13 @@ import { dayOf, listOf, fact, formatCount, nightmail, readOn, tierSizes, type En
 
 // Nightmail vs Mailchimp (/compare/mailchimp): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailchimp's own pages on CHECKED.
-const CHECKED = '2026-11-22'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const MAILCHIMP = 'https://mailchimp.com/pricing/marketing/'
 const mailchimpTier = (size: number, cents: number, sends: number, quote: string): Tier => ({ size, cents, sends, source: read(MAILCHIMP, quote) })
 const mailchimpFree = read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', 'The Free plan includes up to 250 contacts and 500 sends per month, with a daily send limit of 250.')
-const mailchimpSeats = (count: number | null) => ({ count, source: read(MAILCHIMP, '"seats":{"essential":3,"free":1,"premium":"unlimited","standard":5}') })
+const mailchimpSeats = (count: number | null) => ({ count, source: read(MAILCHIMP, 'Users … Unlimited 5 Seats 3 Seats 1 Seat') })
 // Every tier the pricing page lists up to 100,000 contacts (it loads them from /forms/pricing/?currency=USD), at list
 // price: the page itself shows a first-year discount. Still 'points': a size between two tiers has no checked price here,
 // because past a tier's sends Mailchimp bills overages, not the next tier.
@@ -17,7 +17,7 @@ const offer: Offer = {
   counts: 'contacts, sends and seats',
   plans: [
     { name: 'Free', seats: mailchimpSeats(1), startsAtZero: true, note: '250 sends a day', max: { size: 250, source: mailchimpFree }, tiers: [{ size: 250, cents: 0, sends: 500, source: mailchimpFree }] },
-    { name: 'Essentials', seats: mailchimpSeats(3), max: { size: 50_000, source: read(MAILCHIMP, 'Essentials at 100,000 contacts: not offered (max 50,000 contacts)') }, tiers: [
+    { name: 'Essentials', seats: mailchimpSeats(3), max: { size: 50_000, source: read(MAILCHIMP, '"maxContacts":{"essential":50000,"free":250,"premium":1500000,"standard":100000}') }, tiers: [
       mailchimpTier(500, 1_300, 5_000, '"essential" ... {"value":13 ...},"audience_size":500,"sends":5000'),
       mailchimpTier(1_500, 2_650, 15_000, '{"value":26.5 ...},"audience_size":1500,"sends":15000'),
       mailchimpTier(2_500, 4_500, 25_000, '{"value":45 ...},"audience_size":2500,"sends":25000'),
@@ -63,6 +63,7 @@ const sizes: Entry['sizes'] = [5_000, 25_000, 100_000]
 export const mailchimp: Entry = {
   slug: 'mailchimp',
   vendor: 'Mailchimp',
+  focus: 'newsletter',
   offer,
   model: { per: 'contact', sendsPerContact: 4, seats: 3 },
   sizes,
@@ -73,7 +74,7 @@ export const mailchimp: Entry = {
   rows: [
     fact('Contacts at no charge', 'No charge for contacts.', 'Mailchimp counts unsubscribed contacts too, at the month’s highest number.', read('https://mailchimp.com/help/about-mailchimp-pricing-plans/', '"Subscribed, unsubscribed, and non-subscribed contacts are included in your contact count." … "If your contact total increases beyond your contact limit at any time during your monthly billing cycle, we won’t interrupt your service. Instead, you’ll see an additional charge on your bill."')),
     fact('Teammates at no charge', 'No charge for teammates.', `Mailchimp Essentials includes ${offer.plans[1]!.seats!.count} seats and Standard ${offer.plans[2]!.seats!.count}.`, mailchimpSeats(3).source),
-    fact('A role that edits but can’t send', 'Every workspace has a role that edits campaigns but can’t send them.', 'Mailchimp’s starts on Standard.', read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'Author "can create, edit, and delete emails and templates, and view reports" … Role-based Access: 5 Roles, 4 Roles, 2 Roles, Not included (Premium, Standard, Essentials, Free)')),
+    fact('A role that edits but can’t send', 'Every workspace has a role that edits campaigns but can’t send them.', 'Mailchimp’s starts on Standard.', read('https://mailchimp.com/help/manage-user-levels-in-your-account/', 'The Author can create, edit, and delete emails and templates, and view reports. Standard or Premium')),
     { short: 'Receiving email', note: `${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.`, text: `Receiving email, at ${nightmail.perThousand} per 1,000 after ${formatCount(nightmail.freeReceived)} free.` },
   ],
   // Mailchimp's readers first see the list, the contacts and the team.

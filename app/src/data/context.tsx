@@ -20,6 +20,7 @@ import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
 import { productName } from '../../../api/src/brand'
 import { ANALYTICS_SESSION_PARAM } from '../../../api/src/analytics-events'
+import type { WorkspaceFocus } from '../../../api/src/workspace-focus'
 import { analytics } from '../lib/analytics'
 import { Analytics } from '../components/Analytics'
 import { NightmailWordmark } from '../components/NightmailLogo'
@@ -32,10 +33,11 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   /** Staff tools need this account's Google sign-in (Identity.staffSignIn): signs in again with Google, back to this page. */
   signInForStaff: () => void
   /** Sign in (with Google: a sign-in that proves the account's mailbox), back to this page: for the public pages that need one.
-   *  From the price pages, as from the homepage, it opens Overview. */
-  signIn: (method?: 'google') => void
+   *  From the price pages, as from the homepage, it opens Overview; focus (a comparison's) rides along as ?focus=, which
+   *  onboarding reads. */
+  signIn: (method?: 'google', focus?: WorkspaceFocus) => void
   /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
-  signInIntent: (event: { button: number }) => void
+  signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
   notice: string | null; dismissNotice: () => void }
@@ -455,7 +457,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
   // method: it asks for that sign-in (staff tools need Google).
-  function accountUrl(select = false, method?: 'google') {
+  function accountUrl(select = false, method?: 'google', focus?: WorkspaceFocus) {
     // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage or a
     // price page (their Get started), or from an address the dashboard doesn't have, opens Overview.
     const callback = new URL(window.location.origin), path = window.location.pathname
@@ -463,6 +465,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     callback.search = window.location.search
     callback.hash = window.location.hash
     callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
+    if (focus) callback.searchParams.set('focus', focus)
     // Analytics: this signed-out page's session rides in the return URL to the sign-in callback, which links it to the
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()
@@ -473,18 +476,18 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       return url.href
     })
   }
-  function prepareLogin(event: { button: number }) {
+  function prepareLogin(event: { button: number }, focus?: WorkspaceFocus) {
     if (busy || event.button !== 0) return
-    const url = accountUrl()
+    const url = accountUrl(false, undefined, focus)
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
   const login = () => startLogin(false)
-  async function startLogin(select: boolean, method?: 'google') {
+  async function startLogin(select: boolean, method?: 'google', focus?: WorkspaceFocus) {
     setBusy(true); setAuthError(null)
     const pending = signIn.current
     signIn.current = null
-    try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method)); expectAccount(); analytics().flush(); window.location.assign(url) }
+    try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method, focus)); expectAccount(); analytics().flush(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
   const signedOut = !checkIdentity || (identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED')
@@ -511,7 +514,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
-  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (method, focus) => void startLogin(false, method, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
     : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />

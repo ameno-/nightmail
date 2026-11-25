@@ -4,7 +4,7 @@ import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type O
 // Mailchimp's own pages on CHECKED. Mandrill is Mailchimp's transactional email (renamed Mailchimp Transactional in
 // 2025: https://mailchimp.com/features/transactional-email/), sold in blocks of 25,000 emails a month on top of a
 // Mailchimp Standard or Premium plan, which these prices leave out.
-const CHECKED = '2026-11-24'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const MANDRILL = 'https://mailchimp.com/pricing/transactional-email/'
@@ -34,6 +34,7 @@ const sizes: Entry['sizes'] = [10_000, 100_000, 1_000_000]
 export const mandrill: Entry = {
   slug: 'mandrill',
   vendor: 'Mandrill',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,

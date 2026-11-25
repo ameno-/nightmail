@@ -3,7 +3,7 @@ import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type En
 // Nightmail vs SendGrid (/compare/sendgrid): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Twilio SendGrid's own pages on CHECKED: the Email API plans on its pricing page, and each plan's overage in the
 // pricing PDF that page links to ("Download PDF"), whose plan prices are the page's.
-const CHECKED = '2026-11-24'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const SENDGRID = 'https://www.twilio.com/en-us/products/email-api/pricing'
@@ -35,6 +35,7 @@ const sizes: Entry['sizes'] = [10_000, 100_000, 1_000_000]
 export const sendgrid: Entry = {
   slug: 'sendgrid',
   vendor: 'SendGrid',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,

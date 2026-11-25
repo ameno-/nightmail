@@ -3,7 +3,7 @@ import { dayOf, fact, formatCount, listOf, readOn, tierSizes, type Entry, type O
 // Nightmail vs Mailjet (/compare/mailjet): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailjet's own pages on CHECKED: the monthly prices in its help centre's price update of 9 September 2026 (its pricing
 // page opens on annual billing; its monthly figures there are the same), and each plan's overage in its help centre.
-const CHECKED = '2026-11-24'
+const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
 
 const MAILJET = 'https://www.mailjet.com/pricing/'
@@ -39,6 +39,7 @@ const sizes: Entry['sizes'] = [10_000, 100_000, 500_000]
 export const mailjet: Entry = {
   slug: 'mailjet',
   vendor: 'Mailjet',
+  focus: 'developer',
   offer,
   model: { per: 'email' },
   sizes,
