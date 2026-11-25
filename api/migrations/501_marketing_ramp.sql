@@ -9,10 +9,12 @@
 --    so a send is charged in the statement that inserts it and uncharged when it is suppressed or canceled.
 -- 2. ramp_clean_hour: the workspace's largest clean, mature marketing hour of the last 30 days, where it starts on the ramp
 --    (src/sending.ts rampHistory now calls it).
--- 3. ramp_refusal: the workspace's step (the furthest a ramping campaign of it is on, else where its history starts it),
---    and the hour's room: the ceiling less this clock hour's api_marketing and what its ramping campaigns released in
---    their current hours. Over it: RAMP_LIMIT_REACHED, with how many fit now and when more room opens. A send scheduled
---    for later is refused only when it is larger than the step's whole ceiling (src/sending.ts holds it at its time).
+-- 3. ramp_refusal: RAMP_PAUSED while a campaign of the workspace is quarantined (stopped by the automatic pause, the list
+--    probe or the ramp's check, not resumed or canceled); else the workspace's step (the furthest a ramping campaign of it
+--    is on, else where its history starts it) and the hour's room: the ceiling less this clock hour's api_marketing and
+--    what its ramping campaigns released in their current hours. Over it: RAMP_LIMIT_REACHED, with how many fit now and
+--    when more room opens. A send scheduled for later must fit a whole hour of the step and, with the marketing already
+--    scheduled within 24 hours either side of its time, a day of it (src/sending.ts holds it at its time).
 -- 4. send_admission (495) asks ramp_refusal for a live send on the shared pool that names its marketing recipients
 --    (req->'ramp'), after the Hosted limits; otherwise unchanged. A refusal frees the idempotency claim as every refusal does.
 --
@@ -159,19 +161,28 @@ CREATE FUNCTION ramp_clean_hour(wid text,history jsonb) RETURNS int LANGUAGE sql
     THEN coalesce((SELECT max(a) FROM hours WHERE d+b>=a*(history->>'resolved')::float8 AND ramp_clean(a,b,c,history)),0) ELSE 0 END::int FROM total t
 $$;
 
--- Whether `ramp`->>'recipients' more marketing recipients fit in the workspace's ramp hour: NULL when they do or the
--- workspace is past the last step, else the refusal. A send scheduled for later (`ramp`->>'scheduled') need only fit the
--- step's whole ceiling: at its time it is admitted again as a send made then, and held until its hour has room. The step: the furthest a ramping campaign of the workspace is on
--- (src/sending.ts releaseStep places and moves them), else where its clean history starts it (src/standing-model.ts
--- rampStart). The hour holds this clock hour's API marketing (hosted_usage_hourly.api_marketing) and what its ramping
--- campaigns released in their current hours, as releaseStep counts them. More room opens at the first moment what the
--- hour holds frees enough for more than fits now: the next clock hour for the API's part, a campaign's hour's end for its
--- part. `ramp`: src/admission.ts RAMP_POLICY and the request's recipients.
+-- Whether `ramp`->>'recipients' more marketing recipients may go now, on a Hosted live workspace: NULL when they may,
+-- else the refusal. `ramp`: src/admission.ts RAMP_POLICY and the request's recipients (`scheduled` and `at` for a send
+-- scheduled for later).
+-- 1. RAMP_PAUSED: a campaign of the workspace that the automatic pause, the list probe or the ramp's check stopped
+--    (`ramp`->'paused' codes) and that its owner hasn't resumed or canceled pauses the workspace's marketing.
+-- 2. The step: the furthest a ramping campaign of the workspace is on (src/sending.ts releaseStep places and moves them),
+--    else where its clean history starts it (src/standing-model.ts rampStart). Past the last step: NULL.
+-- 3. RAMP_LIMIT_REACHED. Sent now, the recipients fit in what the hour has left: this clock hour's API marketing
+--    (hosted_usage_hourly.api_marketing) and what its ramping campaigns released in their current hours, as releaseStep
+--    counts them. Scheduled for later, they fit a whole hour of the step, and with the marketing already scheduled within
+--    24 hours either side of their time they fit what the step sends in 24 hours (at their time they are held until their
+--    hour has room). More room opens at the first moment what the hour holds frees enough for more than fits now: the
+--    next clock hour for the API's part, a campaign's hour's end for its part.
 CREATE FUNCTION ramp_refusal(wid text,ramp jsonb) RETURNS jsonb LANGUAGE plpgsql STABLE AS $$
 DECLARE
   n_steps int := jsonb_array_length(ramp->'steps'); asked bigint := (ramp->>'recipients')::bigint; later boolean := coalesce((ramp->>'scheduled')::boolean,false);
   this_hour timestamptz := date_trunc('hour',now(),'UTC'); r_step int; best int; ceiling_now bigint; api_used bigint; held bigint; room bigint; opens timestamptz;
+  paused_id text; paused_code text; due_at timestamptz; backlog bigint; budget bigint;
 BEGIN
+  SELECT id,pause_reason->>'code' INTO paused_id,paused_code FROM sending_campaigns WHERE workspace_id=wid AND state='paused'
+    AND pause_reason->>'code' IN (SELECT jsonb_array_elements_text(ramp->'paused')) ORDER BY paused_at DESC,id LIMIT 1;
+  IF paused_id IS NOT NULL THEN RETURN jsonb_build_object('code','RAMP_PAUSED','campaignId',paused_id,'pauseCode',paused_code); END IF;
   SELECT max(ramp_step) INTO r_step FROM sending_campaigns WHERE workspace_id=wid AND state='sending' AND NOT simulated AND ramp_step<n_steps;
   IF r_step IS NULL THEN
     best := ramp_clean_hour(wid,ramp->'history');
@@ -182,8 +193,15 @@ BEGIN
   api_used := coalesce((SELECT api_marketing FROM hosted_usage_hourly WHERE workspace_id=wid AND hour=this_hour),0);
   held := api_used+(SELECT coalesce(sum(greatest(expanded-ramp_from,0)),0) FROM sending_campaigns WHERE workspace_id=wid AND state='sending' AND NOT simulated
     AND ramp_step<n_steps AND ramp_window_started_at>now()-interval '1 hour');
-  -- A send scheduled for later is asked only whether it fits a whole hour of the step: at its time it waits for room.
-  IF asked<=ceiling_now AND (later OR held+asked<=ceiling_now) THEN RETURN NULL; END IF;
+  IF later THEN
+    -- From sending_emails_scheduled_marketing (migration 502) alone. Marketing goes to exactly one recipient (src/sending.ts
+    -- SendInput), so its rows are its recipients.
+    due_at := (ramp->>'at')::timestamptz; budget := 24*ceiling_now;
+    backlog := (SELECT count(*) FROM sending_emails WHERE workspace_id=wid AND status='scheduled' AND campaign_id IS NULL AND (snapshot->>'kind')='marketing'
+      AND scheduled_at>due_at-interval '24 hours' AND scheduled_at<due_at+interval '24 hours');
+    IF asked<=ceiling_now AND backlog+asked<=budget THEN RETURN NULL; END IF;
+  ELSIF held+asked<=ceiling_now THEN RETURN NULL;
+  END IF;
   room := greatest(0,ceiling_now-held);
   SELECT min(f.at) INTO opens FROM (SELECT x.at,sum(x.n) OVER (ORDER BY x.at) AS freed FROM (
       SELECT this_hour+interval '1 hour' AS at,api_used AS n WHERE api_used>0
@@ -192,7 +210,7 @@ BEGIN
     WHERE ceiling_now-(held-f.freed)>room;
   opens := coalesce(opens,this_hour+interval '1 hour');
   RETURN jsonb_build_object('code','RAMP_LIMIT_REACHED','scheduled',later,'step',r_step+1,'steps',n_steps,'cap',ceiling_now,'used',held,'fits',room,'marketing',asked,
-    'resetAt',opens,'retryAfter',greatest(1,ceil(extract(epoch FROM opens-now())))::int);
+    'backlog',backlog,'budget',budget,'resetAt',opens,'retryAfter',greatest(1,ceil(extract(epoch FROM opens-now())))::int);
 END $$;
 
 -- Unchanged from 495 except the ramp's check (ramp_refusal) after the Hosted limits.

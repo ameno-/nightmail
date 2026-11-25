@@ -29718,7 +29718,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT ramp_step FROM sending_campaigns WHERE id=$1', [next.id])).rows[0].ramp_step, RAMP.steps.length);
     });
   });
-  test('marketing ramp: kind marketing sent through the API takes what the workspace\'s ramp step has left this hour, shared with its campaigns both ways; a send that would cross it is refused whole with a retryable RAMP_LIMIT_REACHED and nothing queued, transactional mail never is, and the next hour frees room; a scheduled one is refused only past a whole hour of the step, and at its time is held for room (never rejected), going after 24 hours held unless the workspace is paused', async t => {
+  test('marketing ramp: kind marketing sent through the API takes what the workspace\'s ramp step has left this hour, shared with its campaigns both ways; a send that would cross it is refused whole with a retryable RAMP_LIMIT_REACHED and nothing queued, transactional mail never is, and the next hour frees room; a scheduled one is refused past a whole hour of the step or a day of it with what is already scheduled, and at its time is held for room (never rejected), going after 24 hours held unless the workspace is paused; a quarantined campaign pauses the workspace\'s marketing (RAMP_PAUSED) until it is resumed', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run }) => {
       const { wid, domain, from } = await rampWorkspace(runtime, db, '111122223342', 'api-ramp.example');
       const list = ok(await local('POST', '/v1/lists', { name: unique('api-ramp') }), 201);
@@ -29777,7 +29777,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         ...scheduledCharges(runtime, [{ recipients: 1200, marketing: true, snapshot: { kind: 'marketing' } }], later), claim: { path: '/v1/emails/send', key: claim, hash: 'fixture', receipt: {} } });
       const tooLarge = refusal(runtime, (await runtime.db.execute(sql`SELECT ${asked} AS s`)).rows[0]!.s as never) as import('./src/core.js').ApiError;
       assert.deepEqual([tooLarge.status, tooLarge.code, tooLarge.retryable, tooLarge.retryAfterSeconds], [429, 'RAMP_LIMIT_REACHED', true, Math.max(1, Math.ceil((next.getTime() - now.getTime()) / 1000))]);
-      assert.deepEqual(tooLarge.details, [{ step: 1, steps: 9, ceilingPerHour: 1000, usedThisHour: 20, fitsNow: 980, requested: 1200, stepOpensAt: next.toISOString() }]);
+      assert.deepEqual(tooLarge.details, [{ step: 1, steps: 9, ceilingPerHour: 1000, usedThisHour: 20, fitsNow: 980, requested: 1200, stepOpensAt: next.toISOString(), scheduledBacklog: 0, dailyBudget: 24000 }]);
       assert.equal(tooLarge.message, "This workspace is still ramping up (step 1 of 9): it can send 1,000 marketing recipients an hour, so a send of 1,200 can't be scheduled while it ramps. For a large list, send a campaign instead: campaigns are paced automatically.");
       assert.equal(Number((await db.query('SELECT count(*)::int AS n FROM sending_idempotency WHERE workspace_id=$1 AND request_key=$2', [wid, claim])).rows[0].n), 0, 'The claim is freed for a retry.');
       // One that fits a whole hour is accepted though this hour is full; at its time it is held, not rejected: still
@@ -29812,15 +29812,29 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`UPDATE sending_emails SET status=CASE WHEN review_ordinal<=2 THEN 'complained' ELSE 'delivered' END,provider_id='ramp-'||id WHERE campaign_id=$1`, [c.id]);
       await run('campaign.run');
       assert.deepEqual([ok(await local('GET', `/v1/campaigns/${c.id}`)).state, ok(await local('GET', `/v1/campaigns/${c.id}`)).delivery.pauseReason.code], ['paused', 'COMPLAINT_RATE_HIGH']);
+      // While it is paused, so is the workspace's marketing: sent now or scheduled, refused (409, not retryable, no
+      // Retry-After), naming the campaign. Receipts go, now and scheduled.
+      const refusedNow = await local('POST', '/v1/emails/send', { from, to: 'api-ramp-304@example.net', subject: 'News', text: 'News', kind: 'marketing' });
+      const paused = error(refusedNow, 409, 'RAMP_PAUSED');
+      assert.deepEqual([paused.retryable, paused.details, refusedNow.headers.get('retry-after')], [false, [{ campaignId: c.id, pauseCode: 'COMPLAINT_RATE_HIGH' }], null]);
+      assert.equal(paused.message, `Marketing from this workspace is paused: campaign ${c.id} was paused automatically (COMPLAINT_RATE_HIGH). Review that campaign and resume it first, or cancel it. Transactional mail still sends.`);
+      error(await local('POST', '/v1/emails/send', { from, to: 'api-ramp-304@example.net', subject: 'Later', text: 'Later', kind: 'marketing', scheduledAt: new Date(Date.now() + 120_000).toISOString() }), 409, 'RAMP_PAUSED');
+      ok(await local('POST', '/v1/emails/send', { from, to: 'api-ramp-305@example.net', subject: 'Receipt', text: 'Receipt' }), 202);
+      await schedule(306, 'transactional');
+      // And the held email waits with it, past its 24 hours.
       await dayHeld();
       await due(s2);
       w = await waits(s2);
-      assert.deepEqual([w.status, w.held, w.payload.heldBy], ['scheduled', ['RAMP_LIMIT_REACHED', 'CAMPAIGN_AUTO_PAUSED'], 'CAMPAIGN_AUTO_PAUSED'], 'Past its 24 hours, but the ramp is paused: held.');
+      assert.deepEqual([w.status, w.held, w.payload.heldBy], ['scheduled', ['RAMP_LIMIT_REACHED', 'RAMP_PAUSED'], 'RAMP_PAUSED'], 'Past its 24 hours, but the ramp is paused: held.');
       assert.ok(Date.parse(w.payload.heldSince) > Date.now() - 60_000, 'Its 24 hours count again from the pause.');
-      // The owner resumes the campaign: the email is held only for room again.
+      // The owner resumes the campaign: the email is held only for room again, and the workspace's marketing goes, scheduled
+      // and, once the hour has room, sent now.
       ok(await local('POST', `/v1/campaigns/${c.id}/resume`, {}));
       await due(s2);
       assert.deepEqual([(await waits(s2)).status, (await waits(s2)).held.at(-1)], ['scheduled', 'RAMP_LIMIT_REACHED']);
+      const s3 = await schedule(307);
+      await db.query(`UPDATE hosted_usage_hourly SET api_marketing=999 WHERE workspace_id=$1 AND hour=date_trunc('hour',now(),'UTC')`, [wid]);
+      ok(await local('POST', '/v1/emails/send', { from, to: 'api-ramp-308@example.net', subject: 'News', text: 'News', kind: 'marketing' }), 202);
       // A standing step that holds the workspace's marketing (MARKETING_HELD) holds it past its 24 hours too.
       await db.query("UPDATE sender_standing SET step='restrict' WHERE workspace_id=$1", [wid]);
       await dayHeld();
@@ -29831,6 +29845,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await dayHeld();
       await due(s2);
       assert.deepEqual([(await waits(s2)).status, (await waits(s2)).error_code], ['queued', null]);
+      // A day's budget for scheduled marketing: what the step sends in 24 hours, 24,000 here, counting what is already
+      // scheduled within 24 hours either side of a send's time. Earlier one-recipient sends (seeded as copies of s3) and
+      // three more fill it; the next is refused whole, and receipts still go.
+      const scheduledMarketing = async () => Number((await db.query(`SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1 AND status='scheduled' AND campaign_id IS NULL AND snapshot->>'kind'='marketing'`, [wid])).rows[0].n);
+      await db.query(`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,status,scheduled_at)
+        SELECT 'email_ramp_seed_'||n,workspace_id,actor_key_id,region,from_address,jsonb_build_array('seed-'||n||'@example.net'),'[]','[]',subject,snapshot,simulated,screened,'scheduled',scheduled_at+make_interval(mins=>n%600)
+        FROM sending_emails, generate_series(1,$2::int) n WHERE id=$1`, [s3, 24_000 - 3 - await scheduledMarketing()]);
+      for (const n of [309, 310, 311]) await schedule(n);
+      assert.equal(await scheduledMarketing(), 24_000);
+      const beforeFull = await queued();
+      const overBudget = await local('POST', '/v1/emails/send', { from, to: 'api-ramp-312@example.net', subject: 'Later', text: 'Later', kind: 'marketing', scheduledAt: new Date(Date.now() + 120_000).toISOString() });
+      const full = error(overBudget, 429, 'RAMP_LIMIT_REACHED');
+      assert.ok(full.retryable && Number(overBudget.headers.get('retry-after')) >= 1);
+      assert.deepEqual([full.details[0].step, full.details[0].requested, full.details[0].scheduledBacklog, full.details[0].dailyBudget], [1, 1, 24_000, 24_000]);
+      assert.equal(full.message, 'This workspace already has as much marketing scheduled as it can send in a day while it is still ramping up (step 1 of 9): 24,000 recipients in 24 hours, and 24,000 are scheduled within a day of this send. For a large list, send a campaign instead: campaigns are paced automatically.');
+      assert.equal(await queued(), beforeFull);
+      await schedule(313, 'transactional');
+      ok(await local('POST', '/v1/emails/send', { from, to: 'api-ramp-314@example.net', subject: 'Receipt', text: 'Receipt' }), 202);
     });
   });
   test('campaign order: the list probe is a uniform sample of the whole audience, then the most engaged go first and contacts who joined since the list was last sent to go last; the review counts them', async t => {
