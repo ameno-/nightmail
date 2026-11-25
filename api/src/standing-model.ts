@@ -371,3 +371,137 @@ export function nextGrowth(prev: Growth, o: { graduated: boolean; established?: 
   if (!clean) return { ...prev, hour: o.hour };
   return { ...prev, hour: o.hour, quality: o.quality, cap: Math.max(prev.cap, GROWTH.factor * e.distinct) };
 }
+
+// ---------- the campaign ramp and send readiness ----------
+/**
+ * The campaign ramp and send readiness: one table. A Hosted sender's first large campaigns go out in hourly steps that
+ * grow, as an SES or ESP warm-up schedule grows a new sender's volume, compressed from days to hours because Hosted mail
+ * leaves shared IPs that are already warm: what is new is the sender's domain, its links and its list. The release loop
+ * enforces it per campaign (src/sending.ts releaseStep), for marketing only and for every Hosted workspace, exempt and
+ * first-party ones included (exemptions waive billing and limits, never bounce and complaint monitoring). Transactional
+ * mail never waits for it.
+ *  - steps: the hourly ceiling of each step, in order. Each step lasts at least an hour from its first release.
+ *  - advance: a step is proven by a clean hour that released at least this share of its ceiling. When a step's hour is
+ *    over and its batch's feedback is mature (check), a bad batch pauses the campaign; a clean one moves to the next step
+ *    if it proved this one, or starts another hour on it. Past the last step only the campaign's other limits apply.
+ *  - historyDays: where a sender starts. Its largest clean, mature hour of real marketing mail in this many days proves
+ *    every step it would have (the same advance rule), and it starts at the first step not proven: with no history at the
+ *    first, and with a clean hour of half the last ceiling or more it skips the ramp (an established sender).
+ *  - check: a step's batch is mature once none of it is queued and `resolved` of what SES accepted has a delivery result
+ *    (the growth pace's line), or `maxWaitMinutes` after its hour ended; release looks again every `retryMinutes`. Then
+ *    more than `bounceRate` hard bounces of at least `bounceMinimum` accepted (the list probe's line and size), or more
+ *    than `complaintRate` complaints counting at least `complaints` (the automatic pause's rate, the probe's count, so 1
+ *    complaint in 300 is not enough) pause the campaign. The same lines judge a sender's history clean.
+ *  - readiness: the review's verdict on a marketing campaign (src/sending.ts sendReadiness). Over `required.recipients`, a
+ *    From domain first seen less than `newDomainDays` ago or a send over `required.jump` times the workspace's largest
+ *    in `lookbackDays` (0 without one) needs the plan, a daily cap no larger than its first day, or a confirmed consent
+ *    source (Hosted live sends; elsewhere it is a recommendation). Over `recommended.recipients`, a new domain, a send over
+ *    `recommended.jump` times the largest, no previous send of `establishedSend`, risky or never-mailed shares over
+ *    theirs, no DMARC record, or the last `windowDays` days' bounces or complaints over theirs recommend the plan.
+ *  - plan: one batch a day, the first the larger of `firstBatch` and `cleanFactor` times the largest clean previous send,
+ *    each next `growth` times the last, at most `maxBatches`, the last taking the rest. Contacts who opened or clicked in
+ *    `engagedDays` go first, then those mailed before, never-mailed last (src/audience.ts snapshotCampaignAudience).
+ *  - consent: the length of a confirmed consent source.
+ * A sender with no history reaches the last step in nine clean hours, having released at most about 600,000 recipients.
+ */
+export const RAMP = {
+  steps: [
+    { ceilingPerHour: 1_000 },
+    { ceilingPerHour: 2_500 },
+    { ceilingPerHour: 5_000 },
+    { ceilingPerHour: 10_000 },
+    { ceilingPerHour: 20_000 },
+    { ceilingPerHour: 40_000 },
+    { ceilingPerHour: 75_000 },
+    { ceilingPerHour: 150_000 },
+    { ceilingPerHour: 300_000 },
+  ],
+  advance: 0.5,
+  historyDays: 30,
+  check: { resolved: 0.9, maxWaitMinutes: 60, retryMinutes: 1, bounceRate: 0.03, bounceMinimum: 100, complaintRate: 0.0008, complaints: 2 },
+  readiness: {
+    lookbackDays: 90, windowDays: 30, newDomainDays: 30,
+    required: { recipients: 50_000, jump: 100 },
+    recommended: { recipients: 5_000, jump: 10, establishedSend: 1_000, riskyShare: 0.02, neverMailedShare: 0.5, bounceRate: 0.02, complaintRate: 0.0005 },
+  },
+  plan: { firstBatch: 10_000, cleanFactor: 2, growth: 4, maxBatches: 5, engagedDays: 90 },
+  consent: { minLength: 10, maxLength: 500 },
+} as const;
+export const RAMP_HOUR_MS = 3_600_000;
+/** The step (an index into RAMP.steps) a sender whose largest clean marketing hour is `cleanHour` starts at; RAMP.steps.length skips the ramp. */
+export function rampStart(cleanHour: number) {
+  const step = RAMP.steps.findIndex(s => cleanHour < s.ceilingPerHour * RAMP.advance);
+  return step < 0 ? RAMP.steps.length : step;
+}
+/** Where a campaign is on the ramp: `step` indexes RAMP.steps; the step's hour started at `startedAt` (ms, null before its first release) and released `released` since. */
+export type RampAt = { step: number; startedAt: number | null; released: number };
+/**
+ * When a campaign releases its last recipient (ms), or null when it cannot be told (no known send rate, or over 100,000
+ * windows away). It releases at `ratePerSecond` × `rateShare` from `start`, at most `perDay` in each 24-hour window (a
+ * plan: its batches, one a window, the last repeating; the current window opened at `day.startedAt` as the plan's
+ * `day.index`th, with `day.released` already out) and at most the ramp step's ceiling in each of its hours, moving on as
+ * RAMP.advance says. An estimate: it assumes clean, immediate feedback and leaves out the list probe's wait, quota holds
+ * and other mail sharing the rate.
+ */
+export function estimateFinish(o: { recipients: number; start: number; ratePerSecond: number; rateShare?: number | null; perDay?: number | readonly number[] | null; day?: { startedAt: number | null; released: number; index?: number } | null; ramp?: RampAt | null }): number | null {
+  const perMs = o.ratePerSecond * (o.rateShare ?? 1) / 1000, perDay = o.perDay ?? null, DAY = 86_400_000;
+  if (!(perMs > 0) || !Number.isFinite(o.recipients)) return null;
+  const cap = (index: number) => perDay === null ? Infinity : typeof perDay === 'number' ? perDay : perDay[Math.min(index, perDay.length - 1)] ?? Infinity;
+  let left = Math.max(0, o.recipients), t = o.start;
+  let step = o.ramp ? o.ramp.step : RAMP.steps.length, hourStart = o.ramp?.startedAt ?? null, hourUsed = o.ramp?.released ?? 0;
+  let dayStart = o.day?.startedAt ?? null, dayUsed = o.day?.released ?? 0, dayIndex = o.day?.index ?? 0;
+  for (let i = 0; i < 100_000 && left > 1e-6; i++) {
+    const ramping = step < RAMP.steps.length;
+    if (ramping && hourStart !== null && t >= hourStart + RAMP_HOUR_MS) {
+      if (hourUsed >= RAMP.steps[step]!.ceilingPerHour * RAMP.advance) step++;
+      hourStart = null; hourUsed = 0;
+      continue;
+    }
+    if (ramping && hourStart === null) hourStart = t;
+    if (perDay !== null && (dayStart === null || t >= dayStart + DAY)) { if (dayStart !== null) dayIndex++; dayStart = t; dayUsed = 0; }
+    const hourLeft = ramping ? RAMP.steps[step]!.ceilingPerHour - hourUsed : Infinity, dayLeft = cap(dayIndex) - dayUsed;
+    if (hourLeft <= 0 || dayLeft <= 0) { t = Math.max(hourLeft <= 0 ? hourStart! + RAMP_HOUR_MS : t, dayLeft <= 0 ? dayStart! + DAY : t); continue; }
+    const n = Math.min(left, hourLeft, dayLeft);
+    const end = Math.min(t + n / perMs, ramping ? hourStart! + RAMP_HOUR_MS : Infinity, perDay !== null ? dayStart! + DAY : Infinity);
+    const sent = Math.min(n, (end - t) * perMs);
+    left -= sent; hourUsed += sent; dayUsed += sent; t = end;
+  }
+  return left > 1e-6 ? null : Math.round(t);
+}
+
+/** What the review judges a marketing campaign by (src/sending.ts sendReadiness gathers it). */
+export type ReadinessFacts = {
+  recipients: number; matched: number | null; risky: number; neverMailed: number | null;
+  domainAgeDays: number | null; dmarc: boolean | null;
+  largestSend: number; largestCleanSend: number; accepted: number; bounced: number; complained: number;
+  /** Whether a ramp can be required (Hosted live sending); elsewhere the most it says is a recommendation. */
+  enforced: boolean;
+};
+export const READINESS_REASONS = ['NEW_DOMAIN', 'SIZE_JUMP', 'NO_HISTORY', 'RISKY_LIST', 'NEVER_MAILED', 'NO_DMARC', 'BOUNCES', 'COMPLAINTS'] as const;
+export type ReadinessReason = (typeof READINESS_REASONS)[number];
+export type Verdict = 'ready' | 'ramp_recommended' | 'ramp_required';
+/** The verdict, what it is for, and which of NEW_DOMAIN or SIZE_JUMP requires the ramp (RAMP.readiness). */
+export function judgeReadiness(f: ReadinessFacts): { verdict: Verdict; reasons: ReadinessReason[]; requiredBy: 'NEW_DOMAIN' | 'SIZE_JUMP' | null; jump: number | null } {
+  const r = RAMP.readiness, rec = r.recommended, n = f.recipients;
+  const jump = f.largestSend > 0 ? n / f.largestSend : null;
+  const newDomain = f.domainAgeDays !== null && f.domainAgeDays < r.newDomainDays;
+  const reasons: ReadinessReason[] = [];
+  if (newDomain) reasons.push('NEW_DOMAIN');
+  if (jump !== null && jump > rec.jump) reasons.push('SIZE_JUMP');
+  if (f.largestSend < rec.establishedSend) reasons.push('NO_HISTORY');
+  if (f.matched && f.risky > rec.riskyShare * f.matched) reasons.push('RISKY_LIST');
+  if (f.neverMailed !== null && n > 0 && f.neverMailed > rec.neverMailedShare * n) reasons.push('NEVER_MAILED');
+  if (f.dmarc === false) reasons.push('NO_DMARC');
+  if (f.accepted > 0 && f.bounced > rec.bounceRate * f.accepted) reasons.push('BOUNCES');
+  if (f.accepted > 0 && f.complained > rec.complaintRate * f.accepted) reasons.push('COMPLAINTS');
+  const requiredBy = !f.enforced || n < r.required.recipients ? null : newDomain ? 'NEW_DOMAIN' : n > r.required.jump * f.largestSend ? 'SIZE_JUMP' : null;
+  const verdict: Verdict = requiredBy ? 'ramp_required' : n >= rec.recipients && reasons.length ? 'ramp_recommended' : 'ready';
+  return { verdict, reasons, requiredBy, jump };
+}
+/** The plan's daily batches for `recipients` (RAMP.plan); one batch when they fit in the first. */
+export function rampPlan(recipients: number, largestCleanSend: number): number[] {
+  const p = RAMP.plan, batches: number[] = [];
+  let left = Math.max(0, Math.floor(recipients)), size = Math.max(p.firstBatch, p.cleanFactor * largestCleanSend);
+  while (left > 0) { const n = batches.length === p.maxBatches - 1 ? left : Math.min(left, size); batches.push(n); left -= n; size *= p.growth; }
+  return batches;
+}
