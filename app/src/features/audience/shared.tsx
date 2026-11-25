@@ -1,21 +1,22 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
-import { useApiDef, useApiQuery } from '../../data/context'
+import { useApiDef, useApiMutation, useApiQuery } from '../../data/context'
+import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
-import type { AudienceList, Contact } from '../../data/types'
-import { DataTable, Input, SkeletonText, StatusBadge } from '../../components/ui'
-import { contactColumns, memberColumnsFor } from './skeletons'
+import { errorText, type AudienceList, type Contact } from '../../data/types'
+import { DataTable, DropdownMenu, Input, SkeletonText, StatusBadge, useToast } from '../../components/ui'
+import { contactColumnsFor, memberColumnsFor } from './skeletons'
 import { date as formatDate, number } from '../../lib/format'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
 import { addressParts } from '../../lib/private-address'
 import { useDebounced } from '../../lib/pagination'
-import { consentTitle } from './consent'
+import { displayStatus, riskLabels, riskSkipped, statusTitle } from './consent'
 
 export const pageSize = 8
 export const date = (value: string | null) => value ? formatDate(value) : 'Never'
 export { number }
-export { consentTitle, evidenceRequired, noUnknown, statusOptions } from './consent'
+export { consentTitle, displayStatus, evidenceRequired, noUnknown, riskBreakdown, riskLabels, riskSkipped, statusOptions, statusTitle } from './consent'
 /** A contact name is free text: addresses in it are masked (AddressText), so it is a tooltip only when it holds none. */
 export const nameTitle = (name?: string) => name && !addressParts(name).some(part => part.address) ? name : undefined
 export function useAudienceLists(search = '', cursor?: string) {
@@ -26,6 +27,24 @@ export const aqlString = (value: string) => `'${value.replaceAll("'", "''")}'`
 // A contact's suppression reason as the API records it, in plain words.
 const suppressionWords: Record<string, string> = { hard_bounce: 'Bounced', soft_bounce: 'Bounced', transient: 'Bounced', complaint: 'Marked as spam', email_validation: 'Blocked' }
 export const suppressionText = (reason?: string) => reason ? suppressionWords[reason] ?? 'Blocked' : undefined
+
+/** A contact's status as a badge with its meaning on hover: Risky (warning) when campaigns skip its address. */
+export function ContactStatus({ contact }: { contact: Pick<Contact, 'status' | 'risk'> }) {
+  const status = displayStatus(contact)
+  return <span title={statusTitle(contact)}><StatusBadge status={status} tone={status === 'risky' ? 'warning' : undefined} /></span>
+}
+/** Send anyway (allowed) or skip again a contact flagged as risky; a toast says so, with Undo. */
+export function useAllowRisk() {
+  const toast = useToast()
+  const allow = useApiMutation((api, input: { id: string; allowed: boolean }) => api.contacts.allowRisk(input.id, input.allowed), undefined, false, invalidate.contactProfile)
+  async function run(id: string, allowed: boolean, undo = true) {
+    try {
+      await allow.mutateAsync({ id, allowed })
+      toast(allowed ? 'Campaigns will send to this contact' : 'Campaigns skip this contact again', 'success', undo ? { action: { label: 'Undo', onSelect: () => void run(id, !allowed, false) } } : undefined)
+    } catch (cause) { toast(errorText(cause), 'error') }
+  }
+  return { run, pending: allow.isPending }
+}
 
 // One control to find and choose a list by name: type to search, arrows and Enter to choose. The first option is
 // `emptyLabel` (all lists, or no list). Lists are never shown by ID.
@@ -80,17 +99,23 @@ function listsText(row: Contact, lists: AudienceList[]) {
 }
 const listsTitle = (row: Contact, lists: AudienceList[]) => listNames(row, lists).join(', ') || undefined
 export function ContactTable({ contacts, lists = [], members = false, status, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; status?: string; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
-  const columns = members ? memberColumnsFor(status ?? '') : contactColumns
+  const columns = members ? memberColumnsFor(status ?? '') : contactColumnsFor(status ?? '')
+  const allow = useAllowRisk()
+  const riskMenu = (row: Contact) => row.risk && <DropdownMenu label="Actions for this contact" title={<PrivateAddress value={row.email} />} items={[row.risk.allowed ? { label: 'Skip again', hint: 'Campaigns skip this address', onSelect: () => void allow.run(row.id, false) } : { label: 'Send anyway', hint: 'Campaigns send to this address', onSelect: () => void allow.run(row.id, true) }]} />
+  // Why campaigns skip a contact: its suppression, else its risk.
+  const reason = (row: Contact) => suppressionText(row.suppressionReason) ?? (riskSkipped(row) ? riskLabels[row.risk!.reason] : undefined)
   return <DataTable className="audience-contacts" tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} rowHref={row => `/audience/contacts/${row.id}`} empty={empty} columns={columns.map(column => ({ ...column, cardRender: column.key === 'email' ? (row: Contact) => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span>
     // A card gives the name its own line, so its title is the address alone.
     : column.key === 'name' ? (row: Contact) => <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
     // A member card's second line: the suppression reason when there is one, else the name (never an empty dash).
-    : column.key === 'suppression' ? (row: Contact) => row.suppressionReason ? <span title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason)}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
+    : column.key === 'suppression' ? (row: Contact) => reason(row) ? <span title={reason(row)}>{reason(row)}</span> : <span title={nameTitle(row.name)}>{row.name ? <AddressText text={row.name} /> : 'No name'}</span>
+    : column.key === 'actions' ? riskMenu
     : column.key === 'created' ? (row: Contact) => { const names = members || listsLoading ? null : listsText(row, lists); return <>{`Added ${date(row.createdAt)}`}{names && names !== '—' && <span title={listsTitle(row, lists)}> · {names}</span>}</> } : undefined, render: (row: Contact) => {
     // The name, when there is one, follows the address on its line, muted; it gives way first when the cell is tight.
     if (column.key === 'email') return <span className="audience-contact"><span className="audience-contact__email"><PrivateAddress value={row.email} /></span>{row.name && <span className="audience-contact__name" title={nameTitle(row.name)}><AddressText text={row.name} /></span>}</span>
-    if (column.key === 'status') return <span title={consentTitle(row.status)}><StatusBadge status={row.status} /></span>
-    if (column.key === 'suppression') return <span className="audience-cell-text" title={suppressionText(row.suppressionReason)}>{suppressionText(row.suppressionReason) ?? '—'}</span>
+    if (column.key === 'status') return <ContactStatus contact={row} />
+    if (column.key === 'suppression' || column.key === 'reason') return <span className="audience-cell-text" title={reason(row)}>{reason(row) ?? '—'}</span>
+    if (column.key === 'actions') return riskMenu(row)
     if (column.key === 'lists') {
       if (listsLoading && row.listIds.length) return <SkeletonText width="70%" />
       const text = listsText(row, lists)

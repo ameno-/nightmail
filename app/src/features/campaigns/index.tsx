@@ -21,6 +21,7 @@ import { Notices } from '../../components/Notices'
 import { Checks, checksCount, checksSummary, LOW_SENDABILITY } from '../../components/EmailInsight'
 import { date, label, number, percent } from '../../lib/format'
 import { CampaignAudienceSkeleton, CampaignRouteSkeleton } from './skeletons'
+import { riskBreakdown } from '../audience/consent'
 import { CampaignPacing, CampaignProgress, SummaryLine, campaignDisplayStatus, campaignLogs, campaignPollInterval, maxPerDay, maxRatePercent, minPerDay, minRatePercent, perDayError, ratePercentError } from './CampaignProgress'
 import { CampaignArchiveButton } from './CampaignArchiveButton'
 import { CampaignBar, CampaignSteps } from './steps'
@@ -1074,7 +1075,7 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
       <div className="review-stages">
         <ReviewStage n={1} id="to" title="Recipients" open={openRow === 'to'} done={Boolean(campaign.listId && eligible)} onOpen={() => setOpenRow('to')} summary={toSummary} footer={next('to')}>
           <AudiencePicker campaign={campaign} audience={audienceOptions} notices={settings.data?.requiredNotices === true} disabled={sendMutation.isPending} />
-          {audience.data && campaign.listId && <p className="review-detail">{number(audience.data.matched)} on the list{audience.data.suppressed ? ` · ${number(audience.data.suppressed)} suppressed` : ''}{audience.data.unsubscribed ? <> · {number(audience.data.unsubscribed)} not subscribed · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></> : null}</p>}
+          {audience.data && campaign.listId && <p className="review-detail">{number(audience.data.matched)} on the list{audience.data.suppressed ? ` · ${number(audience.data.suppressed)} suppressed` : ''}{audience.data.unsubscribed ? <> · {number(audience.data.unsubscribed)} not subscribed · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=unknown`}>Fix</Link></> : null}{audience.data.risky ? <> · {number(audience.data.risky)} risky skipped ({riskBreakdown(audience.data.riskyByReason, number)}) · <Link to={`/audience/lists/${encodeURIComponent(campaign.listId)}?status=risky`}>Review</Link></> : null}</p>}
         </ReviewStage>
         <ReviewStage n={2} id="message" title="Message" open={openRow === 'message'} done={!missing.length && !missingFallbacks.length} onOpen={() => setOpenRow('message')} summary={messageSummary} footer={next('message')}>
           <div className="review-message">

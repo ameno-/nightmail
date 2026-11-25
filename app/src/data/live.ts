@@ -210,7 +210,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   analytics().apiResult(options.method ?? 'GET', path, data)
   return data as T
 }
-const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, suppressionReason: r.suppressionReason ?? undefined } as Contact)
+const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, suppressionReason: r.suppressionReason ?? undefined, risk: r.risk ?? null } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
 const mapSegment = (r: Json) => r as Segment
 const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.state, delivery: r.delivery ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', replyTo: r.draft.replyTo ?? [], unsubscribePageUrl: r.draft.unsubscribePageUrl ?? '', requiredNotice: r.draft.requiredNotice === true, subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], recipients: r.delivery?.total ?? r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
@@ -393,7 +393,7 @@ export function createLiveApi(scope?: RequestScope): Api {
       remove: async id => { await call(`/template-assets/${idPath(id)}`, 'DELETE') },
     },
     contacts: {
-      list: (input, signal) => page('/contacts', input, mapContact, {email: input.email, search: input.search, listId: input.listId, ...(input.status === 'suppressed' ? {suppressed: true} : input.status ? {consent: input.status, suppressed: false} : {})}, signal),
+      list: (input, signal) => page('/contacts', input, mapContact, {email: input.email, search: input.search, listId: input.listId, ...(input.status === 'suppressed' ? {suppressed: true} : input.status === 'risky' ? {risky: true, suppressed: false} : input.status ? {consent: input.status, suppressed: false} : {})}, signal),
       get: getContact,
       save: async (input, signal) => {
         const current = input.id ? await call(`/contacts/${idPath(input.id)}`, 'GET', undefined, signal) : null
@@ -406,6 +406,7 @@ export function createLiveApi(scope?: RequestScope): Api {
         for (const listId of removed) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
         return added.length || removed.length ? getContact(result.id, signal) : mapContact({ ...result, listIds: oldLists })
       },
+      allowRisk: async (id, allowed, signal) => mapContact(await call(`/contacts/${idPath(id)}`, 'PATCH', {riskAllowed: allowed}, signal)),
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
     imports: { preview: (input, signal) => call<any>('/contact-imports', 'POST', input, signal), commit: (id, input, signal) => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST', input?.consent ? input : undefined, signal) },
