@@ -24056,19 +24056,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Sending to members only, a reply to someone outside the workspace is refused the same way.
       runtime.config.builtinScope='members';
       assert.deepEqual(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['someone@sender.example']}]);
+      runtime.config.builtinScope='anyone';
+      ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
+      assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
       // Forwarding's confirmation is an email from the built-in domain too (its links on the link domain): to anyone but a
       // member, refused the same way while it sends to members only; to a member's own address, sent.
-      runtime.config.linkHost='links.builtin-fixture.example';
+      runtime.config.builtinScope='members';runtime.config.linkHost='links.builtin-fixture.example';
       const forwarder=ok(await local('POST','/v1/inbound/addresses',{address:`forward@${host}`}),201);
       assert.deepEqual(error(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-outsider',address:'stranger@example.net',from:forwarder.id}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['stranger@example.net']}]);
       assert.equal((await db.query("SELECT count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=$1 AND key='builtin-outsider'",[wid])).rows[0].n,0,'Nothing is kept.');
       ok(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-member',address:AUTH_EMAIL,from:forwarder.id}),201);
       assert.match((await db.query("SELECT snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 AND subject=$2 ORDER BY created_at DESC LIMIT 1",[wid,`Confirm forwarding from forward@${host}`])).rows[0].text,/https:\/\/links\.builtin-fixture\.example\/v1\/forwarding\/confirm\/fwd_/);
-      runtime.config.linkHost=undefined;
-      runtime.config.builtinScope='anyone';
-      ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
-      assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
-      assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
+      runtime.config.linkHost=undefined;runtime.config.builtinScope='anyone';
       // The parent's own role addresses (abuse@, postmaster@, dmarc@, tls-reports@) reach the platform workspace, here this one,
       // through its built-in domain once an operator adds them (scripts/builtin-domain.ts apex), routed like any address.
       const operator='arn:aws:sts::111122225555:assumed-role/operator/fixture',platformBefore=runtime.config.platformDomainWorkspace;
