@@ -5905,6 +5905,17 @@ export type InboundEvent = {
      * Receiving address ID at the time of the event; null for workspace events.
      */
     addressId: string | null;
+    /**
+     * message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone.
+     */
+    message: {
+        from: {
+            name: string | null;
+            address: string;
+        };
+        subject: string;
+        receivedAt: string;
+    } | null;
 };
 
 export type InboundWebhookSecret = InboundWebhook & {

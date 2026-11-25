@@ -1,14 +1,18 @@
 import {ActionRetry,deliverEndpoint} from './endpoint-delivery.js';
-import { and, eq, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
+import { and, eq, getTableColumns, gt, inArray, isNotNull, max, sql, type SQL } from 'drizzle-orm';
 import { ApiError, lazyModule, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
-import { mailboxEvents } from './db/mailbox.js';
+import { mailboxEvents, mailMessages } from './db/mailbox.js';
 import { inboundHookClaim,JobDeferred,mailboxWebhookAttempts,retryDatabaseFailures } from './jobs.js';
 
 export const inboundEventTypes = ['message.received', 'message.junk', 'message.stored', 'message.queued', 'message.sent', 'message.delivered', 'message.delayed', 'message.bounced', 'message.complained', 'message.failed', 'thread.updated', 'address.created', 'address.deleted', 'inbox.created', 'inbox.deleted', 'message.held', 'inbox.quota_exceeded'] as const;
 type MailboxEventType = typeof inboundEventTypes[number];
 export type MailboxEventInput = { type: MailboxEventType; mailboxId: string | null; threadId?: string | null; messageId?: string | null; data?: Record<string, unknown> };
 
-export const eventView = (row: typeof mailboxEvents.$inferSelect) => ({ id: `mev_${row.seq}`, cursor: String(row.seq), type: row.type as MailboxEventType, createdAt: new Date(row.createdAt).toISOString(), addressId: row.mailboxId, threadId: row.threadId, messageId: row.messageId, data: row.data });
+/** The events whose message someone sent to an address here: they carry its sender, subject and arrival (eventView). */
+const RECEIVED_TYPES = ['message.received', 'message.junk'];
+type EventRow = typeof mailboxEvents.$inferSelect & { fromName?: string | null; fromAddress?: string | null; subject?: string | null; receivedAt?: string | null };
+export const eventView = (row: EventRow) => ({ id: `mev_${row.seq}`, cursor: String(row.seq), type: row.type as MailboxEventType, createdAt: new Date(row.createdAt).toISOString(), addressId: row.mailboxId, threadId: row.threadId, messageId: row.messageId, data: row.data,
+  message: row.subject != null && row.receivedAt != null ? { from: { name: row.fromName ?? null, address: row.fromAddress ?? '' }, subject: row.subject, receivedAt: new Date(row.receivedAt).toISOString() } : null });
 export const webhookSecretBinding = (workspaceId: string, webhookId: string) => `${workspaceId}:live:mailbox:${webhookId}`;
 
 // Both ingest and outbound sync append the same immutable event and webhook snapshots. Take the
@@ -54,7 +58,9 @@ function visibleEvents(workspaceId: string, { mailboxIds, includeStored }: Event
     mailboxIds !== null ? inArray(mailboxEvents.mailboxId, mailboxIds) : includeStored ? undefined : isNotNull(mailboxEvents.mailboxId));
 }
 export async function readEvents(db: DbExecutor, workspaceId: string, input: EventScope & { after: number; types?: string[]; limit: number }) {
-  return db.select().from(mailboxEvents).where(and(visibleEvents(workspaceId, input), gt(mailboxEvents.seq, input.after),
+  // Received mail's events name who sent it, its subject and when it arrived, read with the event (by the message's key).
+  return db.select({ ...getTableColumns(mailboxEvents), fromName: mailMessages.fromName, fromAddress: mailMessages.fromAddress, subject: mailMessages.subject, receivedAt: mailMessages.receivedAt })
+    .from(mailboxEvents).leftJoin(mailMessages, and(inArray(mailboxEvents.type, RECEIVED_TYPES), eq(mailMessages.id, mailboxEvents.messageId), eq(mailMessages.workspaceId, mailboxEvents.workspaceId))).where(and(visibleEvents(workspaceId, input), gt(mailboxEvents.seq, input.after),
     inArray(mailboxEvents.type, input.types?.length ? input.types : [...inboundEventTypes]))).orderBy(mailboxEvents.seq).limit(input.limit);
 }
 export async function latestCursor(db: DbExecutor, workspaceId: string, scope: EventScope) {
