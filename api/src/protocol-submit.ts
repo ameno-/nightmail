@@ -64,30 +64,37 @@ export const submittedFile = (f: SubmittedFile) => ({
   contentId: f.contentId?.replace(/^<|>$/g, ''), size: f.size, bytes: () => f.bytes(),
 });
 
-// Raw delivery preserves the outer fields, so accept only mailboxes with one unambiguous spelling.
-// Other fields may fold; the identity fields must fit on one line and agree with admission.
+// Raw delivery preserves the outer fields, so every reader must split them the same way: CRLF only, RFC 5322 field
+// names, no blank folded line and no folded line a lax reader could take for an identity field. From and Sender may fold
+// as mail apps write them; unfolded, each is the admitted mailbox after a name (atoms, encoded words or a quoted string)
+// that holds no angle bracket, so every reader finds the same address.
 const sealedAddress = mailAddress();
+const NAME_WORD = /(?:[\w!#$%&'*+\/=?^`{|}~.-]+|"[^"\\<>]*")/.source;
+const MAILBOX = new RegExp(`^(?:${NAME_WORD}(?:[ \\t]+${NAME_WORD})*[ \\t]*)?<([^<>]+)>$`);
 function verifiedOuterHeaders(text: string, from: string, sender?: string) {
   const end = text.indexOf('\r\n\r\n');
   if (end < 0 || end > 65536) return false;
-  const seen = new Set<string>();
-  let field = '';
+  const fields: { name: string; value: string }[] = [];
   for (const line of text.slice(0, end).split('\r\n')) {
-    if (!line.length || line.length > 998 || /[^\t\x20-\x7e]/.test(line)) return false;
+    if (!line.trim() || line.length > 998 || /[^\t\x20-\x7e]/.test(line)) return false;
     if (/^[ \t]/.test(line)) {
-      if (!field || field === 'from' || field === 'sender' || /^[ \t]+[\w-]+[ \t]*:/.test(line)) return false;
+      const field = fields.at(-1);
+      if (!field || /^[ \t]+(?:from|sender|resent-[!-9;-~]*)[ \t]*:/i.test(line)) return false;
+      field.value += line;
       continue;
     }
-    const header = /^([a-zA-Z0-9-]+):(.*)$/.exec(line);
+    const header = /^([!-9;-~]+):(.*)$/.exec(line);
     if (!header) return false;
-    field = header[1]!.toLowerCase();
-    if (field.startsWith('resent-')) return false;
-    if (field !== 'from' && field !== 'sender') continue;
-    const value = header[2]!.trim();
-    const address = /^(?:(?:[a-zA-Z0-9 .'-]+|"[a-zA-Z0-9 .'-]+")[ \t]+)?<([^<>]+)>$/.exec(value)?.[1] ?? value;
-    if (seen.has(field) || !sealedAddress.safeParse(address).success ||
-      address.toLowerCase() !== (field === 'from' ? from : sender)?.toLowerCase()) return false;
-    seen.add(field);
+    fields.push({ name: header[1]!.toLowerCase(), value: header[2]! });
+  }
+  const seen = new Set<string>();
+  for (const { name, value } of fields) {
+    if (name.startsWith('resent-')) return false;
+    if (name !== 'from' && name !== 'sender') continue;
+    const address = MAILBOX.exec(value.trim())?.[1] ?? value.trim();
+    if (seen.has(name) || !sealedAddress.safeParse(address).success ||
+      address.toLowerCase() !== (name === 'from' ? from : sender)?.toLowerCase()) return false;
+    seen.add(name);
   }
   return seen.has('from') && seen.has('sender') === !!sender;
 }
