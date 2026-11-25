@@ -33,7 +33,7 @@
 /* Facts: muted mono-caps keys over (or beside, on a phone) mono values. */
 .settings-facts dt { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); margin-bottom: var(--space-6); }
 .settings-facts dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
-.settings-facts dd :is(.ui-input, .ui-button, .ui-select-trigger, select) { font-family: var(--font-body); font-size: var(--text-sm); }
+.settings-facts dd :is(.ui-input, .ui-button, .ui-select-trigger, select) { font-family: var(--font-body); }
 .settings-facts dd > .ui-status { vertical-align: top; }
 .settings-group { scroll-margin-top: var(--space-24); }
 .ui-table-scroll.settings-webhooks-table { --table-row-height: 53px; }

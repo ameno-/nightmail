@@ -47,8 +47,8 @@ button.billing-balance__amount:focus-visible > svg { color: var(--color-text); }
 
 /* A dollar input: the sign sits in the field's padding, so typing never shifts it. */
 .billing-dollars { position: relative; display: inline-flex; align-items: center; width: 112px; }
-.billing-dollars > span { position: absolute; left: var(--space-8); color: var(--color-muted); pointer-events: none; }
-.billing-dollars .ui-input { padding-left: 20px; text-align: right; font-variant-numeric: tabular-nums; }
+.billing-dollars > span { position: absolute; left: 10px; color: var(--color-muted); pointer-events: none; }
+.billing-dollars .ui-input { padding-left: 22px; text-align: right; font-variant-numeric: tabular-nums; }
 /* Two tabs never scroll, so the focus ring isn't clipped by the tab list's overflow. */
 .billing-section .ui-tabs { overflow: visible; }
 .billing-section > .ui-section-header { margin-bottom: calc(-1 * var(--space-4)); }

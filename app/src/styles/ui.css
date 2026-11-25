@@ -68,11 +68,13 @@ a.ui-button:focus-visible { text-decoration: none; }
 .ui-button--primary:active:not(:disabled) { background: var(--color-accent-pressed); }
 .ui-icon-button { width: var(--control-height); padding: 0; }
 .ui-icon-button.ui-button--sm { width: var(--control-height-sm); }
-.ui-input { display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 10px; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
+.ui-input { --input-pad-x: 10px; display: block; width: 100%; min-width: 0; height: var(--control-height); border: 0; border-radius: var(--radius-sm); padding: 0 var(--input-pad-x); appearance: none; -webkit-appearance: none; background: var(--color-control); box-shadow: var(--shadow-button); color: var(--color-text); font: inherit; line-height: var(--leading-sm); transition: background var(--motion-duration) var(--ease-standard), box-shadow var(--motion-duration) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .ui-input:hover:not(:disabled):not([aria-invalid='true']):not(:focus) { background-color: var(--color-control-hover); } }
 .ui-input:is(:focus, :focus-visible) { background-color: var(--color-control-focus); }
 .ui-input::placeholder { color: var(--color-muted); opacity: 1; }
-.ui-input:disabled { background: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
+.ui-input:disabled { background-color: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
+/* On an overlay a disabled field keeps the overlay's control fill (the page's layer-1 would sink below the dialog). */
+:is(.ui-popover, .ui-dialog, .ui-sheet) .ui-input:disabled { background-color: var(--color-control); }
 /* An invalid field: a solid danger-tinted fill (no box), its message in red under it (.ui-field__error). */
 .ui-input[aria-invalid='true'] { background-color: var(--color-control-invalid); }
 .ui-input[aria-invalid='true']:is(:focus, :focus-visible) { background-color: var(--color-control-invalid-focus); }
@@ -80,12 +82,24 @@ a.ui-button:focus-visible { text-decoration: none; }
 .ui-input[type='file'] { display: flex; align-items: center; height: auto; min-height: var(--control-height); padding: 0; color: var(--color-muted); cursor: pointer; }
 .ui-input[type='file']::file-selector-button { height: calc(var(--control-height) - 8px); margin: 4px var(--space-8) 4px 4px; padding: 0 var(--space-12); border: 0; border-radius: var(--radius-xs); background: var(--color-layer-2); color: var(--color-text); font: inherit; font-weight: var(--font-weight-medium); cursor: pointer; transition: background var(--motion-duration) var(--ease-standard); }
 @media (hover: hover) and (pointer: fine) { .ui-input[type='file']:hover::file-selector-button { background: var(--color-layer-3); } }
-.ui-textarea { height: auto; min-height: 120px; resize: vertical; }
+/* A search field drops WebKit's own inset; a date reads from the left edge like every other value (iOS centres it). */
+.ui-input::-webkit-search-decoration { -webkit-appearance: none; }
+.ui-input::-webkit-date-and-time-value { text-align: start; }
+/* Number fields drop the native spinner (a white box on the fill); arrow keys still step them. */
+.ui-input[type='number'] { -moz-appearance: textfield; }
+.ui-input::-webkit-inner-spin-button, .ui-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+/* A textarea is padded evenly: its first line starts on the input's 10 px left edge, and 8 px of padding plus the
+   line's leading put the cap height about 10 px under the top edge, so the caret never hugs the top or the corner.
+   Its leading is --textarea-leading (a mono variant sets its own). */
+.ui-textarea { --textarea-leading: var(--leading-md); height: auto; min-height: 120px; padding-block: 8px; line-height: var(--textarea-leading); resize: vertical; }
 .ui-dialog .ui-textarea { resize: none; }
 .ui-field { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .ui-field__label { display: block; font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); }
 .ui-field__hint { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .ui-field__error { color: var(--color-danger); }
+/* A ghost button on its own line in a column of fields (Add an expiry, Load more) hangs out by its own padding, so its
+   icon or text starts on the fields' edge. */
+:is(.stack, .ui-dialog__body, form):has(> .ui-field) > .ui-button--ghost:not(.ui-icon-button) { align-self: flex-start; margin-inline-start: calc(-1 * var(--button-pad-x)); }
 .ui-select-trigger { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); text-align: left; }
 .ui-select-trigger > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-trigger > span:last-child { display: flex; flex-shrink: 0; color: var(--color-muted); }
@@ -163,6 +177,9 @@ a.ui-tab { text-decoration: none; }
 .ui-dialog__footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--space-8); flex-shrink: 0; margin: 0; padding: var(--space-4) var(--dialog-pad) var(--space-16); }
 /* A destructive or secondary action leads the footer on its left, away from the primary one. */
 .ui-dialog__footer > .ui-dialog__footer-start { margin-right: auto; }
+/* A form that carries its footer inside the body: the buttons span the fields' width (the body already pads them) and
+   keep the standalone footer's spacing, 24 px under the last field and 16 px above the edge. */
+.ui-dialog__body .ui-dialog__footer { padding: var(--space-8) 0 0; margin-bottom: calc(var(--space-16) - var(--space-20)); }
 /* Inside a dialog: section labels with their rule, facts as key/value rows, an ID with its copy button. */
 .ui-dialog__body > .ui-label { margin: var(--space-20) 0 var(--space-4); }
 .ui-dialog__body > .ui-label:first-child { margin-top: 0; }
@@ -425,6 +442,7 @@ select.ui-native-select:disabled { background-color: var(--color-layer-1); }
 @media (pointer: coarse), (max-width: 899px) {
   :root { --control-height: 44px; --control-height-sm: 36px; }
   .ui-input { font-size: 16px; }
+  .ui-textarea { --textarea-leading: 22px; }
   .ui-button { --button-pad-x: 14px; font-size: 14px; }
   .ui-icon-button { padding: 0; }
   .ui-button--sm { --button-pad-x: 12px; position: relative; font-size: var(--text-sm); }
