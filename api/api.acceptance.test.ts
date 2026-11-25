@@ -16608,6 +16608,10 @@ describe('Dashboard API capabilities', () => {
     assert.equal(formattedSender('sender@example.com', 'securitya\u20DDpaypal.com'), 'sender@example.com');
     assert.equal(formattedSender('sender@example.com', 'Support \u202Emoc.elpmaxe'), 'sender@example.com');
     assert.equal(formattedSender('sender@example.com', 'Acme Billing'), '"Acme Billing" <sender@example.com>');
+    const literalName = marker + '\\_%';
+    const literalTemplate = await resource(t, key.secret, '/v1/templates', { name: literalName });
+    await resource(t, key.secret, '/v1/templates', { name: marker + ' other' });
+    assert.deepEqual(ok(await http('GET', '/v1/templates?search=' + encodeURIComponent(literalName), key.secret)).data.map((row: Json) => row.id), [literalTemplate.id]);
     const template = await resource(t, key.secret, '/v1/templates', { name: unique('display-name') });
     error(await http('PATCH', `/v1/templates/${template.id}`, key.secret, { revision: template.revision, draft: { ...template.draft, fromName: 'billing\uFF20example.com' } }), 422, 'VALIDATION_FAILED');
     const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
