@@ -463,6 +463,16 @@ impl Identity for Login {
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return false;
         }
+        let account = if u.eq_ignore_ascii_case("apikey") {
+            k
+        } else {
+            failure_key(u, "")
+        };
+        let Some(_share) = self.limits.lock().ok().and_then(|mut l| l.signin(account)) else {
+            self.unavailable
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        };
         let v = match self.api.login(u, pw, p, self.deadline) {
             Ok(v) => v,
             Err(403) => {
