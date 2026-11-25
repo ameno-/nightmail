@@ -2389,18 +2389,32 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     // The account service's tokens name their consent (jti <consent>.<random>). After a revocation in Bane, a new consent
     // (the person connected the client again) starts the approval again under a new key, so nothing tied to the revoked
     // one comes back; the revoked consent's tokens, refreshed ones included, stay refused.
-    let tick=2;
-    const consented=(consent:string)=>token({client_id:'fixture-consent',jti:`${consent}.${randomUUID()}`,iat:now+tick++});
+    const consented=(consent:string,iat:number,auth_time?:number,scope='bane:read')=>token({client_id:'fixture-consent',jti:`${consent}.${randomUUID()}`,iat,auth_time,scope});
     const keyOf=async(access:string)=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${access}`}}),async a=>Response.json(a.keyId));return r.status===200?await r.json() as string:r.status;};
-    const firstKey=await keyOf(consented('consent-first'));
+    const first=consented('consent-first',now-10,now-20,'bane:manage'), firstKey=await keyOf(first);
     assert.equal(typeof firstKey,'string');
+    assert.equal(await keyOf(consented('consent-second',now-5,now-15)),firstKey);
     assert.equal((await call(`/v1/agents/${firstKey}/revoke`,'POST')).status,200);
-    assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent stays refused');
-    const secondKey=await keyOf(consented('consent-second'));
-    assert.equal(typeof secondKey,'string');assert.notEqual(secondKey,firstKey,'A new consent starts the approval under a new key');
-    assert.equal(await keyOf(consented('consent-first')),403,'The revoked consent never takes over the new approval');
-    assert.equal(await keyOf(consented('consent-second')),secondKey);
-    assert.deepEqual((await db.query('SELECT id,revoked,revoked_issuer_grants FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,[{id:secondKey,revoked:false,revoked_issuer_grants:['consent-first']}]);
+    const {cutoff}= (await db.query<{cutoff:number}>('SELECT floor(extract(epoch FROM updated_at))::int AS cutoff FROM nightmail_resource_grants WHERE id=$1',[firstKey])).rows[0]!;
+    const fresh=cutoff+1, clock=t.mock.method(Date,'now',()=>1000*(fresh+10));
+    try {
+      const refreshed=consented('consent-first',fresh+5,now-20,'bane:manage');
+      for (const access of [first,refreshed,consented('consent-second',fresh+5,now-15),consented('consent-unseen',fresh+5,cutoff),
+        consented('consent-no-marker',fresh+5),consented('consent-invalid',fresh+5,fresh+6)]) assert.equal(await keyOf(access),403);
+      const next=consented('consent-reconnect',fresh,fresh), nextKey=await keyOf(next);
+      assert.equal(typeof nextKey,'string');assert.notEqual(nextKey,firstKey,'Post-revocation sign-in and consent start a new approval');
+      assert.equal(await keyOf(first),403);assert.equal(await keyOf(refreshed),403);
+      assert.equal(await keyOf(consented('consent-unseen',fresh+5,now-10)),403);
+      assert.equal(await keyOf(consented('consent-no-marker',fresh+5)),403);
+      assert.equal(await keyOf(consented('consent-reconnect',fresh+2,fresh)),nextKey);
+      assert.deepEqual((await db.query('SELECT id,revoked,permissions,issuer_grant FROM nightmail_resource_grants WHERE user_id=$1 AND client_id=$2',[manager.userId,'fixture-consent'])).rows,
+        [{id:nextKey,revoked:false,permissions:['read'],issuer_grant:'consent-reconnect'}]);
+      // A row an older build reconnected (a history without the '@' cutoff) keeps its reconnecting consent; others need a newer sign-in.
+      await db.query("UPDATE nightmail_resource_grants SET revoked_issuer_grants=ARRAY['consent-first'],issuer_grant='consent-legacy',created_at=to_timestamp($2) WHERE id=$1",[nextKey,fresh+3]);
+      assert.equal(await keyOf(consented('consent-legacy',fresh+6,now-30)),nextKey,'The consent an older build reconnected with keeps working');
+      assert.equal(await keyOf(consented('consent-other',fresh+6,now-30)),403);
+      assert.equal(await keyOf(consented('consent-other',fresh+6,fresh+4)),nextKey);
+    } finally { clock.mock.restore(); }
     // Several workspaces: the connection works at once. A call acts in the workspace it names (or the default), with the
     // token's scopes intersected with the person's role there: members read and send, owners and admins also manage and
     // reach the receiving tools. Members count on hosted installations.
@@ -2412,6 +2426,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Bane-side 
     }
     await db.query('UPDATE nightmail_users SET selected_workspace_id=$2 WHERE id=$1',[manager.userId,'mcp-admin'+suffix]);
     type Seen={default:{id:string;source:string}|null;workspaces:[string,string,string[]][]};
+    let tick=2;
     const multi=()=>token({client_id:'fixture-multi',jti:randomUUID(),iat:now+tick++,scope:'bane:read bane:manage'});
     const connection=async()=>{const r=await authorizeResource(runtime,new Request(resource,{method:'POST',headers:{authorization:`Bearer ${multi()}`}}),async a=>Response.json({default:a.defaultWorkspace,workspaces:a.workspaces.map(w=>[w.id,w.role,w.permissions])}));
       assert.equal(r.status,200);const seen=await r.json() as Seen;return {...seen,workspaces:seen.workspaces.filter(w=>w[0].endsWith(suffix))};};
@@ -13065,6 +13080,33 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
       `This key can only read mail sent from allowed.example.com. Add Send to it ${editKey} Needs Send email.`);
     // A key without manage on all domains, unrestricted otherwise, on received mail: the same style, with the address-key option.
     assert.match(error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound addresses need a full-access key: .* For mail at some addresses only, a key limited to those addresses also works\./);
+    // Reading replies with a key limited to its sender domain (a production agent tried, then guessed at POST /v1/api-keys):
+    // the refusal names the key that reads them and the request that makes one. A key without the domain limit is told how
+    // to make itself Full access, on its own ID.
+    const replyKey = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
+    for (const [key, path] of [[sender, '/v1/inbound/messages'], [replyKey, '/v1/inbound/messages/msg_fixture'], [replyKey, '/v1/inbound/messages/msg_fixture/attachments/att_fixture'], [replyKey, '/v1/inbound/threads']] as const) {
+      const refused = error(await http('GET', path, key.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+      assert.match(refused.message, /^This key can only send from allowed\.example\.com(?: and read what was sent from there)?\. A limit to sender domains doesn't reach received mail, so it can't read replies\. To read the replies to allowed\.example\.com, use a key limited to the receiving addresses there \(Read, and Send to answer from them\): with a full-access key, find their IDs with GET \/v1\/inbound\/addresses, then POST \/v1\/api-keys with \{"name":"Replies","access":\{"type":"addresses","addressIds":\["mbx_…"\],"mail":\["read","send"\]\}\}; or in the dashboard, API keys → Create key → Mail at chosen addresses\. A full-access key reads all received mail\. Docs: https?:\/\/[^ ]+\/docs\/operations\/createApiKey\.md Needs Received mail: read on the whole workspace\.$/, path);
+      assert.equal(refused.required.scope, 'workspace', path);
+    }
+    const unscoped = error(await http('GET', '/v1/inbound/messages', reader.secret), 403, 'ADMIN_REQUIRED');
+    assert.ok(unscoped.message.startsWith(`This key can only read. Received mail needs Full access, or a key limited to receiving addresses. Make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${reader.id} with {"permissions":["read","send","manage"]}. Or, for replies at some addresses only, use a key limited to them: with a full-access key`), unscoped.message);
+    // Making that key, guessed at: every problem at once, each with what was sent and the values allowed, then what keys can
+    // be. A key that can't make keys hears that first.
+    const full = (await keyFixture(t)).secret;
+    const guessed = error(await http('POST', '/v1/api-keys', full, { name: 'Replies', permissions: ['read', 'receive'], access: { type: 'addresses', addresses: ['jon@allowed.example.com'], mail: ['read', 'reply'] } }), 422, 'VALIDATION_FAILED');
+    assert.deepEqual([guessed.field, guessed.details.map((d: Json) => d.field)], ['permissions.1', ['permissions.1', 'access.mail.1', 'access.addresses']]);
+    for (const part of ['3 problems with this key: permissions.1 is "receive": a workspace key\'s permissions are a list of read (sent mail and its logs), send (send email) and manage (everything else, received mail included; with no domains, Full access). Received mail is read with manage, or by a key limited to receiving addresses (access)',
+      'access.mail.1 is "reply": a key for addresses or an inbox takes a list of read, send (reply and start conversations from those addresses), modify (mark read, archive, label) and create (create agent inboxes)',
+      'access.addresses is not a field of a key with access type addresses, which takes type, addressIds, mail.', 'For example, Full access: {"name":"Server","permissions":["read","send","manage"]};', '/docs/operations/createApiKey.md'])
+      assert.ok(guessed.message.includes(part), `${part} in ${guessed.message}`);
+    assert.match(error(await http('POST', '/v1/api-keys', full, { name: 'Replies', access: { type: 'domain', domains: ['allowed.example.com'] } }), 422, 'VALIDATION_FAILED').message,
+      /^A problem with this key: access\.type is "domain": access\.type is workspace \(the default\), addresses \(mail at chosen receiving addresses\) or inbox \(one agent inbox\)\. To limit a workspace key to sender domains, set domains beside permissions, not access\. For example/);
+    const misplaced = error(await http('POST', '/v1/api-keys', full, { name: 'Replies', permissions: ['read', 'send'], access: { type: 'addresses', mail: ['read'] } }), 422, 'VALIDATION_FAILED');
+    assert.deepEqual([misplaced.field, misplaced.message.startsWith('A key with access type addresses takes its permissions in access.mail (read, send (reply and start conversations from those addresses), modify (mark read, archive, label) and create (create agent inboxes)) and has no sender domains: move ["read","send"] from permissions to access.mail.')], ['permissions', true]);
+    assert.match(error(await http('POST', '/v1/api-keys', sender.secret, { name: 'Replies', permissions: ['receive'] }), 403, 'PERMISSION_DENIED').message, /so it can't create, list or revoke API keys\. Create keys in the dashboard under API keys → Create key, or with a full-access key via POST \/v1\/api-keys\./);
+    // A guessed route says where the endpoint is.
+    assert.match(error(await http('DELETE', `/v1/api-keys/${replyKey.id}`, full), 404, 'NOT_FOUND').message, /^Route not found\. Revoke a key with POST \/v1\/api-keys\/\{id\}\/revoke\. Every endpoint is listed in \/llms\.txt and \/docs\.md\.$/);
     const visible = await allPages('/v1/emails', domainReader.secret);
     assert.ok(visible.some(row => row.id === allowed.id));
     assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));
@@ -24689,16 +24731,28 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal((await hosts(own.id)).some((h: Json) => h.host === `busy.${own.name}`), false);
       assert.equal((await db.query('SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND address=$2', [wid, `team@busy.${own.name}`])).rows[0].n, 0);
 
-      // An unverified domain, and a domain that isn't the workspace's: refused, each naming its fix.
+      // A domain added a minute ago and still being verified (ws_417245a5): the address is made all the same and receiving
+      // turned on at its host; the answer says the domain isn't verified yet, and mail waits for that and the MX record.
       const pending = await claim('rx-pending', false);
-      assert.match(error(await create(`hello@${pending.name}`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, new RegExp(`isn’t verified yet\\. Publish the DNS records GET /v1/domains/${pending.id} lists`));
+      const early = ok(await create(`hello@${pending.name}`), 201);
+      assert.deepEqual([early.address, early.receiving.host, early.receiving.turnedOn, early.receiving.verified], [`hello@${pending.name}`, pending.name, true, false]);
+      assert.deepEqual(early.receiving.dns.map((r: Json) => [r.type, r.name]), [['MX', pending.name]]);
+      assert.ok(['provisioning', 'waiting_for_mx'].includes(early.receiving.status), early.receiving.status);
+      assert.deepEqual((await hosts(pending.id)).map((h: Json) => h.host), [pending.name]);
+      // Nothing routes before ownership is proven, whatever MX shows: the host isn't active, and the claim doesn't receive.
+      assert.notEqual((await db.query('SELECT receiving_state FROM domain_claims WHERE workspace_id=$1 AND name=$2', [wid, pending.name])).rows[0].receiving_state, 'active');
+      // A claim released for want of its ownership record, and a domain that isn't the workspace's: refused, each naming its fix.
+      const released = await claim('rx-released', false);
+      await db.query("UPDATE domain_claims SET created_at=now()-interval '73 hours' WHERE workspace_id=$1 AND name=$2", [wid, released.name]);
+      assert.match(error(await create(`hello@${released.name}`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, /was released: its ownership record wasn’t published within 72 hours\. Add it again with POST \/v1\/domains/);
       assert.match(error(await create(`hello@${unique('elsewhere')}.example`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, /isn’t on one of this workspace’s domains\. Add the domain with POST \/v1\/domains/);
-      assert.deepEqual(await hosts(pending.id), []);
+      assert.deepEqual(await hosts(released.id), []);
+      const never = await claim('rx-never', false);
 
       // updateInboundDomain on a domain that has never received names how to turn receiving on; acceptSubdomains, hosted,
       // names the hosts call instead.
-      assert.match(error(await local('PATCH', `/v1/inbound/domains/${pending.id}`, { catchAll: 'store' }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message,
-        new RegExp(`doesn’t receive mail yet, so it has no catch-all to change\\. Turn receiving on with POST /v1/inbound/domains/${pending.id}/enable`));
+      assert.match(error(await local('PATCH', `/v1/inbound/domains/${never.id}`, { catchAll: 'store' }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message,
+        new RegExp(`doesn’t receive mail yet, so it has no catch-all to change\\. Turn receiving on with POST /v1/inbound/domains/${never.id}/enable`));
       assert.match(error(await local('PATCH', `/v1/inbound/domains/${own.id}`, { acceptSubdomains: true }), 409, 'HOSTED_RECEIVING_MANAGED').message, new RegExp(escape(`POST /v1/inbound/domains/${own.id}/hosts`)));
       assert.equal(ok(await local('PATCH', `/v1/inbound/domains/${own.id}`, { catchAll: 'store' })).catchAll, 'store');
 
