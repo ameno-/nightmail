@@ -32,7 +32,7 @@
 .mailbox-thread-row[data-selected]:focus-visible { background: var(--color-raised-control-focus); }
 .mailbox-thread-row__top { display: flex; align-items: center; gap: var(--space-8); min-width: 0; font-size: var(--text-sm); line-height: 20px; }
 .mailbox-thread-row__people { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--color-muted); }
-.mailbox-thread-row__count { flex: none; min-width: 20px; height: 18px; padding: 0 var(--space-6); border-radius: var(--radius-xs); background: var(--color-chip); color: var(--color-muted); font-size: var(--text-label); line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+.mailbox-thread-row__count { flex: none; min-width: 20px; height: 18px; padding: 0 var(--space-6); border-radius: var(--radius-xs); background: var(--color-chip); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
 .mailbox-thread-row[data-selected] .mailbox-thread-row__count { background: var(--color-surface); }
 .mailbox-thread-row__time { flex: none; min-width: 52px; color: var(--color-muted); font-size: var(--text-xs); text-align: right; font-variant-numeric: tabular-nums; }
 .inbound-thread-row__subject { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--color-text); font-size: var(--text-sm); line-height: 20px; }
@@ -318,8 +318,10 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 /* Ask your agent (the add screen's dialog): connection status, setup for a client not connected yet, and prompts. */
 .ui-dialog.ritual-agent-dialog { width: min(640px, calc(100vw - 32px)); }
 .ritual-agent__content { gap: var(--space-16); }
-.ritual-agent__mark { display: inline-block; flex: none; width: 8px; height: 8px; margin-inline-end: var(--space-8); border-radius: 50%; background: var(--color-neutral-marker); vertical-align: 1px; }
-.ritual-agent__mark[data-connected] { background: var(--color-success-marker); }
+/* The connection's dot, centred on the status's first line: a box of the line's height with the dot drawn in it. */
+.ritual-agent__mark { display: inline-flex; align-items: center; height: 1lh; margin-inline-end: var(--space-8); vertical-align: top; }
+.ritual-agent__mark::before { content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--color-neutral-marker); }
+.ritual-agent__mark[data-connected]::before { background: var(--color-success-marker); }
 .ritual-agent__status { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .ritual-agent__status strong { color: var(--color-text); font-weight: 500; }
 .ritual-agent__heading { margin: 0; font-size: var(--text-xs); font-weight: 600; line-height: var(--leading-xs); color: var(--color-muted); }
