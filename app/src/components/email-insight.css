@@ -12,8 +12,8 @@
 .ss__title { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .ss__error { color: var(--color-muted); }
 .ss__fixes { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.ss__fix { display: inline-flex; align-items: baseline; gap: var(--space-6); max-width: 100%; padding-block: var(--space-4); border-radius: var(--radius-xs); color: var(--color-text); text-decoration: none; text-wrap: pretty; }
-.ss__fix > svg { flex: none; width: 12px; height: 12px; color: var(--color-faint); transform: translateY(1px); }
+.ss__fix { display: inline-flex; align-items: flex-start; gap: var(--space-6); max-width: 100%; padding-block: var(--space-4); border-radius: var(--radius-xs); color: var(--color-text); text-decoration: none; text-wrap: pretty; }
+.ss__fix > svg { flex: none; width: 12px; height: 1lh; color: var(--color-faint); }
 @media (hover: hover) and (pointer: fine) { a.ss__fix:hover { text-decoration: underline; text-underline-offset: 3px; } a.ss__fix:hover > svg { color: var(--color-text); } }
 a.ss__fix:focus-visible { text-decoration: underline; text-underline-offset: 3px; }
 a.ss__fix:focus-visible > svg { color: var(--color-text); }
