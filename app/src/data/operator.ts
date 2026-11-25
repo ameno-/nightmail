@@ -32,6 +32,8 @@ export interface OperatorTimelineItem { at: string; kind: TimelineKind; title: s
 export interface OperatorAction { at: string; workspaceId: string; action: string; operatorId: string | null; operatorEmail: string | null; via: string | null; reason: string | null; ticketRef: string | null; requestId: string | null; before: unknown; after: unknown; details: unknown }
 /** The sign-up limit (api/src/signups.ts) and what fills it: accounts that signed up, places held for waiting addresses, and the rest. */
 export interface SignupPlaces { limit: number; signedUp: number; held: number; waiting: number; open: number }
+/** How a raise gives out the places it adds: held for the oldest waiting addresses (each emailed), or open to anyone. */
+export type SignupRaise = 'hold' | 'open'
 /** One workspace on the Sign-ups tab. standing is pause while its sending is paused, and null without hosted sending. */
 export interface WorkspaceSummary { id: string; name: string; createdAt: string; owner: string | null; domain: string | null; domains: number; sent: number; standing: StandingStep | null }
 /** One address on the waitlist: a verified sign-in nothing admitted yet (api/src/account-login.ts). */
@@ -50,6 +52,28 @@ export interface OperatorHealth {
   routes: { route: string; count: number; errors: number; p50Ms: number; p95Ms: number; slowestMs: number; behind: boolean }[] | null
   errors: { kind: 'code' | 'sqlstate' | 'error'; code: string; count: number }[] | null; requests: { count: number; errors: number } | null
   database: { connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number; diskBytes: number | null } | null
+}
+/**
+ * Glass (GET /v1/operator/glass, api/src/glass.ts): everything going on in the installation in one read, cached 30 s.
+ * Money is integer micro-cents as strings; a Count stopped at its cap when atLeast.
+ */
+export type GlassCount = { n: number; atLeast: boolean }
+export type GlassHour = { accepted: number; marketing: number; delivered: number; bounced: number; complained: number }
+export type GlassGrade = 'A+' | 'A' | 'B' | 'C' | 'D' | 'F'
+export interface Glass {
+  generatedAt: string
+  signups: { places: SignupPlaces; today: { open: number; waitlist: number }; week: { open: number; waitlist: number }; daily: number[]
+    funnel: { signedUp: number; domainAdded: number; domainVerified: number; keyCreated: number; firstSend: number } }
+  sending: { perMinute: number; minutes: number[]; today: { transactional: number; marketing: number }; hourly: GlassHour[]; queued: GlassCount; held: GlassCount
+    campaigns: { id: string; name: string; workspace: string; total: number; released: number; rate: number | null }[]; sendApi: { requests: number; p50Ms: number; p95Ms: number } | null }
+  delivery: { grades: Record<GlassGrade, number>; calibrating: number; paused: number; held: number }
+  receiving: { today: number; spam: number; atLeast: boolean; hourly: number[] }
+  money: { creditToday: string; creditMonth: string; creditDaily: number[]; owed: string; owing: number; usageMonth: string }
+  system: { status: 'ok' | 'warning' | 'critical' | 'stale'; measuredAt: string | null
+    alerts: { critical: number; warning: number; top: { key: string; label: string; severity: 'critical' | 'warning'; words: string; since: string }[] }
+    ses: { regions: number; maxSendRate: number; max24HourSend: number; sentLast24Hours: number; checkedAt: string | null } | null
+    deploy: { sha: string | null; at: string | null } }
+  visitors: { views: number; visitors: GlassCount; hourly: number[]; referrers: { host: string; views: number }[]; through: string | null }
 }
 /** Abuse monitoring (/v1/operator/abuse/*): accounts and workspaces that share signals, scored for a person to review. */
 export type AbuseBand = 'low' | 'watch' | 'review' | 'high'
@@ -104,7 +128,8 @@ export const operatorApi = {
   },
   signups: (signal?: AbortSignal) => request<SignupPlaces>(`${base}/signups`, { signal }),
   health: (signal?: AbortSignal) => request<OperatorHealth>(`${base}/health`, { signal }),
-  setSignupLimit: (limit: number, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit }, idempotencyKey: guard.idempotencyKey }),
+  glass: (signal?: AbortSignal) => request<Glass>(`${base}/glass`, { signal }),
+  setSignupLimit: (limit: number, raise: SignupRaise, guard: OperatorGuard) => request<SignupPlaces & { letIn: number; emailed: number; notEmailed: number | null }>(`${base}/signups`, { method: 'PUT', body: { limit, raise }, idempotencyKey: guard.idempotencyKey }),
   allWorkspaces: async (input: { cursor?: string }, signal?: AbortSignal) => {
     const page = await request<{ data: WorkspaceSummary[]; nextCursor: string | null }>(`${base}/signups/workspaces${query({ cursor: input.cursor, limit: 100 })}`, { signal })
     return { items: page.data, nextCursor: page.nextCursor }

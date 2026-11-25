@@ -1,27 +1,38 @@
-import { supportActionsApi, supportApi } from '../../data/support'
+import { supportActionsApi, supportApi, type CurrentSupportConversation } from '../../data/support'
 import { ApiError } from '../../data/types'
 import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
 import { hostedHosts, productName, supportHost } from '../../../../api/src/brand'
 
-// The live transport (support/PROTOCOL.md §1–2, §5): a handoff from Nightmail, then /chat/start or /chat/resume on the support
-// Worker, then one WebSocket. The conversation ID is kept per account and workspace in sessionStorage, so a reload
-// reconnects to the same conversation and another account in this tab never finds it; a lost connection retries with
-// backoff and again as soon as the browser is back online.
+// The live transport (support/PROTOCOL.md §1–2, §5): one continuous conversation per person and workspace.
+// The server is the source of truth: on open without a cached socket URL, GET /v1/support-conversations/current checks
+// for an open chat in this workspace and resumes it via /chat/resume; when none exists, the panel sits in 'ready' until
+// the person sends a message or attaches a screenshot, at which point POST /chat/start { handoff, resume: true } creates
+// or joins it. A lost connection retries with backoff and again as soon as the browser is back online.
 type Started = { conversationId: string; chatToken: string; socketUrl: string; expiresAt: string }
 class StartError extends Error { constructor(readonly status: number, readonly code: string, readonly retryAfter?: number) { super(code) } }
 
-// What rejoins a conversation (PROTOCOL.md §1): its ID, the socket URL until it expires, when it last had a message, and
-// whether the person wrote in it. Two per account and workspace, for this tab: the conversation the panel is in, and the last one
-// the person wrote in on an earlier page, which only "Continue last conversation" opens. A conversation that ended (the
-// server said so, or a day passed without a message: the support Worker closes a chat after 24 hours idle) is forgotten,
-// so nothing asks /chat/resume for one that is gone.
-type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string; activeAt?: number; written?: boolean }
-const IDLE_CLOSE_MS = 24 * 3_600_000
-const storageKey = (userId: string, workspaceId: string, slot: 'conversation' | 'last' = 'conversation') => `bane.support.${slot}.${userId}.${workspaceId}`
-/** Forgets saved conversations: every account's (a sign-out), or only the slots of earlier releases, kept by workspace alone. */
+// What rejoins a conversation on reload without an extra round trip (PROTOCOL.md §1): its ID and the socket URL until
+// its token expires. Keyed by user and workspace in sessionStorage; cleared on sign-out or account change.
+type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string }
+const storageKey = (userId: string, workspaceId: string) => `bane.support.conversation.${userId}.${workspaceId}`
+const draftKey = (mode: 'demo' | 'live', userId: string, workspaceId: string) => `bane.support.draft.${mode}.${userId}.${workspaceId}`
+/** Forgets saved conversations and drafts: every account's (a sign-out), or only legacy slots from earlier releases. */
 export function forgetSaved(all: boolean) {
   try {
-    for (const key of Object.keys(sessionStorage)) if (/^bane\.support\.(conversation|last)\./.test(key) && (all || !/^bane\.support\.\w+\.[^.]+\.[^.]+$/.test(key))) sessionStorage.removeItem(key)
+    for (const key of Object.keys(sessionStorage)) {
+      if (all && /^bane\.support\.(conversation|last|draft)\./.test(key)) sessionStorage.removeItem(key)
+      else if (!all && (/^bane\.support\.last\./.test(key) || (/^bane\.support\.conversation\./.test(key) && !/^bane\.support\.conversation\.[^.]+\.[^.]+$/.test(key)))) sessionStorage.removeItem(key)
+    }
+  } catch { /* Session-only. */ }
+}
+export function loadDraft(mode: 'demo' | 'live', userId: string, workspaceId: string): string {
+  try { return sessionStorage.getItem(draftKey(mode, userId, workspaceId)) ?? '' } catch { return '' }
+}
+export function saveDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, draft: string) {
+  try {
+    const key = draftKey(mode, userId, workspaceId)
+    if (draft) sessionStorage.setItem(key, draft)
+    else sessionStorage.removeItem(key)
   } catch { /* Session-only. */ }
 }
 function load(key: string): Saved | null {
@@ -30,12 +41,10 @@ function load(key: string): Saved | null {
   if (!raw) return null
   let saved: Saved | null = null
   try { saved = JSON.parse(raw) as Saved } catch { /* Not ours: forgotten below. */ }
-  if (typeof saved?.conversationId !== 'string' || (saved.activeAt && Date.now() - saved.activeAt > IDLE_CLOSE_MS)) { save(key, null); return null }
+  if (typeof saved?.conversationId !== 'string') { save(key, null); return null }
   return saved
 }
 const save = (key: string, value: Saved | null) => { try { if (value) sessionStorage.setItem(key, JSON.stringify(value)); else sessionStorage.removeItem(key) } catch { /* Session-only. */ } }
-/** A message in the conversation: it stays open for another day; `written` when it is the person's. */
-const touch = (key: string, written = false) => { const saved = load(key); if (saved) save(key, { ...saved, activeAt: Date.now(), ...written ? { written } : {} }) }
 const fresh = (expiresAt?: string) => Boolean(expiresAt && Date.parse(expiresAt) - Date.now() > 60_000)
 
 // A screenshot upload (§5.1) over XHR, which reports upload progress (fetch doesn't).
@@ -73,6 +82,10 @@ async function post(origin: string, path: string, body: unknown): Promise<Starte
   if (!response.ok || !data?.socketUrl) throw new StartError(response.status, data?.error?.code ?? 'UNAVAILABLE', data?.error?.retryAfter)
   return data
 }
+const currentConversation = async (): Promise<CurrentSupportConversation | null> => {
+  try { return (await supportApi.current()).conversation }
+  catch (error) { throw error instanceof ApiError && error.code !== 'NETWORK_UNAVAILABLE' ? new StartError(error.status ?? 400, error.code) : new StartError(0, 'NETWORK') }
+}
 // The handoff from Nightmail. No token means support signing isn't configured here; a refusal (not a lost network) is final too.
 const handoff = async (shareContent: boolean) => {
   let token: string | null
@@ -84,37 +97,44 @@ const handoff = async (shareContent: boolean) => {
 
 export function createSocketTransport({ origin, userId, workspaceId, resume }: { origin: string; userId: string; workspaceId: string; resume?: string | null }): SupportTransport {
   forgetSaved(false)
-  const key = storageKey(userId, workspaceId), lastKey = storageKey(userId, workspaceId, 'last')
-  // A new page opens Help on a new conversation: the one from before is kept for "Continue last conversation" and never
-  // shown on its own. One the person never wrote in is reused instead, so opening Help again doesn't start another.
-  // ?support=<conversationId> (`resume`) opens that chat conversation, as asked.
-  if (resume) save(key, { conversationId: resume, written: true })
-  else {
-    const before = load(key)
-    if (before && before.written !== false) { save(lastKey, before); save(key, null) }
-  }
+  const key = storageKey(userId, workspaceId)
+  // ?support=<conversationId> (`resume`) opens that chat conversation directly; otherwise keep the workspace's conversation.
+  if (resume) save(key, { conversationId: resume })
   const listeners = new Set<(event: TransportEvent) => void>()
   const emit = (event: TransportEvent) => { for (const listener of listeners) listener(event) }
-  // After a reload, the saved socket URL reconnects directly while it is still valid.
+  // After a reload, the saved socket URL reconnects directly while its token is still valid.
   const saved = load(key)
   let socket: WebSocket | null = null, state: Connection = 'idle'
   let started: Started | null = saved?.socketUrl && fresh(saved.expiresAt) ? { conversationId: saved.conversationId, chatToken: '', socketUrl: saved.socketUrl, expiresAt: saved.expiresAt! } : null
+  let wantCreate = false, connecting: Promise<void> | null = null
   let attempt = 0, retry: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
   let disposed = false, generation = 0
   const setState = (next: Connection, extra: Omit<Extract<TransportEvent, { type: 'connection' }>, 'type' | 'state'> = {}) => { state = next; emit({ type: 'connection', state: next, ...extra }) }
 
-  // /chat/resume for a known conversation (a fresh handoff each time), else /chat/start. One retry on a rejected handoff.
-  async function open(): Promise<Started> {
-    const conversationId = load(key)?.conversationId
+  // Look up the workspace's open conversation from Nightmail (when none is cached locally), resume it if one exists,
+  // or start one only when `wantCreate` is true (the person sent a message, attached a screenshot or asked for a person).
+  async function open(): Promise<Started | null> {
+    let conversationId = load(key)?.conversationId ?? null
     for (let tries = 0; ; tries++) {
       try {
+        if (!conversationId) {
+          const found = await currentConversation()
+          conversationId = found?.id ?? null
+          if (!conversationId && !wantCreate) return null
+        }
         const token = await handoff(false)
-        return conversationId ? await post(origin, '/chat/resume', { conversationId, handoff: token }) : await post(origin, '/chat/start', { handoff: token })
+        return conversationId
+          ? await post(origin, '/chat/resume', { conversationId, handoff: token })
+          : await post(origin, '/chat/start', { handoff: token, resume: true })
       } catch (error) {
         if (!(error instanceof StartError)) throw error
-        if (conversationId && error.status === 404) { save(key, null); return open() }
-        // An email conversation continues by email, never here: Help starts a conversation of its own.
-        if (conversationId && error.code === 'EMAIL_CONVERSATION') { save(key, null); return open() }
+        // Stale or closed conversation, or an email conversation: forget it, then stay ready or start fresh if sending.
+        if (conversationId && (error.status === 404 || error.code === 'EMAIL_CONVERSATION')) {
+          save(key, null)
+          conversationId = null
+          if (!wantCreate) return null
+          continue
+        }
         if (tries === 0 && (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED')) continue
         throw error
       }
@@ -125,73 +145,86 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
     const delay = Math.min(30_000, 1000 * 2 ** attempt++)
     setState('offline', { retryAt: Date.now() + delay })
     clearTimeout(retry)
-    retry = setTimeout(connect, delay)
+    retry = setTimeout(() => { void connect() }, delay)
   }
   function teardown() {
     clearInterval(ping); ping = undefined
     if (socket) { socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null; socket.close(1000); socket = null }
   }
-  async function connect() {
-    if (disposed || state === 'connecting' || (state === 'open' && socket)) return
+  async function connect(options?: { create?: boolean }) {
+    if (options?.create) wantCreate = true
+    if (disposed || (state === 'open' && socket)) return
+    if (state === 'connecting') { if (connecting) await connecting; return }
     clearTimeout(retry)
     const current = ++generation
     setState('connecting')
     teardown()
-    try {
-      // A chat token that hasn't expired reconnects directly; otherwise renew it through /chat/resume.
-      if (!started || !fresh(started.expiresAt)) started = await open()
-    } catch (error) {
-      if (current !== generation) return
-      if (error instanceof StartError && error.code === 'RATE_LIMITED') { setState('unavailable', { reason: 'RATE_LIMITED', retryAt: Date.now() + (error.retryAfter ?? 60) * 1000 }); return }
-      if (error instanceof StartError && (error.code === 'NO_HANDOFF' || error.status >= 400 && error.status < 500 && error.status !== 408)) { setState('unavailable', { reason: error.code }); return }
-      schedule()
-      return
-    }
-    if (current !== generation || disposed) return
-    const previous = load(key), same = previous?.conversationId === started.conversationId
-    save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt, activeAt: same ? previous.activeAt : Date.now(), written: same ? previous.written ?? true : false })
-    let opened = false
-    const ws = socket = new WebSocket(started.socketUrl)
-    ws.onopen = () => {
-      opened = true; attempt = 0
-      setState('open')
-      ping = setInterval(() => send({ type: 'ping' }), 30_000)
-    }
-    ws.onmessage = event => {
-      const message = parseServerMessage(event.data)
-      if (!message) return
-      // GRANT_EXPIRED: account access ended; a fresh handoff renews it and the agent carries on.
-      if (message.type === 'error' && message.code === 'GRANT_EXPIRED') { started = null; teardown(); state = 'idle'; void connect(); return }
-      if (message.type === 'error' && message.code === 'BAD_MESSAGE') console.warn('[support] the server refused a message from the panel', message.message)
-      if (message.type === 'closed' || message.type === 'hello' && message.status === 'closed') save(key, null)
-      else if (message.type === 'message.end') touch(key)
-      else if (message.type === 'history' && message.messages.some(item => item.role === 'user')) touch(key, true)
-      emit({ type: 'server', message })
-    }
-    ws.onclose = event => {
-      if (socket !== ws) return
-      teardown()
-      // 1000: the conversation ended (a closed message came first); nothing to reconnect to.
-      if (opened && event.code === 1000) { setState('idle'); return }
-      // Refused before opening (an expired or revoked token), or closed for an expired token: renew, then reconnect. An
-      // expired token renews at once, without showing the conversation as offline.
-      if (!opened || event.code === 4401 || event.code === 1008) started = null
-      state = 'idle'
-      if (opened && event.code === 4401) void connect()
-      else schedule()
-    }
+    const run = (async () => {
+      let fromCache = false
+      try {
+        // A chat token that hasn't expired reconnects directly; otherwise check Nightmail and resume/start.
+        if (started && fresh(started.expiresAt)) fromCache = true
+        else {
+          const result = await open()
+          if (current !== generation || disposed) return
+          if (!result) {
+            if (wantCreate) { state = 'idle'; void connect({ create: true }); return }
+            setState('ready')
+            return
+          }
+          started = result
+        }
+      } catch (error) {
+        if (current !== generation) return
+        if (error instanceof StartError && error.code === 'RATE_LIMITED') { setState('unavailable', { reason: 'RATE_LIMITED', retryAt: Date.now() + (error.retryAfter ?? 60) * 1000 }); return }
+        if (error instanceof StartError && (error.code === 'NO_HANDOFF' || error.status >= 400 && error.status < 500 && error.status !== 408)) { setState('unavailable', { reason: error.code }); return }
+        schedule()
+        return
+      }
+      if (current !== generation || disposed || !started) return
+      save(key, { conversationId: started.conversationId, socketUrl: started.socketUrl, expiresAt: started.expiresAt })
+      let opened = false
+      const ws = socket = new WebSocket(started.socketUrl)
+      ws.onopen = () => {
+        opened = true; attempt = 0
+        setState('open')
+        ping = setInterval(() => send({ type: 'ping' }), 30_000)
+      }
+      ws.onmessage = event => {
+        const message = parseServerMessage(event.data)
+        if (!message) return
+        // GRANT_EXPIRED: account access ended; a fresh handoff renews it and the agent carries on.
+        if (message.type === 'error' && message.code === 'GRANT_EXPIRED') { started = null; teardown(); state = 'idle'; void connect(); return }
+        if (message.type === 'error' && message.code === 'BAD_MESSAGE') console.warn('[support] the server refused a message from the panel', message.message)
+        if (message.type === 'closed' || message.type === 'hello' && message.status === 'closed') { save(key, null); wantCreate = false }
+        emit({ type: 'server', message })
+      }
+      ws.onclose = event => {
+        if (socket !== ws) return
+        teardown()
+        // 1000: the conversation ended (a closed message came first); nothing to reconnect to.
+        if (opened && event.code === 1000) { setState('idle'); return }
+        // Refused before opening (expired/revoked cached token or closed conversation), or closed for an expired token:
+        // drop the cached socket and renew via open(). A refused cached socket retries immediately without flashing offline.
+        if (!opened || event.code === 4401 || event.code === 1008) started = null
+        state = 'idle'
+        if ((opened && event.code === 4401) || (!opened && fromCache)) void connect()
+        else schedule()
+      }
+    })()
+    connecting = run
+    try { await run } finally { if (connecting === run) connecting = null }
   }
   function send(message: ClientMessage) {
     if (!socket || socket.readyState !== WebSocket.OPEN) return false
     socket.send(JSON.stringify(message))
-    if (message.type === 'user.message') touch(key, true)
     return true
   }
   const online = () => { if (state === 'offline') { attempt = 0; void connect() } }
   window.addEventListener('online', online)
   return {
     kind: 'live',
-    connect: () => { attempt = 0; void connect() },
+    connect: options => { attempt = 0; void connect(options) },
     send,
     // Allow on a consent card (PROTOCOL.md §4.3): the person tells Nightmail with their own session, then the frame says
     // so. The support Worker allows content only if Nightmail's scope agrees, so a failed call still sends the frame.
@@ -209,33 +242,22 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
       return action
     },
     uploads: true,
-    // POST /c/<conversationId>/attachments with the chat token (the one in the socket URL after a reload). A rejected
-    // token renews through /chat/resume, then the upload is tried once more.
+    // POST /c/<conversationId>/attachments with the chat token (the one in the socket URL after a reload). If no
+    // conversation exists yet ('ready'), starts one first; a rejected token renews through /chat/resume once.
     async upload(file, onProgress, signal) {
       const type = await sniff(file)
       if (!type) throw new Error(UPLOAD_ERRORS.UNSUPPORTED_TYPE)
       for (let tries = 0; ; tries++) {
+        if (!started) await connect({ create: true })
         if (!started) throw new Error(`Not connected to ${productName} support yet. Try again in a moment.`)
         const token = started.chatToken || new URL(started.socketUrl).searchParams.get('token') || ''
         const { status, body } = await postImage(`${origin}/c/${encodeURIComponent(started.conversationId)}/attachments`, token, type, file, onProgress, signal)
         if (status === 201 && body?.attachment?.id) return { id: body.attachment.id }
-        if (status === 401 && tries === 0) { started = null; generation++; teardown(); state = 'idle'; await connect(); continue }
+        if (status === 401 && tries === 0) { started = null; generation++; teardown(); state = 'idle'; await connect({ create: true }); continue }
         throw new Error(UPLOAD_ERRORS[body?.error?.code ?? ''] ?? 'The upload failed. Try again.')
       }
     },
-    restart() { save(key, null); started = null; generation++; teardown(); state = 'idle'; attempt = 0; void connect() },
-    last: () => { const last = load(lastKey); return last && last.conversationId !== load(key)?.conversationId ? last.conversationId : null },
-    // The last conversation becomes the panel's. The one it leaves is kept as the last if the person wrote in it, else
-    // ended: nothing in it to keep, and it holds account access until it closes.
-    continueLast() {
-      const last = load(lastKey), current = load(key)
-      if (!last) return
-      if (current?.written) save(lastKey, current)
-      else { if (current) send({ type: 'end' }); save(lastKey, null) }
-      save(key, last)
-      started = last.socketUrl && fresh(last.expiresAt) ? { conversationId: last.conversationId, chatToken: '', socketUrl: last.socketUrl, expiresAt: last.expiresAt! } : null
-      generation++; teardown(); state = 'idle'; attempt = 0; void connect()
-    },
+    restart() { save(key, null); started = null; wantCreate = false; generation++; teardown(); attempt = 0; setState('ready') },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

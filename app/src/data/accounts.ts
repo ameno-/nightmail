@@ -18,6 +18,8 @@ export const accountApi = {
     if (new URL(url).protocol !== 'https:') throw new Error('Invalid sign-in redirect.')
     return url
   },
+  // A sign-in link to an address a raise let in. The answer is the same whether or not one was sent.
+  signInLink: (email: string) => request<{ requested: true }>('/api/auth/sign-in/link', { method: 'POST', body: { email } }),
 }
 export function useAccounts(enabled = true) {
   return useQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), enabled, staleTime: 30_000, gcTime: Infinity })

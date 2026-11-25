@@ -3,9 +3,13 @@ import { recentFailedRequestIds, request } from './live'
 // The in-app support handoff (hosted): POST /v1/contact-support opens a support conversation for this workspace.
 // `url` is the support platform's page for it, when one is configured; otherwise the reference `id` goes in an email.
 export type SupportHandoff = { id: string; url: string | null; token: string | null; expiresAt: string; shareContent: boolean }
+/** The signed-in person's open chat conversation in the current workspace, from GET /v1/support-conversations/current. */
+export type CurrentSupportConversation = { id: string; status: 'open' | 'ticketed'; createdAt: string; lastMessageAt: string | null }
 /** One email waiting for its sender's sign-in, as GET /v1/support-conversations/{id}/claim shows it to that sender. */
 export type SupportPendingEmail = { id: string; messageId: string; subject: string | null; receivedAt: string | null }
 export const supportApi = {
+  /** The open support chat conversation for this person and workspace, or null when none is open. */
+  current: () => request<{ conversation: CurrentSupportConversation | null }>('/v1/support-conversations/current'),
   contact: (input: { shareContent: boolean; message?: string }) => {
     const requestIds = recentFailedRequestIds()
     return request<SupportHandoff>('/v1/contact-support', { method: 'POST', body: {

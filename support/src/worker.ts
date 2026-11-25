@@ -38,11 +38,11 @@ function cors(env: Env, request: Request): Record<string, string> {
 const socketUrl = (env: Env, conversationId: string, token: string) => `${env.PUBLIC_URL.replace(/^http/, 'ws')}/c/${conversationId}?token=${encodeURIComponent(token)}`;
 const conversation = (env: Env, id: string) => env.CONVERSATION.get(env.CONVERSATION.idFromName(id));
 
-async function readHandoff(request: Request): Promise<{ handoff?: string; conversationId?: string } | null> {
+async function readHandoff(request: Request): Promise<{ handoff?: string; conversationId?: string; resume?: boolean } | null> {
   if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return null;
   const text = await request.text();
   if (text.length > 8192) return null;
-  try { const body = JSON.parse(text) as Record<string, unknown>; return { handoff: typeof body.handoff === 'string' ? body.handoff : undefined, conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined }; } catch { return null; }
+  try { const body = JSON.parse(text) as Record<string, unknown>; return { handoff: typeof body.handoff === 'string' ? body.handoff : undefined, conversationId: typeof body.conversationId === 'string' ? body.conversationId : undefined, resume: body.resume === true }; } catch { return null; }
 }
 
 async function startChat(request: Request, env: Env): Promise<Response> {
@@ -55,6 +55,21 @@ async function startChat(request: Request, env: Env): Promise<Response> {
     : fail(401, 'HANDOFF_INVALID', 'That handoff is not valid or has expired. Get a fresh one and retry.', headers);
   const { handoff } = checked;
   if (handoff.usedAt) return fail(409, 'HANDOFF_USED', 'This handoff already opened a conversation. Get a fresh one.', headers);
+  // Continuous chat: when the panel asks to resume, rejoin this person and workspace's open chat instead of starting another.
+  if (body.resume && !handoff.message) {
+    const existing = await env.DB.prepare("SELECT id FROM conversations WHERE channel = 'chat' AND user_id = ? AND workspace_id = ? AND status <> 'closed' ORDER BY updated_at DESC, created_at DESC LIMIT 1")
+      .bind(handoff.userId, handoff.workspace.id).first<{ id: string }>();
+    if (existing) {
+      const admitted = await conversation(env, existing.id).admits({ userId: handoff.userId });
+      if (admitted.ok) {
+        const claimed = await env.DB.prepare('INSERT INTO handoffs_used (jti, conversation_id, used_at) VALUES (?, ?, ?) ON CONFLICT (jti) DO NOTHING').bind(handoff.id, existing.id, Date.now()).run();
+        if (!claimed.meta.changes) return fail(409, 'HANDOFF_USED', 'This handoff already opened a conversation. Get a fresh one.', headers);
+        const chat = await chatToken(env.SUPPORT_ROOT_SECRET, existing.id, handoff.userId);
+        return json({ conversationId: existing.id, chatToken: chat.token, socketUrl: socketUrl(env, existing.id, chat.token), expiresAt: chat.expiresAt }, 200, headers);
+      }
+      if (admitted.code === 'UNAVAILABLE') return fail(503, 'SUPPORT_UNAVAILABLE', 'Support could not open your account just now. Try again in a minute.', headers);
+    }
+  }
   if (env.CHAT_START && !(await env.CHAT_START.limit({ key: `user:${handoff.userId}` })).success) return fail(429, 'RATE_LIMITED', 'Too many conversations started. Try again in a minute.', { ...headers, 'retry-after': '60' }, { retryAfter: 60 });
   const now = Date.now(), dayAgo = now - 86_400_000;
   const today = await env.DB.prepare('SELECT count(*) AS n FROM conversations WHERE user_id = ? AND created_at > ?').bind(handoff.userId, dayAgo).first<{ n: number }>();

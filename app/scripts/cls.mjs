@@ -65,13 +65,18 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above);
 // `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
-// `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice.
+// `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice;
+// `skipped` is a workspace whose onboarding domain step this browser skipped (data/onboarding.ts).
 // dana owns an established hosted workspace (and is a Bane operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [
   ['Overview', '/overview', { from: '/logs' }],
   ['Overview · setup', '/overview', { user: 'nia' }],
+  // No domain yet, onboarding's domain step skipped: Overview's first card asks for one.
+  ['Overview · no domain', '/overview', { user: 'pia', skipped: 'ws_skipped' }],
+  // A verified domain, nothing sent: the same card slot offers a test to yourself, an API key and the cURL example.
+  ['Overview · first send', '/overview', { user: 'ren' }],
   // Switching the time range keeps the old figures up while the new ones load, then tweens, morphs and crossfades them.
   ['Overview · range', '/overview', { from: '/overview', click: '30d' }],
   // A stream scopes the figures and Latest emails; a figure's tile opens Logs on that status, over the same range.
@@ -160,6 +165,10 @@ const pages = ids => [
   ['Domain', `/domains/${ids.domain}`, { from: '/domains' }],
   // A domain with a custom MAIL FROM: its MX and SPF records join the table, each with a menu to change it.
   ['Domain · custom MAIL FROM', `/domains/${ids.sendingDomain}`, { from: '/domains' }],
+  // Added two hours ago, its records still missing at its DNS host: the setup banner over the records (Overview · setup shows it too).
+  ['Domain · records missing', `/domains/${ids.stuckDomain}`, { user: 'nia', from: '/domains' }],
+  // Every record in public DNS, SES not verified yet: "Your records are correct" over the records.
+  ['Domain · records correct', `/domains/${ids.correctDomain}`, { user: 'nia', from: '/domains' }],
   ['API keys', '/api-keys', { from: '/overview' }],
   ['Settings', '/settings', { from: '/overview' }],
   ['Settings · members', '/settings#members', { from: '/settings' }],
@@ -182,7 +191,7 @@ const pages = ids => [
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
   ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator', click: 'Waitlist' }],
-  // Sign-ups: the limit and what fills it over every workspace; Set limit opens its one field once the numbers are in.
+  // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.
   ['Operator · sign-ups', '/operator?view=signups', { from: '/operator', click: 'Sign-ups' }],
   ['Operator · sign-up limit dialog', '/operator?view=signups', { dialog: 'Set limit' }],
   // Abuse: clusters of related accounts beside their facet rail, one cluster beside the list of the others, the alert
@@ -193,6 +202,10 @@ const pages = ids => [
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
+  // Glass: every group's rows are fixed, so the figures (and their 30-second refresh) land in place. Anyone but an
+  // operator gets the app's "Page not found".
+  ['Glass', '/glass', { from: '/operator' }],
+  ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The support inbox (staff): Needs you and its counts, Agent handling, a conversation beside its customer panel, and
   // on a phone the panel's sheet.
   ['Support', '/support', { from: '/overview' }],
@@ -227,6 +240,10 @@ const pages = ids => [
   ['Onboarding · AWS production access', '/onboarding', { user: 'di', dialog: 'Request production access' }],
   ['Onboarding · AWS setting up', '/onboarding', { user: 'ed' }],
   ['Onboarding · AWS disconnecting', '/onboarding', { user: 'hal' }],
+  // Approving an agent's device code (features/connect, api/src/agent-setup.ts): from the link the agent shows, with its
+  // code, and without one, where the code is typed.
+  ['Connect · agent code', `/connect?code=${ids.deviceCode}`, {}],
+  ['Connect · type a code', '/connect', {}],
   // Sending from a connected AWS account: its rows in Settings → Sending, and the banner for a health finding.
   ['Settings · sending · AWS', '/settings#sending', { user: 'gil' }],
   // Two accounts in one browser: a cold load as the default (dana), then switching to nia's workspace from the switcher.
@@ -236,9 +253,16 @@ const pages = ids => [
   ['Signed out · deep link', '/overview', { user: null }],
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
   // A hosted sign-in nothing admitted lands here, with its address in a short-lived cookie (api/src/account-login.ts).
-  ['Signed out · waitlist', '/?auth=waitlist', { user: null, waitlist: 'mara.quinn@example.net' }],
-  // The same refusal for a GitHub or password sign-in with a place held for it or open: how to take it instead.
+  ['Signed out · waitlist', '/?auth=waitlist&position=4', { user: null, waitlist: 'mara.quinn@example.net' }],
+  // The same refusal for a GitHub or password sign-in that showed nothing of its address, with a place open for it: a
+  // sign-in link to it in one click.
   ['Signed out · waitlist, place ready', '/?auth=waitlist&place=ready', { user: null, waitlist: 'kwame.mensah@example.net' }],
+  // A place held for its address that the sign-in didn't show is the person's (GitHub without it verified): a sign-in
+  // link to it in one click; and the refusal after a used or expired link.
+  ['Signed out · waitlist, place held', '/?auth=waitlist&place=held', { user: null, waitlist: 'ines.duarte@example.net' }],
+  ['Signed out · waitlist, link expired', '/?auth=waitlist&link=expired', { user: null, waitlist: 'tomas.berg@example.net' }],
+  // The emailed sign-in link opens Overview signed out, saying a place is held.
+  ['Signed out · sign-in link', '/overview?link=AAAAAAAAAAAAAAAAAAAAAAAA.BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', { user: null }],
   // The public legal pages: signed out from the homepage and between documents, and signed in from the sidebar.
   ['Legal', '/legal', { user: null, from: '/legal/terms', click: 'Overview' }],
   ['Legal · terms', '/legal/terms', { user: null, from: '/', still: true }],
@@ -255,6 +279,14 @@ const pages = ids => [
   // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
   ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
   ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
+  // The other comparisons, from the calculator's Compare line.
+  ['Compare · AgentMail', '/compare/agentmail', { user: null, from: '/pricing', click: 'AgentMail' }],
+  ['Compare · Bird', '/compare/bird', { user: null, from: '/pricing', click: 'Bird' }],
+  ['Compare · Mailgun', '/compare/mailgun', { user: null, from: '/pricing', click: 'Mailgun' }],
+  ['Compare · Mailjet', '/compare/mailjet', { user: null, from: '/pricing', click: 'Mailjet' }],
+  ['Compare · Mandrill', '/compare/mandrill', { user: null, from: '/pricing', click: 'Mandrill' }],
+  ['Compare · Postmark', '/compare/postmark', { user: null, from: '/pricing', click: 'Postmark' }],
+  ['Compare · SendGrid', '/compare/sendgrid', { user: null, from: '/pricing', click: 'SendGrid' }],
   ['Support chat', '/logs', { from: '/overview', support: true }],
   ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
@@ -298,7 +330,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
+const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -468,6 +500,8 @@ async function measure(browser, job, fx) {
   const work = (async () => {
     if (job.waitlist) await context.addCookies([{ name: 'nightmail.waitlist', value: encodeURIComponent(job.waitlist), url: origin }]);
     if (job.user) await context.addCookies([job.user].flat().map((user, slot) => ({ name: slot ? `nightmail.session_token.${slot}` : 'nightmail.session_token', value: encodeURIComponent(fx.sessions[user].cookie), url: origin, httpOnly: true })));
+    // A signed-in browser has been to the dashboard, which remembers it: the marketing pages ask for its session (data/live.ts, sessionLikely).
+    if (job.user) await context.addInitScript(() => { try { localStorage.setItem('nightmail.session', 'in'); } catch {} });
     await context.addInitScript(probe);
     // Privacy mode on (lib/privacy.ts; off by default), so the masking checks and the review screenshots see addresses masked.
     // (Init scripts run in every frame too, and an email preview's sandboxed frame has no storage.)
@@ -483,6 +517,8 @@ async function measure(browser, job, fx) {
     if (job.support) await context.addInitScript(() => sessionStorage.setItem('nightmail.support', 'demo'));
     // UI notes mode, as an operator turns it on (lib/ui-notes-mode.ts).
     if (job.notes) await context.addInitScript(() => localStorage.setItem('nightmail.ui-notes', 'on'));
+    // Onboarding's domain step skipped in this browser (data/onboarding.ts), so a workspace with no domain opens the dashboard.
+    if (job.skipped) await context.addInitScript(workspace => { try { localStorage.setItem(`nightmail.onboarding.domain.${workspace}`, 'done'); } catch {} }, job.skipped);
     // Overview's detail column hidden, as its toggle leaves it (features/overview/panel.ts).
     if (job.panel) await context.addInitScript(panel => { try { localStorage.setItem('nightmail.overview-panel', panel); } catch {} }, job.panel);
     page = await context.newPage();
@@ -508,6 +544,14 @@ async function measure(browser, job, fx) {
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
+    // A price page paints from its HTML first and its app takes over at the reader's first key or touch (app/price-pages.ts,
+    // features/pricing/index.tsx): wake it, as a reader would, so the painted page and the takeover are both measured and
+    // an in-app click lands in the app.
+    if (await page.evaluate(() => !!document.getElementById('price-shell'))) {
+      await page.keyboard.press('Shift');
+      await page.waitForFunction(() => !document.getElementById('price-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
+      await settle(page, net);
+    }
     if (job.support) {
       // Open the chat and let the greeting finish: the panel is idle and no caret is left in it.
       const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
@@ -620,9 +664,9 @@ async function measure(browser, job, fx) {
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
     if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop', job.user !== null));
-    // Overview's latest emails reserve as many 28px rows as reach the card's bottom inset (features/overview/latest.ts):
-    // the list must end less than a row above that inset (the card's top padding: Help's taller bottom padding only
-    // applies in one column) and never past it.
+    // Overview's latest emails reserve as many 32px rows as reach the page's bottom edge (features/overview/latest.ts):
+    // the list must end less than a row above it (Help's taller bottom padding only applies in one column) and never
+    // past it.
     if (job.device === 'desktop' && job.path === '/overview') {
       const gap = await page.evaluate(() => {
         const list = document.querySelector('.ov-latest'), surface = document.querySelector('.page-surface');
@@ -630,7 +674,7 @@ async function measure(browser, job, fx) {
         const bottom = surface.getBoundingClientRect().bottom - parseFloat(getComputedStyle(surface).paddingTop);
         return Math.round(bottom - list.getBoundingClientRect().bottom - surface.scrollTop);
       });
-      if (gap !== null && (gap < 0 || gap >= 28)) problems.push(`Latest emails end ${gap}px above the card's bottom inset (expected 0–27): latest.ts's fixed heights are out of date`);
+      if (gap !== null && (gap < 0 || gap >= 32)) problems.push(`Latest emails end ${gap}px above the page's bottom edge (expected 0–31): latest.ts's fixed heights are out of date`);
     }
     if (result.cls > LIMIT || process.env.CLS_SHOTS) {
       await page.evaluate(() => { for (const n of window.__cls.nodes) if (n.isConnected && n.style) n.style.outline = '2px solid #f0f'; });
@@ -844,12 +888,12 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
-    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   // Multi-step jobs (Support chat, live rules, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);

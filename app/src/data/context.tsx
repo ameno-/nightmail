@@ -1,14 +1,14 @@
-import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ReactNode } from 'react'
+import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { aborted, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, takeInterruptedWrite, type RequestScope } from './live'
+import { aborted, asksOnlyIfLikely, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, rememberSession, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, sessionLikely, takeInterruptedWrite, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
-import { Alert, Button, PageHeader, ToastScope, useToast } from '../components/ui'
+import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
@@ -23,6 +23,7 @@ import { analytics } from '../lib/analytics'
 import { Analytics } from '../components/Analytics'
 import { NightmailWordmark } from '../components/NightmailLogo'
 import { isKnownPath } from '../lib/routes'
+import { DESIGN_SHEET_PATH, designSheetEnabled } from '../lib/design-sheet'
 
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
@@ -71,7 +72,7 @@ const authMessages: Record<string, string> = {
   method_required: 'Sign in again using the authentication method required by this installation.',
   interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
   account_limit: 'This browser has the most accounts it can hold. Sign out of one to add another.',
-  waitlist: `${productName} isn’t open to the public yet. We’ll email you when it opens.`,
+  waitlist: `${productName} is full for now. You’re on the waitlist, and we’ll email you as soon as a place opens.`,
   error: 'Sign-in didn’t finish. Check that you used your invited or approved account.',
 }
 // The section of the current page, without a record from the previous account or workspace in it.
@@ -109,9 +110,12 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
   const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
+  // A visitor on a marketing page with no trace of a session here is signed out, without asking (live.ts, sessionLikely).
+  if (!override && asksOnlyIfLikely(window.location) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
   let result: Identity
   try { result = await read() }
   catch (error) {
+    if (!override && error instanceof ApiError && error.status === 401 && error.code === 'AUTH_REQUIRED') rememberSession(false)
     if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
     else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
@@ -126,6 +130,7 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   if (!override) {
     selectAccount(result.id)
     selectWorkspace(result.multiTenant ? result.workspaceId : null)
+    rememberSession(true)
   }
   return result
 }
@@ -170,22 +175,49 @@ function waitlistAddress() {
   const cookie = document.cookie.split(';').map(part => part.trim()).find(part => /^(?:__Host-)?nightmail\.waitlist=/.test(part))
   try { return cookie ? decodeURIComponent(cookie.slice(cookie.indexOf('=') + 1)) || null : null } catch { return null }
 }
-// ?place=ready: a place is held for the address, or open, but GitHub or a password proves no mailbox, so the API says how
-// to take it instead of waiting.
+// What the refusal says (api/src/account-login.ts). ?place=held (a place is held for the address) or ?place=ready (one is
+// open), but the sign-in didn't show the address is the person's (GitHub without it as its verified primary email, a
+// password, a Google account on another provider's address): one click emails it a sign-in link. Otherwise the address
+// waits, every place taken, and ?position=N says where in the order a raise lets the waitlist in (1 is next); someone
+// told they're in who signed in with another address asks for a link to that one. ?link=expired: the sign-in link it
+// followed was used or ran out.
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
-  const [email] = useState(waitlistAddress), [ready] = useState(() => new URLSearchParams(window.location.search).get('place') === 'ready')
+  const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
+  const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
+  const position = /^[1-9]\d{0,6}$/.test(search.get('position') ?? '') ? Number(search.get('position')) : null
   const who = email ? <bdi data-own-address="">{email}</bdi> : null
-  return <SignedOutPage title={`${productName} isn’t open to the public yet`}>
-    {ready ? <p>There’s a place for {who ?? 'you'}: sign in with an emailed link or Google to take it.</p>
-      : <p>We’ll email {who ?? 'you'} when it opens.</p>}
+  return <SignedOutPage title={ready ? `There’s a place for you in ${productName}` : `${productName} is full for now`}>
+    {expired ? <Alert tone="info">That sign-in link was already used or has expired. Ask for a new one below.</Alert> : null}
+    {ready ? <p>This sign-in didn’t confirm {who} is yours. GitHub counts only a verified primary email. Get a sign-in link sent to it to take your place.</p>
+      : <><p><strong>{position ? `You’re number ${position.toLocaleString('en-US')} on the waitlist.` : 'You’re on the waitlist.'}</strong> We’ll email {who ? <>you at {who}</> : 'you'} as soon as a place opens.</p>
+        <p className="muted">Got an email saying you’re in? Sign in with that address, or get a sign-in link sent to it.</p></>}
+    <SignInLinkForm to={ready ? email : null} />
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
-    <Button variant="primary" loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
+    <Button variant={ready ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
   </SignedOutPage>
 }
+// A sign-in link to an address with a place (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
+// place is held for it or open, in one click, else the address typed. The answer never says whether there is a place.
+// Its words replace the hint in one slot sized for the longest, so asking shifts nothing.
+const linkLines = { idle: 'The link works once, for 30 minutes.', sent: 'If there’s a place for that address, a link is on its way.', failed: 'Couldn’t ask for a link. Try again in a few minutes.' }
+function SignInLinkForm({ to }: { to: string | null }) {
+  const [typed, setTyped] = useState(''), [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
+  async function send(event: FormEvent) {
+    event.preventDefault()
+    setState('sending')
+    try { await accountApi.signInLink(to ?? typed.trim()); setState('sent') } catch { setState('failed') }
+  }
+  const shown = state === 'sending' ? 'idle' : state
+  return <form className="signed-out__link-form" onSubmit={event => void send(event)}>
+    {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input id="waitlist-link-address" type="email" autoComplete="email" required value={typed} onChange={event => { setTyped(event.target.value); setState('idle') }} /></Field>}
+    <Button type="submit" variant={to ? 'primary' : 'secondary'} loading={state === 'sending'} data-analytics="sign-in/waitlist-link">Email me a sign-in link</Button>
+    <p className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === shown || undefined}>{linkLines[key]}</span>)}</p>
+  </form>
+}
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
-export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path === '/pricing' || path.startsWith('/compare/') || path.startsWith('/support/continue/')
+export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path === '/pricing' || path.startsWith('/compare/') || path.startsWith('/support/continue/') || (designSheetEnabled && path === DESIGN_SHEET_PATH)
 export function ApiProvider({ children }: { children: ReactNode }) {
   // The docs, the legal pages and the price pages are public: they render signed out, and /v1/me only adds the workspace's context.
   const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
@@ -349,7 +381,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function redirectAdd() {
     const callback = new URL(window.location.pathname, window.location.origin)
-    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place')
+    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
     try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
     catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : errorText(error, 'Couldn’t add an account.'), 'error') }
   }
@@ -423,7 +455,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     callback.pathname = path === '/' || path === '/pricing' || path.startsWith('/compare/') || !isKnownPath(path) ? '/overview' : path
     callback.search = window.location.search
     callback.hash = window.location.hash
-    callback.searchParams.delete('auth'); callback.searchParams.delete('place')
+    callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
     // Analytics: this signed-out page's session rides in the return URL to the sign-in callback, which links it to the
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()
@@ -454,6 +486,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // /health says which this is.
   // Start alongside /v1/me when no ready dashboard session is remembered so signed-out visitors avoid a second round trip.
   const authResult = new URLSearchParams(window.location.search).get('auth')
+  const signInLink = !publicRoute && /^[\w-]+\.[\w-]+$/.test(new URLSearchParams(window.location.search).get('link') ?? '')
   const checkHome = window.location.pathname === '/' && authResult !== 'waitlist' && (signedOut || (!invitation && !dashboardLikelyReady(selectedWorkspace())))
   const home = useQuery({ queryKey: ['public-home'], enabled: checkHome, staleTime: Infinity, retry: false, queryFn: async ({signal}) => {
     const multiTenant = (await request<{multiTenant?: boolean} | null>('/health', {signal}))?.multiTenant === true
@@ -463,7 +496,9 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const authNotice = authError ? <Alert tone="danger">{String(authError)}</Alert>
     : authResult && authMessages[authResult] ? <Alert tone={authResult === 'interaction_required' || authResult === 'waitlist' ? 'info' : 'danger'}>{authMessages[authResult]}</Alert>
     : notice ? <Alert tone="danger">{notice}</Alert>
-    : invitation && <Alert tone="info" title="You have a workspace invitation">Sign in with an emailed link to the invited address, or its Google account. You join only after you confirm.</Alert>
+    : invitation ? <Alert tone="info" title="You have a workspace invitation">Sign in with an emailed link to the invited address, or its Google account. You join only after you confirm.</Alert>
+    // A sign-in link (api/src/signups.ts): the sign-in from this page takes the place for the address it went to.
+    : signInLink && <Alert tone="info" title="There’s a place for you">Sign in with any account to take it. The link works once.</Alert>
   // M9: an account whose only way in is the invitation signs in with no workspace, so /v1/me is 401 while
   // the invitation itself is readable. It gets the same review; nothing joins until the recipient clicks Join.
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'

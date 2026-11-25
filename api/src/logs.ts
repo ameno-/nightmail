@@ -121,7 +121,7 @@ function logAccess(c: Ctx, q: Filters, mailAccess: (a: Actor) => MailboxAccess |
   const a = actor(c);
   if (q.region) region(c.env, q.region);
   const access = mailAccess(a), onlyReceived = receivedStatus(q.status);
-  if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? unrestrictedRequired('Received mail requires a credential without domain restrictions.', { permission: 'receivedMail', level: 'read' }) : denied('ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.', { permission: 'receivedMail', level: 'read' });
+  if ((q.direction === 'received' || onlyReceived) && !access) throw a.domains.length ? unrestrictedRequired(a, 'Received mail needs', { permission: 'receivedMail', level: 'read' }) : denied('ADMIN_REQUIRED', 'Received mail requires a dashboard session or a manage credential.', { permission: 'receivedMail', level: 'read' });
   return { a, access, onlyReceived, delivery: !!access && readsDelivery(a, access) };
 }
 

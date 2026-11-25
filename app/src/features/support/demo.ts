@@ -160,7 +160,7 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
     await wait(450)
     if (id !== conversation) return
     emit({ type: 'connection', state: 'open' })
-    server({ type: 'hello', conversationId: `conv_demo${id}`, channel: 'chat', status: 'open', agent: { name: `${productName} support`, ai: true }, customer: { firstName }, workspace, contentAccess: false, busy: false })
+    server({ type: 'hello', conversationId: `conv_demo${id}`, channel: 'chat', status: 'open', agent: { name: `${productName} Support`, ai: true }, customer: { firstName }, workspace, contentAccess: false, busy: false })
     server({ type: 'history', messages: [], pending: { consent: null, ticket: null } })
   }
 
@@ -220,8 +220,6 @@ export function createDemoTransport({ firstName, workspace }: { firstName: strin
       })
     },
     restart() { seq = 0; void start() },
-    last: () => null,
-    continueLast() {},
     dispose() { clear(); conversation++; listeners.clear(); if (debug.transport === transport) delete (window as { __baneSupportDemo?: unknown }).__baneSupportDemo },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
   }

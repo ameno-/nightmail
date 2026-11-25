@@ -28,7 +28,7 @@ export function useAdaptivePageSize(minimum = 5, maximum = 20, scope?: string, o
       if (!matches(SHELL_COMPACT)) {
         const style = getComputedStyle(surface)
         const tableStyle = getComputedStyle(table)
-        const rowHeight = parseFloat(tableStyle.getPropertyValue('--table-row-height')) || parseFloat(style.getPropertyValue('--row-height')) || 53
+        const rowHeight = parseFloat(tableStyle.getPropertyValue('--table-row-height')) || parseFloat(style.getPropertyValue('--row-height')) || 38
         const footerHeight = parseFloat(style.getPropertyValue('--row-height-lg')) || 64
         const contentBottom = surface.getBoundingClientRect().bottom - parseFloat(style.paddingBottom)
         const availableBody = contentBottom - table.getBoundingClientRect().top - 36 - footerHeight

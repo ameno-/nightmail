@@ -47,6 +47,9 @@ export interface Actor {
   /** A dashboard session's sign-in proved hosted staff (a Google Workspace sign-in, account-policy.ts). Staff tools need it. */
   staff?: boolean;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
+  /** An API key an agent received through agent setup (agent-setup.ts): it never administers keys or reaches billing
+   *  (keyAdminRefusal, agentSetupRefusal). */
+  agentSetup?: boolean;
   // Number of emails queued per region, for a bounded post-commit wake.
   dispatchTargets?: Map<string, { count: number; priority: boolean }>;
   dispatchAccount?: { aws_account_id: string; kind: ReadyConnection['kind']; maxSendRate?: number };
@@ -63,6 +66,8 @@ export interface Storage {
    * reconciles storage against its records instead (maintenance.ts).
    */
   put(key: string, body: Uint8Array, contentType: string, signal?: AbortSignal): Promise<void>;
+  /** Atomic creation (used for the shared, disposable daily analytics salt). */
+  createIfAbsent?(key: string, body: Uint8Array, contentType: string): Promise<void>;
   get(key: string): Promise<{ body: Uint8Array; contentType: string } | null>;
   /** The object's body as a stream from the bucket, for responses that should not buffer it (preview links). */
   stream?(key: string): Promise<{ body: ReadableStream<Uint8Array>; contentType: string } | null>;
@@ -98,6 +103,11 @@ export interface Config {
   uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
+  /** Hosted: email a domain's owners once when it is still pending an hour after it was added (src/domain-setup.ts, DOMAIN_SETUP_REMINDER=on). Off unless set. */
+  domainSetupReminder?: boolean;
+  /** Hosted: email a new workspace's owners once when it has no domain an hour after sign-up (src/domain-setup.ts, NO_DOMAIN_REMINDER=on). Off unless set. */
+  noDomainReminder?: boolean;
+  analyticsPush?: { url: string; secret: string };
   /** Self-hosted: subjects (or '*') that become owners of 'default' at their first sign-in. */
   defaultWorkspaceOwners: '*' | string[];
   multiTenant: boolean;
@@ -126,6 +136,8 @@ export interface Config {
   operatorSlackWebhookUrl?: string;
   /** DATABASE_DISK_GB in bytes: the Health page shows the database's size against it. Undefined: the size alone. */
   databaseDiskBytes?: number;
+  /** DEPLOY_SHA and DEPLOY_AT: the commit this deploy runs and when it went out (Glass). Null when not set. */
+  deploy?: { sha: string | null; at: string | null };
   /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: its token alone. */
   planetscaleWebhookSecret?: string;
   /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
@@ -205,6 +217,7 @@ export interface Runtime {
   // Dashboard analytics (src/analytics.ts): the Workers ANALYTICS bucket and the ANALYTICS_INGEST limiter. Node uses
   // the installation's bucket and a per-process cap.
   analyticsStorage?: Storage;
+  analyticsPeer?: { ip: string; country?: string; bot?: boolean };
   allowAnalytics?: (peer: string) => Promise<boolean>;
   // The database disk alert (src/disk-alert.ts): the Workers DISK_ALERT limiter, one card a minute per threshold. Node has the per-process count.
   allowDiskAlert?: (key: string) => Promise<boolean>;
@@ -370,8 +383,40 @@ export function requiredFor(method: string, path: string, need?: Permission | 'e
   return { permission, level: read ? 'read' : 'write' };
 }
 export const requiredOf = (c: Ctx, need?: Parameters<typeof requiredFor>[2]) => requiredFor(c.req.method, c.req.path, need);
-/** UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. */
-export const unrestrictedRequired = (message: string, need: Required) => denied('UNRESTRICTED_KEY_REQUIRED', message, { ...need, scope: 'workspace' });
+/**
+ * What a limited credential may do, as one sentence that names its limits: "This key can only send from acme.com." A
+ * refusal starts with it, so whoever reads it (often an integration that made a key in onboarding's Send only tab) knows
+ * which key they used, not only what it lacks.
+ */
+export function credentialLimits(a: Pick<Actor, 'permissions' | 'domains' | 'credential'>) {
+  const who = a.credential === 'agentToken' ? 'This agent token' : a.credential === 'mcp' ? 'This MCP connection' : 'This key';
+  const domains = a.domains.length <= 2 ? a.domains.join(' and ') : `${a.domains[0]}, ${a.domains[1]} and ${a.domains.length - 2} more`;
+  const from = a.domains.length ? ` from ${domains}` : '', send = a.permissions.includes('send'), read = a.permissions.includes('read');
+  if (a.permissions.includes('manage')) return `${who} is limited to the sender domain${a.domains.length > 1 ? 's' : ''} ${domains}.`;
+  if (send && read) return `${who} can only send${from} and read what was sent${from ? ' from there' : ''}.`;
+  if (send) return `${who} can only send${from}.`;
+  return `${who} can only read${from ? ` mail sent${from}` : ''}.`;
+}
+/** Where a full-access key comes from: the dashboard's Create key, or a full-access key itself. */
+export const FULL_ACCESS_KEY = 'create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys';
+// The workspace-wide areas a credential limited to sender domains is refused (UNRESTRICTED_KEY_REQUIRED), by path, as the
+// subject of "… need a full-access key". The first match names it.
+const RESTRICTED_AREAS: [RegExp, string][] = [
+  [/^\/v1\/inbound\/addresses(?:\/|$)/, 'Inbound addresses need'], [/^\/v1\/inbound\/domains(?:\/|$)/, 'Inbound domains need'],
+  [/^\/v1\/(?:inboxes\/[^/]+\/)?app-passwords(?:\/|$)/, 'Mail client passwords need'], [/^\/v1\/(?:inbound|inboxes)(?:\/|$)/, 'Received mail and inboxes need'],
+  [/^\/v1\/billing(?:\/|$)/, 'Billing needs'], [/^\/v1\/campaigns(?:\/|$)/, 'A campaign’s audience and delivery need'],
+  [/^\/v1\/(?:contacts|lists|segments|contact-imports|audience-query)(?:\/|$)/, 'The workspace audience needs'], [/^\/v1\/newsletters(?:\/|$)/, 'Newsletters need'],
+  [/^\/v1\/(?:templates|template-assets)(?:\/|$)/, 'Templates need'], [/^\/v1\/webhooks(?:\/|$)/, 'Webhooks need'], [/^\/v1\/regions(?:\/|$)/, 'Region settings need'],
+  [/^\/v1\/settings(?:\/|$)/, 'Workspace settings need'], [/^\/v1\/(?:metrics|sender-score|usage)(?:\/|$)/, 'Workspace-wide numbers need'],
+];
+export const restrictedArea = (path: string) => RESTRICTED_AREAS.find(([pattern]) => pattern.test(path))?.[1] ?? 'This needs';
+/**
+ * UNRESTRICTED_KEY_REQUIRED: a credential limited to sender domains is refused a workspace-wide area. The message says
+ * what the credential is, what the area needs and where to get it: "This key can only send from acme.com. Inbound
+ * addresses need a full-access key: create one in the dashboard under API keys → Create key → Full access, …".
+ */
+export const unrestrictedRequired = (a: Pick<Actor, 'permissions' | 'domains' | 'credential'> | undefined, area: string, need: Required, note?: string) =>
+  denied('UNRESTRICTED_KEY_REQUIRED', `${a ? `${credentialLimits(a)} ` : ''}${area} a full-access key: ${FULL_ACCESS_KEY}.${note ? ` ${note}` : ''}`, { ...need, scope: 'workspace' });
 export class ModuleLoadError extends ApiError {
   constructor(cause?: unknown) {
     super(503, 'MODULE_LOAD_FAILED', 'Unable to load a required runtime module; retry shortly.', undefined, true);
@@ -516,15 +561,31 @@ export function receivingAdminRefusal(a: Actor | undefined, change?: string): Ap
   return lastingRefusal(a, change, need);
 }
 /** Key administration (auth.ts manageKeys, and the deprecated inbound key routes): why it refuses this actor, or null.
- *  It takes unrestricted manage and a lasting credential. */
+ *  It takes unrestricted manage and a lasting credential that is not an agent's own setup key: an agent that received
+ *  its key through agent setup can't make itself, or anyone, another API key or agent token. */
 export function keyAdminRefusal(a: Actor): ApiError | null {
   const need: Required = { permission: 'configuration', level: 'write' };
+  // An API key that isn't full access (onboarding's Send only key, most often): say which key it is and where keys are made.
+  if (a.credential === 'apiKey' && (!a.permissions.includes('manage') || a.domains.length))
+    return denied('PERMISSION_DENIED', `${credentialLimits(a).slice(0, -1)}, so it can't ${KEY_CHANGE}. Create keys in the dashboard under API keys → Create key, or with a full-access key via POST /v1/api-keys.`,
+      a.permissions.includes('manage') ? { ...need, scope: 'workspace' } : need);
   if (!a.permissions.includes('manage')) return denied('PERMISSION_DENIED', 'This operation requires manage permission.', need);
   const temporary = lastingRefusal(a, KEY_CHANGE, need);
   if (temporary) return temporary;
+  if (a.agentSetup) return denied('PERMISSION_DENIED', `A key an agent received at setup can't ${KEY_CHANGE}. An owner or admin does that in the dashboard (API keys).`, { ...need, person: 'admin' });
   if (a.domains.length) return denied('PERMISSION_DENIED', 'Key administration requires unrestricted management access.', { ...need, scope: 'workspace' });
   return null;
 }
+/** Billing (its balance, payments and top-ups): an agent's setup key never reaches it, reads included. REST refuses it in
+ *  app.ts and the MCP listing leaves it out (mcp.ts refusal), with the same answer. */
+/** agentSetupRefusal's credential routes: an inbox connection's key and a mail client password, which would outlive the
+ *  agent's key when it is revoked. Inbox routes authenticate after the /v1 guard, so createInbox's own key (inboxes.ts,
+ *  from its body) and app passwords (inbox-passwords.ts) are refused in their handlers too; this keeps the MCP listing. */
+const agentCredentialRoute = (method: string, path: string) => method.toUpperCase() === 'POST' && (path === '/v1/inbox-connections' || /^\/v1\/inboxes\/[^/]+\/app-passwords$/.test(path));
+export const agentCredentialRefusal = () => denied('PERMISSION_DENIED', 'A key an agent received at setup can\'t create inbox keys or mail client passwords: they would outlive it when it is revoked. An owner or admin does that in the dashboard.', { person: 'admin' });
+export const agentSetupRefusal = (a: Actor | undefined, path: string, method = 'GET') => !a?.agentSetup ? null
+  : /^\/v1\/billing(?:\/|$)/.test(path) ? denied('PERMISSION_DENIED', 'A key an agent received at setup can\'t read or change billing. An owner or admin does that in the dashboard (Settings → Billing).', { person: 'admin' })
+  : agentCredentialRoute(method, path) ? agentCredentialRefusal() : null;
 /** createAgentToken: only an MCP approval delegates a temporary token. Why it refuses this actor, or null. */
 export const agentTokenMintRefusal = (a: Actor) => a.credential === 'mcp' && a.keyId.startsWith('mcp_') ? null
   : denied('MCP_AUTHORIZATION_REQUIRED', 'Temporary agent tokens can only be delegated directly from an MCP OAuth approval.', { credential: 'signIn' });

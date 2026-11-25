@@ -109,12 +109,12 @@ export async function importByoClaims(db: DbExecutor, connection: { id: string; 
 }
 
 // Shared tail for every claim release (single domain delete, workspace disconnect): the caller's
-// `released` CTE yields (name, token); receiving stops and the claim's polls are canceled.
+// `released` CTE yields (name, token); receiving stops and the claim's polls (verify, MX, the setup DNS check) are canceled.
 // Every receiving host of the domain stops: its own row (found by name, as a domain added again finds it) and the hosts
 // beside it (found by domain; the statement's snapshot still has the operation_domains row it deletes).
 export const releasedClaimCleanup = (wid: string) => sql`retired AS (UPDATE mailbox_domains m SET status='disabled',lost_since=NULL,updated_at=now() FROM released r WHERE m.workspace_id=${wid} AND m.status<>'disabled'
     AND (m.name=r.name OR m.domain_id IN (SELECT d.id FROM operation_domains d WHERE d.workspace_id=${wid} AND d.name=r.name))),
-  canceled AS (DELETE FROM jobs USING released r WHERE jobs.workspace_id=${wid} AND jobs.id IN ('domain.verify:'||r.token,'domain.mx:'||r.token) AND jobs.type IN ('domain.verify','domain.mx') AND jobs.status IN ('pending','running'))`;
+  canceled AS (DELETE FROM jobs USING released r WHERE jobs.workspace_id=${wid} AND jobs.id IN ('domain.verify:'||r.token,'domain.mx:'||r.token,'domain.setupCheck:'||r.token) AND jobs.type IN ('domain.verify','domain.mx','domain.setupCheck') AND jobs.status IN ('pending','running'))`;
 // Keep independently owned exclusive claims. Send-only imports/adoptions have no TXT proof;
 // their authority cannot survive disconnect. The operator's retained ARN journal does survive.
 export const releaseConnectionClaims = (wid: string, target: SQL) => sql`target AS (${target}), detached AS (UPDATE domain_claims dc SET ${detachedClaim}

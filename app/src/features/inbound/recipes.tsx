@@ -134,10 +134,10 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={r => rulePath(r.key)}
       empty={<EmptyState title="No rules yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} />}
       columns={[
-        { key: 'what', label: 'Rule', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
-        { key: 'on', label: 'Runs on', width: '24%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}</span> },
-        { key: 'last', label: 'Last matched', width: '13%', card: 'hide', render: last },
-        { key: 'actions', label: '', align: 'right', card: 'end', render: r => <span className="recipe-controls">
+        { key: 'what', label: 'Rule', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
+        { key: 'on', label: 'Runs on', width: '26%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}</span> },
+        { key: 'last', label: 'Last matched', width: 128, card: 'hide', render: last },
+        { key: 'actions', label: '', width: 96, align: 'right', card: 'end', render: r => <span className="recipe-controls">
           <Switch checked={switching[r.key] ?? r.enabled} disabled={r.key in switching} onCheckedChange={v => void toggle(r, v)} label={<span className="sr-only">Run {r.key}</span>} />
           <DropdownMenu label={`Actions for ${r.key}`} title={<RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} />} items={[
             ...(builderPath(r) ? [{ label: openBuilder, onSelect: () => navigate(builderPath(r)!) }] : []),

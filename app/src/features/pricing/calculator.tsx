@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import { Link, useSearchParams } from 'react-router'
 import { SignInConsent } from '../../components/LegalLinks'
-import { Cells, CELLS, Claim, keys, Mark, useHall, type Start } from './board'
-import { calculatorPath, Ours, PRESETS, sizeOf, Terms, type Field } from './content'
+import { WaitlistLine } from '../home/get-started'
+import { Cells, CELLS, Claim, keys, Mark, opensPainted, useHall, type Start } from './board'
+import { calculatorPath, CheckedPages, Ours, PRESETS, sizeOf, Terms, type Field } from './content'
 import { Bolts } from './eggs'
 import { play } from './sound'
 import { FlapRow } from './splitflap'
-import { billMath, CHECKED, count, dayOf, formatCount, money, nightmail, nightmailBill, OFFERS, quote, ucOf, yearlyFloor, type Offer, type Usage } from './prices'
+import { COMPARISONS, OFFERS } from './compare'
+import { billMath, count, formatCount, money, nightmail, nightmailBill, ucOf, vendorRows, yearlyFloor, type Usage } from './prices'
 
 // The price calculator (/pricing) in the comparisons' hall (board.tsx, Hall): the board is the answer and the console
 // is where the reader sets their numbers. On the board, Nightmail's price for those numbers on large split-flap tiles
@@ -27,19 +29,6 @@ const FIELDS = [
 type Values = Record<Field, string>
 const DEFAULT = PRESETS[1]!.size
 
-/** A vendor's line on the board, as a buyer would pay it: its cheapest plan that holds the numbers, or pay-as-you-go
- *  where that costs less. */
-type Row = { offer: Offer; plan: string; cents: number }
-function rowsFor(u: Usage): Row[] {
-  return OFFERS.flatMap(offer => {
-    if (offer.unit === 'contacts' && u.contacts === 0) return []
-    const q = quote(offer, u)
-    if (q.kind !== 'price') return []
-    if (q.payg) return [{ offer, plan: `${q.payg.plan.name}, pay as you go`, cents: q.payg.cents }]
-    return [{ offer, plan: offer.id === 'resend-marketing' && !/marketing/i.test(q.plan.name) ? `${q.plan.name} marketing` : q.plan.name, cents: q.cents }]
-  })
-}
-const COMPARISONS = [['/compare/mailchimp', 'Mailchimp'], ['/compare/resend', 'Resend']] as const
 /** The rooms the tiles keep, so nothing moves as the numbers do: a vendor's widest price (its pay-as-you-go prices stay
  *  under its last tier's, so the widest is a cent short of that), the longest name; Nightmail's price and the emails
  *  counted keep at least the room of the usual sizes and grow only past them. */
@@ -57,19 +46,18 @@ export function PricingBoard({ start }: { start?: Start }) {
     setValues(next)
     setParams(Object.fromEntries(FIELDS.map(({ key }) => [key, String(count(next[key]))])), { replace: true, preventScrollReset: true })
   }
-  const bill = nightmailBill(u.sent, u.received), floor = yearlyFloor(bill.uc), rows = rowsFor(u)
+  const bill = nightmailBill(u.sent, u.received), floor = yearlyFloor(bill.uc), rows = vendorRows(OFFERS, u)
   const top = [bill.uc, ...rows.map(row => ucOf(row.cents))].reduce((a, b) => b > a ? b : a, 0n)
   const lit = (uc: bigint) => uc === 0n || top === 0n ? 0 : Math.max(1, Math.round(CELLS * Number(uc) / Number(top)))
   const counted = formatCount(u.sent + u.received), slots = OFFERS.map((_, i) => rows[i])
   const { refresh, resend, sounding } = useHall()
-  const settled = useRef(false), settle = !settled.current
+  const [painted] = useState(opensPainted), settled = useRef(false), settle = !settled.current && !painted
   useEffect(() => { settled.current = true }, [])
   const flaps = { settle, refresh, sound: sounding }
   // What a screen reader hears, once the reader stops typing for a moment (the board itself is pictures of figures).
   const summary = <>{formatCount(u.sent)} emails sent and {formatCount(u.received)} received a month, {formatCount(u.contacts)} contacts and {formatCount(u.seats)} teammates: Nightmail <Ours sent={u.sent} received={u.received}>{bill.text}</Ours> a month{rows.map(row => `; ${row.offer.vendor} ${row.plan} ${money(row.cents)}`).join('')}.</>
   const [said, setSaid] = useState(summary), key = calculatorPath(u)
   useEffect(() => { const timer = setTimeout(() => setSaid(summary), 700); return () => clearTimeout(timer) }, [key]) // eslint-disable-line react-hooks/exhaustive-deps
-  const hosts = [...new Set(rows.map(row => row.offer.pricing))]
   return <>
     <h1 id="cb-title" className="cb-title"><Claim text="What Nightmail costs at your size" /></h1>
     <div className="cb-hang" aria-hidden="true"><i /><i /></div>
@@ -96,8 +84,8 @@ export function PricingBoard({ start }: { start?: Start }) {
           </p>
           <p>
             <span>Each vendor’s cheapest plan, list price</span>
-            <span>{hosts.length ? <>Checked {dayOf(CHECKED)} on {hosts.map((url, i) => <span key={url}>{i > 0 && ' and '}<a href={url} target="_blank" rel="noopener noreferrer">{new URL(url).hostname.replace(/^www\./, '')}</a></span>)}</> : '\u00a0'}</span>
-            <span>Compare: {COMPARISONS.map(([path, vendor], i) => <span key={path}>{i > 0 && ' · '}<Link to={path}>{vendor}</Link></span>)}</span>
+            <span>{rows.length ? <CheckedPages offers={rows.map(row => row.offer)} /> : '\u00a0'}</span>
+            <span>Compare: {COMPARISONS.map((comparison, i) => <span key={comparison.path}>{i > 0 && ' · '}<Link to={comparison.path}>{comparison.vendor}</Link></span>)}</span>
           </p>
         </div>
       </div>
@@ -117,9 +105,9 @@ export function PricingBoard({ start }: { start?: Start }) {
       </div>
       {start?.button('cb-key cb-key-start')}
     </div>
-    {start && !start.signedIn && <SignInConsent className="cb-consent cb-consent-hero" />}
+    {start && !start.signedIn && <><SignInConsent className="cb-consent cb-consent-hero" /><WaitlistLine className="cb-consent cb-consent-hero cb-full" full={start.full} /></>}
     <div className="cb-print">
-      <p>Nightmail charges {nightmail.perThousand} per 1,000 emails sent or received, after {formatCount(nightmail.freeSent)} of each free every month.</p>
+      <p>Nightmail charges {nightmail.perThousand} per 1,000 emails sent or received, after {formatCount(nightmail.freeSent)} sent and {formatCount(nightmail.freeReceived)} received free every month.</p>
       <Terms floor={floor} />
     </div>
   </>

@@ -1,8 +1,9 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { ArrowLeftRight } from 'lucide-react'
-import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, StatusDot, fieldError, MutationError } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, DataTable, Dialog, EmptyState, ErrorState, Field, Input, PageHeader, Pagination, PaginationSkeleton, SectionHeader, StatusBadge, StatusDot, fieldError, MutationError, useToast } from '../../components/ui'
 import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
@@ -13,9 +14,10 @@ import { mxTone, receivingStatus } from '../inbound/status'
 import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-title'
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
-import { DnsRecordTable, DnsWaitNote, DomainRecords, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines } from './domain-records'
-import { invalidate, invalidateResources, resourceOf } from '../../data/invalidation'
+import { DnsRecordTable, DnsWaitNote, DomainRecords, checkSummary, dnsChecks, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines, type DnsChecks } from './domain-records'
+import { forgetDomain, invalidate } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
+import { DomainSetupAlert, RecordsCorrectAlert, recordsCorrect, setupGap } from './domain-setup-alert'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
   const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${zoneLines(records)}\n`
@@ -54,14 +56,31 @@ function ReceivingCell({ domain, receiving, unknown = false, card = false }: { d
 
 /** Hosted: the hosts the domain receives on, each with its status, addresses (which open its routes in Receiving) and catch-all. Only once receiving is set up: before that the Receiving record above says how to turn it on. */
 /** The page reads the receiving domain and its hosts before it shows (so this section arrives at its final height) and passes them in. */
-function ReceivingSettings({ domainId, domainName, receiving, hosts }: { domainId: string; domainName: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown }; hosts: { data?: ReceivingHost[]; error: unknown; refetch: () => unknown } }) {
-  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), 'MX records checked', false, invalidate.mailboxDomains, domainId)
+/** `onCheck`: the page's records check, run with Check MX now so the line above the records (and this button's notice)
+ *  names what sending still waits for, such as a missing DKIM record: someone stuck presses whichever check is nearest. */
+function ReceivingSettings({ domainId, domainName, receiving, hosts, onCheck }: { domainId: string; domainName: string; receiving: { data?: MailboxDomain; error: unknown; refetch: () => unknown }; hosts: { data?: ReceivingHost[]; error: unknown; refetch: () => unknown }; onCheck?: () => Promise<string | null> }) {
+  const check = useApiMutation((api, _: void) => api.mailboxes.checkDomain(domainId), undefined, false, invalidate.mailboxDomains, domainId)
+  const toast = useToast(), checking = useRef(false)
+  // Pressed again and again (six times in ten seconds, by one stuck owner): like Check now, the button rests for a few
+  // seconds after each press ("Checking…", at the same width), so it is one check and one notice.
+  const [resting, setResting] = useState(false)
+  useEffect(() => { if (!resting) return; const timer = setTimeout(() => setResting(false), CHECK_REST_MS); return () => clearTimeout(timer) }, [resting])
+  async function checkMx() {
+    if (checking.current || resting) return
+    checking.current = true
+    setResting(true)
+    try {
+      const [, waiting] = await Promise.all([check.mutateAsync(), onCheck?.() ?? null])
+      // "MX records checked" alone reads as all clear while a sending record is missing: the notice names it.
+      toast(waiting ? `MX records checked. Sending still waits: ${waiting}` : 'MX records checked', waiting ? 'info' : 'success')
+    } catch { /* Shown inline. */ } finally { checking.current = false }
+  }
   const state = receiving.data
   const failed = receiving.error ?? hosts.error
   if (!state || !hosts.data) return failed ? <section className="section stack"><SectionHeader title="Receiving" /><ErrorState error={failed as Error} onRetry={() => { void receiving.refetch(); void hosts.refetch() }} /></section> : null
   if (state.status === 'off') return null
   return <section className="section stack" aria-labelledby="domain-receiving">
-    <ReceivingHosts domainId={domainId} domainName={domainName} hosts={hosts.data} actions={state.status !== 'active' && <Button loading={check.isPending} onClick={() => void check.mutateAsync().catch(() => undefined)}>Check MX now</Button>} />
+    <ReceivingHosts domainId={domainId} domainName={domainName} hosts={hosts.data} actions={state.status !== 'active' && <Button className="domain-check" disabled={resting} aria-busy={check.isPending || undefined} onClick={() => void checkMx()}><span data-active={!resting || undefined}>Check MX now</span><span data-active={resting || undefined} aria-hidden={!resting || undefined}>Checking…</span></Button>} />
     <MutationError error={check.error} />
   </section>
 }
@@ -102,7 +121,7 @@ function DomainsList() {
       navigate(`/domains/${domain.id}${then ? `?then=${encodeURIComponent(then)}` : ''}`)
     } catch { /* Shown inline. */ }
   }
-  return <div className="stack">
+  return <div className="stack measure-list measure-list--narrow">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
@@ -125,6 +144,7 @@ function DomainsList() {
   </div>
 }
 
+const CHECK_REST_MS = 8_000
 export function DomainDetailPage() {
   return useWorkspaceAccess().canAdminister ? <DomainDetail /> : <AdminOnlyPage title="Domain" backTo="/domains" />
 }
@@ -136,11 +156,16 @@ function DomainDetail() {
   const { multiTenant } = useWorkspaceAccess()
   const hosted = useSession()?.identity?.connection?.kind === 'shared'
   const [recheckUntil, setRecheckUntil] = useState(0)
-  const domain = useDomain(id, recheckUntil)
+  // Set the moment the domain is deleted: every read of it below stops (no poll, no focus refetch), so dropping its cache
+  // entries on the way back to Domains starts nothing that would answer 404.
+  const [deleted, setDeleted] = useState(false)
+  const domain = useDomain(id, recheckUntil, !deleted)
   // Receiving set up through the API checks the domain in the background: follow it until it settles.
-  const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: multiTenant, interval: state => state?.status === 'provisioning' ? 5_000 : false })
-  const hosts = useReceivingHosts(id, multiTenant, receiving.data?.status === 'provisioning' ? 5_000 : false)
+  const receiving = useApiQuery(['mailbox-domain', id], (api, signal) => api.mailboxes.domain(id, signal), { enabled: multiTenant && !deleted, interval: state => state?.status === 'provisioning' ? 5_000 : false })
+  const hosts = useReceivingHosts(id, multiTenant && !deleted, receiving.data?.status === 'provisioning' ? 5_000 : false)
   const verify = useApiMutation((api, domainId: string) => api.domains.verify(domainId), 'Checking records', true, invalidate.domains)
+  // The same records check without its own notice, for Check MX now (whose notice says what it found).
+  const recheck = useApiMutation((api, domainId: string) => api.domains.verify(domainId), undefined, true, invalidate.domains)
   const client = useQueryClient()
   // Invalidate only after leaving: refetching this domain would 404 while the dialog closes.
   const remove = useApiMutation((api, domainId: string) => api.domains.remove(domainId), 'Domain deleted', true, false)
@@ -178,9 +203,27 @@ function DomainDetail() {
     try { await choose.mutateAsync({ host }) }
     catch (error) { if (host && error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE') { choose.reset(); setMoveMail({ host, message: error.detail.replace(/^Move mail for \S+\? /, '').replace(/ Send confirm: true to choose it anyway\.$/, '') }) } }
   }
-  async function checkNow() { try { await verify.mutateAsync(id); if (multiTenant) setRecheckUntil(Date.now() + 30_000) } catch { /* Shown inline. */ } }
+  // What Check now found in public DNS for this domain, kept while the page polls. The button rests for a few seconds
+  // after each press ("Checking…"): verification runs in the background meanwhile, and DNS answers are cached for 30 s.
+  const [checks, setChecks] = useState<{ id: string; found: DnsChecks } | null>(null)
+  const [resting, setResting] = useState(false)
+  useEffect(() => { if (!resting) return; const timer = setTimeout(() => setResting(false), CHECK_REST_MS); return () => clearTimeout(timer) }, [resting])
+  // Both check buttons run it: Check now, and Check MX now under Receiving. A press while it rests uses the last answer.
+  async function checkRecords(mutation: typeof verify) {
+    if (resting) return checks?.id === id ? checks.found : null
+    setResting(true)
+    try { const found = dnsChecks(await mutation.mutateAsync(id)); setChecks({ id, found }); if (multiTenant) setRecheckUntil(Date.now() + 30_000); return found } catch { return null }
+  }
+  async function checkNow() { await checkRecords(verify) }
+  /** For Check MX now: what sending still waits for, in the words of the line above the records; null when nothing. */
+  async function checkFromMx() {
+    const found = await checkRecords(recheck), current = domain.data
+    if (!found || !current) return null
+    const summary = checkSummary(current, found)
+    return summary?.tone === 'danger' ? summary.text : null
+  }
   if (domain.isPending || (!domain.error && (dns.pending || (multiTenant && ((receiving.isPending && !receiving.error) || (hosts.isPending && !hosts.error)))))) return <DomainDetailSkeleton />
-  if (domain.error) return <div className="stack"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
+  if (domain.error) return <div className="stack domain-page"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
   const state = domainState(current)
   const receivingRecord = recordsFor(current, 'receiving')[0]
@@ -188,25 +231,28 @@ function DomainDetail() {
   // Before the domain receives, its own host's row offers the root or a subdomain instead (Check now in the header checks MX too).
   const receivingActions = multiTenant && receivingRecord && receivingRecord.status !== 'verified' ? [{ label: onRoot ? 'Use a subdomain instead' : `Use ${current.name} instead`, icon: <ArrowLeftRight size={16} />, onSelect: () => void chooseHost(onRoot ? null : current.name) }] : undefined
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
-  return <div className="stack">
+  // Check now's answers, or until it is pressed the background check's that the domain's reads carry (domain-setup-alert.tsx).
+  const pressed = checks?.id === id ? checks.found : undefined, gap = setupGap(current, pressed)
+  return <div className="stack domain-page">
     <PageHeader title={current.name} backTo={then || '/domains'} actions={<>
       <StatusBadge status={state.status} tone={state.tone} />
-      <Button loading={verify.isPending} onClick={() => void checkNow()} data-analytics="domains/check">Check now</Button>
+      <Button className="domain-check" disabled={resting} aria-busy={verify.isPending || undefined} onClick={() => void checkNow()} data-analytics="domains/check"><span data-active={!resting || undefined}>Check now</span><span data-active={resting || undefined} aria-hidden={!resting || undefined}>Checking…</span></Button>
       {!hosted && <a className="ui-button ui-button--secondary ui-button--md" href={sesUrl} target="_blank" rel="noreferrer">Open in SES</a>}
       {multiTenant && <Button variant="danger" onClick={() => { remove.reset(); setDeleteOpen(true) }}>Delete domain</Button>}
     </>} />
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
+    {gap ? <DomainSetupAlert domain={current} gap={gap} page /> : recordsCorrect(current, pressed) && <RecordsCorrectAlert />}
     <div className="domain-sections">
-      <DomainRecords domain={current} setup={dns.setup} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
+      <DomainRecords domain={current} setup={dns.setup} checks={pressed ?? dnsChecks(current)} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
-      {multiTenant && <ReceivingSettings domainId={id} domainName={current.name} receiving={receiving} hosts={hosts} />}
+      {multiTenant && <ReceivingSettings domainId={id} domainName={current.name} receiving={receiving} hosts={hosts} onCheck={checkFromMx} />}
       {!multiTenant && <MailboxReceiving domainId={id} domainName={current.name} />}
     </div>
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); navigate('/domains', { replace: true }); client.removeQueries({ predicate: query => query.queryKey[0] === 'nightmail' && resourceOf(query.queryKey) === 'domain' && query.queryKey[2] === id }); void invalidateResources(client, invalidate.domains.filter(r => r !== 'domain')) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); flushSync(() => setDeleted(true)); navigate('/domains', { replace: true }); void forgetDomain(client, id).catch(() => {}) }} />
     <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
       description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>

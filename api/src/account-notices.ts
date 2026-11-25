@@ -3,12 +3,13 @@ import { ApiError, id, isSimulatedSes, log, ModuleLoadError, type DbExecutor, ty
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
 import { customerNotice, plainAddress, type Notice, type NoticeInput } from './notices.js';
+import { LINK_MINUTES, signinLinkUrl } from './signups.js';
 
 // Sending the account emails (src/notices.ts writes them). Three jobs send one each, every one through deliverNotice:
 // standing.notify (standing.ts: paused, marketing on hold, warning, resumed, campaign paused), billing.notify
 // (billing/notify.ts) and account.notify here, for the moments that have no standing event or billing notice of their
-// own: a domain that stopped verifying, the daily limit reached, the evaluation finished, an invitation and the
-// waitlist. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
+// own: a domain that stopped verifying, a new domain's records still missing after an hour and a new workspace with no
+// domain after an hour (src/domain-setup.ts), the daily limit reached, the evaluation finished, an invitation, the waitlist and a sign-in link. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
 //
 // An email goes out once: the row's dedupe key makes one notice of one moment, the job leases the row so one runner
 // sends it, and the send's idempotency key (its origin) makes a retried send the same email. Nothing here runs in the
@@ -20,12 +21,14 @@ const keyOf = (origin: Origin) => 'standingEvent' in origin ? `standing:${origin
 /**
  * One notice to its recipients, from the platform workspace's own sender (NIGHTMAIL_NOTIFY_FROM), one email each.
  * 'unconfigured' when the installation has no such sender: the dashboard still shows what the email would have said.
+ * `sealed`: the email carries a capability only its recipient may use (a sign-in link), so the platform workspace's own
+ * readers see it withheld (sending.ts visibleEmailContent).
  */
-export async function deliverNotice(runtime: Runtime, to: string[], notice: Notice, origin: Origin): Promise<'sent' | 'unconfigured'> {
+export async function deliverNotice(runtime: Runtime, to: string[], notice: Notice, origin: Origin, sealed = false): Promise<'sent' | 'unconfigured'> {
   const from = runtime.config.notifyFrom, sender = runtime.config.platformDomainWorkspace;
   if (!from || !sender || !runtime.config.multiTenant) return 'unconfigured';
   const { sendSystemEmail } = await import('./sending.js');
-  try { await sendSystemEmail(runtime, sender, { from, to, ...notice, idempotencyKey: keyOf(origin), ...origin }); }
+  try { await sendSystemEmail(runtime, sender, { from, to, ...notice, idempotencyKey: keyOf(origin), ...origin, sealed }); }
   catch (error) {
     // The key was used with other words: a build before this one sent this notice and its job is being retried.
     if (!(error instanceof ApiError && error.code === 'IDEMPOTENCY_CONFLICT')) throw error;
@@ -62,7 +65,7 @@ export async function noticeFailed(runtime: Runtime, table: NoticeTable, noticeI
 export const noticeRecipients = (workspace: SQL) => sql`ARRAY(SELECT u.email FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id
   WHERE m.workspace_id=${workspace} AND m.role IN ('owner','admin') AND u.email_verified ORDER BY u.email LIMIT 20)`;
 
-export type AccountNoticeKind = 'domain_unverified' | 'limit_reached' | 'evaluation_finished' | 'invitation' | 'waitlist_admitted';
+export type AccountNoticeKind = 'domain_unverified' | 'domain_setup' | 'no_domain' | 'limit_reached' | 'evaluation_finished' | 'invitation' | 'waitlist_admitted' | 'signin_link';
 type Queued = { workspaceId: string; kind: AccountNoticeKind; dedupe: string; data?: Record<string, unknown>;
   /** At most one of this kind per workspace in 24 hours (suppressed ones don't count). */
   daily?: boolean;
@@ -95,6 +98,36 @@ export async function queueNotice(db: DbExecutor, n: Queued, savepoint = false):
 /** A domain whose grace ran out: mail from it is refused from now on. Once per loss (the claim's lost_since). */
 export const domainUnverified = (db: DbExecutor, workspaceId: string, domain: { id: string; name: string; lostSince: string | null }) =>
   queueNotice(db, { workspaceId, kind: 'domain_unverified', dedupe: `domain:${domain.id}:${domain.lostSince ?? ''}`, data: { domainId: domain.id, name: domain.name } }, true);
+
+/** What the setup reminder says (src/domain-setup.ts builds it from the background DNS check). */
+export type DomainSetupData = { domainId: string; name: string; total: number; wrong: boolean; missing: { type: string; name: string; value: string }[]; host: { name: string; url: string | null } | null; releasesAt: string | null };
+/**
+ * A domain still pending an hour after it was added, whose records public DNS lacks: once per domain (its claim's token),
+ * and at most one a day per workspace, so a workspace that added several hears about one at a time. Queued only while the
+ * claim is pending (its ownership TXT may be proven while a DKIM CNAME is missing); one that verifies before the email
+ * goes is not told (noticeOf).
+ */
+export const domainSetup = (db: DbExecutor, workspaceId: string, token: string, data: DomainSetupData) =>
+  queueNotice(db, { workspaceId, kind: 'domain_setup', dedupe: `domain-setup:${token}`, data, daily: true,
+    when: sql`EXISTS (SELECT FROM domain_claims WHERE workspace_id=${workspaceId} AND token=${token}::uuid AND sending_state='pending')` });
+
+/**
+ * New workspaces that still have no domain an hour after they were created, each told once (its dedupe key): one
+ * statement, at most 100 at a time, for workspaces created in the last three days only, so turning the reminder on never
+ * mails accounts that signed up long ago. The platform's own workspace is never one. One that adds a domain before the
+ * email goes is not told (noticeOf). Returns how many were queued.
+ */
+export async function noDomainNotices(runtime: Runtime) {
+  const { rows } = await runtime.db.execute(sql`WITH made AS (INSERT INTO account_notices(id,workspace_id,kind,dedupe_key,data)
+      SELECT 'ant_'||replace(gen_random_uuid()::text,'-',''),w.id,'no_domain','no-domain:'||w.id,'{}'::jsonb FROM workspaces w
+      WHERE w.created_at<=now()-interval '1 hour' AND w.created_at>now()-interval '3 days' AND w.id IS DISTINCT FROM ${runtime.config.platformDomainWorkspace ?? null}
+        AND NOT EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=w.id) AND NOT EXISTS (SELECT FROM account_notices p WHERE p.dedupe_key='no-domain:'||w.id)
+      ORDER BY w.created_at LIMIT 100
+      ON CONFLICT (dedupe_key) DO NOTHING RETURNING id,workspace_id),
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'account.notify:'||id,'account.notify',workspace_id,jsonb_build_object('noticeId',id) FROM made ON CONFLICT (id) DO NOTHING)
+    SELECT id FROM made`);
+  return rows.length;
+}
 
 /**
  * A send refused at the daily limit: at most one email in 24 hours, and none for a workspace in its evaluation, paused,
@@ -163,16 +196,28 @@ export async function waitlistAdmitted(runtime: Runtime, db: DbExecutor, email: 
 /** The status of a waitlist address's email (null: none queued), for a lowercased address column. */
 export const waitlistNoticeStatus = (email: SQL) => sql`(SELECT n.status FROM account_notices n WHERE n.dedupe_key='waitlist:'||${email})`;
 
+/** A sign-in link's email (signups.ts sendSigninLink), queued in the transaction that made the link. Only the link's ID
+ * is kept: the job makes the link from it, and sends nothing once it is used or expired. */
+export const signinLink = (workspaceId: string, linkId: string) => noticeInsert({ workspaceId, kind: 'signin_link', dedupe: `signin-link:${linkId}`, data: { linkId } });
+
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
-  domain: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null };
+  domain: string | null; hasDomain: boolean | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string } | null };
 
 /** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
-function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput } | null {
+function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: string[]; input: NoticeInput } | null {
   const workspace = row.name ?? '', held = !!row.paused || (row.standing !== null && ['warn', 'restrict', 'pause'].includes(row.standing.step));
   switch (row.kind) {
     // Still refused: a domain that verified again, or was removed, needs no email.
     case 'domain_unverified': return row.domain === 'pending' || row.domain === 'failed' ? { to: row.recipients, input: { kind: 'domain_unverified', workspace, domain: { id: String(row.data.domainId), name: String(row.data.name) } } } : null;
+    // Still pending: one that verified meanwhile, or was removed, needs no reminder.
+    case 'domain_setup': {
+      const d = row.data as DomainSetupData;
+      return row.domain === 'pending' && Array.isArray(d.missing) && d.missing.length ? { to: row.recipients, input: { kind: 'domain_setup', workspace, domain: { id: String(d.domainId), name: String(d.name) },
+        missing: d.missing, total: Number(d.total), wrong: d.wrong === true, host: d.host ?? null, releasesAt: d.releasesAt ? new Date(d.releasesAt) : null } } : null;
+    }
+    // Still no domain: one added meanwhile, in any state, needs no email.
+    case 'no_domain': return row.hasDomain ? null : { to: row.recipients, input: { kind: 'no_domain', workspace } };
     case 'limit_reached': {
       const p = row.position ?? {}, available = BigInt(p.availableUc ?? '0');
       const unpaid = p.enforcement === 'enforce' && p.mode === 'prepaid' && (available < 0n || (available < RATES.emailUc && (p.freeSentLeft ?? 0) === 0));
@@ -186,6 +231,8 @@ function noticeOf(row: Row, origin: string): { to: string[]; input: NoticeInput 
         acceptUrl: `${origin}/overview?invitation=${encodeURIComponent(String(row.data.invitationId))}` } };
     }
     case 'waitlist_admitted': return typeof row.data.email === 'string' ? { to: [row.data.email], input: { kind: 'waitlist_admitted' } } : null;
+    // Used or expired before it went out: nothing to send.
+    case 'signin_link': return row.link && { to: [row.link.email], input: { kind: 'signin_link', url: signinLinkUrl(config, String(row.data.linkId)), minutes: LINK_MINUTES } };
   }
 }
 
@@ -200,16 +247,18 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
       (SELECT pc.paused_at IS NOT NULL FROM provider_connections pc WHERE pc.workspace_id=l.workspace_id AND pc.kind='shared') AS paused,
       CASE WHEN l.kind='limit_reached' THEN billing_position(l.workspace_id) END AS position,
       (SELECT dc.sending_state FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id AND dc.name=l.data->>'name') AS domain,
+      CASE WHEN l.kind='no_domain' THEN EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id) END AS "hasDomain",
       (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
-        WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation
+        WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation,
+      (SELECT json_build_object('email',sl.email) FROM nightmail_signin_links sl WHERE l.kind='signin_link' AND sl.id=l.data->>'linkId' AND sl.expires_at>now()) AS link
     FROM leased l LEFT JOIN workspaces w ON w.id=l.workspace_id`);
   if (!row) return heldNotice(runtime.db, 'account_notices', noticeId);
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE account_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END WHERE id=${row.id} AND status='sending'`);
   try {
-    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''));
+    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''), runtime.config);
     if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }
     if (!notice.to.length) { await settle('failed'); log('warn', { code: 'ACCOUNT_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: row.kind }); return; }
-    if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }) === 'unconfigured') {
+    if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }, row.kind === 'signin_link') === 'unconfigured') {
       await settle('failed');
       log('info', { code: 'ACCOUNT_NOTIFY_SKIPPED', workspaceId: job.workspaceId, kind: row.kind, reason: 'NIGHTMAIL_NOTIFY_FROM or the platform workspace is not configured' });
       return;

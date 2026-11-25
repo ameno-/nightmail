@@ -7,12 +7,12 @@ import { CopyAction, LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
-import { useApiMutation, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
+import { useApiMutation, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { agentStep, finishedStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
 import { ConnectAwsRegional, PendingDomain, createStack, domainHint, waitingForStack } from './aws'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
-import { AgentPrompt, McpSetup, agentPrompt } from '../docs/agent-setup'
+import { AgentPrompt, McpSetup, agentPrompt, useAgentSetup } from '../docs/agent-setup'
 import { FirstSend } from '../docs/first-send'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { ApiError, errorText, type ConnectionKind, type ConnectionState, type ProviderConnection } from '../../data/types'
@@ -464,6 +464,9 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   const identity = useSession()?.identity
   const origin = usePublicOrigin()
   const domain = useDomain(domainId)
+  // An owner's or admin's copied prompt carries a setup token: the agent gets its own key without one made here.
+  const { canAdminister } = useWorkspaceAccess()
+  const setup = useAgentSetup(Boolean(identity) && canAdminister)
   const [scope, setScope] = useState<KeyScope>('send')
   const create = useApiMutation((api, input: { scope: KeyScope; domain: string | null }) => api.keys.create(input.scope === 'send'
     ? { name: input.domain ? `Send from ${input.domain}` : 'Send only', permissions: ['send'], domains: input.domain ? [input.domain] : [] }
@@ -477,7 +480,8 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
   }
   if (domain.isPending) return <BootLoader inline />
   if (domain.error && !missing) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
-  const prompt = origin ? agentPrompt({ origin, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true }) : null
+  const promptFor = (setupToken: string | null | undefined) => agentPrompt({ origin: origin!, domain: current, email: identity?.email ?? null, multiTenant: identity?.multiTenant === true, setupToken })
+  const prompt = origin ? promptFor(setup ? null : undefined) : null
   // The tab names the key's reach: an app's key sends from this domain only; a coding agent's manages the workspace.
   const scopes = [
     { value: 'send', label: current ? `Send only · ${current.name}` : 'Send only' },
@@ -493,7 +497,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         <div className="onboarding-key-scope" inert={!!secret}>
           <Tabs label="Key access" value={scope} onValueChange={value => setScope(value as KeyScope)} items={scopes} />
         </div>
-        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : <>Store it as <code>{apiKeyEnv}</code> in your project’s environment. It’s shown once.</>}</p>
+        <p className={create.error ? 'developer-copy onboarding-error onboarding-key-copy' : 'muted developer-copy onboarding-key-copy'} role={create.error ? 'alert' : undefined}>{create.error ? <ErrorText error={create.error} /> : scope === 'send' ? <>It can only send{current ? ` from ${current.name}` : ''}. Store it as <code>{apiKeyEnv}</code>; it’s shown once.</> : <>Store it as <code>{apiKeyEnv}</code> in your project’s environment. It’s shown once.</>}</p>
         {/* The key replaces the button in a slot sized for both, so the sections below never move. */}
         <div className="onboarding-slot onboarding-key">
           <div data-active={!secret || undefined} inert={!!secret}><Button loading={create.isPending} data-analytics="onboarding/agent/create-key" onClick={() => void createKey()}>Create API key</Button></div>
@@ -502,7 +506,7 @@ function AgentSetup({ domainId, onFinish }: { domainId: string; onFinish: () => 
         <span className="sr-only" role="status">{secret ? 'API key created. It is shown once.' : ''}</span>
       </section>
       <div className="onb-rise" style={rise(2)}><FirstSend domain={current} apiKey={secret} title="Send with cURL or the SDK" compact /></div>
-      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} compact /></div>
+      <div className="onb-rise" style={rise(3)}><AgentPrompt prompt={prompt} compact setup={setup} copy={setup?.copy(promptFor)} download={origin ? promptFor(undefined) : undefined} /></div>
       <div className="onb-rise" style={rise(4)}><McpSetup compact /></div>
     </div>
     <div className="onboarding-actions">

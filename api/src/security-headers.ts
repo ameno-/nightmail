@@ -7,7 +7,7 @@ import { hostedDomain, hostedHosts, supportHost } from './brand.js';
 const supportSources = hostedHosts.flatMap(host => [`https://${supportHost(host)}`, `wss://${supportHost(host)}`]).join(' ');
 const mediaSources = [hostedDomain, `dev.${hostedDomain}`].map(host => `https://media.${host}`).join(' ');
 export const SECURITY_HEADERS: Readonly<Record<string, string>> = {
-  'Content-Security-Policy': `default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; media-src 'self' ${mediaSources}; connect-src 'self' ${supportSources} ${mediaSources}; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'`,
+  'Content-Security-Policy': `default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; script-src 'self' 'sha256-sH76ouQYBaMQ5FLNfCiRS6RDM5thQuRzt8vLQXjlfHg='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data:; media-src 'self' ${mediaSources}; connect-src 'self' ${supportSources} ${mediaSources}; frame-src 'self' blob:; worker-src 'self' blob:; form-action 'self'`,
   'X-Frame-Options': 'DENY',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',

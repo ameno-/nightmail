@@ -345,25 +345,32 @@ export function registerOperator(app: App) {
   });
 
   // The sign-up limit (src/signups.ts): how many accounts may sign up on their own, and what fills it. A raise lets the
-  // oldest waiting addresses in first; lowering it removes nobody. Every change is audited (workspace 'platform').
+  // oldest waiting addresses in first, or opens its places to anyone; lowering it removes nobody. Every change is audited
+  // (workspace 'platform').
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/signups', operationId: 'operatorGetSignups',
     responses: { 200: response(SignupPlaces), ...errors } }), async c => {
     await operatorActor(c, 'operator:read');
     return c.json(await readPlaces(c.env.db), 200);
   });
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'put', path: '/v1/operator/signups', operationId: 'operatorSetSignupLimit',
-    request: { headers: z.object({ 'Idempotency-Key': Mutation['Idempotency-Key'] }), body: json(z.object({ limit: z.number().int().min(0).max(1_000_000), reason: Reason.optional(), ticketRef: TicketRef }).strict()) },
+    request: { headers: z.object({ 'Idempotency-Key': Mutation['Idempotency-Key'] }), body: json(z.object({ limit: z.number().int().min(0).max(1_000_000),
+      raise: z.enum(['hold', 'open']).default('hold').describe('hold: a raise holds the places it adds for the oldest waiting addresses and emails them. open: it holds none and emails nobody; its places go to whoever signs in next.'),
+      reason: Reason.optional(), ticketRef: TicketRef }).strict()) },
     responses: { 200: response(SignupPlaces.extend({ letIn: z.number().int().describe('Waiting addresses this change let in, oldest first.'),
-      emailed: z.number().int().describe('Held addresses emailed now that they can sign in: those this change let in, and any an earlier save missed.'),
+      emailed: z.number().int().describe('Held addresses emailed now that they can sign in: those this change let in, and any an earlier save missed. Always 0 for an open raise.'),
       notEmailed: z.number().int().nullable().describe('Held addresses still not emailed (save again to retry); null when it could not be checked.') })), ...errors } }), async c => {
     const body = c.req.valid('json'), operator = await operatorActor(c, 'operator');
     const result = await mutate(c, operator, 'platform', body, async tx => {
-      const change = await setLimit(tx, body.limit);
+      const change = await setLimit(tx, body.limit, body.raise);
       return { result: { ...change.after, letIn: change.letIn.length },
-        audit: { action: 'operator-set-signup-limit', before: { limit: change.before.limit }, after: { limit: body.limit, letIn: change.letIn.length }, reason: body.reason, ticketRef: body.ticketRef } };
+        audit: { action: 'operator-set-signup-limit', before: { limit: change.before.limit }, after: { limit: body.limit, raise: body.raise, letIn: change.letIn.length }, reason: body.reason, ticketRef: body.ticketRef } };
     });
-    // After the commit: an email that fails or is slow can't undo the change. Each address is emailed once, ever.
-    return c.json({ ...result, ...await placesOpened(c.env) }, 200);
+    // After the commit: an email that fails or is slow can't undo the change. Each address is emailed once, ever; an
+    // open raise emails nobody. A lowered limit can leave sign-ups nearly full or full, and a raise reopens them, so the
+    // operators' places alert is checked too (operator-alerts.ts signupPlacesAlert).
+    const opened = await placesOpened(c.env, body.raise === 'hold');
+    await (await import('./operator-alerts.js')).signupPlacesAlert(c.env);
+    return c.json({ ...result, ...opened }, 200);
   });
   // The content screen beside the second classifier that repeats its requests (src/screen-shadow.ts): how often they
   // agree at the threshold, how far their scores are apart, how each one's requests ended and how long they took. Read

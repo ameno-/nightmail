@@ -189,6 +189,10 @@ export type ConnectionSummary = {
         verified: number;
     };
     /**
+     * Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).
+     */
+    sent?: boolean;
+    /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
      */
     attention?: string;
@@ -489,6 +493,107 @@ export type UpdateApiKey = {
          */
         mail?: Array<'read' | 'send' | 'modify' | 'create'>;
     };
+};
+
+export type AgentSetupToken = {
+    id: string;
+    /**
+     * nm_setup_…, shown once.
+     */
+    token: string;
+    expiresAt: string;
+    permissions: Array<'read' | 'send' | 'manage'>;
+};
+
+export type AgentSetupStatus = {
+    id: string;
+    status: 'waiting' | 'connected' | 'expired' | 'replaced';
+    expiresAt: string;
+    connectedAt: string | null;
+    keyId: string | null;
+    keyName: string | null;
+};
+
+export type AgentKey = {
+    /**
+     * The API key (nm_…), shown once. Save it as NIGHTMAIL_API_KEY in the project's environment, never in code or a commit.
+     */
+    key: string;
+    keyId: string;
+    /**
+     * Agent (set up <date>), under API keys, where a person revokes it.
+     */
+    name: string;
+    workspaceId: string;
+    /**
+     * The workspace's name: tell the person, so they can confirm the key is in theirs.
+     */
+    workspaceName: string;
+    /**
+     * read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. It can't create API keys, agent tokens, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords; members, billing and deleting the workspace are a person's.
+     */
+    permissions: Array<'read' | 'send' | 'manage'>;
+    /**
+     * The API origin to call.
+     */
+    baseUrl: string;
+    mcp: {
+        url: string;
+        /**
+         * A remote MCP server entry that reads the key from NIGHTMAIL_API_KEY.
+         */
+        config: {
+            [key: string]: unknown;
+        };
+    };
+    nextStep: string;
+};
+
+export type AgentDeviceAuthorization = {
+    /**
+     * nm_device_…: keep it private; only pollAgentDeviceToken takes it.
+     */
+    device_code: string;
+    /**
+     * Show this to the person: they confirm it matches.
+     */
+    user_code: string;
+    verification_uri: string;
+    /**
+     * The page with the user code filled in: the link to give the person.
+     */
+    verification_uri_complete: string;
+    expires_in: number;
+    /**
+     * Seconds to wait between polls.
+     */
+    interval: number;
+};
+
+export type AgentDeviceRequest = {
+    userCode: string;
+    /**
+     * What the agent says it is: its claim, not verified.
+     */
+    clientName: string | null;
+    status: 'pending' | 'approved' | 'denied' | 'used' | 'expired';
+    createdAt: string;
+    expiresAt: string;
+    /**
+     * What its key gets once approved.
+     */
+    permissions: Array<'read' | 'send' | 'manage'>;
+};
+
+export type AgentDeviceApproval = {
+    userCode: string;
+    status: 'approved';
+    workspaceId: string;
+};
+
+export type AgentDeviceDenial = {
+    userCode: string;
+    status: 'denied';
 };
 
 export type ContactRead = Contact & {
@@ -1218,7 +1323,7 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); if both classifiers are unavailable, the request fails with retryable 503 CONTENT_SCREEN_UNAVAILABLE and Retry-After (nothing queued).
+     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
     /**
@@ -1295,7 +1400,7 @@ export type BatchSendEmailItem = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); if both classifiers are unavailable, the request fails with retryable 503 CONTENT_SCREEN_UNAVAILABLE and Retry-After (nothing queued).
+     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
 };
@@ -2222,7 +2327,38 @@ export type DomainReadiness = {
         purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc';
         status: 'pending' | 'verified';
         note?: string;
+        /**
+         * For pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1) shows for this record. verifyDomain looks it up now (answers cached up to 30 seconds). Other reads show the last background check, which runs every 15 to 60 minutes for a Hosted domain still pending an hour after it was added. Null when DNS did not answer in time; absent before any check and on other records.
+         */
+        publicDns?: {
+            /**
+             * found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.
+             */
+            state: 'found' | 'missing' | 'wrong_value';
+            /**
+             * wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise.
+             */
+            values: Array<string>;
+            checkedAt: string;
+        } | null;
     }>;
+    /**
+     * Where this domain’s DNS is hosted, from its zone’s NS records, alongside publicDns: null when the provider is not one Nightmail recognizes.
+     */
+    dnsHost?: {
+        /**
+         * The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap.
+         */
+        name: string;
+        /**
+         * The zone it hosts, which record names are relative to there.
+         */
+        zone: string;
+        /**
+         * The provider's DNS page for the zone, when it has a known address.
+         */
+        url: string | null;
+    } | null;
     /**
      * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
      */
@@ -2806,7 +2942,7 @@ export type Usage = {
          */
         perThousand: number;
         /**
-         * Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round.
+         * The sent allowance (same as freeSentEmails), kept for older clients. Sent and received each have their own allowance (freeSentEmails, freeReceivedEmails), counted separately: sends beyond theirs are charged even while received mail is still free, and the other way round.
          */
         freeEmails: number;
         /**
@@ -5888,7 +6024,7 @@ export type BillingSummary = {
          */
         storagePerGbMonth: string;
         /**
-         * Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).
+         * The sent allowance (same as freeSentEmails), kept for older clients. Each direction has its own allowance, counted separately (freeSentEmails, freeReceivedEmails).
          */
         freeEmails: number;
         /**
@@ -6287,6 +6423,10 @@ export type GetCurrentIdentityResponses = {
          * Nightmail staff only: this session may use staff UI notes. False for everyone else.
          */
         uiNotes?: boolean;
+        /**
+         * Dashboard sessions: whether createWorkspace lets this session create another workspace. Hosted, only staff can for now; everyone else has one workspace and gets 403 WORKSPACE_LIMIT. False for keys, MCP and agent tokens.
+         */
+        canCreateWorkspace?: boolean;
         /**
          * Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false.
          */
@@ -6805,7 +6945,7 @@ export type UpdateApiKeyData = {
     body: UpdateApiKey;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -6869,6 +7009,539 @@ export type UpdateApiKeyResponses = {
 };
 
 export type UpdateApiKeyResponse = UpdateApiKeyResponses[keyof UpdateApiKeyResponses];
+
+export type CreateAgentSetupTokenData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/agent/setup-tokens';
+};
+
+export type CreateAgentSetupTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateAgentSetupTokenError = CreateAgentSetupTokenErrors[keyof CreateAgentSetupTokenErrors];
+
+export type CreateAgentSetupTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentSetupToken;
+};
+
+export type CreateAgentSetupTokenResponse = CreateAgentSetupTokenResponses[keyof CreateAgentSetupTokenResponses];
+
+export type GetAgentSetupTokenData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/agent/setup-tokens/{id}';
+};
+
+export type GetAgentSetupTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetAgentSetupTokenError = GetAgentSetupTokenErrors[keyof GetAgentSetupTokenErrors];
+
+export type GetAgentSetupTokenResponses = {
+    /**
+     * Success
+     */
+    200: AgentSetupStatus;
+};
+
+export type GetAgentSetupTokenResponse = GetAgentSetupTokenResponses[keyof GetAgentSetupTokenResponses];
+
+export type ExchangeAgentSetupTokenData = {
+    body: {
+        /**
+         * The setup token from the prompt.
+         */
+        token: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/setup';
+};
+
+export type ExchangeAgentSetupTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Expired, or replaced by a newer one; use error.code.
+     */
+    410: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ExchangeAgentSetupTokenError = ExchangeAgentSetupTokenErrors[keyof ExchangeAgentSetupTokenErrors];
+
+export type ExchangeAgentSetupTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentKey;
+};
+
+export type ExchangeAgentSetupTokenResponse = ExchangeAgentSetupTokenResponses[keyof ExchangeAgentSetupTokenResponses];
+
+export type StartAgentDeviceAuthorizationData = {
+    body?: {
+        /**
+         * What the agent is, shown to the person as its claim.
+         */
+        client_name?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device';
+};
+
+export type StartAgentDeviceAuthorizationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type StartAgentDeviceAuthorizationError = StartAgentDeviceAuthorizationErrors[keyof StartAgentDeviceAuthorizationErrors];
+
+export type StartAgentDeviceAuthorizationResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceAuthorization;
+};
+
+export type StartAgentDeviceAuthorizationResponse = StartAgentDeviceAuthorizationResponses[keyof StartAgentDeviceAuthorizationResponses];
+
+export type PollAgentDeviceTokenData = {
+    body: {
+        device_code: string;
+        /**
+         * Optional, as RFC 8628 clients send it.
+         */
+        grant_type?: 'urn:ietf:params:oauth:grant-type:device_code';
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/token';
+};
+
+export type PollAgentDeviceTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PollAgentDeviceTokenError = PollAgentDeviceTokenErrors[keyof PollAgentDeviceTokenErrors];
+
+export type PollAgentDeviceTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentKey;
+};
+
+export type PollAgentDeviceTokenResponse = PollAgentDeviceTokenResponses[keyof PollAgentDeviceTokenResponses];
+
+export type LookUpAgentDeviceData = {
+    body: {
+        /**
+         * The code the agent shows, with or without its hyphen.
+         */
+        userCode: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/lookup';
+};
+
+export type LookUpAgentDeviceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type LookUpAgentDeviceError = LookUpAgentDeviceErrors[keyof LookUpAgentDeviceErrors];
+
+export type LookUpAgentDeviceResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceRequest;
+};
+
+export type LookUpAgentDeviceResponse = LookUpAgentDeviceResponses[keyof LookUpAgentDeviceResponses];
+
+export type ApproveAgentDeviceData = {
+    body: {
+        /**
+         * The code the agent shows, with or without its hyphen.
+         */
+        userCode: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/approve';
+};
+
+export type ApproveAgentDeviceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Expired, or replaced by a newer one; use error.code.
+     */
+    410: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ApproveAgentDeviceError = ApproveAgentDeviceErrors[keyof ApproveAgentDeviceErrors];
+
+export type ApproveAgentDeviceResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceApproval;
+};
+
+export type ApproveAgentDeviceResponse = ApproveAgentDeviceResponses[keyof ApproveAgentDeviceResponses];
+
+export type DenyAgentDeviceData = {
+    body: {
+        /**
+         * The code the agent shows, with or without its hyphen.
+         */
+        userCode: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/deny';
+};
+
+export type DenyAgentDeviceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Expired, or replaced by a newer one; use error.code.
+     */
+    410: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DenyAgentDeviceError = DenyAgentDeviceErrors[keyof DenyAgentDeviceErrors];
+
+export type DenyAgentDeviceResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceDenial;
+};
+
+export type DenyAgentDeviceResponse = DenyAgentDeviceResponses[keyof DenyAgentDeviceResponses];
 
 export type ListContactsData = {
     body?: never;
@@ -10069,7 +10742,7 @@ export type SendEmailData = {
     body: SendEmailInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10136,7 +10809,7 @@ export type SendEmailBatchData = {
     body: SendEmailBatchInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10274,11 +10947,25 @@ export type ListEmailsData = {
         region?: string;
         kind?: 'transactional' | 'marketing';
         /**
-         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address.
          */
         search?: string;
+        /**
+         * The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them.
+         */
         from?: string;
+        /**
+         * The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them.
+         */
         to?: string;
+        /**
+         * The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both.
+         */
+        since?: string;
+        /**
+         * The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both.
+         */
+        until?: string;
     };
     url: '/v1/emails';
 };
@@ -10728,7 +11415,7 @@ export type UploadAttachmentData = {
     body: AttachmentUpload;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11069,7 +11756,7 @@ export type CreateCampaignData = {
     body: CreateCampaignInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11764,7 +12451,7 @@ export type TestCampaignData = {
     body: CampaignTestInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11833,7 +12520,7 @@ export type SendCampaignData = {
     body: CampaignSendInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11902,7 +12589,7 @@ export type ScheduleCampaignData = {
     body: CampaignScheduleInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11971,7 +12658,7 @@ export type CancelCampaignData = {
     body?: never;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -21287,7 +21974,7 @@ export type CreateInboundThreadData = {
     body: CreateInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -22024,7 +22711,7 @@ export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };

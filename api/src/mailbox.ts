@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
-import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
+import { actorMailAccess, budgetedRead, mailboxRoute, readLimit, readLimitNote, receivingAdmin, receivingConsentRoute, workspaceMailAccess, ApiError, denied, requiredOf, restrictedArea, unrestrictedRequired, RECEIVING_HOST_CHANGE, digest, errors, getSes, id, isoTime, json, lasting, lazyModule, log, ModuleLoadError, response, SuppressionEventData, type Actor, type App, type Ctx, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { buildBoundedPageJson, PAGE_MAX_BYTES, withBoundedRead } from './read-bounds.js';
 import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpired, longPoll, requireReceivingConsent, reservePolls } from './auth.js';
 import { boundRequestBody } from './request-body.js';
@@ -74,7 +74,7 @@ async function mailboxAuth(c: Ctx, next: () => Promise<void>) {
   }
   return authenticate(c, async () => {
     const value = workspaceMailAccess(c.get('actor'), c.req.method, c.req.path);
-    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw unrestrictedRequired('A key limited to sender domains can’t read received mail. Use a key limited to addresses, or manage permission on all domains.', requiredOf(c));
+    if (value === 'UNRESTRICTED_KEY_REQUIRED') throw unrestrictedRequired(c.get('actor'), restrictedArea(c.req.path), requiredOf(c), 'For mail at some addresses only, a key limited to those addresses also works.');
     if (value === 'ADMIN_REQUIRED') throw denied(value, 'Received mail requires a key limited to addresses, an owner or admin, or an API key with manage permission on all domains.', requiredOf(c));
     c.set('mailboxAccess', value);
     await next();

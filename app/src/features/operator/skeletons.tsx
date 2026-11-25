@@ -1,8 +1,8 @@
 import { forwardRef, type ReactNode } from 'react'
-import { ChevronDown, Download } from 'lucide-react'
+import { ArrowUpRight, ChevronDown, Download } from 'lucide-react'
 import { Link, useLocation } from 'react-router'
 import { useSession } from '../../data/context'
-import { Button, type ButtonProps, EmptyState, FacetRail, LoadingRegion, PageHeader, SearchField, SectionHeader, Select, Skeleton, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
+import { Button, type ButtonProps, EmptyState, FacetRail, LoadingRegion, Meter, MetricRow, PageHeader, SearchField, SectionHeader, Select, Skeleton, Sparkline, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
 import type { AbuseBand } from '../../data/operator'
 import './operator.css'
 
@@ -79,7 +79,7 @@ export const waitlistColumnDefs: SkeletonColumn[] = [
 
 // Sign-ups (?view=signups): the limit and what fills it, then every workspace, newest first. A phone's card shows the
 // name and standing, the owner and when it joined, then its verified domain and what it sent.
-export const signupFacts = ['Signed up', 'Held for the waitlist', 'Waiting', 'Open'] as const
+export const signupFacts = ['Signed up', 'Held for the waitlist', 'Open', 'Waiting'] as const
 export function SignupFacts({ values }: { values?: Record<(typeof signupFacts)[number], ReactNode> }) {
   return <dl className="op-facts op-facts--four">{signupFacts.map(title => <div key={title}><dt>{title}</dt><dd>{values ? values[title] : <Skeleton width={72} height={14} />}</dd></div>)}</dl>
 }
@@ -116,7 +116,7 @@ export const SetLimitTrigger = (props: ButtonProps) => <Button {...props}>Set li
 // phone's card shows the note, its status, page, type and age, with its selection checkbox at the end for the bulk menu.
 export const noteColumnDefs: SkeletonColumn[] = [
   { key: 'select', label: '', width: 40, card: 'end' },
-  { key: 'shot', label: 'Screenshot', width: 96, card: 'hide' },
+  { key: 'shot', label: 'Screenshot', width: 92, card: 'hide' },
   { key: 'note', label: 'Note', card: 'title' },
   { key: 'status', label: 'Status', width: 124, card: 'aside' },
   { key: 'page', label: 'Page', width: '20%', card: 'line' },
@@ -263,6 +263,48 @@ export function OperatorWorkspaceSkeleton({ actions }: { actions: boolean }) {
     <LoadingRegion label="Loading the workspace"><WorkspaceBodySkeleton /></LoadingRegion>
   </>
 }
+// Glass (/glass): groups of metric rows, each row a label, a trend and a figure. The layout is fixed here, rows and all
+// (a slot's label comes with the figures), so the route's placeholder, the page's loading state and every 30-second
+// refresh draw the same rows in the same places. glass.tsx fills them.
+export type GlassRowDef = { key: string; label?: string; spark?: true; meter?: true; grades?: true }
+export type GlassFill = { label?: ReactNode; hint?: ReactNode; spark?: readonly number[]; value: ReactNode; unit?: ReactNode; tone?: Tone; empty?: boolean
+  meter?: { value: number; max: number; mark?: number; tone?: Tone; label?: string }; grades?: { grade: string; count: ReactNode }[] }
+const slots = (prefix: string, n: number, extra: Omit<GlassRowDef, 'key'> = {}) => Array.from({ length: n }, (_, i): GlassRowDef => ({ key: `${prefix}:${i}`, ...extra }))
+export const glassGroups: { key: string; title: string; to?: [href: string, label: string]; rows: GlassRowDef[] }[] = [
+  { key: 'sending', title: 'Sending now', to: ['/operator?view=health', 'Health'], rows: [{ key: 'minute', label: 'Per minute', spark: true }, { key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
+    { key: 'queued', label: 'Queued' }, { key: 'held', label: 'Held for screening' }, { key: 'api', label: 'Send API' }, ...slots('campaign', 2, { meter: true })] },
+  { key: 'delivery', title: 'Delivery · 24 h', to: ['/operator', 'Queue'], rows: [{ key: 'delivered', label: 'Delivered', spark: true }, { key: 'bounced', label: 'Bounced', spark: true, meter: true },
+    { key: 'complained', label: 'Complained', spark: true, meter: true }, { key: 'grades', grades: true }, { key: 'paused', label: 'Paused' }, { key: 'held', label: 'Marketing held' }] },
+  { key: 'system', title: 'System', to: ['/operator?view=health', 'Health'], rows: [{ key: 'health', label: 'Health' }, ...slots('alert', 3),
+    { key: 'rate', label: 'SES rate', meter: true }, { key: 'day', label: 'SES 24 h', meter: true }, { key: 'deploy', label: 'Deploy' }] },
+  { key: 'signups', title: 'Sign-ups', to: ['/operator?view=signups', 'Sign-ups'], rows: [{ key: 'today', label: 'Today', spark: true }, { key: 'week', label: '7 days' }, { key: 'open', label: 'Open places' }, { key: 'waiting', label: 'Waiting' }] },
+  { key: 'funnel', title: 'Funnel · 30 days', to: ['/operator?view=signups', 'Workspaces'], rows: [{ key: 'signedUp', label: 'Signed up', meter: true }, { key: 'domainAdded', label: 'Added a domain', meter: true },
+    { key: 'domainVerified', label: 'Verified it', meter: true }, { key: 'keyCreated', label: 'Created a key', meter: true }, { key: 'firstSend', label: 'Sent mail', meter: true }] },
+  { key: 'money', title: 'Money', rows: [{ key: 'creditToday', label: 'Credit today' }, { key: 'creditMonth', label: 'Credit this month', spark: true }, { key: 'owed', label: 'Owed' }, { key: 'usage', label: 'Usage this month' }] },
+  { key: 'receiving', title: 'Receiving', to: ['/logs?view=received', 'Logs'], rows: [{ key: 'today', label: 'Today', spark: true }, { key: 'spam', label: 'Spam-flagged' }] },
+  { key: 'visitors', title: 'Visitors', rows: [{ key: 'views', label: 'Page views', spark: true }, { key: 'visitors', label: 'Visitors' }, ...slots('referrer', 3)] },
+]
+const GRADE_SLOTS = ['A+', 'A', 'B', 'C', 'D', 'F', 'Warmup']
+/** The groups, filled by `fill`; without it, every figure is a placeholder of its own size. */
+export function GlassGroups({ fill }: { fill?: (group: string, row: string) => GlassFill }) {
+  return <div className="glass">{glassGroups.map(group => <section key={group.key} className="glass-group" aria-label={group.title}>
+    <SectionHeader title={group.title} actions={group.to && <Link className="ui-button ui-button--ghost ui-button--sm" to={group.to[0]}>{group.to[1]} <ArrowUpRight size={16} aria-hidden="true" /></Link>} />
+    {group.rows.map(def => {
+      const row = fill?.(group.key, def.key)
+      if (def.grades) return <div key={def.key} className="glass-grades" role="list" aria-label="Sender scores">{GRADE_SLOTS.map((grade, i) =>
+        <span key={grade} role="listitem"><span>{grade}</span><b>{row?.grades?.[i]?.count ?? <Skeleton width={16} height={12} />}</b></span>)}</div>
+      return <MetricRow key={def.key} className={row?.empty ? 'glass-empty' : undefined} label={row ? row.label ?? def.label : def.label ?? <Skeleton width={112} height={12} />} hint={row?.hint}
+        spark={def.spark && <Sparkline values={row?.spark ?? []} />} value={row ? row.value : <Skeleton width={56} height={14} />} unit={row?.unit} tone={row?.tone}
+        meter={def.meter && <Meter value={row?.meter?.value ?? 0} max={row?.meter?.max ?? 1} mark={row?.meter?.mark} tone={row?.meter?.tone} label={row?.meter?.label} />} />
+    })}
+  </section>)}</div>
+}
+/** When the figures are from: the clock, in a box as wide as its placeholder. */
+export const GlassAsOf = ({ at }: { at?: ReactNode }) => <span className="glass-asof">{at ?? <Skeleton width={96} height={14} />}</span>
+export function GlassSkeleton() {
+  return <><PageHeader title="Glass" actions={<GlassAsOf />} /><LoadingRegion label="Loading glass"><GlassGroups /></LoadingRegion></>
+}
+
 // The route-level placeholder while the operator chunk loads.
 export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'operator:read' | null | undefined }) {
   const { pathname, search } = useLocation(), identity = useSession()?.identity, uiNotes = identity?.uiNotes === true
