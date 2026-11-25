@@ -86,8 +86,16 @@ export async function servesWorkspace(runtime: Pick<Runtime, 'config' | 'db'>, r
 // ----- Custom hostnames (Cloudflare for SaaS) ---------------------------------------------------------------------
 
 type Saas = NonNullable<Config['linkHosts']>;
-type CustomHostname = { id: string; status?: string; ssl?: { status?: string; validation_errors?: { message?: string }[] } | null; verification_errors?: string[] };
+type CustomHostname = { id: string; status?: string; custom_origin_server?: string | null; ssl?: { status?: string; validation_errors?: { message?: string }[] } | null; verification_errors?: string[] };
 class CloudflareUnavailable extends Error { constructor(readonly status?: number) { super('Cloudflare unavailable'); } }
+/** A custom hostname another installation sharing the zone made (production, dev): never adopted or deleted here. */
+class NotOurs extends Error {}
+/**
+ * Which installation a custom hostname is: each makes its own with its target as the custom origin (production
+ * cname.nightmailedge.com, dev cname-dev.nightmailedge.com, both names in the zone), so installations sharing a zone never
+ * adopt or delete each other's.
+ */
+const ours = (saas: Saas, custom: CustomHostname) => custom.custom_origin_server === saas.target;
 /** One call to the zone's custom hostnames API (https://developers.cloudflare.com/api/resources/custom_hostnames/). */
 async function customHostnames(saas: Saas, method: 'GET' | 'POST' | 'DELETE', path: string, body?: unknown) {
   let response: Response;
@@ -101,12 +109,14 @@ async function customHostnames(saas: Saas, method: 'GET' | 'POST' | 'DELETE', pa
 }
 /** The custom hostname for `hostname`, created with an HTTP-validated certificate if the zone has none yet. */
 async function ensureCustomHostname(saas: Saas, hostname: string): Promise<CustomHostname> {
-  const created = await customHostnames(saas, 'POST', '', { hostname, ssl: { method: 'http', type: 'dv', settings: { min_tls_version: '1.2' } } });
+  const created = await customHostnames(saas, 'POST', '', { hostname, custom_origin_server: saas.target, ssl: { method: 'http', type: 'dv', settings: { min_tls_version: '1.2' } } });
   if (created.success) return created.result as CustomHostname;
-  // 1406: the zone already has it (an earlier check, or another workspace with the domain).
+  // 1406: the zone already has it: an earlier check here, or another workspace here with the domain (adopted), or another
+  // installation sharing the zone (refused).
   if (created.codes.includes(1406)) {
     const found = await customHostnames(saas, 'GET', `?hostname=${encodeURIComponent(hostname)}`);
     const [existing] = found.success && Array.isArray(found.result) ? found.result as CustomHostname[] : [];
+    if (existing && !ours(saas, existing)) throw new NotOurs();
     if (existing) return existing;
   }
   throw new CloudflareUnavailable(created.status);
@@ -141,7 +151,7 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
   try {
     if (seen?.state === 'found' || id) {
       let custom: CustomHostname | null = null;
-      if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(read.status); }
+      if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(read.status); if (custom && !ours(saas, custom)) throw new NotOurs(); }
       if (!custom && seen?.state === 'found' && proven) custom = await ensureCustomHostname(saas, hostname);
       id = custom?.id ?? null;
       status = custom && served(custom) ? 'active' : 'pending';
@@ -149,9 +159,15 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
       else if (!custom && seen?.state === 'found') detail = 'The CNAME is in place. The link host is set up once the domain verifies.';
     } else status = 'pending';
   } catch (error) {
-    if (!(error instanceof CloudflareUnavailable)) throw error;
-    log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
-    detail = 'Cloudflare didn\u2019t answer. Check again in a minute.';
+    if (error instanceof NotOurs) {
+      id = null; status = 'pending';
+      detail = `${hostname} is already a custom hostname of another installation on this zone, so it isn\u2019t set up here.`;
+      log('warn', { code: 'LINK_HOST_NOT_OURS', workspaceId });
+    } else {
+      if (!(error instanceof CloudflareUnavailable)) throw error;
+      log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
+      detail = 'Cloudflare didn\u2019t answer. Check again in a minute.';
+    }
   }
   const woke = status === 'active' && row?.status !== 'active';
   await runtime.db.execute(sql`INSERT INTO link_hosts(workspace_id, domain, hostname, custom_hostname_id, status, detail, public_dns, verified_at)
@@ -213,8 +229,7 @@ async function cleanUpLinkHostPage(runtime: Runtime, saas: Saas) {
     FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain) LIMIT 1000`);
   const kept = new Set<string>();
   for (const id of new Set(rows.flatMap(row => row.custom_hostname_id && !row.shared ? [row.custom_hostname_id] : []))) {
-    try { const done = await customHostnames(saas, 'DELETE', `/${encodeURIComponent(id)}`); if (!done.success && done.status !== 404) kept.add(id); }
-    catch { kept.add(id); }
+    if (!await deleteOwnHostname(saas, id)) kept.add(id);
   }
   if (kept.size) log('warn', { code: 'LINK_HOST_DELETE_FAILED', count: kept.size });
   const gone = rows.filter(row => !row.custom_hostname_id || !kept.has(row.custom_hostname_id));
@@ -228,6 +243,17 @@ export async function forgetLinkHost(runtime: Runtime, workspaceId: string, doma
     RETURNING custom_hostname_id, EXISTS (SELECT 1 FROM link_hosts o WHERE o.custom_hostname_id=h.custom_hostname_id AND NOT (o.workspace_id=h.workspace_id AND o.domain=h.domain)) AS shared`);
   const saas = runtime.config.linkHosts;
   if (!saas || !row?.custom_hostname_id || row.shared) return;
-  try { await customHostnames(saas, 'DELETE', `/${encodeURIComponent(row.custom_hostname_id)}`); }
-  catch { log('warn', { code: 'LINK_HOST_DELETE_FAILED', workspaceId }); }
+  if (!await deleteOwnHostname(saas, row.custom_hostname_id)) log('warn', { code: 'LINK_HOST_DELETE_FAILED', workspaceId });
+}
+/** Deletes a custom hostname this installation made; one another installation on the zone made is left alone. True when it
+ *  is gone or isn't ours to delete; false when Cloudflare didn't answer. */
+async function deleteOwnHostname(saas: Saas, id: string) {
+  try {
+    const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`);
+    if (read.status === 404) return true;
+    if (!read.success) return false;
+    if (!ours(saas, read.result as CustomHostname)) { log('warn', { code: 'LINK_HOST_NOT_OURS' }); return true; }
+    const done = await customHostnames(saas, 'DELETE', `/${encodeURIComponent(id)}`);
+    return done.success || done.status === 404;
+  } catch { return false; }
 }
