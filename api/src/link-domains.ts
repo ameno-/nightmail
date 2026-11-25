@@ -31,15 +31,17 @@ export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: 
   const sender = domainOf(from), config = runtime.config;
   // A built-in domain has no DNS of its own to publish a link record in.
   if (isBuiltinHost(config, sender)) throw new ApiError(422, 'BUILTIN_DOMAIN_UNSUPPORTED', `The built-in domain has no link host, so it can\u2019t send mail that carries one: campaign, marketing or forwarded mail. Verify a domain of your own for that.`, field ?? 'from');
-  if (config.linkHosts) {
-    const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname FROM operation_domains d
-      LEFT JOIN link_hosts h ON h.workspace_id=d.workspace_id AND h.domain=d.name AND h.status='active'
-      WHERE d.workspace_id=${workspaceId} AND (d.name=${sender} OR right(${sender},length(d.name)+1)='.'||d.name) ORDER BY length(d.name) DESC`);
-    const active = rows.find(row => row.hostname);
-    if (active) return `https://${active.hostname}`;
-    if (config.multiTenant) throw linkRecordRequired(config, rows[0]?.name ?? sender, field);
-  }
-  if (config.multiTenant) throw linkRecordRequired(config, sender, field);
+  // Self-hosted without link hosts links on its own origin, with nothing to look up. Hosted always looks: only a check
+  // with link hosts on makes an active one, so without them it refuses.
+  if (!config.multiTenant && !config.linkHosts) return config.publicUrl.replace(/\/$/, '');
+  // The workspace's domains the sender is, or is under (its link hosts', and its domains' that have none yet), longest first.
+  const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname
+    FROM (SELECT domain AS name FROM link_hosts WHERE workspace_id=${workspaceId} UNION SELECT name FROM operation_domains WHERE workspace_id=${workspaceId}) d
+    LEFT JOIN link_hosts h ON h.workspace_id=${workspaceId} AND h.domain=d.name AND h.status='active'
+    WHERE d.name=${sender} OR right(${sender},length(d.name)+1)='.'||d.name ORDER BY length(d.name) DESC`);
+  const active = rows.find(row => row.hostname);
+  if (active) return `https://${active.hostname}`;
+  if (config.multiTenant) throw linkRecordRequired(config, rows[0]?.name ?? sender, field);
   return config.publicUrl.replace(/\/$/, '');
 }
 /** linkOrigin for several messages: one lookup per sender domain. */
@@ -136,7 +138,8 @@ export async function withLinkRecords<T extends Readable>(runtime: Runtime, work
   const { rows } = await runtime.db.execute<{ domain: string; status: 'pending' | 'active'; detail: string | null; public_dns: Seen | null }>(sql`SELECT domain, status, detail, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=ANY(${sql.param(reports.map(report => report.name))}::text[])`);
   const found = new Map(rows.map(row => [row.domain, row]));
   for (const report of reports) {
-    if (isBuiltinHost(runtime.config, report.name)) continue; // No DNS of its own, and transactional mail only.
+    // A built-in domain has no DNS of its own; a report that has its link record already keeps it.
+    if (isBuiltinHost(runtime.config, report.name) || report.dns.some(record => record.purpose === 'links')) continue;
     const row = found.get(report.name), active = row?.status === 'active', at = report.dns.findLastIndex(record => record.purpose === 'sending') + 1;
     const record: T['dns'][number] = { name: linkHostName(report.name), type: 'CNAME', value: saas.target, purpose: 'links', status: active ? 'verified' : 'pending',
       ...active ? {} : { note: row?.detail ?? `Campaign and marketing mail from ${report.name} carries its unsubscribe link on this host, and is refused until it verifies. If the domain's DNS is on Cloudflare, set the record to DNS only.`, ...row?.public_dns ? { publicDns: row.public_dns } : {} } };

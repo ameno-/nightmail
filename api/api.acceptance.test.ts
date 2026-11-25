@@ -771,12 +771,6 @@ const AUTH_SECRET = process.env.BANE_ROOT_SECRET;
 if (!AUTH_SECRET) throw new Error('Acceptance tests require the running API’s BANE_ROOT_SECRET to sign synthetic local session fixtures; no scenarios were run.');
 const MANAGER = 'acceptance-dashboard-session'; // Internal sentinel, never an HTTP credential.
 const PUBLIC_ORIGIN = new URL(process.env.PUBLIC_URL ?? BASE).origin;
-// Link hosts on (src/link-domains.ts), with a synthetic Cloudflare for SaaS zone that no scenario reaches unless it mocks
-// it: Hosted refuses campaign and marketing mail from a domain without an active link host. Scenarios that build a runtime
-// from this process's environment get it too (the API under test, started before, doesn't), and every domain a scenario
-// adds has an active one (the trigger installed in before()), as if its CNAME had been checked.
-const LINK_HOSTS = { NIGHTMAIL_LINK_SAAS_ZONE_ID: '0'.repeat(32), NIGHTMAIL_LINK_SAAS_TOKEN: 'acceptance-fixture-cloudflare-token', NIGHTMAIL_LINK_SAAS_TARGET: 'edge.links-fixture.example' };
-for (const [key, value] of Object.entries(LINK_HOSTS)) process.env[key] ??= value;
 const COOKIE_NAME = PUBLIC_ORIGIN.startsWith('https:') ? '__Host-nightmail.session_token' : 'nightmail.session_token';
 const AUTH_EMAIL = process.env.AUTH_TEST_EMAIL ?? 'operator@example.com';
 // The operator's issuer subject (= its user ID). Self-hosted access is by subject: AUTH_ALLOWED_SUBJECTS lists it.
@@ -934,7 +928,8 @@ before(async () => {
   // Drive the real job handlers directly on an isolated, entirely loopback
   // harness. Never start an extra worker on a remote API/database or live SES.
   const loopback=(url:string)=>['localhost','127.0.0.1','[::1]'].includes(new URL(url).hostname);
-  // Every domain a scenario adds gets an active link host, so Hosted scenarios send campaign and marketing mail from it.
+  // Hosted refuses campaign and marketing mail from a domain without an active link host (src/link-domains.ts): every
+  // domain a scenario adds gets one, as if its links CNAME had been checked. The link host scenario removes its own.
   await authDb.query(`CREATE OR REPLACE FUNCTION acceptance_link_host() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
       INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES (NEW.workspace_id,lower(NEW.name),'links.'||lower(NEW.name),'active') ON CONFLICT DO NOTHING; RETURN NEW; END $$`);
   for (const table of ['operation_domains', 'domain_claims']) await authDb.query(`CREATE OR REPLACE TRIGGER acceptance_link_host AFTER INSERT ON ${table} FOR EACH ROW EXECUTE FUNCTION acceptance_link_host()`);
@@ -18601,7 +18596,7 @@ async function stripeFixture(t: TestContext) {
     import('./src/app.js'), import('./src/adapters/node.js'), import('node:async_hooks'), import('./src/billing/stripe.js'), import('./src/billing/stripe-jobs.js'),
   ]);
   const db = await fixtureDatabase(t);
-  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false', ...LINK_HOSTS,
+  const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN, MULTI_TENANT: 'true', ENABLE_LIVE_SES: 'false', 
     ACCOUNT_ISSUER: process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-by-session-fixture', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google',
     STRIPE_SECRET_KEY: 'sk_test_fake', STRIPE_WEBHOOK_SECRET: STRIPE_TEST_WEBHOOK_SECRET, STRIPE_API_BASE: STRIPE_TEST_BASE,
     S3_BUCKET: 'synthetic-billing-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
@@ -21078,7 +21073,7 @@ async function simulatedSesFixture(t: TestContext, scenario: (fixture: {
   const db = await fixtureDatabase(t);
   const instance = nodeRuntime({ DATABASE_URL: FIXTURE_DATABASE_URL, BANE_ROOT_SECRET: AUTH_SECRET,
     ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture', AUTH_ALLOWED_SUBJECTS: AUTH_SUBJECT,
-    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', ...LINK_HOSTS,
+    PUBLIC_URL: PUBLIC_ORIGIN, DEFAULT_SES_REGION: REGION, ENABLE_LIVE_SES: 'false', 
     S3_BUCKET: 'synthetic-simulator-fixture', S3_ACCESS_KEY_ID: 'synthetic-storage-id', S3_SECRET_ACCESS_KEY: 'synthetic-storage-secret' });
   cleanup(t, instance.close);
   const runtime = instance.runtime;
@@ -21499,7 +21494,7 @@ test('Hosted account re-home: drained legacy Ohio installation',async t=>{
   };
   const original=await database();
   const [{nodeRuntime},{createApp}]=await Promise.all([import('./src/adapters/node.js'),import('./src/app.js')]);
-  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:origin,MULTI_TENANT:'true',...LINK_HOSTS,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
+  const origin='https://rehome-fixture.bane.dev',instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:origin,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',BANE_REGIONAL_SENDING:'true',BANE_TRUSTED_POOL:'true',BANE_PLATFORM_AWS_ACCOUNT:dest,ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'fixture-rehome',AWS_SECRET_ACCESS_KEY:'fixture',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture'});
   cleanup(t,instance.close);const runtime=instance.runtime;runtime.db=drizzle(db);runtime.config.hostedScreen=false; // This cutover fixture exercises SES routing, not a classifier transport.
   runtime.snsCertificateState = new SnsCertificateState();
   await t.test('deterministic read-only plan and strict inputs',async()=>{
@@ -23372,7 +23367,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs},{JobDeferred},{ensureRegionSettings},{STSClient},{SESv2Client},{SESClient},{SNSClient}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-ses'),import('@aws-sdk/client-sns')]);
     const db=await fixtureDatabase(t), user=await sessionFixture(t), wid='ws_'+randomUUID().replaceAll('-',''), oh='us-east-2',va='us-east-1',ie='eu-west-1',west='us-west-2', account='222288884444',platform='000033334444',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',...LINK_HOSTS,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'v5-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:'https://synthetic-template.s3.us-east-2.amazonaws.com/byo/v5.yaml'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);
     runtime.snsCertificateState = new SnsCertificateState();
     await db.query('INSERT INTO workspaces(id,slug,name) VALUES($1,$1,$1)',[wid]);
@@ -23668,7 +23663,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     const [{nodeRuntime},{createApp},{regionalByoJobs,queueByoHealth},{JobDeferred},{ensureRegionSettings},{STSClient},{CloudFormationClient},{SESv2Client},{setByoV2}]=await Promise.all([
       import('./src/adapters/node.js'),import('./src/app.js'),import('./src/byo-regional.js'),import('./src/jobs.js'),import('./src/ses-region-state.js'),import('@aws-sdk/client-sts'),import('@aws-sdk/client-cloudformation'),import('@aws-sdk/client-sesv2'),import('./scripts/set-byo-v2.js')]);
     const db=await fixtureDatabase(t),user=await sessionFixture(t),account='333344445555',other='666677778888',platform='000044445555',endpoint='https://byo-acceptance.bane.dev/v1/events/ses';
-    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',...LINK_HOSTS,ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'stack-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`,BYO_EVENTS_ORIGIN:'https://events.byo-acceptance.bane.dev'});
+    const instance=nodeRuntime({DATABASE_URL:FIXTURE_DATABASE_URL,BANE_ROOT_SECRET:AUTH_SECRET,ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER,ACCOUNT_CLIENT_ID:'fixture',ACCOUNT_CLIENT_PRIVATE_KEY:'unused-by-session-fixture',PUBLIC_URL:PUBLIC_ORIGIN,SES_FEEDBACK_URL:endpoint,MULTI_TENANT:'true',ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google',DEFAULT_WORKSPACE_OWNERS:'',BANE_PLATFORM_AWS_ACCOUNT:platform,BANE_REGIONAL_SENDING:'true',BANE_BYO_V2:'true',ENABLE_LIVE_SES:'true',BANE_HOSTED_SCREEN:'false',AWS_ACCESS_KEY_ID:'stack-fixture-platform',AWS_SECRET_ACCESS_KEY:'fixture-only',S3_BUCKET:'fixture',S3_ACCESS_KEY_ID:'fixture',S3_SECRET_ACCESS_KEY:'fixture',BYO_V5_TEMPLATE_URL:`https://nightmail-byo-templates-${platform}.s3.us-east-2.amazonaws.com/byo/6.0.yaml`,BYO_EVENTS_ORIGIN:'https://events.byo-acceptance.bane.dev'});
     const runtime=instance.runtime,app=createApp();cleanup(t,instance.close);runtime.snsCertificateState=new SnsCertificateState();
     const workspaces=['ws_'+randomUUID().replaceAll('-',''),'ws_'+randomUUID().replaceAll('-','')],[wid,wid2]=workspaces;
     for(const w of workspaces){
@@ -38550,7 +38545,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   test('link hosts: campaign, test and marketing mail link on the sending domain\'s verified links.<domain>, refuse on Hosted without it, never name this installation',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run,fetch:page})=>{
       const {SESv2Client,SendEmailCommand,GetEmailIdentityCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:Json[]=[];
-      const {linkOrigin}=await import('./src/link-domains.js'),{linkHostRequest}=await import('./src/link-hosts.js'),target=runtime.config.linkHosts!.target,wid=runtime.config.workspaceId;
+      runtime.config.linkHosts={zoneId:'0'.repeat(32),token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'};
+      const {linkOrigin}=await import('./src/link-domains.js'),{linkHostRequest}=await import('./src/link-hosts.js'),target=runtime.config.linkHosts.target,wid=runtime.config.workspaceId;
       // The domain's SES identity, verified and signing, for its check; every send is captured as SES gets it, then simulated.
       t.mock.method(SESv2Client.prototype,'send',function(this:any,cmd:any,...rest:any[]){
         if(cmd instanceof GetEmailIdentityCommand)return Promise.resolve({VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{Status:'SUCCESS',SigningEnabled:true,SigningAttributesOrigin:'AWS_SES',SigningHostedZone:'dkim.amazonses.com',Tokens:['t1','t2','t3']}});

@@ -907,6 +907,12 @@ export function domainReader(c: Ctx, requested?: string) {
 type DomainQuery = { limit: number; region?: string; refresh: 'true' | 'false'; cursor?: string; /** The caller counts the quota in a statement of its own (getOverviewSetup). */ countedElsewhere?: boolean };
 /** One page of domains as listDomains returns it. Hosted: one statement. Self-hosted: two with refresh=false, otherwise one plus an SES read per domain. */
 export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.infer<typeof DomainPage>> {
+  const page = await domainRows(c, a, q);
+  // Each domain's link record (src/link-domains.ts), so Overview's domains are listDomains' own.
+  await withLinkRecords(c.env, a.workspaceId, page.data);
+  return page;
+}
+async function domainRows(c: Ctx, a: Actor, q: DomainQuery): Promise<z.infer<typeof DomainPage>> {
   const allowed = a.domains.length ? or(...a.domains.map(parent => or(eq(domains.name, parent), like(domains.name, `%.${parent}`)))) : undefined;
   const where = and(scoped(domains, a), allowed, q.region ? eq(domains.region, region(c.env, q.region)) : c.env.config.multiTenant ? undefined : inArray(domains.region, c.env.config.regions), q.cursor ? lt(domains.id, q.cursor) : undefined);
   if (c.env.config.multiTenant) {
