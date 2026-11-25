@@ -34,11 +34,12 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
   const until = clock() + budgetMs;
   let campaignRemoved = 0, campaignKept = 0, campaignUnfolded = 0;
   let metricsRemoved = 0, metricsKept = 0, metricsUnfolded = 0;
+  let tenMinuteRemoved = 0, tenMinuteKept = 0, tenMinuteUnfolded = 0;
 
-  // Alternate bounded slices between campaign tallies and hourly metrics so a large backlog in one table never
-  // starves the other within the per-minute budget.
-  let campaignMore = true, metricsMore = true;
-  for (let pass = 0; pass < FOLD_MAX_PASSES && (campaignMore || metricsMore) && clock() < until; pass++) {
+  // Alternate bounded slices between campaign tallies, hourly metrics and 10-minute metrics so a large backlog in one
+  // table never starves the others within the per-minute budget.
+  let campaignMore = true, metricsMore = true, tenMinuteMore = true;
+  for (let pass = 0; pass < FOLD_MAX_PASSES && (campaignMore || metricsMore || tenMinuteMore) && clock() < until; pass++) {
     if (campaignMore && clock() < until) {
       const { rows: [c] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
         sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_campaign_tallies(${FOLD_BATCH_LIMIT})`
@@ -55,21 +56,32 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
       metricsRemoved += removed; metricsKept += kept; metricsUnfolded = Number(m?.unfolded_rows ?? 0);
       if (removed < FOLD_BATCH_LIMIT || metricsUnfolded === 0) metricsMore = false;
     }
+    if (tenMinuteMore && clock() < until) {
+      const { rows: [tm] } = await runtime.db.execute<{ removed_rows: number; kept_rows: number; unfolded_rows: string }>(
+        sql`SELECT removed_rows, kept_rows, unfolded_rows FROM fold_sending_metrics_ten_minute(${FOLD_BATCH_LIMIT})`
+      );
+      const removed = Number(tm?.removed_rows ?? 0), kept = Number(tm?.kept_rows ?? 0);
+      tenMinuteRemoved += removed; tenMinuteKept += kept; tenMinuteUnfolded = Number(tm?.unfolded_rows ?? 0);
+      if (removed < FOLD_BATCH_LIMIT || tenMinuteUnfolded === 0) tenMinuteMore = false;
+    }
   }
 
-  if (campaignUnfolded > UNFOLDED_ALERT_THRESHOLD || metricsUnfolded > UNFOLDED_ALERT_THRESHOLD) {
+  if (campaignUnfolded > UNFOLDED_ALERT_THRESHOLD || metricsUnfolded > UNFOLDED_ALERT_THRESHOLD || tenMinuteUnfolded > UNFOLDED_ALERT_THRESHOLD) {
     log('error', {
       code: 'SENDING_TALLIES_UNFOLDED_HIGH',
       threshold: UNFOLDED_ALERT_THRESHOLD,
       campaignUnfolded,
       metricsUnfolded,
+      tenMinuteUnfolded,
       campaignFolded: campaignRemoved - campaignKept,
       metricsFolded: metricsRemoved - metricsKept,
+      tenMinuteFolded: tenMinuteRemoved - tenMinuteKept,
     });
   }
   return {
     campaignRemoved, campaignKept, campaignUnfolded,
     metricsRemoved, metricsKept, metricsUnfolded,
+    tenMinuteRemoved, tenMinuteKept, tenMinuteUnfolded,
   };
 }
 
@@ -202,6 +214,15 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
       } catch (error) {
         logError(error, { code: 'SENDING_EVENT_OUTCOMES_CHECK_FAILED', workspace: target.workspace_id }, 'warn');
       }
+    }
+  }
+
+  // Prune 10-minute rollup rows past the 7-day rolling retention window (bounded index scan on bucket).
+  if (clock() < until) {
+    try {
+      await runtime.db.execute(sql`DELETE FROM sending_metrics_ten_minute WHERE bucket < now() - interval '7 days'`);
+    } catch (error) {
+      logError(error, { code: 'METRICS_TEN_MINUTE_PRUNE_FAILED' }, 'warn');
     }
   }
 

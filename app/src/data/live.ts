@@ -299,22 +299,30 @@ export function createLiveApi(scope?: RequestScope): Api {
       const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
       const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
       if (input.stream) params.set('stream', input.stream)
-      const hourly = input.range !== '30d'
+      // 24h uses 10-minute buckets (sending_metrics_ten_minute); 7d uses 1-hour and 30d folds 1-hour into 4-hour
+      // buckets (sending_metrics_hourly), keeping every range around 144–180 points with zero raw table scans.
+      const granularity = input.range === '24h' ? '10m' : 'hour'
+      const step = input.range === '24h' ? 600_000 : input.range === '7d' ? 3_600_000 : 4 * 3_600_000
       // One request returns the chart buckets and the previous period's totals.
-      const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day'); chartParams.set('include', 'previous')
+      const chartParams = new URLSearchParams(params); chartParams.set('granularity', granularity); chartParams.set('include', 'previous')
       const metrics = await call(`/metrics?${chartParams}`, 'GET', undefined, signal)
       if (!metrics.previous) throw new ApiError('The API did not return the previous period’s totals.', 'INVALID_RESPONSE')
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
-      const buckets = hourly ? metrics.hourly : metrics.daily
+      const buckets = granularity === '10m' ? metrics.tenMinute : metrics.hourly
       if (!Array.isArray(buckets)) throw new ApiError('The API did not return the requested chart buckets.', 'INVALID_RESPONSE')
-      const series = new Map<number, Json>(buckets.map((row: Json) => [Date.parse(row.date), row]))
-      const step = hourly ? 3600000 : 86400000
+      const series = new Map<number, { sent: number; delivered: number; bounced: number; complaints: number }>()
+      for (const row of buckets as Json[]) {
+        const key = Math.floor(Date.parse(row.date) / step) * step
+        const acc = series.get(key) ?? { sent: 0, delivered: 0, bounced: 0, complaints: 0 }
+        acc.sent += row.count ?? 0; acc.delivered += row.delivered ?? 0; acc.bounced += row.bounced ?? 0; acc.complaints += row.complained ?? 0
+        series.set(key, acc)
+      }
       const startAt = Math.floor(Date.parse(metrics.from) / step) * step, endAt = Date.parse(metrics.to)
       const points = []
       for (let bucket = startAt; bucket < endAt; bucket += step) {
         const at = new Date(bucket).toISOString(), row = series.get(bucket)
-        points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
+        points.push({ at, sent: row?.sent ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complaints ?? 0 })
       }
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points }
     },

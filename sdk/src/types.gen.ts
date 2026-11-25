@@ -2731,6 +2731,14 @@ export type Metrics = {
         bounced: number;
         complained: number;
     }>;
+    tenMinute?: Array<{
+        date: string;
+        count: number;
+        sent: number;
+        delivered: number;
+        bounced: number;
+        complained: number;
+    }>;
     /**
      * Present with include=previous.
      */
@@ -15012,7 +15020,7 @@ export type GetMetricsData = {
         from?: string;
         to?: string;
         stream?: 'transactional' | 'marketing';
-        granularity?: 'day' | 'hour';
+        granularity?: 'day' | 'hour' | '10m';
         /**
          * Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).
          */

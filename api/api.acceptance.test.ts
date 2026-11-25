@@ -40088,17 +40088,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Mid-hour boundaries exercising both left edge (inside hour -1) and right edge (now, empty tail -> zero raw scan)
       const qFrom = at(-3_600_000 + 1_800_000), qTo = new Date(Date.now() + 1_000).toISOString();
       const metricsPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=hour&include=previous,streams`;
+      const tenMinPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=10m&include=previous,streams`;
       const viaTallies = ok(await request('GET', metricsPath, key));
+      const tenMinTallies = ok(await request('GET', tenMinPath, key));
       const detailViaTallies = ok(await request('GET', `/v1/campaigns/${cid}`, key));
       const statsViaTallies = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.ok(Array.isArray(tenMinTallies.tenMinute) && tenMinTallies.tenMinute.length >= 2, '10m granularity returns 10-minute buckets.');
+      error(await request('GET', `/v1/metrics?from=${encodeURIComponent(at(-8 * 86_400_000))}&to=${encodeURIComponent(qTo)}&granularity=10m`, key), 422, 'INVALID_DATE_RANGE');
 
       // 2. Emergency one-statement undo: disabling triggers immediately falls back to live queries, producing exact same answers!
       await db.query('ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete');
       assert.equal(await talliesEnabled(runtime.db), false);
       const viaLive = ok(await request('GET', metricsPath, key));
+      const tenMinLive = ok(await request('GET', tenMinPath, key));
       const detailViaLive = ok(await request('GET', `/v1/campaigns/${cid}`, key));
       const statsViaLive = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
       assert.deepEqual(viaTallies, viaLive, 'Hourly metrics rollup + partial edge split equals live scan.');
+      assert.deepEqual(tenMinTallies, tenMinLive, '10-minute metrics rollup + partial edge split equals live scan.');
       assert.deepEqual(detailViaTallies.counts, detailViaLive.counts, 'Campaign detail tally equals live scan.');
       assert.deepEqual({ counts: statsViaTallies.counts, totals: statsViaTallies.totals, rates: statsViaTallies.rates },
         { counts: statsViaLive.counts, totals: statsViaLive.totals, rates: statsViaLive.rates }, 'Campaign stats tally equals live scan.');
