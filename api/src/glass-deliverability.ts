@@ -18,7 +18,9 @@ import { poolSends } from './states.js';
 //  - standing: sender_standing (one row a workspace);
 //  - Amazon's view: deliverability_vdm_daily (VDM's daily estimates per ISP) and deliverability_checks (each region's
 //    GetAccount health, each VDM read and each platform domain's Spamhaus DBL listing), written by
-//    refreshDeliverabilitySources from the minute tick: SES health every 10 minutes, VDM and DBL hourly.
+//    refreshDeliverabilitySources from the minute tick: SES health every 10 minutes, VDM and DBL hourly;
+//  - Google's view: deliverability_postmaster_daily (Gmail Postmaster Tools per platform domain and day), read every
+//    6 hours with the OAuth grant in NIGHTMAIL_POSTMASTER_CREDENTIALS.
 // Behind the operator gate like every /v1/operator path, and hidden from the public OpenAPI document.
 
 export const GLASS_DELIVERABILITY_TTL_SECONDS = 30;
@@ -49,7 +51,11 @@ const Board = z.object({
     vdm: Check.extend({ error: z.string().nullable(), since: z.string(), until: z.string(), previousSince: z.string(),
       providers: z.array(z.object({ provider: z.union([z.enum(PROVIDER_NAMES), z.literal('all')]), current: Vdm, previous: Vdm })) }) })),
   blocklist: z.array(Check.extend({ domain: z.string() })).describe('Spamhaus DBL through NIGHTMAIL_PLACEMENT_DBL_ZONE: listed, clear, unknown or unconfigured.'),
-  postmaster: z.array(z.object({ domain: z.string(), url: z.string() })),
+  postmaster: z.array(Check.extend({ domain: z.string(), url: z.string(), error: z.string().nullable(),
+    latest: z.object({ day: z.string(), reputation: z.string().nullable().describe('HIGH, MEDIUM, LOW or BAD.'), spamRatio: z.number().nullable(), spf: z.number().nullable(), dkim: z.number().nullable(), dmarc: z.number().nullable() }).nullable()
+      .describe('Google\u2019s latest day for the domain: published a day or two late, and only for a day with enough mail to Gmail.'),
+    spamRatio: z.object({ current: z.number().nullable(), previous: z.number().nullable() }).describe('Gmail users\u2019 spam reports over mail delivered, the mean of the period\u2019s published days.') }))
+    .describe('Gmail Postmaster Tools for each platform domain. status null: not connected (NIGHTMAIL_POSTMASTER_CREDENTIALS unset).'),
   standing: z.object({ grades: z.record(z.enum(GRADES), int), calibrating: int, steps: z.object({ ok: int, notice: int, warn: int, restrict: int, pause: int }) }),
   top: z.object({ complaints: z.array(z.object({ workspaceId: z.string(), accepted: int, bounced: int, complained: int })), bounces: z.array(z.object({ workspaceId: z.string(), accepted: int, bounced: int, complained: int })) })
     .describe('The 10 workspaces with the most complaints and the most bounces in the period (simulated mail included), IDs only.'),
@@ -79,6 +85,7 @@ type Raw = {
   pool: { region: string; sending: boolean }[];
   vdm: { region: string; isp: string; metric: string; current: boolean; value: number }[];
   vdm_days: { since: string; until: string; prev: string };
+  postmaster: { domain: string; day: string; current: boolean; reputation: string | null; spam_ratio: number | null; spf_ratio: number | null; dkim_ratio: number | null; dmarc_ratio: number | null }[];
 };
 
 export async function readDeliverability(runtime: Pick<Runtime, 'db' | 'config'>, window: DeliverabilityWindow): Promise<DeliverabilityBoard> {
@@ -102,7 +109,9 @@ export async function readDeliverability(runtime: Pick<Runtime, 'db' | 'config'>
       (SELECT coalesce(json_agg(json_build_object('region',p.region,'sending',${poolSends()}) ORDER BY p.region),'[]') FROM provider_pool_regions p) AS pool,
       (SELECT coalesce(json_agg(v),'[]') FROM (SELECT region,isp,metric,day>win.today-${days}::int AS current,sum(value) AS value FROM deliverability_vdm_daily,win
         WHERE day>win.today-${days * 2}::int AND day<=win.today GROUP BY 1,2,3,4) v) AS vdm,
-      (SELECT json_build_object('since',(today-${days - 1}::int)::text,'until',today::text,'prev',(today-${days * 2 - 1}::int)::text) FROM win) AS vdm_days`);
+      (SELECT json_build_object('since',(today-${days - 1}::int)::text,'until',today::text,'prev',(today-${days * 2 - 1}::int)::text) FROM win) AS vdm_days,
+      (SELECT coalesce(json_agg(p ORDER BY p.domain,p.day),'[]') FROM (SELECT domain,day::text AS day,day>win.today-${days}::int AS current,reputation,spam_ratio,spf_ratio,dkim_ratio,dmarc_ratio
+        FROM deliverability_postmaster_daily,win WHERE day>win.today-${Math.max(days * 2, 14)}::int AND day<=win.today) p) AS postmaster`);
   return shape(r!, window, unit, runtime.config);
 }
 
@@ -151,7 +160,13 @@ function shape(r: Raw, window: DeliverabilityWindow, unit: 'hour' | 'day', confi
     series: r.series.map(s => ({ at: s.at, kind: s.kind, region: s.region, ...counts(s) })),
     regions,
     blocklist: domains.map(domain => { const c = check('dbl', domain); return { domain, status: c?.status ?? null, checkedAt: c?.checked_at ?? null }; }),
-    postmaster: domains.map(domain => ({ domain, url: 'https://postmaster.google.com/v2/domains' })),
+    postmaster: domains.map(domain => {
+      const c = check('postmaster', domain), days = r.postmaster.filter(p => p.domain === domain), last = days.at(-1);
+      const mean = (list: typeof days) => { const known = list.filter(p => p.spam_ratio !== null); return known.length ? known.reduce((n, p) => n + Number(p.spam_ratio), 0) / known.length : null; };
+      return { domain, url: 'https://postmaster.google.com/', status: c?.status ?? null, checkedAt: c?.checked_at ?? null, error: detail(c, 'error'),
+        latest: last ? { day: last.day, reputation: last.reputation, spamRatio: last.spam_ratio, spf: last.spf_ratio, dkim: last.dkim_ratio, dmarc: last.dmarc_ratio } : null,
+        spamRatio: { current: mean(days.filter(p => p.current)), previous: mean(days.filter(p => !p.current)) } };
+    }),
     standing: { grades: Object.fromEntries(GRADES.map(grade => [grade, Number(r.grades[grade] ?? 0)])) as Record<Grade, number>, calibrating: Number(r.grades.calibrating ?? 0),
       steps: { ok: Number(r.steps.ok), notice: Number(r.steps.notice), warn: Number(r.steps.warn), restrict: Number(r.steps.restrict), pause: Number(r.steps.pause) } },
     top: { complaints: workspaces.filter(w => w.complained > 0).sort((a, b) => b.complained - a.complained || b.bounced - a.bounced || a.workspaceId.localeCompare(b.workspaceId)).slice(0, 10),
@@ -165,26 +180,29 @@ const errorName = (error: unknown) => (error as { name?: string })?.name && (err
  * Brings Amazon's and Spamhaus's figures up to date, from the minute tick (worker.ts, runner.ts): each region's
  * GetAccount every 10 minutes, its VDM figures and each platform domain's DBL listing every hour. Each check is elected
  * once (deliverability_checks.next_at), so any number of processes run it once. Reads go out with the platform's own
- * credentials (the runtime's IAM user needs ses:GetAccount and ses:BatchGetMetricData). Never throws: a failed check is
+ * credentials (the runtime's IAM user needs ses:GetAccount and ses:BatchGetMetricData); Gmail Postmaster Tools, every
+ * 6 hours, with the OAuth grant in NIGHTMAIL_POSTMASTER_CREDENTIALS when it is set. Never throws: a failed check is
  * kept with its error's name, logged, and run again at its next time.
  */
 export async function refreshDeliverabilitySources(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
   try {
-    const { rows } = await runtime.db.execute<{ kind: 'ses' | 'vdm' | 'dbl'; subject: string; account: string | null }>(sql`WITH wanted(kind,subject,account,every) AS (
+    const { rows } = await runtime.db.execute<{ kind: 'ses' | 'vdm' | 'dbl' | 'postmaster'; subject: string; account: string | null }>(sql`WITH wanted(kind,subject,account,every) AS (
         SELECT 'ses',region,aws_account_id,interval '10 minutes' FROM provider_pool_regions
         UNION ALL SELECT 'vdm',region,aws_account_id,interval '1 hour' FROM provider_pool_regions
         UNION ALL SELECT 'dbl',d,NULL,interval '1 hour' FROM unnest(${sql.param(platformDomains(runtime.config))}::text[]) d
+        UNION ALL SELECT 'postmaster',d,NULL,interval '6 hours' FROM unnest(${sql.param(runtime.config.postmaster ? platformDomains(runtime.config) : [])}::text[]) d
       ), claimed AS (INSERT INTO deliverability_checks AS c (kind,subject,next_at) SELECT kind,subject,now()+every FROM wanted
         ON CONFLICT (kind,subject) DO UPDATE SET next_at=excluded.next_at WHERE c.next_at<=now() RETURNING c.kind,c.subject)
       SELECT c.kind,c.subject,w.account FROM claimed c JOIN wanted w USING (kind,subject) ORDER BY c.kind='vdm',c.kind,c.subject`);
     if (!rows.length) return;
     const { loadDispatchTransport, poolSes } = await import('./dispatcher.js');
-    let transport: Awaited<ReturnType<typeof loadDispatchTransport>> | undefined;
+    let transport: Awaited<ReturnType<typeof loadDispatchTransport>> | undefined, google: Promise<string> | undefined;
     for (const row of rows) {
       let status = 'ok', detail: Record<string, unknown> | null = null;
       try {
         if (row.kind === 'dbl') status = await blocklisted(runtime, row.subject);
+        else if (row.kind === 'postmaster') detail = await readPostmaster(runtime, row.subject, await (google ??= postmasterToken(runtime.config.postmaster!)));
         else {
           transport ??= await loadDispatchTransport(runtime);
           const { ses } = poolSes(runtime, transport, row.subject, row.account!);
@@ -230,6 +248,45 @@ async function readVdm(runtime: Runtime, ses: import('@aws-sdk/client-sesv2').SE
     SELECT ${region},r.day::date,r.isp,r.metric,r.value FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) r(day text,isp text,metric text,value float8)
     ON CONFLICT (region,day,isp,metric) DO UPDATE SET value=excluded.value,fetched_at=now()`);
   return { days: new Set(rows.map(r => r.day)).size, ...failed.size ? { error: [...failed].sort().join(',') } : {} };
+}
+
+// Gmail Postmaster Tools (v1): an access token from the stored grant, then the domain's daily traffic stats.
+const POSTMASTER_API = 'https://gmailpostmastertools.googleapis.com/v1';
+const googleError = (status: number, body: { error?: string | { status?: string } }) => Object.assign(new Error('Google refused the request'),
+  { name: (typeof body.error === 'string' ? body.error : body.error?.status) ?? `HTTP_${status}` });
+async function postmasterToken(grant: NonNullable<Runtime['config']['postmaster']>) {
+  const res = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', signal: AbortSignal.timeout(10_000),
+    body: new URLSearchParams({ client_id: grant.clientId, client_secret: grant.clientSecret, refresh_token: grant.refreshToken, grant_type: 'refresh_token' }) });
+  const body = await res.json().catch(() => ({})) as { access_token?: string; error?: string };
+  if (!res.ok || !body.access_token) throw googleError(res.status, body);
+  return body.access_token;
+}
+type TrafficStats = { name?: string; domainReputation?: string; userReportedSpamRatio?: number; spfSuccessRatio?: number; dkimSuccessRatio?: number; dmarcSuccessRatio?: number; deliveryErrors?: unknown[] };
+/** The last 60 days Google has for a domain, upserted by day (a day Google revises is written again). */
+async function readPostmaster(runtime: Runtime, domain: string, token: string) {
+  const today = new Date(), end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)), start = new Date(end.getTime() - 60 * 86_400_000);
+  const date = (prefix: string, d: Date) => [[`${prefix}.year`, String(d.getUTCFullYear())], [`${prefix}.month`, String(d.getUTCMonth() + 1)], [`${prefix}.day`, String(d.getUTCDate())]];
+  const stats: TrafficStats[] = [];
+  let page: string | undefined;
+  for (let i = 0; i < 5; i++) {
+    const query = new URLSearchParams([...date('startDate', start), ...date('endDate', end), ['pageSize', '100'], ...page ? [['pageToken', page]] : []]);
+    const res = await fetch(`${POSTMASTER_API}/domains/${encodeURIComponent(domain)}/trafficStats?${query}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
+    const body = await res.json().catch(() => ({})) as { trafficStats?: TrafficStats[]; nextPageToken?: string; error?: { status?: string } };
+    if (!res.ok) throw googleError(res.status, body);
+    stats.push(...body.trafficStats ?? []);
+    if (!(page = body.nextPageToken)) break;
+  }
+  const ratio = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : null;
+  const rows = stats.flatMap(t => {
+    const day = /\/trafficStats\/(\d{4})(\d{2})(\d{2})$/.exec(t.name ?? '');
+    return day ? [{ day: `${day[1]}-${day[2]}-${day[3]}`, reputation: t.domainReputation && t.domainReputation !== 'REPUTATION_CATEGORY_UNSPECIFIED' ? t.domainReputation : null,
+      spam: ratio(t.userReportedSpamRatio), spf: ratio(t.spfSuccessRatio), dkim: ratio(t.dkimSuccessRatio), dmarc: ratio(t.dmarcSuccessRatio), errors: Array.isArray(t.deliveryErrors) ? t.deliveryErrors.slice(0, 20) : [] }] : [];
+  });
+  if (rows.length) await runtime.db.execute(sql`INSERT INTO deliverability_postmaster_daily AS p (domain,day,reputation,spam_ratio,spf_ratio,dkim_ratio,dmarc_ratio,delivery_errors)
+    SELECT ${domain},r.day::date,r.reputation,r.spam,r.spf,r.dkim,r.dmarc,r.errors FROM jsonb_to_recordset(${JSON.stringify(rows)}::jsonb) r(day text,reputation text,spam float8,spf float8,dkim float8,dmarc float8,errors jsonb)
+    ON CONFLICT (domain,day) DO UPDATE SET reputation=excluded.reputation,spam_ratio=excluded.spam_ratio,spf_ratio=excluded.spf_ratio,dkim_ratio=excluded.dkim_ratio,
+      dmarc_ratio=excluded.dmarc_ratio,delivery_errors=excluded.delivery_errors,fetched_at=now()`);
+  return { days: rows.length };
 }
 
 async function blocklisted(runtime: Runtime, domain: string) {

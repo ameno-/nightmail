@@ -14,6 +14,7 @@ const REFRESH_MS = 60_000
 const providers: MailProvider[] = ['gmail', 'microsoft', 'yahoo', 'apple', 'proton', 'gmx', 'other']
 const providerNames: Record<MailProvider | 'all', string> = { all: 'All ISPs', gmail: 'Gmail', microsoft: 'Microsoft', yahoo: 'Yahoo · AOL', apple: 'Apple iCloud', proton: 'Proton', gmx: 'GMX · Web.de', other: 'Other' }
 const grades = ['A+', 'A', 'B', 'C', 'D', 'F'] as const
+const reputations: Record<string, [string, Tone]> = { HIGH: ['High', 'success'], MEDIUM: ['Medium', 'neutral'], LOW: ['Low', 'warning'], BAD: ['Bad', 'danger'] }
 // The lines deliverability.ts THRESHOLDS publishes: hard bounces 2% and 5%, complaints 0.1% (Gmail) and 0.3% (enforced).
 const HARD = [0.02, 0.05] as const, COMPLAINT = [0.001, 0.003] as const
 const zero = (): DeliverabilityCounts => ({ accepted: 0, delivered: 0, hardBounced: 0, softBounced: 0, deferred: 0, complained: 0, opened: 0, humanOpened: 0, clicked: 0 })
@@ -40,13 +41,15 @@ function fill(d: Deliverability, stream: DeliverabilityStream, region: string): 
     return { value: value === null ? '—' : <Tick value={value} format={rateText} />, tone: lines ? zone(value, lines) : undefined, spark: series(c => c[key], c => c[of]),
       hint: `${number(now[key])} of ${number(now[of])} ${of}`, delta: points(value ?? 0, rate(before, key, of) ?? 0, good, what, of === 'accepted' ? had : engaged, periods) }
   }
+  const spam = d.postmaster.map(p => p.spamRatio.current).filter((n): n is number => n !== null), gmailSpam = spam.length ? spam.reduce((a, b) => a + b, 0) / spam.length : null
   const tiles: Record<string, GlassTileFill> = {
     accepted: { value: <Tick value={now.accepted} />, hint: `${number(before.accepted)} ${window.before}`, spark: buckets.map(c => c.accepted), delta: delta(now.accepted, before.accepted, null, 'Accepted', periods) },
     delivered: tile('delivered', 'up', 'Delivered'),
     hard: tile('hardBounced', 'down', 'Hard bounces', 'accepted', HARD),
     soft: tile('softBounced', 'down', 'Soft bounces'),
     deferred: tile('deferred', 'down', 'Deferred'),
-    complained: { ...tile('complained', 'down', 'Complaints', 'accepted', COMPLAINT), hint: `${number(now.complained)} · Gmail reports none here` },
+    // Gmail sends no complaints back; Postmaster's spam rate (when connected) stands in for them.
+    complained: { ...tile('complained', 'down', 'Complaints', 'accepted', COMPLAINT), hint: gmailSpam === null ? `${number(now.complained)} · Gmail reports none here` : `${number(now.complained)} · Gmail ${rateText(gmailSpam)} (Postmaster)` },
     human: tile('humanOpened', 'up', 'Opened by people', 'delivered'),
     clicked: tile('clicked', 'up', 'Clicked', 'delivered'),
   }
@@ -87,8 +90,16 @@ function fill(d: Deliverability, stream: DeliverabilityStream, region: string): 
       ...Object.fromEntries([0, 1].map(i => { const b = d.blocklist[i]; return [`dbl:${i}`, b ? { label: b.domain, hint: `Spamhaus DBL${b.checkedAt ? ` · checked ${since(b.checkedAt)}` : ''}`,
         value: b.status === 'listed' ? <StatusBadge status="Listed" tone="danger" /> : b.status === 'clear' ? <StatusBadge status="Clear" tone="success" /> : b.status === 'unconfigured' ? 'No DQS key' : b.status === 'unknown' ? 'Unknown' : '—',
         tone: b.status === 'unconfigured' || b.status === 'unknown' ? 'warning' : undefined } : empty(false, '')] })),
-      ...Object.fromEntries([0, 1].map(i => { const p = d.postmaster[i]; return [`postmaster:${i}`, p ? { label: p.domain, hint: 'Gmail Postmaster Tools',
-        value: <a className="glass-link" href={p.url} target="_blank" rel="noreferrer">Open <ArrowUpRight size={14} aria-hidden="true" /></a> } : empty(false, '')] })),
+      // Gmail Postmaster Tools: Google's reputation for the domain and its users' spam reports (Gmail's complaints).
+      ...Object.fromEntries([0, 1].map(i => {
+        const p = d.postmaster[i], key = `postmaster:${i}`
+        if (!p) return [key, empty(false, '')]
+        const open = <a className="glass-link" href={p.url} target="_blank" rel="noreferrer">Open <ArrowUpRight size={14} aria-hidden="true" /></a>
+        const [words, tone] = reputations[p.latest?.reputation ?? ''] ?? []
+        if (p.latest) return [key, { label: p.domain, hint: `Gmail spam ${pct(p.spamRatio.current ?? p.latest.spamRatio)} · ${date(p.latest.day, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`,
+          value: words ? <StatusBadge status={words} tone={tone} /> : open }]
+        return [key, { label: p.domain, hint: p.status === 'error' ? `Gmail Postmaster · ${p.error}` : p.status === 'ok' ? 'Gmail Postmaster · no day with enough mail yet' : 'Gmail Postmaster · not connected', value: open }]
+      })),
     },
     standing: {
       grades: { value: null, cells: [...grades.map(g => number(d.standing.grades[g])), number(d.standing.calibrating)] },

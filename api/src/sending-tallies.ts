@@ -237,11 +237,12 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
       logError(error, { code: 'METRICS_TEN_MINUTE_PRUNE_FAILED' }, 'warn');
     }
   }
-  // Glass's deliverability history (migrations 525, 529): 120 days, so the 30-day board always has the 30 days before.
+  // Glass's deliverability history (migrations 525, 529, 530): 120 days, so the 30-day board always has the 30 days before.
   if (clock() < until) {
     try {
       await runtime.db.execute(sql`DELETE FROM deliverability_hourly WHERE hour < now() - interval '120 days'`);
       await runtime.db.execute(sql`DELETE FROM deliverability_vdm_daily WHERE day < current_date - 120`);
+      await runtime.db.execute(sql`DELETE FROM deliverability_postmaster_daily WHERE day < current_date - 120`);
     } catch (error) {
       logError(error, { code: 'DELIVERABILITY_PRUNE_FAILED' }, 'warn');
     }
