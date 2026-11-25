@@ -381,6 +381,15 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   const { resolveJobHandler } = await import('../src/dispatch.js');
   const types = new Map<string, string>();
   const record = (type: string, where: string) => { if (!types.has(type)) types.set(type, where); };
+  // A job's type in an INSERT INTO jobs statement (TypeScript sql`…` or a migration's SQL function): its quoted dotted names.
+  const INSERT_JOBS = /INSERT\s+INTO\s+(?:public\.)?jobs\s*(?:AS\s+\w+\s*)?\(([^)]+)\)\s*([\s\S]*?)(?=\bON\s+CONFLICT\b|\bRETURNING\b|\)\s*,\s*[a-z_]+\s+AS\s*\(|`$|;)/gi;
+  const insertedTypes = (raw: string, where: string) => {
+    for (const ins of raw.matchAll(INSERT_JOBS)) {
+      const cols = ins[1]!.split(',').map(c => c.trim().toLowerCase()), body = ins[2]!;
+      if (cols.includes('status') && /'completed'/.test(body)) continue;
+      for (const m of body.matchAll(/'([a-z][a-z0-9]*\.[a-zA-Z0-9_]+)'/g)) if (!/^(?:public|pg_catalog)\./.test(m[1]!)) record(m[1]!, where);
+    }
+  };
   const walkFiles = (dir: URL, rel: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) walkFiles(new URL(entry.name + '/', dir), `${rel}${entry.name}/`);
@@ -401,28 +410,25 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
         const visit = (node: ts.Node) => {
           if (ts.isCallExpression(node)) {
             const callee = node.expression.getText(sf);
-            if (callee === 'enqueue' || callee.endsWith('.enqueue')) {
-              const arg = node.arguments[1];
-              if (arg && ts.isObjectLiteralExpression(arg)) {
-                const prop = arg.properties.find(p => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'type') as ts.PropertyAssignment | undefined;
-                const val = prop && evalStr(prop.initializer);
-                if (val) record(val, file);
-              }
+            // A job enqueue takes (db, job); a stream controller's enqueue(chunk) takes one argument and is no job.
+            if ((callee === 'enqueue' || callee.endsWith('.enqueue')) && node.arguments.length >= 2) {
+              const arg = node.arguments[1]!;
+              const prop = ts.isObjectLiteralExpression(arg) ? arg.properties.find(p => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'type') as ts.PropertyAssignment | undefined : undefined;
+              const val = prop && evalStr(prop.initializer);
+              if (val) record(val, file);
+              // A type this check can't read could be one with no handler: name it with a literal or a const in the file.
+              else fail('Job handlers', `${file}: enqueue's job type isn't a string literal or a const in this file, so this check can't verify it has a handler.`, file, sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1);
+            }
+            // Jobs inserted with Drizzle: insert(jobs).values(…), each row's literal type.
+            if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'values' && /\binsert\(jobs\)$/.test(node.expression.expression.getText(sf))) {
+              const types = (n: ts.Node): void => { if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name) && n.name.text === 'type') { const val = evalStr(n.initializer); if (val) record(val, file); } ts.forEachChild(n, types); };
+              node.arguments.forEach(types);
             }
           }
           if (ts.isTaggedTemplateExpression(node) && node.tag.getText(sf) === 'sql') {
             // Inspect only each INSERT INTO jobs(...) statement up to its ON CONFLICT / RETURNING / CTE end,
             // ignoring sibling CTEs (audit events, webhook events) and state-marker rows inserted as completed.
-            const raw = node.template.getText(sf);
-            for (const ins of raw.matchAll(/INSERT\s+INTO\s+jobs\s*\(([^)]+)\)\s*([\s\S]*?)(?=\bON\s+CONFLICT\b|\bRETURNING\b|\)\s*,\s*[a-z_]+\s+AS\s*\(|`$)/gi)) {
-              const cols = ins[1]!.split(',').map(c => c.trim().toLowerCase());
-              const body = ins[2]!;
-              if (cols.includes('status') && /'completed'/.test(body)) continue;
-              for (const m of body.matchAll(/'([a-z][a-z0-9]*\.[a-zA-Z0-9_]+)'/g)) {
-                const candidate = m[1]!;
-                if (!/^(?:public|pg_catalog)\./.test(candidate)) record(candidate, file);
-              }
-            }
+            insertedTypes(node.template.getText(sf), file);
           }
           ts.forEachChild(node, visit);
         };
@@ -431,6 +437,8 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     }
   };
   walkFiles(new URL('src/', api), 'api/src/');
+  // Jobs a migration's SQL function inserts (triggers, send_admission and the like) need handlers too.
+  for (const name of readdirSync(new URL('migrations/', api)).filter(n => n.endsWith('.sql')).sort()) insertedTypes(readFileSync(new URL(`migrations/${name}`, api), 'utf8'), `api/migrations/${name}`);
   const registries = await Promise.all([
     import('../src/sending.js').then(m => ['api/src/sending.ts', m.jobHandlers] as const),
     import('../src/operations.js').then(m => ['api/src/operations.ts', m.operationJobs] as const),
