@@ -38617,6 +38617,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([missing.name,missing.type,missing.value,missing.status,missing.publicDns.state],['links.example.com','CNAME',target,'pending','missing']);
       assert.equal(cloudflare.length,0,'No custom hostname before the CNAME resolves.');
       published=true;
+      // Hosted: a claim not yet proven gets no custom hostname, CNAME or not (anyone can add a domain, and a wildcard CNAME
+      // answers for any name under one): this fixture's domain has no proven claim.
+      {const {checkLinkHost}=await import('./src/link-domains.js'),hosted=runtime.config.multiTenant;runtime.config.multiTenant=true;
+        try{await checkLinkHost(runtime,wid,'example.com');}finally{runtime.config.multiTenant=hosted;}
+        assert.equal(cloudflare.length,0,'No custom hostname for an unproven Hosted claim.');
+        assert.deepEqual((await db.query('SELECT status,custom_hostname_id,detail FROM link_hosts WHERE workspace_id=$1 AND domain=$2',[wid,'example.com'])).rows[0],{status:'pending',custom_hostname_id:null,detail:'The CNAME is in place. The link host is set up once the domain verifies.'});}
       const found=await record();
       assert.deepEqual([found.status,found.publicDns.state],['pending','found']);assert.match(found.note,/certificate is being issued/);
       assert.deepEqual(cloudflare,[{method:'POST',path:`/client/v4/zones/${runtime.config.linkHosts!.zoneId}/custom_hostnames`,body:{hostname:'links.example.com',ssl:{method:'http',type:'dv',settings:{min_tls_version:'1.2'}}},auth:`Bearer ${runtime.config.linkHosts!.token}`}]);
@@ -38636,9 +38642,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(shown.status,200);assert.match(html,/Unsubscribe from marketing emails\?/);assert.ok(!/https?:\/\//.test(html),html);
       const oneClick=await page(new Request(unsubscribe,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded'},body:'List-Unsubscribe=One-Click'}));
       assert.equal(oneClick.status,200);assert.equal(oneClick.headers.get('location'),null);assert.ok(!/https?:\/\//.test(await oneClick.text()));
+      // links.example.com serves only its own workspace's links: another workspace's valid token is unknown there.
+      const foreign=`u_${'f'.repeat(64)}`;
+      await db.query("INSERT INTO operation_unsubscribe_tokens(token_hash,workspace_id,email) VALUES (encode(sha256(convert_to($1,'UTF8')),'hex'),'ws_link_foreign','someone@example.net')",[foreign]);
+      assert.equal((await page(new Request(`https://links.example.com/unsubscribe/${foreign}`,{headers:{accept:'text/html'}}))).status,404);
       // The Worker's rule for a link host: its links, and nothing else; this installation's own hosts are untouched.
       for(const [host,path,answer] of [['links.example.com','/unsubscribe/u_x','link'],['links.example.com','/v1/forwarding/stop/x','link'],['links.example.com','/i/x.png','link'],
-        ['links.example.com','/','missing'],['links.example.com','/overview','missing'],['links.example.com','/v1/campaigns','missing'],['links.example.com','/unsubscribe/u_x/y','missing'],['nightmail.dev','/overview','other']] as const)
+        ['links.example.com','/','missing'],['links.example.com','/overview','missing'],['links.example.com','/v1/campaigns','missing'],['links.example.com','/unsubscribe/u_x/y','missing'],['nightmail.dev','/overview','other'],['dev.nightmail.dev','/overview','pass'],['media.nightmail.dev','/a.png','pass']] as const)
         assert.equal(linkHostRequest(true,host,path,['nightmail.dev']),answer,`${host}${path}`);
       assert.equal(linkHostRequest(false,'links.example.com','/overview',['nightmail.dev']),'other');
       } finally { globalThis.fetch=prior; }

@@ -72,6 +72,17 @@ export function foundLinkOrigin(config: Config, from: string, found: string | nu
   return config.publicUrl.replace(/\/$/, '');
 }
 
+/**
+ * Whether a link page (unsubscribe, forwarding) may answer on the request's host for a link of `workspaceId`: this
+ * installation's own origin (links sent before link hosts), or that workspace's own active link host. So links.a.com never
+ * serves workspace B's links.
+ */
+export async function servesWorkspace(runtime: Pick<Runtime, 'config' | 'db'>, requestUrl: string, workspaceId: string) {
+  const host = new URL(requestUrl).hostname.toLowerCase().replace(/\.$/, ''), config = runtime.config;
+  if (!config.linkHosts || [config.publicUrl, ...config.previousOrigins ?? []].some(origin => new URL(origin).hostname === host)) return true;
+  return !!(await runtime.db.execute(sql`SELECT 1 FROM link_hosts WHERE workspace_id=${workspaceId} AND hostname=${host} AND status='active'`)).rowCount;
+}
+
 // ----- Custom hostnames (Cloudflare for SaaS) ---------------------------------------------------------------------
 
 type Saas = NonNullable<Config['linkHosts']>;
@@ -120,6 +131,10 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
   const hostname = linkHostName(domain), checkedAt = new Date().toISOString();
   const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active'; public_dns: Seen | null }>(sql`SELECT custom_hostname_id, status, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
   let id = row?.custom_hostname_id ?? null, status = row?.status ?? 'pending', detail: string | null = null, seen: Seen | null = row?.public_dns ?? null;
+  // Hosted: only a domain this workspace has proven it controls gets a custom hostname (self-hosted: the operator's own): a pending claim (anyone can add one, and a
+  // wildcard CNAME answers for any name under a domain they own) would otherwise make hostnames in the SaaS zone at will.
+  const { rows: [claim] } = await runtime.db.execute<{ proven: boolean }>(sql`SELECT ever_proven OR sending_state IN ('verified','lost') AS proven FROM domain_claims WHERE workspace_id=${workspaceId} AND name=${domain}`);
+  const proven = !runtime.config.multiTenant || claim?.proven === true;
   let target: string | null | undefined;
   try { target = await cname(hostname, AbortSignal.timeout(5000)); } catch { target = undefined; }
   if (target !== undefined) seen = target === null ? { state: 'missing', values: [], checkedAt } : fqdn(target) === saas.target ? { state: 'found', values: [], checkedAt } : { state: 'wrong_value', values: [fqdn(target)], checkedAt };
@@ -127,10 +142,11 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
     if (seen?.state === 'found' || id) {
       let custom: CustomHostname | null = null;
       if (id) { const read = await customHostnames(saas, 'GET', `/${encodeURIComponent(id)}`); custom = read.success ? read.result as CustomHostname : null; if (!custom && read.status !== 404) throw new CloudflareUnavailable(read.status); }
-      if (!custom && seen?.state === 'found') custom = await ensureCustomHostname(saas, hostname);
+      if (!custom && seen?.state === 'found' && proven) custom = await ensureCustomHostname(saas, hostname);
       id = custom?.id ?? null;
       status = custom && served(custom) ? 'active' : 'pending';
       if (custom && status !== 'active') detail = waiting(custom);
+      else if (!custom && seen?.state === 'found') detail = 'The CNAME is in place. The link host is set up once the domain verifies.';
     } else status = 'pending';
   } catch (error) {
     if (!(error instanceof CloudflareUnavailable)) throw error;

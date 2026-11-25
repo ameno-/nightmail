@@ -324,6 +324,9 @@ export default {
       .flatMap(origin => { try { return [new URL(origin.trim()).hostname]; } catch { return []; } }).concat(eventsHost ? [eventsHost.replace(/:\d+$/, '')] : []);
     const linkAnswer = linkHostRequest(!!setting(env, 'LINK_SAAS_ZONE_ID') && !!setting(env, 'LINK_SAAS_TOKEN'), url.hostname, pathname, own);
     if (linkAnswer === 'missing') return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+    // A name of the zone that isn't this Worker's (dev, support, media): the zone-wide route runs before its custom domain
+    // or bucket, so it goes on to them unchanged (a subrequest to the same zone skips the route).
+    if (linkAnswer === 'pass') return fetch(request);
     const linkHost = linkAnswer === 'link';
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !requestHeaderNames('environment').some(name => request.headers.has(name))) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;

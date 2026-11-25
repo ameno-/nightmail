@@ -13,10 +13,13 @@ const LINK_PATH = /^\/(?:unsubscribe|v1\/forwarding\/(?:confirm|stop)|i|fonts)\/
 /**
  * How the Worker answers a request on `host`. `other`: one of this installation's own hosts (`own`), or link hosts are
  * off. `link`: a link on a customer's link host, for the API's handlers (never the dashboard's shell). `missing`:
- * anything else there. With link hosts on, every host that is none of `own` came through the SaaS zone.
+ * anything else there. `pass`: a host that is no link host, handed on untouched to its own origin. With link hosts on, every host that is none of `own` came through the SaaS zone.
  */
-export function linkHostRequest(enabled: boolean, host: string, path: string, own: readonly string[]): 'other' | 'link' | 'missing' {
+export function linkHostRequest(enabled: boolean, host: string, path: string, own: readonly string[]): 'other' | 'link' | 'missing' | 'pass' {
   const name = host.toLowerCase().replace(/\.$/, '');
   if (!enabled || own.includes(name) || ['localhost', '127.0.0.1', '[::1]'].includes(name)) return 'other';
+  // Not a link host (always links.<domain>): a name of the zone the zone-wide route caught by mistake, such as another
+  // Worker's custom domain or an R2 bucket's. Routes run before custom domains, so the Worker passes it on to its origin.
+  if (!name.startsWith(`${LINK_LABEL}.`)) return 'pass';
   return LINK_PATH.test(path) ? 'link' : 'missing';
 }

@@ -39,7 +39,7 @@ import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 import { PostalAddress, postalAddressText, unsubscribePageLink } from './outbound-content.js';
-import { checkLinkHost, forgetLinkHost, withLinkRecords } from './link-domains.js';
+import { checkLinkHost, forgetLinkHost, servesWorkspace, withLinkRecords } from './link-domains.js';
 export type { PublishedEvent } from './db/operations.js';
 
 const RegionalAccepted = z.object({ operationId: z.string(), regions: z.array(z.string()) });
@@ -1655,7 +1655,7 @@ function registerPublicEvents(app: App) {
     const [token] = await c.env.db.select().from(unsubscribeTokens).where(eq(unsubscribeTokens.tokenHash, await digest(raw)));
     // The confirmation form may continue to the campaign's own page: browsers apply form-action to that redirect too.
     c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', `default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; form-action 'self'${token?.pageUrl ? ` ${new URL(token.pageUrl).origin}` : ''}; frame-ancestors 'none'; base-uri 'none'`);
-    if (!token) return browser(c) ? invalidLink(c) : notFound('Unsubscribe link');
+    if (!token || !await servesWorkspace(c.env, c.req.url, token.workspaceId)) return browser(c) ? invalidLink(c) : notFound('Unsubscribe link');
     // Link scanners and mail security gateways fetch every link in a message, so a footer GET only asks for
     // confirmation. Mailbox one-click (RFC 8058, List-Unsubscribe-Post) and the confirmation form are POSTs.
     if (method === 'get') return c.html(unsubscribePage('Unsubscribe from marketing emails?', '<p>You will no longer receive marketing emails from this workspace.</p><form method="post"><input type="hidden" name="confirm" value="footer"><button type="submit" style="font:inherit;font-weight:600;padding:10px 18px;border:0;border-radius:8px;background:#111;color:#fff;cursor:pointer">Unsubscribe</button></form>'), 200);

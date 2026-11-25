@@ -25,7 +25,7 @@ import { detachDestination, enableRouting, RoutingKey } from './routing.js';
 import { endpointPolicy, DEFAULT_POLICY, type EndpointPolicy } from './ritual-retry.js';
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
 import { legacyWebhookFormat, loopHeader, productName, webhookFormat } from './brand.js';
-import { linkOrigin } from './link-domains.js';
+import { linkOrigin, servesWorkspace } from './link-domains.js';
 
 // ── The model ─────────────────────────────────────────────────────────────────────────────
 type HeaderList = z.infer<typeof WebhookHeaders>;
@@ -684,7 +684,7 @@ function registerForwardPages(app: App) {
   const confirm = '/v1/forwarding/confirm/:token', stop = '/v1/forwarding/stop/:token';
   app.get(confirm, async c => {
     const token = c.req.param('token'), row = /^fwd_[0-9a-f]{64}$/.test(token) ? (await c.env.db.execute<Pending>(sql`SELECT workspace_id,id,encrypted_target,request_from FROM mailbox_webhooks WHERE ${await pendingWhere(token)}`)).rows[0] : undefined;
-    if (!row) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed. Nothing will be forwarded unless a new request is allowed.</p>', 410);
+    if (!row || !await servesWorkspace(c.env, c.req.url, row.workspace_id)) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed. Nothing will be forwarded unless a new request is allowed.</p>', 410);
     const address = await decrypt(c.env, row.encrypted_target, targetBinding(row.workspace_id, row.id));
     return page(c, 'Allow email forwarding?', `<p><strong>${escapeHtml(row.request_from ?? `A ${productName} workspace`)}</strong> wants to forward the email it receives to <strong>${escapeHtml(address)}</strong>.</p><p>Forwarded messages arrive from that address with their attachments, each with a link to stop. If you decline, this sender cannot ask again for 30 days.</p><form method="post"><button name="choice" value="allow">Allow forwarding</button><button name="choice" value="decline">Decline</button></form>`);
   });
@@ -693,6 +693,8 @@ function registerForwardPages(app: App) {
     if (!sameOrigin(c)) return page(c, 'Open the link from your email', '<p>Confirm from the page the emailed link opens.</p>', 403);
     const form = await c.req.parseBody().catch(() => ({} as Record<string, unknown>)), choice = form.choice === 'allow' ? 'allow' : form.choice === 'decline' ? 'decline' : null;
     if (!choice || !/^fwd_[0-9a-f]{64}$/.test(token)) return page(c, 'Choose Allow or Decline', '<p>Open the link from your email again and choose an option.</p>', 403);
+    const pending = (await c.env.db.execute<{ workspace_id: string }>(sql`SELECT workspace_id FROM mailbox_webhooks WHERE ${await pendingWhere(token)}`)).rows[0];
+    if (pending && !await servesWorkspace(c.env, c.req.url, pending.workspace_id)) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed.</p>', 410);
     try {
       const done = await answerForward(c.env, token, choice);
       return choice === 'allow'
@@ -706,7 +708,8 @@ function registerForwardPages(app: App) {
   const stopRow = async (c: Ctx) => {
     const [endpointId, signature] = c.req.param('token')!.split('.');
     if (!endpointId || !signature || !/^con_[A-Za-z0-9_-]+$/.test(endpointId) || signature !== await stopSignature(c.env, endpointId)) return undefined;
-    return (await c.env.db.execute<Pending & { declined_at: string | null }>(sql`SELECT workspace_id,id,encrypted_target,request_from,declined_at FROM mailbox_webhooks WHERE id=${endpointId} AND type='forward'`)).rows[0];
+    const row = (await c.env.db.execute<Pending & { declined_at: string | null }>(sql`SELECT workspace_id,id,encrypted_target,request_from,declined_at FROM mailbox_webhooks WHERE id=${endpointId} AND type='forward'`)).rows[0];
+    return row && await servesWorkspace(c.env, c.req.url, row.workspace_id) ? row : undefined;
   };
   app.get(stop, async c => {
     const row = await stopRow(c);
