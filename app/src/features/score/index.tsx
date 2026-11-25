@@ -21,6 +21,11 @@ export function useSenderScore() { return useApiDef(queries.senderScore(), { int
 const whole = (value: number) => Math.round(value)
 // Before the first grade there is no score to show: a dash and the progress to it, never a 0 that reads as a bad grade.
 const progressLabel = (report: SenderScore) => `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails. ${evaluationLeft(report)}`
+// The card counts down to the first grade, so its number never reads as a cap on sending (the daily limit is Overview's).
+function toGrade(report: SenderScore) {
+  const left = report.needed - report.emails.firstEmails
+  return left > 0 ? `${number(left)} ${left === 1 ? 'email' : 'emails'} to a grade` : 'Grading soon'
+}
 
 export function SidebarScore() {
   const { data: report, isError } = useSenderScore()
@@ -32,7 +37,7 @@ export function SidebarScore() {
   // A dot from Warn up, and the card then goes to Overview's standing card; otherwise it opens the explainer.
   const raised = stepAtLeast(report.standing?.step, 'warn') ? report.standing!.step as RaisedStep : null
   const label = (graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Sender score not graded yet: ${progressLabel(report)}`) + (raised ? `. ${standingTitle[raised]}` : '. About the sender score')
-  const note = graded ? scoreMove(report) : `${number(report.emails.firstEmails)} of ${number(report.needed)} emails`
+  const note = graded ? scoreMove(report) : toGrade(report)
   // The tile takes the score's colour as the number moves (score.css): the tweened value, not the final one.
   const props = { className: 'score-card', 'data-scored': graded || undefined, style: graded ? { '--score': shown } as CSSProperties : undefined, 'aria-label': label }
   const inner = <>

@@ -107,6 +107,8 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-line--sent { stroke: var(--color-accent-data); }
 .ov-line--bounces { stroke: var(--color-warning-marker); }
 .ov-line--complaints { stroke: var(--color-danger-marker); }
+/* The bucket under way: what it has so far. */
+.ov-line--partial { stroke-dasharray: 2 4; }
 .ov-dot { stroke: var(--color-surface); stroke-width: 2; }
 .ov-dot--sent { fill: var(--color-accent-data); }
 .ov-dot--bounces { fill: var(--color-warning-marker); }
