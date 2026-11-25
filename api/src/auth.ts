@@ -296,6 +296,47 @@ const KeyUpdate = z.object({ name: KeyName.optional(),
     mail: z.array(MailPermission).min(1).max(4).optional().describe('A key for addresses or an inbox: replaces what it may do with that mail: read, send, modify, and create (agent inboxes, which it then reaches as well).'),
   }).strict().optional().describe('A key limited to addresses or an inbox: what it reaches. A workspace key stays a workspace key, and a key for addresses or an inbox stays one of those two.'),
 }).strict().openapi('UpdateApiKey');
+const PERMISSION_WORDS = 'read (sent mail and its logs), send (send email) and manage (everything else, received mail included; with no domains, Full access)';
+const MAIL_WORDS = 'read, send (reply and start conversations from those addresses), modify (mark read, archive, label) and create (create agent inboxes)';
+const KEY_FIELDS = { key: ['name', 'permissions', 'domains', 'access', 'expiresAt'], addresses: ['type', 'addressIds', 'mail'], inbox: ['type', 'inboxId', 'mail'], workspace: ['type'] } as const;
+const KEY_EXAMPLES = 'For example, Full access: {"name":"Server","permissions":["read","send","manage"]}; reading and sending at one sender domain: {"name":"App","permissions":["read","send"],"domains":["example.com"]}; reading and answering replies at some receiving addresses: {"name":"Replies","access":{"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}} (their IDs: GET /v1/inbound/addresses).';
+type KeyIssue = { code: string; path: PropertyKey[]; message: string; keys?: string[] };
+/**
+ * createApiKey's and updateApiKey's 422 for a body that doesn't parse: every problem at once, each naming its field, what
+ * was sent and the values allowed, then what keys can be (a production agent guessed at permissions and access four times
+ * trying to make a key that reads replies). A caller that can't administer keys at all is told that first, since fixing
+ * the body would only lead to that refusal.
+ */
+export async function keyInputRefusal(c: Ctx, issues: readonly KeyIssue[], target: string, operation: string) {
+  manageKeys(c);
+  const body = target === 'json' ? await c.req.json().catch(() => undefined) as Record<string, unknown> | undefined : undefined;
+  const at = (path: PropertyKey[]) => path.reduce<unknown>((value, key) => value !== null && typeof value === 'object' ? (value as Record<PropertyKey, unknown>)[key] : undefined, body);
+  const shown = (value: unknown) => { const text = JSON.stringify(value) ?? 'missing'; return text.length > 80 ? `${text.slice(0, 77)}…` : text; };
+  const accessType = (at(['access', 'type']) as string | undefined) ?? 'workspace';
+  const problems = issues.flatMap(issue => {
+    const path = issue.path.map(String), field = path.join('.'), sent = at(issue.path), head = path[0], valueOf = `${field} is ${sent === undefined ? 'missing' : shown(sent)}`;
+    if (issue.code === 'unrecognized_keys') {
+      const object = head === 'access' ? KEY_FIELDS[accessType as keyof typeof KEY_FIELDS] ?? KEY_FIELDS.addresses : KEY_FIELDS.key, where = head === 'access' ? `a key with access type ${accessType}` : 'a key';
+      return (issue.keys ?? []).slice(0, 5).map(key => ({ field: [...path, key].join('.'), message: `${[...path, key].join('.')} is not a field of ${where}, which takes ${object.join(', ')}${head === 'access' ? '' : '; to limit a key to receiving addresses or an inbox, use access'}` }));
+    }
+    if (head === 'permissions') return [{ field, message: `${valueOf}: a workspace key's permissions are a list of ${PERMISSION_WORDS}. Received mail is read with manage, or by a key limited to receiving addresses (access)` }];
+    if (head === 'access' && path[1] === 'type') return [{ field, message: `${valueOf}: access.type is workspace (the default), addresses (mail at chosen receiving addresses) or inbox (one agent inbox). To limit a workspace key to sender domains, set domains beside permissions, not access` }];
+    if (head === 'access' && path[1] === 'mail') return [{ field, message: `${valueOf}: a key for addresses or an inbox takes a list of ${MAIL_WORDS}` }];
+    if (head === 'access' && path[1] === 'addressIds') return [{ field, message: `${valueOf}: addressIds are receiving address IDs (mbx_…, from GET /v1/inbound/addresses), up to 500; omit them for every address` }];
+    if (head === 'access' && path.length === 1) return [{ field, message: `${valueOf}: access is an object such as {"type":"addresses","addressIds":["mbx_…"],"mail":["read","send"]}` }];
+    if (head === 'domains' || head === 'addDomains' || head === 'removeDomains') return [{ field, message: `${valueOf}: domains are sender domains such as example.com (no scheme, path or @), up to 50; they include their subdomains` }];
+    if (head === 'name') return [{ field, message: sent === undefined ? 'name is missing: enter a name for this key, 1 to 100 characters' : `name: ${issue.message}` }];
+    return [{ field, message: `${valueOf}: ${issue.message}` }];
+  }).map(p => ({ ...p, message: p.message.replace(/\.$/, '') }));
+  const keyShape = problems.some(p => /^(?:permissions|access|domains)/.test(p.field) || p.message.includes('not a field of'));
+  const error = new ApiError(422, 'VALIDATION_FAILED', `${problems.length > 1 ? `${problems.length} problems with this key` : 'A problem with this key'}: ${problems.map(p => p.message).join('; ')}.${keyShape ? ` ${KEY_EXAMPLES}` : ''} Docs: ${new URL(c.env.config.publicUrl).origin}/docs/operations/${operation}.md`, problems[0]?.field);
+  error.details = problems;
+  error.logField = [...new Set(issues.map(issue => issue.path[0]).filter((key): key is string => typeof key === 'string'))].join(', ');
+  return error;
+}
+const keyInputHook = (operation: string) => async (result: { success: boolean; target: string; error?: { issues: readonly KeyIssue[] } }, c: Ctx) => {
+  if (!result.success) throw await keyInputRefusal(c, result.error!.issues, result.target, operation);
+};
 /** Key administration's actor (core.ts keyAdminRefusal). */
 export function manageKeys(c: Parameters<typeof actor>[0]) {
   // keyAdminRefusal first: it refuses what actor's manage check would, saying more to a key that isn't full access.
@@ -465,7 +506,7 @@ export function registerAuth(app: App) {
       return approval ? { approval, nextStep: tiedNextStep('key', approval) } : { approval };
     };
     if (access.type !== 'workspace') {
-      if (input.permissions || input.domains?.length) throw new ApiError(422, 'VALIDATION_FAILED', 'A key for addresses or an inbox takes its permissions in access.mail and has no sender domains.', input.permissions ? 'permissions' : 'domains');
+      if (input.permissions || input.domains?.length) throw new ApiError(422, 'VALIDATION_FAILED', `A key with access type ${access.type} takes its permissions in access.mail (${MAIL_WORDS}) and has no sender domains: ${[input.permissions ? `move ${JSON.stringify(input.permissions.filter(p => p !== 'manage'))} from permissions to access.mail` : '', input.domains?.length ? 'remove domains' : ''].filter(Boolean).join(' and ')}. Or leave out access for a workspace key with permissions and domains. ${KEY_EXAMPLES}`, input.permissions ? 'permissions' : 'domains');
       const { createLimitedKey, limitedKeyView } = await addressKeys();
       const { row, secret } = await createLimitedKey(c, auth.workspaceId, input.name, access, { addresses: 'access.addressIds', inbox: 'access.inboxId', mail: 'access.mail' }, askedExpiry(input.expiresAt));
       return c.json({ ...limitedKeyView(row), ...await tied(row.id), lastChange: await lastChange(c, auth.workspaceId, row.id), secret }, 201);
@@ -482,7 +523,7 @@ export function registerAuth(app: App) {
       return rows;
     });
     return c.json({ ...keyView(key!), ...await tied(key!.id), lastChange: await lastChange(c, auth.workspaceId, key!.id), secret }, 201);
-  });
+  }, keyInputHook('createApiKey') as never);
   app.openapi(createRoute({ method: 'get', path: '/v1/api-keys', operationId: 'listApiKeys', tags: ['ApiKeys'], security, description: 'Every API key in the workspace, ordered by ID: workspace keys and keys limited to addresses or an inbox, each with its latest change (lastChange). includeRevoked=false also leaves out expired keys, and keys whose inbox was deleted or whose lease ended.',
     request: { query: PageQuery.extend({ includeRevoked: z.enum(['true', 'false']).default('true') }) }, responses: { 200: response(page(KeySchema)), ...errors } }), async c => {
     const auth = manageKeys(c); const q = c.req.valid('query'), w = auth.workspaceId, active = q.includeRevoked === 'false', after = q.cursor ? sql`AND id > ${q.cursor}` : sql``;
@@ -539,6 +580,6 @@ export function registerAuth(app: App) {
     const view = await idempotent(c.env.db, { ...idempotentRequest(c), workspaceId: auth.workspaceId, actorKeyId: auth.keyId }, input,
       async tx => limited ? limited.updateLimitedKey(tx, c, auth, keyId, input) : keyView(await updateWorkspaceKey(tx, c, auth, keyId, input)));
     return c.json({ ...view, approval: await approvalTie(c.env, auth.workspaceId, ['api_key', 'key'], keyId), lastChange: await lastChange(c, auth.workspaceId, keyId) }, 200);
-  });
+  }, keyInputHook('updateApiKey') as never);
 }
 const lastChange = async (c: Ctx, w: string, keyId: string) => (await lastChanges(c.env.db, w, [keyId])).get(keyId) ?? null;
