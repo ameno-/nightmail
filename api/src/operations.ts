@@ -80,7 +80,8 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
   dnsHost: z.object({ name: z.string().describe('The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap.'), zone: z.string().describe('The zone it hosts, which record names are relative to there.'), url: z.string().nullable().describe('The provider\'s DNS page for the zone, when it has a known address.') })
     .nullable().optional().describe(`Where this domain\u2019s DNS is hosted, from its zone\u2019s NS records, alongside publicDns: null when the provider is not one ${productName} recognizes.`),
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
-  receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.') }).openapi('DomainReadiness');
+  receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.'),
+  builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`) }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const settingsSchema = z.object({ name: z.string(), postalAddress: z.string().nullable().describe('The postal address every campaign footer and marketing send shows under Unsubscribe; null until one is set. Campaigns can\'t be sent or scheduled without it.'),
   requiredNotices: z.boolean().describe('Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.') }).openapi('WorkspaceSettings');
@@ -294,6 +295,8 @@ type ProofTimes={receiving_proved_at?:Date|string|null;receiving_identity_at?:Da
 export type HostedDomain = DomainRef & ClaimState & ProofTimes & { setup_check: SetupCheck | null; connection: ReadyConnection & { tenant_state: TenantState;legacy?:boolean }; token: string; proof_label: ProofLabel; identity: IdentityFacts | null; claim_scope:'account'|'exclusive'|'txt'; pool_receiving:boolean; receiving_setup:ReceivingSetup|null; expired:boolean; check_txt:boolean; created_at:string; ever_proven:boolean; dns_first:boolean; hosts: ReceivingHostRow[] };
 /** The domain's receiving hosts, its own row first: what every hosted read of a claim carries. `d` is operation_domains. */
 const unavailableDomain = () => new ApiError(409, 'DOMAIN_UNAVAILABLE', 'This SES identity is unavailable for this domain claim.');
+/** The built-in domain (builtin-domain.ts) is the workspace's for good: no DNS, MAIL FROM or receiving host of its own to change. */
+const builtinDomainFixed = () => new ApiError(409, 'BUILTIN_DOMAIN', `This is the workspace\u2019s built-in domain. ${productName} manages it, so it can\u2019t be deleted or changed; add a domain of your own instead.`);
 const ownsIdentity = (identity: GetEmailIdentityCommandOutput, token: string) => hasTags(identity.Tags, [{ Key: claimTag, Value: token }]);
 function hostedDomainSelect(wid:string, domainId:string, lock:SQL=sql``) {
   return sql`SELECT d.id,d.name,d.region,to_jsonb(pc) AS connection,dc.token,dc.proof_label,dc.claim_scope,dc.sending_state,dc.receiving_state,dc.receiving_host,dc.lost_since,dc.receiving_lost_since,dc.identity,
@@ -310,7 +313,7 @@ export async function hostedDomain(db: DbExecutor, wid: string, domainId: string
   const allowed = recheck?.domains.length ? sql`EXISTS (SELECT 1 FROM jsonb_array_elements_text(${JSON.stringify(recheck.domains)}::jsonb) p(parent)
     WHERE right('.'||name,length(parent)+1)='.'||lower(parent))` : sql`true`;
   const accountFence=recheck?.platformAccount ? sql`AND (connection->>'kind'<>'shared' OR connection->>'aws_account_id' IS NULL OR connection->>'aws_account_id'=${recheck.platformAccount})` : sql``;
-  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE NOT expired AND ${allowed} ${accountFence} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
+  const query = recheck ? sql`WITH target AS (${target}), queued AS (${recheckJob(wid, sql`SELECT id,token FROM target WHERE NOT expired AND NOT coalesce(identity ? 'builtin',false) AND ${allowed} ${accountFence} ${recheck.mode==='dashboard' ? sql`AND sending_state='pending'` : sql``}`,recheck.mode)})
     SELECT target.*,EXISTS(SELECT 1 FROM queued) AS queued FROM target` : target;
   return (await db.execute<HostedDomain & {queued?:boolean}>(query)).rows[0];
 }
@@ -399,6 +402,10 @@ export async function verifyHostedDomain(runtime: Runtime, a: Actor, domainId: s
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
 export function derivedReadiness(row: ClaimRow): Readiness {
   const facts=row.identity, held=sends(row);
+  // The built-in domain has no DNS records of its own: it sends under its parent's identity and receives on its name.
+  if (facts?.builtin) return { id:row.id, name:row.name, region:row.region, verificationStatus:held ? 'SUCCESS' : 'PENDING', verified:held, dkimStatus:held ? 'SUCCESS' : 'PENDING', dmarc:null, ready:held, sending:state(held),
+    receiving:state(row.receiving_state==='active' || row.receiving_state==='lost'), mailFromDomain:facts.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus:facts.ses.MailFromAttributes?.MailFromDomainStatus ?? null,
+    dnsStatus:'available', dnsUnavailableReason:null, dns:[], releasesAt:null, receivingIssue:null, builtIn:true };
   const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note,facts?.dmarc);
   if(row.dns_first && !row.ever_proven){
     if(!report.dns.some(record=>record.name===proofRecordName(row.proof_label,row.name))) report.dns.unshift({name:proofRecordName(row.proof_label,row.name),type:'TXT',value:row.token,purpose:'sending',status:'pending'});
@@ -670,6 +677,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
   if (payload.platformAccount && payload.platformAccount!==runtime.config.platformAccount) throw new JobDeferred(new Date(Date.now()+60_000).toISOString(),payload);
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
   if (!row || row.token!==payload.token || row.expired) return; // Deleted, reclaimed, disconnected or awaiting expiry cleanup.
+  if (row.identity?.builtin) return; // Proven by its parent identity (builtin-domain.ts), never by DNS of its own.
   assertSharedAccount(runtime,row.connection);
   // Only previously proven claims keep polling beyond 72 hours (including recovery after lost proof).
   const poll=Number(payload.poll ?? 0);
@@ -826,7 +834,7 @@ const domainVerify: JobHandler = async (runtime,payload,job) => {
 const domainMx:JobHandler=async(runtime,payload,job)=>{
   if (!runtime.config.multiTenant || typeof payload.domainId!=='string') return;
   const row=await hostedDomain(runtime.db,job.workspaceId,payload.domainId);
-  if (!row?.identity || row.token!==payload.token) return;
+  if (!row?.identity || row.token!==payload.token || row.identity.builtin) return;
   assertSharedAccount(runtime,row.connection);
   const checkReceiving=row.connection.legacy!==false && row.receiving_state!=='off';
   // undefined preserves the locked row's last observation and its original expiry.
@@ -1037,6 +1045,7 @@ export function registerOperations(app: App) {
     if (c.env.config.multiTenant) {
       const report=await c.env.db.transaction(async db=>{
         const current=await hostedDomain(db,a.workspaceId,row.id,true) ?? notFound('Domain');
+        if (current.identity?.builtin) throw builtinDomainFixed();
         // The receiving host's MX points to inbound-smtp; a MAIL FROM subdomain needs its own MX to feedback-smtp. One name can't hold both.
         const receivingHosts=new Set([...derivedReadiness(current).dns.filter(r=>r.purpose==='receiving').map(r=>r.name),...current.hosts.filter(h=>h.status!=='disabled').map(h=>h.host)]);
         if (mailFromDomain && receivingHosts.has(mailFromDomain)) throw new ApiError(409,'MAIL_FROM_RECEIVING_CONFLICT',`${mailFromDomain} is one of ${row.name}’s receiving hosts, so its MX points to inbound-smtp.${row.region}.amazonaws.com. A custom MAIL FROM subdomain needs its own MX to feedback-smtp.${row.region}.amazonses.com. Use another subdomain, such as email.${row.name}.`);
@@ -1082,6 +1091,7 @@ export function registerOperations(app: App) {
     const {host,confirm}=c.req.valid('json'), domainId=c.req.valid('param').id;
     // DNS is read before the row lock; the locked write is fenced on the claim token.
     const row=await hostedDomain(c.env.db,a.workspaceId,domainId) ?? notFound('Domain'); allowedDomain(a,row.name);
+    if (row.identity?.builtin) throw builtinDomainFixed();
     if (host!==null && host!==row.name && !host.endsWith(`.${row.name}`)) throw new ApiError(422,'RECEIVING_HOST_INVALID',`Use ${row.name} or one of its subdomains.`,'host');
     if (host!==null && reservedPlatformName(host,c.env.config)) throw new ApiError(409,'RECEIVING_HOST_RESERVED',`${host} is one of ${productName}’s own hosts, so it can’t receive mail for ${row.name}.`,'host');
     // Once the domain receives somewhere (or the owner removed its own host), a chosen host goes beside the others.
@@ -1136,6 +1146,7 @@ export function registerOperations(app: App) {
     responses:{200:response(z.object({provider:z.object({id:z.string(),name:z.string()}).nullable(),applyUrl:z.url().nullable(),groups:z.array(z.enum(groupIds))}).openapi('DomainDnsSetup')),...errors}}),async c=>{
     const a=dnsSetupActor(c), wid=a.workspaceId, id=c.req.valid('param').id;
     const row=await hostedDomain(c.env.db,wid,id) ?? notFound('Domain');
+    if (row.identity?.builtin) throw builtinDomainFixed();
     const found=await discover(row.name);
     const [report]=await withLinkRecords(c.env,wid,[derivedReadiness(row)]);
     const selection=pendingGroups(report!,row.connection.kind==='shared',row.claim_scope!=='account' && (row.connection.kind==='byo' || row.pool_receiving) && row.identity?.mx?.state==='missing',row.sending_state==='failed' ? [] : c.req.valid('query').groups?.split(','));
@@ -1208,6 +1219,7 @@ export function registerOperations(app: App) {
         return detached.name;
       }
       allowedDomain(a,row.name);
+      if (row.identity?.builtin) throw builtinDomainFixed();
       if (!row.identity?.imported) {
         await deleteClaimIdentity(c.env,a.workspaceId,row);
         if (row.connection.kind==='byo' && row.connection.legacy===false) await db.execute(sql`UPDATE provider_connection_regions SET ownership_journal=(
@@ -2336,4 +2348,4 @@ const publishBatchJob: JobHandler = async (runtime, payload, job) => {
     }
   });
 };
-export const operationJobs: Record<string, JobHandler> = { 'domain.placement': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./placement.js'))).shadowPlacement(...args); }), 'domain.verify': retryDatabaseFailures(domainVerify), 'domain.setupCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainSetupCheckJob(...args); }), 'domain.linkCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainLinkCheckJob(...args); }), 'domain.mx': retryDatabaseFailures(domainMx), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.resumeDeliveries': retryDatabaseFailures(resumeDeliveries), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };
+export const operationJobs: Record<string, JobHandler> = { 'domain.placement': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./placement.js'))).shadowPlacement(...args); }), 'domain.verify': retryDatabaseFailures(domainVerify), 'domain.setupCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainSetupCheckJob(...args); }), 'domain.linkCheck': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./domain-setup.js'))).domainLinkCheckJob(...args); }), 'domain.mx': retryDatabaseFailures(domainMx), 'domain.builtin': retryDatabaseFailures(async (...args) => { await (await wrapModuleLoad(() => import('./builtin-domain.js'))).builtinDomainJob(...args); }), 'operation.webhook': retryDatabaseFailures(webhookJob), 'operation.resumeDeliveries': retryDatabaseFailures(resumeDeliveries), 'operation.ses': retryDatabaseFailures(sesJob), 'operation.simulatedFeedback': retryDatabaseFailures(simulatedFeedbackJob), 'operation.simulatedFeedbackRecovery': retryDatabaseFailures(simulatedFeedbackRecovery), 'operation.publish': retryDatabaseFailures(publishJob), 'operation.publishBatch': retryDatabaseFailures(publishBatchJob) };

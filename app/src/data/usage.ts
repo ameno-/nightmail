@@ -14,9 +14,3 @@ export interface Usage {
   simulated: boolean
 }
 export const usageApi = { get: (signal?: AbortSignal) => request<Usage>('/v1/usage', { signal }) }
-/** What this month costs at the published price beyond each direction's free allowance, from the counts billing prices
- *  (each recipient of a send). Sent mail only when the received count is hidden. */
-export function monthEstimate(usage: Usage) {
-  const { perThousand, freeSentEmails, freeReceivedEmails } = usage.pricing
-  return (Math.max(0, usage.month.billedSent - freeSentEmails) + Math.max(0, (usage.month.billedReceived ?? 0) - freeReceivedEmails)) / 1000 * perThousand
-}

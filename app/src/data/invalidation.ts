@@ -72,8 +72,11 @@ export function invalidateResources(client: QueryClient, resources: readonly str
  * links to it or prefetches it, and are then read again. Call it once the page that read the domain has stopped reading
  * it (its queries disabled), so removing them can't start a fetch.
  */
+const domainQuery = (id: string) => (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === 'nightmail' && (resourceOf(query.queryKey) === 'domain' || resourceOf(query.queryKey) === 'mailbox-domain') && query.queryKey[2] === id
+/** Aborts any read of the domain in flight (its page's poll, its receiving or hosts read), keeping what is cached. */
+export const cancelDomainQueries = (client: QueryClient, id: string) => client.cancelQueries({ predicate: domainQuery(id) })
 export function forgetDomain(client: QueryClient, id: string) {
-  const own = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] === 'nightmail' && (resourceOf(query.queryKey) === 'domain' || resourceOf(query.queryKey) === 'mailbox-domain') && query.queryKey[2] === id
+  const own = domainQuery(id)
   void client.cancelQueries({ predicate: own }).catch(() => {})
   client.removeQueries({ predicate: own })
   const without = (rows: unknown) => Array.isArray(rows) ? rows.filter(row => (row as { id?: unknown } | null)?.id !== id) : rows

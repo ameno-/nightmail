@@ -7,6 +7,7 @@ import { fitPageByBytes, INBOUND_ADDRESS_PAGE_LIMIT, messageFieldCount, sliceAdd
 import { emails } from './db/sending.js';
 import { enroll24hPoll, enrollLogFacet, logFacetPeriod, LOG_FACET_WAIT_MS, readPublishedLogFacet, readRecent24hFacet, readTicketCut, releaseLogFacetTicket, type FacetTicket } from './log-facet-fold.js';
 import { LOG_FACET_MAX_SOURCE_ROWS, logFacetSourceRows, type LogFacetCut, type LogFacetPeriod } from './log-facet-source.js';
+import type { AggregateTicket } from './log-facet-aggregate-view.js';
 import { mailMessages as messages } from './db/mailbox.js';
 import { readsDelivery, visibleAddresses } from './inbound-threads.js';
 import { accessibleMessages, sentThreadId, threadSize } from './thread-view.js';
@@ -187,7 +188,15 @@ const facetBusy = (error: unknown): error is ApiError => error instanceof ApiErr
 function readLastFacet(c: Ctx, q: Filters, scope: LogScope, mailAccess: (a: Actor) => MailboxAccess | null, period: LogFacetPeriod, busy = false) {
   return withBoundedRead(c, () => budgetedRead(c.env.db, async db => {
     const fresh = await currentFacetScope(c, db, q, scope, mailAccess);
-    const p = await readPublishedLogFacet(db, fresh.a.workspaceId, q.region ?? null, period);
+    let p = await readPublishedLogFacet(db, fresh.a.workspaceId, q.region ?? null, period);
+    if (c.env.startLogFacetAggregate) {
+      const model = await import('./log-facet-aggregate-view.js');
+      if (await model.hasFacetRegistry(db)) {
+        const archived = await model.readArchivedBucketFacet(db, fresh.a.workspaceId, q.region ?? null, period);
+        if (archived && (!p || archived.cut.asOf > p.cut.asOf)) p = archived;
+        if (!p && !busy) p = await model.readCertifiedRollingFacet(db, fresh.a.workspaceId, q.region ?? null, period);
+      }
+    }
     const visibility = facetVisibility(fresh);
     return p ? { counts: projectCut(q, fresh, p.cut), asOf: p.cut.asOf, from: p.from, visibility }
       : { counts: null, asOf: null, from: null, visibility };
@@ -225,7 +234,11 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
     // Authorize and project it in the same read snapshot, before sizing mail or occupying a worker.
     const recent = () => withBoundedRead(c,()=>budgetedRead(c.env.db,async db=>{
       const current=await currentFacetScope(c,db,q,scope,mailAccess);
-      const cut=await readRecent24hFacet(db,current.a.workspaceId,q.region??null,fromIso);
+      let cut=await readRecent24hFacet(db,current.a.workspaceId,q.region??null,fromIso);
+      if(!cut && c.env.startLogFacetAggregate){
+        const a=await import('./log-facet-aggregate-view.js');
+        if(await a.hasFacetRegistry(db))cut=await a.readRecentAggregateDay(db,current.a.workspaceId,q.region??null,fromIso);
+      }
       return cut ? {counts:projectCut(q,current,cut),asOf:cut.asOf,from:fromIso,visibility:facetVisibility(current)} : null;
     },readLimit(COUNTS_READ),'repeatable read'),opts);
     if (poll24h) {
@@ -233,11 +246,26 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
       if (found instanceof Response) return found;
       if (found) return c.json(found,200);
     }
-    const rolling = period ? Math.floor(Date.now() / 60_000) * 60_000 - { '24h': 1, '7d': 7, '30d': 30 }[period] * 86_400_000 : fromMs;
-    const sized = await withBoundedRead(c, () => budgetedRead(c.env.db,
-      db => logFacetSourceRows(db, scope.a.workspaceId, new Date(Math.min(fromMs, rolling)).toISOString(), q.region ?? null), readLimit(COUNTS_READ)), opts);
-    if (sized instanceof Response) return sized;
-    if (sized > LOG_FACET_MAX_SOURCE_ROWS) throw readLimit(COUNTS_READ).refusal();
+    let aggregate=false,seeding=false;
+    if(mode==='refresh' && period && c.env.startLogFacetAggregate){
+      const {facetAggregateState}=await import('./log-facet-aggregate-view.js');
+      const state=await withBoundedRead(c,()=>budgetedRead(c.env.db,db=>facetAggregateState(db,scope.a.workspaceId),readLimit(COUNTS_READ)),opts);
+      if(state instanceof Response)return state;
+      aggregate=state==='seeded';seeding=state==='seeding';
+    }
+    if(!aggregate){
+      const rolling = period ? Math.floor(Date.now() / 60_000) * 60_000 - { '24h': 1, '7d': 7, '30d': 30 }[period] * 86_400_000 : fromMs;
+      const sized = await withBoundedRead(c, () => budgetedRead(c.env.db,
+        db => logFacetSourceRows(db, scope.a.workspaceId, new Date(Math.min(fromMs, rolling)).toISOString(), q.region ?? null), readLimit(COUNTS_READ)), opts);
+      if (sized instanceof Response) return sized;
+      // Until this workspace's buckets are seeded (after install, or a new generation after a gap or a
+      // source rewrite), the source fold keeps serving a window it can size. Only a larger one waits.
+      if (seeding && sized <= LOG_FACET_MAX_SOURCE_ROWS) {
+        await (await import('./log-facet-aggregate-view.js')).wakeFacetAggregate(c.env.db,scope.a.workspaceId);
+        c.env.startLogFacetAggregate?.(scope.a.workspaceId);
+      } else if (seeding) aggregate=true;
+      else if (sized > LOG_FACET_MAX_SOURCE_ROWS) throw readLimit(COUNTS_READ).refusal();
+    }
     const end = performance.now() + LOG_FACET_WAIT_MS;
     if (signal.aborted) return new Response(null, { status: 499 });
     let hold;
@@ -256,7 +284,12 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
     };
     let ticket:FacetTicket|null=null;
     try {
-      if (poll24h) {
+      let aggregateTicket:AggregateTicket|undefined;
+      const model=aggregate?await import('./log-facet-aggregate-view.js'):undefined;
+      if(model && period){
+        aggregateTicket=await model.enrollAggregateFacet(c.env.db,scope.a.workspaceId,q.region??null,period,fromIso);
+        c.env.startLogFacetAggregate?.(scope.a.workspaceId);
+      } else if (poll24h) {
         ticket=await enroll24hPoll(c.env,scope.a.workspaceId,fromIso,q.region??null);
         if (!ticket) {
           const found=await recent();
@@ -264,10 +297,10 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
           if (found) return c.json(found,200);
         }
       }
-      ticket??=await enrollLogFacet(c.env,scope.a.workspaceId,fromIso,q.region??null,period);
+      if(!aggregateTicket)ticket??=await enrollLogFacet(c.env,scope.a.workspaceId,fromIso,q.region??null,period);
       const admitted=ticket;
-      if (ticket.wake) c.env.startLogFacetFold?.(ticket.slot);
-      let probes = 0;
+      if (ticket?.wake) c.env.startLogFacetFold?.(ticket.slot);
+      let probes = 0,nextNudge=performance.now()+1000;
       while (performance.now() < end) {
         // A small healthy cut can already be published at the first probe. Park only between probes.
         if (probes && !await waitForFacetProbe(Math.min(probes === 1 ? 25 : FACET_REPROBE_MS, end - performance.now()), signal)) return new Response(null, { status: 499 });
@@ -277,7 +310,7 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
           if (performance.now() >= end) throw unavailable();
           // Every probe resolves the real session and role against the same snapshot that reads the published cut.
           const current=await currentFacetScope(c,db,q,scope,mailAccess);
-          const cut=await readTicketCut(db,admitted);
+          const cut=model && aggregateTicket ? await model.readAggregateTicket(db,aggregateTicket) : await readTicketCut(db,admitted!);
           if(!cut)return null;
           return {counts:projectCut(q,current,cut),asOf:cut.asOf,
             ...(mode==='refresh' && {from:new Date(fromMs).toISOString(),visibility:facetVisibility(current)})};
@@ -285,6 +318,9 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
         if (next instanceof Response) return next;
         if (signal.aborted) return new Response(null, { status: 499 });
         if (next) return c.json(next, 200);
+        if(aggregateTicket && performance.now()>=nextNudge){
+          c.env.startLogFacetAggregate?.(scope.a.workspaceId);nextNudge=performance.now()+1000;
+        }
       }
       // A platform/worker failure is not a successful numerical bound; never substitute the previous generation.
       throw unavailable();

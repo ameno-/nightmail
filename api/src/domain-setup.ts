@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { log, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
+import { log, logError, ModuleLoadError, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
 
 // The domain setup check. Someone adds a domain, sees its records and leaves, and nothing tells them the records never
 // went live. Every five minutes (elected, from the minute cron and the Node runner) domainSetupTick queues one
@@ -23,7 +23,7 @@ export async function domainSetupTick(runtime: Runtime) {
   if (!elected.rows.length) return;
   const { rows } = await runtime.db.execute<{ id: string }>(sql`WITH due AS (SELECT d.id,dc.workspace_id,dc.token FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name
       WHERE dc.sending_state='pending' AND dc.created_at<=now()-interval '1 hour' AND dc.created_at>now()-interval '72 hours'
-        AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ? 'adopted',false)
+        AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ?| array['adopted','builtin'],false)
         AND coalesce((dc.setup_check->>'checkedAt')::timestamptz,'-infinity')<=now()-CASE WHEN dc.created_at>now()-interval '6 hours' THEN interval '14 minutes' ELSE interval '59 minutes' END
       ORDER BY dc.setup_check->>'checkedAt' NULLS FIRST,dc.created_at LIMIT 100)
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.setupCheck:'||token,'domain.setupCheck',workspace_id,jsonb_build_object('domainId',id,'token',token) FROM due
@@ -31,7 +31,7 @@ export async function domainSetupTick(runtime: Runtime) {
     RETURNING id`);
   const links = runtime.config.linkHosts ? (await runtime.db.execute<{ id: string }>(sql`WITH due AS (SELECT d.id,dc.workspace_id,dc.token FROM domain_claims dc
       JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name LEFT JOIN link_hosts h ON h.workspace_id=dc.workspace_id AND h.domain=dc.name
-      WHERE dc.sending_state IN ('pending','verified') AND NOT domain_claim_expired(dc) AND coalesce(h.status,'pending')<>'active'
+      WHERE dc.sending_state IN ('pending','verified') AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ? 'builtin',false) AND coalesce(h.status,'pending')<>'active'
         AND coalesce(h.checked_at,'-infinity')<=now()-CASE WHEN h.created_at>now()-interval '1 day' THEN interval '14 minutes' ELSE interval '6 hours' END
       ORDER BY h.checked_at NULLS FIRST LIMIT 100)
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.linkCheck:'||token,'domain.linkCheck',workspace_id,jsonb_build_object('domainId',id,'token',token) FROM due
@@ -39,7 +39,11 @@ export async function domainSetupTick(runtime: Runtime) {
     RETURNING id`)).rows : [];
   // New workspaces with no domain at all an hour on: the one email, with NO_DOMAIN_REMINDER=on.
   const notices = runtime.config.noDomainReminder ? await (await wrapModuleLoad(() => import('./account-notices.js'))).noDomainNotices(runtime) : 0;
-  if (rows.length + links.length + notices) try { await runtime.wake?.(rows.length + links.length + notices); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Domain setup checks and notices are durable; the scheduler will run them.' }); }
+  // Built-in domains: the parent's check, the label backfill and the domains still to set up (builtin-domain.ts).
+  let builtin = 0;
+  if (runtime.config.builtinDomain) try { builtin = await (await wrapModuleLoad(() => import('./builtin-domain.js'))).builtinDomainTick(runtime); }
+  catch (error) { if (error instanceof ModuleLoadError) throw error; logError(error, { code: 'BUILTIN_DOMAIN_TICK_FAILED' }); }
+  if (rows.length + links.length + notices + builtin) try { await runtime.wake?.(rows.length + links.length + notices + builtin); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Domain setup checks and notices are durable; the scheduler will run them.' }); }
 }
 
 // A record's name as a DNS provider asks for it: relative to the zone that hosts it, the full name when that is unknown.
@@ -49,8 +53,8 @@ export const domainSetupCheckJob: JobHandler = async (runtime, payload, job) => 
   if (!runtime.config.multiTenant || typeof payload.domainId !== 'string' || typeof payload.token !== 'string') return;
   const [{ derivedReadiness, hostedDomain }, { checkSetup }, { checkLinkHost, withLinkRecords }] = await wrapModuleLoad(() => Promise.all([import('./operations.js'), import('./record-check.js'), import('./link-domains.js')]));
   const row = await hostedDomain(runtime.db, job.workspaceId, payload.domainId);
-  // Removed, added again, verified, released or adopted since it was queued: nothing to check.
-  if (!row || row.token !== payload.token || row.expired || row.sending_state !== 'pending' || row.identity?.adopted || Date.parse(row.created_at) <= Date.now() - 72 * 3600_000) return;
+  // Removed, added again, verified, released, adopted or built in since it was queued: nothing to check.
+  if (!row || row.token !== payload.token || row.expired || row.sending_state !== 'pending' || row.identity?.adopted || row.identity?.builtin || Date.parse(row.created_at) <= Date.now() - 72 * 3600_000) return;
   // The link record is one of the domain's records: checked (and its custom hostname made) with the rest.
   await checkLinkHost(runtime, job.workspaceId, row.name);
   const [report] = await withLinkRecords(runtime, job.workspaceId, [derivedReadiness(row)]), check = await checkSetup(report!);

@@ -1,5 +1,6 @@
 import { sql } from 'drizzle-orm';
 import { ApiError, log, type Config, type DbExecutor, type Runtime } from './core.js';
+import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
 import { LINK_LABEL } from './link-hosts.js';
 import { cname, fqdn } from './public-dns.js';
 
@@ -28,6 +29,8 @@ export function linkRecordRequired(config: Config, domain: string, field = 'from
  *  workspace's domain it is under), else PUBLIC_URL when self-hosted. Hosted without one: LINK_RECORD_REQUIRED. */
 export async function linkOrigin(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, field?: string): Promise<string> {
   const sender = domainOf(from), config = runtime.config;
+  // A built-in domain has no DNS of its own to publish a link record in, and sends transactional mail only.
+  if (isBuiltinHost(config, sender)) throw builtinRefusal(config, { code: 'BUILTIN_DOMAIN_UNSUPPORTED', field: 'kind', host: sender });
   if (config.linkHosts) {
     const { rows } = await db.execute<{ name: string; hostname: string | null }>(sql`SELECT d.name, h.hostname FROM operation_domains d
       LEFT JOIN link_hosts h ON h.workspace_id=d.workspace_id AND h.domain=d.name AND h.status='active'
@@ -94,7 +97,7 @@ type Seen = { state: 'found' | 'missing' | 'wrong_value'; values: string[]; chec
  */
 export async function checkLinkHost(runtime: Runtime, workspaceId: string, domain: string) {
   const saas = runtime.config.linkHosts;
-  if (!saas) return;
+  if (!saas || isBuiltinHost(runtime.config, domain)) return;
   const hostname = linkHostName(domain), checkedAt = new Date().toISOString();
   const { rows: [row] } = await runtime.db.execute<{ custom_hostname_id: string | null; status: 'pending' | 'active'; public_dns: Seen | null }>(sql`SELECT custom_hostname_id, status, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=${domain}`);
   let id = row?.custom_hostname_id ?? null, status = row?.status ?? 'pending', detail: string | null = null, seen: Seen | null = row?.public_dns ?? null;
@@ -133,6 +136,7 @@ export async function withLinkRecords<T extends Readable>(runtime: Runtime, work
   const { rows } = await runtime.db.execute<{ domain: string; status: 'pending' | 'active'; detail: string | null; public_dns: Seen | null }>(sql`SELECT domain, status, detail, public_dns FROM link_hosts WHERE workspace_id=${workspaceId} AND domain=ANY(${sql.param(reports.map(report => report.name))}::text[])`);
   const found = new Map(rows.map(row => [row.domain, row]));
   for (const report of reports) {
+    if (isBuiltinHost(runtime.config, report.name)) continue; // No DNS of its own, and transactional mail only.
     const row = found.get(report.name), active = row?.status === 'active', at = report.dns.findLastIndex(record => record.purpose === 'sending') + 1;
     const record: T['dns'][number] = { name: linkHostName(report.name), type: 'CNAME', value: saas.target, purpose: 'links', status: active ? 'verified' : 'pending',
       ...active ? {} : { note: row?.detail ?? `Campaign and marketing mail from ${report.name} carries its unsubscribe link on this host, and is refused until it verifies. If the domain's DNS is on Cloudflare, set the record to DNS only.`, ...row?.public_dns ? { publicDns: row.public_dns } : {} } };

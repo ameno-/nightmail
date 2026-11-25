@@ -4729,12 +4729,14 @@ test('permission refusals: every refusal helper names the permission, scope, cre
   const refused = (run: () => unknown) => { try { const value = run(); if (value instanceof ApiError) return value; } catch (error) { if (error instanceof ApiError) return error; throw error; } return assert.fail('not refused'); };
   // [helper call, code, message before the added sentence, required, header]
   const rows: [string, () => unknown, string, string, Json, string][] = [
-    ['actor: editContent', () => core.actor(ctx(key(['read']), 'POST', '/v1/lists'), 'editContent'), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'audience', level: 'write' }, 'audience=write'],
-    ['actor: send', () => core.actor(ctx(key(['read']), 'POST', '/v1/emails/send'), 'send'), 'PERMISSION_DENIED', 'This operation requires send permission.', { permission: 'sendEmail', level: 'on' }, 'send_email=on'],
-    ['actor: read', () => core.actor(ctx(key(['send']), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', 'This operation requires read permission.', { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
+    ['actor: editContent', () => core.actor(ctx(key(['read']), 'POST', '/v1/lists'), 'editContent'), 'PERMISSION_DENIED', `This key can only read. Make it Full access in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'audience', level: 'write' }, 'audience=write'],
+    ['actor: send', () => core.actor(ctx(key(['read']), 'POST', '/v1/emails/send'), 'send'), 'PERMISSION_DENIED', `This key can only read. Add Send to it in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'sendEmail', level: 'on' }, 'send_email=on'],
+    ['actor: read', () => core.actor(ctx(key(['send'], { domains: ['acme.example'] }), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', `This key can only send from acme.example. Add Read to it in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
     ['lasting', () => core.lasting(ctx(agentToken, 'POST', '/v1/webhooks'), core.WEBHOOK_CHANGE), 'CREDENTIAL_DELEGATION_FORBIDDEN', `Temporary agent tokens cannot ${core.WEBHOOK_CHANGE}. Use the dashboard, an API key or the MCP approval itself.`, { permission: 'configuration', level: 'write', credential: 'lasting' }, 'configuration=write; credential=lasting'],
-    ['receivingAdminRefusal: read key', () => core.receivingAdminRefusal(key(['read'])), 'PERMISSION_DENIED', 'This operation requires manage permission.', { permission: 'receivingRules', level: 'read' }, 'receiving_rules=read'],
-    ['receivingAdminRefusal: sender domains', () => core.receivingAdminRefusal(key(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
+    ['actor: read sign-in', () => core.actor(ctx(signIn(['send']), 'GET', '/v1/emails/em_1'), 'read'), 'PERMISSION_DENIED', 'This operation requires read permission.', { permission: 'sentMail', level: 'read' }, 'sent_mail=read'],
+    ['receivingAdminRefusal: read key', () => core.receivingAdminRefusal(key(['read'])), 'PERMISSION_DENIED', `This key can only read. Make it Full access in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'receivingRules', level: 'read' }, 'receiving_rules=read'],
+    ['receivingAdminRefusal: sender domains', () => core.receivingAdminRefusal(key(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', `This key is limited to the sender domain example.com. Receiving configuration covers every address in the workspace, so it needs a full-access key: ${core.FULL_ACCESS_KEY}.`, { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
+    ['receivingAdminRefusal: sign-in on sender domains', () => core.receivingAdminRefusal(signIn(['manage'], { domains: ['example.com'] }), 'change routes'), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'write', scope: 'workspace' }, 'receiving_rules=write; scope="workspace"'],
     ['receivingAdminRefusal: member', () => core.receivingAdminRefusal(session('member')), 'ADMIN_REQUIRED', 'Receiving configuration covers every address in the workspace. Use an owner or admin session, or an API key with manage permission on all domains.', { permission: 'receivingRules', level: 'read', person: 'admin' }, 'receiving_rules=read; person=admin'],
     ['receivingAdminRefusal: approval', () => core.receivingAdminRefusal(signIn(['manage'], { grantId: 'g' }), 'change routes'), 'ADMIN_REQUIRED', 'Changing receiving configuration requires an owner or admin of this workspace.', { permission: 'receivingRules', level: 'write', person: 'admin' }, 'receiving_rules=write; person=admin'],
     ['receivingAdminRefusal: agent token', () => core.receivingAdminRefusal(agentToken, 'change routes'), 'CREDENTIAL_DELEGATION_FORBIDDEN', 'Temporary agent tokens cannot change routes. Use the dashboard, an API key or the MCP approval itself.', { permission: 'receivingRules', level: 'write', credential: 'lasting' }, 'receiving_rules=write; credential=lasting'],
@@ -5236,10 +5238,12 @@ describe('Hosted MCP OAuth and tools', () => {
           const response = credential.actor ? await dispatchAsActor(app, req, runtime, credential.actor, { requestId: 'req_' + '0'.repeat(32), clientIp: null, userAgent: null }) : await app.fetch(req, runtime);
           const text = await response.text(); let error: Json | undefined; try { error = JSON.parse(text).error; } catch { /* a redirect or a page */ }
           const refused = response.status === 401 || (response.status === 403 && (entry.row.access === 'staff' || !!error?.required));
-          return { refused, hidden: response.status === 404, text, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
+          return { refused, hidden: response.status === 404, text, error: error as Json | undefined, answer: `${response.status} ${error?.code ?? ''} ${error?.required ? JSON.stringify(error.required) : error?.message ?? ''}` };
         } finally { await db.query('ROLLBACK TO SAVEPOINT permission_table'); }
       };
       const mismatches: string[] = [];
+      // Workspace API keys that aren't full access: limited permissions, or limited to sender domains.
+      const limitedKeys = new Set(['readKey', 'sendKey', 'readSendKey', 'domainKey']), unhelpful: string[] = [];
       // Some admitted writes reach for the network (an upload to object storage); here such a fetch fails like any other.
       // The fixture's own network guard stays underneath, for the issuer, and is back once every operation was called.
       const guarded = globalThis.fetch;
@@ -5256,7 +5260,11 @@ describe('Hosted MCP OAuth and tools', () => {
           const body = bodies[id] ? { ...example(entry.operation), ...bodies[id] } : example(entry.operation);
           const outcomes = new Set<boolean>();
           for (const label of Object.keys(credentials)) {
-            const expected = admits(credentials[label]!, row), { refused, answer } = await call(label, entry, path, body);
+            const expected = admits(credentials[label]!, row), { refused, answer, error: refusal } = await call(label, entry, path, body);
+            // A key that isn't full access, refused for what it can't do, says what it can do and how to get a key that can
+            // (core.ts credentialLimits, missingPermission, unrestrictedRequired), on every operation that refuses it so.
+            if (refused && limitedKeys.has(label) && admits(credentials.manageKey!, row) && ['PERMISSION_DENIED', 'UNRESTRICTED_KEY_REQUIRED', 'ADMIN_REQUIRED'].includes(refusal?.code) && !/^This key (?:can only|is limited to)\b.*\bfull-access key\b/s.test(refusal?.message ?? ''))
+              unhelpful.push(`${id} ${label}: ${refusal?.code} "${refusal?.message}"`);
             outcomes.add(expected);
             if (expected === refused) mismatches.push(`${id} ${label}: the table ${expected ? 'admits' : 'refuses'} it, REST answered ${answer}`);
           }
@@ -5314,6 +5322,7 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.ok(checked >= 55, `${checked} scoped rows called on real resources`);
       } finally { globalThis.fetch = guarded; }
       assert.deepEqual(mismatches, []);
+      assert.deepEqual(unhelpful, [], 'Every refusal of a key that is not full access says what it can do and how to get a key that can.');
       assert.deepEqual(Object.keys(OPERATION_PERMISSIONS).filter(id => !entries.some(e => e.id === id)), [], 'Rows for operations that no longer exist.');
       assert.ok(entries.length >= 270, String(entries.length));
     });
@@ -12989,7 +12998,14 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     error(await http('POST', '/v1/emails/send', sender.secret, mail({ from: 'sender@allowed.example.com', subject: 'Header\r\nBcc: victim@example.com' })), 422);
     const allowed = ok(await http('POST', '/v1/emails/send', sender.secret, mail({ from: 'sender@allowed.example.com' })), 202);
     assert.equal(allowed.simulated, true);
-    error(await http('GET', `/v1/emails/${allowed.id}`, sender.secret), 403, 'PERMISSION_DENIED');
+    // A send-only key doesn't read back what it sent (a third production workspace tried): send stays send, and the refusal
+    // says how to get Read on the same key (API keys → Edit keeps its secret) or a full-access key. The list says the same.
+    const editKey = 'in the dashboard (API keys → Edit; it keeps its secret), or use a full-access key: create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys.';
+    for (const path of [`/v1/emails/${allowed.id}`, '/v1/emails', `/v1/emails/${allowed.id}/events`]) {
+      const refused = error(await http('GET', path, sender.secret), 403, 'PERMISSION_DENIED');
+      assert.equal(refused.message, `This key can only send from allowed.example.com. Add Read to it ${editKey} Needs Sent mail: read.`, path);
+      assert.deepEqual(refused.required, { permission: 'sentMail', level: 'read' }, path);
+    }
     // Onboarding's Send only key used beyond sending (two production workspaces did): each refusal keeps its code, says
     // which key this is and where a full-access key comes from.
     const fullAccess = 'a full-access key: create one in the dashboard under API keys → Create key → Full access, or with a full-access key via POST /v1/api-keys.';
@@ -13012,6 +13028,10 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     // N9: workspace-wide totals would count other domains' mail, so a restricted key gets none.
     for (const query of ['', '?include=previous,streams', '?granularity=hour']) error(await http('GET', `/v1/metrics${query}`, domainReader.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
     assert.match(error(await http('GET', '/v1/inbound/addresses', domainReader.secret), 403, 'UNRESTRICTED_KEY_REQUIRED').message, /^This key can only read mail sent from allowed\.example\.com\. Inbound addresses need a full-access key/);
+    assert.equal(error(await http('POST', '/v1/emails/send', domainReader.secret, mail({ from: 'sender@allowed.example.com' })), 403, 'PERMISSION_DENIED').message,
+      `This key can only read mail sent from allowed.example.com. Add Send to it ${editKey} Needs Send email.`);
+    // A key without manage on all domains, unrestricted otherwise, on received mail: the same style, with the address-key option.
+    assert.match(error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound addresses need a full-access key: .* For mail at some addresses only, a key limited to those addresses also works\./);
     const visible = await allPages('/v1/emails', domainReader.secret);
     assert.ok(visible.some(row => row.id === allowed.id));
     assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));
@@ -17847,6 +17867,64 @@ describe('Sealed Logs facets', () => {
         await assert.rejects(readTicketCut(runtime.db, original), { code: 'FACET_CATCHUP_UNAVAILABLE' });
       } finally { delayed.release(); await stale; }
     });
+  });
+
+  test('aggregate Logs tickets publish scoped exact rows and reauthorize the viewer before returning a stamped result', {timeout:25_000}, async t=>{
+    if(!fixtureWorker||!FIXTURE_DATABASE_URL)return t.skip('requires isolated loopback database and simulated installation');
+    const [{drizzle},{createApp},{runFacetAggregateTurn},{ensureRegionSettings}]=await Promise.all([
+      import('drizzle-orm/node-postgres'),import('./src/app.js'),import('./src/log-facet-aggregate-worker.js'),import('./src/ses-region-state.js'),
+    ]);
+    const db=await fixtureDatabase(t),person=await sessionFixture(t),wid=unique('logs-aggregate');
+    const hp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1}),wp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1});
+    cleanup(t,async()=>{await Promise.all([hp.end(),wp.end()]);});
+    await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+    await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),person.userId,wid]);
+    const runtime:import('./src/core.js').Runtime={...fixtureWorker.runtime,db:drizzle(hp),config:{...fixtureWorker.runtime.config,multiTenant:true,workspaceId:wid},
+      startLogFacetFold:()=>assert.fail('an aggregate dashboard must not enroll a legacy source scan'),startLogFacetAggregate:(_ws:string)=>{}};
+    await ensureRegionSettings(runtime.db,runtime.config);
+    cleanup(t,async()=>{
+      for(const name of ['mailbox_messages','mail_messages','mailboxes','mail_threads','mailbox_domains','sending_emails','log_facet_changes',
+        'log_facet_dirty_messages','log_facet_deadlines','log_facet_message_facts','log_facet_buckets','log_facet_sent_seeds','log_facet_inbound_progress',
+        'log_facet_results','log_facet_rolling','log_facet_demands','log_facet_wakes','log_facet_retired_generations','log_facet_generations','log_facet_coverage',
+        'sending_metrics_hourly','jobs','ses_installation_settings','workspace_members'])
+        await db.query(`DELETE FROM ${name} WHERE workspace_id=$1`,[wid]);
+      await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);
+    });
+    const app=createApp(),region=REGION,from=earlierMinute(floorMinute(),90),href=(mode:string)=>facetPath({mode,range:'24h',region,...mode==='refresh'&&{from}});
+    const get=async(path:string,ws=wid)=>await app.fetch(new Request(PUBLIC_ORIGIN+path,{headers:{cookie:person.cookie,'x-nightmail-workspace':ws}}),runtime);
+    const fresh=async(afterEnroll?:()=>Promise<void>)=>{
+      let wake!:()=>void;const registered=new Promise<void>(resolve=>{wake=resolve;});
+      runtime.startLogFacetAggregate=w=>{assert.equal(w,wid);wake();};
+      const original=runtime.db,probe=stage('before');runtime.db=stageDatabase(original,[probe],true);
+      const answer=get(href('refresh'));
+      try{
+        await Promise.race([registered,answer.then(()=>assert.fail('No aggregate demand registered'))]);await waitAt(probe,answer);
+        if(afterEnroll)await afterEnroll();
+        for(let i=0;i<16;i++){const turn=await runFacetAggregateTurn(drizzle(wp),wid);if(turn?.ready)break;}
+      }finally{probe.release();runtime.db=original;}
+      const response=await answer;assert.equal(response.status,200);return await response.json() as Json;
+    };
+    await seedSent(db,wid,from,'transactional','delivered');await seedInbound(db,wid,from);
+    const initial=await get(href('last'));assert.equal(initial.status,200);assert.equal((await initial.json() as Json).counts,null);
+    // Until its buckets are seeded, a window the source fold can size keeps the legacy fold, and the backfill is woken.
+    let folds=0;const cold=new AbortController();runtime.startLogFacetFold=()=>{folds++;cold.abort();};
+    const seeding=await app.fetch(new Request(PUBLIC_ORIGIN+href('refresh'),{headers:{cookie:person.cookie,'x-nightmail-workspace':wid},signal:cold.signal}),runtime);
+    assert.equal(seeding.status,499);assert.equal(folds,1);
+    assert.equal((await db.query('SELECT 1 FROM log_facet_wakes WHERE workspace_id=$1',[wid])).rowCount,1);
+    assert.equal((await db.query('SELECT 1 FROM log_facet_demands WHERE workspace_id=$1',[wid])).rowCount,0);
+    await db.query("DELETE FROM jobs WHERE workspace_id=$1 AND type='logs.facetFold'",[wid]);
+    runtime.startLogFacetFold=()=>assert.fail('an aggregate dashboard must not enroll a legacy source scan');
+    for(let i=0;i<16;i++)if((await runFacetAggregateTurn(drizzle(wp),wid))?.ready)break;
+    const owner=await fresh();assert.equal(owner.visibility,'admin');assert.equal(owner.from,from);assert.match(owner.asOf,/\.\d{6}Z$/);
+    const live=await get('/v1/logs?counts=true&limit=1&region='+encodeURIComponent(region)+'&from='+encodeURIComponent(from));
+    assert.deepEqual(owner.counts,(await live.json() as Json).counts);assert.equal(owner.counts.status.spam,1);
+    const old=await get(href('last'));assert.equal((await old.json() as Json).asOf,owner.asOf);
+    const member=await fresh(async()=>{await db.query("UPDATE workspace_members SET role='member' WHERE workspace_id=$1 AND user_id=$2",[wid,person.userId]);});
+    assert.equal(member.visibility,'member');assert(!Object.hasOwn(member.counts.status,'spam'));assert(member.asOf>owner.asOf);
+    const publicMember=await get('/v1/logs?counts=true&limit=1&region='+encodeURIComponent(region)+'&from='+encodeURIComponent(from));
+    assert.deepEqual(member.counts,(await publicMember.json() as Json).counts);
+    const foreign=await get(href('refresh'),unique('no-membership'));assert.equal(foreign.status,403);assert.equal((await foreign.json() as Json).counts,undefined);
+    assert.equal((await db.query("SELECT id FROM jobs WHERE workspace_id=$1 AND type='logs.facetFold'",[wid])).rowCount,0);
   });
 
   test('busy dashboard Logs responds pending, with only a freshly authorized historical cut for the same view', {timeout:15_000}, async t=>{
@@ -22971,6 +23049,192 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const results=await ingestFeedbackBatch(runtime,[feedback(replacement,va,acct),feedback(trusted,oh,acct),feedback(trusted,va,'000000000000'),feedback(trusted,va,acct)]);
       assert.deepEqual(results.map(r=>!!r.error),[true,true,true,false]);assert.equal((await frozen(mixed[1].id)).status,'delivered');
     });
+  });
+
+  // Built-in domains (src/builtin-domain.ts, migration 495): every Hosted workspace gets <label>.<parent> on creation (or from
+  // the backfill), a domain of its own that needs no DNS. It sends with the workspace's own tenant under the parent identity
+  // once that is associated with it, within its send scope and caps, transactional only and screened, until a domain of
+  // the workspace's own verifies; it receives at every address into one default inbox, and drops spam and viruses before
+  // they are counted. A pause stops its sending, a revoke stops everything, and its label is never given out again.
+  test('built-in domain: given on creation and by the backfill, unique and never a reserved name, sends within its caps and scope, receives into a catch-all inbox, refused when paused or revoked',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
+      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser},{acceptInboundNotification},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
+        import('./src/dispatcher.js'),import('@aws-sdk/client-sesv2'),import('./src/builtin-domain.js'),import('./src/workspaces.js'),import('./src/mailbox-ingest.js'),import('./src/mailbox-ingest-store.js'),
+        import('./src/mailbox-ingest-input.js'),import('./src/routing-match.js'),import('drizzle-orm'),import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href)]);
+      const wid=runtime.config.workspaceId,acct='111122225555',oh='us-east-2',parent='nightmail-fixture.email',topic=`arn:aws:sns:${oh}:${acct}:bane-feedback`;
+      const inbound=`arn:aws:sns:${oh}:${acct}:bane-inbound`,bucket='builtin-fixture-mail',screenOrigin='https://screen.builtin.invalid';
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture-only'},builtinDomain:parent,builtinScope:'anyone',platformAccount:undefined});
+      runtime.mailR2={write:true,name:'builtin-fixture',bucket:{put:async()=>{}}} as unknown as typeof runtime.mailR2;
+      await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket,inbound_topic_arn,receiving_state) VALUES($1,$2,$3,'ready',$4,$5,'ready')`,[oh,acct,topic,bucket,inbound]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
+      // SES: the parent identity is missing until "the domain is bought", then verified and tagged for built-in domains.
+      let parentIdentity:Json|null=null;const sent:Json[]=[],writes:string[]=[];
+      const verifiedParent={IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningAttributesOrigin:'AWS_SES',SigningEnabled:true,Status:'SUCCESS',Tokens:['a','b','c']},
+        MailFromAttributes:{MailFromDomain:`bounce.${parent}`,MailFromDomainStatus:'SUCCESS'},Tags:[{Key:'bane:purpose',Value:'builtin-domains'}],Policies:{},FeedbackForwardingStatus:false};
+      // One mock for the whole test (a second t.mock.method on the prototype would outlive it): the race below swaps the handler.
+      let onSend=async(cmd:any):Promise<Json>=>{
+        if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
+        if(cmd instanceof GetEmailIdentityCommand){assert.equal(cmd.input.EmailIdentity,parent);if(!parentIdentity)throw Object.assign(new Error('missing'),{name:'NotFoundException'});return parentIdentity;}
+        if(cmd instanceof CreateTenantResourceAssociationCommand||cmd instanceof DeleteTenantResourceAssociationCommand){writes.push(`${cmd.constructor.name}:${cmd.input.TenantName}:${cmd.input.ResourceArn}`);return {};}
+        assert.ok(cmd instanceof SendEmailCommand,cmd.constructor.name);sent.push(cmd.input);return {MessageId:unique('ses')};
+      };
+      t.mock.method(SESv2Client.prototype,'send',(cmd:any)=>onSend(cmd));
+      const pace=()=>db.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+
+      // 1. Names: the workspace name in DNS letters, filler dropped, a protected brand or reserved word replaced, never reissued.
+      assert.deepEqual(["Ryan's workspace",'Acme Corp','Café Crème Inc','PayPal Security','Support','xn--fixture','12345','A','The Very Long Workspace Name For Testing',
+        'Nightmail Support','Security Team','Acme no-reply','Login Verification','Postmaster Team','Secure Pay'].map(builtin.builtinBase),
+        ['ryans','acme-corp','cafe-creme','mail','mail','mail','mail','mail','the-very-long-name','mail','mail','mail','mail','mail','mail']);
+      const labels=new Set<string>();
+      for (let i=0;i<40;i++) {const w=unique('ws-acme');await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$2,$1)',[w,'Acme']);labels.add((await builtin.allocateBuiltinDomain(runtime.db,runtime.config,w,'Acme'))!);}
+      assert.equal(labels.size,40,'Every workspace gets its own label.');
+      for (const name of labels) assert.match(name,/^acme-[a-z0-9]{2,4}\.nightmail-fixture\.email$/);
+      const [taken]=[...labels];
+      await db.query('SAVEPOINT duplicate');
+      await assert.rejects(db.query(`INSERT INTO builtin_domains(workspace_id,label,name) VALUES('ws-duplicate',$1,$2)`,[taken!.split('.')[0],taken]),/duplicate key/);
+      await db.query('ROLLBACK TO SAVEPOINT duplicate');
+      for (const label of ['www','mail','support','test','bounce']) assert.ok(builtin.reservedBuiltinLabel(label),label);
+      error(await local('POST','/v1/domains',{name:`fixture.${parent}`}),422,'DOMAIN_NOT_ALLOWED');
+      error(await local('POST','/v1/domains',{name:parent}),422,'DOMAIN_NOT_ALLOWED');
+
+      // 2. On creation: a new account's workspace has its label in the same transaction.
+      const user=unique('user');await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,'Acme Corp',`${user}@example.net`]);
+      assert.equal(await onboardNewUser(runtime.db,{id:user,name:'Acme Corp',email:`${user}@example.net`},true,oh,null,runtime.config),true);
+      assert.match((await db.query('SELECT b.name FROM builtin_domains b JOIN workspace_members m ON m.workspace_id=b.workspace_id WHERE m.user_id=$1',[user])).rows[0].name,/^acme-corps-[a-z0-9]{2}\.nightmail-fixture\.email$/);
+
+      // 3. The backfill: this workspace predates built-in domains. The sweep gives it a label and queues its domain.
+      assert.equal((await db.query('SELECT FROM builtin_domains WHERE workspace_id=$1',[wid])).rowCount,0);
+      // Oldest first, 200 a turn: other fixtures' workspaces may be ahead of this one.
+      for (let turn=0;turn<20 && !(await db.query('SELECT FROM builtin_domains WHERE workspace_id=$1',[wid])).rowCount;turn++) await builtin.builtinDomainTick(runtime);
+      const host=(await db.query('SELECT name FROM builtin_domains WHERE workspace_id=$1',[wid])).rows[0].name as string,from=`hello@${host}`;
+      assert.match(host,/^simulated-ses-[a-z0-9]{2}\.nightmail-fixture\.email$/);
+      assert.deepEqual((await db.query("SELECT ok,problem FROM builtin_parent WHERE name=$1",[parent])).rows,[{ok:false,problem:'missing'}]);
+      // The domain, its receiving host, default inbox and catch-all exist at once; it sends once the parent is associated.
+      await pace();await run('domain.builtin');
+      const claim=async()=>(await db.query("SELECT sending_state,receiving_state,receiving_host,identity->>'builtin' AS builtin FROM domain_claims WHERE workspace_id=$1 AND name=$2",[wid,host])).rows[0];
+      assert.deepEqual(await claim(),{sending_state:'pending',receiving_state:'active',receiving_host:host,builtin:'true'});
+      assert.deepEqual(writes,[],'Nothing is associated with an identity that is not verified.');
+      const me=async()=>ok(await local('GET','/v1/me')).connection.builtinDomain;
+      assert.deepEqual(await me(),{id:(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id,name:host,sending:'pending',scope:'anyone',perDay:100,perMinute:10});
+      error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Too early',text:'Pending.'}),403,'SENDER_DOMAIN_NOT_VERIFIED');
+      parentIdentity=verifiedParent;await db.query('UPDATE builtin_parent SET checked_at=now()-interval \'2 hours\' WHERE name=$1',[parent]);
+      await builtin.builtinDomainTick(runtime);await pace();await run('domain.builtin');
+      assert.deepEqual(writes,[`CreateTenantResourceAssociationCommand:bane-${wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`],'The parent joins this workspace\'s own tenant.');
+      assert.equal((await claim()).sending_state,'verified');assert.equal((await me()).sending,'ready');
+      // Domains lists it, built in, with no DNS to publish; it can't be deleted or changed, and counts toward no limit.
+      const listed=ok(await local('GET','/v1/domains?limit=10'));
+      const row=listed.data.find((d:Json)=>d.name===host);
+      assert.deepEqual([row.builtIn,row.sending,row.receiving,row.dns,row.releasesAt],[true,'verified','verified',[],null]);
+      assert.equal(listed.quota.used,0);
+      assert.equal(error(await local('DELETE',`/v1/domains/${row.id}`),409,'BUILTIN_DOMAIN').code,'BUILTIN_DOMAIN');
+      error(await local('POST',`/v1/domains/${row.id}/mail-from`,{mailFromDomain:`mail.${host}`}),409,'BUILTIN_DOMAIN');
+      assert.equal(ok(await local('GET','/v1/me')).connection.domains.total,0,'Own domains only.');
+
+      // 4. Sending: anyone, 10 a minute, transactional only, screened as a new sender, from its own tenant.
+      Object.assign(runtime.config,{hostedScreen:true,screen:{endpoint:screenOrigin,apiKey:'fixture',model:'fixture',mode:'reject',threshold:0.7}});
+      await t.test('screened sends',async t=>{
+        t.mock.method(globalThis,'fetch',async(url:RequestInfo|URL,init?:RequestInit)=>{assert.equal(String(url),screenOrigin);return Response.json({answers:{spam:{noul:/buy cheap crypto/i.test(String(init?.body??''))?0.99:0.01}}});});
+        const mail=(n:number,extra:Json={})=>({from,to:`friend-${n}@example.net`,subject:`Hello ${n}`,text:`It works, ${n}.`,...extra});
+        const first=ok(await local('POST','/v1/emails/send',mail(0,{fromName:'Acme',replyTo:[`support@${host}`]})),202);
+        error(await local('POST','/v1/emails/send',mail(1,{text:'Buy cheap crypto now'})),422,'CONTENT_REJECTED_SPAM');
+        for (const [extra,field] of [[{kind:'marketing'},'kind'],[{scheduledAt:new Date(Date.now()+3600_000).toISOString()},'scheduledAt'],[{headers:[{name:'X-Entity-Ref-ID',value:'1'}]},'headers'],[{replyTo:['me@elsewhere.example']},'replyTo'],[{from:`x@deep.${host}`},'from']] as const)
+          assert.equal(error(await local('POST','/v1/emails/send',mail(2,extra)),422,'BUILTIN_DOMAIN_UNSUPPORTED').field,field,field);
+        assert.equal(error(await local('POST','/v1/emails/batch',{emails:[mail(3),mail(4,{replyTo:['me@elsewhere.example']})]}),422,'BUILTIN_DOMAIN_UNSUPPORTED').field,'emails.1.replyTo');
+        ok(await local('POST','/v1/emails/batch',{emails:[1,2,3,4,5,6,7,8,9].map(n=>mail(n))}),202); // 10 this minute.
+        const minute=error(await local('POST','/v1/emails/send',mail(10)),429,'BUILTIN_DOMAIN_LIMIT');assert.equal(minute.retryable,true);assert.ok(Date.parse(minute.resetAt)>Date.now());
+        await runDispatcher(runtime,{region:oh,accountId:acct});
+        assert.equal(sent.length,10);
+        assert.deepEqual([sent[0]!.FromEmailAddress,sent[0]!.TenantName,sent[0]!.ConfigurationSetName,sent[0]!.EmailTags.find((tag:Json)=>tag.Name==='bane_workspace_id').Value],[`"Acme" <${from}>`,`bane-${wid}`,'bane-transactional',wid]);
+        assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[first.id])).rows[0].status,'accepted');
+      });
+      Object.assign(runtime.config,{hostedScreen:false,screen:undefined});
+      // 100 in 24 hours: older mail stops counting after a day.
+      const age=(interval:string)=>db.query('UPDATE sending_emails SET created_at=created_at-$2::interval WHERE workspace_id=$1',[wid,interval]);
+      for (let round=1;round<10;round++){await age('2 minutes');ok(await local('POST','/v1/emails/batch',{emails:[0,1,2,3,4,5,6,7,8,9].map(n=>({from,to:`r${round}-${n}@example.net`,subject:`Round ${round} ${n}`,text:'Daily.'}))}),202);}
+      await age('2 minutes');
+      assert.match(error(await local('POST','/v1/emails/send',{from,to:'over@example.net',subject:'Over',text:'Over.'}),429,'BUILTIN_DOMAIN_LIMIT').message,/100 in 24 hours/);
+      await age('24 hours');ok(await local('POST','/v1/emails/send',{from,to:'next-day@example.net',subject:'Next day',text:'Again.'}),202);
+      // The other scope: only the members' own verified addresses, 3 a minute and 10 a day.
+      runtime.config.builtinScope='members';await age('24 hours');
+      assert.equal(error(await local('POST','/v1/emails/send',{from,to:'stranger@example.net',subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT').field,'to');
+      error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,cc:['stranger@example.net'],subject:'No',text:'No.'}),422,'BUILTIN_DOMAIN_RECIPIENT');
+      ok(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Mine',text:'Mine.'}),202);
+      assert.deepEqual((await me()).scope,'members');
+      runtime.config.builtinScope='anyone';
+      // Unset, the installation's built-in domains stop sending at once (the kill switch); receiving is checked below.
+      runtime.config.builtinDomain=undefined;error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Off',text:'Off.'}),409,'BUILTIN_DOMAIN_UNAVAILABLE');runtime.config.builtinDomain=parent;
+
+      // 5. Receiving: every address at it reaches the workspace; one without an inbox or route goes to the default inbox,
+      // keeping its own address; spam and viruses are dropped before they are counted.
+      const inbox=(await db.query("SELECT b.id,b.address FROM mailboxes b WHERE b.workspace_id=$1 AND b.client_id=$2",[wid,`builtin:${host}`])).rows[0];
+      assert.equal(inbox.address,from);
+      assert.deepEqual((await db.query('SELECT match,destinations FROM mail_routes WHERE workspace_id=$1',[wid])).rows,[{match:`*@${host}`,destinations:[inbox.id]}]);
+      const support=ok(await local('POST','/v1/inbound/addresses',{address:`support@${host}`}),201);
+      const window=async()=>(await db.query('SELECT coalesce(sum(message_level),0)::float AS level FROM mail_receive_windows WHERE workspace_id=$1',[wid])).rows[0].level;
+      const receive=async(recipients:string[],verdicts:{spam?:string;virus?:string}={})=>{const mid=unique('builtin-mail');
+        const n=await acceptInboundNotification(runtime,{topicArn:inbound,region:oh,message:{notificationType:'Received',mail:{messageId:mid,commonHeaders:{subject:'Hi'}},receipt:{timestamp:new Date().toISOString(),recipients,
+          spamVerdict:{status:verdicts.spam??'PASS'},virusVerdict:{status:verdicts.virus??'PASS'},action:{type:'S3',bucketName:bucket,topicArn:inbound,objectKey:'staging/'+mid}}}});
+        return {n,mid};};
+      const level=await window();
+      for (const verdicts of [{spam:'FAIL'},{spam:'GRAY'},{virus:'FAIL'}]) assert.equal((await receive([`random-${randomUUID().slice(0,6)}@${host}`],verdicts)).n,0,JSON.stringify(verdicts));
+      assert.equal(await window(),level,'Dropped mail takes nothing from the receive budget.');
+      runtime.config.builtinDomain=undefined;assert.equal((await receive([`switched-off@${host}`])).n,0,'The kill switch stops receiving too.');runtime.config.builtinDomain=parent;
+      const deliver=async(recipients:string[])=>{const {n,mid}=await receive(recipients);assert.equal(n,1);const message=unique('msg');
+        const input=(await runtime.db.execute<{i:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS i`)).rows[0]!.i;
+        const plan=matchRouting(input.routing,input.recipients,false,'PASS',new Date().toISOString());
+        await storeIncoming(runtime.db,{id:message,workspaceId:wid,direction:'inbound',region:oh,sesMessageId:mid,messageId:`<${mid}@sender.example>`,inReplyTo:null,references:[],subject:'Hi',
+          fromAddress:'someone@sender.example',fromName:null,to:recipients,cc:[],bcc:[],replyTo:[],envelopeFrom:'someone@sender.example',envelopeTo:recipients,sentAt:null,receivedAt:new Date().toISOString(),
+          text:'Hi.',html:null,bodyTruncated:false,snippet:'Hi.',headers:[],attachmentCount:0,sizeBytes:100,rawBucket:bucket,rawKey:`workspaces/${wid}/raw/${mid}.eml`,verdicts:{spam:'PASS',virus:'PASS'},spam:false,automated:false,status:'received',
+          lifecycle:plan.recipients.some(r=>r.inboxes.some(id=>input.routing.boxes?.[id]?.kept))?'kept':undefined} as any,[],true,true,false,plan,undefined,null); // As ingest stores a kept inbox's mail.
+        return {plan,boxes:(await db.query('SELECT mailbox_id FROM mailbox_messages WHERE message_id=$1 ORDER BY mailbox_id',[message])).rows.map(r=>r.mailbox_id),
+          envelope:(await db.query('SELECT envelope_to FROM mail_messages WHERE id=$1',[message])).rows[0].envelope_to};};
+      const anyone=`order-4821@${host}`,caught=await deliver([anyone]);
+      assert.deepEqual([caught.boxes,caught.envelope,caught.plan.recipients[0]!.tier],[[inbox.id],[anyone],'catchall'],'A new address lands in the default inbox with its own address.');
+      assert.deepEqual((await deliver([`support@${host}`])).boxes,[support.id],'An address of its own keeps its mail.');
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
+
+      // 6. A pause stops sending (receiving goes on); an own domain closes it; a revoke stops everything for good.
+      await db.query("UPDATE provider_connections SET paused_at=now(),pause_reason='Synthetic hold' WHERE id=$1",[wid]);
+      error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Paused',text:'Paused.'}),409,'HOSTED_SENDING_PAUSED');
+      assert.equal((await receive([`while-paused@${host}`])).n,1);
+      await db.query('UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE id=$1',[wid]);
+      await db.query("INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('own-domain.example',$1,$1,'verified')",[wid]);
+      assert.match(error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Closed',text:'Closed.'}),409,'OWN_DOMAIN_VERIFIED').message,/own-domain\.example/);
+      assert.equal((await me()).sending,'closed');
+      await db.query("DELETE FROM domain_claims WHERE name='own-domain.example' AND workspace_id=$1",[wid]);
+      assert.equal(await builtin.revokeBuiltinDomain(runtime.db,wid,'Synthetic phishing report','arn:aws:sts::111122225555:assumed-role/operator/fixture'),host);
+      error(await local('POST','/v1/emails/send',{from,to:AUTH_EMAIL,subject:'Revoked',text:'Revoked.'}),403,'BUILTIN_DOMAIN_REVOKED');
+      assert.equal((await receive([`after-revoke@${host}`])).n,0);
+      assert.equal((await me()).sending,'off');
+      await pace();await run('domain.builtin');
+      assert.deepEqual(writes.slice(1),[`DeleteTenantResourceAssociationCommand:bane-${wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`]);
+      assert.equal((await builtin.ensureBuiltinDomain(runtime,wid)),null,'A revoked domain is never set up again.');
+      assert.equal((await db.query("SELECT details->>'reason' AS reason FROM hosted_operator_audit WHERE workspace_id=$1 AND action='builtin-domain-revoked'",[wid])).rows[0].reason,'Synthetic phishing report');
+      // A revoke that lands while the domain.builtin job is associating the parent: the running job takes it back out.
+      const other=(await db.query('SELECT b.workspace_id AS wid,b.name FROM builtin_domains b JOIN workspace_members m ON m.workspace_id=b.workspace_id WHERE m.user_id=$1',[user])).rows[0];
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[other.wid,oh,acct]);
+      await builtin.builtinDomainTick(runtime);
+      assert.equal((await db.query("SELECT status FROM jobs WHERE id=$1",['domain.builtin:'+other.wid])).rows[0]?.status,'pending');
+      const late:string[]=[],raced:string[]=[];
+      onSend=async(cmd:any)=>{
+        if(cmd instanceof GetEmailIdentityCommand)return parentIdentity;
+        if(cmd instanceof CreateTenantResourceAssociationCommand&&!raced.length){raced.push(String(cmd.input.TenantName));await builtin.revokeBuiltinDomain(runtime.db,other.wid,'Revoked mid-association','arn:aws:sts::111122225555:assumed-role/operator/fixture');}
+        late.push(`${cmd.constructor.name}:${cmd.input.TenantName}:${cmd.input.ResourceArn}`);return {};
+      };
+      await pace();await builtin.builtinDomainJob(runtime,{},{id:'domain.builtin:'+other.wid,attempts:1,workspaceId:other.wid});
+      assert.deepEqual(late,[`CreateTenantResourceAssociationCommand:bane-${other.wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`,`DeleteTenantResourceAssociationCommand:bane-${other.wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`]);
+      assert.equal((await db.query('SELECT FROM domain_claims WHERE workspace_id=$1 AND name=$2',[other.wid,other.name])).rowCount,0,'Nothing of the revoked domain stays.');
+
+      // The runtime key may associate only the tagged parent with a tenant, never another identity.
+      const statements=Object.values(render('--fresh',{account:acct,origin:'https://dev.bane.mx'}) as Record<string,{Statement:IamStatement[]}>).flatMap(d=>d.Statement);
+      const arn=`arn:aws:ses:${oh}:${acct}:identity/${parent}`;
+      for (const action of ['ses:CreateTenantResourceAssociation','ses:DeleteTenantResourceAssociation']) {
+        assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh,'aws:ResourceTag/bane:purpose':'builtin-domains'}),true,action);
+        assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh}),false,action+' untagged');
+      }
+      assert.equal(iamAllows(statements,'ses:DeleteEmailIdentity',arn,{'aws:RequestedRegion':oh,'aws:ResourceTag/bane:purpose':'builtin-domains'}),false);
+    }));
   });
 
   test('MX regional campaign editing, controls and disabled queue recovery', async t=>{
@@ -29799,6 +30063,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([mail.subject, mail.to_addresses, mail.kind], ['Add your domain to start sending', [AUTH_EMAIL], 'transactional']);
       assert.equal(mail.text, `Pine Studio was created over an hour ago, but it has no domain yet.\n\nNightmail sends from your own domain, so nothing can be sent until you add one.\n\nIt takes about 5 minutes: add the domain, then copy the records it lists to where its DNS is hosted.\n\nAdd your domain: ${PUBLIC_ORIGIN}/domains\n\nNightmail sends this once, to the owners and admins of Pine Studio. To reach us, write to support@nightmail.dev.\n`);
       assert.doesNotMatch(`${mail.subject}\n${mail.text}`, HOW_IT_WORKS);
+      // With a built-in domain (builtin-domain.ts) the workspace already sends: the email asks for one of its own and says how far the built-in one goes.
+      const { customerNotice } = await import('./src/notices.js');
+      const withBuiltin = customerNotice(PUBLIC_ORIGIN, { kind: 'no_domain', workspace: 'Pine Studio', builtin: { name: 'pine-studio-k7.nightmail.email', scope: 'anyone', perDay: 100 } });
+      assert.equal(withBuiltin.subject, 'Add your own domain');
+      assert.match(withBuiltin.text, /^Pine Studio was created over an hour ago, but it has no domain of its own yet\.\n\nUntil it has one, it sends from pine-studio-k7\.nightmail\.email, to anyone, up to 100 recipients a day\. Your own domain lifts that limit\.\n/);
       await tick();
       assert.equal((await notices(all)).length, 1, 'Once per workspace.');
       // One that adds a domain before its email goes is not told.

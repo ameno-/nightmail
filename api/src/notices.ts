@@ -92,7 +92,8 @@ export type NoticeInput =
   | Workspace & { kind: 'domain_unverified'; domain: { id: string; name: string } }
   /** missing: of the domain's `total` sending records, the ones public DNS lacks or has with another value. host: where its DNS is hosted, when known. */
   | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
-  | Workspace & { kind: 'no_domain' }
+  /** builtin: the workspace's built-in domain while it sends (builtin-domain.ts), with who it sends to and its daily cap. */
+  | Workspace & { kind: 'no_domain'; builtin?: { name: string; scope: 'anyone' | 'members'; perDay: number } | null }
   | Workspace & { kind: 'evaluation_finished'; limited: boolean }
   | Workspace & { kind: 'low_balance'; balance: string; emails: number }
   | Workspace & { kind: 'out_of_credit'; receivingUntil: Date | null }
@@ -170,11 +171,16 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
           `Mail from addresses at ${name} can’t be sent until they are published.${n.releasesAt ? ` If the ownership record is still missing on ${moment(n.releasesAt)}, the domain is released.` : ''}`,
           provider ? `Its DNS is hosted at ${provider}. Add ${records.length === 1 ? 'this record' : 'these records'} there:` : `Add ${records.length === 1 ? 'this record' : 'these records'} where its DNS is hosted:`] });
     }
-    case 'no_domain': return notice({ subject: 'Add your domain to start sending', action: { label: 'Add your domain', url: `${base}/domains` },
-      why: `${productName} sends this once, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: [
-        `${w === 'your workspace' ? 'Your workspace' : w} was created over an hour ago, but it has no domain yet.`,
-        `${productName} sends from your own domain, so nothing can be sent until you add one.`,
-        'It takes about 5 minutes: add the domain, then copy the records it lists to where its DNS is hosted.'] });
+    case 'no_domain': {
+      // With a built-in domain the workspace already sends, within its caps: the email asks for a domain of its own.
+      const b = n.builtin, ws = w === 'your workspace' ? 'Your workspace' : w;
+      return notice({ subject: b ? 'Add your own domain' : 'Add your domain to start sending', action: { label: b ? 'Add your own domain' : 'Add your domain', url: `${base}/domains` },
+        why: `${productName} sends this once, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: [
+          b ? `${ws} was created over an hour ago, but it has no domain of its own yet.` : `${ws} was created over an hour ago, but it has no domain yet.`,
+          b ? `Until it has one, it sends from ${b.name}, ${b.scope === 'members' ? `only to its members’ own addresses, up to ${count(b.perDay)} a day` : `to anyone, up to ${count(b.perDay)} recipients a day`}. Your own domain lifts that limit.`
+            : `${productName} sends from your own domain, so nothing can be sent until you add one.`,
+          'It takes about 5 minutes: add the domain, then copy the records it lists to where its DNS is hosted.'] });
+    }
     case 'low_balance': return notice({ subject: `The balance of ${w} is low`, action: billing('Add credit'), why: members, lines: [
       `The prepaid balance of ${w} is ${n.balance}, enough for about ${count(n.emails)} more emails.`,
       'Sending and receiving continue. When the balance reaches $0, sending pauses.',

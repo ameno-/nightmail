@@ -110,7 +110,10 @@ export function AppShell() {
   // The page in front of the user: its first-screen requests start with its code, not after it, on a cold load too.
   useEffect(() => {
     const path = latest.current.pathname
-    if (regionReady && ((sidebarPaths as readonly string[]).includes(path) || path.startsWith('/newsletters'))) void latest.current.prefetchRoute(path)
+    // Logs starts its actual filtered rows at the table ref's first fit. Warming a
+    // remembered default page here can race that read with a different range or size.
+    if (regionReady && path === '/logs') void preloadRouteChunk(path)
+    else if (regionReady && ((sidebarPaths as readonly string[]).includes(path) || path.startsWith('/newsletters'))) void latest.current.prefetchRoute(path)
     if (access.multiTenant) { void score.preload().catch(() => {}); void prefetchQueries([queries.senderScore()]) }
   }, [regionReady])
   // Once the page in front of the user has settled, warm every other sidebar page's JS chunk one at a time (never

@@ -84,6 +84,8 @@ export type IdentityFacts = {
   imported?: true;
   /** Immutable operator-attested SES fingerprint. Only the operator can restore a revoked adoption. */
   adopted?: {arn:string;fingerprint:string};
+  /** The workspace's built-in domain (builtin-domain.ts): sent under its parent's identity, proven by it, never DNS-checked itself. */
+  builtin?: true;
   /** Hosted: when receiving was enabled (enableInboundDomain) and the check it queued hasn't observed the domain yet.
    * Every check that observes the domain writes its facts afresh, without it. */
   receivingRequested?: string;
