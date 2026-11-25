@@ -9569,7 +9569,10 @@ describe('Hosted MCP OAuth and tools', () => {
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init);
         if (new URL(request.url).origin !== 'https://support.example.com') return previous(input, init);
-        wakes.push({ method: request.method, url: request.url, headers: [...request.headers.keys()], body: await request.text() });
+        const body = await request.text(), { conversationId } = JSON.parse(body), token = request.headers.get('authorization')?.slice(7) ?? '';
+        assert.ok(await platform.verifyWake(token, conversationId));
+        assert.equal(await platform.verifyWake(token, conversation()), false);
+        wakes.push({ method: request.method, url: request.url, headers: [...request.headers.keys()], body });
         return new Response(null, { status: 202 });
       };
       try {
@@ -9658,7 +9661,7 @@ describe('Hosted MCP OAuth and tools', () => {
           const listed = ok(await send('GET', `${inbox}?view=paused`, session(reader))).data.find((c: Json) => c.id === chatId);
           assert.deepEqual([listed.pausedBy.kind, listed.pausedBy.userId, listed.queuedReplies, listed.lastAuthor, listed.needsReply], ['staff', operator.userId, 1, 'staff', false]);
           // The wake names the conversation and nothing else.
-          assert.deepEqual(wakes, [1, 2].map(() => ({ method: 'POST', url: 'https://support.example.com/hooks/nightmail-wake', headers: ['content-type'], body: JSON.stringify({ conversationId: chatId }) })));
+          assert.deepEqual(wakes, [1, 2].map(() => ({ method: 'POST', url: 'https://support.example.com/hooks/nightmail-wake', headers: ['authorization', 'content-type'], body: JSON.stringify({ conversationId: chatId }) })));
           assert.deepEqual((await db.query(`SELECT user_id, actor_id, internal, summary->>'message' AS message FROM audit_events WHERE action = 'support.reply' AND target_id = $1`, [chatId])).rows,
             [{ user_id: owner.userId, actor_id: operator.userId, internal: true, message: queued.id }]);
           // The outbox: one conversation's after its wake, or every one; marked sent once.
