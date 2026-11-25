@@ -15,20 +15,20 @@ import { ReceivedEmailDetailPage } from './received-detail'
 import { useScheduledActions } from './scheduled'
 import { useMediaQuery } from '../../lib/media'
 import { LogsBody, logStatuses, receivedStatuses, withStream, type LogFilters } from './facets'
-import { logRange, logRanges, rangeStart } from './range'
+import { keptRangeStart, logRange, logRanges, touchRangeStart } from './range'
 import { useLogFacets } from './facet-query'
 
 const directions = [{ value: 'all', label: 'All' }, { value: 'sent', label: 'Sent' }, { value: 'received', label: 'Received' }]
 const option = (value: string) => ({ value, label: value === 'all' ? 'All statuses' : label(value) })
 const streams = [{ value: 'all', label: 'All streams' }, { value: 'transactional', label: 'Transactional' }, { value: 'marketing', label: 'Marketing' }]
 export const logDirection = (view: string | null, campaignId?: string): LogDirection => campaignId ? 'sent' : view === 'sent' || view === 'received' ? view : 'all'
-// A range's start (range.ts), kept until another range is chosen.
+// A range's start (range.ts), kept while the page shows that range and for a while after it leaves it.
 function useRangeStart(range: TimeRange) {
-  const [start, setStart] = useState(() => ({ range, from: rangeStart(range) }))
-  if (start.range === range) return start.from
-  const next = { range, from: rangeStart(range) }
-  setStart(next)
-  return next.from
+  const [start, setStart] = useState(() => ({ range, from: keptRangeStart(range) }))
+  const shown = start.range === range ? start : { range, from: keptRangeStart(range) }
+  if (shown !== start) setStart(shown)
+  useEffect(() => () => touchRangeStart(shown.range, shown.from), [shown.range, shown.from])
+  return shown.from
 }
 // A substring search needs 3 characters (the API refuses fewer): until then the list isn't searched.
 const searchTerm = (value: string) => value.trim().length >= 3 ? value.trim() : ''
