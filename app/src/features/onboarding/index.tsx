@@ -10,7 +10,7 @@ import { AccountSwitcher } from '../../components/AccountSwitcher'
 import { useApiMutation, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { afterDomainStep, agentStep, finishedStep, focusStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
-import { leadFocus, useSaveFocus } from '../../data/focus'
+import { leadFocus, useSaveFocus, type WorkspaceFocus } from '../../data/focus'
 import { AgentInboxStep, FocusStep, MarketingStep, NewsletterStep, useWarmFocus } from './focus-steps'
 import { ConnectAwsRegional, PendingDomain, createStack, domainHint, waitingForStack } from './aws'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
@@ -189,7 +189,11 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   // Overview opens next: bring the identity's daily limit and counts up to date first.
   const finish = () => { setDomainStep(workspaceId, finishedStep); refreshIdentity() }
   // After a domain, the focus question (once), then the step its first pick leads to. Saving it runs in the background.
-  const next = (domainId: string) => setDomainStep(workspaceId, afterDomainStep(identity, domainId))
+  // The picks this visit made: the step they lead to opens in the same render as the pick, never the previous focus's step
+  // for a frame while the session's copy catches up.
+  const [pickedFocus, setPickedFocus] = useState<WorkspaceFocus[] | null>(null)
+  const focus = pickedFocus ?? identity?.focus ?? null
+  const next = (domainId: string) => setDomainStep(workspaceId, afterDomainStep({ focus }, domainId))
   const saveFocus = useSaveFocus(), warmFocus = useWarmFocus()
   // An agent inbox goes on the built-in domain while it receives, a newsletter while it sends; else on the domain
   // onboarding verified.
@@ -204,11 +208,11 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   if (stage.step === 'focus') {
     const domainId = stage.domainId
     view = 'focus'
-    content = <FocusStep initial={identity?.focus ?? []} onBack={domainId === builtin?.id ? () => setDomainStep(workspaceId, '') : undefined}
-      onContinue={focus => { if (focus[0]) warmFocus(focus[0], receives); saveFocus(focus); setDomainStep(workspaceId, agentStep(domainId)) }} />
+    content = <FocusStep initial={focus ?? []} onBack={domainId === builtin?.id ? () => setDomainStep(workspaceId, '') : undefined}
+      onContinue={focus => { if (focus[0]) warmFocus(focus[0], receives); setPickedFocus(focus); saveFocus(focus); setDomainStep(workspaceId, agentStep(domainId)) }} />
   }
   else if (stage.step === 'agent') {
-    const domainId = stage.domainId, lead = leadFocus(identity), back = () => setDomainStep(workspaceId, focusStep(domainId))
+    const domainId = stage.domainId, lead = leadFocus({ focus }), back = () => setDomainStep(workspaceId, focusStep(domainId))
     view = 'agent'
     // Overview, next, is warmed while a focus's step is up, as the agent setup warms it.
     content = lead === 'agents' ? <><FocusDomain domainId={domainId} builtin={receives}>{domain => <AgentInboxStep domain={domain} onBack={back} onFinish={finish} />}</FocusDomain><WarmOverview /></>
