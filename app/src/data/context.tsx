@@ -8,7 +8,7 @@ import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
-import { clearLandingFocus, noteLandingLocation } from './landing-focus'
+import { clearLandingFocus, noteLandingLocation, rememberLandingFocus } from './landing-focus'
 import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
@@ -485,6 +485,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const login = () => startLogin(false)
   async function startLogin(select: boolean, method?: 'google', focus?: WorkspaceFocus) {
     setBusy(true); setAuthError(null)
+    if (focus) rememberLandingFocus(focus, window.location.pathname)
     const pending = signIn.current
     signIn.current = null
     try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method, focus)); expectAccount(); analytics().flush(); window.location.assign(url) }

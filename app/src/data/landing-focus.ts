@@ -31,8 +31,14 @@ export function noteLandingLocation(pathname: string, search: string) {
   const focus = new URLSearchParams(search).get('focus')
   if (focus === null || !(WORKSPACE_FOCUS as readonly string[]).includes(focus)) return
   const kept = readLandingFocus()
-  const from = comparison(pathname) ?? comparison(before) ?? (before === null ? comparison(referrerPath()) : null) ?? (kept?.focus === focus ? kept.from : null)
-  memory = { focus: focus as WorkspaceFocus, from, at: Date.now() }
+  keep(focus as WorkspaceFocus, comparison(pathname) ?? comparison(before) ?? (before === null ? comparison(referrerPath()) : null) ?? (kept?.focus === focus ? kept.from : null))
+}
+/** A comparison page's Get started (data/context.tsx startLogin): its focus and page, kept before the browser leaves for
+ *  the account service. Its ?focus= rides only in the sign-in's return URL, which a sign-in that ends on the waitlist never
+ *  opens, and which comes back from another site, so it can't say which page sent it. */
+export function rememberLandingFocus(focus: WorkspaceFocus, pathname: string) { keep(focus, comparison(pathname)) }
+function keep(focus: WorkspaceFocus, from: string | null) {
+  memory = { focus, from, at: Date.now() }
   try { localStorage.setItem(key, JSON.stringify(memory)) } catch { /* This page load keeps it. */ }
 }
 export function readLandingFocus(): LandingFocus | null {
