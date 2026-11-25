@@ -11,6 +11,7 @@ import { useScoreAbout } from '../lib/score-about'
 import { openConnectAgent, useConnectAgentOpen } from '../lib/connect-agent'
 import { Alert, Button, EmptyState, ErrorState, Icon, Select, Sheet, Skeleton, SkeletonText, useToast, type IconSize } from './ui'
 import { CommandMenu, type Command } from './CommandMenu'
+import { useRowKeys } from '../lib/row-keys'
 import { modKey, useCompactShell } from '../lib/media'
 import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
@@ -31,7 +32,7 @@ const score = chunk(() => import('../features/score'))
 const SidebarScore = score.page(module => module.SidebarScore)
 // The sender score explainer: one dialog for every place the score appears, loaded when first opened.
 const ScoreAboutHost = score.page(module => module.ScoreAboutHost)
-// Connect an agent: one dialog for the whole shell, its code loaded when the sidebar's row is pointed at or first opened.
+// Connect your agent: one dialog for the whole shell, its code loaded when the sidebar's row is pointed at or first opened.
 const connectAgent = chunk(() => import('../features/docs/connect-agent'))
 const ConnectAgentHost = connectAgent.page(module => module.ConnectAgentHost)
 const preloadConnectAgent = () => { void connectAgent.preload().catch(() => {}) }
@@ -41,7 +42,7 @@ const UiNotesLayer = chunk(() => import('../features/ui-notes')).page(module => 
 // Members can't manage sending infrastructure; the API enforces this too.
 const adminOnly = new Set(['/api-keys', '/domains'])
 type NavItem = readonly [path: string, title: string]
-const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Receiving'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
+const navigation: readonly NavItem[] = [['/overview', 'Overview'], ['/logs', 'Logs'], ['/receiving', 'Mail routing'], ['/campaigns', 'Campaigns'], ['/audience', 'Audience'], ['/domains', 'Domains'], ['/api-keys', 'API keys'], ['/docs', 'Docs'], ['/settings', 'Settings']]
 // Nightmail staff (a platform operator role in GET /v1/me) also get the support inbox and the operator console, last.
 const staffLinks: readonly NavItem[] = [['/support', 'Support'], ['/operator', 'Operator']]
 // A self-hosted installation has no operator area; the same address is its Health page (features/operator/health.tsx).
@@ -60,8 +61,12 @@ const current = (path: string, pathname: string) => pathname === path || pathnam
 // The sidebar's four groups. A newsletter sits with Campaigns; staff and self-hosted pages close Workspace.
 const groups = [['Mail', ['/overview', '/logs', '/receiving']], ['Marketing', ['/campaigns', '/audience']], ['Infra', ['/domains', '/api-keys']], ['Workspace', ['/docs', '/settings']]] as const
 const groupOf = (path: string) => path.startsWith('/newsletters') ? 'Marketing' : groups.find(([, paths]) => (paths as readonly string[]).includes(path))?.[0] ?? 'Workspace'
-// Keyboard-first: G then a letter opens a page from anywhere you aren't typing (G O Overview, G L Logs…), and ⌘K jumps.
+// Keyboard-first: G then a letter opens a page from anywhere you aren't typing (G O Overview, G L Logs…; G R kept its
+// letter when Receiving became Mail routing), ⌘K finds any page or action, and J and K move through a list's rows.
 const goKeys: Record<string, string> = { '/overview': 'O', '/logs': 'L', '/receiving': 'R', '/campaigns': 'C', '/audience': 'A', '/domains': 'D', '/api-keys': 'K', '/settings': 'S' }
+// What else ⌘K finds each page by: its old name, the things on it.
+const pageWords: Record<string, string> = { '/overview': 'home dashboard', '/logs': 'emails sent received delivered bounced', '/receiving': 'receiving inbound addresses rules destinations inboxes', '/campaigns': 'marketing broadcast templates', '/audience': 'contacts lists segments subscribers', '/domains': 'dns dkim verify', '/api-keys': 'tokens smtp app passwords agents', '/docs': 'documentation guides reference', '/settings': 'billing members webhooks account', '/support': 'inbox conversations', '/operator': 'staff admin health' }
+const commandId = (path: string) => path.startsWith('/newsletters') ? 'go-newsletter' : `go-${path.slice(1).replace(/[^a-z0-9]+/g, '-')}`
 const typing = (target: EventTarget | null) => Boolean((target as HTMLElement | null)?.closest?.('input, textarea, select, [contenteditable=""], [contenteditable="true"]'))
 const commandKey = `${modKey}K`
 // A link of the navigation. `on`: undefined lets the address decide, as everywhere; a boolean decides for it.
@@ -215,7 +220,7 @@ export function AppShell() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
-  // ⌘K (Ctrl+K) opens or closes the quick jumper, except inside the email editor, where it is the editor's own.
+  // ⌘K (Ctrl+K) opens or closes the command menu, except inside the email editor, where it is the editor's own.
   const [commandOpen, setCommandOpen] = useState(false)
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -226,6 +231,7 @@ export function AppShell() {
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
   }, [])
+  useRowKeys()
   // G then a letter, within a second, opens that page (goKeys), unless you are typing or a dialog or menu has focus.
   const go = useRef(navigate)
   go.current = navigate
@@ -283,12 +289,13 @@ export function AppShell() {
     </> : discovery.isFetching ? <><div className="quota-label"><span>Checking SES…</span><Skeleton width={28} /></div><Skeleton height={3} /><SkeletonText lineHeight={18} /></> : needsProvisioning ? null : <><span>SES · {discovery.isError ? 'Check failed' : label(current?.discoveryStatus ?? 'not_discovered')}</span><Link to="/settings">Set up SES</Link></>}</div>
     {access.multiTenant && <div className="sidebar-score-slot"><SidebarScore /></div>}
   </>
-  // The quick jumper lists every page of the navigation, grouped as the sidebar groups them.
-  const commands = useMemo<Command[]>(() => links.map(([path, title]) => ({ path, title, group: groupOf(path), icon: glyphOf(path), keys: goKeys[path], locked: !access.canAdminister && adminOnly.has(path) })), [links.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister]) // eslint-disable-line react-hooks/exhaustive-deps
+  // ⌘K lists every page of the navigation in the sidebar's order, each with its G shortcut.
+  const commands = useMemo<Command[]>(() => links.map(([path, title]) => ({ id: commandId(path), path, title, section: 'Pages', icon: glyphOf(path), words: pageWords[path], locked: locked(path),
+    shortcut: goKeys[path] ? { keys: ['G', goKeys[path]], label: `G then ${goKeys[path]}` } : undefined, run: () => navigate(path) })), [links.map(([path, title]) => `${path}:${title}`).join('\n'), access.canAdminister, navigate]) // eslint-disable-line react-hooks/exhaustive-deps
   const grouped = groups.map(([name]) => ({ name, links: links.filter(([path]) => groupOf(path) === name) })).filter(group => group.links.length)
   const section = [...links, ...unlisted].find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName
-  const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{contacting && <ContactSupportDialog onClose={() => setContacting(false)} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} commands={commands} /></>
+  const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{contacting && <ContactSupportDialog onClose={() => setContacting(false)} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} pages={commands} help={help} signOut={signOut} /></>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <Notices />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>

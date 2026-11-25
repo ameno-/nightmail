@@ -162,7 +162,7 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
   .alias-list .ui-icon-button { grid-area: 1 / 2 / 3 / 3; }
 }
 
-/* Receiving: shared search width and one-line clipping. */
+/* Mail routing: shared search width and one-line clipping. */
 .receiving-search { width: 240px; }
 .inbox-clip { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* Agent inboxes and their messages: the address or subject takes the slack, the figures keep their widths, so a narrow

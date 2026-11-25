@@ -268,7 +268,7 @@ export function SupportInboxPage() {
       <InboxTabs view={view} counts={counts} onChange={next => setParams(previous => { const params = new URLSearchParams(previous); if (next === 'needs_you') params.delete('view'); else params.set('view', next); return params }, { replace: true })} />
       <InboxToolbar search={search} onSearch={setSearch} channel={channel} onChannel={setChannel} onShortcuts={() => setKeysOpen(true)} />
       {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <InboxBody rows={rows} everyChannel={channel ? everyChannel.data && flatten(everyChannel.data.pages) : rows} channel={channel} setChannel={setChannel}>
-        <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty}
+        <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty} rowKeys={false}
           rowHref={c => `/support/${c.id}`} rowLabel={titleOf} onRowIntent={c => void prefetchConversation(client, c.id)} onRowFocus={phone ? undefined : c => setSelectedId(c.id)} />
         {list.hasNextPage && <Button className="sinbox-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
       </InboxBody>}

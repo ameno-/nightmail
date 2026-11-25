@@ -117,34 +117,34 @@ const pages = ids => [
   ['Received email · thread', `/logs/${ids.threadReceived}`, { from: '/logs?view=received', row: 'Re: What happened' }],
   ['Received email · from its thread', `/logs/${ids.threadReceived}`, { from: `/logs/${ids.threadEmail}` }],
   ['Sent email · thread sheet', `/logs/${ids.threadEmail}`, { dialog: '5 messages', phoneOnly: true }],
-  ['Receiving', '/receiving', { from: '/overview' }],
+  ['Mail routing', '/receiving', { from: '/overview' }],
   // A workspace with no receiving domain yet: the three steps that start it.
-  ['Receiving · new workspace', '/receiving', { user: 'nia' }],
-  ['Receiving · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
+  ['Mail routing · new workspace', '/receiving', { user: 'nia' }],
+  ['Mail routing · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
   // The flow panel: an address chosen in the list (a full-height sheet on a phone), and an address typed in the search
   // that has none of its own, whose panel says where its mail would go once its test answers.
   // guard: Edit on the panel opens the address's route editor (never the builder, which only creates) and writes nothing.
-  ['Receiving · flow panel', `/receiving?open=${ids.address}`, { from: '/receiving?tab=rules', guard: 'receiving-edit' }],
-  ['Receiving · typed address', '/receiving?q=orders%40northwind.example', {}],
+  ['Mail routing · flow panel', `/receiving?open=${ids.address}`, { from: '/receiving?tab=rules', guard: 'receiving-edit' }],
+  ['Mail routing · typed address', '/receiving?q=orders%40northwind.example', {}],
   // An address's page opens on its mail; Where mail goes and Settings are its other tabs.
-  ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
-  ['Receiving · address · where mail goes', `/receiving/addresses/${ids.address}?tab=flow`, { from: `/receiving/addresses/${ids.address}`, click: 'Where mail goes' }],
+  ['Mail routing · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
+  ['Mail routing · address · where mail goes', `/receiving/addresses/${ids.address}?tab=flow`, { from: `/receiving/addresses/${ids.address}`, click: 'Where mail goes' }],
   // Its Settings tab shares its name with the sidebar's Settings, so the in-app pass opens it through the router.
-  ['Receiving · address · settings', `/receiving/addresses/${ids.address}?tab=settings`, { from: `/receiving/addresses/${ids.address}` }],
-  // Rules: the list (the Receiving tab), New rule's recipes, a recipe's form, and a rule's page, its code: a rule made
+  ['Mail routing · address · settings', `/receiving/addresses/${ids.address}?tab=settings`, { from: `/receiving/addresses/${ids.address}` }],
+  // Rules: the list (Mail routing's tab), New rule's recipes, a recipe's form, and a rule's page, its code: a rule made
   // from a recipe, a script, and a new one.
-  ['Receiving · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
-  ['Receiving · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
-  ['Receiving · new rule · new workspace', '/receiving/rules/new', { user: 'nia' }],
-  ['Receiving · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
-  ['Receiving · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
-  ['Receiving · rule editor', '/receiving/rules/triage', { from: '/receiving?tab=rules', row: 'triage' }],
-  ['Receiving · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write code' }],
-  ['Receiving · rules · live update', '/receiving/rules/triage', { user: 'kai', live: 'apply' }],
-  ['Receiving · rules · live conflict', '/receiving/rules/triage', { user: 'kai', live: 'conflict' }],
-  ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
-  ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
-  ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=destinations' }],
+  ['Mail routing · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
+  ['Mail routing · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
+  ['Mail routing · new rule · new workspace', '/receiving/rules/new', { user: 'nia' }],
+  ['Mail routing · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
+  ['Mail routing · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
+  ['Mail routing · rule editor', '/receiving/rules/triage', { from: '/receiving?tab=rules', row: 'triage' }],
+  ['Mail routing · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write code' }],
+  ['Mail routing · rules · live update', '/receiving/rules/triage', { user: 'kai', live: 'apply' }],
+  ['Mail routing · rules · live conflict', '/receiving/rules/triage', { user: 'kai', live: 'conflict' }],
+  ['Mail routing · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
+  ['Mail routing · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
+  ['Mail routing · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=destinations' }],
   ['Campaigns', '/campaigns', { from: '/overview' }],
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
@@ -358,8 +358,10 @@ const pages = ids => [
   // Connect your agent: the sidebar's row on a desktop, More's on a phone. The agents list loads (and polls) inside a
   // dialog of fixed height. More itself: the rest of the pages, Connect your agent, Help and Sign out, and the footer.
   ['Overview · connect agent dialog', '/overview', { dialog: 'Connect your agent' }],
-  ['Overview · connect agent sheet', '/overview', { menu: ['More', 'Connect your agent', 'Connect an agent'], phoneOnly: true }],
+  ['Overview · connect agent sheet', '/overview', { menu: ['More', 'Connect your agent', 'Connect your agent'], phoneOnly: true }],
   ['Overview · More sheet', '/overview', { dialog: 'More', phoneOnly: true }],
+  // ⌘K, from the command bar's field: the command menu over Logs, its whole list (pages, then actions) at a fixed height.
+  ['Logs · command menu', '/logs', { dialog: 'Search or jump' }],
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
   ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { dialog: 'Add custom MAIL FROM' }],
   ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
@@ -369,20 +371,20 @@ const pages = ids => [
   ['API keys · SMTP login dialog', '/api-keys?create=smtp', {}],
   // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
   ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
-  ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
+  ['Mail routing · new address dialog', '/receiving', { dialog: 'New address' }],
   // The address builder over the list for the chosen address (one it can draw): its flow, read back from its route and rules.
-  ['Receiving · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
+  ['Mail routing · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
   // New rule's Split by words with no address yet asks which address, then opens the builder on it, split on that check.
-  ['Receiving · split chooser dialog', '/receiving/rules/new', { dialog: 'Split by words' }],
+  ['Mail routing · split chooser dialog', '/receiving/rules/new', { dialog: 'Split by words' }],
   // guard: two splits, New rule on a split address, Test's AI answer, a failed create. Alone: it adds addresses and rules.
-  ['Receiving · split edits', `/receiving/addresses/${ids.address}?tab=flow`, { alone: true, guard: 'receiving-splits' }],
-  ['Receiving · address builder from New rule', `/receiving?tab=rules&build=${ids.address}&split=ai`, {}],
+  ['Mail routing · split edits', `/receiving/addresses/${ids.address}?tab=flow`, { alone: true, guard: 'receiving-splits' }],
+  ['Mail routing · address builder from New rule', `/receiving?tab=rules&build=${ids.address}&split=ai`, {}],
   // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
   // Why a received message went where it did, from its conversation on the address's Mail tab.
-  ['Receiving · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],
-  ['Receiving · route editor dialog', `/receiving/addresses/${ids.address}?tab=flow&edit=1`, { dialog: 'Change' }],
-  ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
-  ['Receiving · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
+  ['Mail routing · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],
+  ['Mail routing · route editor dialog', `/receiving/addresses/${ids.address}?tab=flow&edit=1`, { dialog: 'Change' }],
+  ['Mail routing · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
+  ['Mail routing · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
   ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],
   // A member imports without a list: the list picker is off and says who can add to one.
   ['Audience · import dialog · member', '/audience', { user: 'max', dialog: 'Import contacts' }],
@@ -398,7 +400,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · focus agent inbox', 'Overview · focus marketing', 'Overview · focus newsletter', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Received email · details sheet', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · get started', 'Onboarding · get started by hand', 'Onboarding · get started provisioning', 'Onboarding · get started own domain', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Glass · deliverability', 'Support', 'Support · AI handling', 'Support · waiting on customer', 'Support · conversation', 'Support · email conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Compare · Nylas', 'Compare · Robotomail', 'Compare · Postfleet', 'Compare · Lumbox', 'Compare · Mails.ai', 'Compare · Dead Simple Email', 'Compare · Agent Identity', 'Compare · Inkbox', 'Compare · beehiiv', 'Compare · MailerLite', 'Compare · Buttondown', 'Compare · EmailOctopus', 'Compare · Ghost(Pro)', 'Compare · AWeber', 'Compare · Loops', 'Compare · Brevo', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'Overview · More sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email', 'Compare · MailerSend', 'Compare · Mailtrap', 'Compare · SMTP2GO', 'Compare · AhaSend', 'Compare · CloudMailin', 'Compare · SocketLabs', 'Compare · MailPace', 'Compare · UniOne', 'Compare · MailChannels']);
+const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · focus agent inbox', 'Overview · focus marketing', 'Overview · focus newsletter', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Received email · details sheet', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Mail routing', 'Mail routing · rules', 'Mail routing · new rule', 'Mail routing · recipe form', 'Mail routing · recipe rule', 'Mail routing · rule editor', 'Mail routing · rule editor · new script', 'Mail routing · flow panel', 'Mail routing · typed address', 'Mail routing · why it went here dialog', 'Mail routing · address', 'Mail routing · address · where mail goes', 'Mail routing · address · settings', 'Mail routing · agent inboxes', 'Mail routing · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · get started', 'Onboarding · get started by hand', 'Onboarding · get started provisioning', 'Onboarding · get started own domain', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Mail routing · inbox', 'Mail routing · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Glass · deliverability', 'Support', 'Support · AI handling', 'Support · waiting on customer', 'Support · conversation', 'Support · email conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Compare · Nylas', 'Compare · Robotomail', 'Compare · Postfleet', 'Compare · Lumbox', 'Compare · Mails.ai', 'Compare · Dead Simple Email', 'Compare · Agent Identity', 'Compare · Inkbox', 'Compare · beehiiv', 'Compare · MailerLite', 'Compare · Buttondown', 'Compare · EmailOctopus', 'Compare · Ghost(Pro)', 'Compare · AWeber', 'Compare · Loops', 'Compare · Brevo', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'Overview · More sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Mail routing · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email', 'Compare · MailerSend', 'Compare · Mailtrap', 'Compare · SMTP2GO', 'Compare · AhaSend', 'Compare · CloudMailin', 'Compare · SocketLabs', 'Compare · MailPace', 'Compare · UniOne', 'Compare · MailChannels']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },

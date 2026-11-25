@@ -91,7 +91,7 @@ export const guides: Guide[] = [
       <Section title="Set it up">
         <ol className="docs-steps">
           <li>Open <Link to="/domains">Domains</Link>, choose the domain and publish its <strong>Receiving</strong> MX record at your DNS provider. {productName} turns receiving on once it resolves.</li>
-          <li>In <Link to="/receiving">Receiving</Link>, choose <strong>New address</strong>, for example <code>support@reply.yourdomain.com</code>.</li>
+          <li>In <Link to="/receiving">Mail routing</Link>, choose <strong>New address</strong>, for example <code>support@reply.yourdomain.com</code>.</li>
           <li>Send it a test email. It shows up on the address’s Mail tab within seconds.</li>
           <li>Optional: add an <Link to="/docs/endpoints">endpoint</Link> (Slack, a webhook…) and a <Link to="/docs/rules">rule</Link> that chooses which mail goes there.</li>
         </ol>
@@ -109,11 +109,11 @@ export const guides: Guide[] = [
         <Code label="rule example">{ruleExample}</Code>
       </Section>
       <Section title="Ready-made rules">
-        <p><Link to="/receiving/rules/new">Receiving → Rules → New rule</Link> lists ready-made rules by what they do: tell your team, pass it on, keep out junk, sort with AI. Pick one, fill in one or two fields (a Slack channel, the senders to block) and choose its addresses; Save turns it on. A Slack, Discord or webhook URL you paste there becomes an endpoint, stored encrypted.</p>
+        <p><Link to="/receiving/rules/new">Mail routing → Rules → New rule</Link> lists ready-made rules by what they do: tell your team, pass it on, keep out junk, sort with AI. Pick one, fill in one or two fields (a Slack channel, the senders to block) and choose its addresses; Save turns it on. A Slack, Discord or webhook URL you paste there becomes an endpoint, stored encrypted.</p>
         <p>Each one writes an ordinary rule, shown in the list as its sentence, like <em>Post new mail to support in Slack</em>, with when it last matched and a switch that turns it off without detaching it. Opening one shows its code; saving a change there makes it your own script. AI rules are free.</p>
       </Section>
       <Section title="Writing a script">
-        <p>For anything else, <Link to="/receiving/rules/new/script">Receiving → Rules → New rule → Write code</Link>. A rule’s page is its code. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try on recent mail</strong> (⌘↵) runs your draft on recent emails without saving or sending anything. <strong>Save</strong> (⌘S) keeps the code, where it runs and whether it’s on, together; <strong>Undo</strong> goes back to the saved rule, and leaving asks first.</p>
+        <p>For anything else, <Link to="/receiving/rules/new/script">Mail routing → Rules → New rule → Write code</Link>. A rule’s page is its code. The editor checks it as you type and completes <code>email.</code>, <code>ctx.</code> and your endpoint names. <strong>Try on recent mail</strong> (⌘↵) runs your draft on recent emails without saving or sending anything. <strong>Save</strong> (⌘S) keeps the code, where it runs and whether it’s on, together; <strong>Undo</strong> goes back to the saved rule, and leaving asks first.</p>
       </Section>
       <Section title="Where it runs">
         <p>A rule runs only on mail to the addresses it’s attached to. Choose its addresses on the line beside its name, or attach it from an address’s page. Up to {RITUALS_PER_ADDRESS} rules run on an address, in order. The first one that acts stops the rest, unless its <strong>Run the next one too</strong> is on; ready-made rules always have it on and run before your scripts.</p>
@@ -139,7 +139,7 @@ export const guides: Guide[] = [
     id: 'endpoints', title: 'Endpoints and routes', summary: 'Where mail can go besides the Inbox, and the difference between a route and a rule.',
     body: () => <>
       <Section title="Endpoints">
-        <p>{endpointsLine} Create them in <Link to="/receiving?tab=destinations">Receiving → Destinations</Link>; each has a name rules call it by. Send a test from its ⋯ menu.</p>
+        <p>{endpointsLine} Create them in <Link to="/receiving?tab=destinations">Mail routing → Destinations</Link>; each has a name rules call it by. Send a test from its ⋯ menu.</p>
         <Table head={['Type', 'Call it as', 'Notes']} rows={[
           ['Slack', <code key="c">{endpointPayloads.slack.signature('support')}</code>, 'An incoming webhook URL from Slack. Stored encrypted; mentions and link previews are off.'],
           ['Discord', <code key="c">{endpointPayloads.discord.signature('alerts')}</code>, 'A webhook URL from Discord. Stored encrypted; mentions are off.'],
@@ -169,7 +169,7 @@ export const guides: Guide[] = [
         <p>Past its limit (200 messages or 25 MiB by default) new mail is held the same way. {productName} pulls one-time codes and links out of each message. An inbox can reply only to people who wrote to it, if replies were allowed when it was created.</p>
       </Section>
       <Section title="Create one">
-        <p>In <Link to="/receiving/inboxes">Receiving → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
+        <p>In <Link to="/receiving/inboxes">Mail routing → Agent inboxes → New agent inbox</Link>, or with <Link to="/docs/api/createInbox">createInbox</Link>. Tick <strong>Create an API key for this inbox</strong> to get a key that reads only this inbox, with a ready setup for OpenCode, Claude Code or Cursor. Later, <strong>Connect an agent</strong> on the inbox’s page makes another one.</p>
         <Code label="create inbox example">{`curl --request POST "${publicOrigin}/v1/inboxes" \\\n  --header "Authorization: Bearer $${apiKeyEnv}" \\\n  --header 'Content-Type: application/json' \\\n  --data '{"name":"Sign-up test","ttlSeconds":3600,"credential":{"name":"Sign-up test key","permissions":["read"]}}'`}</Code>
         <p>Then wait for mail with <Link to="/docs/api/listInboxMessages">listInboxMessages</Link> (or the MCP tool <code>waitForMessage</code>), and delete the inbox with <Link to="/docs/api/deleteInbox">deleteInbox</Link> when you’re done.</p>
       </Section>
@@ -226,7 +226,7 @@ export const guides: Guide[] = [
     body: () => <Section title="Check the Webhook-Signature header">
       <p>{webhookSignatureGuide.text}</p>
       <Code label="webhook signature check">{webhookSignatureGuide.code}</Code>
-      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for received mail’s webhooks in <Link to="/receiving?tab=destinations">Receiving → Destinations</Link>.</p>
+      <p>Find each webhook’s secret in <Link to="/settings#webhooks">Settings → Webhooks</Link>, and for received mail’s webhooks in <Link to="/receiving?tab=destinations">Mail routing → Destinations</Link>.</p>
     </Section>,
   },
 ]

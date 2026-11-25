@@ -77,7 +77,7 @@ function AdminOnly({ title, backTo }: { title: string; backTo: string }) {
 }
 export function InboundWebhookDetailPage() { return useWorkspaceAccess().canAdminister ? <WebhookDetail /> : <AdminOnly title="Webhook" backTo="/receiving" /> }
 
-// Webhooks are endpoints: their list is Receiving's Endpoints tab.
+// Webhooks are endpoints: their list is Mail routing's Destinations tab.
 const list = '/receiving?tab=destinations'
 function WebhookDetail() {
   const { id = '' } = useParams()

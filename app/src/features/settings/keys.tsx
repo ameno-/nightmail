@@ -53,7 +53,7 @@ const agentClient = (key: ApiKey) => key.agent?.client && !key.name.startsWith(k
 const expiry = (token: AgentTokenSummary) => tokenState(token) ?? `Expires ${shortDateTime(token.expiresAt)} UTC`
 
 export function ApiKeysPage() {
-  // /api-keys?connect=1 (from Overview and Docs) opens Connect an agent. Members connect one as themselves too, so
+  // /api-keys?connect=1 (from Overview and Docs) opens Connect your agent. Members connect one as themselves too, so
   // their locked page keeps the button.
   const [connectLink] = useState(() => new URLSearchParams(window.location.search).has('connect'))
   return useWorkspaceAccess().canAdminister ? <ApiKeys connectLink={connectLink} /> : <AdminOnlyPage title="API keys" button="Create key" actions={<ConnectAgentButton initiallyOpen={connectLink} />} />
@@ -76,22 +76,28 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   // /api-keys?create=send&domain=acme.com opens Create key on an API key, filled in (Overview's setup step links here),
   // /api-keys?create=smtp on an SMTP login (the Keys guide links there) and /api-keys?create=app on an app password
   // (onboarding's inbox for myself links there);
-  // the parameters then leave the URL, so Back and reload don't open it again.
+  // the parameters then leave the URL, so Back and reload don't open it again. A link followed while the page is open
+  // (⌘K's New API key) opens the form the same way; Create key opens it from the start.
   const [params, setParams] = useSearchParams()
   const mailServers = useMailServers()
-  const [initial] = useState(() => {
+  const linked = (params: URLSearchParams) => {
     if (!params.has('create')) return undefined
     // Without a mail gateway an SMTP login could never sign in: the link opens the key types instead.
     if (params.get('create') === 'smtp') return mailServers ? { smtp: true } : {}
     if (params.get('create') === 'app') return { app: true }
     const asked = params.get('create') === 'inbound' ? 'addresses' : params.get('create')
     return { purpose: (['send', 'read_send', 'read', 'manage', 'addresses', 'inbox', 'create'] as Purpose[]).find(value => value === asked) ?? 'send', domain: params.get('domain') || undefined }
-  })
+  }
+  const [initial, setInitial] = useState(() => linked(params))
   const [open, setOpen] = useState(Boolean(initial))
   // A form opened from a link waits for its domains, so they don't push its fields down as they arrive.
   const linkedDomains = useDomainOptions(Boolean(initial) && open)
   const [connecting, setConnecting] = useState(connectLink)
-  useEffect(() => { if (params.has('create')) setParams(previous => { const next = new URLSearchParams(previous); next.delete('create'); next.delete('domain'); return next }, { replace: true }) }, [params, setParams])
+  useEffect(() => {
+    if (!params.has('create')) return
+    setInitial(linked(params)); setOpen(true)
+    setParams(previous => { const next = new URLSearchParams(previous); next.delete('create'); next.delete('domain'); return next }, { replace: true })
+  }, [params, setParams]) // eslint-disable-line react-hooks/exhaustive-deps
   const [secret, setSecret] = useState<CreatedSecret | null>(null)
   const [revoking, setRevoking] = useState<Row | null>(null)
   const [viewing, setViewing] = useState<Row | null>(null)
@@ -135,7 +141,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const empty = failed.length ? <EmptyState title="Nothing else to show" />
     : cursor && keysShown ? <EmptyState title="No keys on this page" />
     : type === 'api' ? <EmptyState title={`No ${active}API keys`} />
-    : type === 'agent' ? <EmptyState title="No agents connected" action={<Button onClick={() => setConnecting(true)}>Connect an agent</Button>} />
+    : type === 'agent' ? <EmptyState title="No agents connected" action={<Button onClick={() => setConnecting(true)}>Connect your agent</Button>} />
     : type === 'app' ? <EmptyState title="No app passwords" />
     : <EmptyState title={`No ${active}keys`} />
 
@@ -179,7 +185,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const [nameColumn, typeColumn, accessColumn, prefixColumn, lastColumn, actionsColumn] = settingsColumns.keys
 
   return <div className="stack">
-    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => setOpen(true)} data-analytics="keys/create">Create key</Button></>} />
+    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => { setInitial(undefined); setOpen(true) }} data-analytics="keys/create">Create key</Button></>} />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
         <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
