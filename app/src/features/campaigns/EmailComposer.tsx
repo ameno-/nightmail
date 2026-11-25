@@ -154,11 +154,49 @@ export const EmailComposer = forwardRef<EmailComposerRef, Props>(function EmailC
         button.setAttribute('aria-label', `${index === 0 ? 'Use uniform' : 'Use individual'} ${section.toLowerCase()} values`)
       })
     }
-    label()
-    const observer = new MutationObserver(label)
+    // An empty field shows what the selected block has now (its computed style) as its placeholder: its size, line height
+    // and colour, no border, no background ("None"), instead of a bare unit or the library's sample 1.
+    const hex = (color: string) => {
+      const [r = 0, g = 0, b = 0, a = 1] = (color.match(/[\d.]+/g) ?? []).map(Number)
+      return a === 0 ? '' : `#${[r, g, b].map(channel => Math.round(channel).toString(16).padStart(2, '0')).join('')}`
+    }
+    const selectedBlock = () => {
+      const value = editor.current?.editor
+      if (!value) return null
+      const { selection } = value.state, { $from } = selection
+      const dom = selection.toJSON().type === 'node' ? value.view.nodeDOM(selection.from) : $from.depth ? value.view.nodeDOM($from.before($from.depth)) : null
+      if (!(dom instanceof HTMLElement)) return null
+      // A node view's wrapper holds the element that carries the block's styles (a heading, a button's link, an image).
+      const styled = 'a, img, hr, p, h1, h2, h3, li, blockquote, pre, section'
+      return dom.matches(styled) ? dom : dom.querySelector<HTMLElement>(styled) ?? dom
+    }
+    const placeholders = () => {
+      const block = selectedBlock(), panel = inspector.current
+      if (!block || !panel) return
+      const style = getComputedStyle(block), size = parseFloat(style.fontSize)
+      const set = (name: string, text: string) => {
+        const control = panel.querySelector<HTMLInputElement>(`input[aria-label="${name}"]`)
+        if (control && control.placeholder !== text) control.placeholder = text
+      }
+      set('Typography Size', String(Math.round(size)))
+      set('Typography Line height', style.lineHeight === 'normal' ? '120' : String(Math.round(parseFloat(style.lineHeight) / size * 100)))
+      set('Typography Color', hex(style.color) || 'None')
+      set('Background Color', hex(style.backgroundColor) || 'None')
+      set('Border', String(parseFloat(style.borderTopWidth) || 0))
+      for (const side of ['top', 'right', 'bottom', 'left'] as const) set(`Border ${side} width`, String(parseFloat(style.getPropertyValue(`border-${side}-width`)) || 0))
+    }
+    const refresh = () => { label(); placeholders() }
+    refresh()
+    const observer = new MutationObserver(refresh)
     observer.observe(inspector.current, { childList: true, subtree: true })
-    return () => observer.disconnect()
-  }, [panelShown])
+    // Another block selected (or this one restyled) can reuse the same fields: read its style again once they render.
+    const instance = editor.current?.editor
+    let frame = 0
+    const later = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(placeholders) }
+    instance?.on('selectionUpdate', later)
+    instance?.on('update', later)
+    return () => { observer.disconnect(); cancelAnimationFrame(frame); instance?.off('selectionUpdate', later); instance?.off('update', later) }
+  }, [panelShown, ready])
   useEffect(() => {
     pickImage = () => { if (!locked) { onDirty(); fileInput.current?.click() } }
     return () => { pickImage = null }
