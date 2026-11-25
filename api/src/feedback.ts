@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { actor, ApiError, denied, errors, json, response, security, type Actor, type App, type Runtime } from './core.js';
-import { productName } from './brand.js';
+import { ownSecretPattern, productName } from './brand.js';
 
 // Agent feedback (POST /v1/feedback): an agent reports what in Nightmail got in its way, from a confusing message to a
 // blocker. The MCP server's instructions ask agents to (mcp.ts). Nightmail files it in the support inbox itself
@@ -21,11 +21,11 @@ const TICKET_SEVERITY = { critical: 'P1', high: 'P2', medium: 'P3', low: 'P3' } 
 const KIND_LABELS = { bug: 'Bug', friction: 'Friction', feature: 'Feature request', docs: 'Docs', other: 'Feedback' } as const;
 const CREDENTIALS = { apiKey: 'API key', agentToken: 'agent token', mcp: 'MCP sign-in', dashboard: 'dashboard session' } as const;
 
-// Credentials as they appear in text, most specific first: Nightmail's own secrets (src/brand.ts secretPrefixes: nm_…,
-// and the u_ and fwd_ capability links), private keys, JWTs (an MCP access token is one) and common providers' keys.
+// Credentials as they appear in text, most specific first: Nightmail's own secrets (src/brand.ts ownSecretPattern: nm_…
+// and the earlier bane_… and os_… keys, which still work; and the u_ and fwd_ capability links), private keys, JWTs (an MCP access token is one) and common providers' keys.
 const SECRETS: RegExp[] = [
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|$)/g,
-  /\b(?:nm|bane)_[a-z_]*[0-9a-f]{32}[0-9a-f.]*/g,
+  ownSecretPattern,
   /\b(?:u|fwd)_[0-9a-f]{64}\b/g,
   /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
   /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g,
