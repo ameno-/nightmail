@@ -379,7 +379,7 @@ export function GlassBoard({ fill, feed, live }: { fill?: GlassBoardFill; feed?:
 export const GLASS_EVENT_HEIGHT = 52
 /** Whether the figures are live: a dot and the time they are from, in a box as wide as its placeholder. */
 export const GlassAsOf = ({ at, state = 'live' }: { at?: ReactNode; state?: 'live' | 'stalled' }) => <span className="glass-asof" data-state={at ? state : undefined}>
-  <span className="glass-asof__dot" aria-hidden="true" />{at ?? <Skeleton width={96} height={14} />}</span>
+  <span className="glass-asof__dot" aria-hidden="true" />{at ?? <Skeleton width="12ch" height={14} />}</span>
 /** /glass shows the live board; /glass?view=deliverability the Deliverability board. */
 export type GlassView = 'live' | 'deliverability'
 export const glassView = (search: string): GlassView => new URLSearchParams(search).get('view') === 'deliverability' ? 'deliverability' : 'live'

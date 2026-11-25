@@ -225,8 +225,8 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
 .glass-skel-line { display: inline-flex; align-items: center; height: 1lh; vertical-align: top; }
 /* Glass's two views: Live and Deliverability, tabs under the page header. */
 .glass-views { margin: 0 0 var(--space-16); }
-/* A fixed note in a group: four lines at most, in the space of its own. */
-.glass-note { display: -webkit-box; height: 64px; margin: 0; padding-top: var(--space-8); overflow: hidden; color: var(--color-faint); font-size: var(--text-xs); line-height: 16px; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+/* A fixed note in a group: the same words loading and loaded, so the same height. */
+.glass-note { margin: 0; padding-top: var(--space-8); color: var(--color-faint); font-size: var(--text-xs); line-height: 16px; }
 .glass-link { display: inline-flex; align-items: center; gap: var(--space-4); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-xs); text-decoration: none; }
 .glass-link:is(:hover, :focus-visible) { text-decoration: underline; text-underline-offset: 3px; }
 .glass-ws { color: inherit; font-family: var(--font-mono); font-size: var(--text-xs); text-decoration: none; }
@@ -240,7 +240,7 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
 .dlv-controls { display: flex; align-items: center; gap: var(--space-16); height: 36px; min-width: 0; }
 .dlv-controls > .ui-tabs { flex: none; }
 .ui-select-trigger.dlv-region, .dlv-region { flex: none; width: 224px; }
-.dlv-note { display: flex; flex: 1 1 0; justify-content: flex-end; align-items: center; height: 20px; min-width: 0; color: var(--color-faint); font-size: var(--text-xs); line-height: 20px; }
+.dlv-note { display: flex; flex: 1 1 0; align-items: center; height: 20px; min-width: 0; color: var(--color-faint); font-size: var(--text-xs); line-height: 20px; }
 .dlv-note > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .glass-tiles.dlv-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 @container (min-width: 1500px) { .glass-tiles.dlv-tiles { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
@@ -263,13 +263,14 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
 @container (max-width: 759px) {
   .dlv-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-8) var(--space-12); height: auto; align-items: center; }
   .dlv-controls > .ui-tabs { grid-column: 1 / -1; }
+  .dlv-note { justify-content: flex-start; }
   .ui-select-trigger.dlv-region, .dlv-region { width: 176px; }
   .dlv-row--head { display: none; }
-  .dlv-row { grid-template-columns: repeat(5, minmax(0, 1fr)) !important; grid-auto-rows: auto; align-items: start; row-gap: var(--space-8); height: auto; padding: var(--space-8); }
+  .dlv-row { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; grid-auto-rows: auto; align-items: start; row-gap: var(--space-8); height: auto; padding: var(--space-8); }
   .dlv-table--vdm .dlv-row { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
   .dlv-row > :first-child { grid-column: 1 / -1; height: 20px; font-weight: var(--font-weight-medium); }
-  .dlv-row > :not(:first-child) { display: flex; flex-direction: column; gap: 2px; height: 36px; line-height: 16px; text-align: left; }
-  .dlv-row > :not(:first-child)::before { content: attr(data-label); overflow: hidden; color: var(--color-faint); font-family: var(--font-body); font-size: var(--text-label); text-overflow: ellipsis; text-transform: none; }
+  .dlv-row > :not(:first-child) { display: flex; flex-direction: column; gap: var(--space-2, 2px); height: auto; line-height: 16px; text-align: left; white-space: normal; }
+  .dlv-row > :not(:first-child)::before { content: attr(data-label); color: var(--color-faint); font-family: var(--font-body); font-size: var(--text-label); text-transform: none; }
   .dlv-table--providers .dlv-row > [data-col='change'] { display: none; }
 }
 
