@@ -3,7 +3,7 @@ import { ApiError, id, isSimulatedSes, log, ModuleLoadError, type DbExecutor, ty
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
 import { SEND_LIMITS } from './send-limits.js';
-import { customerNotice, plainAddress, type Notice, type NoticeInput } from './notices.js';
+import { customerNotice, plainAddress, type Notice, type NoticeInput, type ScoreCard } from './notices.js';
 import { LINK_MINUTES, signinLinkUrl } from './signups.js';
 
 // Sending the account emails (src/notices.ts writes them). Three jobs send one each, every one through deliverNotice:
@@ -210,7 +210,7 @@ type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>;
   domain: string | null; hasDomain: boolean | null; builtin: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string } | null };
 
 /** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
-function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: string[]; input: NoticeInput } | null {
+function noticeOf(row: Row, origin: string, config: Runtime['config'], score: ScoreCard | null): { to: string[]; input: NoticeInput } | null {
   const workspace = row.name ?? '', held = !!row.paused || (row.standing !== null && ['warn', 'restrict', 'pause'].includes(row.standing.step));
   switch (row.kind) {
     // Still refused: a domain that verified again, or was removed, needs no email.
@@ -232,7 +232,7 @@ function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: st
       return row.exempt || row.paused || unpaid || row.standing?.phase !== 'graded' || row.standing.daily === null ? null : { to: row.recipients, input: { kind: 'limit_reached', workspace } };
     }
     // A workspace that left its evaluation into a warning, a hold or a pause is told that instead.
-    case 'evaluation_finished': return row.exempt || held ? null : { to: row.recipients, input: { kind: 'evaluation_finished', workspace, limited: row.data.limited === true } };
+    case 'evaluation_finished': return row.exempt || held ? null : { to: row.recipients, input: { kind: 'evaluation_finished', workspace, limited: row.data.limited === true, score } };
     case 'invitation': {
       const i = row.invitation;
       return i && { to: [i.email], input: { kind: 'invitation', inviter: { email: i.inviterEmail }, role: i.role, expiresAt: new Date(i.expiresAt),
@@ -264,7 +264,15 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
   if (!row) return heldNotice(runtime.db, 'account_notices', noticeId);
   const settle = (status: 'sent' | 'suppressed' | 'failed') => runtime.db.execute(sql`UPDATE account_notices SET status=${status},lease_until=NULL,sent_at=CASE WHEN ${status}='sent' THEN now() END WHERE id=${row.id} AND status='sending'`);
   try {
-    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''), runtime.config);
+    // The first grade's email opens with the score as the dashboard shows it now (sender-score.ts scoreView): this
+    // workspace's own, the one the row was leased under, read when the email is made rather than when it was queued.
+    let score: ScoreCard | null = null;
+    if (row.kind === 'evaluation_finished') {
+      const { loadDisplayedStanding, scoreView } = await import('./sender-score.js');
+      const view = scoreView(await loadDisplayedStanding(runtime, job.workspaceId));
+      if (view.score !== null && view.grade) score = { score: Math.round(view.score), grade: view.grade, daily: view.limit?.daily ?? null, at: new Date() };
+    }
+    const notice = noticeOf(row, runtime.config.publicUrl.replace(/\/$/, ''), runtime.config, score);
     if (!notice) { await settle('suppressed'); log('info', { code: 'ACCOUNT_NOTICE_SUPPRESSED', workspaceId: job.workspaceId, kind: row.kind }); return; }
     if (!notice.to.length) { await settle('failed'); log('warn', { code: 'ACCOUNT_NOTIFY_NO_RECIPIENTS', workspaceId: job.workspaceId, kind: row.kind }); return; }
     if (await deliverNotice(runtime, notice.to, customerNotice(runtime.config.publicUrl, notice.input), { notice: row.id }, row.kind === 'signin_link') === 'unconfigured') {

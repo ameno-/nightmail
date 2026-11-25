@@ -6,8 +6,10 @@ import { wildcardMessage } from './dns-messages.js';
 // why it was sent. customerNotice() is pure and returns the subject with a text part and an HTML part that carry the
 // same words; the HTML part sets a line length, the link as a button and its own colours, light and dark, and nothing
 // else (no images). A notice never says how a check works: no score figures, rates, thresholds or provider names. The
-// domain setup reminder alone also lists the DNS records to publish and links the customer's own DNS provider's page,
-// and the first grade's email (evaluation_finished) alone adds a paragraph on what the sender score is and what moves it.
+// domain setup reminder alone also lists the DNS records to publish and links the customer's own DNS provider's page.
+// The first grade's email (evaluation_finished) alone shows a figure: it opens with the sender score as the dashboard's
+// card shows it when the email is made (score, grade, the daily limit then, and that moment), adds a paragraph on what
+// the score is and what moves it, and its button opens the live score.
 //
 // Words a customer chose (a workspace's name, a campaign's) are shown through shownName, an address through
 // plainAddress and a domain through hostName, and nowhere but where a template puts them. The invitation goes to an
@@ -19,7 +21,10 @@ import { wildcardMessage } from './dns-messages.js';
 
 export type Notice = { subject: string; text: string; html: string };
 /** `records`: DNS records to publish, after the lines, each ready to copy; `link`: one more place to go, under them (a DNS provider's page). */
-type Parts = { subject: string; lines: string[]; records?: SetupRecord[]; link?: { label: string; url: string }; action: { label: string; url: string }; why: string };
+/** `card`: the sender score as a card above the lines (the first grade's email). */
+type Parts = { subject: string; lines: string[]; card?: ScoreCard; records?: SetupRecord[]; link?: { label: string; url: string }; action: { label: string; url: string }; why: string };
+/** The sender score as the dashboard's card shows it (app/src/features/score), at the moment the email is made. */
+export type ScoreCard = { score: number; grade: string; /** The daily limit then; null is none. */ daily: number | null; at: Date };
 /** A DNS record as the setup reminder lists it: the name as the DNS provider asks for it (relative to the zone when known). */
 export type SetupRecord = { type: string; name: string; value: string };
 
@@ -70,21 +75,50 @@ const owes = (workspace: string, owed: string, since: Date | null) => since ? `$
 // on white, because the page left its background to the client.
 const FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif", MONO = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace";
 const PAPER = '#ffffff', INK = '#171717', MUTED = '#5d5d5d';
-const DARK = '@media (prefers-color-scheme:dark){.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important;border-top-color:#2e2e2e!important}.nm-action{background:#314770!important;border-color:#556f9d!important;color:#ffffff!important}}';
+const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important;border-top-color:#2e2e2e!important}.nm-action{background:#314770!important;border-color:#556f9d!important;color:#ffffff!important}';
+
+// The score card's tile, ink and label colours: the dashboard's ramp (app/src/styles/tokens.css, --score-*), a hue from
+// red through amber to green as the score rises at one lightness and chroma per theme, as hex because mail clients
+// don't read oklch. Like the page, the light colours are inline and the dark ones (tile and text together) in the query.
+const SCORE_HUE = { poor: 25, mid: 75, high: 150 };
+const SCORE_TONES = { light: { tile: [0.88, 0.055], ink: [0.29, 0.05], soft: [0.42, 0.05] }, dark: { tile: [0.34, 0.065], ink: [0.97, 0.01], soft: [0.84, 0.035] } } as const;
+const unit = (v: number) => Math.min(1, Math.max(0, v));
+const scoreHue = (score: number) => SCORE_HUE.poor + unit((score - 25) / 50) * (SCORE_HUE.mid - SCORE_HUE.poor) + unit((score - 75) / 20) * (SCORE_HUE.high - SCORE_HUE.mid);
+/** An OKLCH colour as sRGB hex, clipped to the gamut (Björn Ottosson's OKLab matrices). */
+function hex([l, c]: readonly [number, number], hue: number) {
+  const a = c * Math.cos(hue * Math.PI / 180), b = c * Math.sin(hue * Math.PI / 180);
+  const L = (l + 0.3963377774 * a + 0.2158037573 * b) ** 3, M = (l - 0.1055613458 * a - 0.0638541728 * b) ** 3, S = (l - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  return '#' + [4.0767416621 * L - 3.3077115913 * M + 0.2309699292 * S, -1.2684380046 * L + 2.6097574011 * M - 0.3413193965 * S, -0.0041960863 * L - 0.7034186147 * M + 1.707614701 * S]
+    .map(v => { const x = unit(v); return Math.round((x <= 0.0031308 ? 12.92 * x : 1.055 * x ** (1 / 2.4) - 0.055) * 255).toString(16).padStart(2, '0'); }).join('');
+}
+const tones = (score: number, theme: 'light' | 'dark') => { const t = SCORE_TONES[theme], h = scoreHue(score); return { tile: hex(t.tile, h), ink: hex(t.ink, h), soft: hex(t.soft, h) }; };
+const limitNow = (c: ScoreCard) => c.daily === null ? 'No daily limit' : `A daily limit of ${count(c.daily)} recipients for now`;
+/** The card's words as the text part says them. */
+const cardText = (c: ScoreCard) => `Sender score: ${c.score} (grade ${c.grade}), ${limitNow(c).replace(/^./, x => x.toLowerCase())}\nAs of ${moment(c.at)}`;
+/** The card: a flat tile in the score's colour (one table cell, no image), its label, the score with its grade, what it means for sending now and when. */
+function cardHtml(c: ScoreCard) {
+  const t = tones(c.score, 'light'), p = (cls: 'ink' | 'soft', style: string, body: string) => `<p class="nm-card-${cls}" style="margin:0;${style};color:${t[cls]}">${body}</p>`;
+  const figure = `<span class="nm-card-ink" style="font-family:${MONO};font-size:40px;line-height:44px;font-weight:400;letter-spacing:-0.02em;color:${t.ink}">${c.score}</span>`
+    + `<span class="nm-card-ink" style="padding-left:8px;font-family:${MONO};font-size:18px;line-height:22px;font-weight:700;color:${t.ink}">${escapeHtml(c.grade)}</span>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 22px;border-collapse:separate"><tr><td class="nm-card" bgcolor="${t.tile}" style="padding:14px 16px 13px;border-radius:8px;background-color:${t.tile};color:${t.ink}">`
+    + p('soft', 'font-size:13px;line-height:18px', 'Sender score') + p('ink', 'padding-top:4px;line-height:44px', figure)
+    + p('ink', 'padding-top:6px;font-size:15px;line-height:22px', escapeHtml(limitNow(c))) + p('soft', 'padding-top:2px;font-size:13px;line-height:18px', `As of ${escapeHtml(moment(c.at))}`) + '</td></tr></table>';
+}
+const cardDark = (c: ScoreCard) => { const t = tones(c.score, 'dark'); return `.nm-card{background-color:${t.tile}!important;color:${t.ink}!important}.nm-card-ink{color:${t.ink}!important}.nm-card-soft{color:${t.soft}!important}`; };
 const page = `class="nm-page" bgcolor="${PAPER}"`, ink = (style = '') => `class="nm-text" style="margin:0 0 14px;color:${INK}${style}"`;
 
 /** One notice as an email: the same words as text and as HTML. */
 export function notice(p: Parts): Notice {
   const records = p.records ?? [];
-  const text = [p.lines.join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
+  const text = [...p.card ? [cardText(p.card)] : [], p.lines.join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
   const field = (label: string, value: string) => `<tr><td class="nm-why" style="width:40px;padding:2px 12px 2px 0;vertical-align:top;font-size:13px;color:${MUTED};white-space:nowrap">${label}</td><td class="nm-text" style="padding:2px 0;font:14px/1.5 ${MONO};color:${INK};word-break:break-all">${escapeHtml(value)}</td></tr>`;
   const paragraphs = p.lines.map(line => `<p ${ink()}>${escapeHtml(line)}</p>`).join('')
     + records.map(r => `<p ${ink(';margin-bottom:4px;font-weight:600')}>${escapeHtml(r.type)} record</p><table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 14px">${field('Name', r.name)}${field('Value', r.value)}</table>`).join('')
     + (p.link ? `<p ${ink()}><a class="nm-text" href="${escapeHtml(p.link.url)}" style="color:${INK};text-decoration:underline">${escapeHtml(p.link.label)}</a></p>` : '');
-  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(p.subject)}</title><style>:root{color-scheme:light dark;supported-color-schemes:light dark}${DARK}</style></head>`
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light dark"><meta name="supported-color-schemes" content="light dark"><title>${escapeHtml(p.subject)}</title><style>:root{color-scheme:light dark;supported-color-schemes:light dark}@media (prefers-color-scheme:dark){${DARK}${p.card ? cardDark(p.card) : ''}}</style></head>`
     + `<body ${page} style="margin:0;padding:0;background-color:${PAPER};color:${INK}"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ${page} style="background-color:${PAPER}"><tr><td ${page} style="padding:20px 16px 28px;background-color:${PAPER};color:${INK}">`
     + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px"><tr><td class="nm-text" style="font:15px/1.6 ${FONT};color:${INK}">`
-    + `${paragraphs}<p style="margin:22px 0 0"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:8px 16px;border:1px solid #223459;border-radius:6px;background:#223459;color:#ffffff;font-weight:500;text-decoration:none">${escapeHtml(p.action.label)}</a></p>`
+    + `${p.card ? cardHtml(p.card) : ''}${paragraphs}<p style="margin:22px 0 0"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:8px 16px;border:1px solid #223459;border-radius:6px;background:#223459;color:#ffffff;font-weight:500;text-decoration:none">${escapeHtml(p.action.label)}</a></p>`
     + `<p class="nm-why" style="margin:32px 0 0;padding-top:14px;border-top:1px solid #e4e4e4;font-size:13px;line-height:1.5;color:${MUTED}">${escapeHtml(p.why)}</p>`
     + '</td></tr></table></td></tr></table></body></html>';
   return { subject: p.subject, text, html };
@@ -103,7 +137,8 @@ export type NoticeInput =
   | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; noDns?: boolean; /** A wildcard (*.domain), and the parking host it points to, answering its missing CNAMEs. */ wildcard?: string; parking?: { owner: string; target: string }; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
   /** builtin: the workspace's built-in domain while it sends (builtin-domain.ts), with who it sends to and its daily cap. */
   | Workspace & { kind: 'no_domain'; builtin?: { name: string; scope: 'anyone' | 'members'; perDay: number } | null }
-  | Workspace & { kind: 'evaluation_finished'; limited: boolean }
+  /** score: the card, as the dashboard showed the score when the email was made; its daily limit, when there is one, picks the version. */
+  | Workspace & { kind: 'evaluation_finished'; limited: boolean; score?: ScoreCard | null }
   | Workspace & { kind: 'low_balance'; balance: string; emails: number }
   | Workspace & { kind: 'out_of_credit'; receivingUntil: Date | null }
   | Workspace & { kind: 'recharge_failed'; last4: string | null; decline: string; taxLocation?: boolean; balance: string }
@@ -146,8 +181,10 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       'The dashboard shows the limit and what raises it.'] });
     // The first grade: the one email that says what the sender score is, what moves it and what it changes.
     case 'evaluation_finished': {
-      const score = `The sender score works like a credit score for your sending. Bounces, spam complaints and mail our content screening flags bring it down; mail people want ${n.limited ? 'brings it up' : 'keeps it up'}. Recent mail counts most.`;
-      return notice({ subject: `${w} now has a sender score`, action: dashboard, why: `${productName} sends this once, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: n.limited ? [
+      const limited = n.score ? n.score.daily !== null : n.limited;
+      const score = `The sender score works like a credit score for your sending. Bounces, spam complaints and mail our content screening flags bring it down; mail people want ${limited ? 'brings it up' : 'keeps it up'}. Recent mail counts most.`;
+      return notice({ subject: `${w} now has a sender score`, card: n.score ?? undefined, action: { label: 'See the live score', url: `${base}/overview#sender-score` },
+        why: `${productName} sends this once, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: limited ? [
         `The first emails from ${w} showed some problems, so its sender score starts low and it keeps a daily limit for now.`,
         score,
         'Mail within the limit sends as usual. As the score rises the limit goes up, and once the score is good there is no daily limit.',

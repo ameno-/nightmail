@@ -32182,9 +32182,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('account notices: a workspace\'s first grade emails its owners and admins what the sender score is, what moves it and what it changes, once: grading again and a retried job send nothing more', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
-      const { wid, name, fresh } = await noticeFixture(runtime, db);
+      const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
       const { refreshStanding } = await import('./src/standing.js');
       const { accountNotifyJob } = await import('./src/account-notices.js');
+      const { loadDisplayedStanding, scoreView } = await import('./src/sender-score.js');
+      // Another graded workspace (the platform's own) with a low score and a daily limit: its figures must not reach this email.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,daily_limit,band_limit,computed_at) VALUES ($1,'graded',500,61.4,61.4,61.4,100,100,now())`, [platform]);
       // Who account emails go to: owners and admins with a verified address. A member and an unverified admin are not told.
       await db.query(`INSERT INTO nightmail_users(id,name,email,email_verified) VALUES ('user_grade_admin','Ada','ada@first-grade.example',true),('user_grade_member','Mo','mo@first-grade.example',true),('user_grade_unverified','Una','una@first-grade.example',false)`);
       await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ('wm_grade_admin',$1,'user_grade_admin','admin'),('wm_grade_member',$1,'user_grade_member','member'),('wm_grade_unverified',$1,'user_grade_unverified','admin')`, [wid]);
@@ -32211,6 +32214,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await regrade();
       const graded = await standing();
       assert.equal(graded.phase, 'graded');
+      // The card shows the score as the dashboard does when the email is made: this workspace's score, grade and limit.
+      const view = scoreView(await loadDisplayedStanding(runtime, wid));
+      assert.deepEqual([view.limit?.daily, view.grade !== null], [null, true]);
+      const card = `Sender score: ${Math.round(view.score!)} (grade ${view.grade}), no daily limit\nAs of `;
       // One email to each owner and admin, sent once however often the job runs.
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const emails = await fresh();
@@ -32218,12 +32225,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       for (const email of emails) {
         assert.equal(email.subject, `${name} now has a sender score`);
         // What happened, what the score is and what moves it, what it changes, and where to see it.
+        assert.ok(email.text.startsWith(card), email.text);
         for (const line of ['so it now has a sender score and its starting limit is lifted.', 'The sender score works like a credit score for your sending.',
           'Bounces, spam complaints and mail our content screening flags bring it down; mail people want keeps it up.', 'there is no daily limit. If it drops, a daily limit applies until it recovers.',
-          `Open the dashboard: ${PUBLIC_ORIGIN}/overview`, 'sends this once, to the owners and admins of']) assert.ok(email.text.includes(line), `${line}\n\n${email.text}`);
-        // The words are the dashboard's to back up: no figure, rate, threshold or provider name, and not the score itself.
+          `See the live score: ${PUBLIC_ORIGIN}/overview#sender-score`, 'sends this once, to the owners and admins of']) assert.ok(email.text.includes(line), `${line}\n\n${email.text}`);
+        // The score is the one figure: no rate, threshold or provider name, and nothing of the other workspace's.
         assert.doesNotMatch(email.text, HOW_IT_WORKS);
-        assert.doesNotMatch(email.text, new RegExp(`\\b${graded.score}\\b`));
+        assert.doesNotMatch(email.text, /\b61\b|\b100 recipients|grade D/);
+        assert.ok(email.html.includes(`>${Math.round(view.score!)}</span>`) && email.html.includes('class="nm-card"'), 'The card is in the HTML part too.');
       }
       // Never again for this workspace: a later run, and the job run once more, send nothing.
       await regrade();
