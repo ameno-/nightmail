@@ -49,9 +49,7 @@
 .dns-connect[data-hidden] { visibility: hidden; }
 @media (max-width: 640px) { .dns-connect { flex-direction: column; align-items: stretch; } .dns-connect .ui-button { height: 40px; } }
 
-/* Domain page: plain sections set apart by space alone, no boxes and no rules (same rhythm as onboarding). Its records
-   wrap their values, so it keeps the wide measure on a wide window, left-aligned. */
-.page-surface > .domain-page { width: 100%; max-width: var(--measure-wide); }
+/* Domain page: plain sections set apart by space alone, no boxes and no rules (same rhythm as onboarding). */
 .domain-sections { display: flex; flex-direction: column; min-width: 0; }
 .domain-sections > .section { margin-block: 0; }
 .domain-sections > :not(:first-child) { margin-top: var(--space-32); }

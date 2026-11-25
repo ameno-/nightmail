@@ -192,17 +192,6 @@
   --sidebar-inset: var(--space-8);
   --page-inset: 0px;
   --page-gap: var(--space-12);
-  /* Readable widths on a wide window, left-aligned in the page: forms and label/value pages (settings, a contact, a
-     webhook), and detail pages whose main content is a wrapping table or a transcript beside a panel (a domain's
-     records, a support conversation). Tables and logs keep the full width. */
-  --measure: 920px;
-  --measure-wide: 1280px;
-  /* List pages (styles/app.css .measure-list): a list stops widening here, so its first column takes the room it needs
-     (about 480–560 px) and the short columns sit right beside it; narrow for lists with few short columns. Receiving's
-     list beside its docked flow panel takes the wide one. Logs and Overview keep their own widths. */
-  --measure-list: 1120px;
-  --measure-list-narrow: 960px;
-  --measure-list-wide: 1440px;
   /* Colour, fill and border changes on controls, links, rows and tabs. */
   --motion-duration: 150ms;
   --ease-standard: cubic-bezier(.4, 0, .2, 1);

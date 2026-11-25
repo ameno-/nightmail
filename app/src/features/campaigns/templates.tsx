@@ -86,7 +86,7 @@ export function TemplatesPage() {
     try { const result = await create.mutateAsync(name.trim()); navigate(`/campaigns/templates/${encodeURIComponent(result.id)}`) }
     catch (error) { toast(errorText(error), 'error') }
   }
-  return <div className="campaigns-page measure-list">
+  return <div className="campaigns-page">
     <CampaignsHeader actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search templates" placeholder="Search templates" value={search} onChange={event => setParams(previous => { const next = new URLSearchParams(previous); event.target.value ? next.set('search', event.target.value) : next.delete('search'); next.delete('page'); return next })} /><Select aria-label="Filter templates" value={archived ? 'archived' : 'active'} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); value === 'archived' ? next.set('archived', 'true') : next.delete('archived'); next.delete('page'); return next })} options={[{value: 'active', label: 'Active'}, {value: 'archived', label: 'Archived'}]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>

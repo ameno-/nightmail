@@ -117,7 +117,8 @@ export function AgentInboxStep({ domain, onBack, onFinish }: { domain: string; o
 // never sent as they are.
 const starter = (workspace: string) => ({ name: 'Announcement', subject: `What’s new at ${workspace}`, previewText: 'One thing worth knowing this week.',
   html: `<h1>What’s new at ${workspace}</h1><p>Say what changed in a sentence or two, and why it matters to the people reading.</p><p>One idea per email reads best. Link to the details instead of putting them all here.</p><p>The ${workspace} team</p>` })
-const RAMP = 'Sending ramps up: your first 500 recipients are an evaluation, then volume grows for a day, and in good standing there’s no daily limit.'
+// docs/sending-limits.md, Campaign ramp and Send readiness (#737).
+const RAMP = 'Your first big campaigns ramp up: they go out in hourly steps from 1,000 recipients, each checked for bounces and complaints before the next.'
 
 /** A draft from a published template (or a blank one) that stays put: the step shows it, nothing opens or sends. */
 function useDraft() {

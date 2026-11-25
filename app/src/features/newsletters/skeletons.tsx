@@ -32,7 +32,7 @@ export function IssuesSkeleton({ id }: { id: string }) {
 /** The newsletter's page before its code or data: its name is the sidebar's, so the title is already right. */
 function NewsletterSkeleton({ id }: { id: string }) {
   const name = useNewsletters().find(item => item.id === id)?.name
-  return <div className="stack newsletter measure-list">
+  return <div className="stack newsletter">
     <PageHeader title={name ?? <SkeletonText width={140} lineHeight={24} />} actions={<Button variant="primary" disabled>New issue</Button>} />
     <ReadersSkeleton />
     <IssuesSkeleton id={id} />
@@ -42,5 +42,5 @@ function NewsletterSkeleton({ id }: { id: string }) {
 export function NewsletterRouteSkeleton({ id }: { id?: string }) {
   if (id === 'new') return <div className="stack newsletter-new"><PageHeader title="New newsletter" backTo="/campaigns" actions={<Button variant="primary" disabled>Create newsletter</Button>} /><FieldSkeleton label="Name" /><FieldSkeleton label="From" /></div>
   if (id) return <NewsletterSkeleton id={decodeURIComponent(id)} />
-  return <div className="stack measure-list"><PageHeader title="Newsletters" /><TableSkeleton className="newsletters-table" columns={newsletterColumns} rows={4} /></div>
+  return <div className="stack"><PageHeader title="Newsletters" /><TableSkeleton className="newsletters-table" columns={newsletterColumns} rows={4} /></div>
 }

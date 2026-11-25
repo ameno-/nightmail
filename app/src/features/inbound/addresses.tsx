@@ -1,9 +1,11 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { flushSync } from 'react-dom'
+import { useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { Alert, Button, ConfirmDialog, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
-import { invalidate } from '../../data/invalidation'
+import { addressForget, cancelOwnQueries, forgetResource, invalidate } from '../../data/invalidation'
 import { date, number } from '../../lib/format'
 import { AddressMail } from './threads'
 import { FlowPanel } from './panel'
@@ -129,9 +131,20 @@ export function InboundAddressDetailPage() {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const { canAdminister } = useWorkspaceAccess()
-  const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal))
+  const client = useQueryClient()
+  // Set when Delete is confirmed, before the DELETE goes out: the address's reads (its page, its mail) stop, so nothing
+  // asks for it once it is gone. Cleared again if the delete fails. (data/invalidation.ts forgetResource)
+  const [deleted, setDeleted] = useState(false)
+  const address = useApiQuery(['inbound-address', id], (api, signal) => api.inbound.address(id, signal), { enabled: !deleted })
   const save = useApiMutation((api, patch: InboundAddressPatch) => api.inbound.updateAddress(id, patch), 'Address saved', false, invalidate.inboundAddresses, id)
-  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted', false, invalidate.inboundAddresses, id)
+  const remove = useApiMutation((api, _: void) => api.inbound.deleteAddress(id), 'Address deleted', false, false, id)
+  async function deleteAddress() {
+    flushSync(() => setDeleted(true))
+    void cancelOwnQueries(client, id, addressForget).catch(() => {})
+    try { await remove.mutateAsync() } catch (error) { setDeleted(false); throw error }
+    navigate('/receiving')
+    void forgetResource(client, id, addressForget).catch(() => {})
+  }
   const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const patternInput = useRef<HTMLInputElement>(null)
@@ -146,7 +159,7 @@ export function InboundAddressDetailPage() {
     for (const key of ['view', 'thread', 'message']) { const value = previous.get(key); if (value) query.set(key, value) }
     return query
   }, { replace: true })
-  const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow')
+  const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow' && !deleted)
   // Where its mail goes is the flow panel's diagram; Edit (or ?edit from the panel) opens its steps to change them.
   const entry = overview.data?.routes.data.find(r => r.address?.id === id)
   // Edit opens the builder when it can draw the flow. ?edit=1 (Edit otherwise, or a builder's "more rules") shows the
@@ -181,7 +194,7 @@ export function InboundAddressDetailPage() {
       items={[{ value: 'mail', label: 'Mail' }, { value: 'flow', label: 'Where mail goes' }, { value: 'settings', label: 'Settings' }]} />}
     {expired && <Alert tone="info">This temporary address expired. It can’t receive or send, but its mail stays readable.</Alert>}
     {/* Mail stays mounted, hidden, behind the other tabs: a reply being written survives a look at them. */}
-    <AddressMail addressId={id} hidden={tab !== 'mail'} />
+    <AddressMail addressId={id} hidden={tab !== 'mail'} enabled={!deleted} />
     {tab === 'mail' ? null
       : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
       : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
@@ -208,6 +221,6 @@ export function InboundAddressDetailPage() {
         </form>}
         <div className="addr-danger"><Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete address</Button></div>
       </div>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all, and nothing else delivers here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(); navigate('/receiving') }} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all, and nothing else delivers here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={deleteAddress} />
   </div>
 }
