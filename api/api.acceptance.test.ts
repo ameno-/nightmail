@@ -17837,6 +17837,28 @@ describe('Sealed Logs facets', () => {
     });
   });
 
+  test('Health counts work on a parked Logs refresh but not the wait before a disconnect', async t => {
+    await facetFixture(t, async ({ runtime, db, fetch }) => {
+      const counters = await import('./src/health-counters.js');
+      await db.query('CREATE TEMP TABLE health_minutes (LIKE public.health_minutes INCLUDING ALL) ON COMMIT DROP');
+      counters.resetCounters(); t.after(counters.resetCounters);
+      let now = Date.now();
+      const start = now, abort = new AbortController(), timeout = globalThis.setTimeout;
+      const clock = t.mock.method(Date, 'now', () => now);
+      const timer = t.mock.method(globalThis, 'setTimeout', ((cb: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+        ms === 25 ? timeout(() => { now += 30_000; abort.abort(); }, 0) : timeout(cb, ms, ...args)) as typeof setTimeout);
+      runtime.startLogFacetAggregate = undefined;
+      runtime.startLogFacetFold = () => { now += 85; };
+      try {
+        const path = facetPath({ mode: 'refresh', range: '24h', from: floorMinute(), region: REGION });
+        const res = await fetch(new Request(PUBLIC_ORIGIN + path, { signal: abort.signal, headers: { cookie: manager!.cookie } }));
+        assert.equal(res.status, 499); assert.equal(now - start, 30_085);
+      } finally { timer.mock.restore(); clock.mock.restore(); }
+      await counters.flushCounters(runtime.db);
+      assert.deepEqual((await db.query("SELECT n, slowest FROM health_minutes WHERE kind='route' AND key='GET /v1/logs/facets'")).rows, [{ n: 1, slowest: 85 }]);
+    });
+  });
+
   test('sealed Logs rejects stale lease publication and tickets for replaced slots', { timeout: 10_000 }, async t => {
     await facetFixture(t, async ({ runtime, db, local }) => {
       const { enrollLogFacet, foldLogFacetSlot, dueLogFacetSlots, readTicketCut, releaseLogFacetTicket } = await import('./src/log-facet-fold.js');
@@ -31174,6 +31196,42 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       error(await local('GET','/v1/inbound/events?wait=30&after=0',undefined,'live',{authorization:`Bearer ${key.secret}`}),429,'REQUEST_RATE_LIMITED');
       assert.equal(query.mock.callCount(),2,'Only credential and reservation statements, no event query or wait.');
       query.mock.restore();
+    });
+  });
+
+  test('MCP Health: a 30-second inbox wait is idle, but a 31-second tool read still alerts on POST /mcp', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const counters = await import('./src/health-counters.js'), { healthTick } = await import('./src/health.js');
+      const box = ok(await local('POST', '/v1/inboxes', { type: 'sandbox', credential: { name: 'mcp-waiter', permissions: ['read'] } }), 201);
+      const call = async (name: string, args: Json) => {
+        const r = await request('POST', '/mcp?codemode=true', box.credential.secret, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+          { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' });
+        assert.match(r.headers.get('content-type') ?? '', /^application\/json/);
+        const result = ok(r).result; assert.equal(result.isError, false); return result.structuredContent;
+      };
+      await db.query(`CREATE TEMP TABLE health_minutes (LIKE public.health_minutes INCLUDING ALL) ON COMMIT DROP;
+        CREATE TEMP TABLE health_alerts (LIKE public.health_alerts INCLUDING ALL) ON COMMIT DROP`);
+      counters.resetCounters(); t.after(counters.resetCounters);
+      let now = Date.now();
+      const start = now, timeout = globalThis.setTimeout, clock = t.mock.method(Date, 'now', () => now);
+      const timer = t.mock.method(globalThis, 'setTimeout', ((cb: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+        ms === 1000 ? timeout(() => { now += ms; cb(...args); }, 0) : timeout(cb, ms, ...args)) as typeof setTimeout);
+      const query = db.query.bind(db);
+      const wire = t.mock.method(db, 'query', ((...args: any[]) => {
+        if (String(args[0]?.text ?? args[0]).includes('SELECT inbox_view(b) box FROM mailboxes')) now += 31_000;
+        return Reflect.apply(query, db, args);
+      }) as typeof db.query);
+      const mcp = async () => (await db.query("SELECT n,slowest FROM health_minutes WHERE kind='route' AND key='POST /mcp'")).rows;
+      try {
+        assert.deepEqual((await call('listInboxMessages', { inboxId: box.id, wait: 30 })).data, []);
+        assert.equal(now - start, 30_000); await counters.flushCounters(runtime.db);
+        assert.deepEqual(await mcp(), [{ n: 1, slowest: 0 }]);
+        assert.equal((await call('getInbox', { inboxId: box.id })).id, box.id);
+      } finally { timer.mock.restore(); wire.mock.restore(); clock.mock.restore(); }
+      await counters.flushCounters(runtime.db);
+      assert.deepEqual(await mcp(), [{ n: 2, slowest: 31_000 }]);
+      await healthTick(runtime, {}, { force: true });
+      assert.ok(ok(await local('GET', '/v1/operator/health')).alerts.some((a: Json) => a.key === 'slow-requests:POST:/mcp' && a.value === 31_000));
     });
   });
 
