@@ -99,8 +99,10 @@
 .sinbox-summary > summary::-webkit-details-marker { display: none; }
 .sinbox-summary > summary svg { flex: none; width: 14px; height: 14px; color: var(--color-faint); }
 .sinbox-summary__label { flex: none; font-weight: var(--font-weight-bold); }
-.sinbox-summary__title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sinbox-summary__title { flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
+.sinbox-summary[open] .sinbox-summary__title { white-space: normal; -webkit-mask-image: none; mask-image: none; }
 .sinbox-summary__chevron { margin-left: auto; transition: transform 150ms ease-out; }
+@media (prefers-reduced-motion: reduce) { .sinbox-summary__chevron { transition: none; } }
 .sinbox-summary[open] .sinbox-summary__chevron { transform: rotate(90deg); }
 .sinbox-summary__body { display: grid; gap: var(--space-8); margin: var(--space-8) 0 0; font-size: var(--text-sm); line-height: 22px; }
 .sinbox-summary__body dt { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); }
