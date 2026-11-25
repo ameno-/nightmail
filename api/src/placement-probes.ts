@@ -81,7 +81,8 @@ async function mailDns(name:string,signal:AbortSignal,probe:ReturnType<typeof pr
   return {mx:mx && mx.values.length>0 && mx.values.every(v=>{const m=/^(\d+)\s+(\S+)$/.exec(v);return !!m && +m[1]!<=65535 && hostSyntax.test(fqdn(m[2]!));}),
     spf:policy && spf(policy.values),dmarc:report && dmarc(report.values)};
 }
-async function dbl(name:string,zone:string,signal:AbortSignal) {
+/** A name on Spamhaus DBL through a DQS zone: listed, clear, or null when the answer proves neither. */
+export async function dbl(name:string,zone:string,signal:AbortSignal) {
   const res=await dns(`${name}.${zone}`,'A',signal);
   // A denied public resolver, usage-limit code, unexpected address or SERVFAIL is not clean.
   if(res.status===0 && res.values.some(a=>/^127\.0\.1\.(?:2|4|5|6|10[2-6])$/.test(a))) return 'listed';

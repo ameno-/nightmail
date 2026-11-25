@@ -556,6 +556,8 @@ export default {
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
       // A pool region nothing has sent through yet still gets its SES quota sampled (Glass, the customer share); never throws.
       await (await core.wrapModuleLoad(() => import('./dispatcher.js'))).refreshPoolQuotas(runtime);
+      // Glass's deliverability sources (SES health, VDM, Spamhaus DBL), each due at its own time; never throws.
+      await (await core.wrapModuleLoad(() => import('./glass-deliverability.js'))).refreshDeliverabilitySources(runtime);
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       // Screen any pre-deploy or rollout-window rows held with screened=false outside the mail room before waking shards.
       try { await (await core.wrapModuleLoad(() => import('./sending.js'))).screenHeldMail(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }

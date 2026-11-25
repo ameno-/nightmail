@@ -30,12 +30,12 @@ const loadSimulatedSes = lazyModule(() => import('./adapters/simulated-ses.js'))
 // Provider pacing lives in process memory (one shard owns one share of the regional quota),
 // so the hot path costs three database statements per batch rather than ten per email.
 
-type DispatchTransport = {
+export type DispatchTransport = {
   GetAccountCommand: typeof import('@aws-sdk/client-sesv2').GetAccountCommand;
   SendEmailCommand: typeof import('@aws-sdk/client-sesv2').SendEmailCommand;
   clientFor: (runtime: Runtime, region: string, connection?: ReadyConnection, runClients?: Map<string, SESv2Client>) => SESv2Client;
 };
-function loadDispatchTransport(runtime: Runtime): Promise<DispatchTransport> {
+export function loadDispatchTransport(runtime: Runtime): Promise<DispatchTransport> {
   return wrapModuleLoad(async () => {
     if (isSimulatedSes(runtime)) {
       const [{ GetAccountCommand, SendEmailCommand }, { simulatedSes }] = await Promise.all([loadSesv2(), loadSimulatedSes()]);
@@ -212,6 +212,13 @@ export const POOL_QUOTA_STALE_MS = 5 * 60_000;
  * time), with the platform's own credentials. A region that sends keeps its fresh sample and costs nothing here. Never
  * throws: a region that can't be read is logged and tried again the next minute.
  */
+/** The platform's own SES client for a shared pool region: shared credentials, so the account must be the platform's
+ *  (core.ts assertSharedAccount), and a runtime scoped to the region (core.ts region()). Quota and deliverability reads. */
+export function poolSes(runtime: Runtime, transport: DispatchTransport, region: string, account: string) {
+  const scoped = { ...runtime, config: { ...runtime.config, regions: [region] } };
+  const pool: ReadyConnection = { id: `pool:${region}`, kind: 'shared', aws_account_id: account, role_arn: '', external_id: '' };
+  return { scoped, ses: transport.clientFor(scoped, region, forDelivery(pool, { purpose: 'quota' })) };
+}
 export async function refreshPoolQuotas(runtime: Runtime) {
   if (!runtime.config.multiTenant) return;
   try {
@@ -222,9 +229,8 @@ export async function refreshPoolQuotas(runtime: Runtime) {
     const transport = await loadDispatchTransport(runtime);
     for (const { region, account } of rows) {
       try {
-        const scoped = { ...runtime, config: { ...runtime.config, regions: [region] } };
-        const pool: ReadyConnection = { id: `pool:${region}`, kind: 'shared', aws_account_id: account, role_arn: '', external_id: '' };
-        await ensureQuota({ runtime: scoped, a: { workspaceId: runtime.config.workspaceId }, transport, ses: transport.clientFor(scoped, region, forDelivery(pool, { purpose: 'quota' })) }, account, region, initialGate(), QUOTA_REFRESH_MS);
+        const { scoped, ses } = poolSes(runtime, transport, region, account);
+        await ensureQuota({ runtime: scoped, a: { workspaceId: runtime.config.workspaceId }, transport, ses }, account, region, initialGate(), QUOTA_REFRESH_MS);
       } catch (error) { logError(error, { code: 'POOL_QUOTA_REFRESH_FAILED', region }, 'warn'); }
     }
   } catch (error) { logError(error, { code: 'POOL_QUOTA_REFRESH_FAILED' }, 'warn'); }
