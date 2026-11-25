@@ -133,7 +133,8 @@ function logRequest(c: Ctx, durationMs: number) {
   const refusedOrigin = route === '/internal/v1/analytics' && code === 'ORIGIN_NOT_ALLOWED';
   const origin = refusedOrigin ? c.req.header('origin') : undefined;
   const workspace = c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId;
-  countRequest({ route, method: c.req.method, status, durationMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
+  const activeMs = Math.max(0, durationMs - (c.get('pollWaitMs') ?? 0));
+  countRequest({ route, method: c.req.method, status, durationMs: activeMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
     code, field: failure?.field, databaseCode: failure?.databaseCode,
