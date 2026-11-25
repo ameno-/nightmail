@@ -33,10 +33,14 @@
     // Not an off switch: without it (and without own link hosts), production refuses campaign and marketing mail rather
     // than put customers' links on nightmail.dev (src/link-domains.ts ownOrigin).
     "NIGHTMAIL_LINK_HOST": "links.nightmailedge.com",
-    // Own link hosts (customers' links.<domain> as custom hostnames of that zone) are off: Cloudflare's custom hostname quota
-    // doesn't allow one per customer yet. To turn them on, set NIGHTMAIL_LINK_SAAS_ZONE_ID to the zone's ID
-    // (7b0d7306312182f66e12368f93efbb96) and NIGHTMAIL_LINK_SAAS_TARGET to cname.nightmailedge.com; the deploy then binds
-    // nightmail/production/NIGHTMAIL_LINK_SAAS_TOKEN (.github/scripts/deploy-worker.sh).
+    // Own link hosts (a domain's links.<domain>, a custom hostname of that zone) only for the workspaces listed:
+    // Cloudflare's custom hostname quota doesn't allow one per customer, so nobody else is shown the record or takes a
+    // slot. Listed: the platform's own workspace (NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE). With the zone set, the deploy binds
+    // nightmail/production/NIGHTMAIL_LINK_SAAS_TOKEN (.github/scripts/deploy-worker.sh) and stops before any change when
+    // it can't. A listed domain whose own host isn't active links on NIGHTMAIL_LINK_HOST meanwhile.
+    "NIGHTMAIL_LINK_SAAS_ZONE_ID": "7b0d7306312182f66e12368f93efbb96",
+    "NIGHTMAIL_LINK_SAAS_TARGET": "cname.nightmailedge.com",
+    "NIGHTMAIL_LINK_HOST_WORKSPACES": "ws_90b0696c835f49fbaa9396fb726e9fe2",
     // Mail apps connect to imap.nightmail.dev and smtp.nightmail.dev (the gateway certificate names both). Shown only
     // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.production.yaml).
     "MAILGW_PUBLIC_DOMAIN": "nightmail.dev",

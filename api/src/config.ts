@@ -151,6 +151,10 @@ const values = z.object({
   NIGHTMAIL_LINK_SAAS_ZONE_ID: optional(z.string().trim().regex(/^[0-9a-f]{32}$/)),
   NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().regex(/^[A-Za-z0-9._~+/=-]{20,500}$/)),
   NIGHTMAIL_LINK_SAAS_TARGET: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Hosted: the workspaces own link hosts are for, by ID, separated by commas. Unset, none: every workspace links on the
+  // link domain even with the SaaS zone set, so no other workspace is shown a links record or takes one of the zone's few
+  // custom hostnames. Self-hosted ignores it (the operator's own domains all may).
+  NIGHTMAIL_LINK_HOST_WORKSPACES: optional(z.string().trim().regex(/^ws_[0-9a-f]{32}(?:\s*,\s*ws_[0-9a-f]{32})*$/)),
   NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   // The origin a connected account's SNS topics deliver to (https://events.nightmail.dev): its role template allows
@@ -257,7 +261,7 @@ export function deriveEncryptionKey(secret: string): string {
 const featureSettings = {
   builtinDomains: ['NIGHTMAIL_BUILTIN_DOMAIN', 'NIGHTMAIL_BUILTIN_SEND_SCOPE'],
   listHygiene: ['NIGHTMAIL_HYGIENE_LISTS'], dnsHygiene: ['NIGHTMAIL_HYGIENE_DNS'],
-  linkHosts: ['NIGHTMAIL_LINK_SAAS_ZONE_ID', 'NIGHTMAIL_LINK_SAAS_TOKEN', 'NIGHTMAIL_LINK_SAAS_TARGET'],
+  linkHosts: ['NIGHTMAIL_LINK_SAAS_ZONE_ID', 'NIGHTMAIL_LINK_SAAS_TOKEN', 'NIGHTMAIL_LINK_SAAS_TARGET', 'NIGHTMAIL_LINK_HOST_WORKSPACES'],
   sharedLinks: ['NIGHTMAIL_LINK_HOST'],
   postmaster: ['NIGHTMAIL_POSTMASTER_CREDENTIALS'],
   supportChat: ['NIGHTMAIL_SUPPORT_URL', 'NIGHTMAIL_SUPPORT_SIGNING_KEY'],
@@ -394,7 +398,8 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const configuredHost = v.MULTI_TENANT === 'true' ? v.NIGHTMAIL_LINK_HOST : undefined;
   const linkHost = configuredHost && [url.origin, ...previousOrigins].some(origin => site(new URL(origin).hostname) === site(configuredHost)) ? disabled('sharedLinks') : configuredHost;
   const linkHosts = v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN && linkTarget
-    ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: linkTarget } : undefined;
+    ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: linkTarget,
+      ...v.MULTI_TENANT === 'true' ? { workspaces: list(v.NIGHTMAIL_LINK_HOST_WORKSPACES ?? '') } : {} } : undefined;
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,

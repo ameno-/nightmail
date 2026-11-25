@@ -30,9 +30,12 @@ export async function domainSetupTick(runtime: Runtime) {
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.setupCheck:'||token,'domain.setupCheck',workspace_id,jsonb_build_object('domainId',id,'token',token) FROM due
     ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload=excluded.payload WHERE jobs.status IN ('completed','failed')
     RETURNING id`);
+  // Hosted, only the workspaces own link hosts are for (NIGHTMAIL_LINK_HOST_WORKSPACES).
+  const listed = runtime.config.linkHosts?.workspaces;
   const links = runtime.config.linkHosts ? (await runtime.db.execute<{ id: string }>(sql`WITH due AS (SELECT d.id,dc.workspace_id,dc.token FROM domain_claims dc
       JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name LEFT JOIN link_hosts h ON h.workspace_id=dc.workspace_id AND h.domain=dc.name
       WHERE dc.sending_state IN ('pending','verified') AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ? 'builtin',false)
+        ${listed ? sql`AND dc.workspace_id=ANY(${sql.param([...listed])}::text[])` : sql``}
         -- An active host is checked again daily: a custom hostname deleted at Cloudflare (by hand, a cleanup race, or dev's
         -- checks on the shared zone) is made again instead of leaving every link in the domain's mail unanswered.
         AND coalesce(h.checked_at,'-infinity')<=now()-CASE WHEN h.status='active' THEN interval '1 day' WHEN h.created_at>now()-interval '1 day' THEN interval '14 minutes' ELSE interval '6 hours' END
