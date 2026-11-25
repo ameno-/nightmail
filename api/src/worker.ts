@@ -301,6 +301,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
     }, config);
   }
   async verifyWake(token: string, conversationId: string) { return (await this.platform()).verifyWake(token, conversationId); }
+  async verifyFile(token: string, conversationId: string, attachmentId: string) { return (await this.platform()).verifyFile(token, conversationId, attachmentId); }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
   async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
   async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }

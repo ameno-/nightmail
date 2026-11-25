@@ -9888,12 +9888,13 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(await order('needs_you'), [p1, blocked, paused, p3]);
           assert.deepEqual((await ours('needs_you')).map((c: Json) => [c.needsYou.reasons, c.needsYou.urgent]), [[['ticket'], true], [['blocked'], true], [['paused'], true], [['ticket'], false]]);
           assert.deepEqual([(await ours('needs_you'))[1].needsYou.since, (await ours('needs_you'))[2].needsYou.since].map(s => Math.round((Date.now() - Date.parse(s)) / 60_000)), [50, 40], 'Waiting since the customer wrote.');
-          assert.deepEqual(await order('agent'), [handled]);
+          assert.deepEqual([await order('agent'), await order('waiting')], [[], [handled]], 'The agent answered: it waits on the customer.');
           assert.equal((await ours('all')).find((c: Json) => c.id === handled).needsYou, null);
           assert.equal((await ours('all')).find((c: Json) => c.id === paused).firstLine, 'First question');
           assert.ok((await list('all', reader, '&q=first%20QUESTION')).data.some((c: Json) => c.id === paused), 'A conversation with no subject is found by the opening line it is listed under.');
           const everything = await list('needs_you'), agent = await list('agent');
-          assert.deepEqual([everything.nextCursor, everything.counts.needsYou, agent.counts.agent], [null, everything.data.length, agent.data.length]);
+          const waitingList = await list('waiting');
+          assert.deepEqual([everything.nextCursor, everything.counts.needsYou, agent.counts.agent, waitingList.counts.waiting], [null, everything.data.length, agent.data.length, waitingList.data.length]);
           // Pages follow the same order; a cursor from another view, or one edited, is refused.
           const walked: string[] = [];
           for (let cursor: string | null = null, i = 0; i < 200; i++) {
@@ -9908,7 +9909,7 @@ describe('Hosted MCP OAuth and tools', () => {
 
           // A staff reply: staff no longer owe the next message, and the agent stays paused (in neither view); the customer's answer brings it back.
           ok(await send('POST', `${inbox}/${paused}/replies`, keyed(operator), { text: 'Looking now.' }), 201);
-          assert.deepEqual([(await order('needs_you')).includes(paused), (await order('agent')).includes(paused)], [false, false]);
+          assert.deepEqual([(await order('needs_you')).includes(paused), (await order('agent')).includes(paused), (await order('waiting')).includes(paused)], [false, false, true]);
           ok(reply(await platform.mirrorMessages(paused, [{ id: msg(), author: 'customer', text: 'Thanks, any news?' }])));
           assert.deepEqual((await ours('needs_you')).find((c: Json) => c.id === paused).needsYou.reasons, ['paused']);
           // The support platform's notice that the agent is paused answers nobody: the customer is still waiting.
@@ -9974,6 +9975,103 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(ok(await send('PUT', `${inbox}/${handled}/read`, session(reader), { read: false })), { id: handled, unread: true });
           assert.equal(ok(await send('GET', `${inbox}/${handled}`, session(reader))).conversation.unread, true, 'Opening the page alone marks nothing.');
           assert.equal(await unread(operator, paused), false, 'A staff reply is read by its author.');
+        });
+
+        await t.test('10 timeline: each customer email in full from the support address, held answers and why, internal notes, what happened besides, the agent’s brief, previews of the last message itself, and waiting and done', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const list = async (view: string, who = reader, extra = '') => ok(await send('GET', `${inbox}?view=${view}&limit=100${extra}`, session(who)));
+          const box = `mbx_${hex().slice(0, 32)}`, domainName = `tl-${hex().slice(0, 10)}.example`, domain = unique('mdom'), thread = unique('thread'), sender = `pat-${hex().slice(0, 8)}@elsewhere.example`;
+          await db.query("INSERT INTO mailbox_domains(id, workspace_id, domain_id, name, region, status) VALUES ($1, $2, $1, $3, $4, 'active')", [domain, home, domainName, REGION]);
+          await db.query('INSERT INTO mailboxes(id, workspace_id, domain_id, address) VALUES ($1, $2, $3, $4)', [box, home, domain, `support@${domainName}`]);
+          await db.query('INSERT INTO mail_threads(id, workspace_id) VALUES ($1, $2)', [thread, home]);
+          const full = 'My campaign stopped sending yesterday.\n\nOn Mon, 23 Nov 2026, Nightmail wrote:\n> Your domain is verified.';
+          const mail = async (atSupport = true) => {
+            const id = `msg_${hex().slice(0, 32)}`;
+            await db.query(`INSERT INTO mail_messages(id, workspace_id, direction, thread_id, region, subject, from_address, from_name, envelope_to, verdicts, headers, "to", text, html, sent_at, attachment_count)
+              VALUES ($1, $2, 'inbound', $3, $4, 'Campaign stuck', $5, 'Pat', '[]', $6, '[]', $7, $8, $9, now(), 1)`,
+              [id, home, thread, REGION, sender, JSON.stringify({ dmarc: 'PASS', virus: 'PASS' }), JSON.stringify([{ name: null, address: `support@${domainName}` }]), full, '<p>My campaign stopped sending yesterday.</p><img src="https://tracker.example/p.png">']);
+            if (atSupport) await db.query("INSERT INTO mailbox_messages(mailbox_id, message_id, workspace_id, thread_id, direction, received_at) VALUES ($1, $2, $3, $4, 'inbound', now())", [box, id, home, thread]);
+            await db.query(`INSERT INTO mail_attachments(id, workspace_id, message_id, filename, content_type, size_bytes, disposition, sha256, bucket, storage_key) VALUES ($1, $2, $3, 'logs.txt', 'text/plain', 2048, 'attachment', '00', 'fixture-mail', $4)`,
+              [`att-${id}`, home, id, `workspaces/${home}/att/${id}`]);
+            return id;
+          };
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            const conv = await stranger(sender), received = await mail(), elsewhere = await mail(false), other = await stranger();
+            const customer = msg(), held = msg(), answered = msg(), stray = msg();
+            ok(reply(await platform.mirrorMessages(conv, [{ id: customer, author: 'customer', text: 'My campaign stopped sending yesterday.', source: received, at: new Date(Date.now() - 120_000).toISOString() },
+              { id: held, author: 'agent', kind: 'held', text: 'Your sending is paused for review.', delivery: 'held', reason: 'access', at: new Date(Date.now() - 110_000).toISOString() }])));
+            ok(reply(await platform.mirrorMessages(other, [{ id: stray, author: 'customer', text: 'Hello', source: elsewhere }])));
+            error(reply(await platform.mirrorMessages(conv, [{ id: msg(), author: 'agent', text: 'Hi', source: received }])), 422);
+            error(reply(await platform.mirrorMessages(conv, [{ id: msg(), author: 'agent', text: 'Hi', delivery: 'sent', reason: 'gate' }])), 422);
+            assert.deepEqual((await db.query('SELECT id, source_message_id FROM support_messages WHERE id = ANY($1) ORDER BY id = $2 DESC', [[customer, stray], customer])).rows.map(r => r.source_message_id), [received, null],
+              'A source is kept only when the support address received it.');
+
+            // The customer's email as it arrived: subject, sender, all of its text with the quoted history apart, attachments.
+            let detail = ok(await send('GET', `${inbox}/${conv}`, session(reader)));
+            const [first, draft] = detail.messages;
+            assert.deepEqual([first.email.id, first.email.subject, first.email.from, first.email.text, first.email.replyText, first.email.hasHtml, first.email.textTruncated],
+              [received, 'Campaign stuck', { name: 'Pat', address: sender }, full, 'My campaign stopped sending yesterday.', true, false]);
+            assert.deepEqual(first.email.attachments, [{ id: `att-${received}`, filename: 'logs.txt', contentType: 'text/plain', size: 2048, inline: false, available: true }]);
+            assert.deepEqual([draft.author, draft.delivery, draft.heldReason, draft.email], ['agent', 'held', 'access', null]);
+            const formatted = ok(await send('GET', `${inbox}/${conv}/emails/${received}`, session(reader)));
+            assert.deepEqual([formatted.text, formatted.html.includes('tracker.example'), formatted.htmlTooComplex], [full, true, false], 'The HTML as stored: the page renders it sandboxed, images off.');
+            error(await send('GET', `${inbox}/${other}/emails/${received}`, session(reader)), 404);
+            error(await send('GET', `${inbox}/${other}/emails/${elsewhere}`, session(reader)), 404); // an email no message came from is not shown
+            error(await send('GET', `${inbox}/${conv}/emails/${received}`, session(owner, acme)), 403, 'OPERATOR_REQUIRED');
+            error(await send('GET', `${inbox}/${conv}/emails/${received}/attachments/att-nope`, session(reader)), 404);
+            error(await send('GET', `${inbox}/${other}/emails/${received}/attachments/att-${received}`, session(reader)), 404);
+            await db.query(`UPDATE mail_messages SET verdicts = '{"dmarc":"PASS"}' WHERE id = $1`, [received]);
+            error(await send('GET', `${inbox}/${conv}/emails/${received}/attachments/att-${received}`, session(reader)), 404); // only an attachment scanned clean opens
+            assert.equal(ok(await send('GET', `${inbox}/${conv}`, session(reader))).messages[0].email.attachments[0].available, false);
+
+            // A note: internal, the operator role, never delivered, and no change to who owes the next message.
+            const before = (await list('all', reader, `&q=${conv}`)).data[0];
+            error(await send('POST', `${inbox}/${conv}/notes`, keyed(reader), { text: 'Checked the campaign.' }), 403, 'OPERATOR_REQUIRED');
+            const note = ok(await send('POST', `${inbox}/${conv}/notes`, keyed(operator), { text: 'Checked the campaign: paused by review.' }), 201);
+            assert.deepEqual([note.author, note.kind, note.delivery, note.staff.userId], ['staff', 'note', null, operator.userId]);
+            assert.deepEqual(ok(reply(await platform.pullOutbox(conv))).data, [], 'A note never reaches the outbox.');
+            const after = (await list('all', reader, `&q=${conv}`)).data[0];
+            assert.deepEqual([after.lastAuthor, after.needsReply, after.needsYou?.reasons ?? null, after.preview, after.lastMessageAt], [before.lastAuthor, before.needsReply, before.needsYou?.reasons ?? null, before.preview, before.lastMessageAt]);
+            assert.deepEqual(before.preview, { author: 'agent', text: 'Your sending is paused for review.', held: true }, 'The list previews the last message itself.');
+
+            // What happened besides the messages, in order, with who did it; the agent's brief above them all.
+            const tkt = ticketId(), brief = { title: 'Campaign stuck', summary: 'Pat’s campaign stopped sending.', ask: 'Why did my campaign stop?', recommendation: 'Check the review hold.' };
+            ok(reply(await platform.mirrorState(conv, { ticket: { id: tkt, type: 'deliverability', severity: 'P3', brief } })));
+            ok(reply(await platform.mirrorState(conv, { ticket: { id: tkt, type: 'deliverability', severity: 'P2' } })));
+            ok(await send('POST', `${inbox}/${conv}/pause`, keyed(operator)));
+            ok(await send('POST', `${inbox}/${conv}/replies`, keyed(operator), { text: 'We released the hold.' }), 201);
+            ok(await send('POST', `${inbox}/${conv}/resume`, keyed(operator)));
+            ok(await send('POST', `${inbox}/${conv}/done`, keyed(operator)));
+            detail = ok(await send('GET', `${inbox}/${conv}`, session(reader)));
+            assert.deepEqual(detail.brief, brief);
+            assert.deepEqual(detail.events.map((e: Json) => [e.kind, e.by?.userId ?? null, e.details.severity ?? e.details.to ?? null]),
+              [['opened', null, null], ['ticket', null, 'P3'], ['priority', null, 'P2'], ['paused', operator.userId, null], ['resumed', operator.userId, null], ['done', operator.userId, null]]);
+            assert.deepEqual(detail.messages.map((m: Json) => [m.author, m.kind]), [['customer', null], ['agent', 'held'], ['staff', 'note'], ['staff', 'reply']]);
+            assert.deepEqual(detail.replyTarget, { address: sender, verified: false }, 'A sender who proved nothing: the reply cannot go.');
+
+            // Waiting on the customer once answered; done once marked, and closed ones too.
+            const views = async (id: string) => (await Promise.all(['needs_you', 'agent', 'waiting', 'done'].map(async view => (await list(view, reader, `&q=${id}`)).data.some((c: Json) => c.id === id) ? view : null))).filter(Boolean);
+            assert.deepEqual(await views(conv), ['done']);
+            ok(reply(await platform.mirrorMessages(conv, [{ id: answered, author: 'customer', text: 'Thanks, it works.' }])));
+            assert.deepEqual(await views(conv), ['agent']);
+            ok(reply(await platform.mirrorMessages(conv, [{ id: msg(), author: 'agent', kind: 'reply', text: 'Glad it works.', delivery: 'sent' }])));
+            assert.deepEqual(await views(conv), ['waiting']);
+            ok(reply(await platform.closeConversation(conv)));
+            assert.deepEqual(await views(conv), ['done']);
+
+            // A chat screenshot: a five-minute link to the support site that only Nightmail's check opens, for that one file.
+            const shot = `att_${random(16)}`;
+            ok(reply(await platform.mirrorMessages(chatId, [{ id: msg(), author: 'customer', text: 'Here is a screenshot.', attachments: [shot], files: [{ id: shot, name: 'error.png', type: 'image/png', size: 4096 }] }])));
+            const shown = ok(await send('GET', `${inbox}/${chatId}`, session(reader))).messages.find((m: Json) => m.attachments.includes(shot));
+            assert.deepEqual(shown.files, [{ id: shot, name: 'error.png', type: 'image/png', size: 4096 }]);
+            const link = ok(await send('GET', `${inbox}/${chatId}/files/${shot}`, session(reader))), url = new URL(link.url), token = url.searchParams.get('staff')!;
+            assert.deepEqual([url.origin, url.pathname], ['https://support.example.com', `/attachments/${chatId}/${shot}`]);
+            assert.deepEqual([await platform.verifyFile(token, chatId, shot), await platform.verifyFile(token, chatId, `att_${random(16)}`), await platform.verifyFile(token, conv, shot), await platform.verifyWake(token, chatId)], [true, false, false, false]);
+            error(await send('GET', `${inbox}/${chatId}/files/att_${random(16)}`, session(reader)), 404);
+            error(await send('GET', `${inbox}/${conv}/files/${shot}`, session(reader)), 404);
+          } finally { runtime.config.support!.addressIds = configured; }
         });
       } finally { globalThis.fetch = previous; }
     });
