@@ -109,7 +109,8 @@ function MessageCard({ message, addressId, parent, expanded, onToggle, onReply, 
   }
   return <li id={`message-${message.id}`} className="mailbox-message" data-direction={outbound ? 'outbound' : 'inbound'} data-unread={unread || undefined} data-reply-target={isTarget || undefined}>
     <article className="mailbox-message__card">
-      <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded}>
+      {/* Its text is the sender's name: analytics records the click by name, never that text (data-private). */}
+      <button type="button" className="mailbox-message__header" onClick={onToggle} aria-expanded={expanded} data-analytics="inbound/message" data-private>
         <span className="mailbox-message__from"><strong><bdi>{outbound ? 'You' : <Sender name={message.from.name} address={message.from.address} nameOnly />}</bdi></strong>{(outbound || nameParts(message.from.name, message.from.address)) && <bdi className="muted"><PrivateAddress value={message.from.address} /></bdi>}</span>
         <span className="mailbox-message__meta">
           {unread && <StatusBadge status="New" tone="info" />}

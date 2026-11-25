@@ -21301,6 +21301,41 @@ describe('Operational configuration and public event boundaries', () => {
     }));
   });
 
+  test('SNS stops verifying a peer whose signatures keep failing, for a minute, and keeps verifying SNS itself', async t => {
+    await simulatedSesFixture(t, async ({ db, local, runtime }) => t.test('mocked certificate origin', async t => {
+      const { admissionPeer } = await import('./src/core.js'), { SnsFailureBudget, SnsCertificateState } = await import('./src/operations.js');
+      let now = Date.parse('2026-11-25T12:00:10Z');
+      const budget = new SnsFailureBudget(() => now);
+      Object.assign(runtime, { snsFailureBudget: budget, snsCertificateState: new SnsCertificateState() });
+      const host = `https://sns.${REGION}.amazonaws.com/`, cert = snsCertName();
+      const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048 }), pem = await selfSignedPem(privateKey);
+      t.mock.method(globalThis, 'fetch', async (input: URL) => { assert.equal(input.href, host + cert); return new Response(pem); });
+      runtime.config.multiTenant = true;
+      const topic = `arn:aws:sns:${REGION}:111122223333:fixture`;
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,'111122223333','ready',$2)`, [REGION, topic]);
+      const fields = { Message: 'fixture', MessageId: 'budget', SubscribeURL: host, Timestamp: new Date().toISOString(), Token: 'fixture', TopicArn: topic, Type: 'UnsubscribeConfirmation' };
+      const signature = Buffer.from(sign('RSA-SHA256', Buffer.from(Object.entries(fields).map(([k, v]) => `${k}\n${v}\n`).join('')), privateKey)).toString('base64');
+      const post = (peer: string, good: boolean) => local('POST', '/v1/events/ses', { ...fields, SignatureVersion: '2', Signature: good ? signature : Buffer.alloc(256, 1).toString('base64'), SigningCertURL: host + cert },
+        'live', { 'x-nightmail-client-ip': admissionPeer(peer) });
+      const [sns, failing, other, unknown] = ['2001:db8:200::1', '2001:db8:201::1', '2001:db8:202::1', '2001:db8:203::1'];
+      ok(await post(sns, true), 202);
+      for (let i = 0; i < 20; i++) error(await post(failing, false), 403, 'SNS_INVALID_SIGNATURE');
+      // Its budget spent, it isn't verified again this minute, even with a good signature; other peers and SNS still are.
+      for (const good of [false, true]) assert.equal(error(await post(failing, good), 429, 'SNS_RATE_LIMITED').retryable, true);
+      error(await post(other, false), 403, 'SNS_INVALID_SIGNATURE');
+      ok(await post(sns, true), 202);
+      now += 60_000;
+      ok(await post(failing, true), 202);
+      // Past an isolate's ceiling of failures in a minute, a peer that failed this minute gets no more tries; a peer with
+      // no failure (SNS from an address this isolate hasn't seen) and one that verified recently still are verified.
+      error(await post(other, false), 403, 'SNS_INVALID_SIGNATURE');
+      for (let i = 0; i < 1200; i++) budget.failed(`filler-${i}`);
+      error(await post(other, true), 429, 'SNS_RATE_LIMITED');
+      ok(await post(unknown, true), 202);
+      ok(await post(sns, true), 202);
+    }));
+  });
+
   test('SNS isolate limits simultaneous and rolling cold lookups independently of peer budgets', async () => {
     const { SnsCertMissBudget } = await import('./src/operations.js');
     let now=0, calls=0, finish!:()=>void;
@@ -38146,6 +38181,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const logo = await upload('/v1/attachments', 'logo', MiB);
       ok((await measure(await draft(refs(['logo']), [logo]))).reply, 303);
       assert.equal(reads, 1); assert.equal(occurrences(rendered[0]!, `data:image/png;base64,${body(MiB)}`), 1);
+      // An inline image's data URI names its bare type/subtype, never the parameters stored with its type.
+      const marked = 'image/png;x="><iframe src=https://example.org/></iframe><i y="';
+      const stale = await upload('/v1/attachments', 'stale', 16, marked);
+      ok((await measure(await draft(refs(['stale']), [stale]))).reply, 303);
+      assert.ok(rendered[0]!.includes(`data:image/png;base64,${body(16)}`) && !rendered[0]!.includes('iframe'), 'Only the bare type reaches the page');
       // A 6 MiB image would hold about 30 MiB even once; 60 references, about 1.5 GB; the hostile draft, far more.
       const hero = await upload('/v1/attachments', 'hero', 6 * MiB);
       for (const html of [refs(['hero']), refs(['hero'], 60), hostile]) await refused(await draft(html, [hero]));
@@ -38157,9 +38197,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(reads, 6); assert.equal(occurrences(rendered[0]!, part), 6);
       await refused(await draft(refs(names, 2), parts));
 
-      // A content type may contain "cid:". Its 1,000 data URIs are never scanned again for references, so the part
-      // referenced once is embedded once, not 1,001 times (334 MiB).
-      const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png;x=cid:part0');
+      // A content type's quoted parameter may contain "cid:". Its 1,000 data URIs are never scanned again for references
+      // (and carry only the bare type), so the part referenced once is embedded once, not 1,001 times (334 MiB).
+      const tiny = await upload('/v1/attachments', 'tiny', 1, 'image/png; x="cid:part0"');
       ok((await measure(await draft(refs(['tiny'], 1000) + refs(['part0']), [tiny, parts[0]!]))).reply, 303);
       assert.equal(reads, 2); assert.equal(occurrences(rendered[0]!, part), 1); assert.ok(rendered[0]!.length < 2 * MiB);
 
@@ -40889,6 +40929,22 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await stored(2*GiB);ok(await upload(),201);
       await stored(100*GiB-7);ok(await upload(),201);
       assert.match(error(await upload(),413,'STORED_ATTACHMENT_LIMIT_EXCEEDED').message,/100 GiB/);
+      // Template assets are uploads too: refused past the same cap before anything is stored, and counted while they are
+      // kept, so the reconciliation finds nothing to correct.
+      const asset=()=>local('POST','/v1/template-assets',{filename:'logo.png',contentType:'image/png',content:Buffer.from('fixture-image').toString('base64')});
+      const before=objects.size;
+      assert.match(error(await asset(),413,'STORED_ATTACHMENT_LIMIT_EXCEEDED').message,/100 GiB/);
+      assert.equal(objects.size,before,'Nothing was stored');
+      assert.equal(Number((await db.query('SELECT count(*) FROM sending_upload_reservations WHERE workspace_id=$1',[wid])).rows[0].count),0,'No reservation is left');
+      await stored(2*GiB);
+      const kept=ok(await asset(),201);assert.equal(kept.size,13);
+      const usage=async()=>Number((await db.query('SELECT bytes FROM sending_asset_usage WHERE workspace_id=$1',[wid])).rows[0].bytes);
+      assert.equal(await usage(),2*GiB+13);
+      const counted=Number((await db.query(`SELECT (SELECT coalesce(sum(size),0) FROM sending_attachments WHERE workspace_id=$1)+(SELECT coalesce(sum(size),0) FROM template_assets WHERE workspace_id=$1) AS n`,[wid])).rows[0].n);
+      await db.query('UPDATE sending_asset_usage SET bytes=$2 WHERE workspace_id=$1',[wid,counted]);await db.query('SELECT reconcile_asset_usage()');
+      assert.equal(await usage(),counted,'The reconciliation counts template assets as the trigger does');
+      ok(await local('DELETE',`/v1/template-assets/${kept.id}`));
+      assert.equal(await usage(),counted-13,'A deleted template asset frees its bytes');
     });
   });
 
@@ -44043,6 +44099,8 @@ describe('dashboard analytics', () => {
     fire('click', { target: el('button', { 'aria-label': 'Remove Dana Lee' }, 'Remove', el('td', {}, 'Dana Lee ' + typed, el('tr', {}, 'Dana Lee'))) });
     fire('click', { target: el('a', { href: '/audience/contacts/con_0123456789abcdef?ref=' + typed }, 'Dana Lee') });
     fire('click', { target: el('span', {}, 'Dana Lee', el('button', { 'data-private': '', 'aria-label': 'Dana Lee, Acme. Switch account' }, 'Acme')) });
+    // A received message's header: its text is the sender's name, so the click is known by its data-analytics name alone.
+    fire('click', { target: el('strong', {}, 'Dana Lee', el('button', { 'data-analytics': 'inbound/message', 'data-private': '' }, 'Dana Lee')) });
     fire('click', { target: el('span', { class: 'private-address' }, typed) });
     tracker.dialog(true, 'Invite ' + typed); clock += 1500; tracker.dialog(false, 'Invite ' + typed, undefined, 1500);
     tracker.apiError('POST', '/v1/workspaces/current/invitations?email=' + encodeURIComponent(typed), 422, 'VALIDATION_FAILED', 'email');
@@ -44058,18 +44116,18 @@ describe('dashboard analytics', () => {
     assert.deepEqual(envelope, { v: 1, sid: 'id0000000001', ws, uid, app: 'abc123def456', vp: 'phone' });
     assert.deepEqual(events.map(event => [event.type, event.name ?? (event.role ?? '') + ':' + (event.label ?? event.step ?? event.code ?? '')]), [
       ['page_view', ':'], ['track', ':signed_up'], ['click', 'textbox:[email]'], ['form_invalid', 'members/invite'], ['form_invalid', 'field:Email'], ['form_submit', 'members/invite'],
-      ['click', 'button:Invite [email]'], ['click', 'button:'], ['click', 'link:/audience/contacts/:id'], ['click', 'button:'], ['click', 'none:'],
+      ['click', 'button:Invite [email]'], ['click', 'button:'], ['click', 'link:/audience/contacts/:id'], ['click', 'button:'], ['click', 'inbound/message'], ['click', 'none:'],
       ['dialog_open', 'dialog:Invite [email]'], ['dialog_close', 'dialog:Invite [email]'], ['api_error', ':VALIDATION_FAILED'], ['page_view', ':'], ['page_hide', ':'],
     ]);
     assert.deepEqual(events.filter(event => event.type === 'page_view').map(event => [event.route, event.ref ?? null, event.ms ?? null]), [['/settings', null, null], ['/receiving/rules/:id', '/settings', 3500]]);
-    assert.deepEqual([events[3]!.field, events[3]!.reason, events[13]!.op, events[13]!.field], ['email', 'typeMismatch', 'POST /v1/workspaces/current/invitations', 'email']);
+    assert.deepEqual([events[3]!.field, events[3]!.reason, events[14]!.op, events[14]!.field], ['email', 'typeMismatch', 'POST /v1/workspaces/current/invitations', 'email']);
     // What the ingest stores from it is just as clean.
     const ingest = await setup();
     assert.equal((await ingest.post(sent[0]!)).status, 204);
     const stored = ingest.rows();
     assert.equal(stored.length, events.length);
     assert.ok(!JSON.stringify(stored).match(/dana|Dana|Lee|example|Acme|con_0123/), JSON.stringify(stored));
-    assert.deepEqual(stored.map(row => row.target).filter(Boolean), ['textbox:[email]', 'members/invite', 'field:Email', 'members/invite', 'button:Invite [email]', 'button:', 'link:/audience/contacts/:id', 'button:', 'none:', 'dialog:Invite [email]', 'dialog:Invite [email]']);
+    assert.deepEqual(stored.map(row => row.target).filter(Boolean), ['textbox:[email]', 'members/invite', 'field:Email', 'members/invite', 'button:Invite [email]', 'button:', 'link:/audience/contacts/:id', 'button:', 'inbound/message', 'none:', 'dialog:Invite [email]', 'dialog:Invite [email]']);
     // Do Not Track or Global Privacy Control: on or not, nothing listens and nothing is sent.
     optedOut = true;
     const dnt = page();
