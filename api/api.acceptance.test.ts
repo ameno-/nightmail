@@ -3953,7 +3953,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>(), cnames=new Map<string,string>();
           const policies=new Map<string,string[]>(); let dmarcQueries=0,dmarcFailure=false;
           dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
-            const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query');
+            const url = new URL(String(input)); assert.ok(['https://cloudflare-dns.com/dns-query','https://dns.google/resolve'].includes(url.origin + url.pathname));
             if (fault===url.searchParams.get('type')+'-servfail') return Response.json({Status:2});
             if (fault===url.searchParams.get('type')+'-503') return new Response(null,{status:503});
             if (fault===url.searchParams.get('type')+'-timeout') throw new DOMException('timed out','TimeoutError');
@@ -32056,7 +32056,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const networkGuard = globalThis.fetch;
       t.after(() => { globalThis.fetch = networkGuard; });
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const url = new URL(String(input)); assert.ok(['cloudflare-dns.com', 'dns.google'].includes(url.hostname));
         const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!, soa = (zone: string) => ({ name: `${zone}.`, type: 6, data: 'ns. hostmaster. 1 1 1 1 1' });
         if (type === 'NS') lookups.push(name);
         if (name.endsWith('broken.example')) return new Response('', { status: 500 });
