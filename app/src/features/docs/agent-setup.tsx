@@ -104,6 +104,36 @@ export function signupFormPrompt({ origin, newsletter, setupToken }: { origin: s
   ].join('\n')
 }
 
+// The marketing focus: the agent imports contacts and drafts campaigns, over MCP or REST; it never sends one on its own.
+export function marketingPrompt({ origin, setupToken }: { origin: string; setupToken?: string | null }) {
+  return [
+    `Help me send marketing email with ${productName}.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Audience and Campaigns).`,
+    `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Or call the REST API with the key as a bearer token.`,
+    '- Import my contacts from the CSV I point you to: previewContactImport, show me its summary, then commitContactImport. Mark them subscribed only if I confirm they agreed to hear from me.',
+    '- Draft a first campaign with createCampaign (read getCampaignContentGuide before writing its HTML). Leave it as a draft: never send or schedule a campaign without my go-ahead.',
+  ].join('\n')
+}
+
+// The personal inbox focus: their own address on their own domain. mailServers: the installation's IMAP/SMTP hosts, when
+// it has a mail gateway (a mail app's password is made in the dashboard: an agent's key can't make one).
+export function personalInboxPrompt({ origin, setupToken, mailServers }: { origin: string; setupToken?: string | null; mailServers: { imap: string; smtp: string } | null }) {
+  return [
+    `Set up my own email address with ${productName}: mail to me@<my domain> lands in a ${productName} inbox.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Domains and Agent inboxes).`,
+    '- Ask me which domain and which address I want before changing anything.',
+    `- Add the domain with createDomain (POST ${origin}/v1/domains) and walk me through its DNS records (getDomain lists them); it verifies by itself once they resolve. Receiving needs its MX record: on the domain itself that moves where the domain's existing mail goes, so confirm that with me first.`,
+    `- Once the domain receives, create a persistent inbox for the address with createInbox (POST ${origin}/v1/inboxes, {"type":"persistent","domain":…,"localPart":…}) and send me a test email from it.`,
+    ...mailServers ? [`- To read it in a mail app, I create an app password for that inbox under API keys in the dashboard (your key can't): the app signs in to ${mailServers.imap} (IMAP) and ${mailServers.smtp} (SMTP) with the inbox's address.`] : [],
+  ].join('\n')
+}
+
 const ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g
 /** Code or prose that holds mailbox addresses: each one goes through PrivateAddress, so it is blurred until hovered or
  * focused (and shown when privacy mode is off). Copy buttons keep copying the plain text, in full. */

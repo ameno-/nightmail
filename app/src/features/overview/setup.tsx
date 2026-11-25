@@ -137,7 +137,9 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   // Another focus than developer emails (onboarding's question, Settings) has its own first steps after the domain.
   const lead = leadFocus(identity)
   if (lead !== 'developer' && progress) {
-    const focusSteps = [domainStep, ...stepsFor(lead, progress, keyed, newsletter)]
+    // An inbox of their own is on their own domain: the built-in one doesn't count.
+    const ownDomain: SetupStep = { key: 'domain', done: !!ownVerified, title: 'Add your own domain', action: !ownVerified && <Link className="ui-button ui-button--primary ui-button--md" to={pending ? `/domains/${pending.id}` : '/domains?add'}>{pending ? 'View records' : 'Add domain'}</Link> }
+    const focusSteps = [lead === 'personal' ? ownDomain : domainStep, ...stepsFor(lead, progress, keyed, newsletter)]
     if (focusSteps.every(step => step.done)) return { loading: false, steps: null, ...known }
     const current = focusSteps.find(step => !step.done)
     return { loading: false, steps: focusSteps, current, open: current ? [current] : [], ...known }
@@ -167,6 +169,11 @@ function stepsFor(lead: Exclude<WorkspaceFocus, 'developer'>, progress: SetupPro
     // The prompt's setup token gets the agent a key of its own: a key is what connecting leaves behind.
     { key: 'connect', done: keyed, title: 'Connect your agent', action: !keyed && <Button variant="primary" onClick={openConnectAgent}>Connect an agent</Button> },
     { key: 'receive', done: progress.received, title: 'Receive your first email', action: !progress.received && action('/receiving/inboxes', 'Open inboxes', false) },
+  ]
+  // An inbox of their own: mail to their domain lands in Receiving's inbox, which a mail app can also open where the
+  // installation has a mail gateway (onboarding's step says so).
+  if (lead === 'personal') return [
+    { key: 'inbox', done: progress.received, title: 'Read your mail', action: !progress.received && action('/receiving', 'Open Receiving', false) },
   ]
   if (lead === 'marketing') return [
     { key: 'contacts', done: progress.contacts, title: 'Import your contacts', action: !progress.contacts && action('/audience', 'Open Audience') },

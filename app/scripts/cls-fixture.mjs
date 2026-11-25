@@ -250,7 +250,10 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
             const headers = { cookie: req.headers.cookie ?? '', origin: req.headers.origin ?? origin, ...req.headers['x-nightmail-workspace'] ? { 'x-nightmail-workspace': req.headers['x-nightmail-workspace'] } : {} };
             const me = await fetch(apiOrigin + '/v1/me', { headers }).then(r => r.ok ? r.json() : null, () => null);
             if (me?.multiTenant) {
-              await hosted(db, me.workspaceId);
+              const conn = await hosted(db, me.workspaceId);
+              // Starting Hosted mail sets up the workspace's built-in domain too (startHostedMail): the first email sends from it.
+              // Pages measured at once (light, dark, phone) start it together: whichever comes second finds it made.
+              if (!(await db.query('SELECT 1 FROM builtin_domains WHERE workspace_id=$1', [me.workspaceId])).rowCount) await builtin(db, me.workspaceId, conn, me.workspaceId.replace(/[^a-z0-9]/g, '').slice(0, 16) + '-e5').catch(() => {});
               const read = await fetch(apiOrigin + '/v1/connection', { headers }), json = await read.json();
               res.writeHead(read.ok ? 201 : read.status, { 'content-type': 'application/json' });
               res.end(JSON.stringify(read.ok ? json.connection : json));
@@ -945,7 +948,7 @@ export async function seed(fx) {
   const verifiedConn = await hosted(db, 'ws_verified');
   await builtin(db, 'ws_verified', verifiedConn, 'rowan-bakery-m2');
   await domain(db, 'ws_verified', verifiedConn, 'rowanbakery.example');
-  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its domain step.
+  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its first email.
   await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
   await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
   // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
@@ -964,6 +967,7 @@ export async function seed(fx) {
   await focused('abe', 'abe@aspen.example', 'Abe Lowe', 'ws_focus_agents_new', 'Aspen', ['agents'])
   await focused('mae', 'mae@maple.example', 'Mae Ford', 'ws_focus_marketing', 'Maple', ['marketing', 'newsletter'])
   await focused('noa', 'noa@linden.example', 'Noa Hart', 'ws_focus_newsletter', 'Linden', ['newsletter'])
+  await focused('pam', 'pam@poplar.example', 'Pam Reid', 'ws_focus_personal', 'Poplar', ['personal'])
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');

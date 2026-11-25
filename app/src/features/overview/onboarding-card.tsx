@@ -118,7 +118,7 @@ function FirstSendCard({ domain, onSent }: { domain?: Domain; onSent?: () => voi
 }
 
 /** The setup steps whose actions the card already has, for each focus (Overview leaves them out of the steps beside it). */
-export const cardActions: Record<WorkspaceFocus, string[]> = { developer: ['send'], agents: ['inbox', 'connect'], marketing: ['contacts', 'campaign'], newsletter: ['newsletter', 'issue'] }
+export const cardActions: Record<WorkspaceFocus, string[]> = { developer: ['send'], agents: ['inbox', 'connect'], marketing: ['contacts', 'campaign'], newsletter: ['newsletter', 'issue'], personal: [] }
 
 const ImportContactsDialog = lazy(() => import('../audience/import').then(module => ({ default: module.ImportContactsDialog })))
 
