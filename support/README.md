@@ -106,7 +106,7 @@ The tests run the deployed bundle in Miniflare, as Console's agent tests do. `@c
 - a bug ticket: refused without its reproduction, then filed with request IDs from `api_errors`. The `[Nightmail bug]` email carries signed screenshot links, and tampered or expired links are refused;
 - email image attachments;
 - the work queues, and the ledger and sweep: mail held at the edge for the digest, intake mail for an unlisted address accepted once it's listed, a ticket's lost team email sent once, and a failed digest resent once;
-- replay and readiness: mail stored before any route is answered once, a key that gains an address replays its mail, no flow takes another's address, and health reports readiness as counts only.
+- replay and readiness: mail stored before any route is answered once, a key that gains an address replays its mail, no flow takes another's address, and health reports whether the service is ready.
 
 They make no network or model calls. `test/*.local.ts` scripts, which are git-ignored, are for a few real turns against the gateway with a key read from a file.
 
@@ -156,7 +156,7 @@ Nightmail records a `message.received` event for every message an address receiv
 
 - **Key self-check:** each sweep lists the addresses each key reads (`GET /v1/inbound/addresses`) and compares them with the flow's list: `SUPPORT_ADDRESSES` (default `SUPPORT_ADDRESS`) or `INTAKE_ADDRESSES`. The result is `ok`, `missing`, `extra`, `not_configured` (this Worker has no key for the flow: its secret is unset), `unauthorized` (Nightmail refused the key) or `unavailable` (D1 `support_checks`). When a flow's coverage becomes complete again, objects with blocked work are woken, and that work runs at once.
 - **Replay:** only addresses that are both listed and readable are polled, up to 50 events per flow per sweep, each from its own cursor (D1 `replay_cursors`). An address the key can't read isn't polled, so its cursor never passes mail it couldn't see; once the key reads it, its mail since the cursor is replayed. Polling starts at the end of the log when first installed. A message with a ledger row is skipped. A message for a thread whose conversation closed more than 7 days ago is kept for the digest instead of reopening it.
-- **`GET /health`:** `status` stays `ok` (the deploy reads it as liveness). `ready` and `checks` come from D1 alone, as counts and states, never addresses, IDs or error text; `work.blockedBy` counts blocked items by error code (`MISSING_SECRET`: set the secret; `NOT_FOUND` or `FORBIDDEN`: widen the key or add the route). `ready` means both keys are `ok`, nothing is blocked, nothing has failed six or more times, and the poller caught up within 15 minutes. `routeGaps24h` counts mail the poller found before any webhook did.
+- **`GET /health`:** `status` stays `ok` (the deploy reads it as liveness). `ready` means both keys read their configured addresses, nothing is blocked, no pending work has failed six or more times, and the poller caught up within 15 minutes. The underlying checks stay in D1.
 - **Changing a key:** expand an existing key's addresses rather than replacing the key: idempotency keys are scoped to the API key, so a replaced key could resend a reply. Replace a key only when health shows nothing blocked. Every move into `blocked` logs `WORK_BLOCKED` at error level.
 
 ## Limits and retention
