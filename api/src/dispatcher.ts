@@ -2,7 +2,7 @@ import { getTableColumns, sql, type SQL } from 'drizzle-orm';
 import type { Attachment, SESv2Client, SendEmailCommandInput } from '@aws-sdk/client-sesv2';
 import { ApiError, getSes, isSimulatedSes, rowId, lazyModule, log, logError, ModuleLoadError, preloadSesTransport, wrapModuleLoad, type Actor, type DbExecutor, type Runtime } from './core.js';
 import { attachments, emails, type EmailSnapshot, type EmailStatus, type CampaignDraft, type ReviewedRecipient } from './db/sending.js';
-import { approvedOriginUser, checkedDispatchAttachments, customerCredits, formattedSender, inlineMessage, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
+import { approvedOriginUser, checkedDispatchAttachments, customerCredits, formattedSender, inlineMessage, LINK_RECORD_RECHECK_MS, materializeCampaignEmail, originAllowed, publicEventType, QUOTA_REFRESH_MS, queueSimulatedFeedback, rank, sesDailyReserve, sizeCheck, statusForEvent, terminalColumns, terminalEvents, verifiedAttachment } from './sending.js';
 import { receivingPolicy } from './mailbox-ingest-input.js';
 import { tieAllows } from './approval-ties.js';
 import { principal } from './mail-gateway.js';
@@ -1072,7 +1072,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     return { processed: 0, blocked: true };
   }
   const loadAttachments = batchAttachments(base, ready);
-  const unscreened: Mail[] = [];
+  const unscreened: Mail[] = [], linkWaiting: Mail[] = [];
   const prepare = async (item: typeof ready[number]) => {
     try {
       if (item.contentBytes) {
@@ -1091,6 +1091,9 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
     catch (error) {
       if (error instanceof ModuleLoadError) { await releaseLeases(base, [item.mail]); throw error; }
       if (error instanceof HeldForScreen) { unscreened.push(item.mail); counters.deferred++; lane.advanced++; logEmail(lane, item.mail, item.trace, 'deferred', 'SCREEN_REQUIRED'); return; }
+      // A campaign launched before link hosts whose sending domain has none active yet (src/link-domains.ts): the email
+      // stays queued, as its campaign waits, and is tried again in 15 minutes instead of failing.
+      if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') { linkWaiting.push(item.mail); counters.deferred++; lane.advanced++; logEmail(lane, item.mail, item.trace, 'deferred', 'LINK_RECORD_REQUIRED'); return; }
       counters.skipped++; lane.advanced++;
       logEmail(lane, item.mail, item.trace, await rejectPreflight(item.owner.runtime, item.mail, error), error instanceof ApiError ? error.code : 'DISPATCH_PREFLIGHT_FAILED');
     }
@@ -1151,6 +1154,7 @@ async function dispatchReady(base: Runtime, lane: Lane, ready: (Leased & { owner
   if (unscreened.length) await base.db.execute(sql`UPDATE sending_emails e SET screened = false, lease_until = NULL
     FROM jsonb_to_recordset(${JSON.stringify(unscreened.map(m => ({ workspace_id: m.workspaceId, id: m.id, version: m.dispatchVersion, status: 'queued' })))}::jsonb) x(workspace_id text, id text, version int, status text)
     WHERE e.workspace_id = x.workspace_id AND e.id = x.id AND e.dispatch_version = x.version AND e.status = x.status`);
+  if (linkWaiting.length) await releaseLeases(base, linkWaiting, Date.now() + LINK_RECORD_RECHECK_MS);
   return { processed: ready.length, blocked: false };
 }
 const logLost = (count:number) => log('warn', { code:'DISPATCH_CLAIM_LOST', count, message:'Rows changed between lease and claim; they will be reconsidered on the next pass.' });

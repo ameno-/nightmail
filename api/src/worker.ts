@@ -10,6 +10,7 @@ import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
 import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { linkHostRequest } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -323,6 +324,16 @@ export default {
     // The events host (BYO_EVENTS_ORIGIN) takes AWS's signed notifications and nothing else.
     let eventsHost: string | undefined; try { eventsHost = new URL(String((env as { BYO_EVENTS_ORIGIN?: unknown }).BYO_EVENTS_ORIGIN)).host; } catch { eventsHost = undefined; }
     if (eventsHost && url.host === eventsHost && pathname !== '/health' && !(request.method === 'POST' && (pathname === '/v1/events/ses' || pathname === '/v1/events/cloudformation'))) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+    // A customer's link host (src/link-hosts.ts) answers the links in their mail and nothing else. With link hosts on,
+    // every host that is none of this installation's own came through the Cloudflare for SaaS zone: a links.<domain>.
+    const own = [String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL), ...String((env as { PREVIOUS_PUBLIC_URLS?: unknown }).PREVIOUS_PUBLIC_URLS ?? '').split(',')]
+      .flatMap(origin => { try { return [new URL(origin.trim()).hostname]; } catch { return []; } }).concat(eventsHost ? [eventsHost.replace(/:\d+$/, '')] : []);
+    const linkAnswer = linkHostRequest(!!setting(env, 'LINK_SAAS_ZONE_ID') && !!setting(env, 'LINK_SAAS_TOKEN'), url.hostname, pathname, own);
+    if (linkAnswer === 'missing') return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+    // A name of the zone that isn't this Worker's (dev, support, media): the zone-wide route runs before its custom domain
+    // or bucket, so it goes on to them unchanged (a subrequest to the same zone skips the route).
+    if (linkAnswer === 'pass') return fetch(request);
+    const linkHost = linkAnswer === 'link';
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !requestHeaderNames('environment').some(name => request.headers.has(name))) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true', analytics = (env as unknown as { DASHBOARD_ANALYTICS?: unknown }).DASHBOARD_ANALYTICS === 'on';
@@ -332,7 +343,7 @@ export default {
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !linkHost && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal)(?:\/|$)/.test(pathname)) {
       // Existing files are served asset-first. Only dashboard routes get the shell on a miss. "/" on a hosted
       // installation is the homepage: home.html, the dashboard's shell with the homepage's first screen painted in it
       // (app/home-shell.ts); Workers Assets answers /home with it.
