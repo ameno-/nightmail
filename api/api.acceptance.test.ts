@@ -2098,6 +2098,22 @@ test('Account switcher: two accounts in one browser switch, stay apart on every 
     assert.equal(forged.status,403); assert.equal(await code(forged),'CSRF_ORIGIN_INVALID');
     assert.equal(await who(), work.id, 'A forged switch changes nothing');
   }
+  // A refused request's log line says what kind of page asked and its Sec-Fetch-Site, never the origin itself.
+  const { originClass } = await import('./src/account-login.js');
+  const served = 'https://app.nightmail.example';
+  assert.deepEqual([null, 'null', 'chrome-extension://abcdefghijklmnop', 'moz-extension://1234', 'safari-web-extension://x', 'file://', 'http://app.nightmail.example', 'https://app.nightmail.example:8443',
+    'https://www.nightmail.example', 'https://elsewhere.example', 'not an origin'].map(value => originClass(value, served)),
+    ['missing', 'null', 'extension', 'extension', 'extension', 'other-scheme', 'same-host-other-scheme', 'same-host-other-port', 'same-site-other-host', 'other-host', 'invalid']);
+  const warnings: string[] = [];
+  const warn = t.mock.method(console, 'warn', (line: string) => { warnings.push(line); });
+  for (const [foreign, site] of [['moz-extension://f1e2d3c4', 'cross-site'], ['null', 'same-origin'], [undefined, undefined]] as const) {
+    const refused = await app.fetch(new Request(origin+'/api/auth/sign-out',{method:'POST',headers:{'content-type':'application/json',...(foreign?{origin:foreign}:{}),...(site?{'sec-fetch-site':site}:{})},body:'{}'}),runtime);
+    assert.equal(await code(refused),'CSRF_ORIGIN_INVALID');
+  }
+  const logged = warnings.map(line => JSON.parse(line)).filter(row => row.code === 'CSRF_ORIGIN_INVALID');
+  assert.deepEqual(logged.map(row => [row.originClass, row.fetchSite ?? null]), [['extension', 'cross-site'], ['null', 'same-origin'], ['missing', null]]);
+  assert.ok(!warnings.join('\n').includes('f1e2d3c4'), 'The origin itself is never logged');
+  warn.mock.restore();
   const unknown = await request('/api/auth/accounts/switch','POST',{account:'not-connected-here'});
   assert.equal(unknown.status,401);
   const switched = store(await request('/api/auth/accounts/switch','POST',{account:personal.id}));
