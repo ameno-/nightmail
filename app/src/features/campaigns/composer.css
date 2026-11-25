@@ -6,7 +6,7 @@
 .composer-toolbar { position: sticky; top: 0; z-index: 3; display: flex; align-items: center; flex-shrink: 0; height: 48px; margin: 0 var(--space-8) var(--space-8); padding: 0 var(--space-6); border: 0; background: var(--color-email-surface); }
 .composer-tools { display: flex; align-items: center; flex: 1; min-width: 0; flex-wrap: nowrap; gap: var(--space-4); overflow-x: auto; --fade-pad-x: var(--space-4); }
 .composer-tools > * { flex-shrink: 0; }
-.composer-tools .cluster { flex-wrap: nowrap; gap: 2px; }
+.composer-tools .cluster { flex-wrap: nowrap; gap: var(--space-4); }
 .composer-tools .ui-button--ghost[aria-pressed='true'] { background: var(--color-active-bg); color: var(--color-text); }
 .composer-history { margin-left: auto; }
 /* On touch every tool is a full 44px target. */
@@ -19,7 +19,7 @@
 .composer-visual[hidden] { display: none; }
 .composer-canvas { position: relative; display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; min-height: 320px; padding: 0; background: var(--color-email-surface); color: var(--color-email-text); color-scheme: light; }
 /* The starting lines sit where the loading composer's were (.composer-skeleton-canvas) and the email's text will be. */
-.composer-starting { position: absolute; inset: 0; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16) 40px; }
+.composer-starting { position: absolute; inset: 0; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16) var(--space-40); }
 .composer-starting .ui-skeleton-block { background: #EDEDED; }
 .composer-document { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
 /* The editor theme converts its px sizes to em against a 14px root; keep that root so a 16px paragraph edits at 16px.
@@ -30,6 +30,8 @@
 .composer-document .tiptap:focus-visible { outline: none; }
 :is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input]):focus-visible { box-shadow: none; background-color: var(--color-overlay-hover); }
 body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-slash-command]) { visibility: hidden; pointer-events: none; }
+/* The slash menu is placed in a wrapper on the page's body: lift it over the studio, which covers the page from 900 px. */
+body > div:has(> [data-re-slash-command]) { z-index: 90; }
 .composer-document .tiptap h1, .composer-document .tiptap h2, .composer-document .tiptap h3 { color: inherit; }
 /* Converted paragraphs retain node-paragraph; its later theme rule must not override heading metrics. */
 .composer-document .tiptap.ProseMirror h1.node-h1.node-paragraph { font-size: 26px; line-height: 1.25; margin: 0 0 20px; }
@@ -61,7 +63,7 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 .composer-document .tiptap .node-section > p:last-child:has(> br.ProseMirror-trailingBreak:only-child) { min-height: 1px; height: 1px; margin: 0; line-height: 1px; }
 .composer-document .tiptap a { cursor: text; }
 .composer-document .tiptap table { max-width: 100%; }
-.email-composer > :is(.ui-alert, .composer-error) { margin: 0 40px var(--space-16); }
+.email-composer > :is(.ui-alert, .composer-error) { margin: 0 var(--space-40) var(--space-16); }
 /* The Style panel's own fields (the library's Inspector; campaigns.css places the panel). One grid for every property:
    its label in one column, its control filling the other to the panel's 16 px edge (where Close's X ends too), 28 px tall
    like the dashboard's other controls, on the control steps: solid fills, no edges, a stronger step while pointed at or
@@ -131,8 +133,8 @@ body:has(.email-composer[data-inactive]) :is([data-re-bubble-menu], [data-re-sla
 @media (pointer: coarse), (max-width: 899px) {
   [data-re-bubble-menu] { flex-wrap: wrap; max-width: calc(100vw - 16px); }
   [data-re-bubble-menu-group] { border-left: 0; }
-  :is([data-re-bubble-menu-item], [data-re-link-selector-trigger], [data-re-link-bm-item], [data-re-btn-bm-item], [data-re-img-bm-item]) { padding: 11px; }
-  [data-re-node-selector-trigger] { min-height: 36px; padding-inline: 12px; }
+  :is([data-re-bubble-menu-item], [data-re-link-selector-trigger], [data-re-link-bm-item], [data-re-btn-bm-item], [data-re-img-bm-item]) { display: inline-grid; place-items: center; min-width: 36px; min-height: 36px; padding: 0; }
+  [data-re-node-selector-trigger] { min-height: 36px; padding-inline: var(--space-12); }
   :is([data-re-slash-command-item], [data-re-node-selector-item]) { min-height: 44px; }
   :is([data-re-link-selector-input], [data-re-link-bm-input], [data-re-btn-bm-input], [data-re-img-bm-input], .composer-inspector :is(input, select, textarea)) { font-size: 16px; }
 }
