@@ -51,13 +51,15 @@ shard() (
   if [[ $1 == integration ]]; then
     node --import tsx src/runner.ts > "$HOME/runner.log" 2>&1 & pids+=("$!")
   fi
-  # Start as soon as all fixtures are alive and the HTTP server accepts requests.
+  # A live issuer PID doesn't mean its TLS listener can serve the first OAuth grant yet.
+  issuer_ready() { curl -fs --max-time 1 --cacert "$NODE_EXTRA_CA_CERTS" "$ACCOUNT_ISSUER/jwks" | jq -e '.keys | any(.kid == "fixture" and .alg == "ES256")' >/dev/null; }
   for ((i=0; i<100; i++)); do
     kill -0 "${pids[@]}"
-    if curl -fs --max-time 1 "$PUBLIC_URL/health" >/dev/null; then break; fi
+    if curl -fs --max-time 1 "$PUBLIC_URL/health" >/dev/null && issuer_ready; then break; fi
     sleep .1
   done
   curl -fsS --max-time 1 "$PUBLIC_URL/health" >/dev/null
+  issuer_ready || { echo "${1}: fixture issuer did not serve its signing key" >&2; exit 1; }
   # /health only serves the base app. Wait for this shard's lazy auth router
   # before starting the tests: the first authenticated /v1/me in the shared
   # before hook otherwise spends its 5s request budget importing the router.

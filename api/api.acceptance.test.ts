@@ -17915,8 +17915,11 @@ describe('Sealed Logs facets', () => {
       import('drizzle-orm/node-postgres'),import('./src/app.js'),import('./src/log-facet-aggregate-worker.js'),import('./src/ses-region-state.js'),
     ]);
     const db=await fixtureDatabase(t),person=await sessionFixture(t),wid=unique('logs-aggregate');
-    const hp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1}),wp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1});
-    cleanup(t,async()=>{await Promise.all([hp.end(),wp.end()]);});
+    const hp=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:1}),worker=await fixtureDatabase(t),workerDb=drizzle(worker);
+    cleanup(t,async()=>{await hp.end();});
+    // The live runner may discover committed mail at any point. Own this workspace's worker lock
+    // before it exists; the real turns below take it reentrantly on this same dedicated session.
+    await worker.query('SELECT pg_advisory_lock(712008,hashtext($1))',[wid]);
     await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
     await db.query("INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES($1,$2,$3,'owner')",[randomUUID(),person.userId,wid]);
     const runtime:import('./src/core.js').Runtime={...fixtureWorker.runtime,db:drizzle(hp),config:{...fixtureWorker.runtime.config,multiTenant:true,workspaceId:wid},
@@ -17932,6 +17935,10 @@ describe('Sealed Logs facets', () => {
     });
     const app=createApp(),region=REGION,from=earlierMinute(floorMinute(),90),href=(mode:string)=>facetPath({mode,range:'24h',region,...mode==='refresh'&&{from}});
     const get=async(path:string,ws=wid)=>await app.fetch(new Request(PUBLIC_ORIGIN+path,{headers:{cookie:person.cookie,'x-nightmail-workspace':ws}}),runtime);
+    const certify=async()=>{
+      for(let i=0;i<16;i++){const turn=await runFacetAggregateTurn(workerDb,wid);if(turn?.ready)return turn;}
+      assert.fail('The fixture worker did not certify its generation');
+    };
     const fresh=async(afterEnroll?:()=>Promise<void>)=>{
       let wake!:()=>void;const registered=new Promise<void>(resolve=>{wake=resolve;});
       runtime.startLogFacetAggregate=w=>{assert.equal(w,wid);wake();};
@@ -17940,7 +17947,7 @@ describe('Sealed Logs facets', () => {
       try{
         await Promise.race([registered,answer.then(()=>assert.fail('No aggregate demand registered'))]);await waitAt(probe,answer);
         if(afterEnroll)await afterEnroll();
-        for(let i=0;i<16;i++){const turn=await runFacetAggregateTurn(drizzle(wp),wid);if(turn?.ready)break;}
+        assert.equal((await certify()).work.published,1,'Publish the enrolled view before releasing its reader');
       }finally{probe.release();runtime.db=original;}
       const response=await answer;assert.equal(response.status,200);return await response.json() as Json;
     };
@@ -17948,13 +17955,16 @@ describe('Sealed Logs facets', () => {
     const initial=await get(href('last'));assert.equal(initial.status,200);assert.equal((await initial.json() as Json).counts,null);
     // Until its buckets are seeded, a window the source fold can size keeps the legacy fold, and the backfill is woken.
     let folds=0;const cold=new AbortController();runtime.startLogFacetFold=()=>{folds++;cold.abort();};
-    const seeding=await app.fetch(new Request(PUBLIC_ORIGIN+href('refresh'),{headers:{cookie:person.cookie,'x-nightmail-workspace':wid},signal:cold.signal}),runtime);
-    assert.equal(seeding.status,499);assert.equal(folds,1);
-    assert.equal((await db.query('SELECT 1 FROM log_facet_wakes WHERE workspace_id=$1',[wid])).rowCount,1);
-    assert.equal((await db.query('SELECT 1 FROM log_facet_demands WHERE workspace_id=$1',[wid])).rowCount,0);
-    await db.query("DELETE FROM jobs WHERE workspace_id=$1 AND type='logs.facetFold'",[wid]);
+    // Inspect the cold enrollment in its writer transaction: the runner consumes wakes before attempting the worker lock.
+    await drizzle(db).transaction(async tx=>{
+      const seeding=await app.fetch(new Request(PUBLIC_ORIGIN+href('refresh'),{headers:{cookie:person.cookie,'x-nightmail-workspace':wid},signal:cold.signal}),{...runtime,db:tx});
+      assert.equal(seeding.status,499);assert.equal(folds,1);
+      assert.equal((await db.query('SELECT 1 FROM log_facet_wakes WHERE workspace_id=$1',[wid])).rowCount,1);
+      assert.equal((await db.query('SELECT 1 FROM log_facet_demands WHERE workspace_id=$1',[wid])).rowCount,0);
+      await db.query("DELETE FROM jobs WHERE workspace_id=$1 AND type='logs.facetFold'",[wid]);
+    });
     runtime.startLogFacetFold=()=>assert.fail('an aggregate dashboard must not enroll a legacy source scan');
-    for(let i=0;i<16;i++)if((await runFacetAggregateTurn(drizzle(wp),wid))?.ready)break;
+    await certify();
     const owner=await fresh();assert.equal(owner.visibility,'admin');assert.equal(owner.from,from);assert.match(owner.asOf,/\.\d{6}Z$/);
     const live=await get('/v1/logs?counts=true&limit=1&region='+encodeURIComponent(region)+'&from='+encodeURIComponent(from));
     assert.deepEqual(owner.counts,(await live.json() as Json).counts);assert.equal(owner.counts.status.spam,1);
@@ -26888,6 +26898,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     await simulatedSesFixture(t,async({runtime,db,local})=>t.test('synthetic transports',async t=>{
       const {runDispatcher,initialGate}=await import('./src/dispatcher.js'),{SESv2Client,GetAccountCommand}=await import('@aws-sdk/client-sesv2');
       const wid=runtime.config.workspaceId,acct='112223330001',origin='https://screen.synthetic.invalid',topic=`arn:aws:sns:${REGION}:${acct}:fixture`;
+      // Precharge, lease, dispatch and both EXPLAINs measure one quota minute, even across a wall-clock rollover.
+      // Only statement_timestamp is pinned; leases, classifier latency and the benchmark timer still use real time.
+      await db.query(`CREATE SCHEMA bench_clock;
+        CREATE FUNCTION bench_clock.statement_timestamp() RETURNS timestamptz LANGUAGE sql STABLE AS $$ SELECT pg_catalog.transaction_timestamp() $$;
+        SET LOCAL search_path TO public, bench_clock, pg_catalog`);
       runtime.config.hostedSendCaps.firstWeek=10000;
       const key=ok(await local('POST','/v1/api-keys',{name:'bench',permissions:['send','read']}),201);
       Object.assign(runtime.config,{multiTenant:true,hostedScreen:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture'},screen:{ primary: 'jev', mode: 'reject', jev: { endpoint: origin, apiKey: 'fixture', model: 'fixture', threshold: 0.7 } }});
@@ -26901,7 +26916,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>cmd instanceof GetAccountCommand?{SendingEnabled:true,SendQuota:{MaxSendRate:10000,Max24HourSend:100000,SentLast24Hours:0}}:{MessageId:randomUUID()});
       const gate=initialGate(),run=()=>runDispatcher(runtime,{region:REGION,accountId:acct,batchSize:24,lanes:1,gate});
       for(const [name,n] of [['attachment',24],['burst',48],['outage',12]] as const){
-        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50)`,[wid]);}
+        if(name==='burst'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);assert.equal((await db.query(`SELECT hosted_burst_ok($1,'bench.invalid',50) AS charged`,[wid])).rows[0].charged,true);}
         if(name==='outage'){await db.query(`DELETE FROM hosted_burst_windows WHERE workspace_id=$1`,[wid]);outage=true;}
         const mail=Array.from({length:n},(_,i)=>({from:'a@bench.invalid',to:`success+${i}@simulator.amazonses.com`,subject:name+i,text:'Private fixture',attachments:[asset.id]}));
         screens=peak=0;
@@ -26944,7 +26959,6 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated)
             SELECT 'backlog_'||i,$1,$2,'fixture','a@bench.invalid','["b@example.invalid"]','[]','[]','fixture','{"kind":"transactional"}',false FROM generate_series(1,$3::int)i`,[wid,REGION,backlog]);
           await db.query('ANALYZE sending_emails');
-          await db.query("UPDATE hosted_burst_windows SET minute=date_trunc('minute',statement_timestamp()) WHERE workspace_id=$1",[wid]);
           const lease=q.mock.calls.find(c=>(c.arguments[0] as any)?.text?.includes('queued_owners'))!.arguments as any;
           const prefix='EXPLAIN (ANALYZE,BUFFERS,TIMING OFF,FORMAT JSON) ';
           const fixed=(await db.query(prefix+lease[0].text,lease[1])).rows[0]['QUERY PLAN'][0].Plan;
@@ -40736,6 +40750,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
       const { dashboardRevision, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD } = await import('./src/dashboard-cache.js');
       const wid = runtime.config.workspaceId;
+      // The maintenance folds have no workspace predicate. Exercise the real triggers, indexes and folds
+      // on this transaction's deltas, independent of the previous scenarios' backlog and vacuum timing.
+      await db.query(`CREATE TEMP TABLE sending_campaign_tallies (LIKE public.sending_campaign_tallies INCLUDING ALL) ON COMMIT DROP;
+        CREATE TEMP TABLE sending_metrics_hourly (LIKE public.sending_metrics_hourly INCLUDING ALL) ON COMMIT DROP;
+        CREATE TEMP TABLE sending_metrics_ten_minute (LIKE public.sending_metrics_ten_minute INCLUDING ALL) ON COMMIT DROP`);
       const key = ok(await local('POST', '/v1/api-keys', { name: unique('tally-key'), permissions: ['read', 'send', 'manage'] }), 201).secret;
       assert.equal(await talliesEnabled(runtime.db), true);
 
@@ -40744,7 +40763,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const cid = ok(await local('POST', '/v1/campaigns', { name: 'Tallies' }), 201).id;
       const rev = unique('rev');
       await db.query("UPDATE sending_campaigns SET state='sending',review_id=$2,actor_key_id='fixture',total=12,prepared=12,expanded=12 WHERE id=$1", [cid, rev]);
-      const baseMs = Math.floor(Date.now() / 3_600_000) * 3_600_000;
+      const baseMs = (Math.floor(Date.now() / 3_600_000) - 1) * 3_600_000;
       const at = (offsetMs: number) => new Date(baseMs + offsetMs).toISOString();
       // Previous window & edge-hour emails + current window emails (marketing campaign + transactional direct)
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,created_at)
@@ -40759,8 +40778,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES
         ('te_1',$1,'t_m1','open',false), ('te_2',$1,'t_m1','click',false), ('te_3',$1,'t_tx1','open',false)`, [wid]);
 
-      // Mid-hour boundaries exercising both left edge (inside hour -1) and right edge (now, empty tail -> zero raw scan)
-      const qFrom = at(-3_600_000 + 1_800_000), qTo = new Date(Date.now() + 1_000).toISOString();
+      // Both mid-hour edges are in the past. Include the +5m row even when the suite starts at :00.
+      const qFrom = at(-3_600_000 + 1_800_000), qTo = at(2_700_000);
       const metricsPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=hour&include=previous,streams`;
       const tenMinPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=10m&include=previous,streams`;
       const viaTallies = ok(await request('GET', metricsPath, key));
