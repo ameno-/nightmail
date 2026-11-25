@@ -65,8 +65,9 @@ export const gradeCounts = sql.join(GRADE_BANDS.map((band, i) => {
   const above = GRADE_BANDS[i - 1];
   return sql`${band.grade}::text,count(*) FILTER (WHERE s.phase='graded' AND s.score>=${band.min}${above ? sql` AND s.score<${above.min}` : sql``})`;
 }), sql`,`);
-/** The platform's own domains: the dashboard's, and the one built-in domains are under. */
-export const platformDomains = (config: Pick<Runtime['config'], 'publicUrl' | 'builtinDomain'>) => [...new Set([new URL(config.publicUrl).hostname, ...config.builtinDomain ? [config.builtinDomain] : []])];
+/** The platform's own domains: the dashboard's (not an address or localhost) and the one built-in domains are under. */
+export const platformDomains = (config: Pick<Runtime['config'], 'publicUrl' | 'builtinDomain'>) => [...new Set([new URL(config.publicUrl).hostname, ...config.builtinDomain ? [config.builtinDomain] : []])]
+  .filter(name => name.includes('.') && !/^[\d.]+$|^\[|:/.test(name));
 
 type Raw = {
   bounds: { since: string; until: string; prev: string; today: string }; coverage: string | null;
