@@ -256,7 +256,8 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
       log('warn', { code: 'LINK_HOST_QUOTA_FULL', workspaceId });
     } else {
       if (!(error instanceof CloudflareUnavailable)) throw error;
-      log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
+      if (error.status === 401 || error.status === 403) log('error', { code: 'LINK_HOST_AUTH_FAILED', workspaceId, status: error.status });
+      else log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
       detail = 'Cloudflare didn\u2019t answer. Check again in a minute.';
     }
   }
