@@ -283,7 +283,7 @@ function shape(r: Raw, config: Pick<Runtime['config'], 'deploy'>): Glass {
 }
 
 // The activity feed (the board's right column): what just happened across the installation, newest first. Each kind is
-// the newest GLASS_ACTIVITY of its own table through an index on its time (migration 503 adds the ones that were
+// the newest GLASS_ACTIVITY of its own table through an index on its time (migration 506 adds the ones that were
 // missing), so a read costs the same however long the installation has run:
 //  - signup: nightmail_signups, with the sign-in method of the address's first sign-in and the workspace it made;
 //  - first_send: the first email of each workspace created in the last 30 days (sending_emails_created_page);
