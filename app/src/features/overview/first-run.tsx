@@ -14,7 +14,7 @@ import { useTestSend } from '../docs/first-send'
 import type { SetupRead } from './setup'
 import './first-run.css'
 
-// Overview's get-started strip, for a new hosted workspace's owners and admins: three steps that tick off from the
+// Overview's get-started strip (no visible heading: the steps say it), for a new hosted workspace's owners and admins: three steps that tick off from the
 // workspace's own state (GET /v1/overview/setup and /v1/me), never from clicks here: Send your first email (any email,
 // the test included), Add your domain (one of its own verified) and Connect your agent (a key an agent's setup made, or
 // a member's MCP sign-in here). Each step has one action: the test email to yourself, Domains' add form, the Connect
@@ -35,9 +35,9 @@ export type StepKey = 'send' | 'domain' | 'agent'
 type Stored = 'on' | 'done' | 'dismissed' | 'off'
 /** Real recipients (the sender score's count) under which a workspace with no grade is still new. */
 const FRESH_RECIPIENTS = 25
-/** What the strip takes above the figures on a desktop: its fixed height (first-run.css: 108px and a control, 44px on a
+/** What the strip takes above the figures on a desktop: its fixed height (first-run.css: 80px and a control, 44px on a
  *  touch screen) and its .ov-lead row's 4 + 12px padding. */
-export const stripSpace = () => 108 + (matches('(pointer: coarse)') ? 44 : 28) + 16
+export const stripSpace = () => 80 + (matches('(pointer: coarse)') ? 44 : 28) + 16
 
 const storeKey = (workspaceId: string) => `nightmail.overview.start.${workspaceId}`
 const memory = new Map<string, Stored | null>(), listeners = new Set<() => void>()
@@ -174,13 +174,6 @@ export function FirstRunStrip({ setup, done, onSent, onLeave }: { setup: SetupRe
   useEffect(() => { if (!done || live) return; const frame = requestAnimationFrame(() => setLive(true)); return () => cancelAnimationFrame(frame) }, [done, live])
   const count = done ? order.filter(key => done[key]).length : 0, all = count === order.length
   const next = done ? order.find(key => !done[key]) : undefined
-  // The count rolls up to its new figure.
-  const digit = useRef<HTMLSpanElement>(null), counted = useRef(count)
-  useEffect(() => {
-    if (counted.current === count) return
-    counted.current = count
-    if (live && !matchMedia('(prefers-reduced-motion: reduce)').matches) digit.current?.animate([{ transform: 'translateY(60%)', opacity: 0, filter: 'blur(2px)' }, { transform: 'none', opacity: 1, filter: 'blur(0)' }], { duration: 320, easing: spring })
-  }, [count, live])
 
   // Leaving: a fade with a slight settle (or only the fade with reduced motion), then the page closes the row.
   const leaving = useRef(false)
@@ -191,7 +184,7 @@ export function FirstRunStrip({ setup, done, onSent, onLeave }: { setup: SetupRe
     const fade = strip.current.animate(reduced ? [{ opacity: 1 }, { opacity: 0 }] : [{ opacity: 1, transform: 'none', filter: 'blur(0)' }, { opacity: 0, transform: 'scale(.98)', filter: 'blur(3px)' }], { duration: reduced ? 160 : 220, easing: spring, fill: 'forwards' })
     void fade.finished.then(() => onLeave(how), () => onLeave(how))
   }
-  // All three done: the header says so for a beat, then the strip goes, not while the pointer rests on it.
+  // All three done: the marks say so for a beat, then the strip goes, not while the pointer rests on it.
   const hovering = useRef(false), due = useRef(false)
   useEffect(() => {
     if (!all) return
@@ -201,11 +194,8 @@ export function FirstRunStrip({ setup, done, onSent, onLeave }: { setup: SetupRe
 
   return <section ref={strip} className="ov-start" aria-labelledby="ov-start-title" data-live={live || undefined} data-all={all || undefined}
     onPointerEnter={() => { hovering.current = true }} onPointerLeave={() => { hovering.current = false; if (due.current) exit('done') }}>
-    <div className="ov-start__head">
-      <h2 id="ov-start-title" className="ov-start__title"><span data-active={!all || undefined} aria-hidden={all || undefined}>Get started</span><span data-active={all || undefined} aria-hidden={!all || undefined}>You’re set up</span></h2>
-      <span className="ov-start__count" aria-label={`${count} of ${order.length} done`}><span ref={digit} className="ov-start__digit">{count}</span> of {order.length}</span>
-      <IconButton className="ov-start__dismiss" label="Dismiss" onClick={() => exit('dismissed')} data-analytics="overview/start/dismiss"><X size={16} aria-hidden /></IconButton>
-    </div>
+    <h2 id="ov-start-title" className="sr-only">{all ? 'You’re set up' : `Get started: ${count} of ${order.length} done`}</h2>
+    <IconButton className="ov-start__dismiss" label="Dismiss" onClick={() => exit('dismissed')} data-analytics="overview/start/dismiss"><X size={16} aria-hidden /></IconButton>
     <ol className="ov-start__steps">
       <Step index={0} title={titles.send} done={done?.send} known={!!done} live={live}
         line={test.error ? <span className="ov-step__error"><ErrorText error={test.error} /></span> : !setup.sendFrom ? builtin?.paused ? 'Built-in domains are paused for now.' : 'Ready in a moment.' : `A test to your own address, from ${setup.sendFrom.builtIn ? 'the built-in domain' : setup.sendFrom.name}.`}
@@ -243,7 +233,6 @@ function Step({ index, title, done = false, known, live = false, line, doneLine,
 /** The route skeleton's strip, for a workspace this browser already shows it for: the same box, its steps not yet known. */
 export function FirstRunSkeleton() {
   return <section className="ov-start" aria-hidden="true">
-    <div className="ov-start__head"><span className="ov-start__title"><span data-active>Get started</span></span></div>
     <ol className="ov-start__steps">{order.map((key, index) => <Step key={key} index={index} title={titles[key]} known={false} line={null} doneLine={null} action={null} />)}</ol>
   </section>
 }

@@ -1,22 +1,13 @@
-/* Overview's get-started strip (first-run.tsx): one calm well over the figures, "Get started" and how many of the three
-   steps are done, then the steps side by side, each a mark, a title, one line and its action. One fixed height per width
+/* Overview's get-started strip (first-run.tsx): one calm well over the figures, its three steps side by side, each a
+   mark, a title, one line and its action, and a dismiss button in the top-right corner. One fixed height per width
    (STRIP_SPACE), so its arrival and its leaving move nothing; ticking a step changes what is in its cells, never their
    size. Inside it, controls take the raised steps, as on every well. */
 .ov-start {
   --color-hover: var(--color-raised-hover); --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed);
-  display: flex; flex-direction: column; gap: var(--space-12); box-sizing: border-box; height: calc(108px + var(--control-height)); padding: var(--space-12) var(--space-12) var(--space-16);
+  position: relative; display: flex; flex-direction: column; box-sizing: border-box; height: calc(80px + var(--control-height)); padding: var(--space-16) var(--space-40) var(--space-16) var(--space-16);
   border-radius: var(--radius-sm); background: var(--color-well); transform-origin: 50% 0;
 }
-.ov-start__head { display: flex; align-items: center; gap: var(--space-8); height: 20px; }
-.ov-start__title, .ov-start__count { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-weight: 400; letter-spacing: var(--tracking-label); text-transform: uppercase; }
-/* "Get started" and "You're set up" share one cell: the done one takes over in place. */
-.ov-start__title { display: inline-grid; }
-.ov-start__title > span { grid-area: 1 / 1; }
-.ov-start__title > span:not([data-active]) { opacity: 0; transform: translateY(4px); filter: blur(2px); visibility: hidden; }
-.ov-start[data-all] .ov-start__title { color: var(--color-text); }
-.ov-start__count { display: inline-flex; gap: .5ch; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
-.ov-start__digit { display: inline-block; min-width: 1ch; }
-.ov-start__dismiss { margin: 0 calc(-1 * var(--space-4)) 0 auto; }
+.ov-start__dismiss { position: absolute; top: var(--space-8); right: var(--space-8); }
 
 .ov-start__steps { display: grid; flex: 1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-24); min-height: 0; margin: 0; padding: 0; list-style: none; }
 .ov-step { display: grid; grid-template-columns: 20px minmax(0, 1fr); grid-template-rows: 20px 16px auto; align-content: start; gap: var(--space-2) var(--space-12); min-width: 0; }
@@ -49,23 +40,24 @@
 .ov-start[data-live] .ov-step__mark > span { transition: opacity 120ms ease-out, transform 200ms var(--ease-out-strong), filter 200ms var(--ease-out-strong); }
 .ov-start[data-live] .ov-step__mark svg { transition: stroke-dashoffset 300ms var(--ease-out-strong) 120ms; }
 .ov-start[data-live] .ov-step__title { transition: color 200ms ease; }
-.ov-start[data-live] :is(.ov-step__line, .ov-start__title) > span { transition: opacity 180ms ease-out, transform 260ms var(--ease-out-strong), filter 260ms var(--ease-out-strong), visibility 0s; }
-.ov-start[data-live] :is(.ov-step__line, .ov-start__title) > span:not([data-active]) { transition: opacity 140ms ease-out, transform 200ms var(--ease-out-strong), filter 200ms var(--ease-out-strong), visibility 0s 200ms; }
+.ov-start[data-live] .ov-step__line > span { transition: opacity 180ms ease-out, transform 260ms var(--ease-out-strong), filter 260ms var(--ease-out-strong), visibility 0s; }
+.ov-start[data-live] .ov-step__line > span:not([data-active]) { transition: opacity 140ms ease-out, transform 200ms var(--ease-out-strong), filter 200ms var(--ease-out-strong), visibility 0s 200ms; }
 .ov-start[data-live] .ov-step__do { transition: opacity 160ms ease-out, transform 200ms var(--ease-out-strong), visibility 0s; }
 .ov-start[data-live] .ov-step[data-done] .ov-step__do { transition: opacity 160ms ease-out, transform 200ms var(--ease-out-strong), visibility 0s 200ms; }
 
-/* A phone: the head is a 44px row; each step is one row of its mark, its title and its action (a 44px target), and the
-   line stays out (a failed test says why in a notice instead). */
+/* A phone: each step is one row of its mark, its title and its action (a 44px target), the dismiss button in a narrow
+   column beside the first, and the line stays out (a failed test says why in a notice instead). */
 @media (max-width: 639px) {
-  .ov-start { gap: 0; height: calc(52px + 3 * (var(--control-height-sm) + var(--space-12))); padding: 0 0 var(--space-8) var(--space-16); }
-  .ov-start__head { height: 44px; }
-  .ov-start__dismiss { margin: 0 0 0 auto; }
+  .ov-start { height: calc(var(--space-16) + 3 * (var(--control-height-sm) + var(--space-12))); padding: var(--space-8) var(--space-28) var(--space-8) var(--space-12); }
+  .ov-start__dismiss { top: calc(var(--space-8) + (var(--control-height-sm) + var(--space-12) - 44px) / 2); right: 0; width: var(--space-28); height: 44px; }
   .ov-start__steps { grid-template-columns: minmax(0, 1fr); grid-auto-rows: calc(var(--control-height-sm) + var(--space-12)); gap: 0; }
-  .ov-step { grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: auto; align-items: center; align-content: center; column-gap: var(--space-12); padding-right: var(--space-12); }
+  .ov-step { grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: auto; align-items: center; align-content: center; column-gap: var(--space-8); }
+  /* The title reads whole: the row is laid out so it fits a 375px phone, with no fade at its end. */
+  .ov-step__title { overflow: visible; mask-image: none; }
   .ov-step > :not(.ov-step__mark) { grid-column: auto; }
   .ov-step__line { display: none; }
   .ov-step__do { margin: 0; }
-  .ov-start__action { position: relative; height: var(--control-height-sm); padding-inline: var(--space-12); font-size: var(--text-sm); }
+  .ov-start__action { position: relative; height: var(--control-height-sm); padding-inline: var(--space-8); font-size: var(--text-sm); }
   .ov-start__action > svg { display: none; }
   .ov-start__action::after { content: ''; position: absolute; inset: -4px 0; }
 }
