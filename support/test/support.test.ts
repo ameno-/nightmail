@@ -375,6 +375,14 @@ describe('support Worker', () => {
     const preflight = await mf.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'OPTIONS', headers: { origin: ORIGIN } });
     assert.equal(preflight.headers.get('access-control-allow-origin'), ORIGIN);
     assert.equal((await mf.dispatchFetch(`${SUPPORT}/agents/support-conversation/x`)).status, 404, 'No client-named route to a Durable Object.');
+    for (const path of ['/', '/chat']) {
+      const landing = await mf.dispatchFetch(`${SUPPORT}${path}`);
+      assert.deepEqual([landing.status, landing.headers.get('content-type')], [200, 'text/html; charset=utf-8']);
+      assert.ok(landing.headers.get('content-security-policy')?.includes("default-src 'none'"));
+      const html = await landing.text();
+      assert.ok(html.includes(ORIGIN) && html.includes(`mailto:${addresses.support}`), html);
+    }
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback`)).status, 404, 'Staff ticket pages are retired.');
     // The tab icon of this Worker's own pages: the moon on its tile (the tile ink on a pale theme, paper on a dark one).
     for (const [path, fill] of [['/favicon.svg', '#0a0a0a'], ['/favicon-dark.svg', '#fafafa']]) {
       const icon = await mf.dispatchFetch(`${SUPPORT}${path}`);

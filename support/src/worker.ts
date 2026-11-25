@@ -253,6 +253,12 @@ function confirm(env: Env): Response {
   return page('Continue in Help', `<h1>Continue in Help</h1><p>To get help with your ${productName} account, sign in to <a href="${new URL(env.BANE_ORIGIN).origin}">${productName}</a> and press Help. There’s nothing to confirm here; you can close this page.</p>`);
 }
 
+/** Support chat lives in the dashboard's Help panel; direct visits to / or /chat (such as a handoff URL) land here instead of 404. */
+function supportPage(env: Env): Response {
+  const dashboard = new URL(env.BANE_ORIGIN).origin;
+  return page(`${productName} Support`, `<h1>${productName} Support</h1><p>Support chat lives in the <a href="${dashboard}">${productName} dashboard</a>. Sign in and open Help, or email <a href="mailto:${addresses.support}">${addresses.support}</a> with your support reference.</p>`);
+}
+
 // Route templates for the request line, never the raw path: paths carry conversation and ticket IDs and confirm tokens,
 // and queries carry chat tokens and attachment signatures.
 async function route(request: Request, env: Env, url: URL, at: { route: string }, ctx: ExecutionContext): Promise<Response> {
@@ -266,6 +272,7 @@ async function route(request: Request, env: Env, url: URL, at: { route: string }
   // (The brand's tab icon, for the tabs of this Worker's own pages.)
   const icon = request.method === 'GET' ? favicon(path) : null;
   if (icon) { name('/favicon'); return icon; }
+  if (request.method === 'GET' && (path === '/' || path === '/chat')) { name(path); return supportPage(env); }
   if (request.method === 'OPTIONS' && (path.startsWith('/chat/') || /^\/c\/conv_[a-z2-7]{26}\/attachments$/.test(path))) {
     name(path.startsWith('/chat/') ? '/chat/*' : '/c/:conversationId/attachments');
     return new Response(null, { status: allowedOrigin(env, request) ? 204 : 403, headers: cors(env, request) });
