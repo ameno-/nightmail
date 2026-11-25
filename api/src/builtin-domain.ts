@@ -35,6 +35,9 @@ export type BuiltinScope = keyof typeof SEND_LIMITS.builtin;
 export const BUILTIN_REGION = 'us-east-2';
 /** The default inbox every address at the built-in domain goes to, and the address its first email comes from. */
 export const BUILTIN_INBOX_LOCAL = 'hello';
+/** While the parent isn't ready (a new parent's MAIL FROM or DKIM still verifying), each domain.builtin job looks again every
+ * 5 minutes, 12 times, then hourly. The count is in the job's payload and starts over each time the job is queued again. */
+export const BUILTIN_PARENT_RETRY = { everyMs: 300_000, times: 12, thenMs: 3600_000 } as const;
 
 // Labels nobody is given: mail, DNS and service names, words that would pass for Nightmail itself or for an account
 // notice, and the platform's own labels (domain-claims.ts platformLabel).
@@ -265,7 +268,7 @@ export async function resetBuiltinBreaker(db: DbExecutor, parent: string, reason
     queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.builtin:'||b.workspace_id,'domain.builtin',b.workspace_id,'{}'::jsonb
       FROM reset CROSS JOIN builtin_domains b JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
       WHERE b.revoked_at IS NULL AND dc.sending_state='pending'
-      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed'))
+      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL,payload='{}'::jsonb WHERE jobs.status IN ('completed','failed'))
     SELECT trip FROM reset`);
   return row?.trip ?? null;
 }
@@ -319,14 +322,14 @@ export async function ensureBuiltinDomain(runtime: Runtime, wid: string) {
 }
 /** The workspace's domain.builtin job: verifies its domain (or, revoked, removes the parent from its tenant). */
 export const queueBuiltinJob = (wid: string) => sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES('domain.builtin:'||${wid}::text,'domain.builtin',${wid},'{}'::jsonb)
-  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed')`;
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload='{}'::jsonb WHERE jobs.status IN ('completed','failed')`;
 
 /**
  * domain.builtin: makes sure the workspace's built-in domain exists, then associates the parent identity with the
  * workspace's SES tenant and marks the domain verified. A revoked domain's association is removed instead. Waits (without
  * using attempts) for the tenant, and for the parent identity while it isn't verified.
  */
-export const builtinDomainJob: JobHandler = async (runtime, _payload, job) => {
+export const builtinDomainJob: JobHandler = async (runtime, payload, job) => {
   const config = runtime.config, parent = config.builtinDomain, wid = job.workspaceId;
   if (!config.multiTenant || !parent) return;
   const wait = (ms: number): never => { throw new JobDeferred(new Date(Date.now() + ms).toISOString()); };
@@ -354,7 +357,10 @@ export const builtinDomainJob: JobHandler = async (runtime, _payload, job) => {
     }
     const stored = await storedParent(runtime.db, parent);
     const facts = stored?.ok && Date.parse(stored.checked_at) > Date.now() - 2 * 3600_000 ? stored : await checkParent(runtime, ses, parent);
-    if (!facts.ok) wait(3600_000);
+    if (!facts.ok) {
+      const waits = Number(payload.parentWaits) || 0;
+      throw new JobDeferred(new Date(Date.now() + (waits < BUILTIN_PARENT_RETRY.times ? BUILTIN_PARENT_RETRY.everyMs : BUILTIN_PARENT_RETRY.thenMs)).toISOString(), { ...payload, parentWaits: waits + 1 });
+    }
     try { await ses.send(new CreateTenantResourceAssociationCommand(binding)); }
     catch (e) { if (!['AlreadyExistsException', 'AlreadyExists'].includes(awsName(e))) throw e; }
     const { rowCount } = await runtime.db.execute(sql`UPDATE domain_claims dc SET sending_state='verified',identity=dc.identity||jsonb_build_object('ses',${JSON.stringify(facts.ses)}::jsonb)
@@ -408,7 +414,7 @@ export async function builtinDomainTick(runtime: Runtime) {
         AND (j.id IS NULL OR (j.status IN ('completed','failed') AND j.created_at<=now()-interval '1 hour'))
       ORDER BY b.created_at LIMIT 200)
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.builtin:'||workspace_id,'domain.builtin',workspace_id,'{}'::jsonb FROM due
-    ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed') RETURNING 1`);
+    ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL,payload='{}'::jsonb WHERE jobs.status IN ('completed','failed') RETURNING 1`);
   // The parent is the built-in domains' receiving proof: while it verifies, each stays fresh (route() wants 72 hours). A
   // tripped breaker stops their sending, not their receiving: the identity still verifies.
   await runtime.db.execute(sql`UPDATE domain_claims dc SET receiving_proved_at=now(),receiving_identity_at=now(),receiving_proof_missed_at=NULL FROM builtin_domains b

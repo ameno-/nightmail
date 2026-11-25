@@ -23238,6 +23238,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const claim=async()=>(await db.query("SELECT sending_state,receiving_state,receiving_host,identity->>'builtin' AS builtin FROM domain_claims WHERE workspace_id=$1 AND name=$2",[wid,host])).rows[0];
       assert.deepEqual(await claim(),{sending_state:'pending',receiving_state:'active',receiving_host:host,builtin:'true'});
       assert.deepEqual(writes,[],'Nothing is associated with an identity that is not verified.');
+      // A parent still verifying (a new parent's MAIL FROM, at launch) is looked at again in 5 minutes, not an hour.
+      assert.deepEqual((await db.query("SELECT payload->>'parentWaits' AS waits,available_at BETWEEN clock_timestamp()+interval '4 minutes' AND clock_timestamp()+interval '6 minutes' AS soon FROM jobs WHERE id=$1",['domain.builtin:'+wid])).rows,[{waits:'1',soon:true}]);
       const me=async()=>ok(await local('GET','/v1/me')).connection.builtinDomain;
       assert.deepEqual(await me(),{id:(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id,name:host,sending:'pending',scope:'anyone',perDay:100,perMinute:10});
       error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Too early',text:'Pending.'}),403,'SENDER_DOMAIN_NOT_VERIFIED');
