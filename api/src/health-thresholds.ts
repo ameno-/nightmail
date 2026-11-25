@@ -127,8 +127,9 @@ export const CAMPAIGNS = {
   preparingSeconds: 300,
   /** Waiting on a quota, the balance or a hold this long. A list probe waits ten minutes by design, so it gets thirty. */
   waitingSeconds: 900, probeSeconds: 1_800,
-  /** Waiting on its own daily pace is the customer's choice: never an alert. */
-  waitingIgnored: ['pacing_window'],
+  /** Waiting on its own daily pace is the customer's choice, and on the ramp's hourly steps by design (a step's hour, then
+   *  at most an hour for its results: src/standing-model.ts RAMP): never an alert. */
+  waitingIgnored: ['pacing_window', 'ramp'],
   remindMinutes: 60,
   /**
    * Bounces and complaints on settled mail (delivered + bounced), once this much has settled: the lines Amazon's own
@@ -167,7 +168,7 @@ export const REQUESTS = {
    * Codes that alert at the first line, critical, and as a failed job's error at the first job. MAILBOX_STAGING_UNDELIVERED
    * (#625): mail arrived for a real workspace and its arrival notice was lost, so nobody would otherwise know.
    */
-  errorLinesFirst: ['MAILBOX_STAGING_UNDELIVERED'],
+  errorLinesFirst: ['MAILBOX_STAGING_UNDELIVERED', 'SES_ACCOUNT_SENDING_PAUSED', 'SES_CREDENTIALS_INVALID', 'LINK_HOST_AUTH_FAILED', 'SUPPORT_LOGS_AUTH_FAILED'],
   /**
    * A dispatcher shard's run failing (DISPATCHER_RUN_FAILED and its kin) this often in fifteen minutes. One failure
    * heals itself: the shard runs again 15 seconds later and its leased mail is taken back within three minutes. On the

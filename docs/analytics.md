@@ -21,9 +21,9 @@ Typed values, email addresses, message content, subjects, recipients, names, key
 
 ## Public pages and daily visitors
 
-`app/public-beacon.js` is inlined by `publicBeacon.transformIndexHtml` in `app/vite.config.ts`, before the build copies the shell to home.html and the price/compare pages. A standalone static page generated separately should include exactly the same script at the end of its body. Both CSP policies allow only its exact SHA-256. The build checks the hash and the 1 KiB budget. `app/src/components/Analytics.tsx` calls the hook on React Router navigation, so hydration does not cause a second view.
+`app/public-beacon.js` is inlined by `publicBeacon.transformIndexHtml` in `app/vite.config.ts`, before the build copies the shell to home.html and the price/compare pages. A standalone static page generated separately should include exactly the same script at the end of its body. Both CSP policies allow only its exact SHA-256. The build checks the hash and the 1 KiB budget, and that every HTML page it writes carries the script byte for byte. `app/src/components/Analytics.tsx` calls the hook on React Router navigation, so hydration does not cause a second view.
 
-On `/`, pricing, compare, HTML docs and legal pages, the hook sends views and link/CTA clicks after load and idle, once `/health` enables collection. Link targets are public paths, external DNS hostnames, or fixed labels; `data-cta="sign-in"` identifies the shared sign-in control. No link text, query string, fragment, form input or full referrer is collected. These public events carry no account or workspace. Markdown documents, assets and crawlers that do not run JavaScript produce no beacon.
+On `/`, pricing, compare, HTML docs and legal pages, the hook sends views and link/CTA clicks after load and idle, once `/health` enables collection. Link targets are public paths, external DNS hostnames, or fixed labels; `data-cta="sign-in"` identifies the shared sign-in control. Only clicks a person made count (`isTrusted`): a price page replays a press made on its painted page before the app loaded (`features/pricing/index.tsx`), and that replay isn't a second click. No link text, query string, fragment, form input or full referrer is collected. These public events carry no account or workspace. Markdown documents, assets and crawlers that do not run JavaScript produce no beacon.
 
 Each UTC date gets a new random 256-bit salt in `analytics/v1/salts/YYYY-MM-DD` (atomic create-if-absent across isolates). HMAC-SHA256 of the date, trusted client IP and user agent yields a 128-bit daily visitor code. Old salts are deleted by hourly upkeep; hosted R2 also expires salt objects after one day. Configure the same one-day prefix lifecycle on self-hosted S3, particularly if turning collection off. Do not version or back up salts. Missing IP or UA means a view with no unique. Shared networks can merge visitors, IP or UA changes can split them, and counts do not identify or link people across dates.
 
@@ -66,7 +66,7 @@ One JSON object per line. Human rows have the batch's envelope and one event. A 
 | `dialog_open` / `dialog_close` | A dialog or sheet opens or closes |
 | `form_submit` / `form_invalid` | A form is submitted / a field fails the browser's validation |
 | `api_error` | An API request the dashboard made failed |
-| `track` | A funnel step: `signed_up`, `domain_added`, `domain_verified`, `first_send`, `key_created`, `inbox_created`, `campaign_sent`, `byo_connected` (see below) |
+| `track` | A funnel step: `signed_up`, `domain_added`, `domain_verified`, `first_send`, `key_created`, `inbox_created`, `campaign_sent`, `byo_connected`, or `focus_chosen` with the onboarding picks in `name`, the lead first (`focus/agents/developer`, or `focus/skip`), or a focus a landing link's `?focus=` brought, which skips the question (`landing/agents`, plus the comparison page's slug when it came from one: `landing/agents/agentmail`) (see below), or `onboarding` with a step and what happened on it in `name`: `email/shown`, `email/sent`, `email/replied`, `email/skip`, `focus/shown`, `focus/skip`, `next/<focus>/shown` and `finished` (no words, addresses or timings) |
 | `sign_in` | Written by the API at the sign-in callback: the signed-out session (`sid`) and the account that signed in from it (`uid`) |
 
 Funnel steps come from the API's answers to the dashboard (`apiResult` in `app/src/lib/analytics.ts`), so each is something the server confirmed. `domain_added`, `key_created`, `inbox_created` and `campaign_sent` fire on the create, send or schedule response. The others are states the dashboard reads, reported once per page and workspace, so take the earliest: `signed_up` (a hosted workspace with no sending connection yet), `byo_connected` (its own AWS connection is ready), `domain_verified` (a verify or domain read says ready) and `first_send` (Overview's setup says the workspace has sent mail). These are first *seen* times, at most a page load after the fact.
@@ -83,6 +83,8 @@ Funnel steps come from the API's answers to the dashboard (`apiResult` in `app/s
 Hosted installations use their own bucket, `nightmail-<stage>-analytics`, created by Pulumi (`infra/pulumi/index.ts`). Node and other installations use their configured bucket. The hourly upkeep deletes compacted days older than 400 days; hosted buckets also have lifecycle rules as a backstop (raw after 30 days, events after 400).
 
 Compaction and rollup use the UTC hour of **receipt**, settled five minutes after it ends. Upkeep rereads all parts for a changed hour, deduplicates event IDs, replaces its SQL groups atomically, and only then deletes those raw batches. A failure leaves the raw objects for retry. Older, already compacted hours from before this migration remain available in R2. For direct object reads, deduplicate on `id` across both prefixes.
+
+On an ingest storage failure the API tries once more before returning 503. Only an exhausted first POST includes an `NM-R` retry suffix: the page can see it on the keepalive fetch and sends the same bytes once more with `sendBeacon` after 0–500 ms of jitter. It never replays a response it did not receive. The receipt is good for one minute; it pins the original UTC hour, raw object key and public event ID, including over midnight. Dashboard events keep their original IDs. Validation, privacy and rate-limit responses do not request retries.
 
 ## SQL and export
 
@@ -101,7 +103,7 @@ FROM analytics_hourly WHERE metric = 'page_view' ORDER BY hour DESC;
 {"v":1,"from":"2026-11-20T00:00:00.000Z","to":"2026-11-21T00:00:00.000Z","grain":"day","rows":[{"bucket":"2026-11-20T00:00:00.000Z","metric":"visit","dimensions":{},"events":12,"visitors":9}]}
 ```
 
-`page_view` dimensions: path × referrer × source × medium × campaign × country × device × viewport class. `cta`: path × target (public links and named dashboard controls). `bot_view`: path only. Milestones: counts of workspaces, no identifier. Bot and milestone rows have null visitors. Don't sum distincts across groups; the `visit` row is the site-wide distinct.
+`page_view` dimensions: path × referrer × source × medium × campaign × country × device × viewport class. `cta`: path × target (public links and named dashboard controls). `focus`: the onboarding picks (`focus_chosen`'s name), with visitors. `onboarding`: each step's events (`onboarding`'s name), with visitors. `bot_view`: path only. Milestones: counts of workspaces, no identifier. Bot and milestone rows have null visitors. Don't sum distincts across groups; the `visit` row is the site-wide distinct.
 
 ## Optional hourly push
 

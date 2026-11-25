@@ -170,6 +170,7 @@ export function projectEmail(
       isImage: f.contentType?.startsWith('image/') ?? false,
       safe: v.virus === 'PASS',
     }));
+  const forwardHops = loopHeaderNames.reduce((hops, name) => hops + (headers[name]?.length ?? 0), 0);
   return {
     id: m.id,
     messageId: m.messageId,
@@ -202,7 +203,8 @@ export function projectEmail(
       autoReply: !!headers['auto-submitted'],
       bulk: !!headers['list-id'],
       listId: headers['list-id']?.[0] ?? null,
-      baneHops: loopHeaderNames.reduce((hops, name) => hops + (headers[name]?.length ?? 0), 0),
+      forwardHops,
+      baneHops: forwardHops,
     },
     thread: {
       id: m.threadId ?? null,
@@ -218,7 +220,7 @@ type Email = ReturnType<typeof projectEmail>;
 const cache = new Map<string, { at: number; values: Record<string, number> }>();
 /** The workspace's decision answers, and how many Jev calls that took (0 on a cache hit or failure before the call). */
 async function evaluate(runtime: Runtime, w: string, email: Email, prompts: string[], calls: { n: number }) {
-  const conf = runtime.config.screen;
+  const conf = runtime.config.screen?.jev;
   if (!conf || !prompts.length) return {};
   const state = {
     notice:

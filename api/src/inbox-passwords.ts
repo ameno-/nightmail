@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi';
 import { createHmac, hkdfSync, randomBytes } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { auditContext, auditInsert } from './audit.js';
-import { actorMailAccess, ApiError, denied, errors, id, isoTime, json, lasting, response, security, type App, type Ctx, type MailboxAccess } from './core.js';
+import { actorMailAccess, agentCredentialRefusal, ApiError, denied, errors, fullAccessRefusal, id, isoTime, json, lasting, response, security, type App, type Ctx, type MailboxAccess, type Required } from './core.js';
 
 export function passwordDigest(pepper: string, value: string) {
   return createHmac('sha256', hkdfSync('sha256', pepper, '', 'bane:protocol-password:v1', 32))
@@ -14,8 +14,10 @@ const item = z.object({ id: z.string(), name: z.string(), protocols: z.array(pro
 const base = '/v1/inboxes/{id}/app-passwords',
   params = z.object({ id: z.string().min(1).max(120) }),
   meta = { tags: ['Agent inboxes'], security };
-const managerRequired = (c: Ctx) => denied('ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.',
-  { permission: 'configuration', level: 'write', ...(c.get('actor')?.role === 'member' ? { person: 'admin' } : { scope: 'workspace' }) });
+const managerRequired = (c: Ctx) => {
+  const a = c.get('actor'), need: Required = { permission: 'configuration', level: 'write', ...(a?.role === 'member' ? { person: 'admin' } : { scope: 'workspace' }) };
+  return a?.credential === 'apiKey' ? fullAccessRefusal('ADMIN_REQUIRED', a, 'Mail client passwords need', need) : denied('ADMIN_REQUIRED', 'An unrestricted workspace manager must grant mail client access.', need);
+};
 export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAccess) {
   const manager = (c: Ctx, change = false) => {
     const v = access(c);
@@ -49,8 +51,10 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       responses: { 201: response(item.extend({ password: z.string() })), ...errors },
     }),
     async (c) => {
-      const wid = manager(c, true),
-        bid = c.req.valid('param').id,
+      const wid = manager(c, true);
+      // Inbox routes authenticate after the /v1 guard, so the agent key's refusal is checked here too (core.ts).
+      if (c.get('actor')?.agentSetup) throw agentCredentialRefusal();
+      const bid = c.req.valid('param').id,
         q = c.req.valid('json'),
         kid = id('app'),
         password = Buffer.from(randomBytes(16)).toString('hex').match(/.{4}/g)!.join('-'),

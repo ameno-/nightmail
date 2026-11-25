@@ -36,8 +36,9 @@ export type ShadowItem = {
   workspaceId?: string; kind: 'email' | 'campaign_test' | 'campaign_copy'; emailId?: string; campaignId?: string;
   /** The verdict cache key of a message (src/screen.ts screenSnapshot) or a campaign copy's key (copyKey). */
   digest: string; window: number; windows: number;
-  /** The threshold the screen's caller applies. */
+  /** The cutoffs in effect when Jev was asked. Older queue messages used one cutoff for both. */
   threshold: number;
+  jevfThreshold?: number;
   jev: { outcome?: string; httpStatus?: number; ms?: number; score?: number; model?: string; inputTokens?: number };
   /** What the screen sent, sent again as it is. Absent when the buffer had no room for it: the row says skipped_backlog. */
   request?: { state: unknown; questions: unknown };
@@ -167,7 +168,7 @@ function gateFor(settings: ShadowSettings): ShadowGate {
 /** A pair's row: the screen's side as it was kept, the second classifier's as `result` says. Every value bounded. */
 function rowOf(item: ShadowItem, result: Result): Row | undefined {
   try {
-    const threshold = score(item.threshold), jev = score(item.jev.score), jevf = score(result.score);
+    const threshold = score(item.threshold), jevfThreshold = score(item.jevfThreshold ?? item.threshold), jev = score(item.jev.score), jevf = score(result.score);
     return { pair_id: item.id.slice(0, 64), at: typeof item.at === 'number' && Number.isFinite(item.at) ? item.at : Date.now(), workspace_id: text(item.workspaceId),
       kind: text(item.kind, 20) ?? 'email', email_id: text(item.emailId), campaign_id: text(item.campaignId), digest: text(item.digest, 128) ?? '',
       window_index: integer(item.window, SMALL) ?? 0, windows: integer(item.windows, SMALL) ?? 1, threshold,
@@ -175,7 +176,7 @@ function rowOf(item: ShadowItem, result: Result): Row | undefined {
       jev_model: text(item.jev.model), jev_input_tokens: integer(item.jev.inputTokens, INT), jev_flagged: jev === null || threshold === null ? null : jev >= threshold,
       jevf_outcome: text(result.outcome, 40) ?? 'unknown', jevf_http_status: integer(result.httpStatus, SMALL), jevf_ms: integer(result.ms, INT), jevf_score: jevf,
       jevf_model: text(result.model), jevf_input_tokens: integer(result.inputTokens, INT), jevf_request_id: text(result.requestId, 80),
-      jevf_flagged: jevf === null || threshold === null ? null : jevf >= threshold };
+      jevf_flagged: jevf === null || jevfThreshold === null ? null : jevf >= jevfThreshold };
   } catch { return undefined; /* A record never changes what happens next. */ }
 }
 
@@ -260,11 +261,11 @@ export class ShadowRunner {
       else if (response.status === 413 || ((response.status === 400 || response.status === 422) && TOO_LARGE.test(answer))) result.outcome = 'refused_too_large';
       else if (!response.ok) result.outcome = `http_${response.status}`;
       else {
-        let parsed: { model?: unknown; answers?: { spam?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null = null;
+        let parsed: { model?: unknown; answers?: { harm?: { noul?: unknown } }; usage?: { input_tokens?: unknown } } | null = null;
         try { parsed = whole ? JSON.parse(answer) : null; } catch { /* Not JSON: invalid. */ }
-        const spam = score(parsed?.answers?.spam?.noul);
-        if (spam === null) result.outcome = 'invalid';
-        else { result.outcome = 'ok'; result.score = spam; result.model = typeof parsed?.model === 'string' ? parsed.model : this.settings.model; result.inputTokens = integer(parsed?.usage?.input_tokens, INT) ?? undefined; }
+        const harm = score(parsed?.answers?.harm?.noul);
+        if (harm === null) result.outcome = 'invalid';
+        else { result.outcome = 'ok'; result.score = harm; result.model = typeof parsed?.model === 'string' ? parsed.model : this.settings.model; result.inputTokens = integer(parsed?.usage?.input_tokens, INT) ?? undefined; }
       }
     } catch (error) {
       let name: unknown;

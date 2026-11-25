@@ -5,7 +5,7 @@ import { useApiMutation, useApiQuery } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { ApiError, type Segment } from '../../data/types'
 import { SearchField, Button, DataTable, EmptyState, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, Pagination, SectionHeader, Select, Textarea, fieldError, MutationError } from '../../components/ui'
-import { AudienceRouteSkeleton, AudienceSummarySkeleton } from './skeletons'
+import { AudienceRouteSkeleton, AudienceSummarySkeleton, segmentColumns } from './skeletons'
 import { date, ListPicker, number, ruleSummary } from './shared'
 import { useAdaptivePageSize } from '../../lib/pagination'
 import { AudienceHeader } from './header'
@@ -16,12 +16,12 @@ function SegmentsEmpty({ search, onClear }: { search: string; onClear: () => voi
 }
 
 export function SegmentsPage() {
-  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize()
+  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize(5, 100)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   useEffect(() => setPage(1), [adaptivePageSize])
   const query = useApiQuery(['segments', { page, search, pageSize: adaptivePageSize }], (api, signal) => api.segments.list({ page, search, pageSize: adaptivePageSize }, signal))
-  return <div className="audience-page"><AudienceHeader actions={<Link className="ui-button ui-button--primary ui-button--md" to="/audience/segments/new">Create segment</Link>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} rowHref={row => `/audience/segments/${row.id}`} empty={<SegmentsEmpty search={search} onClear={() => { setSearch(''); setPage(1) }} />} columns={[{ key: 'name', label: 'Name', card: 'title', render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { key: 'rule', label: 'Conditions', width: '50%', card: 'line', render: row => { const text = ruleSummary(row.rule); return <span className="audience-cell-text" title={text}>{text}</span> } }, { key: 'updatedAt', label: 'Updated', card: 'hide', render: row => date(row.updatedAt) }]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
+  return <div className="audience-page"><AudienceHeader actions={<Link className="ui-button ui-button--primary ui-button--md" to="/audience/segments/new">Create segment</Link>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} rowHref={row => `/audience/segments/${row.id}`} empty={<SegmentsEmpty search={search} onClear={() => { setSearch(''); setPage(1) }} />} columns={[{ ...segmentColumns[0], render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { ...segmentColumns[1], render: row => { const text = ruleSummary(row.rule); return <span className="audience-cell-text" title={text}>{text}</span> } }, { ...segmentColumns[2], render: row => date(row.updatedAt) }]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
 }
 
 // The editor for the API's public segment rule: a leaf {field, operator, value}, {field, operator, days} or a property's
@@ -229,5 +229,5 @@ function SegmentCounts({ id, at, listId, stale }: { id: string; at: string; list
     if (query.error instanceof ApiError && query.error.code === 'READ_TOO_LARGE') return <ErrorState error={new ApiError('This segment took too long to count across all contacts. Narrow the rules or pick a list to count within.', query.error.code, query.error.fields, query.error.requestId, query.error.status)} onRetry={() => query.refetch()} />
     return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   }
-  return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{stale && <span className="muted">Save to update</span>}</div>
+  return <div className="audience-summary cluster"><span><strong>{number(query.data.matched)}</strong> match</span><span>{number(query.data.eligible)} can receive campaigns</span><span className="muted">{number(query.data.unsubscribed)} not subscribed</span><span className="muted">{number(query.data.suppressed)} suppressed</span>{(query.data.risky ?? 0) > 0 && <span className="muted" title="Flagged addresses campaigns skip">{number(query.data.risky!)} risky</span>}{stale && <span className="muted">Save to update</span>}</div>
 }

@@ -55,6 +55,8 @@ const KINDS = {
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
 const isKind = (kind: string): kind is Kind => Object.hasOwn(KINDS, kind);
+/** An open alert's label, as Health shows it; null for a kind this version does not know (Health leaves those out too). */
+export const alertLabel = (kind: string) => isKind(kind) ? KINDS[kind].label : null;
 const sectionOf = (key: string): Section => { const kind = key.split(':')[0]!; return isKind(kind) ? KINDS[kind].section : 'requests'; };
 /** One condition that holds this tick. value is the one number that matters, in its kind's unit. */
 export type Finding = { key: string; kind: Kind; severity: Severity; value: number; words: string; remindMinutes: number };
@@ -121,7 +123,7 @@ type Measured = Omit<Health, 'generatedAt' | 'stale' | 'delivery' | 'alerts'>;
 type Rollup = Measured & { memory: Memory };
 
 /** A quantile's upper bound from a latency histogram: the bucket it falls in, or the slowest request for the last one. */
-function quantile(hist: number[], q: number, slowest: number) {
+export function quantile(hist: number[], q: number, slowest: number) {
   const total = hist.reduce((sum, n) => sum + n, 0);
   let seen = 0;
   for (let i = 0; i < hist.length; i++) { seen += hist[i]!; if (seen > 0 && seen >= total * q) return Math.min(LATENCY_BUCKETS[i] ?? slowest, Math.max(slowest, 1)); }
@@ -370,7 +372,12 @@ function openLine(f: Finding) {
     case 'campaign-slow': return `Campaign ${subject} has stopped releasing mail`;
     case 'campaign-bounces': return `Campaign ${f.words.replaceAll('`', '')}`;
     case 'server-errors': return `${count(f.value)} requests failed in five minutes`;
-    case 'errors': return 'An inbound mail arrival notice could not be delivered';
+    case 'errors': return subject === 'MAILBOX_STAGING_UNDELIVERED' ? 'An inbound mail arrival notice could not be delivered'
+      : subject === 'SES_ACCOUNT_SENDING_PAUSED' ? 'SES paused sending on a platform account'
+      : subject === 'SES_CREDENTIALS_INVALID' ? 'SES rejected platform AWS credentials'
+      : subject === 'LINK_HOST_AUTH_FAILED' ? 'Cloudflare rejected NIGHTMAIL_LINK_SAAS_TOKEN (401/403)'
+      : subject === 'SUPPORT_LOGS_AUTH_FAILED' ? 'Cloudflare rejected CF_OBSERVABILITY_TOKEN (401/403)'
+      : `Critical error ${subject}: ${count(f.value)} in 5 min`;
     case 'database-errors': return `Database: ${SQLSTATES[subject]?.label ?? subject} (${subject})`;
     case 'database-disk': return `Database disk is ${percent(f.value)} full`;
     default: return `${KINDS[f.kind].label}: ${f.words.replaceAll('`', '')}`;

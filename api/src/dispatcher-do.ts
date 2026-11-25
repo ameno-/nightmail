@@ -3,6 +3,7 @@ import type { Pool } from 'pg';
 import { shardsForRate, TARGET_SHARD_RATE, type GateState } from './dispatcher.js';
 export { shardsForRate, TARGET_SHARD_RATE };
 import type { Runtime } from './core.js';
+import { InboxWaiters, serveInboxWake } from './inbox-wake.js';
 
 function initDeps() {
   return Promise.all([
@@ -47,6 +48,9 @@ export class DispatcherShard extends DurableObject<Env> {
   private placementLogged = false;
   // The first wake that found no run in progress since the last run started: DISPATCH_RUN's wakeMs, the cost of the hop.
   private wokenAt?: number;
+  // An inbox-wake:<workspace> object (inbox-wake.ts) only holds its inbox long polls' waits and wakes them; it never
+  // dispatches, as no /wake reaches it.
+  private inboxWaiters?: InboxWaiters;
 
 
   // Once per persisted shard, after its first dispatch: where it runs and the cost of one DB round trip.
@@ -71,6 +75,7 @@ export class DispatcherShard extends DurableObject<Env> {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    if (url.pathname.startsWith('/inbox/')) return serveInboxWake(this.inboxWaiters ??= new InboxWaiters(), request);
     if (url.pathname !== '/wake' || url.searchParams.has('environment')) return new Response('Not found', { status: 404 });
     const identity: Identity = {
       region: url.searchParams.get('region') ?? '',

@@ -7,6 +7,7 @@ import { invalidate } from '../../data/invalidation'
 import { errorText, type CampaignTemplate, type CampaignTemplateDraft, type CampaignTemplateSummary } from '../../data/types'
 import { SearchField, Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, Field, IconButton, Input, PageHeader, Pagination, PaginationSkeleton, Select, SkeletonText, StatusBadge, useToast } from '../../components/ui'
 import { EmailPreview } from '../../components/EmailPreview'
+import { Notices } from '../../components/Notices'
 import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import type { EmailComposerRef } from './EmailComposer'
@@ -16,6 +17,7 @@ import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skeletons'
+import { RowProblem } from './steps'
 import { CampaignsHeader } from './header'
 import { publishFirst } from './copy'
 import './campaigns.css'
@@ -85,11 +87,11 @@ export function TemplatesPage() {
     try { const result = await create.mutateAsync(name.trim()); navigate(`/campaigns/templates/${encodeURIComponent(result.id)}`) }
     catch (error) { toast(errorText(error), 'error') }
   }
-  return <>
+  return <div className="campaigns-page">
     <CampaignsHeader actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search templates" placeholder="Search templates" value={search} onChange={event => setParams(previous => { const next = new URLSearchParams(previous); event.target.value ? next.set('search', event.target.value) : next.delete('search'); next.delete('page'); return next })} /><Select aria-label="Filter templates" value={archived ? 'archived' : 'active'} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); value === 'archived' ? next.set('archived', 'true') : next.delete('archived'); next.delete('page'); return next })} options={[{value: 'active', label: 'Active'}, {value: 'archived', label: 'Archived'}]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable className="campaigns-table" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/campaigns/templates/${encodeURIComponent(row.id)}`} onRowIntent={row => { void warm([queries.template(row.id)]); void composerChunk.preload().catch(() => {}) }} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
+      <DataTable className="campaigns-table ui-table--two-line" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/campaigns/templates/${encodeURIComponent(row.id)}`} onRowIntent={row => { void warm([queries.template(row.id)]); void composerChunk.preload().catch(() => {}) }} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
         {...templateColumns[0], render: row => { const about = row.subject || row.description; return <div className="campaign-row-name"><span title={row.name}>{row.name}</span>{about && <span className="muted" title={about}>{about}</span>}</div> }, cardRender: row => row.name},
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
         {...templateColumns[2], render: row => row.description || row.subject || 'No subject yet'},
@@ -99,7 +101,7 @@ export function TemplatesPage() {
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={page => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(page)); return next })} />}
     </>}
     <Dialog open={createOpen} onOpenChange={setCreateOpen} title="Create template" footer={<><Button onClick={() => setCreateOpen(false)}>Cancel</Button><Button variant="primary" loading={create.isPending} disabled={!name.trim()} onClick={() => void createTemplate()}>Create</Button></>}><Field label="Name"><Input autoFocus placeholder="Monthly newsletter" value={name} onChange={event => setName(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') void createTemplate() }} /></Field></Dialog>
-  </>
+  </div>
 }
 
 export function TemplateEditorPage() {
@@ -209,7 +211,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         <Button variant="primary" title={upToDate ? 'New campaigns use this version' : 'New campaigns use the published version'} disabled={archived || saving || !ready || upToDate} onClick={() => void publish()}>{upToDate ? 'Published' : 'Publish'}</Button>
       </>}
     </>} />
-    <section className="campaign-compose-workspace" aria-label="Template composer"><div className="campaign-compose-scroll"><div className="campaign-compose-sheet">
+    <section className="campaign-compose-workspace" aria-label="Template composer"><div className="campaign-compose-scroll"><div className="studio-notices"><Notices /></div><div className="campaign-compose-sheet">
       <div className="campaign-compose-metadata">
         <div className="campaign-compose-row"><label htmlFor="template-name">Name</label><Input id="template-name" placeholder="Template name" value={draft.name} disabled={archived} aria-invalid={!draft.name.trim() || undefined} onChange={event => change('name', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-description">Purpose</label><Input id="template-description" placeholder="When to use it" value={draft.description} disabled={archived} onChange={event => change('description', event.target.value)} /></div>
@@ -217,7 +219,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         <div className="campaign-compose-row"><label htmlFor="template-preview">Inbox preview</label><Input id="template-preview" placeholder="Shown after the subject" value={draft.previewText ?? ''} disabled={archived} onChange={event => change('previewText', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-from">From name</label><Input id="template-from" placeholder="Sender name, e.g. Acme" value={draft.fromName ?? ''} disabled={archived} onChange={event => change('fromName', event.target.value)} /></div>
         <div className="campaign-compose-row"><label htmlFor="template-reply">Reply to</label><Input id="template-reply" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} disabled={archived} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'template-reply-error' : undefined} onChange={event => { setReplyToText(event.target.value); change('replyTo', replyToAddresses(event.target.value)) }} /></div>
-        {replyToValidation && <div id="template-reply-error" className="campaign-compose-feedback ui-field__error" role="alert">{replyToValidation}</div>}
+        <RowProblem id="template-reply-error" message={replyToValidation} />
       </div>
       <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} body={template.draft.html ?? ''} shown={ready} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />

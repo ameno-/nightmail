@@ -28,15 +28,17 @@ export type EmailSnapshot = {
   replyAuthors?: string[];
   /** Immutable content provenance. Missing on legacy snapshots; never infer trust from missing mailbox history. */
   untrustedContent?: boolean;
-  /** Live transactional only: ask the content classifier (Jev) before accepting into the queue. */
+  /** Live transactional only: ask the outbound content classifier before accepting into the queue. */
   screen?: boolean;
-  /** Content-screen verdict recorded at accept time so the dispatcher never re-screens queued mail. */
-  screenVerdict?: { status: 'passed' | 'skipped'; spam?: number; model?: string; digest?: string; rules?: 'probation' | 'standard' | null };
+  /** Content-screen verdict recorded at accept time so the dispatcher never re-screens queued mail. 'platform': the
+   *  dashboard's test email, whose words are fixed by us and which goes only to the signed-in person (sending.ts
+   *  platformTestVerdict); reason says so. */
+  screenVerdict?: { status: 'passed' | 'skipped' | 'platform'; reason?: 'platform test email'; spam?: number; model?: string; digest?: string; rules?: 'probation' | 'standard' | null };
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
   unsubscribeUrl?: string;
   /** A sent required notice's email, which has no unsubscribe URL to keep: its body is re-rendered the same way. */
   requiredNotice?: true;
-  /** Bane-authored notice with a recipient-only capability; reads withhold it. */
+  /** Nightmail-authored notice with a recipient-only capability; reads withhold it. */
   sealed?: boolean;
   /** Sent from a receiving address or inbox: a reply, a new conversation, a forward or a mail-client submission. Reading it needs mailbox access. */
   mailbox?: boolean;
@@ -50,6 +52,9 @@ export type CampaignDraft = {
   /** Only stored in the launch review: the workspace's postal address its footer shows. A review from before postal
    *  addresses has none until the campaign starts sending (src/sending.ts frozenPostalAddress). */
   postalAddress?: string;
+  /** Only stored in the launch review: the origin of the links Nightmail adds to its copies (src/link-domains.ts). A
+   *  review on the link domain (or from before link hosts) has none: each copy asks when it is made. */
+  linkOrigin?: string;
   name: string; from: string; fromName?: string; previewText?: string; replyTo?: string[]; region: string; subject: string; html?: string;
   attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
   /** A required notice (src/sending.ts): to everyone in the audience but the suppressed, without an unsubscribe link. */
@@ -108,7 +113,7 @@ export const campaigns = pgTable('sending_campaigns', {
   pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true), rateShare: doublePrecision('rate_share'),
   windowStartedAt: time('window_started_at'), windowExpanded: integer('window_expanded').notNull().default(0),
   pausedAt: time('paused_at'), pauseReason: jsonb('pause_reason').$type<CampaignFailure>(), healthCheckedAt: time('health_checked_at'),
-  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag'>(), waitingUntil: time('waiting_until'),
+  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp'>(), waitingUntil: time('waiting_until'),
   // Hosted list probe (migration 231): when release may continue after the probe, when it was cleared, and how many quarantines this launch had.
   probeWaitUntil: time('probe_wait_until'), probeClearedAt: time('probe_cleared_at'), quarantines: smallint('quarantines').notNull().default(0),
   // When a sender in good standing skipped the probe (migration 357): kept apart from a probe that went out and passed.
@@ -122,6 +127,14 @@ export const campaigns = pgTable('sending_campaigns', {
   listId: text('list_id'),
   // Last eligible count returned by previewCampaignAudience (migration 429): fallback for CampaignQueued.queued on large deferred launches.
   audienceEstimate: integer('audience_estimate'),
+  // The ramp (migration 500, src/standing-model.ts RAMP): the step (an index into RAMP.steps; their count is past the last
+  // step), when its current hour started (null before its first release) and the review ordinal it started at.
+  rampStep: smallint('ramp_step'), rampWindowStartedAt: time('ramp_window_started_at'), rampFrom: integer('ramp_from').notNull().default(0),
+  // Send readiness (migration 500): the recommended plan's daily batches it was launched with, which 24-hour window it is
+  // in (from 0), the largest daily cap that counts as a ramp when one was required (null: none was), and the consent
+  // source its sender confirmed.
+  pacePlan: integer('pace_plan').array(), windowIndex: integer('window_index').notNull().default(0), rampRequiredCap: integer('ramp_required_cap'),
+  consent: jsonb('consent').$type<{ source: string; confirmedBy: string | null; confirmedAt: string }>(),
 }, t => [index('sending_campaigns_page').on(t.workspaceId, t.id), index('sending_campaigns_created_page').on(t.workspaceId, t.createdAt.desc(), t.id.desc()), index('sending_campaigns_archive_page').on(t.workspaceId, t.archivedAt, t.createdAt.desc(), t.id.desc()),
   index('sending_campaigns_list_page').on(t.workspaceId, t.listId, t.createdAt.desc(), t.id.desc()).where(sql`${t.listId} IS NOT NULL`)]);
 // The frozen snapshot a launch sends from: the draft and rendered base every recipient is interpolated into, and the
@@ -141,7 +154,7 @@ export const campaignReviews = pgTable('sending_campaign_reviews', {
 // One verdict per campaign and copy as delivered (src/screen.ts copyKey), shared by every recipient whose copy is the same.
 export const campaignScreens = pgTable('sending_campaign_screens', {
   campaignId: text('campaign_id').notNull(), ...scope(), copyHash: text('copy_hash').notNull(), requests: integer('requests').notNull(), windows: integer('windows').notNull().default(0),
-  spam: doublePrecision('spam').notNull().default(0), model: text('model'), createdAt: time('created_at').notNull().defaultNow(), judgedAt: time('judged_at'),
+  spam: doublePrecision('spam').notNull().default(0), model: text('model'), threshold: doublePrecision('threshold'), createdAt: time('created_at').notNull().defaultNow(), judgedAt: time('judged_at'),
 }, t => [primaryKey({ columns: [t.campaignId, t.copyHash] })]);
 // Recipient values are copied once from one database snapshot; no live contact joins during preparation or expansion.
 export const reviewRecipients = pgTable('sending_review_recipients', {

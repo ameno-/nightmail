@@ -350,7 +350,7 @@ jobs:
           persist-credentials: false
 
       # The dashboard's live support chat (app/src/components/SupportChat.tsx): on for every hosted workspace on dev;
-      # in production only for Bane staff and free (billing-exempt) workspaces while it rolls out. "true" opens it to all.
+      # in production only for Nightmail staff and free (billing-exempt) workspaces while it rolls out. "true" opens it to all.
       # VITE_PUBLIC_URL makes the link-preview image URLs in index.html absolute for the stage's own host.
       # VITE_FACTORY_MEDIA is where the desktop homepage's render sets are published: the stage's R2 media bucket
       # (infra/pulumi) on its media host. Until a set is published there (app/scripts/factory-media.mjs), the
@@ -452,7 +452,7 @@ jobs:
         env:
           DATABASE_URL: ${{ env.DATABASE_URL }}
           PUBLIC_URL: ${{ env.PUBLIC_URL }}
-          BANE_E2E_DOMAIN_ID: ${{ vars.E2E_DOMAIN_ID }}
+          NIGHTMAIL_E2E_DOMAIN_ID: ${{ vars.E2E_DOMAIN_ID }}
         run: node --import tsx scripts/dev-e2e-fixture.ts
 
       - *stage-tip
@@ -497,15 +497,15 @@ jobs:
         working-directory: api
         timeout-minutes: 5
         env:
-          BANE_E2E_URL: ${{ env.PUBLIC_URL }}
-          BANE_E2E_API_KEY: ${{ env.E2E_API_KEY }}
-          BANE_E2E_DOMAIN: ${{ vars.E2E_DOMAIN }}
-          BANE_E2E_DOMAIN_ID: ${{ vars.E2E_DOMAIN_ID }}
-          BANE_E2E_REGION: us-east-2
-          BANE_E2E_ALLOW_DESTRUCTIVE: '1'
+          NIGHTMAIL_E2E_URL: ${{ env.PUBLIC_URL }}
+          NIGHTMAIL_E2E_API_KEY: ${{ env.E2E_API_KEY }}
+          NIGHTMAIL_E2E_DOMAIN: ${{ vars.E2E_DOMAIN }}
+          NIGHTMAIL_E2E_DOMAIN_ID: ${{ vars.E2E_DOMAIN_ID }}
+          NIGHTMAIL_E2E_REGION: us-east-2
+          NIGHTMAIL_E2E_ALLOW_DESTRUCTIVE: '1'
         run: bun run e2e
 
-      # Only the failed steps' own requests, and only Bane's structured fields: the report becomes a public issue.
+      # Only the failed steps' own requests, and only Nightmail's structured fields: the report becomes a public issue.
       - name: Keep the Worker log lines of the failed requests
         if: ${{ !cancelled() && needs.authorize.outputs.stage == 'dev' && steps.e2e.outcome == 'failure' }}
         continue-on-error: true
@@ -553,7 +553,7 @@ jobs:
         run: bash .github/scripts/e2e-issue.sh "$RUNNER_TEMP/e2e"
 
   # The support Worker (support/README.md): bane-support-dev beside bane-dev, bane-support beside bane-production. It runs
-  # alongside Bane; its first write waits for Bane's healthy SupportPlatform entrypoint. Off until the repository variable
+  # alongside Nightmail; its first write waits for Nightmail's healthy SupportPlatform entrypoint. Off until the repository variable
   # SUPPORT_DEPLOY is 'true': its D1 database, support address and Worker secrets are set up once by hand, and its secrets
   # (CONSOLE_GATEWAY_KEY and the rest) are set with `wrangler secret put`, never read here.
   support:
@@ -622,7 +622,7 @@ jobs:
       - *stage-tip
 
       # The token verifies at once, but D1's API can refuse a just-minted token for a few seconds (Authentication error
-      # 10000; the Bane job above never sees it because its first call comes ~10 s after minting). Retry only that error:
+      # 10000; the Nightmail job above never sees it because its first call comes ~10 s after minting). Retry only that error:
       # migrations apply is idempotent and fails before running anything.
       - name: Require this attempt's healthy main Worker before changing support
         env:

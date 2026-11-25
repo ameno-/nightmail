@@ -2,7 +2,7 @@ import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { ApiError, log } from './core.js';
 import type { Config } from './core.js';
-import { envNames, settingNames } from './brand.js';
+import { envNames, linkHostTarget, settingNames } from './brand.js';
 import { mailServerHosts } from './mail-servers.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { EVALUATION } from './standing-model.js';
@@ -51,6 +51,15 @@ const values = z.object({
   // Dashboard usage analytics (docs/analytics.md): first-party, stored in this installation's own bucket. Off by default;
   // off, the dashboard sends nothing and the ingest discards whatever arrives.
   DASHBOARD_ANALYTICS: z.enum(['on', 'off']).default('off'),
+  // Hosted: the one email to a domain's owners when its records are still missing an hour after it was added
+  // (src/domain-setup.ts). Off by default; the dashboard's banner and the DNS check run either way.
+  DOMAIN_SETUP_REMINDER: z.enum(['on', 'off']).default('off'),
+  // Hosted: one bounded NS lookup when a domain is added, so a name nobody serves DNS for says so at once (record-check.ts
+  // dnsZone). On by default; off, such a domain is only found by Check now and the background check.
+  DOMAIN_NS_CHECK: z.enum(['on', 'off']).default('on'),
+  // Hosted: the one email to a new workspace's owners when it still has no domain an hour after sign-up (src/domain-setup.ts).
+  // Off by default; the Overview card runs either way.
+  NO_DOMAIN_REMINDER: z.enum(['on', 'off']).default('off'),
   ANALYTICS_PUSH_URL: optional(z.url().refine(value => {
     const u = new URL(value); return !u.username && !u.password && !u.hash && (u.protocol === 'https:' || u.protocol === 'http:' && ['localhost','127.0.0.1','[::1]'].includes(u.hostname));
   })),
@@ -62,6 +71,13 @@ const values = z.object({
   // Hosted only: From for owner notices about sender standing (warn, restrict, pause, quarantine). Sent through the
   // platform workspace above; unset means notices appear only in the dashboard and the account.standing.changed webhook.
   NIGHTMAIL_NOTIFY_FROM: optional(z.email().max(254)),
+  // Hosted only: the parent of every workspace's built-in domain (src/builtin-domain.ts), nightmail.email in production, whose
+  // SES identity is tagged for built-in domains in us-east-2 and whose wildcard MX points at Ohio. Unset (the kill switch):
+  // no new built-in domains, mail from existing ones is refused and mail to them is dropped. Never PUBLIC_URL's own domain.
+  NIGHTMAIL_BUILTIN_DOMAIN: optional(z.string().trim().toLowerCase().max(200).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Hosted only: who a built-in domain sends to. anyone (the default, 100 recipients a day) or members (the workspace
+  // members' own verified addresses, 10 a day): SEND_LIMITS.builtin.
+  NIGHTMAIL_BUILTIN_SEND_SCOPE: z.enum(['anyone', 'members']).default('anyone'),
   // Hosted only: a list (lst_…) of the platform workspace above that everyone who joins the waitlist or signs up is
   // kept in as a contact, with properties to segment by (src/signups.ts). Unset, or not a list ID: nothing is written.
   NIGHTMAIL_SIGNUPS_LIST_ID: z.unknown().optional(),
@@ -96,6 +112,10 @@ const values = z.object({
   // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
   // queue, the jobs, a campaign, a route or the database falling behind. Unset, nothing is posted. Treat as a secret.
   OPERATOR_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
+  // The commit this deploy runs and when it was deployed (.github/scripts/deploy-worker.sh sets both; Docker may). Glass
+  // shows them; a value that isn't a commit or a time is ignored, never an error.
+  DEPLOY_SHA: z.unknown().optional(),
+  DEPLOY_AT: z.unknown().optional(),
   // The database's disk in GB, optional: the Health page shows the database's size against it (src/health.ts).
   DATABASE_DISK_GB: optional(z.coerce.number().positive().max(1_000_000)),
   // Hosted only, optional: the signing secret of the PlanetScale webhook that reports the database disk (src/disk-alert.ts).
@@ -104,6 +124,10 @@ const values = z.object({
   PLANETSCALE_WEBHOOK_SECRET: optional(z.string()),
   // Hosted only. Reserved for a later release: monitoring only observes, and nothing reads this.
   NIGHTMAIL_ABUSE_ENFORCE: z.enum(['true','false']).default('false'),
+  // List hygiene (src/list-hygiene.ts): the nightly sync of the open disposable/role/provider lists (off: the vendored snapshot
+  // only), and the DNS-over-HTTPS resolver for its domain checks (off: none; Hosted defaults to Cloudflare's).
+  NIGHTMAIL_HYGIENE_LISTS: z.enum(['on','off']).default('on'),
+  NIGHTMAIL_HYGIENE_DNS: z.union([z.literal('off'), z.string().url().refine(u => u.startsWith('https://'), 'Use an https:// DNS-over-HTTPS URL, or off.')]).optional(),
   STRIPE_SECRET_KEY: optional(z.string().regex(/^(?:sk|rk)_(?:test|live)_[A-Za-z0-9_]+$/)),
   STRIPE_WEBHOOK_SECRET: optional(z.string().regex(/^whsec_[A-Za-z0-9_]+$/)),
   STRIPE_AUTOMATIC_TAX: z.enum(['true','false']).default('false'),
@@ -112,8 +136,21 @@ const values = z.object({
   STRIPE_TAX_CODE: z.string().regex(/^txcd_\d{8}$/).default('txcd_10103001'),
   STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
   NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
+  // Hosted only, a secret: Glass's Gmail Postmaster Tools reads, an OAuth grant as JSON {clientId, clientSecret, refreshToken}
+  // (scripts/postmaster-auth.ts makes it, for the Google account that verified the domains in Postmaster Tools).
+  NIGHTMAIL_POSTMASTER_CREDENTIALS: optional(z.string().max(4000)),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Hosted: the link domain (src/link-domains.ts): the host the links in campaign and marketing mail (unsubscribe,
+  // forwarding) go on, links.nightmailedge.com, served by the Worker's route on that zone. Never a name of PUBLIC_URL's domain.
+  NIGHTMAIL_LINK_HOST: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Own link hosts, off unless set: each sending domain's links.<domain>, a CNAME to NIGHTMAIL_LINK_SAAS_TARGET (Hosted
+  // default: brand.ts linkHostTarget; required self-hosted), served as a custom hostname of the Cloudflare for SaaS zone
+  // NIGHTMAIL_LINK_SAAS_ZONE_ID, which NIGHTMAIL_LINK_SAAS_TOKEN may edit. A domain whose own host is active links there.
+  // Neither set: links stay on PUBLIC_URL, as before link hosts (self-hosted; Hosted dev).
+  NIGHTMAIL_LINK_SAAS_ZONE_ID: optional(z.string().trim().regex(/^[0-9a-f]{32}$/)),
+  NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().min(20).max(500)),
+  NIGHTMAIL_LINK_SAAS_TARGET: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   // The origin a connected account's SNS topics deliver to (https://events.nightmail.dev): its role template allows
@@ -151,19 +188,22 @@ const values = z.object({
   API_RATE_LIMIT_PER_MINUTE: z.coerce.number().int().min(60).max(100000).default(1200),
   // Slack incoming webhook for hourly SES reputation threshold alerts. Treat as a secret.
   REPUTATION_ALERT_SLACK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
-  // Key for the opt-in Jev content screen on transactional sends (`screen: true`): a TypeSafe AI key, or an
+  // Jev's key for outbound fallback and inbound Ritual questions: a TypeSafe AI key, or an
   // OpenCode Console key when JEV_ENDPOINT is OpenCode's inference gateway. Treat as a secret.
   TYPESAFE_API_KEY: optional(z.string().min(1)),
   JEV_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://api.typesafe.ai/v1/systemone')),
   JEV_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jev-latest')),
   JEV_SCREEN_MODE: z.preprocess(v => v === '' ? undefined : v, z.enum(['reject', 'flag']).default('reject')),
-  JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.7)),
+  // Outbound policy: switch the order without moving either model's calibrated cutoff.
+  JEV_SCREEN_PRIMARY: z.preprocess(v => v === '' ? undefined : v, z.enum(['jevf', 'jev']).default('jevf')),
+  JEVF_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.50)),
+  JEV_SCREEN_THRESHOLD: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().min(0).max(1).default(0.70)),
   // Screened-text limits in UTF-8 bytes (src/screen.ts): a message is screened on its own, a campaign once for all its
   // recipients, so a campaign may be longer. Each 8,000-byte classifier request reads at least 4.7 KB of new text
   // (about 7 KB for a message with few link hosts): src/screen.ts chunksFor.
   JEV_MESSAGE_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.messageBytes)),
   JEV_CAMPAIGN_LIMIT_BYTES: z.preprocess(v => v === '' ? undefined : v, z.coerce.number().int().min(4096).max(256 * 1024).default(SEND_LIMITS.screen.campaignBytes)),
-  // Second classifier for shadow comparisons and for failover when the primary fails (401/402/403/429/451/5xx/timeouts).
+  // JevF gates outbound mail by default when its key is installed.
   JEVF_API_KEY: optional(z.string().min(1)),
   JEVF_ENDPOINT: z.preprocess(v => v === '' ? undefined : v, z.string().url().refine(v => v.startsWith('https://'), 'Use an https URL.').default('https://jevf-inference.opencode.ai/v1/systemone')),
   JEVF_MODEL: z.preprocess(v => v === '' ? undefined : v, z.string().min(1).max(100).default('jevf')),
@@ -198,6 +238,13 @@ function planetscaleSecret(value: string | undefined) {
 }
 let signupsListIgnored = false;
 /** The sign-ups list, or undefined for a value that isn't a list ID: the optional sync is off, and nothing else is. Said once, never with the value. */
+// The built-in domains' parent is a domain of its own: never one the installation is served on, nor a parent or child of one.
+function builtinParent(name: string | undefined, origins: string[]) {
+  if (!name) return undefined;
+  const overlaps = (a: string, b: string) => a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
+  if (origins.some(origin => overlaps(name, new URL(origin).hostname.toLowerCase()))) throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_BUILTIN_DOMAIN must be a domain of its own, not PUBLIC_URL’s domain or one of its earlier origins.');
+  return name;
+}
 function signupsListId(value: unknown): string | undefined {
   if (value == null || value === '') return undefined;
   if (typeof value === 'string' && /^lst_[0-9a-f]{32}$/.test(value)) return value;
@@ -263,18 +310,41 @@ export function loadConfig(input: Record<string, unknown>): Config {
     if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.d !== 'string' || typeof jwk.x !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_SIGNING_KEY to an Ed25519 private JWK with d and x.');
     supportSigningKey = { kty: 'OKP', crv: 'Ed25519', d: jwk.d, x: jwk.x };
   }
+  let postmaster: Config['postmaster'];
+  if (v.NIGHTMAIL_POSTMASTER_CREDENTIALS) {
+    const grant = (() => { try { return JSON.parse(v.NIGHTMAIL_POSTMASTER_CREDENTIALS!) as Record<string, unknown>; } catch { return null; } })();
+    if (!grant || typeof grant.clientId !== 'string' || typeof grant.clientSecret !== 'string' || typeof grant.refreshToken !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_POSTMASTER_CREDENTIALS to the JSON scripts/postmaster-auth.ts writes: clientId, clientSecret and refreshToken.');
+    postmaster = { clientId: grant.clientId, clientSecret: grant.clientSecret, refreshToken: grant.refreshToken };
+  }
   const supportAddressIds = list(v.NIGHTMAIL_SUPPORT_ADDRESS_IDS ?? '');
   if (supportAddressIds.some(id => !/^mbx_[0-9a-f]{32}$/.test(id))) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_ADDRESS_IDS to inbound address IDs (mbx_…) separated by commas.');
   const url = new URL(v.PUBLIC_URL);
-  const jevf = v.TYPESAFE_API_KEY && v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined;
+  const jevf = v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, threshold: v.JEVF_SCREEN_THRESHOLD, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined;
+  const screen: Config['screen'] = v.TYPESAFE_API_KEY ? {
+    primary: jevf ? v.JEV_SCREEN_PRIMARY : 'jev', mode: v.JEV_SCREEN_MODE,
+    jev: { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, threshold: v.JEV_SCREEN_THRESHOLD }, jevf,
+  } : undefined;
   const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
+  if (!v.NIGHTMAIL_LINK_SAAS_ZONE_ID !== !v.NIGHTMAIL_LINK_SAAS_TOKEN) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_ZONE_ID and NIGHTMAIL_LINK_SAAS_TOKEN together, or neither.');
+  // The target is a name in the SaaS zone, which is a domain of its own: Hosted's is brand.ts linkHostTarget; a self-hosted
+  // installation names its own.
+  const linkTarget = v.NIGHTMAIL_LINK_SAAS_TARGET ?? (v.MULTI_TENANT === 'true' ? linkHostTarget : undefined);
+  if (v.NIGHTMAIL_LINK_SAAS_ZONE_ID && !linkTarget) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_TARGET to the name in the Cloudflare for SaaS zone that links.<domain> CNAMEs point to.');
+  // The link domain shares no domain with this installation's own origins (nightmail.dev never carries customer links):
+  // compared by their last two labels.
+  const site = (host: string) => host.split('.').slice(-2).join('.'), linkHost = v.MULTI_TENANT === 'true' ? v.NIGHTMAIL_LINK_HOST : undefined;
+  if (linkHost && [url.origin, ...previousOrigins].some(origin => site(new URL(origin).hostname) === site(linkHost)))
+    throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_LINK_HOST must be a name in the link domain\u2019s own zone, not under PUBLIC_URL\u2019s domain.');
+  const linkHosts = v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN && linkTarget
+    ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: linkTarget } : undefined;
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
     mailServers: v.MAILGW_API_TOKEN ? mailServerHosts(v.MAILGW_PUBLIC_DOMAIN ?? url.hostname) : undefined,
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
+    builtinDomain: v.MULTI_TENANT==='true' ? builtinParent(v.NIGHTMAIL_BUILTIN_DOMAIN, [url.origin, ...previousOrigins]) : undefined, builtinScope: v.NIGHTMAIL_BUILTIN_SEND_SCOPE,
     signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
     support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
@@ -284,32 +354,37 @@ export function loadConfig(input: Record<string, unknown>): Config {
     requireDmarcForBulk: v.MULTI_TENANT === 'true' && (v.NIGHTMAIL_REQUIRE_DMARC_FOR_BULK ?? v.ENABLE_LIVE_SES) === 'true',
     hostedScreen: v.MULTI_TENANT==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true',
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
+    hygieneLists: v.NIGHTMAIL_HYGIENE_LISTS === 'on',
+    hygieneDnsUrl: v.NIGHTMAIL_HYGIENE_DNS === 'off' ? null : v.NIGHTMAIL_HYGIENE_DNS ?? (v.MULTI_TENANT === 'true' ? 'https://cloudflare-dns.com/dns-query' : null),
     abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
+    deploy: { sha: typeof v.DEPLOY_SHA === 'string' && /^[0-9a-f]{7,40}$/.test(v.DEPLOY_SHA) ? v.DEPLOY_SHA : null,
+      at: typeof v.DEPLOY_AT === 'string' && Number.isFinite(Date.parse(v.DEPLOY_AT)) ? new Date(v.DEPLOY_AT).toISOString() : null },
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
       creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
-    placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
+    placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE, postmaster: v.MULTI_TENANT === 'true' ? postmaster : undefined,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     // The daily limit of a workspace the standing job has not seen yet: the evaluation's (docs/sending-limits.md).
     hostedSendCaps: { firstWeek: EVALUATION.limit },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
+    domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true' && v.DOMAIN_NS_CHECK === 'on', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
     analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
-    publicUrl: url.origin, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
+    publicUrl: url.origin, linkHost, linkHosts, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: v.DISPATCH_TX_RESERVE_PERCENT, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
     aws,
     // Resource names and trusted feedback bindings are hydrated from persisted setup state.
     snsTopicArns: [], inboundTopicArns: [],
     reputationAlertUrl: v.REPUTATION_ALERT_SLACK_URL,
-    screen: v.TYPESAFE_API_KEY ? { apiKey: v.TYPESAFE_API_KEY, endpoint: v.JEV_ENDPOINT, model: v.JEV_MODEL, mode: v.JEV_SCREEN_MODE, threshold: v.JEV_SCREEN_THRESHOLD, ...(jevf && { failover: jevf }) } : undefined,
-    shadow: jevf, // Workers without a comparison queue disable only this handoff, not the failover gate.
+    screen,
+    shadow: screen?.primary === 'jev' ? jevf : undefined,
     screenLimits: { messageBytes: v.JEV_MESSAGE_LIMIT_BYTES, campaignBytes: v.JEV_CAMPAIGN_LIMIT_BYTES },
     apiRateLimitPerMinute: v.API_RATE_LIMIT_PER_MINUTE,
     configurationSets: { transactional: '', marketing: '' },

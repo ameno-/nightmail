@@ -1,4 +1,6 @@
 import { Buffer } from 'node:buffer';
+import { BUILTIN_CAPS } from './builtin-limits.js';
+import { ATTACHMENT_CAPS } from './attachment-limits.js';
 
 /**
  * Every limit a send is admitted against, defined once. The admission decision (send_admission, migration 323)
@@ -18,19 +20,21 @@ export const SEND_LIMITS = {
   /** DMARC facts older than this are not evidence. */
   dmarcMaxAgeHours: 48,
   /** SES's limit on an attachment's MIME type and content ID, in printable ASCII characters. */
-  mimeFieldChars: 78,
+  mimeFieldChars: ATTACHMENT_CAPS.mimeFieldChars,
   /** Decoded attachments per message (so also per attachment). SES v2 takes messages up to 40 MB after base64
    * encoding (https://docs.aws.amazon.com/ses/latest/dg/quotas.html); base64 with MIME line breaks grows a file by
    * 4/3 × 78/76 (about 37%), so 25 MiB of files is about 36 MB on the wire and leaves room for the body and headers. */
-  attachmentBytes: 25 * 1024 * 1024,
+  attachmentBytes: ATTACHMENT_CAPS.attachmentBytes,
   /** A file sent as base64 inside a JSON request (uploadAttachment's JSON body, inbox mail's inline content, MCP): the
    * request text, the parsed string and the decoded bytes are all held at once, so these stay at 8 MiB decoded.
    * Larger files upload as raw bytes (POST /v1/attachments/upload). */
-  jsonAttachmentBytes: 8 * 1024 * 1024,
+  jsonAttachmentBytes: ATTACHMENT_CAPS.jsonAttachmentBytes,
+  /** Uploaded attachment bytes one workspace keeps at once (sending_asset_usage). */
+  storedAttachmentBytes: ATTACHMENT_CAPS.storedAttachmentBytes,
   /** Files per message: sends, batch items, campaigns and templates, inbox mail, the SMTP relay and forwards. The bytes are
    * bounded by attachmentBytes together; the dispatcher reads each file from storage once (cached), one subrequest each,
    * far inside a Worker invocation's 10,000, and inbound mail parses as many (mailbox-ingest.ts MAX_ATTACHMENTS). */
-  attachments: 100,
+  attachments: ATTACHMENT_CAPS.attachments,
   /** The html and text of one batch's messages together, in characters. The request itself stays bounded at 12 MiB
    * (request-body.ts), so this is what lets a batch of 100 ordinary 30-100 KB HTML emails through. */
   batchContentChars: 10 * 1024 * 1024,
@@ -55,6 +59,9 @@ export const SEND_LIMITS = {
    * kept, so a scheduled email is visible for its whole wait (longer plans are campaigns, up to a year); up to a minute
    * in the past for a sender's clock (it then sends at once); and how many may wait per workspace. */
   schedule: { horizonSeconds: 30 * 86_400, skewSeconds: 60, workspace: 100_000 },
+  /** A built-in domain's recipients in a minute and in a rolling 24 hours (builtin-domain.ts), for each send scope
+   * (NIGHTMAIL_BUILTIN_SEND_SCOPE): anyone, or only the workspace members' own verified addresses. */
+  builtin: BUILTIN_CAPS,
 } as const;
 
 /** UTF-8 bytes of the parts a message's MIME carries, counted without copying them. A message sent as written (mime)

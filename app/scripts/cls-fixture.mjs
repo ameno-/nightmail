@@ -1,4 +1,4 @@
-// A throwaway hosted Bane for the CLS gate: a fresh Postgres database, the Node API serving the production dashboard
+// A throwaway hosted Nightmail for the CLS gate: a fresh Postgres database, the Node API serving the production dashboard
 // build (app/dist) and synthetic workspaces. Nothing touches a real deployment, SES or real mail.
 // Postgres comes from CLS_PG_URL (an admin connection, as the CI service provides), else a container of the CI image
 // when Docker is running, else a temporary initdb cluster. The database and role are created here and removed on stop().
@@ -139,8 +139,10 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
     const envFor = (port, publicOrigin = `http://127.0.0.1:${port}`) => ({
       PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: publicOrigin, API_BASE_URL: publicOrigin, HOST: '127.0.0.1', PORT: String(port),
       MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', API_RATE_LIMIT_PER_MINUTE: '100000',
+      // Built-in domains (api/src/builtin-domain.ts): the workspaces seeded with one below show it in onboarding, Domains and Overview.
+      NIGHTMAIL_BUILTIN_DOMAIN: 'nightmail.email',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
-      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
@@ -148,6 +150,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       MAILGW_API_TOKEN: randomBytes(24).toString('hex'), MAILGW_PUBLIC_DOMAIN: 'northwind.example',
       // Bring your own AWS (regional): the hosted connections' account is the platform's, as in production.
       BANE_PLATFORM_AWS_ACCOUNT: '111122223333', BANE_BYO_V2: 'true', BYO_V5_TEMPLATE_URL: 'https://nightmail-byo-templates-111122223333.s3.us-east-2.amazonaws.com/byo/6.0.yaml', BYO_EVENTS_ORIGIN: 'https://events.nightmail.dev',
+      // The link domain, as production has it (own link hosts off): no link record on any domain's page.
+      NIGHTMAIL_LINK_HOST: 'links.edge.northwind.example',
     });
     execFileSync('node', ['--import', 'tsx', 'src/migrate.ts'], { cwd: api, env: envFor(0), stdio: ['ignore', 'ignore', 'inherit'] });
     log('postgres: migrated');
@@ -248,7 +252,10 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
             const headers = { cookie: req.headers.cookie ?? '', origin: req.headers.origin ?? origin, ...req.headers['x-nightmail-workspace'] ? { 'x-nightmail-workspace': req.headers['x-nightmail-workspace'] } : {} };
             const me = await fetch(apiOrigin + '/v1/me', { headers }).then(r => r.ok ? r.json() : null, () => null);
             if (me?.multiTenant) {
-              await hosted(db, me.workspaceId);
+              const conn = await hosted(db, me.workspaceId);
+              // Starting Hosted mail sets up the workspace's built-in domain too (startHostedMail): the first email sends from it.
+              // Pages measured at once (light, dark, phone) start it together: whichever comes second finds it made.
+              if (!(await db.query('SELECT 1 FROM builtin_domains WHERE workspace_id=$1', [me.workspaceId])).rowCount) await builtin(db, me.workspaceId, conn, me.workspaceId.replace(/[^a-z0-9]/g, '').slice(0, 16) + '-e5').catch(() => {});
               const read = await fetch(apiOrigin + '/v1/connection', { headers }), json = await read.json();
               res.writeHead(read.ok ? 201 : read.status, { 'content-type': 'application/json' });
               res.end(JSON.stringify(read.ok ? json.connection : json));
@@ -347,6 +354,39 @@ async function domain(db, workspaceId, conn, name, { receiving = false, mailFrom
   await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at,mx,checked_at) VALUES($1,$2,$3,$4,$5,$4,'active','store',now()-interval '20 days',$6::jsonb,now()-interval '12 minutes')",
     [mdom, workspaceId, id, name, REGION, JSON.stringify(mx)]);
   return { id, mdom, host: name };
+}
+
+// A workspace's built-in domain as its Hosted connection leaves it (create_builtin_claim, migration 495): sending, receiving
+// on its own name with no DNS of its own, and its default inbox's catch-all. `pending`: not associated with its tenant yet.
+async function builtin(db, workspaceId, conn, label, { pending = false } = {}) {
+  const name = `${label}.nightmail.email`, id = 'dom_builtin_' + workspaceId, mdom = 'mdom_builtin_' + workspaceId;
+  await db.query('INSERT INTO builtin_domains(workspace_id,label,name) VALUES($1,$2,$3)', [workspaceId, label, name]);
+  const identity = { builtin: true, proven: true, mx: null, note: null, ses: pending ? { VerificationStatus: 'PENDING' } : { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
+  await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES($1,$2,$3,$5,'active',$2,$4::jsonb,now(),now())",
+    [workspaceId, name, conn, JSON.stringify(identity), pending ? 'pending' : 'verified']);
+  await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at) VALUES($1,$2,$3,$4,$5,$4,'active','store',now()-interval '1 day')", [mdom, workspaceId, id, name, REGION]);
+  return { id, name };
+}
+
+// A domain added two hours ago whose records never went live, as the background DNS check (api/src/domain-setup.ts) left
+// it: the TXT and one DKIM CNAME missing at Cloudflare. Its page and Overview show the setup banner.
+// `correct`: its ownership is proven and every DKIM CNAME is in public DNS, but SES hasn't looked again yet.
+// `noDns`: nobody serves DNS for it (a typo): every record missing and the check's noDns, so its page says to check the name.
+// `wildcard`: a *.<domain> address record answers its DKIM names, so all three CNAMEs are missing and the banner names the wildcard.
+// `parking`: Porkbun's parking default (* CNAME pixie.porkbun.com) answers them instead.
+async function stuck(db, workspaceId, conn, name, { correct = false, noDns = false, wildcard = false, parking = false } = {}) {
+  const id = 'dom_' + name.replace(/\W/g, '_'), tokens = [0, 1, 2].map(i => `${name.replace(/\W/g, '').slice(0, 10)}${i}p4w8v6dkim`);
+  const identity = { ses: { VerificationStatus: 'PENDING', VerifiedForSendingStatus: false, DkimAttributes: { Status: 'PENDING', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com', Tokens: tokens } }, proven: correct, mx: null, note: null };
+  const { rows: [{ token }] } = await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,identity,ever_proven,created_at) VALUES($1,$2,$3,'pending','off',$4::jsonb,$5,now()-interval '2 hours') RETURNING token",
+    [workspaceId, name, conn, JSON.stringify(identity), correct]);
+  await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
+  const checkedAt = ago(6), seen = state => ({ state, values: [], checkedAt, ...(wildcard || parking) && state === 'missing' ? { wildcard: `*.${name}`, ...parking ? { parking: { owner: 'Porkbun', target: 'pixie.porkbun.com' } } : {} } : {} });
+  const records = [...tokens.map((t, i) => ({ type: 'CNAME', name: `${t}._domainkey.${name}`, value: `${t}.dkim.amazonses.com`, publicDns: seen(noDns || wildcard || parking || (i === 2 && !correct) ? 'missing' : 'found') })),
+    ...correct ? [] : [{ type: 'TXT', name: `_nightmail.${name}`, value: token, publicDns: seen('missing') }]];
+  const host = noDns ? null : parking ? { name: 'Porkbun', zone: name, url: null } : { name: 'Cloudflare', zone: name, url: `https://dash.cloudflare.com/?to=/:account/${name}/dns/records` };
+  await db.query('UPDATE domain_claims SET setup_check=$3::jsonb WHERE workspace_id=$1 AND name=$2', [workspaceId, name, JSON.stringify({ checkedAt, host, ...noDns ? { noDns: true } : {}, records })]);
+  return { id };
 }
 
 const RECEIPT_TEXT = 'Northwind\n\nThanks for your order.\n\nOrder 4821 is confirmed and ships within two business days.\n\nWalnut desk organizer  $48.00\nShipping  $6.00\nTotal  $54.00\n\nView your order: https://northwind.example/orders/4821\n\nNorthwind, 120 Harbor Street, Portland, OR 97209';
@@ -718,7 +758,7 @@ export async function seed(fx) {
   if ((await db.query("SELECT to_regclass('audit_events') IS NOT NULL AS ok")).rows[0].ok) await db.query(`INSERT INTO audit_events
     (workspace_id,user_id,actor_type,actor_id,actor_label,via,action,target_type,target_id,summary,reason,request_id,ip_network,user_agent,internal,at,retain_until) VALUES
     ('ws_northwind','user_sam','member','user_sam',NULL,'dashboard','member.join','member','user_sam','{"after":{"role":"admin"}}',NULL,'req_fixture_join','198.51.100.0/24','Safari 18 on macOS',false,now()-interval '6 days',now()+interval '1 year'),
-    ('ws_northwind','user_sam','support','sgr_fixture','Bane support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
+    ('ws_northwind','user_sam','support','sgr_fixture','Nightmail support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
   // The newest receipt as a well-made transactional email, and a junk-like one sent a minute ago (EmailInsight's two cases).
   // Neither links a remote image: the sent-mail preview loads those, and the gate allows no external request.
@@ -814,7 +854,9 @@ export async function seed(fx) {
   const contacts = [];
   for (const [i, who] of ['ada', 'grace', 'linus', 'margaret', 'ken'].entries()) contacts.push(await dana.api('POST', '/v1/contacts', { email: `${who}@example.net`, name: who[0].toUpperCase() + who.slice(1),
     properties: { plan: who.length > 4 ? 'pro' : 'free', status: i < 3 ? 'waiting' : 'signed_up', joined_at: `2026-11-1${i}T09:30:00.000Z`, mailbox: i % 2 ? 'free' : 'company', attempts: i + 1 } }));
-  await dana.api('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(c => c.id) });
+  // A role address list hygiene flags (Audience · risky): campaigns skip it until someone sends to it anyway.
+  const risky = await dana.api('POST', '/v1/contacts', { email: 'noreply@example.net' });
+  await dana.api('POST', `/v1/lists/${list.id}/members`, { contactIds: [...contacts, risky].map(c => c.id) });
   const segment = await dana.api('POST', '/v1/segments', { name: 'Pro plan', rule: { field: 'plan', operator: 'eq', value: 'pro' } });
   // Property rules (Segment · property rules): a string, a day and a presence check.
   const propertySegment = await dana.api('POST', '/v1/segments', { name: 'Waiting companies', rule: { operator: 'and', rules: [
@@ -822,12 +864,24 @@ export async function seed(fx) {
     { field: 'property', key: 'mailbox', type: 'string', operator: 'eq', value: 'company' }, { field: 'property', key: 'attempts', type: 'number', operator: 'gt', value: 0 }, { field: 'property', key: 'let_in_at', type: 'date', operator: 'notSet' }] } });
   const template = await dana.api('POST', '/v1/templates', { name: 'Receipt' });
   const campaign = await dana.api('POST', '/v1/campaigns', { name: 'November product update', subject: 'What shipped in November', from: 'news@mail.northwind.example', html: '<p>Hello</p>' });
+  // Review's Send stage (Campaign review · send, · ramp): a campaign to 40 subscribers, which the send review finds ready,
+  // and one to 12,000 from a domain added today, which it recommends sending in two daily batches.
+  const subscribers = async (name, prefix, n) => {
+    const made = await dana.api('POST', '/v1/lists', { name });
+    await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_cls_'||$2||'_'||n,'ws_northwind',$2||'-'||n||'@example.org','subscribed' FROM generate_series(1,$3::int) n RETURNING id)
+      INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT 'ws_northwind',$1,id FROM c`, [made.id, prefix, n]);
+    return made;
+  };
+  const readyCampaign = await dana.api('POST', '/v1/campaigns', { name: 'Customer note', subject: 'A note for customers', from: 'news@mail.northwind.example', html: '<p>Hello</p>', audience: { listId: (await subscribers('Early customers', 'early', 40)).id } });
+  const waitlist = await subscribers('Waitlist import', 'waitlist', 12000);
+  const rampCampaign = await dana.api('POST', '/v1/campaigns', { name: 'Waitlist launch', subject: 'We are live', from: 'news@mail.northwind.example', html: '<p>Hello</p>', audience: { listId: waitlist.id } });
   const contact = contacts[0];
 
-  // Northwind's standing: graded B with a notice (a first complaint). Dana is also a Bane operator, so the operator
+  // Northwind's standing: graded B with a notice (two complaints in 10,000 accepted). Dana is also a Nightmail operator, so the operator
   // console has a signed-in user.
+  const { noticeReasons } = await tsImport(join(apiDir, 'src/standing-model.ts'), import.meta.url);
   await standing(db, 'ws_northwind', { score: 86.4, limit: null, step: 'notice', since: ago(90), factors: [factor('complaints', 'Complaints', 30, 0.0003, 93.1), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 91.1), factor('hygiene', 'List quality', 15, 0.012, 97.5), factor('auth', 'Authentication', 10, 0.85, 85), factor('engagement', 'Engagement', 10, 0.0031, 93.9)],
-    reasons: [{ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: 0.0011, count: 1, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: '1 accepted email was marked as spam in 24 hours.' }] });
+    reasons: noticeReasons({ accepted: 10_000, complaints: 2, bounces: 0 }, 'notice') });
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_dana','operator','CLS fixture')");
   // The waitlist (Operator · waitlist): refused sign-ins to email when Nightmail opens, one without a name.
   await db.query(`INSERT INTO nightmail_waitlist(email,name,attempts,first_at,last_at) VALUES
@@ -878,8 +932,44 @@ export async function seed(fx) {
   await db.query("INSERT INTO mail_messages(id, workspace_id, direction, thread_id, subject, from_address, received_at) VALUES ($1, 'ws_fresh', 'inbound', 'thr_niacontinue', 'Why did my first campaign bounce at Outlook?', 'nia@lumenlabs.example', now() - interval '2 hours')", [continueMessage]);
   await db.query("INSERT INTO support_conversations(id, channel, pending_address, verification, mode) VALUES ($1, 'email', 'nia@lumenlabs.example', 'none', 'pending_signin')", [continueConversation]);
   await db.query("INSERT INTO support_email_signins(conversation_id, message_id, address) VALUES ($1, $2, 'nia@lumenlabs.example')", [continueConversation, continueMessage]);
-  await domain(db, 'ws_fresh', await hosted(db, 'ws_fresh'), 'lumenlabs.example');
+  const freshConn = await hosted(db, 'ws_fresh');
+  await domain(db, 'ws_fresh', freshConn, 'lumenlabs.example');
+  const stuckDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenmail.example');
+  const correctDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpost.example', { correct: true });
+  // Lists after lumenmail.example, so Overview's setup banner stays that one's.
+  const noDnsDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenaml.example', { noDns: true });
+  const wildcardDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenwild.example', { wildcard: true });
+  const parkedDomain = await stuck(db, 'ws_fresh', freshConn, 'lumenpark.example', { parking: true });
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
+  // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
+  await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
+  // Its built-in domain sends meanwhile: Overview's card asks for a domain of its own, and Domains lists the built-in one.
+  const builtinDomain = await builtin(db, 'ws_skipped', await hosted(db, 'ws_skipped'), 'pine-studio-k7');
+  // A verified domain of its own and nothing sent yet: Overview's first card offers the first send, from that domain, not the built-in one.
+  await fx.signIn('ren', 'ren@rowanbakery.example', 'Ren Okafor', { id: 'ws_verified', name: 'Rowan Bakery' });
+  const verifiedConn = await hosted(db, 'ws_verified');
+  await builtin(db, 'ws_verified', verifiedConn, 'rowan-bakery-m2');
+  await domain(db, 'ws_verified', verifiedConn, 'rowanbakery.example');
+  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its first email.
+  await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
+  await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
+  // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
+  await fx.signIn('ula', 'ula@ulmus.example', 'Ula Berg', { id: 'ws_builtin_pending', name: 'Ulmus' });
+  await builtin(db, 'ws_builtin_pending', await hosted(db, 'ws_builtin_pending'), 'ulmus-r8', { pending: true });
+  // What each workspace said it is here for (onboarding's focus question): the step and Overview card each focus leads to.
+  // Alder: agent inboxes, its agent@ inbox made and two emails in it. Aspen: the same focus, nothing received yet (Overview's card).
+  const focused = async (user, email, name, workspace, label, focus) => {
+    await fx.signIn(user, email, name, { id: workspace, name: label })
+    const made = await builtin(db, workspace, await hosted(db, workspace), label.toLowerCase() + '-' + user.slice(0, 1) + '3')
+    await db.query('UPDATE workspaces SET focus = $2 WHERE id = $1', [workspace, focus])
+    return made
+  }
+  const alder = await focused('ada', 'ada@alder.example', 'Ada Moss', 'ws_focus_agents', 'Alder', ['agents', 'developer'])
+  await agentInbox(db, 'ws_focus_agents', { mdom: 'mdom_builtin_ws_focus_agents', host: alder.name }, 'Agent', 24 * 30, mix(2))
+  await focused('abe', 'abe@aspen.example', 'Abe Lowe', 'ws_focus_agents_new', 'Aspen', ['agents'])
+  await focused('mae', 'mae@maple.example', 'Mae Ford', 'ws_focus_marketing', 'Maple', ['marketing', 'newsletter'])
+  await focused('noa', 'noa@linden.example', 'Noa Hart', 'ws_focus_newsletter', 'Linden', ['newsletter'])
+  await focused('pam', 'pam@poplar.example', 'Pam Reid', 'ws_focus_personal', 'Poplar', ['personal'])
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');
@@ -895,6 +985,8 @@ export async function seed(fx) {
   // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
+  // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
+  await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
   // API keys' agent tokens: that agent with two short-lived tokens it made in Northwind, and Sam's agent with one (an
   // owner sees another member's agent once it has made tokens here).
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at) VALUES('mcp_at_cls_sam','https://account.anoma.ly','user_sam','user_sam','claude-code',NULL,'{read}',now()+interval '1 day',0)");
@@ -954,7 +1046,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
+    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

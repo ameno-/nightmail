@@ -1,9 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
-import { ChevronDown, MessageCircleQuestionMark } from 'lucide-react'
+import { ChevronDown, MessageCircleQuestionMark, X } from 'lucide-react'
 import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
-import { IconButton } from './ui'
+import { Button, IconButton } from './ui'
+import { NightmailMark } from './NightmailLogo'
+import { productName } from '../../../api/src/brand'
 
 // The support chat's Help button and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
 // page is idle (hover, focus or press warms it sooner); the conversation and its transport start when Help opens.
@@ -17,16 +19,37 @@ const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'nightmail.support'
 export type SupportMode = 'demo' | 'live'
+export type PendingSupportOpen = { message?: string; shareContent?: boolean }
+
+let pendingOpen: PendingSupportOpen | null = null
+let activeOpener: (() => void) | null = null
+
+/** Opens the in-dashboard Help panel when support chat is enabled for this session; returns false otherwise. */
+export function openSupportChat(detail?: PendingSupportOpen): boolean {
+  if (!activeOpener) return false
+  if (detail?.message || detail?.shareContent) pendingOpen = detail
+  activeOpener()
+  window.dispatchEvent(new CustomEvent('nightmail:support-handoff'))
+  return true
+}
+
+/** Consumes any message/content-sharing request queued by openSupportChat(). */
+export function consumePendingSupportOpen(): PendingSupportOpen | null {
+  const next = pendingOpen
+  pendingOpen = null
+  return next
+}
 
 function readMode(hosted: boolean, staff: boolean) {
   const param = new URLSearchParams(window.location.search).get('support')
+  const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
+  const demoAllowed = import.meta.env.DEV || flag === 'true' || staff
   try {
-    if (param === 'demo') sessionStorage.setItem(modeKey, 'demo')
-    if (param === 'off') sessionStorage.removeItem(modeKey)
+    if (param === 'demo' && demoAllowed) sessionStorage.setItem(modeKey, 'demo')
+    if (param === 'off' || !demoAllowed) sessionStorage.removeItem(modeKey)
   } catch { /* Session storage is unavailable: the parameter still applies to this load. */ }
   let stored: string | null = null
-  try { stored = sessionStorage.getItem(modeKey) } catch { stored = param === 'demo' ? 'demo' : null }
-  const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
+  try { stored = demoAllowed ? sessionStorage.getItem(modeKey) : null } catch { stored = demoAllowed && param === 'demo' ? 'demo' : null }
   const live = hosted && (flag === 'true' || flag === 'staff' && staff)
   const mode: SupportMode | null = stored === 'demo' ? 'demo' : live ? 'live' : null
   return { mode, resume: mode === 'live' && param?.startsWith('conv_') ? param : null }
@@ -38,6 +61,12 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)
+  useEffect(() => {
+    if (!mode) return
+    const openPanel = () => { setUsed(true); setOpen(true) }
+    activeOpener = openPanel
+    return () => { if (activeOpener === openPanel) activeOpener = null }
+  }, [mode])
   // The panel's code loads when the page is idle, so Help opens at once even on a first tap (a touch has no hover).
   useEffect(() => {
     if (!mode) return
@@ -82,5 +111,37 @@ export function SupportHost({ chat }: { chat: SupportChat }) {
     return () => document.removeEventListener('keydown', onKey)
   }, [chat.open])
   if (!chat.mode || !chat.used) return null
-  return <Panel mode={chat.mode} resume={chat.resume} open={chat.open} onClose={() => chat.setOpen(false)} onUnread={chat.setUnread} />
+  return <SupportErrorBoundary open={chat.open} phone={phone} onClose={() => chat.setOpen(false)}>
+    {attempt => <Panel key={attempt} mode={chat.mode!} resume={chat.resume} open={chat.open} onClose={() => chat.setOpen(false)} onUnread={chat.setUnread} />}
+  </SupportErrorBoundary>
+}
+
+// Isolates any render or chunk failure inside the support panel so it never takes down the dashboard.
+class SupportErrorBoundary extends Component<{ open: boolean; phone: boolean; onClose: () => void; children: (attempt: number) => ReactNode }, { failed: boolean; attempt: number }> {
+  state = { failed: false, attempt: 0 }
+  static getDerivedStateFromError() { return { failed: true } }
+  componentDidCatch(_error: Error, _info: ErrorInfo) { /* Contained in the panel; never bubble to AppErrorBoundary. */ }
+  private retry = () => {
+    window.dispatchEvent(new CustomEvent('nightmail:support-reset'))
+    this.setState(s => ({ failed: false, attempt: s.attempt + 1 }))
+  }
+  render() {
+    if (!this.state.failed) return this.props.children(this.state.attempt)
+    const { open, phone, onClose } = this.props
+    if (!open) return null
+    return <>
+      {phone && <div className="support-overlay" data-open="" aria-hidden="true" onClick={onClose} />}
+      <section id="support-panel" className={phone ? 'support-panel support-panel--sheet support-panel--error' : 'support-panel support-panel--error'} role="dialog" aria-modal="false" aria-labelledby="support-title" data-open="">
+        <header className="support-panel__header">
+          <NightmailMark className="support-panel__mark" size={18} />
+          <div className="support-panel__heading"><h2 id="support-title">{productName} Support</h2></div>
+          <div className="support-panel__actions"><IconButton label="Close" onClick={onClose}><X size={16} /></IconButton></div>
+        </header>
+        <div className="support-error" role="alert">
+          <p>Support couldn’t load.</p>
+          <Button size="sm" onClick={this.retry}>Retry</Button>
+        </div>
+      </section>
+    </>
+  }
 }

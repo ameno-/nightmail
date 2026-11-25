@@ -6,7 +6,7 @@ import { Alert, Button, Checkbox, ControlSkeleton, DataTable, Dialog, DropdownMe
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import { ApiError, type SenderScoreFactor, type StandingReason, type StandingStep } from '../../data/types'
-import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type SignupPlaces, type TimelineKind, type WaitlistEntry, type WorkspaceSummary } from '../../data/operator'
+import { isoTime, operatorApi, type OperatorAction, type OperatorCampaign, type OperatorDomain, type OperatorMember, type OperatorQueueItem, type OperatorTimelineItem, type OperatorWorkspace, type SignupPlaces, type SignupRaise, type TimelineKind, type WaitlistEntry, type WorkspaceSummary } from '../../data/operator'
 import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsvChunks, formatCsvRow } from '../../lib/download'
 import { errorText } from '../../data/types'
@@ -22,6 +22,7 @@ import { HealthView } from './health'
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
 export { OperatorClusterPage } from './abuse'
+export { GlassPage } from './glass'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
 const NotFound = StaffOnly
 const def = (defs: typeof queueColumnDefs, key: string) => defs.find(column => column.key === key)!
@@ -70,8 +71,8 @@ function Signups() {
   })
   const rows = (list.data?.pages ?? []).flatMap(page => page.items)
   return <>
-    <SignupFacts values={places ? { 'Signed up': `${number(places.signedUp)} of ${number(places.limit)}`, 'Held for the waitlist': number(places.held), Waiting: number(places.waiting), Open: number(places.open) }
-      : unknown ? { 'Signed up': '—', 'Held for the waitlist': '—', Waiting: '—', Open: '—' } : undefined} />
+    <SignupFacts values={places ? { 'Signed up': `${number(places.signedUp)} of ${number(places.limit)}`, 'Held for the waitlist': number(places.held), Open: number(places.open), Waiting: number(places.waiting) }
+      : unknown ? { 'Signed up': '—', 'Held for the waitlist': '—', Open: '—', Waiting: '—' } : undefined} />
     {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
       <DataTable className="op-table" loading={list.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} columns={signupColumns}
         rowHref={row => row.standing ? `/operator/workspaces/${encodeURIComponent(row.id)}` : undefined} empty={<EmptyState title="No workspaces yet" />} />
@@ -80,7 +81,8 @@ function Signups() {
     </>}
   </>
 }
-// One number. A raise lets the oldest on the waitlist in first; lowering it removes no one. The change is audited.
+// One number. A raise holds its places for the oldest on the waitlist, or opens them to anyone; lowering it removes no
+// one. The change is audited.
 function SetLimit() {
   const places = useSignupPlaces().data
   const [key, setKey] = useState<string | null>(null)
@@ -89,30 +91,38 @@ function SetLimit() {
   if (key && places && shown.current?.key !== key) shown.current = { key, places }
   return <>
     <SetLimitTrigger disabled={!places} onClick={() => setKey(crypto.randomUUID())} />
-    <Dialog open={key !== null} onOpenChange={next => { if (!next) setKey(null) }} title="Set the sign-up limit">
+    <Dialog open={key !== null} onOpenChange={next => { if (!next) setKey(null) }} title="Set the sign-up limit"
+      description={shown.current && `${number(shown.current.places.signedUp)} signed up · ${number(shown.current.places.held)} held · ${number(shown.current.places.open)} open · ${number(shown.current.places.waiting)} waiting`}>
       {shown.current && <SignupLimitForm key={shown.current.key} idempotencyKey={shown.current.key} places={shown.current.places} onClose={() => setKey(null)} />}
     </Dialog>
   </>
 }
 function SignupLimitForm({ places, idempotencyKey, onClose }: { places: SignupPlaces; idempotencyKey: string; onClose: () => void }) {
   const client = useQueryClient(), toast = useToast()
-  const [value, setValue] = useState(String(places.limit)), [tried, setTried] = useState(false)
+  const [value, setValue] = useState(String(places.limit)), [raise, setRaise] = useState<SignupRaise>('hold'), [tried, setTried] = useState(false)
   const limit = Number(value), error = value.trim() === '' || !(Number.isInteger(limit) && limit >= 0 && limit <= 1_000_000) ? 'A whole number from 0 to 1,000,000.' : ''
-  const letIn = error ? 0 : Math.min(places.waiting, Math.max(0, limit - places.signedUp - places.held))
-  const hint = error ? '' : limit < places.limit ? 'Lowering it removes no one.' : letIn ? `Lets in ${number(letIn)} from the waitlist, oldest first.` : ''
+  // As api/src/signups.ts setLimit: a hold raise holds the places it adds, as far as the waitlist goes; an open one holds none.
+  const raising = !error && limit > places.limit, added = raising ? Math.min(limit - places.limit, Math.max(0, limit - places.signedUp - places.held)) : 0
+  // Only a raise has new places; any other save is sent as hold, so it still retries the emails an earlier save missed.
+  const sent: SignupRaise = raising ? raise : 'hold'
+  const letIn = sent === 'hold' ? Math.min(places.waiting, added) : 0, opened = added - letIn
+  const hint = error ? '' : limit < places.limit ? 'Lowering it removes no one.'
+    : [letIn && `Holds ${number(letIn)} for the oldest waiting and emails them.`, opened && `Opens ${number(opened)} to anyone, first come, no emails.`].filter(Boolean).join(' ')
   const mutation = useMutation({
-    mutationFn: () => operatorApi.setSignupLimit(limit, { idempotencyKey }),
+    mutationFn: () => operatorApi.setSignupLimit(limit, sent, { idempotencyKey }),
     // Everyone held is emailed once; one a failure missed is said here, and saving again emails it.
     onSuccess: saved => {
-      const missed = saved.notEmailed ?? 0
-      toast(missed ? `Limit saved. ${number(missed)} held ${missed === 1 ? 'address isn’t' : 'addresses aren’t'} emailed yet: save again to retry.`
+      const missed = sent === 'hold' ? saved.notEmailed ?? 0 : 0
+      toast(sent === 'open' ? `Limit saved. ${number(saved.open)} open to anyone.` : missed ? `Limit saved. ${number(missed)} held ${missed === 1 ? 'address isn’t' : 'addresses aren’t'} emailed yet: save again to retry.`
         : saved.emailed ? `Limit saved. ${number(saved.emailed)} emailed that they can sign in.` : 'Limit saved', missed ? 'error' : 'success')
       void client.invalidateQueries({ queryKey: ['operator'] }); onClose()
     },
   })
   function submit(event: FormEvent) { event.preventDefault(); setTried(true); if (!error) mutation.mutate() }
   return <form className="op-dialog-fields" onSubmit={submit} noValidate>
-    <Field label={`Places (${number(places.signedUp)} signed up)`} error={tried ? error : ''} hint={hint}><Input type="number" inputMode="numeric" min={0} max={1_000_000} step={1} autoFocus value={value} onChange={event => setValue(event.target.value)} /></Field>
+    <Field label="Places" error={tried ? error : ''} hint={hint}><Input type="number" inputMode="numeric" min={0} max={1_000_000} step={1} autoFocus value={value} onChange={event => setValue(event.target.value)} /></Field>
+    <Field label="New places" htmlFor="signup-raise"><Select id="signup-raise" value={raise} disabled={!raising} onValueChange={next => setRaise(next as SignupRaise)}
+      options={[{ value: 'hold', label: 'Hold for the waitlist' }, { value: 'open', label: 'Open to anyone' }]} /></Field>
     <MutationError error={mutation.error} />
     <div className="ui-dialog__footer"><Button disabled={mutation.isPending} onClick={onClose}>Cancel</Button><Button type="submit" variant="primary" loading={mutation.isPending}>Save limit</Button></div>
   </form>

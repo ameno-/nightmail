@@ -40,8 +40,9 @@ export function useDialogAnalytics(open: boolean, title: ReactNode, name?: strin
     return () => analytics().dialog(false, label, name, Date.now() - opened)
   }, [open])
 }
-/** A field showing a validation error: its label and a static field ID, never what was typed. */
-export function useFieldErrorAnalytics(error: unknown, label: ReactNode, field?: string) {
+/** A field showing a validation error: its label, a static field ID and, when the form names it, which rule refused it
+ *  (`code`, a constant such as missing_domain), never what was typed. A different rule refusing it is recorded again. */
+export function useFieldErrorAnalytics(error: unknown, label: ReactNode, field?: string, code?: string) {
   const failing = Boolean(error)
-  useEffect(() => { if (failing) analytics().fieldError(label, field) }, [failing])
+  useEffect(() => { if (failing) analytics().fieldError(label, field, code) }, [failing, code])
 }

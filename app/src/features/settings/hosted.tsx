@@ -2,7 +2,9 @@ import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } fro
 import { Link, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, Dialog, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { FocusPicker } from '../../components/FocusPicker'
+import { focusLabels, useSaveFocus, type WorkspaceFocus } from '../../data/focus'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { connectionApi, connectionKindLabel, useConnectionCache } from '../../data/connections'
@@ -34,8 +36,7 @@ import { PostalAddressDialog, postalAddressLine } from '../../components/PostalA
 type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'billing' | 'account'
 const moved: Record<string, SectionKey> = { workspace: 'general', usage: 'billing' }
 // Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
-// controls they can't use, so nothing is silently missing. Every section takes the whole panel, to the same right edge
-// as the app's other tables.
+// controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
   { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'billing', label: 'Billing' }] },
   { title: 'You', items: [{ key: 'account', label: 'Account' }] },
@@ -71,7 +72,7 @@ export function HostedSettings() {
       </div>)}</div>
     </nav>
     {/* Keyed, so switching sections fades the new one in. */}
-    <div key={section} className="hosted-settings__content">
+    <div key={section} className="hosted-settings__content" data-section={section}>
       {locked(current) ? <AdminOnly title={current.label} />
         : <>
           {section === 'general' && <WorkspaceRows />}
@@ -101,6 +102,7 @@ function WorkspaceRows() {
   return <div className="settings-rows">
     <Row title="Name">{current ? <NameForm key={current.id} initial={current.name} canEdit={canAdminister} /> : <span className="muted">—</span>}</Row>
     <PostalAddressRow canEdit={canAdminister} />
+    <FocusRow canEdit={canAdminister} />
     <Row title="Workspace ID"><span className="cluster settings-inline"><code>{id}</code>{id && <CopyButton value={id} label="Copy workspace ID" />}</span></Row>
   </div>
 }
@@ -118,6 +120,27 @@ function PostalAddressRow({ canEdit }: { canEdit: boolean }) {
     </span>
     {open && <PostalAddressDialog open onOpenChange={setOpen} initial={address} title="Postal address" submitLabel="Save" />}
   </Row>
+}
+// What the workspace is here for (onboarding's question), from the session, so it is there on the first frame; owners and
+// admins change it in a dialog with the same cards. The first pick leads Overview's first card and its Get started steps.
+function FocusRow({ canEdit }: { canEdit: boolean }) {
+  const focus = useSession()?.identity?.focus ?? null
+  const [open, setOpen] = useState(false)
+  return <Row title="Focus">
+    <span className="cluster settings-inline settings-address">{focus?.length ? <span className="settings-address__value">{focus.map(item => focusLabels[item]).join(', ')}</span> : <span className="muted">{focus ? 'Skipped' : 'Not chosen'}</span>}
+      {canEdit ? <Button onClick={() => setOpen(true)} data-analytics="settings/focus/edit">Edit</Button> : <Lock size={12} aria-label="Owners and admins only" />}
+    </span>
+    {open && <FocusDialog initial={focus ?? []} onClose={() => setOpen(false)} />}
+  </Row>
+}
+function FocusDialog({ initial, onClose }: { initial: WorkspaceFocus[]; onClose: () => void }) {
+  const [value, setValue] = useState(initial)
+  const save = useSaveFocus()
+  return <Dialog open onOpenChange={open => { if (!open) onClose() }} title="Focus" size="lg"
+    description="Pick any. The first leads Overview’s first card and its Get started steps."
+    footer={<><Button onClick={onClose}>Cancel</Button><Button variant="primary" data-analytics="settings/focus/save" onClick={() => { save(value); onClose() }}>Save</Button></>}>
+    <FocusPicker value={value} onChange={setValue} />
+  </Dialog>
 }
 function NameForm({ initial, canEdit }: { initial: string; canEdit: boolean }) {
   // Members read the name as text with the rail's lock: an input that ignores typing looks broken.
@@ -163,15 +186,16 @@ function SendingRows() {
 // Three rows whatever loads, so the rows below never move.
 function ConnectedAccountRows({ connection }: { connection: ProviderConnection | null }) {
   const update = useApiMutation(() => connectionApi.updateStack(), undefined, true, invalidate.connection)
-  // The template row keeps its code element while loading: on a phone that decides whether the row stacks.
-  if (!connection) return <><Row title="Role template"><span className="cluster settings-inline settings-version"><code><Skeleton width={32} height={20} /></code></span></Row>{['Production access', 'Health'].map(title => <Row key={title} title={title}><Skeleton width={140} height={20} /></Row>)}</>
-  const { stack, health } = connection
+  const stack = connection?.stack
+  const templateRow = <Row title="Role template" error={update.error ? <MutationError error={update.error} /> : undefined}><span className="cluster settings-inline settings-version"><code>{connection ? stack?.version ?? '—' : <Skeleton width={32} height={20} />}</code>
+      {update.data ? <a href={update.data.consoleUrl} target="_blank" rel="noopener noreferrer">Review update in AWS<ArrowUpRight size={14} aria-hidden="true" /></a>
+        : <Button size="sm" disabled={!stack?.updateAvailable} aria-hidden={!stack?.updateAvailable || undefined} loading={update.isPending} onClick={() => update.mutate(undefined)}>Prepare update</Button>}</span></Row>
+  if (!connection) return <>{templateRow}{['Production access', 'Health'].map(title => <Row key={title} title={title}><Skeleton width={140} height={20} /></Row>)}</>
+  const { health } = connection
   const ready = connection.scan?.regions.filter(region => region.sendingState === 'ready') ?? []
   const sandboxed = ready.filter(region => !region.facts.production)
   return <>
-    <Row title="Role template" error={update.error ? <MutationError error={update.error} /> : undefined}><span className="cluster settings-inline settings-version"><code>{stack?.version ?? '—'}</code>
-      {update.data ? <a href={update.data.consoleUrl} target="_blank" rel="noopener noreferrer">Review update in AWS<ArrowUpRight size={14} aria-hidden="true" /></a>
-        : stack?.updateAvailable ? <Button size="sm" loading={update.isPending} onClick={() => update.mutate(undefined)}>Prepare update</Button> : null}</span></Row>
+    {templateRow}
     <Row title="Production access">{!ready.length ? '—' : sandboxed.length ? `SES sandbox in ${sandboxed.map(region => region.regionLabel).join(', ')}` : ready.map(region => region.regionLabel).join(', ')}</Row>
     {/* The banner above shows the first finding; this row adds any others. */}
     <Row title="Health">{!health ? 'Not checked yet' : health.issues.length ? <span className="settings-attention">{health.issues.length === 1 ? 'Needs attention' : health.issues.slice(1).map(issue => issue.message).join(' ')}</span> : `Checked ${ago(health.checkedAt)}`}</Row>

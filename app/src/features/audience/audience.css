@@ -1,20 +1,34 @@
 .audience-page { display: flex; flex-direction: column; min-width: 0; min-height: 100%; }
 .audience-page > * { flex-shrink: 0; }
+/* A contact or a segment reads as label/value rows and a form: it keeps a readable width on a wide window. */
+/* The head of Audience reads as one block: the title, its sections a short step under it, then search and filters. */
+.audience-page .ui-page-header { margin-bottom: var(--space-8); }
 .audience-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A contact's row: the address, then its name muted on the same line. Tight, the name gives way well before the address. */
+.audience-contact { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; white-space: nowrap; }
+.audience-contact__email { display: flex; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.audience-contact__email > .private-address { min-width: 0; }
+.audience-contact__name { flex: 0 12 auto; min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; }
+.audience-contact__name::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
+/* Lists: the counts keep their widths, so a narrow window scrolls the table sideways before the name gets too short. */
+.audience-lists .ui-table { min-width: 800px; }
 .data-toolbar .ui-select-trigger.audience-status-filter { width: 170px; }
 .audience-summary > .ui-skeleton-line { width: auto; }
 .audience-page > .data-toolbar > .cluster { flex-wrap: wrap; }
 .ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
-.audience-page > .section { margin-block: var(--space-40) 0; }
+.audience-page > .section { margin-block: var(--space-32) 0; }
 .audience-page > .ui-alert { margin-top: var(--space-16); }
 .audience-summary { min-height: var(--space-20); gap: var(--space-8) var(--space-24); }
 .section > .audience-summary { margin-bottom: var(--space-12); }
 .audience-summary strong { font-family: var(--font-mono); font-weight: 400; font-variant-numeric: tabular-nums; }
+/* Dates in Audience's tables read as data: mono, a size down, like the counts beside them. */
+.audience-page .ui-table td:is([data-col='created'], [data-col='updated'], [data-col='updatedAt'], [data-col='at'], [data-col='time']) { font-family: var(--font-mono); font-size: var(--text-xs); white-space: nowrap; }
 .audience-properties { gap: var(--space-24) var(--space-32); }
 .audience-properties .ui-facts { grid-template-columns: 140px minmax(0, 1fr); }
 .cluster.audience-links { gap: var(--space-8) var(--space-16); }
 .audience-editor { gap: var(--space-24); }
-.audience-editor > .section { margin: 0; padding-top: var(--space-24); border-top: 1px solid var(--color-border-muted); }
+/* The editor's sections sit apart by space alone, no rule between them. */
+.audience-editor > .section { margin: 0; padding-top: var(--space-24); }
 .audience-name { max-width: 480px; }
 .audience-rule { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr) 34px; gap: var(--space-12); align-items: start; }
 
@@ -25,10 +39,10 @@
 /* ListPicker: an input that searches lists by name, with the shared popover surface for its options. */
 .audience-list-picker { position: relative; min-width: 0; width: 100%; }
 .audience-list-picker > .ui-input { padding-right: var(--space-32); text-overflow: ellipsis; }
-.audience-list-picker > svg { position: absolute; right: var(--space-12); top: 50%; translate: 0 -50%; color: var(--color-muted); pointer-events: none; }
+.audience-list-picker > svg { position: absolute; right: 10px; top: 50%; translate: 0 -50%; color: var(--color-muted); pointer-events: none; }
 .data-toolbar .audience-list-filter, .audience-list-picker.audience-count-list { width: 220px; max-width: 100%; flex-shrink: 0; }
 .audience-list-options { position: absolute; inset-inline: 0; top: calc(100% + var(--space-4)); display: flex; flex-direction: column; min-width: 220px; max-height: min(280px, 40vh); }
-.audience-list-option { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); width: 100%; min-height: var(--control-height); padding: var(--space-4) var(--space-8); border: 0; border-radius: 4px; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.audience-list-option { display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); width: 100%; min-height: var(--control-height); padding: var(--space-4) var(--space-8); border: 0; border-radius: var(--radius-xs); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .audience-list-option > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .audience-list-option[aria-selected='true'] { background: var(--color-hover); }
 .audience-list-option[data-current] { color: var(--color-text); font-weight: var(--font-weight-bold); }
@@ -38,16 +52,17 @@
 .ui-dialog.audience-import-dialog .ui-dialog__footer { flex-wrap: wrap; }
 .audience-import-status { flex: 1 0 100%; margin: 0; font-size: var(--text-xs); line-height: var(--leading-xs); }
 .audience-import-file { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--space-8); }
-.audience-consent { display: flex; flex-direction: column; gap: var(--space-8); padding-top: var(--space-16); border-top: 1px solid var(--color-border-muted); }
-/* Under the preview the table's last rule already divides: no second one. */
-.audience-import-preview + .audience-consent { padding-top: 0; border-top: 0; }
+/* Consent sits apart from the fields above it by space, no rule. */
+.audience-consent { display: flex; flex-direction: column; gap: var(--space-8); padding-top: var(--space-16); }
+/* Under the preview the table's own rhythm already sets it apart. */
+.audience-import-preview + .audience-consent { padding-top: 0; }
 .audience-result p { margin: 0; }
 .audience-review-bar { justify-content: space-between; gap: var(--space-8) var(--space-16); }
 /* The count (up to two lines) and five sample addresses fit this height, so the dialog keeps its size when the count arrives. */
 .audience-plan { display: flex; flex-direction: column; gap: var(--space-8); min-height: calc(7 * var(--leading-sm) + 6 * var(--space-8)); }
 .audience-plan p { margin: 0; }
 .audience-sample { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
-.audience-sample li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 3px; margin: -3px; }
+.audience-sample li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: var(--space-4); margin: calc(-1 * var(--space-4)); }
 
 /* Segment rule builder: one row per condition (field, operator, value, remove). */
 .audience-conditions { display: flex; flex-direction: column; gap: var(--space-8); }
@@ -60,10 +75,11 @@
 .audience-condition--property > .audience-condition-subject { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 .audience-condition-day { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .audience-condition-day > .ui-input { flex: 1 1 auto; }
-/* A nested group: its rule as one line, and Edit as JSON beside it (the builder edits one level). */
-.audience-condition-group { grid-column: 1 / 4; display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); min-width: 0; padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12); border: 1px solid var(--color-border-muted); border-radius: var(--radius-sm); }
+/* A nested group: its rule as one line on a solid well, and Edit as JSON beside it (the builder edits one level). */
+.audience-condition-group { --color-hover: var(--color-well-hover); grid-column: 1 / 4; display: flex; align-items: center; justify-content: space-between; gap: var(--space-8); min-width: 0; min-height: var(--control-height); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); }
 .audience-condition-group > .ui-button { flex-shrink: 0; }
-.ui-textarea.audience-json { font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.ui-textarea.audience-json { --textarea-leading: var(--leading-xs); font-family: var(--font-mono); font-size: var(--text-xs); }
+@media (pointer: coarse), (max-width: 899px) { .ui-textarea.audience-json { --textarea-leading: var(--leading-lg); font-size: var(--text-lg); } }
 
 @media (max-width: 800px) {
   .audience-rule { grid-template-columns: minmax(0, 1fr) 34px; }

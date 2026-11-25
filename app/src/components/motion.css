@@ -2,7 +2,11 @@
 .ui-button.copy-action { transition: background var(--motion-duration), color 200ms ease, box-shadow 200ms ease, transform 160ms var(--ease-out-strong); }
 .ui-button.copy-action:active:not(:disabled) { transform: scale(.97); }
 .copy-action[data-copied]:not(.ui-button--primary) { color: var(--color-success); }
-.copy-action__icon, .copy-action__roll { display: inline-grid; }
+.copy-action__icon, .copy-action__roll, .copy-action__text.copy-action__swap { display: inline-grid; }
+.copy-action__swap > span { grid-area: 1 / 1; transition: opacity 160ms ease-out, filter 220ms var(--ease-out-strong); }
+.copy-action__swap > span:last-child { opacity: 0; filter: blur(2px); justify-self: start; }
+.copy-action[data-copied] .copy-action__swap > span:first-child { opacity: 0; filter: blur(2px); }
+.copy-action[data-copied] .copy-action__swap > span:last-child { opacity: 1; filter: none; }
 .copy-action__icon > svg, .copy-action__roll > span { grid-area: 1 / 1; transition: transform 220ms var(--ease-out-strong), opacity 160ms ease-out, filter 220ms var(--ease-out-strong); }
 .copy-action__icon > svg:last-child, .copy-action__roll > span:last-child { opacity: 0; filter: blur(2px); }
 .copy-action__icon > svg:last-child { transform: scale(.5); }
@@ -12,10 +16,9 @@
 .copy-action[data-copied] .copy-action__icon > svg:last-child,
 .copy-action[data-copied] .copy-action__roll > span:last-child { opacity: 1; transform: none; filter: none; }
 .copy-action__text { display: inline-flex; overflow: hidden; }
-/* The roll reserves room for "ied"; trim the right padding so Copy still looks centred. */
+/* The roll reserves room for "ied"; trim the right inset by a step so Copy still looks centred. */
 .copy-action__roll { text-align: left; }
-.ui-button.copy-action:not(.copy-action--compact) { padding-right: 7px; }
-.ui-button--sm.copy-action:not(.copy-action--compact) { padding-right: 5px; }
+.ui-button.copy-action:not(.copy-action--compact) { padding-right: calc(var(--button-pad-x) - var(--space-4)); }
 .copy-action--compact { width: var(--control-height); padding: 0; }
 .copy-action--compact.ui-button--sm { width: 28px; height: 28px; }
 

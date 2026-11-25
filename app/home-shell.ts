@@ -5,6 +5,7 @@ import { productName, publicOrigin } from '../api/src/brand.ts'
 import type { Format, Manifest } from './src/features/home/factory/manifest.ts'
 import { frameOf, UPRIGHT } from './src/features/home/frame.ts'
 import { toneVars } from './src/features/home/tones.ts'
+import { jsonLd, structuredData } from './src/features/pricing/readable.ts'
 
 // home.html: the homepage's first screen, painted from the HTML alone. A hosted installation's Worker answers "/" with
 // it (api/src/worker.ts); every other path, and "/" on a self-hosted one, gets index.html as before. It is index.html
@@ -63,7 +64,7 @@ export function homeShell(): Plugin {
         const full = `${elsewhere}<source ${here}type="image/avif" srcset="${set(p.avif)}" sizes="100vw"><source ${here}srcset="${set(p.jpeg)}" sizes="100vw">`
           + `<img class="fac-poster" src="${format === 'phone' ? NOTHING : url(p.src)}" ${size} fetchpriority="low">`
         return `<div class="srt-page fac-page" data-format="${format}" data-visitor><main><section class="fac-hero" aria-label="Pricing">`
-          + '<h1 class="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1><p class="sr-only">Free every month: 5,000 emails sent and 5,000 received. Responds in about 100 ms.</p>'
+          + '<h1 class="sr-only">$0.20 per 1,000 emails, sent or received via API.</h1><p class="sr-only">Free every month: 5,000 emails sent and 20,000 received. Responds in about 100 ms.</p>'
           + `<div class="fac-stage" style="${attr(Object.entries(vars).map(([key, value]) => `${key}:${value}`).join(';'))}"><div class="fac-frame"><picture>${soft}</picture><picture>${full}</picture>`
           + `<button type="button" class="fac-cta hs-visitor" data-cta="sign-in" style="${box}"><span class="srt-cta-label">Get started${ARROW}${BUSY}</span></button>`
           + `<a class="fac-cta hs-member" href="/overview" style="${box}"><span class="srt-cta-label">Open dashboard${ARROW}</span></a></div></div>`
@@ -75,6 +76,9 @@ export function homeShell(): Plugin {
         .replace(/<title>[^<]*<\/title>/, `<title>${productName.toLowerCase()} · Email infrastructure</title>`)
         // (Served only at the hosted site's "/", so it can name its address: the sitemap lists it, app/price-pages.ts.)
         .replace(/<!-- Link previews\.[^>]*-->/, `<!-- Link previews: the homepage's own (app/home-shell.ts). -->\n    <meta property="og:url" content="${publicOrigin}/" />\n    <link rel="canonical" href="${publicOrigin}/" />`)
+        // Its Markdown twin and structured data (features/pricing/readable.ts; price-pages.ts writes index.md).
+        .replace(/<link rel="alternate" type="text\/markdown" href="[^"]*" title="[^"]*" \/>/, `<link rel="alternate" type="text/markdown" href="${publicOrigin}/index.md" title="${productName}, in Markdown" />`)
+        .replace('<link rel="manifest" href="/site.webmanifest" />', `<link rel="manifest" href="/site.webmanifest" />\n    <script type="application/ld+json">${jsonLd(structuredData('home'))}</script>`)
         .replace('</head>', `  <link rel="preload" href="${font}" as="font" type="font/woff2" crossorigin />\n    <style>${style}</style>\n  </head>`)
         .replace('<div id="root"></div>', `<div id="home-shell">${variant('desktop')}${variant('phone')}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
       this.emitFile({ type: 'asset', fileName: 'home.html', source: html })

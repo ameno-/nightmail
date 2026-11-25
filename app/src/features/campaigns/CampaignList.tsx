@@ -52,7 +52,7 @@ export function CampaignsPage() {
       return next
     })
   }
-  return <>
+  return <div className="campaigns-page">
     <CampaignsHeader actions={<>{canAdminister && <Button onClick={() => navigate('/newsletters/new')}>New newsletter</Button>}<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button></>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={draft} onChange={event => type(event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },
@@ -60,7 +60,7 @@ export function CampaignsPage() {
       { value: 'archived', label: 'Archived' },
     ]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable className="campaigns-table" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={campaignPath} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignPath(row).endsWith('/edit')) void composer.preload().catch(() => {}) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
+      <DataTable className="campaigns-table ui-table--two-line" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={campaignPath} onRowIntent={row => { void warm([queries.campaign(row.id)]); if (campaignPath(row).endsWith('/edit')) void composer.preload().catch(() => {}) }} empty={<EmptyState title={filtered ? 'No matching campaigns' : archived ? 'No archived campaigns' : 'No campaigns yet'} action={filtered ? <Button variant="secondary" onClick={() => setParams(archived ? { archived: 'true' } : {})}>Clear filters</Button> : archived ? undefined : <Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button>} />} columns={[
         { ...campaignColumns[0], render: row => <div className="campaign-row-name"><span title={row.name}>{row.name}</span>{row.subject.trim() && row.subject.trim() !== row.name.trim() && <span className="muted" title={row.subject}>{row.subject}</span>}</div>, cardRender: row => row.name },
         { ...campaignColumns[1], render: row => <StatusBadge status={campaignDisplayStatus(row)} /> },
         { ...campaignColumns[2], render: row => row.subject.trim() || <span className="muted">No subject</span> },
@@ -71,5 +71,5 @@ export function CampaignsPage() {
       ]} />
       {query.isPending ? <PaginationSkeleton /> : <Pagination page={query.data.page} pageSize={query.data.pageSize} total={query.data.total} nextCursor={query.data.nextCursor} count={query.data.items.length} onPageChange={value => setParams(previous => { const next = new URLSearchParams(previous); next.set('page', String(value)); return next })} />}
     </>}
-  </>
+  </div>
 }

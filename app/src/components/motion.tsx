@@ -6,12 +6,15 @@ import './motion.css'
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 
 // A labelled copy button whose icon morphs to a check and whose label rolls Copy → Copied.
-export function CopyAction({ value, label, variant = 'secondary', size = 'md', compact = false, className }: { value: string; label: string; variant?: 'secondary' | 'ghost' | 'primary'; size?: 'sm' | 'md'; compact?: boolean; className?: string }) {
+/** value: the text, or a function that makes it when clicked (a prompt with a fresh setup token). */
+// `text`: the button names what it copies ("Copy agent prompt"), and says Copied in the same cell, so it keeps its width.
+export function CopyAction({ value, label, variant = 'secondary', size = 'md', compact = false, className, text }: { value: string | (() => Promise<string>); label: string; variant?: 'secondary' | 'ghost' | 'primary'; size?: 'sm' | 'md'; compact?: boolean; className?: string; text?: string }) {
   const { copy, copied } = useCopy()
   return <>
     <button type="button" className={cx('ui-button', `ui-button--${variant}`, `ui-button--${size}`, 'copy-action', compact && 'copy-action--compact', className)} data-copied={copied || undefined} aria-label={label} title={label} onClick={() => void copy(value)}>
       <span className="copy-action__icon" aria-hidden="true"><Copy size={14} /><Check size={14} strokeWidth={2.5} /></span>
-      {!compact && <span className="copy-action__text" aria-hidden="true">Cop<span className="copy-action__roll"><span>y</span><span>ied</span></span></span>}
+      {!compact && (text ? <span className="copy-action__text copy-action__swap" aria-hidden="true"><span>{text}</span><span>Copied</span></span>
+        : <span className="copy-action__text" aria-hidden="true">Cop<span className="copy-action__roll"><span>y</span><span>ied</span></span></span>)}
     </button>
     <span className="sr-only" role="status">{copied ? 'Copied to clipboard' : ''}</span>
   </>

@@ -4,10 +4,13 @@ import { WorkerEntrypoint } from 'cloudflare:workers';
 import type { Config, FeedbackItem, Runtime } from './core.js';
 import { DispatcherShard, dispatcherName, shardCount, shardsForRate } from './dispatcher-do.js';
 import { CampaignRoom } from './campaign-room.js';
+import { durableInboxWake } from './inbox-wake.js';
 import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
+import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { linkHostRequest } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -16,6 +19,43 @@ function fastSecure(response: Response): Response {
   const headers = new Headers(response.headers);
   for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!headers.has(name)) headers.set(name, value);
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+}
+
+// A page from the static assets, as Workers Assets sent it but never transformed on the way: Cloudflare otherwise adds
+// its analytics beacon to HTML, which the CSP refuses (an error in every visitor's console). no-transform also stops
+// Cloudflare compressing it, so the Worker does: a Content-Encoding the client accepts has the runtime encode the body
+// (brotli, else gzip), and a price page's 95 kB of HTML goes out as about 18 kB.
+function untransformed(response: Response, request: Request, status = response.status): Response {
+  const headers = new Headers(response.headers), cache = headers.get('cache-control') ?? 'public, max-age=0, must-revalidate';
+  if (!/\bno-transform\b/.test(cache)) headers.set('cache-control', `${cache}, no-transform`);
+  if ((response.status === 200 || response.status === 304) && !headers.has('content-encoding')) {
+    const encoding = clientEncoding(request), etag = headers.get('etag');
+    headers.append('vary', 'accept-encoding');
+    // The encoded body is another representation of the file: its validator is weak (on the 304 too), as Cloudflare makes
+    // it when it compresses. Workers Assets matches If-None-Match either way.
+    if (encoding && etag?.startsWith('"')) headers.set('etag', `W/${etag}`);
+    if (encoding && response.status === 200) { headers.set('content-encoding', encoding); headers.delete('content-length'); }
+  }
+  return fastSecure(new Response(response.body, { status, statusText: status === response.status ? response.statusText : '', headers }));
+}
+
+// What the client accepts. Cloudflare tells every Worker "br, gzip" and keeps the client's own header in
+// cf.clientAcceptEncoding; with no-transform nothing on the way decodes a body for a client that can't, so the choice
+// is made from the client's header (q=0 refuses a coding).
+function clientEncoding(request: Request): 'br' | 'gzip' | null {
+  const header = request.cf ? (typeof request.cf.clientAcceptEncoding === 'string' ? request.cf.clientAcceptEncoding : '') : request.headers.get('accept-encoding') ?? '';
+  const accepted = new Set(header.toLowerCase().split(',').map(part => part.split(';'))
+    .filter(([, ...params]) => !params.some(param => /^\s*q\s*=\s*0(?:\.0*)?\s*$/.test(param))).map(([coding]) => coding!.trim()));
+  return accepted.has('br') ? 'br' : accepted.has('gzip') ? 'gzip' : null;
+}
+
+// /llms.txt: the API's, with the website's own pages under its title when the dashboard build lists them (site-index.ts).
+async function withSitePages(response: Response, assets: Fetcher, url: URL): Promise<Response> {
+  const site = await assets.fetch(new Request(new URL(SITE_INDEX, url))).catch(() => null);
+  if (!site?.ok || !site.headers.get('content-type')?.startsWith('text/plain')) return response;
+  const headers = new Headers(response.headers);
+  headers.delete('content-length');
+  return new Response(withSiteIndex(await response.text(), await site.text()), { status: response.status, statusText: response.statusText, headers });
 }
 
 function initRuntimeDeps() {
@@ -167,6 +207,8 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
     return await work({ db, storage: r2Storage(env.ATTACHMENTS), config, shadow: shadowQueue && (items => { const sent = enqueueShadow(shadowQueue, items); if (keepShadow) keepShadow(sent); else handovers.push(sent); }), mailR2: env.MAIL && { bucket:env.MAIL,name:setting(env,'MAIL_BUCKET')!,write:setting(env,'MAIL_STORE')==='r2' }, jwksCacheScope: env.HYPERDRIVE,
       allowSnsCertMiss: async peer => (await env.SNS_CERT_MISSES.limit({key: `bane:sns-miss:${await core.digest(peer)}`})).success,
       allowMalformedSns: async peer => (await env.ADMISSION.limit({key:`bane:sns-malformed:${await core.digest(peer)}`})).success,
+      // Weighted so a peer's 20 failed SNS verifications a minute spend the limiter's 6,000 (operations.ts SnsFailureBudget).
+      allowSnsFailure: async peer => (await env.ADMISSION.limit({key:`bane:sns-invalid:${await core.digest(peer)}`,delta:300} as RateLimitOptions)).success,
       // 6,000 units of 16 KiB a minute per workspace in each location: about 94 MiB of preview memory, eight previews at the limit.
       // The per-isolate budget is the memory bound, so a limiter that rejects the weight fails open.
       allowPreview:(workspaceId,bytes)=>env.ADMISSION.limit({key:`bane:preview:${workspaceId}`,delta:Math.max(1,Math.ceil(bytes/16384))} as RateLimitOptions).then(r=>r.success,()=>{core.log('warn',{code:'PREVIEW_RATE_LIMIT_UNAVAILABLE'});return true;}),
@@ -183,7 +225,14 @@ async function withRuntime<T>(env: Env, work: (runtime: Runtime) => Promise<T>, 
         visit: (name, credential, lookup, saved) => { const visit = roomVisit(env, rooms, name, credential, lookup, saved); if (ctx) ctx.waitUntil(visit); },
       },
       startLogFacetFold: ctx ? slot => afterwards(env,ctx,async independent => { await (await import('./log-facet-fold.js')).foldLogFacetSlot(independent,slot); }) : undefined,
-      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined, wake: async (readyJobs = 1, immediate) => {
+      startLogFacetAggregate: ctx ? workspace => afterwards(env,ctx,async independent => {
+        try { await (await import('./log-facet-aggregate-worker.js')).runFacetAggregateTurn(independent.db,workspace); }
+        catch { core.log('warn',{code:'LOG_FACET_AGGREGATE_FAILED',workspaceId:workspace}); }
+      }) : undefined,
+      placementEdge:{probesPerJob:Math.min(3,Math.floor(6/concurrency))}, deferNudge: ctx ? pending => { nudges.push(pending); } : undefined,
+      // Inbox long polls wait on their workspace's object in the dispatcher namespace and end as mail is stored.
+      inboxWake: durableInboxWake(env.DISPATCHER),
+      detach: ctx ? detached => { const run = withRuntime(env, detached, 1, ctx); ctx.waitUntil(run.catch(() => {})); return run; } : undefined, wake: async (readyJobs = 1, immediate) => {
       if (immediate === 'webhook' && env.WEBHOOK_QUEUE) return workWake(env.WEBHOOK_QUEUE,concurrency)(readyJobs);
       if (immediate || readyJobs > concurrency) return notify(readyJobs);
       // Only orchestration singletons coalesce. Delay past the window so the signal cannot
@@ -251,6 +300,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
       return withRuntime(this.env, async runtime => app.fetch(request, { ...runtime, ...platformRuntime(conversation) }), SUPPORT_POOL, this.ctx);
     }, config);
   }
+  async verifyWake(token: string, conversationId: string) { return (await this.platform()).verifyWake(token, conversationId); }
   async verifyHandoff(token: string) { return (await this.platform()).verifyHandoff(token); }
   async registerConversation(body: Parameters<SupportPlatformApi['registerConversation']>[0]) { return (await this.platform()).registerConversation(body); }
   async closeConversation(conversationId: string) { return (await this.platform()).closeConversation(conversationId); }
@@ -275,6 +325,16 @@ export default {
     // The events host (BYO_EVENTS_ORIGIN) takes AWS's signed notifications and nothing else.
     let eventsHost: string | undefined; try { eventsHost = new URL(String((env as { BYO_EVENTS_ORIGIN?: unknown }).BYO_EVENTS_ORIGIN)).host; } catch { eventsHost = undefined; }
     if (eventsHost && url.host === eventsHost && pathname !== '/health' && !(request.method === 'POST' && (pathname === '/v1/events/ses' || pathname === '/v1/events/cloudformation'))) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+    // The link domain and customers' own link hosts (src/link-hosts.ts) answer the links in customer mail and nothing else.
+    // With either on, every host that is none of this installation's own came through the link zone's route.
+    const own = [String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL), ...String((env as { PREVIOUS_PUBLIC_URLS?: unknown }).PREVIOUS_PUBLIC_URLS ?? '').split(',')]
+      .flatMap(origin => { try { return [new URL(origin.trim()).hostname]; } catch { return []; } }).concat(eventsHost ? [eventsHost.replace(/:\d+$/, '')] : []);
+    const linkAnswer = linkHostRequest(!!setting(env, 'LINK_HOST') || !!setting(env, 'LINK_SAAS_ZONE_ID') && !!setting(env, 'LINK_SAAS_TOKEN'), url.hostname, pathname, own);
+    if (linkAnswer === 'missing') return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
+    // A name of the zone that isn't this Worker's (dev, support, media): the zone-wide route runs before its custom domain
+    // or bucket, so it goes on to them unchanged (a subrequest to the same zone skips the route).
+    if (linkAnswer === 'pass') return fetch(request);
+    const linkHost = linkAnswer === 'link';
     if (pathname === '/health' && (request.method === 'GET' || request.method === 'HEAD') && !requestHeaderNames('environment').some(name => request.headers.has(name))) {
       const requestId = `req_${crypto.randomUUID().replaceAll('-', '')}`;
       const multiTenant = ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true', analytics = (env as unknown as { DASHBOARD_ANALYTICS?: unknown }).DASHBOARD_ANALYTICS === 'on';
@@ -284,14 +344,26 @@ export default {
     }
     const staticDoc = (request.method === 'GET' || request.method === 'HEAD') && (['/openapi.json', '/docs.md', '/llms.txt'].includes(pathname) || pathname.startsWith('/docs/operations/') || pathname.startsWith('/docs/tags/'));
     const assets = (env as unknown as { ASSETS?: Fetcher }).ASSETS;
-    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal|i)(?:\/|$)/.test(pathname)) {
+    if (assets && (request.method === 'GET' || request.method === 'HEAD') && !staticDoc && !linkHost && !/^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|internal|i)(?:\/|$)/.test(pathname)) {
       // Existing files are served asset-first. Only dashboard routes get the shell on a miss. "/" on a hosted
       // installation is the homepage: home.html, the dashboard's shell with the homepage's first screen painted in it
       // (app/home-shell.ts); Workers Assets answers /home with it.
       if (pathname.startsWith('/assets/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
-      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok) return fastSecure(page); }
-      return fastSecure(await assets.fetch(new Request(new URL('/', url), request)));
+      if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
+      // A price page (app/price-pages.ts writes one per comparison), or its Markdown twin: the file, compressed here
+      // (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash) go back as they are.
+      if (pathname === '/pricing' || pathname.startsWith('/compare/')) {
+        const page = await assets.fetch(request);
+        if (page.ok || page.status === 304) return untransformed(page, request);
+        if (page.status !== 404) return fastSecure(page);
+      }
+      const shell = await assets.fetch(new Request(new URL('/', url), request));
+      // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
+      // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
+      // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
+      if (isMissingComparePage(pathname)) return untransformed(shell, request, 404);
+      return untransformed(shell, request);
     }
     // A linked campaign image (src/linked-images.ts) is the same bytes for every reader: once answered, this colo keeps it
     // and answers it again before admission, the database or storage.
@@ -325,13 +397,14 @@ export default {
       const cf = (request as Request & { cf?: { asn?: unknown; country?: string; botManagement?: { verifiedBot?: boolean; score?: number } } }).cf;
       if (typeof cf?.asn === 'number' || typeof cf?.country === 'string') headers.set(clientNetworkHeader, `${typeof cf.asn === 'number' ? `AS${cf.asn}` : ''};${typeof cf.country === 'string' ? cf.country : ''}`);
       const runtimeStarted = performance.now();
-      const response = staticDoc
+      let response = staticDoc
         ? await app.fetch(new Request(request, { headers }), {} as Runtime)
         : await core.guardPublicRequest(pathname, headers, peer, () => withRuntime(env, async runtime =>
           app.fetch(new Request(request, { headers }), pathname === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: {
             ip: request.headers.get('CF-Connecting-IP') ?? '', country: cf?.country,
             bot: cf?.botManagement?.verifiedBot === true || (cf?.botManagement?.score ?? 100) === 1,
           } } : runtime), 1, ctx));
+      if (pathname === '/llms.txt' && request.method === 'GET' && response.ok && assets) response = await withSitePages(response, assets, url);
       const runtimeMs = performance.now() - runtimeStarted;
       // What this isolate counted (app.ts logRequest), written after the response, at most every 20 seconds. Without a
       // context (a handler called directly) nothing is written, and nothing here can throw into the request.
@@ -464,8 +537,10 @@ export default {
         const {dueLogFacetSlots,foldLogFacetSlot}=await import('./log-facet-fold.js');
         for (const slot of await dueLogFacetSlots(background.db)) afterwards(env,ctx,separate => foldLogFacetSlot(separate,slot));
       });
-      if (runtime.config.multiTenant) afterwards(env, ctx, async background => {
+      afterwards(env, ctx, async background => {
         try {
+          const {maintainFacetAggregates}=await import('./log-facet-aggregate-worker.js');
+          if(await maintainFacetAggregates(background.db,12_000,true)||!background.config.multiTenant)return;
           const [{ bootstrapLogFacet }, { foldLogFacetSlot }] = await Promise.all([
             import('./log-facet-bootstrap.js'), import('./log-facet-fold.js'),
           ]);
@@ -502,6 +577,10 @@ export default {
       try { const { drainFeedbackRecovery } = await import('./operations.js'); await drainFeedbackRecovery(runtime); }
       catch { core.log('error',{code:'FEEDBACK_RECOVERY_DRAIN_FAILED'}); }
       await reconcileSharedConnections(runtime); // Installation work must not depend on a workspace or a successful queue drain.
+      // A pool region nothing has sent through yet still gets its SES quota sampled (Glass, the customer share); never throws.
+      await (await core.wrapModuleLoad(() => import('./dispatcher.js'))).refreshPoolQuotas(runtime);
+      // Glass's deliverability sources (SES health, VDM, Spamhaus DBL), each due at its own time; never throws.
+      await (await core.wrapModuleLoad(() => import('./glass-deliverability.js'))).refreshDeliverabilitySources(runtime);
       try { await syncOutboundMessages(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
       // Screen any pre-deploy or rollout-window rows held with screened=false outside the mail room before waking shards.
       try { await (await core.wrapModuleLoad(() => import('./sending.js'))).screenHeldMail(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }
@@ -522,6 +601,8 @@ export default {
       if (env.WEBHOOK_QUEUE) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WEBHOOK_QUEUE.send({kind:'wake'},{delaySeconds}),0,'webhooks');
       // Fold sending_campaign_tallies and sending_metrics_hourly delta rows in bounded chunks every minute.
       try { await (await core.wrapModuleLoad(() => import('./sending-tallies.js'))).foldSendingTallies(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'SENDING_TALLIES_FOLD_FAILED' }); }
+      // The raw-event audit is independent of dispatch, folding, and the hourly whole-workspace tally repairs.
+      afterwards(env, ctx, async rt => { await (await import('./sending-tallies.js')).auditSendingOutcomePage(rt); });
       // Last, after recovery: GET /v1/public/stats serves only what this writes. Best-effort and time-bounded.
       await publicStatsTick(runtime);
       // Sender standing: every ten minutes (elected), the score, limit and ladder of each Hosted workspace.
@@ -535,6 +616,8 @@ export default {
       if (runtime.config.multiTenant) await (await core.wrapModuleLoad(() => import('./signups.js'))).signupsTick(runtime);
       // Billing: the auto-recharge sweep and Stripe reconciliation (elected every 5 minutes).
       if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./billing/stripe-jobs.js'))).billingMinute(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
+      // New domains whose records are still missing an hour on: a DNS check each (elected every 5 minutes, src/domain-setup.ts).
+      if (runtime.config.multiTenant) try { await (await core.wrapModuleLoad(() => import('./domain-setup.js'))).domainSetupTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'DOMAIN_SETUP_TICK_FAILED' }); }
       // Last, as it can take minutes: retention of the sent-side tables (elected every 15 minutes).
       try { await (await core.wrapModuleLoad(() => import('./maintenance.js'))).retentionTick(runtime); } catch (error) { core.log('warn', { code: error instanceof core.ApiError ? error.code : 'RETENTION_TICK_FAILED' }); }
     }, concurrency + 2, undefined, waitUntilOf(ctx)); // The minute cron drains jobs too: as in queue(), nothing waits for the second classifier's queue.

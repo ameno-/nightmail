@@ -21,18 +21,18 @@ export const settingsColumns = {
   ],
   // A domain's card: its name and sending status, then the host it receives at (or Off). Every cell is one line.
   domains: [
-    { key: 'name', label: 'Domain', width: '40%', card: 'title' },
-    { key: 'status', label: 'Status', width: '30%', card: 'aside' },
-    { key: 'receiving', label: 'Receiving', width: '32%', card: 'line' },
-    { key: 'addresses', label: 'Addresses', align: 'right', card: 'hide' },
-    { key: 'region', label: 'Region', card: 'hide' },
+    { key: 'name', label: 'Domain', card: 'title' },
+    { key: 'status', label: 'Status', width: 176, card: 'aside' },
+    { key: 'receiving', label: 'Receiving', width: 216, card: 'line' },
+    { key: 'addresses', label: 'Addresses', width: 96, align: 'right', card: 'hide' },
+    { key: 'region', label: 'Region', width: 112, card: 'hide' },
   ],
   // A receiving host's card: the host and its status, then its addresses and catch-all; Remove is in the row's menu.
   hosts: [
-    { key: 'host', label: 'Host', width: '38%', card: 'title' },
+    { key: 'host', label: 'Host', card: 'title' },
     { key: 'status', label: 'Status', width: '24%', card: 'aside' },
-    { key: 'addresses', label: 'Addresses', width: '14%', card: 'field' },
-    { key: 'catchAll', label: 'Catch-all', card: 'field' },
+    { key: 'addresses', label: 'Addresses', width: 96, card: 'field' },
+    { key: 'catchAll', label: 'Catch-all', width: '22%', card: 'field' },
     { key: 'actions', label: '', align: 'right', width: 56, skeleton: <ControlSkeleton width={32} />, card: 'end' },
   ],
   // A record's card: what it is for and its type, its status, then its name and value; Copy is in the row's menu.
@@ -47,8 +47,8 @@ export const settingsColumns = {
     { key: 'actions', label: '', align: 'right', width: 56, skeleton: <span />, card: 'end' },
   ],
   regions: [
-    { key: 'region', label: 'Region', width: '45%' },
-    { key: 'status', label: 'Status' },
+    { key: 'region', label: 'Region' },
+    { key: 'status', label: 'Status', width: 240 },
     { key: 'actions', label: '', align: 'right', width: 120, skeleton: <ControlSkeleton width={76} /> },
   ],
   configurationSets: [
@@ -61,34 +61,34 @@ export const settingsColumns = {
   ],
   // A member's card: name and role, then the email; Remove and the role change are in the row's menu.
   members: [
-    { key: 'name', label: 'Name', width: '24%', card: 'title' },
-    { key: 'email', label: 'Email', width: '38%', card: 'line' },
+    { key: 'name', label: 'Name', width: '32%', card: 'title' },
+    { key: 'email', label: 'Email', card: 'line' },
     { key: 'role', label: 'Role', width: 140, card: 'aside' },
     { key: 'actions', label: '', align: 'right', width: 112, skeleton: <ControlSkeleton width={70} />, card: 'end' },
   ],
   // An invitation's card: the address, its role, when it expires; copy and Revoke are in the row's menu.
   invitations: [
-    { key: 'email', label: 'Email', width: '40%', card: 'title' },
-    { key: 'role', label: 'Role', width: 160, card: 'line' },
-    { key: 'expires', label: 'Expires', card: 'inline' },
+    { key: 'email', label: 'Email', card: 'title' },
+    { key: 'role', label: 'Role', width: 140, card: 'line' },
+    { key: 'expires', label: 'Expires', width: 124, card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 160, skeleton: <ControlSkeleton width={120} />, card: 'end' },
   ],
   // A webhook's card: its name and status, its URL, then how many events it gets.
   webhooks: [
-    { key: 'name', label: 'Name / Endpoint URL', width: '38%', skeleton: twoLines, card: 'title' },
+    { key: 'name', label: 'Name / Endpoint URL', skeleton: twoLines, card: 'title' },
     { key: 'url', label: 'URL', table: false, card: 'line' },
     { key: 'scope', label: 'Region scope', width: '18%', card: 'hide' },
-    { key: 'events', label: 'Events', width: '10%', card: 'line' },
+    { key: 'events', label: 'Events', width: 120, card: 'line' },
     { key: 'headers', label: 'Headers', width: '18%', card: 'hide' },
-    { key: 'status', label: 'Status', card: 'aside' },
+    { key: 'status', label: 'Status', width: 112, card: 'aside' },
   ],
   // A delivery's card: when and its status, the event and response, then Retry and Inspect.
   deliveries: [
-    { key: 'time', label: 'Time · UTC', width: '16%', skeleton: twoLines, card: 'title' },
-    { key: 'region', label: 'Region', width: '14%', card: 'hide' },
-    { key: 'event', label: 'Event', width: '16%', card: 'line' },
-    { key: 'status', label: 'Status', width: '22%', skeleton: twoLines, card: 'aside' },
-    { key: 'attempts', label: 'Attempts', card: 'inline' },
+    { key: 'time', label: 'Time · UTC', width: 128, skeleton: twoLines, card: 'title' },
+    { key: 'region', label: 'Region', width: 112, card: 'hide' },
+    { key: 'event', label: 'Event', card: 'line' },
+    { key: 'status', label: 'Status', width: '30%', skeleton: twoLines, card: 'aside' },
+    { key: 'attempts', label: 'Attempts', width: 88, card: 'inline' },
     { key: 'actions', label: '', align: 'right', width: 220, skeleton: <ControlSkeleton width={85} />, card: 'end' },
   ],
   // An activity card: what happened and when, then plain lines for who (and where from) and the target.
@@ -102,13 +102,14 @@ export const settingsColumns = {
 } satisfies Record<string, SkeletonColumn[]>
 // Hosted workspaces span every region, so their domains table has no Region column.
 const [domainName, domainStatus, domainReceiving, domainAddresses, domainRegion] = settingsColumns.domains
-// The widths the loaded table forces (domain-records.css), so the skeleton and the list agree.
+// The name takes the slack; sending, receiving and the counts keep to their content. Shared by the list and its skeleton.
+const domainSending: SkeletonColumn = { ...domainStatus, key: 'sending', label: 'Sending' }
 export const domainColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant
-  ? [{ ...domainName, width: '38%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '29%' }, { ...domainReceiving, width: '23%' }, { ...domainAddresses, width: '10%' }]
-  : [{ ...domainName, width: '34%' }, { ...domainStatus, key: 'sending', label: 'Sending', width: '26%' }, { ...domainReceiving, width: '21%' }, { ...domainAddresses, width: '9%' }, { ...domainRegion, width: '10%' }]
+  ? [domainName, domainSending, domainReceiving, domainAddresses]
+  : [domainName, domainSending, domainReceiving, domainAddresses, domainRegion]
 // Hosted webhooks cover every region, so they have no region scope or region columns.
-const hostedWebhookColumns: SkeletonColumn[] = [{ ...settingsColumns.webhooks[0], width: '54%' }, settingsColumns.webhooks[1], { ...settingsColumns.webhooks[3], width: '16%' }, { ...settingsColumns.webhooks[4], width: '12%' }, settingsColumns.webhooks[5]]
-const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], { ...settingsColumns.deliveries[2], width: '30%' }, ...settingsColumns.deliveries.slice(3)]
+const hostedWebhookColumns: SkeletonColumn[] = [settingsColumns.webhooks[0], settingsColumns.webhooks[1], settingsColumns.webhooks[3], { ...settingsColumns.webhooks[4], width: '20%' }, settingsColumns.webhooks[5]]
+const hostedDeliveryColumns: SkeletonColumn[] = [settingsColumns.deliveries[0], ...settingsColumns.deliveries.slice(2)]
 export const webhookColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant ? hostedWebhookColumns : settingsColumns.webhooks
 export const deliveryColumns = (multiTenant: boolean): SkeletonColumn[] => multiTenant ? hostedDeliveryColumns : settingsColumns.deliveries
 
@@ -147,7 +148,7 @@ export function EndpointFieldsSkeleton({ isNew = false, selectedRegions = false 
     {!multiTenant && <div className="stack settings-region-scope"><div className="ui-field"><span className="ui-field__label">Region scope</span><ControlSkeleton /></div>
     {selectedRegions && <div className="settings-choices"><ControlSkeleton width={135} /><ControlSkeleton width={135} /></div>}</div>}
     <div className="stack"><div>Events</div><div className="settings-choices settings-choices--events">{['Sent', 'Delivered', 'Bounced', 'Complained', 'Rejected', 'Rendering failed', 'Delivery delayed', 'Opened', 'Clicked', 'Contact subscription changed', 'Sending standing changed'].map(event => <div className="ui-check-field" key={event} aria-hidden="true"><Skeleton width={14} height={14} /><span>{event}</span></div>)}</div></div>
-    <div className="ui-field webhook-headers"><span className="ui-field__label">Headers</span><div className="webhook-headers__actions"><Skeleton width={isNew ? 100 : 124} height={24} /></div></div>
+    <div className="ui-field webhook-headers"><span className="ui-field__label">Headers</span><div className="webhook-headers__actions"><Skeleton width={isNew ? 100 : 124} height="var(--control-height-sm)" /></div></div>
   </div>
 }
 
@@ -157,7 +158,7 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
     {isNew ? <div className="stack"><EndpointFieldsSkeleton isNew /><div className="cluster"><ControlSkeleton width={128} /></div></div> : <>
       <EndpointFieldsSkeleton selectedRegions={selectedRegions} />
       <section className="section stack settings-rule settings-secret"><SectionHeader title={<span className="settings-guide-title">Signing secret<span className="guide-link">Guide</span></span>} actions={<><ControlSkeleton width={76} /><ControlSkeleton width={138} /></>} /></section>
-      <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton columns={deliveryColumns(multiTenant)} rows={2} /></section>
+      <section className="section stack settings-rule"><SectionHeader title="Delivery history" /><TableSkeleton className="ui-table--two-line" columns={deliveryColumns(multiTenant)} rows={2} /></section>
       <div><ControlSkeleton width={146} /></div>
     </>}
   </LoadingRegion>
@@ -165,9 +166,9 @@ export function WebhookBodySkeleton({ isNew = false, selectedRegions = false }: 
 
 export function DomainDetailSkeleton() {
   const { multiTenant } = useWorkspaceAccess()
-  return <LoadingRegion className="stack" label="Loading domain">
+  return <LoadingRegion className="stack domain-page" label="Loading domain">
     <PageHeader title={<SkeletonText width={260} lineHeight={28} />} backTo="/domains" actions={<><Skeleton className="domain-status-skeleton" width={72} height={20} /><ControlSkeleton width={112} /><ControlSkeleton width={124} /></>} />
-    <div className="domain-sections"><section className="section stack domain-records-section"><div className="domain-records-actions"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div><div className="domain-records-list"><TableSkeleton className="domain-records" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></section></div>
+    <div className="domain-sections"><section className="section stack domain-records-section"><div className="domain-records-actions"><ControlSkeleton width={128} /><ControlSkeleton width={104} /></div><div className="domain-records-list"><TableSkeleton className="domain-records ui-table--two-line" columns={settingsColumns.dns} rows={multiTenant ? 6 : 4} /><div className="domain-records-add"><SkeletonText width={176} /></div></div></section></div>
   </LoadingRegion>
 }
 
@@ -182,6 +183,6 @@ export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table keys-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
+  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table ui-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
   return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }

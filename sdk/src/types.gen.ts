@@ -182,12 +182,48 @@ export type ConnectionSummary = {
         marketingHeld: boolean;
     } | null;
     /**
-     * Domains claimed in this workspace and how many can send.
+     * Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.
      */
     domains?: {
         total: number;
         verified: number;
     };
+    /**
+     * Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).
+     */
+    sent?: boolean;
+    /**
+     * Whether this workspace has received any email (kept as long as its received mail is).
+     */
+    received?: boolean;
+    /**
+     * Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.
+     */
+    builtinDomain?: {
+        /**
+         * Its ID in listDomains, once it is set up on this connection.
+         */
+        id: string | null;
+        name: string;
+        /**
+         * ready: it sends now (in a new workspace's first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused).
+         */
+        sending: 'ready' | 'pending' | 'closed' | 'off';
+        /**
+         * Present while sending from every built-in domain is paused (the circuit breaker on their shared reputation) until an operator turns it back on. Mail still queued from it when it paused was canceled; it keeps receiving.
+         */
+        paused?: true;
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace's members.
+         */
+        scope: 'anyone' | 'members';
+        perDay: number;
+        perMinute: number;
+        /**
+         * Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends.
+         */
+        used: number;
+    } | null;
     /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
      */
@@ -317,9 +353,21 @@ export type ApiKey = {
     expiresAt: string | null;
     approval: ApprovalTie;
     lastChange: ApiKeyLastChange;
+    /**
+     * A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key.
+     */
+    agent: {
+        /**
+         * What the agent said it is (client_name), its claim, never verified. Null when it didn't say.
+         */
+        client: string | null;
+    } | null;
 };
 
 export type CreateApiKey = {
+    /**
+     * Any text, 1 to 100 characters once trimmed. Need not be unique.
+     */
     name: string;
     /**
      * Workspace keys: read, send and manage. Defaults to send.
@@ -439,6 +487,9 @@ export type AuditEntry = {
 };
 
 export type UpdateApiKey = {
+    /**
+     * Any text, 1 to 100 characters once trimmed. Need not be unique.
+     */
     name?: string;
     /**
      * Workspace keys: replaces its permissions.
@@ -491,12 +542,131 @@ export type UpdateApiKey = {
     };
 };
 
+export type AgentSetupToken = {
+    id: string;
+    /**
+     * nm_setup_…, shown once.
+     */
+    token: string;
+    expiresAt: string;
+    permissions: Array<'read' | 'send' | 'manage'>;
+};
+
+export type AgentSetupStatus = {
+    id: string;
+    status: 'waiting' | 'connected' | 'expired' | 'replaced';
+    expiresAt: string;
+    connectedAt: string | null;
+    keyId: string | null;
+    keyName: string | null;
+};
+
+export type AgentKey = {
+    /**
+     * The API key (nm_…), shown once. Save it as NIGHTMAIL_API_KEY in the project's environment, never in code or a commit.
+     */
+    key: string;
+    keyId: string;
+    /**
+     * "<client_name>, set up <date>" ("Agent, set up <date>" without one), under API keys, where a person revokes it.
+     */
+    name: string;
+    workspaceId: string;
+    /**
+     * The workspace's name: tell the person, so they can confirm the key is in theirs.
+     */
+    workspaceName: string;
+    /**
+     * read, send and manage, on every sender domain: send email, manage domains, inboxes, receiving, webhooks and campaigns. It can't create API keys, agent tokens, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords; members, billing and deleting the workspace are a person's.
+     */
+    permissions: Array<'read' | 'send' | 'manage'>;
+    /**
+     * The API origin to call.
+     */
+    baseUrl: string;
+    mcp: {
+        url: string;
+        /**
+         * A remote MCP server entry that reads the key from NIGHTMAIL_API_KEY.
+         */
+        config: {
+            [key: string]: unknown;
+        };
+    };
+    nextStep: string;
+};
+
+export type AgentDeviceAuthorization = {
+    /**
+     * nm_device_…: keep it private; only pollAgentDeviceToken takes it.
+     */
+    device_code: string;
+    /**
+     * Show this to the person: they confirm it matches.
+     */
+    user_code: string;
+    verification_uri: string;
+    /**
+     * The page with the user code filled in: the link to give the person.
+     */
+    verification_uri_complete: string;
+    expires_in: number;
+    /**
+     * Seconds to wait between polls.
+     */
+    interval: number;
+};
+
+export type AgentDeviceRequest = {
+    userCode: string;
+    /**
+     * What the agent says it is: its claim, not verified.
+     */
+    clientName: string | null;
+    status: 'pending' | 'approved' | 'denied' | 'used' | 'expired';
+    createdAt: string;
+    expiresAt: string;
+    /**
+     * What its key gets once approved.
+     */
+    permissions: Array<'read' | 'send' | 'manage'>;
+};
+
+export type AgentDeviceApproval = {
+    userCode: string;
+    status: 'approved';
+    workspaceId: string;
+};
+
+export type AgentDeviceDenial = {
+    userCode: string;
+    status: 'denied';
+};
+
 export type ContactRead = Contact & {
     /**
      * Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.
      */
     listIds: Array<string>;
 };
+
+/**
+ * Why campaigns and marketing sends skip this contact, or null when nothing is wrong with the address. Flagged when the contact is created or imported, and again hourly for every contact. Transactional mail is never refused.
+ */
+export type ContactRisk = {
+    /**
+     * invalid: not a deliverable address. disposable: a public temporary inbox on a listed domain or subdomain. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce). no_mail_domain: the domain can't receive mail (it doesn't exist, or has no mail server).
+     */
+    reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
+    /**
+     * For typo_domain, the address with the provider it most likely meant.
+     */
+    suggestion: string | null;
+    /**
+     * Its owner allowed it: campaigns and marketing sends reach it anyway.
+     */
+    allowed: boolean;
+} | null;
 
 export type Contact = {
     id: string;
@@ -509,6 +679,7 @@ export type Contact = {
     marketingConsent: 'unknown' | 'subscribed' | 'unsubscribed';
     suppressed: boolean;
     suppressionReason: string | null;
+    risk: ContactRisk;
     lastOpenAt: string | null;
     lastClickAt: string | null;
     observedSince: string | null;
@@ -799,6 +970,10 @@ export type AudienceImport = {
         properties: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * What the address says about it, if anything: the contact is imported and flagged, and campaigns skip it.
+         */
+        risk?: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead' | 'no_mail_domain';
     }>;
     errors: Array<{
         row: number;
@@ -810,6 +985,7 @@ export type AudienceImport = {
      * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
      */
     rowsRetained: boolean;
+    risky: RiskBreakdown;
     /**
      * false once per-row error details are no longer kept after the retention window (errors is then []).
      */
@@ -817,6 +993,21 @@ export type AudienceImport = {
     createdAt: string;
     updatedAt: string;
 };
+
+/**
+ * Rows flagged as risky. At preview, what the addresses say; once committed, the imported contacts campaigns skip, addresses that bounced elsewhere included. null for imports from before list hygiene.
+ */
+export type RiskBreakdown = {
+    total: number;
+    byReason: {
+        invalid: number;
+        disposable: number;
+        typo_domain: number;
+        role: number;
+        dead: number;
+        no_mail_domain: number;
+    };
+} | null;
 
 export type CommittedContactImport = AudienceImport & {
     /**
@@ -1158,6 +1349,10 @@ export type SingleEmailQueued = {
     simulated: boolean;
     screen?: EmailScreenSummary;
     /**
+     * Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.
+     */
+    warnings?: Array<RecipientWarning>;
+    /**
      * A scheduled send: when it goes (UTC).
      */
     scheduledAt?: string;
@@ -1178,7 +1373,16 @@ export type EmailScreenSummary = {
     status: 'passed' | 'skipped';
 };
 
+export type RecipientWarning = {
+    email: string;
+    risk: 'invalid' | 'disposable' | 'typo_domain' | 'role';
+    suggestion: string | null;
+};
+
 export type SendEmailInput = {
+    /**
+     * An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.
+     */
     from: string;
     fromName?: string;
     to: string | Array<string>;
@@ -1208,6 +1412,9 @@ export type SendEmailInput = {
             [key: string]: unknown;
         };
     };
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     /**
@@ -1218,7 +1425,7 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
+     * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
     /**
@@ -1232,7 +1439,7 @@ export type SendEmailInput = {
      */
     replyMailboxId?: string;
     /**
-     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId.
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected), except Hosted marketing its ramp hour has no room for, which is held until there is (RAMP_LIMIT_REACHED in sendEmail's description). Not with replyAddressId.
      */
     scheduledAt?: string;
 };
@@ -1246,6 +1453,10 @@ export type EmailQueued = {
     status: 'queued';
     simulated: boolean;
     screen?: EmailScreenSummary;
+    /**
+     * Recipients whose address looks risky (a disposable inbox, a mistyped provider, a role address): the email was queued anyway. Campaigns and marketing sends skip risky contacts.
+     */
+    warnings?: Array<RecipientWarning>;
 };
 
 export type SendEmailBatchInput = {
@@ -1256,6 +1467,9 @@ export type SendEmailBatchInput = {
 };
 
 export type BatchSendEmailItem = {
+    /**
+     * An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.
+     */
     from: string;
     fromName?: string;
     to: string | Array<string>;
@@ -1285,6 +1499,9 @@ export type BatchSendEmailItem = {
             [key: string]: unknown;
         };
     };
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     /**
@@ -1295,7 +1512,7 @@ export type BatchSendEmailItem = {
         value: string;
     }>;
     /**
-     * Request Jev screening at accept time for live transactional mail (with JevF failover). Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
+     * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
 };
@@ -1576,6 +1793,7 @@ export type Campaign = {
         };
     };
     delivery: CampaignDelivery;
+    sendEstimate: CampaignSendEstimate;
 };
 
 /**
@@ -1596,6 +1814,9 @@ export type CampaignDraft = {
      */
     regionPinned?: boolean;
     subject?: string | '';
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -1674,7 +1895,22 @@ export type CampaignDelivery = {
          * When the next 24-hour window opens, when a daily cap is set.
          */
         nextWindowAt: string | null;
+        /**
+         * Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise.
+         */
+        plan: Array<number> | null;
+        /**
+         * With a plan: the batch the current window releases, from 1.
+         */
+        batch: number | null;
     };
+    /**
+     * The consent source confirmed at launch, if any.
+     */
+    consent: {
+        source: string;
+        confirmedAt: string;
+    } | null;
     pausedAt: string | null;
     pauseReason: {
         code: string;
@@ -1685,10 +1921,10 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace's sending is paused, or with own link hosts, its domain's isn't active yet); it continues by itself.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record';
         until: string;
     } | null;
     /**
@@ -1698,6 +1934,55 @@ export type CampaignDelivery = {
         oldestMs: number;
         lane: 'routine' | 'priority';
     } | null;
+} | null;
+
+/**
+ * How long sending takes, for a draft or a campaign that has recipients left to release. Null for a finished or canceled campaign; lists leave it out.
+ */
+export type CampaignSendEstimate = {
+    /**
+     * Recipients still to release: for a draft, the last audience count (previewCampaignAudience; null before one); once launched, those not released yet.
+     */
+    recipients: number | null;
+    /**
+     * The region's send rate the campaign plans at, per second, before its rate share; null until the region's quota was read.
+     */
+    ratePerSecond: number | null;
+    ramp: CampaignRamp;
+    /**
+     * How long releasing the recipients left takes from when it starts (the campaign's last change, updatedAt, or scheduledAt): from the ramp, the daily cap (pacing.perDay), the rate share and the region's send rate. A draft is estimated without a daily cap at the full rate. An estimate: it assumes clean, prompt feedback and leaves out the list probe's wait, quota holds and other mail sharing the rate. Null when it cannot be told (no audience count or send rate yet).
+     */
+    seconds: number | null;
+    /**
+     * A launched campaign: when its last recipient is expected to be released, as of its last change (updatedAt or scheduledAt, plus seconds). Null for a draft, while paused or failed, or when it cannot be told.
+     */
+    finishAt: string | null;
+} | null;
+
+/**
+ * Where the campaign is on the ramp. A Hosted sender's first large campaigns release in hourly steps that grow (1,000 an hour at first), moving to the next step once an hour at this one went out and its delivery results are in and clean; more than 3% bounces or more than 0.08% complaints (at least 2) in a step pause the campaign. The first step not already proven by the workspace's largest clean marketing hour of the last 30 days is where it starts, so an established sender skips it. Null when no ramp applies (self-hosted, your own AWS account, simulated mail, an established sender, or past the last step). Transactional mail never waits for it.
+ */
+export type CampaignRamp = {
+    /**
+     * The step the campaign releases at, from 1.
+     */
+    step: number;
+    /**
+     * How many steps the ramp has; past the last one only the other limits apply.
+     */
+    steps: number;
+    /**
+     * Most recipients this step releases in its hour.
+     */
+    ceilingPerHour: number;
+    /**
+     * When this step's hour started: its first release. Null before it.
+     */
+    startedAt: string | null;
+    /**
+     * Recipients released since this step's hour started.
+     */
+    released: number;
 } | null;
 
 export type CreateCampaignInput = {
@@ -1718,6 +2003,9 @@ export type CreateCampaignInput = {
      */
     regionPinned?: boolean;
     subject?: string | '';
+    /**
+     * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+     */
     attachments?: Array<string>;
     tracking?: boolean;
     audience?: {
@@ -1960,13 +2248,157 @@ export type CampaignPreview = {
 };
 
 /**
- * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed or unsubscribed remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
+ * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
  */
 export type CampaignAudienceCounts = {
     matched: number;
     eligible: number;
     suppressed: number;
     unsubscribed: number;
+    /**
+     * Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible.
+     */
+    risky: number;
+    riskyByReason: {
+        invalid: number;
+        disposable: number;
+        typo_domain: number;
+        role: number;
+        dead: number;
+        no_mail_domain: number;
+    };
+    /**
+     * With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.
+     */
+    readiness?: {
+        /**
+         * ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.
+         */
+        verdict: 'ready' | 'ramp_recommended' | 'ramp_required';
+        /**
+         * Why, in one or two plain sentences, when a ramp is recommended or required.
+         */
+        summary: string | null;
+        /**
+         * Every finding behind the verdict.
+         */
+        reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        domain: {
+            name: string;
+            /**
+             * When the From domain (or the domain it is under) was added to this workspace.
+             */
+            firstSeenAt: string | null;
+            ageDays: number | null;
+            /**
+             * The DMARC policy last observed; null when not checked yet.
+             */
+            dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null;
+            /**
+             * The custom MAIL FROM domain (aligned SPF).
+             */
+            mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * A link host of the domain's own for tracked links: not configurable yet.
+             */
+            linkHost: 'not_configured';
+        };
+        history: {
+            /**
+             * Every kind of mail the workspace sent; largestSend counts campaigns.
+             */
+            workspace: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+            /**
+             * Campaigns from this From domain.
+             */
+            domain: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+        };
+        list: {
+            recipients: number;
+            /**
+             * Risky contacts the send skips.
+             */
+            risky: number;
+            /**
+             * Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.
+             */
+            neverMailed: number | null;
+            createdAt: string | null;
+            /**
+             * When a campaign last went to this list.
+             */
+            lastSentAt: string | null;
+            lastImport: {
+                at: string;
+                contacts: number;
+                /**
+                 * The consent evidence it was imported with, if any.
+                 */
+                consent: string | null;
+            } | null;
+        };
+        /**
+         * This send ÷ the largest campaign its domain sent in the last 90 days; null without one.
+         */
+        sizeJump: number | null;
+        /**
+         * The recommended daily batches; null when one day covers everyone.
+         */
+        plan: {
+            /**
+             * Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.
+             */
+            batches: Array<number>;
+            /**
+             * How long the plan takes from its start, the hourly ramp included.
+             */
+            seconds: number | null;
+        } | null;
+        required: {
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * The largest daily limit that counts as a ramp: the plan's first day.
+             */
+            maxPerDay: number;
+        } | null;
+    } | null;
 };
 
 export type CampaignPreviewImage = {
@@ -2012,6 +2444,9 @@ export type CampaignUpdateInput = {
          */
         regionPinned?: boolean;
         subject?: string | '';
+        /**
+         * IDs of files uploaded first (uploadAttachment). One file is at most 8 MiB decoded when sent as base64 in JSON (POST /v1/attachments), or 25 MiB as raw bytes (POST /v1/attachments/upload, with the name URI-encoded in X-Nightmail-Filename and the type in Content-Type). One email carries at most 100 files and 25 MiB of them together, decoded. A workspace keeps at most 100 GiB of uploaded files. For anything larger, link to the file from the email.
+         */
         attachments?: Array<string>;
         tracking?: boolean;
         audience?: {
@@ -2071,11 +2506,158 @@ export type CampaignQueued = {
     queued: number;
     scheduledAt: string | null;
     simulated: boolean;
+    /**
+     * Recipients the send skips as risky contacts, by reason: exact when queued is; null when a large audience could not be counted at launch.
+     */
+    risky?: {
+        total: number;
+        byReason: {
+            invalid: number;
+            disposable: number;
+            typo_domain: number;
+            role: number;
+            dead: number;
+            no_mail_domain: number;
+        };
+    } | null;
+    /**
+     * The send review as of the launch (list.neverMailed is not counted then); null for a required notice.
+     */
+    readiness?: {
+        /**
+         * ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.
+         */
+        verdict: 'ready' | 'ramp_recommended' | 'ramp_required';
+        /**
+         * Why, in one or two plain sentences, when a ramp is recommended or required.
+         */
+        summary: string | null;
+        /**
+         * Every finding behind the verdict.
+         */
+        reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        domain: {
+            name: string;
+            /**
+             * When the From domain (or the domain it is under) was added to this workspace.
+             */
+            firstSeenAt: string | null;
+            ageDays: number | null;
+            /**
+             * The DMARC policy last observed; null when not checked yet.
+             */
+            dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null;
+            /**
+             * The custom MAIL FROM domain (aligned SPF).
+             */
+            mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * A link host of the domain's own for tracked links: not configurable yet.
+             */
+            linkHost: 'not_configured';
+        };
+        history: {
+            /**
+             * Every kind of mail the workspace sent; largestSend counts campaigns.
+             */
+            workspace: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+            /**
+             * Campaigns from this From domain.
+             */
+            domain: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+        };
+        list: {
+            recipients: number;
+            /**
+             * Risky contacts the send skips.
+             */
+            risky: number;
+            /**
+             * Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.
+             */
+            neverMailed: number | null;
+            createdAt: string | null;
+            /**
+             * When a campaign last went to this list.
+             */
+            lastSentAt: string | null;
+            lastImport: {
+                at: string;
+                contacts: number;
+                /**
+                 * The consent evidence it was imported with, if any.
+                 */
+                consent: string | null;
+            } | null;
+        };
+        /**
+         * This send ÷ the largest campaign its domain sent in the last 90 days; null without one.
+         */
+        sizeJump: number | null;
+        /**
+         * The recommended daily batches; null when one day covers everyone.
+         */
+        plan: {
+            /**
+             * Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.
+             */
+            batches: Array<number>;
+            /**
+             * How long the plan takes from its start, the hourly ramp included.
+             */
+            seconds: number | null;
+        } | null;
+        required: {
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * The largest daily limit that counts as a ramp: the plan's first day.
+             */
+            maxPerDay: number;
+        } | null;
+    } | null;
 };
 
 export type CampaignSendInput = {
     revision: number;
     pacing?: CampaignPacing;
+    consent?: CampaignConsentConfirmation;
     /**
      * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
      */
@@ -2095,11 +2677,27 @@ export type CampaignPacing = {
      * Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.
      */
     rateShare?: number;
+    /**
+     * Send in the daily batches previewCampaignAudience recommends (readiness.plan), worked out again at launch: the most engaged contacts first, never-mailed last. Not with perDay.
+     */
+    plan?: 'recommended';
+};
+
+/**
+ * The sender confirms everyone on the list agreed to this mail, and where that consent comes from. Lets a send the review requires a ramp for (readiness.verdict ramp_required) go out without the plan. Stored with the campaign, with who and when, and in the workspace's Activity. An agent asks the person first.
+ */
+export type CampaignConsentConfirmation = {
+    confirmed: true;
+    /**
+     * Where this list's consent comes from, for example "Signed up at checkout on our site since 2023".
+     */
+    source: string;
 };
 
 export type CampaignScheduleInput = {
     revision: number;
     pacing?: CampaignPacing;
+    consent?: CampaignConsentConfirmation;
     /**
      * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
      */
@@ -2143,6 +2741,10 @@ export type WorkspaceSettings = {
      * Whether campaigns in this workspace may be required notices (requiredNotice), which also reach people who unsubscribed from marketing. Only an operator turns this on.
      */
     requiredNotices: boolean;
+    /**
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.
+     */
+    focus: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type UpdateWorkspaceSettings = {
@@ -2151,6 +2753,10 @@ export type UpdateWorkspaceSettings = {
      * The workspace's postal address, as plain text: at most 300 characters on up to 6 lines, without HTML. Every campaign email and marketing send shows it under the Unsubscribe link, as US law (CAN-SPAM) requires; a campaign can't be sent or scheduled without it.
      */
     postalAddress?: string | null;
+    /**
+     * What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails, agent inboxes or a personal inbox. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped. Order matters: the first leads.
+     */
+    focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
 };
 
 export type SesAccount = {
@@ -2219,10 +2825,71 @@ export type DomainReadiness = {
         type: 'CNAME' | 'TXT' | 'MX';
         value: string;
         priority?: number;
-        purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc';
+        /**
+         * links: optional, the domain's own link host (links.<domain>) for the unsubscribe and other links Nightmail adds to campaign and marketing mail; shown when the installation has a link domain with Cloudflare for SaaS.
+         */
+        purpose: 'sending' | 'receiving' | 'mail_from' | 'dmarc' | 'links';
         status: 'pending' | 'verified';
         note?: string;
+        /**
+         * For pending sending and MAIL FROM records: what public DNS (Cloudflare 1.1.1.1) shows for this record. verifyDomain looks it up now (answers cached up to 30 seconds). Other reads show the last background check, which runs every 15 to 60 minutes for a Hosted domain still pending an hour after it was added. Null when DNS did not answer in time; absent before any check and on other records.
+         */
+        publicDns?: {
+            /**
+             * With wildcard: the answer is a registrar’s parking or forwarding record.
+             */
+            parking?: {
+                /**
+                 * The registrar or host, e.g. Porkbun.
+                 */
+                owner: string;
+                /**
+                 * What its record points to, e.g. pixie.porkbun.com.
+                 */
+                target: string;
+            };
+            /**
+             * With missing on a CNAME: a wildcard record (e.g. *.example.com) answers this name with an address instead, as it does a random name beside it. Add the CNAME exactly: the specific record wins over the wildcard.
+             */
+            wildcard?: string;
+            /**
+             * found: public DNS has this record as listed (it may still take SES a few minutes to verify). missing: nothing of this type at the name. wrong_value: the name has a record of this type with another value.
+             */
+            state: 'found' | 'missing' | 'wrong_value';
+            /**
+             * wrong_value only: what public DNS has at the name instead (at most 5). Empty otherwise.
+             */
+            values: Array<string>;
+            checkedAt: string;
+        } | null;
     }>;
+    /**
+     * Where this domain’s DNS is hosted, from its zone’s NS records, alongside publicDns: null when the provider is not one Nightmail recognizes.
+     */
+    dnsHost?: {
+        /**
+         * The provider, e.g. Cloudflare, Vercel, Route 53, GoDaddy or Namecheap.
+         */
+        name: string;
+        /**
+         * The zone it hosts, which record names are relative to there.
+         */
+        zone: string;
+        /**
+         * The provider's DNS page for the zone, when it has a known address.
+         */
+        url: string | null;
+    } | null;
+    /**
+     * Set when adding the domain (one bounded NS lookup), by Check now and by the background check: the domain has no DNS at all. Never set when DNS couldn’t be read. Fix the name (add the right domain and delete this one) or register the domain.
+     */
+    dnsIssue?: {
+        /**
+         * no_dns: no nameservers serve this domain: it is unregistered, lapsed or mistyped, so its records can’t be published and it can’t verify.
+         */
+        code: 'no_dns';
+        message: string;
+    } | null;
     /**
      * Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.
      */
@@ -2251,6 +2918,35 @@ export type DomainReadiness = {
          */
         suggestion?: string | null;
     } | null;
+    /**
+     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
+     */
+    builtIn?: boolean;
+    /**
+     * Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.
+     */
+    limits?: {
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace’s members.
+         */
+        scope: 'anyone' | 'members';
+        /**
+         * Recipients in a rolling 24 hours.
+         */
+        perDay: number;
+        /**
+         * Recipients in a minute.
+         */
+        perMinute: number;
+        /**
+         * Request fields a send from it can’t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign.
+         */
+        unsupported: Array<'from' | 'replyTo' | 'headers' | 'attachments' | 'template' | 'scheduledAt' | 'kind' | 'campaign'>;
+        /**
+         * The same, in one sentence.
+         */
+        summary: string;
+    };
 };
 
 export type CreateDomain = {
@@ -2276,13 +2972,18 @@ export type TestEmailQueued = {
     simulated: boolean;
 };
 
+export type TestEmailContent = {
+    subject?: string;
+    text?: string;
+};
+
 export type DomainDnsSetup = {
     provider: {
         id: string;
         name: string;
     } | null;
     applyUrl: string | null;
-    groups: Array<'sending' | 'ownership' | 'receiving' | 'receivingReply' | 'mailfrom'>;
+    groups: Array<'sending' | 'links' | 'ownership' | 'receiving' | 'receivingReply' | 'mailfrom'>;
 };
 
 export type WebhookPage = {
@@ -2478,6 +3179,14 @@ export type Metrics = {
         complained: number;
     }>;
     hourly?: Array<{
+        date: string;
+        count: number;
+        sent: number;
+        delivered: number;
+        bounced: number;
+        complained: number;
+    }>;
+    tenMinute?: Array<{
         date: string;
         count: number;
         sent: number;
@@ -2806,7 +3515,7 @@ export type Usage = {
          */
         perThousand: number;
         /**
-         * Emails included free each calendar month (UTC) in each direction, counted separately: this many sent and this many received (freeSentEmails, freeReceivedEmails). Sends beyond it are charged even while received mail is still free, and the other way round.
+         * The sent allowance (same as freeSentEmails), kept for older clients. Sent and received each have their own allowance (freeSentEmails, freeReceivedEmails), counted separately: sends beyond theirs are charged even while received mail is still free, and the other way round.
          */
         freeEmails: number;
         /**
@@ -3758,6 +4467,10 @@ export type InboxMessagePage = {
      */
     cursor: string;
     hasMore: boolean;
+    /**
+     * When this page was read, on the clock storedAt uses: servedAt minus a message’s storedAt is how long it took to reach you after it was stored.
+     */
+    servedAt: string;
 };
 
 export type InboxMessage = {
@@ -3787,7 +4500,18 @@ export type InboxMessage = {
     toCount: number;
     subject: string;
     snippet: string;
+    /**
+     * When the sending server handed it over (SES received it).
+     */
     receivedAt: string;
+    /**
+     * When the write that stored it in Nightmail committed, on the clock servedAt uses.
+     */
+    storedAt: string;
+    /**
+     * Milliseconds from the receipt reaching Nightmail to storedAt: fetching, parsing, routing and storing the message. Null for mail that came another way (simulated, sent, copied).
+     */
+    processingMs: number | null;
     read: boolean;
     flags: Array<'flagged' | 'answered' | 'draft' | 'forwarded' | 'junk' | 'notJunk' | 'mdnSent'>;
     labels: Array<string>;
@@ -4066,7 +4790,7 @@ export type AddReceivingHost = {
         [key: string]: unknown;
     };
     /**
-     * The host: the domain itself, a label (acme) or a subdomain (acme.example.com).
+     * The host: the domain itself (or @), a label (acme) or a subdomain (acme.example.com).
      */
     name: string;
     confirm?: boolean;
@@ -4208,6 +4932,43 @@ export type InboundAddress = {
      * inbox: an agent inbox; manage it with /v1/inboxes.
      */
     kind: 'address' | 'inbox';
+};
+
+export type CreatedInboundAddress = InboundAddress & {
+    /**
+     * Present while the host doesn’t route mail here yet: hosted, an address on one of your own domains, verified or still being verified, turns receiving on at its host if it was off.
+     */
+    receiving?: {
+        /**
+         * The domain the address is on (receiving hosts: /v1/inbound/domains/{id}/hosts).
+         */
+        domainId: string;
+        /**
+         * Where the address receives.
+         */
+        host: string;
+        /**
+         * Whether creating the address turned receiving on at this host (it didn’t receive mail before).
+         */
+        turnedOn: boolean;
+        /**
+         * The host’s receiving status now: waiting_for_mx until its MX record is live (poll getInboundDomain or listReceivingHosts).
+         */
+        status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
+        /**
+         * Whether the domain is verified. Until it is (its DNS records: getDomain), mail waits even with the MX record live.
+         */
+        verified: boolean;
+        /**
+         * The MX record to publish at the host, if it isn’t already: mail arrives once it is.
+         */
+        dns: Array<{
+            type: 'MX';
+            name: string;
+            value: string;
+            priority: number;
+        }>;
+    };
 };
 
 export type CreateInboundAddress = {
@@ -4998,6 +5759,14 @@ export type InboundOverviewDomain = {
      * Receiving host: the domain, or the subdomain it receives at.
      */
     name: string;
+    /**
+     * The domain itself. Hosted, an address on it or any of its subdomains turns receiving on there (createInboundAddress).
+     */
+    domain: string;
+    /**
+     * Every host the domain receives at, or is being set up to (name is its first); addresses can be created at each.
+     */
+    hosts: Array<string>;
     status: 'off' | 'provisioning' | 'waiting_for_mx' | 'active' | 'disabling' | 'disabled' | 'failed';
     catchAll: 'create_address' | 'store';
 };
@@ -5159,6 +5928,17 @@ export type InboundEvent = {
      * Receiving address ID at the time of the event; null for workspace events.
      */
     addressId: string | null;
+    /**
+     * message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone.
+     */
+    message: {
+        from: {
+            name: string | null;
+            address: string;
+        };
+        subject: string;
+        receivedAt: string;
+    } | null;
 };
 
 export type InboundWebhookSecret = InboundWebhook & {
@@ -5743,6 +6523,43 @@ export type OverviewSetup = {
          */
         pending: number;
     } | null;
+    /**
+     * The first steps of each focus (focus in getWorkspaceSettings), as yes or no. Null unless the caller manages the whole workspace.
+     */
+    progress?: {
+        /**
+         * An agent inbox exists.
+         */
+        inbox: boolean;
+        /**
+         * Any email was received.
+         */
+        received: boolean;
+        /**
+         * The audience has a contact.
+         */
+        contacts: boolean;
+        /**
+         * A campaign exists, draft or not.
+         */
+        campaign: boolean;
+        /**
+         * A campaign was launched (preparing, scheduled, sending, paused or done).
+         */
+        campaignSent: boolean;
+        /**
+         * A newsletter exists.
+         */
+        newsletter: boolean;
+        /**
+         * A newsletter has a reader (a member of its list).
+         */
+        readers: boolean;
+        /**
+         * A campaign to a newsletter was launched.
+         */
+        issueSent: boolean;
+    } | null;
 };
 
 export type SupportHandoff = {
@@ -5888,7 +6705,7 @@ export type BillingSummary = {
          */
         storagePerGbMonth: string;
         /**
-         * Free emails each calendar month (UTC) in each direction, counted separately (freeSentEmails, freeReceivedEmails).
+         * The sent allowance (same as freeSentEmails), kept for older clients. Each direction has its own allowance, counted separately (freeSentEmails, freeReceivedEmails).
          */
         freeEmails: number;
         /**
@@ -6272,6 +7089,14 @@ export type GetCurrentIdentityResponses = {
         mcpScopes: Array<string>;
         connection: ConnectionSummary;
         /**
+         * A hosted dashboard session in a workspace made seconds ago whose Hosted mail (its connection and built-in domain) is still being written: starting. Read /v1/me again shortly; null otherwise.
+         */
+        hostedSetup?: 'starting' | null;
+        /**
+         * A hosted dashboard session: what this workspace is here for, the first leading (focus in getWorkspaceSettings, which changes it). Null until chosen or for other credentials; empty when skipped.
+         */
+        focus?: Array<'marketing' | 'newsletter' | 'developer' | 'agents' | 'personal'> | null;
+        /**
          * A hosted dashboard session's workspaces and roles (select one with X-Nightmail-Workspace); null for keys, MCP, agent tokens and self-hosted.
          */
         workspaces: Array<Workspace> | null;
@@ -6287,6 +7112,10 @@ export type GetCurrentIdentityResponses = {
          * Nightmail staff only: this session may use staff UI notes. False for everyone else.
          */
         uiNotes?: boolean;
+        /**
+         * Dashboard sessions: whether createWorkspace lets this session create another workspace. Hosted, only staff can for now; everyone else has one workspace and gets 403 WORKSPACE_LIMIT. False for keys, MCP and agent tokens.
+         */
+        canCreateWorkspace?: boolean;
         /**
          * Whether this installation records how its dashboard is used (DASHBOARD_ANALYTICS). The dashboard sends nothing when false.
          */
@@ -6805,7 +7634,7 @@ export type UpdateApiKeyData = {
     body: UpdateApiKey;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -6870,6 +7699,543 @@ export type UpdateApiKeyResponses = {
 
 export type UpdateApiKeyResponse = UpdateApiKeyResponses[keyof UpdateApiKeyResponses];
 
+export type CreateAgentSetupTokenData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/agent/setup-tokens';
+};
+
+export type CreateAgentSetupTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateAgentSetupTokenError = CreateAgentSetupTokenErrors[keyof CreateAgentSetupTokenErrors];
+
+export type CreateAgentSetupTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentSetupToken;
+};
+
+export type CreateAgentSetupTokenResponse = CreateAgentSetupTokenResponses[keyof CreateAgentSetupTokenResponses];
+
+export type GetAgentSetupTokenData = {
+    body?: never;
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/agent/setup-tokens/{id}';
+};
+
+export type GetAgentSetupTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type GetAgentSetupTokenError = GetAgentSetupTokenErrors[keyof GetAgentSetupTokenErrors];
+
+export type GetAgentSetupTokenResponses = {
+    /**
+     * Success
+     */
+    200: AgentSetupStatus;
+};
+
+export type GetAgentSetupTokenResponse = GetAgentSetupTokenResponses[keyof GetAgentSetupTokenResponses];
+
+export type ExchangeAgentSetupTokenData = {
+    body: {
+        /**
+         * The setup token from the prompt.
+         */
+        token: string;
+        /**
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
+         */
+        client_name?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/setup';
+};
+
+export type ExchangeAgentSetupTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Expired, or replaced by a newer one; use error.code.
+     */
+    410: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ExchangeAgentSetupTokenError = ExchangeAgentSetupTokenErrors[keyof ExchangeAgentSetupTokenErrors];
+
+export type ExchangeAgentSetupTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentKey;
+};
+
+export type ExchangeAgentSetupTokenResponse = ExchangeAgentSetupTokenResponses[keyof ExchangeAgentSetupTokenResponses];
+
+export type StartAgentDeviceAuthorizationData = {
+    body?: {
+        /**
+         * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
+         */
+        client_name?: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device';
+};
+
+export type StartAgentDeviceAuthorizationErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type StartAgentDeviceAuthorizationError = StartAgentDeviceAuthorizationErrors[keyof StartAgentDeviceAuthorizationErrors];
+
+export type StartAgentDeviceAuthorizationResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceAuthorization;
+};
+
+export type StartAgentDeviceAuthorizationResponse = StartAgentDeviceAuthorizationResponses[keyof StartAgentDeviceAuthorizationResponses];
+
+export type PollAgentDeviceTokenData = {
+    body: {
+        device_code: string;
+        /**
+         * Optional, as RFC 8628 clients send it.
+         */
+        grant_type?: 'urn:ietf:params:oauth:grant-type:device_code';
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/token';
+};
+
+export type PollAgentDeviceTokenErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type PollAgentDeviceTokenError = PollAgentDeviceTokenErrors[keyof PollAgentDeviceTokenErrors];
+
+export type PollAgentDeviceTokenResponses = {
+    /**
+     * Success
+     */
+    201: AgentKey;
+};
+
+export type PollAgentDeviceTokenResponse = PollAgentDeviceTokenResponses[keyof PollAgentDeviceTokenResponses];
+
+export type LookUpAgentDeviceData = {
+    body: {
+        /**
+         * The code the agent shows, with or without its hyphen.
+         */
+        userCode: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/lookup';
+};
+
+export type LookUpAgentDeviceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type LookUpAgentDeviceError = LookUpAgentDeviceErrors[keyof LookUpAgentDeviceErrors];
+
+export type LookUpAgentDeviceResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceRequest;
+};
+
+export type LookUpAgentDeviceResponse = LookUpAgentDeviceResponses[keyof LookUpAgentDeviceResponses];
+
+export type ApproveAgentDeviceData = {
+    body: {
+        /**
+         * The code the agent shows, with or without its hyphen.
+         */
+        userCode: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/approve';
+};
+
+export type ApproveAgentDeviceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Expired, or replaced by a newer one; use error.code.
+     */
+    410: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ApproveAgentDeviceError = ApproveAgentDeviceErrors[keyof ApproveAgentDeviceErrors];
+
+export type ApproveAgentDeviceResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceApproval;
+};
+
+export type ApproveAgentDeviceResponse = ApproveAgentDeviceResponses[keyof ApproveAgentDeviceResponses];
+
+export type DenyAgentDeviceData = {
+    body: {
+        /**
+         * The code the agent shows, with or without its hyphen.
+         */
+        userCode: string;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/deny';
+};
+
+export type DenyAgentDeviceErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Expired, or replaced by a newer one; use error.code.
+     */
+    410: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type DenyAgentDeviceError = DenyAgentDeviceErrors[keyof DenyAgentDeviceErrors];
+
+export type DenyAgentDeviceResponses = {
+    /**
+     * Success
+     */
+    200: AgentDeviceDenial;
+};
+
+export type DenyAgentDeviceResponse = DenyAgentDeviceResponses[keyof DenyAgentDeviceResponses];
+
 export type ListContactsData = {
     body?: never;
     path?: never;
@@ -6883,6 +8249,10 @@ export type ListContactsData = {
         email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
+        /**
+         * true: only contacts campaigns skip as risky (risk set and not allowed).
+         */
+        risky?: 'true';
         listId?: string;
     };
     url: '/v1/contacts';
@@ -7153,6 +8523,10 @@ export type UpdateContactData = {
         properties?: {
             [key: string]: string | number | boolean | null;
         };
+        /**
+         * true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).
+         */
+        riskAllowed?: boolean;
     };
     path: {
         id: string;
@@ -7716,6 +9090,10 @@ export type ListListMembersData = {
         email?: string;
         consent?: 'unknown' | 'subscribed' | 'unsubscribed';
         suppressed?: 'true' | 'false';
+        /**
+         * true: only contacts campaigns skip as risky (risk set and not allowed).
+         */
+        risky?: 'true';
     };
     url: '/v1/lists/{id}/members';
 };
@@ -8303,6 +9681,10 @@ export type PreviewSegmentResponses = {
         eligible: number;
         suppressed: number;
         unsubscribed: number;
+        /**
+         * Subscribed, not suppressed and flagged as risky: campaigns skip them. Not in eligible.
+         */
+        risky: number;
     };
 };
 
@@ -8378,6 +9760,7 @@ export type ListContactImportsResponses = {
              * false once committed row payloads are no longer kept after the retention window (rows is then [] while imported keeps the count).
              */
             rowsRetained: boolean;
+            risky: RiskBreakdown;
             /**
              * false once per-row error details are no longer kept after the retention window (errors is then []).
              */
@@ -10069,7 +11452,7 @@ export type SendEmailData = {
     body: SendEmailInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10136,7 +11519,7 @@ export type SendEmailBatchData = {
     body: SendEmailBatchInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -10274,11 +11657,25 @@ export type ListEmailsData = {
         region?: string;
         kind?: 'transactional' | 'marketing';
         /**
-         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED.
+         * Literal case-insensitive substring of sender, To/Cc/Bcc, subject or email/campaign/provider ID, at least 3 characters: a shorter term is refused with 422 VALIDATION_FAILED. This is how to filter by sender or recipient address.
          */
         search?: string;
+        /**
+         * The start of the time range: emails created at or after this ISO 8601 date-time with Z or an offset, such as 2026-11-01T00:00:00Z. A time, not a sender: filter by sender address with search. since is the same filter by a clearer name; send one of them.
+         */
         from?: string;
+        /**
+         * The end of the time range: emails created before this ISO 8601 date-time with Z or an offset. A time, not a recipient: filter by recipient address with search. until is the same filter by a clearer name; send one of them.
+         */
         to?: string;
+        /**
+         * The start of the time range, the same filter as from: emails created at or after this ISO 8601 date-time. Send since or from, not both.
+         */
+        since?: string;
+        /**
+         * The end of the time range, the same filter as to: emails created before this ISO 8601 date-time. Send until or to, not both.
+         */
+        until?: string;
     };
     url: '/v1/emails';
 };
@@ -10728,7 +12125,7 @@ export type UploadAttachmentData = {
     body: AttachmentUpload;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11069,7 +12466,7 @@ export type CreateCampaignData = {
     body: CreateCampaignInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11513,7 +12910,12 @@ export type PreviewCampaignAudienceData = {
     path: {
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Also review the send (readiness).
+         */
+        readiness?: 'true' | 'false';
+    };
     url: '/v1/campaigns/{id}/audience';
 };
 
@@ -11764,7 +13166,7 @@ export type TestCampaignData = {
     body: CampaignTestInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11833,7 +13235,7 @@ export type SendCampaignData = {
     body: CampaignSendInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11902,7 +13304,7 @@ export type ScheduleCampaignData = {
     body: CampaignScheduleInput;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -11971,7 +13373,7 @@ export type CancelCampaignData = {
     body?: never;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. They are retained indefinitely. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. This route's keys do not expire: a repeat with the same key replays the original result at any later time. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -12866,7 +14268,7 @@ export type ChooseReceivingHostResponses = {
 export type ChooseReceivingHostResponse = ChooseReceivingHostResponses[keyof ChooseReceivingHostResponses];
 
 export type SendDomainTestEmailData = {
-    body?: never;
+    body?: TestEmailContent;
     path: {
         id: string;
     };
@@ -14198,7 +15600,7 @@ export type GetMetricsData = {
         from?: string;
         to?: string;
         stream?: 'transactional' | 'marketing';
-        granularity?: 'day' | 'hour';
+        granularity?: 'day' | 'hour' | '10m';
         /**
          * Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).
          */
@@ -20930,7 +22332,7 @@ export type CreateInboundAddressResponses = {
     /**
      * Success
      */
-    201: InboundAddress;
+    201: CreatedInboundAddress;
 };
 
 export type CreateInboundAddressResponse = CreateInboundAddressResponses[keyof CreateInboundAddressResponses];
@@ -21287,7 +22689,7 @@ export type CreateInboundThreadData = {
     body: CreateInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };
@@ -22024,7 +23426,7 @@ export type ReplyToInboundThreadData = {
     body: ReplyToInboundThread;
     headers?: {
         /**
-         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
+         * Optional. Makes retries safe. Repeating a request with the same key and the same body returns the original result without performing the write again. While the first request with a key is still running, a duplicate returns 409 IDEMPOTENCY_IN_PROGRESS with Retry-After: retry with the same key, never a new one. Reusing a key with a different body returns 409 IDEMPOTENCY_CONFLICT. Keys are scoped to the API key and request path. A send's key is kept at least 30 days from the request, as long as the log of the emails it queued; then it is deleted, and the same key is a new request that sends again. A scheduled send's key is kept at least 60 days, after which a repeat is refused because its time has passed. Without a key, every request is processed, so a retried send can deliver twice.
          */
         'Idempotency-Key'?: string;
     };

@@ -2,6 +2,7 @@ import { skipToken, useQuery } from '@tanstack/react-query'
 import { Link, Outlet, useMatch } from 'react-router'
 import { Skeleton, SkeletonText } from '../../components/ui'
 import { useOnboardingStage } from '../../data/context'
+import { sessionLikely } from '../../data/live'
 import { ChunkFallback } from '../../lib/preloadable'
 import './frame.css'
 import { productName, sdkPackage } from '../../../../api/src/brand'
@@ -17,7 +18,7 @@ export function useDocsAudience(): DocsAudience | null {
   const stage = useOnboardingStage()
   if (!onDocs) return null
   if (identity.data && !identity.isError) return stage ? 'standalone' : 'shell'
-  return identity.isPending ? 'checking' : 'standalone'
+  return identity.isPending && sessionLikely() ? 'checking' : 'standalone'
 }
 
 export function DocsStandalone() {

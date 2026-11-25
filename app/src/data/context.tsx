@@ -3,11 +3,12 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
 import { roleLabel, workspaceApi } from './workspaces'
-import { aborted, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, takeInterruptedWrite, type RequestScope } from './live'
+import { aborted, asksOnlyIfLikely, clearInterruptedWrites, createLiveApi, currentScope, isCurrentScope, rememberedWorkspace, rememberSession, request, selectAccount, selectedAccount, selectedWorkspace, selectWorkspace, sessionLikely, takeInterruptedWrite, type RequestScope } from './live'
 import { accountApi, accountsKey, announce, expectAccount, onAccountEvent, POPUP_PATH, takeExpectedAccount, type AccountList } from './accounts'
 import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
+import { clearLandingFocus, noteLandingLocation, rememberLandingFocus } from './landing-focus'
 import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
@@ -19,10 +20,12 @@ import { useGuardedMutation } from '../lib/single-flight'
 import { SignInConsent } from '../components/LegalLinks'
 import { productName } from '../../../api/src/brand'
 import { ANALYTICS_SESSION_PARAM } from '../../../api/src/analytics-events'
+import type { WorkspaceFocus } from '../../../api/src/workspace-focus'
 import { analytics } from '../lib/analytics'
 import { Analytics } from '../components/Analytics'
 import { NightmailWordmark } from '../components/NightmailLogo'
 import { isKnownPath } from '../lib/routes'
+import { DESIGN_SHEET_PATH, designSheetEnabled } from '../lib/design-sheet'
 
 // The tab's account and workspace. logout signs out of this tab's account only; another connected account takes its place.
 type Session = { identity: Identity | null; logout: () => Promise<void>; switchWorkspace: (id: string, path?: string) => Promise<void>
@@ -30,10 +33,11 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   /** Staff tools need this account's Google sign-in (Identity.staffSignIn): signs in again with Google, back to this page. */
   signInForStaff: () => void
   /** Sign in (with Google: a sign-in that proves the account's mailbox), back to this page: for the public pages that need one.
-   *  From the price pages, as from the homepage, it opens Overview. */
-  signIn: (method?: 'google') => void
+   *  From the price pages, as from the homepage, it opens Overview; focus (a comparison's) rides along as ?focus=, which
+   *  onboarding reads. */
+  signIn: (method?: 'google', focus?: WorkspaceFocus) => void
   /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
-  signInIntent: (event: { button: number }) => void
+  signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
   notice: string | null; dismissNotice: () => void }
@@ -71,7 +75,7 @@ const authMessages: Record<string, string> = {
   method_required: 'Sign in again using the authentication method required by this installation.',
   interaction_required: 'Your identity provider needs you to complete sign-in. Try again and follow its prompts.',
   account_limit: 'This browser has the most accounts it can hold. Sign out of one to add another.',
-  waitlist: `${productName} isn’t open to the public yet. We’ll email you when it opens.`,
+  waitlist: `${productName} is full for now. You’re on the waitlist, and we’ll email you as soon as a place opens.`,
   error: 'Sign-in didn’t finish. Check that you used your invited or approved account.',
 }
 // The section of the current page, without a record from the previous account or workspace in it.
@@ -109,9 +113,12 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
   const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
+  // An explicit refetch (e.g. after logout) also respects the public-page hint; refetch bypasses useQuery's enabled flag.
+  if (!override && asksOnlyIfLikely(window.location.pathname) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
   let result: Identity
   try { result = await read() }
   catch (error) {
+    if (!override && error instanceof ApiError && error.status === 401 && error.code === 'AUTH_REQUIRED') rememberSession(false)
     if (error instanceof ApiError && error.code === 'ACCOUNT_SIGNED_OUT' && account) { account = null; workspace = null; if (!override) selectAccount(null) }
     else if (error instanceof ApiError && error.code === 'WORKSPACE_ACCESS_DENIED' && workspace) { workspace = null; if (!override) selectWorkspace(null) }
     else throw error
@@ -126,6 +133,7 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   if (!override) {
     selectAccount(result.id)
     selectWorkspace(result.multiTenant ? result.workspaceId : null)
+    rememberSession(true)
   }
   return result
 }
@@ -173,16 +181,19 @@ function waitlistAddress() {
 // What the refusal says (api/src/account-login.ts). ?place=held (a place is held for the address) or ?place=ready (one is
 // open), but the sign-in didn't show the address is the person's (GitHub without it as its verified primary email, a
 // password, a Google account on another provider's address): one click emails it a sign-in link. Otherwise the address
-// waits; someone told they're in who signed in with another address asks for a link to that one. ?link=expired: the
-// sign-in link it followed was used or ran out.
+// waits, every place taken, and ?position=N says where in the order a raise lets the waitlist in (1 is next); someone
+// told they're in who signed in with another address asks for a link to that one. ?link=expired: the sign-in link it
+// followed was used or ran out.
 function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
   const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
+  const position = /^[1-9]\d{0,6}$/.test(search.get('position') ?? '') ? Number(search.get('position')) : null
   const who = email ? <bdi data-own-address="">{email}</bdi> : null
-  return <SignedOutPage title={ready ? `There’s a place for you in ${productName}` : `${productName} isn’t open to the public yet`}>
+  return <SignedOutPage title={ready ? `There’s a place for you in ${productName}` : `${productName} is full for now`}>
     {expired ? <Alert tone="info">That sign-in link was already used or has expired. Ask for a new one below.</Alert> : null}
     {ready ? <p>This sign-in didn’t confirm {who} is yours. GitHub counts only a verified primary email. Get a sign-in link sent to it to take your place.</p>
-      : <p>We’ll email {who ?? 'you'} when it opens. Got an email saying you’re in? Sign in with the address you joined the waitlist with, or get a sign-in link sent to it.</p>}
+      : <><p><strong>{position ? `You’re number ${position.toLocaleString('en-US')} on the waitlist.` : 'You’re on the waitlist.'}</strong> We’ll email {who ? <>you at {who}</> : 'you'} as soon as a place opens.</p>
+        <p className="muted">Got an email saying you’re in? Sign in with that address, or get a sign-in link sent to it.</p></>}
     <SignInLinkForm to={ready ? email : null} />
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
     <Button variant={ready ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
@@ -209,17 +220,19 @@ function SignInLinkForm({ to }: { to: string | null }) {
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
-export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path === '/pricing' || path.startsWith('/compare/') || path.startsWith('/support/continue/')
+export const isPublicPath = (path: string) => (path !== '/' && asksOnlyIfLikely(path)) || path.startsWith('/support/continue/') || (designSheetEnabled && path === DESIGN_SHEET_PATH)
 export function ApiProvider({ children }: { children: ReactNode }) {
   // The docs, the legal pages and the price pages are public: they render signed out, and /v1/me only adds the workspace's context.
-  const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
+  const { pathname, search } = useLocation(), publicRoute = isPublicPath(pathname)
+  // A landing link's ?focus= (landing-focus.ts), noted before anything below reads it: an address the app moves to.
+  noteLandingLocation(pathname, search)
   const navigate = useNavigate()
   // A sign-in (or a return from a provider) this tab started names the account the page opens as; the tab then stays
   // with it. The server names only an account this browser has a session for; a link alone never moves the tab.
   useState(() => {
     const url = new URL(window.location.href), account = url.searchParams.get('account')
     if (account === null) return
-    if (takeExpectedAccount() && /^[A-Za-z0-9._:-]{1,200}$/.test(account)) selectAccount(account)
+    if (takeExpectedAccount() && /^[A-Za-z0-9._:-]{1,200}$/.test(account)) { selectAccount(account); rememberSession(true) }
     url.searchParams.delete('account')
     window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
   })
@@ -238,8 +251,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
     setInvitation(null)
   }
+  const checkIdentity = !asksOnlyIfLikely(pathname) || sessionLikely()
   const identity = useQuery({
     queryKey: ['identity'],
+    enabled: checkIdentity,
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
@@ -373,7 +388,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   }
   async function redirectAdd() {
     const callback = new URL(window.location.pathname, window.location.origin)
-    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place')
+    callback.search = window.location.search; callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
     try { const url = await accountApi.signIn(callback.href, true); expectAccount(); window.location.assign(url) }
     catch (error) { toast(error instanceof ApiError && error.code === 'ACCOUNT_LIMIT' ? authMessages.account_limit : errorText(error, 'Couldn’t add an account.'), 'error') }
   }
@@ -417,6 +432,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     if (publicRoute || invitation || selectedWorkspace() || window.location.pathname === '/onboarding' || !dashboardLikelyReady(selectedWorkspace())) return
     void cache.prefetchQuery({ queryKey: regionCatalogKey(client), queryFn: ({ signal }) => client.regions.list(signal), staleTime: 30_000 })
   }, [cache, client, publicRoute, invitation])
+  // A landing link's focus with no onboarding left whose focus question it could answer: dropped.
+  useEffect(() => { if (identity.data && !identity.isError && !identityOnboardingStage(identity.data)) clearLandingFocus() }, [identity.data, identity.isError, search])
   useEffect(() => {
     if (!identity.data || identityOnboardingStage(identity.data)) return
     const path = window.location.pathname, review = reviewRoute.exec(path)
@@ -440,14 +457,15 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
   // method: it asks for that sign-in (staff tools need Google).
-  function accountUrl(select = false, method?: 'google') {
+  function accountUrl(select = false, method?: 'google', focus?: WorkspaceFocus) {
     // Assign path components rather than resolving an untrusted redirect parameter. Signing in from the homepage or a
     // price page (their Get started), or from an address the dashboard doesn't have, opens Overview.
     const callback = new URL(window.location.origin), path = window.location.pathname
     callback.pathname = path === '/' || path === '/pricing' || path.startsWith('/compare/') || !isKnownPath(path) ? '/overview' : path
     callback.search = window.location.search
     callback.hash = window.location.hash
-    callback.searchParams.delete('auth'); callback.searchParams.delete('place')
+    callback.searchParams.delete('auth'); callback.searchParams.delete('place'); callback.searchParams.delete('position')
+    if (focus) callback.searchParams.set('focus', focus)
     // Analytics: this signed-out page's session rides in the return URL to the sign-in callback, which links it to the
     // account and removes it before the browser opens the page (docs/analytics.md).
     const session = analytics().signInSession()
@@ -458,21 +476,22 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       return url.href
     })
   }
-  function prepareLogin(event: { button: number }) {
+  function prepareLogin(event: { button: number }, focus?: WorkspaceFocus) {
     if (busy || event.button !== 0) return
-    const url = accountUrl()
+    const url = accountUrl(false, undefined, focus)
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
   const login = () => startLogin(false)
-  async function startLogin(select: boolean, method?: 'google') {
+  async function startLogin(select: boolean, method?: 'google', focus?: WorkspaceFocus) {
     setBusy(true); setAuthError(null)
+    if (focus) rememberLandingFocus(focus, window.location.pathname)
     const pending = signIn.current
     signIn.current = null
-    try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method)); expectAccount(); analytics().flush(); window.location.assign(url) }
+    try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method, focus)); expectAccount(); analytics().flush(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
-  const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
+  const signedOut = !checkIdentity || (identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED')
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
   // Multi-tenant installations greet everyone at "/" with the public homepage (signed in, it is App's index route);
   // /health says which this is.
@@ -496,10 +515,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
-  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (method, focus) => void startLogin(false, method, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
     : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.

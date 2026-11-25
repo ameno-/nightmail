@@ -3,6 +3,8 @@ import { ArrowUp, Check, CircleAlert, Image as ImageIcon, ImagePlus, Square, Use
 import { Button, DropdownMenu, IconButton, Skeleton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
+import { supportApi } from '../../data/support'
+import { consumePendingSupportOpen } from '../../components/SupportChat'
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
 import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
@@ -17,9 +19,9 @@ import { productName } from '../../../../api/src/brand'
 const cx = (...values: Array<string | false | null | undefined>) => values.filter(Boolean).join(' ')
 // The account in this tab changes or signs out (data/context.tsx, or a 401 from the API): its conversation, socket and state
 // end with it. A sign-out also forgets the conversations this tab saved.
-for (const type of ['nightmail:account-changed', 'nightmail:account-signed-out', 'nightmail:unauthorized']) window.addEventListener(type, event => {
+for (const type of ['nightmail:account-changed', 'nightmail:account-signed-out', 'nightmail:unauthorized', 'nightmail:support-reset']) window.addEventListener(type, event => {
   endSupport()
-  if (type !== 'nightmail:unauthorized' && (event as CustomEvent<{ signedOut?: boolean } | null>).detail?.signedOut !== false) forgetSaved(true)
+  if (type !== 'nightmail:unauthorized' && type !== 'nightmail:support-reset' && (event as CustomEvent<{ signedOut?: boolean } | null>).detail?.signedOut !== false) forgetSaved(true)
 })
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches
 /** The panel's own first line: shown at the top of the conversation once loaded, with no model call. */
@@ -44,7 +46,26 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   }, { read: () => loadDraft(mode, userId, workspaceId), write: draft => saveDraft(mode, userId, workspaceId, draft) }), [mode, userId, workspaceId])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const panel = useRef<HTMLElement>(null), input = useRef<HTMLTextAreaElement>(null)
-  useEffect(() => { store.setVisible(open); if (open) store.start() }, [store, open])
+  const pendingShare = useRef(false)
+  useEffect(() => {
+    store.setVisible(open)
+    if (!open) return
+    store.start()
+    const applyHandoff = () => {
+      const pending = consumePendingSupportOpen()
+      if (!pending) return
+      if (pending.shareContent) pendingShare.current = true
+      if (pending.message) { store.setDraft(pending.message); store.send() }
+    }
+    applyHandoff()
+    window.addEventListener('nightmail:support-handoff', applyHandoff)
+    return () => window.removeEventListener('nightmail:support-handoff', applyHandoff)
+  }, [store, open])
+  useEffect(() => {
+    if (!pendingShare.current || !state.hello?.conversationId) return
+    pendingShare.current = false
+    if (!state.hello.contentAccess && store.transport.kind === 'live') void supportApi.allowContent(state.hello.conversationId).catch(() => {})
+  }, [state.hello?.conversationId, state.hello?.contentAccess, store])
   useEffect(() => { onUnread(state.unread) }, [state.unread])
   // Opening moves focus in (to the message box, or the panel itself on a touch screen, so the keyboard doesn't jump up);
   // closing with focus inside returns it to the Help button.
@@ -91,16 +112,17 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
 function Header({ state, store, workspaceName, onClose }: { state: ChatState; store: SupportStore; workspaceName: string | null; onClose: () => void }) {
   const hello = state.hello
   // While it connects the header already reads as it will once connected; only the dot turns green.
-  const workspace = hello?.workspace.name ?? workspaceName
+  const workspace = hello?.workspace?.name ?? workspaceName
+  const displayName = `${productName} Support`
   const [tone, subtitle] = state.closed ? ['neutral', 'Conversation ended']
     : state.connection === 'offline' ? ['warning', 'Offline · reconnecting']
     : state.connection === 'unavailable' ? ['danger', 'Unavailable']
-    : [hello || state.connection === 'ready' ? 'success' : 'neutral', `${hello?.agent.ai === false ? 'Support' : 'AI support agent'}${workspace ? ` · ${workspace}` : ''}`]
+    : [hello || state.connection === 'ready' ? 'success' : 'neutral', `${workspace ? `${workspace} · ` : ''}${hello?.agent.ai === false ? 'Support' : 'AI-assisted'}`]
   const ticketed = state.status === 'ticketed' || state.humanRequested
   return <header className="support-panel__header">
     <NightmailMark className="support-panel__mark" size={18} />
     <div className="support-panel__heading">
-      <h2 id="support-title">{hello?.agent.name ?? `${productName} support`}</h2>
+      <h2 id="support-title">{displayName}</h2>
       <p className="support-panel__subtitle" data-tone={tone}><span className="support-panel__dot" aria-hidden="true" /><span key={subtitle} className="support-panel__subtitle-text" title={subtitle}>{subtitle}</span></p>
     </div>
     <div className="support-panel__actions">
@@ -306,21 +328,23 @@ function ActionCard({ part, store }: { part: ActionPart; store: SupportStore }) 
 // goes, when, and the screenshots that went with it.
 function TicketCard({ part }: { part: Extract<Part, { kind: 'ticket' }> }) {
   const { ticket, screenshots } = part
+  const hasFacts = Boolean(ticket.replyTo || ticket.expect || screenshots > 0)
   return <div className="support-card support-ticket" role="group" aria-label="Ticket">
     <span className="support-ticket__mark" aria-hidden="true"><Check size={12} strokeWidth={2.75} /></span>
     <div className="support-ticket__text">
       <p className="support-ticket__title"><span>{ticketTitle(ticket)}</span><code>{ticket.ticketId}</code></p>
-      <dl className="support-ticket__facts">
-        <div><dt>Reply to</dt><dd><MaskedAddress value={ticket.replyTo} /></dd></div>
-        <div><dt>When</dt><dd>{ticket.expect}</dd></div>
+      {hasFacts && <dl className="support-ticket__facts">
+        {ticket.replyTo && <div><dt>Reply to</dt><dd><MaskedAddress value={ticket.replyTo} /></dd></div>}
+        {ticket.expect && <div><dt>When</dt><dd>{ticket.expect}</dd></div>}
         {screenshots > 0 && <div><dt>Screenshots</dt><dd>{screenshots}</dd></div>}
-      </dl>
+      </dl>}
     </div>
   </div>
 }
 // The reply address arrives masked ("a…@acme.com"). It reads like every address in the dashboard: its first characters,
 // then a blurred run; the rest is never in the page.
-function MaskedAddress({ value }: { value: string }) {
+function MaskedAddress({ value }: { value: string | null | undefined }) {
+  if (typeof value !== 'string' || !value) return null
   const shown = [...value.split(/…|@/)[0]].slice(0, 2).join('')
   return <span className="support-masked" title="Hidden for privacy"><span>{shown}</span><span className="support-masked__rest" aria-hidden="true" /><span className="sr-only"> (address hidden)</span></span>
 }
@@ -366,7 +390,7 @@ function Composer({ state, store, input, busy, canAttach }: { state: ChatState; 
         {/* On a phone this opens the photo picker: images only, no camera capture. */}
         <input ref={picker} type="file" accept={IMAGE_TYPES.join(',')} multiple hidden tabIndex={-1} onChange={event => { void store.attach([...event.target.files ?? []]); event.target.value = '' }} />
       </>}
-      <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label={`Message ${productName} support`}
+      <textarea ref={input} className="support-composer__input" rows={1} value={state.draft} maxLength={MAX_MESSAGE} aria-label={`Message ${productName} Support`}
         placeholder={state.connection === 'offline' ? 'Waiting for the connection…' : limited ? 'Messages are paused for now' : 'Ask anything about your sending'}
         onChange={event => store.setDraft(event.target.value)}
         onPaste={event => { const pasted = [...event.clipboardData.files]; if (pasted.length && canAttach) { event.preventDefault(); void store.attach(pasted) } }}

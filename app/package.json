@@ -8,7 +8,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview --host 127.0.0.1",
-    "cls": "bun run build && node scripts/cls.mjs"
+    "cls": "bun run build && node scripts/cls.mjs",
+    "design-lint": "bun scripts/design-lint/index.ts"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.4",
@@ -42,6 +43,7 @@
     "agentation": "3.0.2",
     "marked": "15.0.12",
     "playwright-core": "1.65.0",
+    "stylelint": "18.1.0",
     "typescript": "7.0.2",
     "vite": "8.2.4"
   },

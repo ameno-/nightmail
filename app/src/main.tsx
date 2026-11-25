@@ -7,6 +7,7 @@ import { ThemeProvider } from './lib/theme'
 import { ToastProvider } from './components/ui'
 import { App } from './App'
 import { watchScrollFades } from './components/ui/scroll-fade'
+import { noteLandingLocation } from './data/landing-focus'
 import './styles/tokens.css'
 import './styles/ui.css'
 import './styles/app.css'
@@ -14,6 +15,7 @@ import './styles/app.css'
 const DevAnnotations = import.meta.env.DEV ? lazy(() => import('./components/DevAnnotations')) : null
 
 watchScrollFades()
+noteLandingLocation(window.location.pathname, window.location.search)
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, staleTime: 30_000, gcTime: 30 * 60_000, refetchOnWindowFocus: false } } })
 createRoot(document.getElementById('root')!).render(

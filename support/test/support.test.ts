@@ -215,14 +215,14 @@ export default {
 };`;
 
 const baseEnv = (overrides: Record<string, unknown> = {}) => ({
-  STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), BANE_ORIGIN: text(ORIGIN),
+  STAGE: text('dev'), PUBLIC_URL: text(SUPPORT), DASHBOARD_ORIGINS: text(`${ORIGIN},http://localhost:5173`), NIGHTMAIL_ORIGIN: text(ORIGIN),
   SUPPORT_ADDRESS: text('support@dev.bane.mx'), SUPPORT_ADDRESS_ID: text('adr_support'), TICKET_TO: text('ryan@anoma.ly'), GATEWAY_URL: text('https://opencode.ai/inference/anthropic/v1'),
   CONSOLE_GATEWAY_KEY: text(GATEWAY_KEY), SUPPORT_ROOT_SECRET: text(ROOT), BANE_INBOUND_WEBHOOK_SECRET: text(WEBHOOK_SECRET), BANE_SUPPORT_INBOX_KEY: text(`bane_mbx_${'7'.repeat(64)}`),
   CONVERSATION: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportConversation' },
   INTAKE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportIntake' },
   INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
   // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
-  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS: text('200'),
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_TURNS_PER_EMAIL_DOMAIN: text('1000'), LIMIT_TURNS_GENERAL_PER_DAY: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS: text('200'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -291,8 +291,9 @@ async function chatIn(instance: Miniflare = mf, token = handoff()) {
 }
 
 /** Nightmail's inbound webhook for one message, signed with the test secret (support@, or the intake addresses). */
-function signedHook(messageId: string, threadId: string, from = 'ada@acme.test', options: { to?: string; intake?: boolean; instance?: Miniflare; recipients?: string[] } = {}) {
-  const body = JSON.stringify({ type: 'message.received', data: { messageId, ...(options.recipients ? { recipients: options.recipients } : {}), message: { id: messageId, threadId, direction: 'inbound', from: { address: from }, to: [{ address: options.to ?? 'support@dev.bane.mx' }] } } });
+function signedHook(messageId: string, threadId: string, from = 'ada@acme.test', options: { to?: string; intake?: boolean; instance?: Miniflare; recipients?: string[]; dmarc?: string } = {}) {
+  const dmarc = options.dmarc ?? (messageId.includes('nodmarc') ? 'FAIL' : 'PASS');
+  const body = JSON.stringify({ type: 'message.received', data: { messageId, ...(options.recipients ? { recipients: options.recipients } : {}), message: { id: messageId, threadId, direction: 'inbound', from: { address: from }, to: [{ address: options.to ?? 'support@dev.bane.mx' }], authentication: { dmarc } } } });
   const id = `wh_${randomBytes(8).toString('hex')}`, ts = String(Math.floor(Date.now() / 1000)), secret = options.intake ? INTAKE_SECRET : WEBHOOK_SECRET;
   const signature = `v1,${createHmac('sha256', Buffer.from(secret.slice(6), 'base64')).update(`${id}.${ts}.${body}`).digest('base64')}`;
   return (options.instance ?? mf).dispatchFetch(`${SUPPORT}/hooks/${options.intake ? 'bane-intake' : 'bane-inbound'}`, { method: 'POST', body, headers: { 'webhook-id': id, 'webhook-timestamp': ts, 'webhook-signature': signature } });
@@ -304,7 +305,7 @@ const registeredIn = async (message: string, instance: Miniflare = mf) => (await
 /** The sign-in reply a message got, from the conversation it was registered in. */
 const SIGNIN = async (message: string, instance: Miniflare = mf) => signinReply(await registeredIn(message, instance), message);
 /** Nightmail's wake for one conversation (after a staff reply or a sign-in): its ID only. */
-const wakeHook = (conversationId: string, instance: Miniflare = mf) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', body: JSON.stringify({ conversationId }) });
+const wakeHook = (conversationId: string, instance: Miniflare = mf) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { authorization: `Bearer fixture-wake-${conversationId}` }, body: JSON.stringify({ conversationId }) });
 /** The person confirms one message signed in, as the claim does in Nightmail (the fake's hook). */
 const claim = async (conversationId: string, messageId: string, userId: string, instance: Miniflare = mf) => (await fakeHook('/__claim', { conversationId, messageId, userId }, instance)).status;
 /** A verified answer that couldn't go: the fixed notice, under a key of its own. */
@@ -368,13 +369,21 @@ async function eventually<T>(read: () => Promise<T | undefined>, ms = 30_000): P
 describe('support Worker', () => {
   test('health, origin and handoff checks on /chat/start', async () => {
     const health = await (await mf.dispatchFetch(`${SUPPORT}/health`)).json() as any;
-    assert.deepEqual([health.status, health.service, health.stage, health.ready, health.checks.keys], ['ok', 'bane-support', 'dev', false, { support: 'unchecked', intake: 'unchecked' }], 'Live, not ready before any sweep.');
+    assert.deepEqual(health, { status: 'ok', service: 'bane-support', stage: 'dev', ready: false }, 'Live, not ready before any sweep.');
     assert.equal((await post('/chat/start', { handoff: handoff() }, { origin: 'https://evil.test' })).status, 403);
     assert.equal((await post('/chat/start', {})).status, 400);
     assert.equal((await post('/chat/start', { handoff: 'forged' })).status, 401);
     const preflight = await mf.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'OPTIONS', headers: { origin: ORIGIN } });
     assert.equal(preflight.headers.get('access-control-allow-origin'), ORIGIN);
     assert.equal((await mf.dispatchFetch(`${SUPPORT}/agents/support-conversation/x`)).status, 404, 'No client-named route to a Durable Object.');
+    for (const path of ['/', '/chat']) {
+      const landing = await mf.dispatchFetch(`${SUPPORT}${path}`);
+      assert.deepEqual([landing.status, landing.headers.get('content-type')], [200, 'text/html; charset=utf-8']);
+      assert.ok(landing.headers.get('content-security-policy')?.includes("default-src 'none'"));
+      const html = await landing.text();
+      assert.ok(html.includes(ORIGIN) && html.includes(`mailto:${addresses.support}`), html);
+    }
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback`)).status, 404, 'Staff ticket pages are retired.');
     // The tab icon of this Worker's own pages: the moon on its tile (the tile ink on a pale theme, paper on a dark one).
     for (const [path, fill] of [['/favicon.svg', '#0a0a0a'], ['/favicon-dark.svg', '#fafafa']]) {
       const icon = await mf.dispatchFetch(`${SUPPORT}${path}`);
@@ -398,7 +407,7 @@ describe('support Worker', () => {
     const before = recorded.length;
     const chat = await connect(started.body.socketUrl);
     const hello = await chat.until(f => f.type === 'hello');
-    assert.deepEqual([hello.v, hello.agent, hello.workspace, hello.channel], [1, { name: 'Nightmail support', ai: true }, { id: 'ws_acme', name: 'Acme Prod' }, 'chat']);
+    assert.deepEqual([hello.v, hello.agent, hello.workspace, hello.channel], [1, { name: 'Nightmail Support', ai: true }, { id: 'ws_acme', name: 'Acme Prod' }, 'chat']);
     const history = await chat.until(f => f.type === 'history');
     assert.deepEqual(history.messages, [], 'A new conversation starts empty: the panel shows its own opening line.');
     // Opening a chat makes no model call and writes no greeting; OpenCode boots in the background meanwhile.
@@ -485,6 +494,11 @@ describe('support Worker', () => {
     assert.equal(team[4], `Bearer bane_mbx_${'7'.repeat(64)}`);
     assert.match(customer[3].text, new RegExp(`passed your request to the Nightmail team as ${filed.ticketId}`));
     chat.ws.close();
+    // Reconnecting to a ticketed conversation replays the full ticket card fields (never only ticketId).
+    const rejoined = await connect(started.body.socketUrl);
+    const replay = await rejoined.until(f => f.type === 'history');
+    assert.deepEqual(replay.pending.ticket, { ticketId: filed.ticketId, ticketType: 'billing', category: 'refund', replyTo: 'a…@acme.test', expect: 'usually within one business day' });
+    rejoined.ws.close();
   }, 180_000);
 
   test('consent counts only when Nightmail’s scope says so, never on the frame', async () => {
@@ -672,6 +686,63 @@ describe('support Worker', () => {
     const afterEnd = await post('/chat/start', { handoff: handoff('usr_cont', false, 'ws_acme'), resume: true });
     assert.equal(afterEnd.status, 200, JSON.stringify(afterEnd.body));
     assert.notEqual(afterEnd.body.conversationId, first.body.conversationId);
+  }, 180_000);
+
+  test('general email turn budgets stay isolated from signed-in customer chats, and oversized bodies are rejected early', async () => {
+    // Declared and streaming oversized payloads are rejected with 413 before parsing or verification.
+    const bigHandoff = JSON.stringify({ handoff: 'x'.repeat(10_000) });
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN, 'content-length': String(bigHandoff.length) }, body: bigHandoff })).status, 413);
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: bigHandoff })).status, 413);
+    const bigHook = 'x'.repeat(1_000_050);
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/hooks/bane-inbound`, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': String(bigHook.length) }, body: bigHook })).status, 413);
+    assert.equal((await mf.dispatchFetch(`${SUPPORT}/hooks/bane-intake`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: bigHook })).status, 413);
+
+    // Chat tokens expire in 15 minutes and are rejected once the user signs out or signs in again later.
+    const now = Date.now();
+    const short = await chatToken(ROOT, 'conv_' + 'b'.repeat(26), 'usr_tok', now);
+    assert.ok(await readChatToken(ROOT, short.token, 'conv_' + 'b'.repeat(26), now + 14 * 60_000));
+    assert.equal(await readChatToken(ROOT, short.token, 'conv_' + 'b'.repeat(26), now + 16 * 60_000), null);
+    const started = await post('/chat/start', { handoff: handoff('usr_signout') });
+    assert.equal(started.status, 200);
+    await fakeHook('/__session', { userId: 'usr_signout', activeSession: false });
+    const afterSignOut = await mf.dispatchFetch(started.body.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
+    assert.equal(afterSignOut.status, 401);
+    await fakeHook('/__session', { userId: 'usr_signout', activeSession: true, sessionSince: new Date(Date.now() + 60_000).toISOString() });
+    const afterNewLogin = await mf.dispatchFetch(started.body.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
+    assert.equal(afterNewLogin.status, 401);
+
+    // General (non-member) email turn caps do not consume the verified customer reserve.
+    const isolated = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_DAY: text('2'), LIMIT_TURNS_GENERAL_PER_DAY: text('1'), LIMIT_TURNS_PER_EMAIL_DOMAIN: text('1') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(isolated);
+      assert.equal((await signedHook('msg_stranger_cap_1', 'thr_cap_1', 'stranger@else.test', { instance: isolated })).status, 200);
+      assert.ok(await eventually(async () => (await replies('thr_cap_1', isolated))[0]));
+      assert.equal((await signedHook('msg_stranger_cap_2', 'thr_cap_2', 'stranger@else.test', { instance: isolated })).status, 200);
+      const second = await eventually(async () => (await replies('thr_cap_2', isolated))[0]);
+      assert.match(second?.[3].text ?? '', /can’t answer automatically/, 'Second non-member email hits general budget.');
+      const db = await isolated.getD1Database('DB', 'support');
+      assert.equal(await db.prepare("SELECT n FROM daily_counters WHERE key = 'global:turns'").first(), null, 'Customer reserve untouched.');
+      const chat = await chatIn(isolated, handoff('usr_ada'));
+      chat.send({ type: 'user.message', clientMessageId: 'cust_ok_1', text: 'Hello from signed-in chat' });
+      assert.equal((await chat.until(f => f.type === 'message.end' && f.text === 'OK.', 60_000)).text, 'OK.');
+      chat.ws.close();
+    } finally { await isolated.dispose(); }
+  }, 180_000);
+
+  test('chat ingress limits queued messages before persisting them', async () => {
+    const chat = await chatIn(mf, handoff('usr_queue'));
+    // Send 8 rapid messages while the first turn is running: messages past the queue bound get RATE_LIMITED and are not stored.
+    for (let i = 1; i <= 8; i++) chat.send({ type: 'user.message', clientMessageId: `q_${i}`, text: `Queued message ${i}` });
+    const limited = await chat.until(f => f.type === 'error' && f.code === 'RATE_LIMITED', 30_000);
+    assert.equal(limited.retryable, true);
+    await eventually(async () => chat.frames.filter(f => f.type === 'message.end' && f.text === 'OK.').length >= 5 || undefined, 60_000);
+    chat.ws.close();
+    const again = await connect((await post('/chat/resume', { conversationId: chat.id, handoff: handoff('usr_queue') })).body.socketUrl);
+    const replay = await again.until(f => f.type === 'history');
+    const userCount = replay.messages.filter((m: any) => m.role === 'user').length;
+    assert.ok(userCount <= 5, `Only accepted messages are persisted, got ${userCount}`);
+    again.ws.close();
   }, 180_000);
 
   /** A new chat's first turn for this person in this workspace: its conversation and the turn's context (<customer> on). */
@@ -957,14 +1028,14 @@ describe('support Worker', () => {
   test('M3: a ticket from an unverified sender names no customer and says so first; one verified by email says it is for reading only', () => {
     const base = { conversationId: 'conv_x', channel: 'email' as const, threadId: 'thr', costUsd: 0, model: 'm', attachments: [], customer: { userId: null, email: null, name: null, role: null, workspaces: [] } };
     const input = { type: 'billing' as const, title: 'Refund', severity: 'P3' as const, summary: 's', ask: 'refund', tried: [], recommendation: 'r', evidence: { ids: [] }, details: {} };
-    const unverified = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
+    const unverified = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, verified: null, dmarc: 'FAIL', sender: 'victim@acme.test' }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(unverified.text.startsWith('UNVERIFIED SENDER (DMARC FAIL): not a confirmed customer.'), unverified.text);
     assert.ok(!unverified.text.includes('Customer:') && unverified.text.includes('Sender (unverified): victim@acme.test'));
     assert.equal(unverified.subject, '[Nightmail billing] [UNVERIFIED] tkt_x: Refund (P3)');
-    const verified = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
+    const verified = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, verified: 'dmarc', dmarc: 'PASS', sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(verified.text.includes('Verified: dmarc (DMARC PASS)') && verified.text.includes('Customer: Ada <ada@acme.test>, owner') && !verified.text.includes('UNVERIFIED'));
     assert.ok(verified.text.startsWith('VERIFIED BY EMAIL, FOR READING ONLY: not grounds for a change.'), verified.text);
-    const chat = ticketEmail({ BANE_ORIGIN: ORIGIN }, { ...base, channel: 'chat', verified: 'handoff', dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
+    const chat = ticketEmail({ NIGHTMAIL_ORIGIN: ORIGIN }, { ...base, channel: 'chat', verified: 'handoff', dmarc: null, sender: null, customer: { userId: 'usr_ada', email: 'ada@acme.test', name: 'Ada', role: 'owner', workspaces: [] } }, { id: 'tkt_x', dueAt: 0 }, input);
     assert.ok(!chat.text.includes('FOR READING ONLY'), 'A signed-in chat’s ticket is not.');
   });
 
@@ -1043,7 +1114,8 @@ describe('support Worker', () => {
     assert.deepEqual(stamped.filter(c => c[3] !== 'GET'), [], 'Email writes nothing.');
     const turn = recorded.slice(before).filter(r => about(r, 'Verified probe'));
     const tools = offered(turn[0]!);
-    for (const read of ['account_context', 'bounce_reasons', 'list_emails', 'choose_workspace', 'reply', 'file_ticket']) assert.ok(tools.includes(read), read);
+    for (const read of ['account_context', 'bounce_reasons', 'choose_workspace', 'reply', 'file_ticket']) assert.ok(tools.includes(read), read);
+    for (const chatOnly of ['list_emails', 'get_email', 'list_events', 'list_campaigns', 'get_campaign', 'screen_rejections', 'audience_health']) assert.ok(!tools.includes(chatOnly), chatOnly);
     for (const never of ['propose_action', 'recheck_domain', 'request_content_access', 'add_note', ...MANAGER]) assert.ok(!tools.includes(never), `A member’s email turn never lists ${never}.`);
     const body = JSON.stringify(turn.map(r => r.body));
     assert.ok(body.includes('verified: dmarc') && body.includes('<account read=') && body.includes('Acme Prod'), 'Her own account, in <customer> and <account>.');
@@ -1083,8 +1155,8 @@ describe('support Worker', () => {
     const turns = recorded.slice(before).filter(r => about(r, 'Excluded probe'));
     assert.ok(turns.length >= 6, 'The model tried each excluded tool, then answered.');
     const tools = offered(turns[0]!);
-    for (const read of ['account_context', 'list_workspaces', 'list_domains', 'domain_health', 'get_standing', 'list_emails', 'get_email', 'list_events', 'delivery_metrics', 'bounce_reasons',
-      'screen_rejections', 'lint_email', 'list_campaigns', 'get_campaign', 'lint_campaign', 'audience_health', 'choose_workspace', 'reply', 'file_ticket']) assert.ok(tools.includes(read), read);
+    for (const read of ['account_context', 'list_workspaces', 'list_domains', 'domain_health', 'get_standing', 'delivery_metrics', 'bounce_reasons', 'choose_workspace', 'reply', 'file_ticket']) assert.ok(tools.includes(read), read);
+    for (const chatOnly of ['list_emails', 'get_email', 'list_events', 'screen_rejections', 'lint_email', 'list_campaigns', 'get_campaign', 'lint_campaign', 'audience_health']) assert.ok(!tools.includes(chatOnly), chatOnly);
     assert.deepEqual(tools.filter(name => NOT_BY_EMAIL.includes(name)), [], 'An owner’s email turn lists none of them.');
     assert.deepEqual(tools.sort(), toolNames({ channel: 'email', verified: true, manager: true }).sort());
     // Each forced call is refused by the tool host, and none reaches Nightmail.
@@ -1933,7 +2005,7 @@ describe('support Worker', () => {
     const fakeBane = async (path: string, init?: RequestInit) => (await instance.getWorker('fake-bane')).fetch(`http://fake-bane${path}`, init);
     const inboxOf = async (id: string) => await (await fakeBane(`/__inbox?id=${id}`)).json() as any;
     const setInbox = async (body: object) => assert.equal((await fakeBane('/__inbox', { method: 'POST', body: JSON.stringify(body) })).status, 204);
-    const wake = (conversationId: unknown) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ conversationId }) });
+    const wake = (conversationId: unknown) => instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer fixture-wake-${conversationId}` }, body: JSON.stringify({ conversationId }) });
     const marked = async (messageId: string) => (await fakeCalls(instance)).filter(c => c[0] === 'markDelivery' && c[2] === messageId).map(c => c[3]);
     /** The wake has queued this staff reply (its pull runs after the 202). */
     const queued = (id: string, reply: string) => eventually(async () => (await drive(id)).rows.some(r => r.id === `staff:${reply}`) || undefined);
@@ -2036,9 +2108,11 @@ describe('support Worker', () => {
       assert.deepEqual([emailed.length, emailed[0][2], emailed[0][3].to, emailed[0][3].subject], [1, '/v1/inbound/threads', ['ada@acme.test'], 'Re: your Nightmail support chat']);
       assert.equal(emailed[0][3].text, 'Hi Ada,\n\nOne more thing: verification finished.\n\nDana Rivera, Nightmail', 'Named from the scope read when the panel joined.');
       assert.deepEqual(await marked(two), ['sent']);
-      // Unknown or malformed: 202, and nothing is pulled.
+      // A signed unknown ID is acknowledged, malformed and unsigned requests are refused.
       const pulls = (await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length;
-      for (const id of [`conv_${'z'.repeat(26)}`, 'nope', 42]) assert.equal((await wake(id)).status, 202);
+      assert.equal((await wake(`conv_${'z'.repeat(26)}`)).status, 202);
+      for (const id of ['nope', 42]) assert.equal((await wake(id)).status, 401);
+      assert.equal((await instance.dispatchFetch(`${SUPPORT}/hooks/nightmail-wake`, { method: 'POST', body: JSON.stringify({ conversationId: c.id }) })).status, 401);
       await new Promise(r => setTimeout(r, 300));
       assert.equal((await fakeCalls(instance)).filter(x => x[0] === 'pullOutbox').length, pulls);
     }, 180_000);
@@ -2534,6 +2608,15 @@ describe('support Worker', () => {
       // A redelivery under a new webhook ID finds the row and changes nothing.
       assert.equal((await signedHook('msg_rate_2', 'thr_rate_2', 'rate@else.test', { instance })).status, 200);
       assert.equal((await kept()).length, 1);
+      // Unauthenticated mail uses its own bucket and never blocks a DMARC-verified sender.
+      assert.equal((await signedHook('msg_unauth_1', 'thr_unauth_1', 'fresh@else.test', { instance, dmarc: 'FAIL' })).status, 200);
+      assert.equal((await signedHook('msg_unauth_2', 'thr_unauth_2', 'fresh@else.test', { instance, dmarc: 'FAIL' })).status, 200);
+      assert.deepEqual(await ledger('msg_unauth_2'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
+      // Another unverified sender has its own bucket: one sender's unverified mail never holds everyone else's.
+      assert.equal((await signedHook('msg_unauth_3', 'thr_unauth_3', 'other@else.test', { instance, dmarc: 'FAIL' })).status, 200);
+      assert.notDeepEqual(await ledger('msg_unauth_3'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
+      assert.equal((await signedHook('msg_dmarc_ok_1', 'thr_dmarc_ok_1', 'fresh@else.test', { instance, dmarc: 'PASS' })).status, 200);
+      assert.notDeepEqual(await ledger('msg_dmarc_ok_1'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
       // The answered message's row is its object's, mirrored once its work finished.
       const first = await eventually(async () => (await ledger('msg_rate_1')).find(r => r.state === 'done'));
       assert.ok(first?.object.length === 64 && first.source === 'webhook', JSON.stringify(await ledger('msg_rate_1')));
@@ -2684,7 +2767,7 @@ describe('support Worker', () => {
       assert.equal((await signedHook('msg_wake_1', 'thr_wake', 'waker@else.test', { instance })).status, 200);
       assert.ok(await eventually(async () => (await ledger('msg_wake_1')).find(r => r.state === 'blocked')));
       await swept(); await settle();
-      assert.equal((await health()).checks.keys.support, 'missing');
+      assert.equal((await health()).ready, false);
       assert.equal((await replies('thr_help', instance)).length, 0);
       await outage('/v1/inbound/messages/msg_wake_1');
       await reads(SUPPORT_KEY, ['adr_support', 'adr_help']);
@@ -2697,22 +2780,19 @@ describe('support Worker', () => {
       assert.deepEqual([(await replies('thr_help', instance)).length, (await replies('thr_wake', instance)).length], [1, 1]);
     });
 
-    test('health is ok but not ready with a missing address, a key this Worker lacks or blocked work, and shows counts and causes only', async () => {
-      const shape = (h: any) => ({ ...h, checks: { ...h.checks, replay: { ...h.checks.replay, lagSeconds: typeof h.checks.replay.lagSeconds }, checkedAt: typeof h.checks.checkedAt } });
-      const ready = { status: 'ok', service: 'bane-support', stage: 'dev', ready: true, checks: { keys: { support: 'ok', intake: 'ok' }, work: { blocked: 0, blockedBy: {}, overdue: 0, dead: 0 },
-        replay: { lagSeconds: 'number', routeGaps24h: 4 }, checkedAt: 'string' } };
-      assert.deepEqual(shape(await health()), ready);
+    test('health reports readiness without individual checks or work counts', async () => {
+      const ready = { status: 'ok', service: 'bane-support', stage: 'dev', ready: true };
+      assert.deepEqual(await health(), ready);
       // Blocked work: not ready.
       await outage('/v1/inbound/messages/msg_block_1', 404);
       assert.equal((await signedHook('msg_block_1', 'thr_block', 'blocked@else.test', { instance })).status, 200);
-      const blocked = await eventually(async () => { const h = await health(); return h.checks.work.blocked ? h : undefined; });
-      assert.deepEqual(shape(blocked), { ...ready, ready: false, checks: { ...ready.checks, work: { blocked: 1, blockedBy: { NOT_FOUND: 1 }, overdue: 0, dead: 0 } } }, 'Blocked work names its cause.');
+      const blocked = await eventually(async () => { const h = await health(); return !h.ready ? h : undefined; });
+      assert.deepEqual(blocked, { ...ready, ready: false });
       // A configured address the key can't read: not ready either.
       await reads(SUPPORT_KEY, ['adr_support']);
       await swept();
       const missing = await health();
-      assert.deepEqual([missing.status, missing.ready, missing.checks.keys], ['ok', false, { support: 'missing', intake: 'ok' }]);
-      assert.doesNotMatch(JSON.stringify(missing), /@|adr_|msg_|thr_|conv_|req_/, 'Counts and states only.');
+      assert.deepEqual(missing, { ...ready, ready: false });
       await outage('/v1/inbound/messages/msg_block_1');
       // A stage whose Worker has no support key (its secret unset) says so, apart from a key Nightmail refuses.
       const bare = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ BANE_SUPPORT_INBOX_KEY: text('') })),
@@ -2720,8 +2800,9 @@ describe('support Worker', () => {
       try {
         await migrate(bare);
         await (await bare.getWorker('support')).scheduled({ cron: '*/5 * * * *', scheduledTime: new Date() });
-        const unset = await eventually(async () => { const h = await (await bare.dispatchFetch(`${SUPPORT}/health`)).json() as any; return h.checks.keys.intake !== 'unchecked' ? h : undefined; });
-        assert.deepEqual([unset?.ready, unset?.checks.keys], [false, { support: 'not_configured', intake: 'ok' }]);
+        const store = await bare.getD1Database('DB', 'support');
+        await eventually(async () => (await store.prepare("SELECT flow FROM support_checks WHERE flow='intake'").first()) ?? undefined);
+        assert.deepEqual(await (await bare.dispatchFetch(`${SUPPORT}/health`)).json(), { ...ready, ready: false });
       } finally { await bare.dispose(); }
     });
   });
@@ -2916,7 +2997,9 @@ describe('support Worker', () => {
     // Nightmail's own addresses are contacts an answer may pass on.
     assert.deepEqual(gate('Write to privacy@nightmail.dev, legal@nightmail.dev or security@nightmail.dev.', scope), { ok: true });
     const chat = await chatToken(ROOT, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa', 'usr_ada');
-    assert.deepEqual(await readChatToken(ROOT, chat.token, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa'), { userId: 'usr_ada' });
+    const parsed = await readChatToken(ROOT, chat.token, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa');
+    assert.equal(parsed?.userId, 'usr_ada');
+    assert.equal(parsed ? parsed.expiresAt - parsed.issuedAt : 0, 15 * 60_000);
     assert.equal(await readChatToken(ROOT, chat.token, 'conv_bbbbbbbbbbbbbbbbbbbbbbbbbb'), null, 'Another conversation.');
     assert.equal(await readChatToken(ROOT, chat.token, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa', Date.now() + 13 * 3_600_000), null, 'Expired.');
     assert.equal(await readChatToken(randomBytes(32).toString('hex'), chat.token, 'conv_aaaaaaaaaaaaaaaaaaaaaaaaaa'), null, 'Another root.');

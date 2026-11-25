@@ -140,6 +140,7 @@ export const mailReceipts = pgTable('mail_receipts', {
   notification: jsonb('notification').$type<Record<string, unknown>>().notNull(), status: text('status').$type<'pending' | 'held' | 'processed' | 'failed'>().notNull().default('pending'),
   recoveryAttempts:smallint('recovery_attempts').notNull().default(0),lastRecoveredAt:ts('last_recovered_at'),settledBy:text('settled_by'),
   error: text('error'), createdAt: ts('created_at').notNull().defaultNow(), processedAt: ts('processed_at'),
+  /** When the write that stored its message committed (migration 517). */ committedAt: ts('committed_at'),
 }, t => [primaryKey({ columns: [t.workspaceId, t.sesMessageId] })]);
 
 export const mailReceiptHolds=pgTable('mail_receipt_holds',{

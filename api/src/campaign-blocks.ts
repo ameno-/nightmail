@@ -6,7 +6,7 @@
 import type { DefaultTreeAdapterMap } from 'parse5';
 import { boundedHtmlFragment } from './bounded-html.js';
 import { sanitizeBlockStyle } from './block-style.js';
-import { productName } from './brand.js';
+import { linkDomain, productName } from './brand.js';
 import { SEND_LIMITS } from './send-limits.js';
 
 type Node = DefaultTreeAdapterMap['node'];
@@ -95,7 +95,9 @@ A campaign created from a template copies them: give it a default for each one (
 ## Unsubscribe
 
 ${productName} adds an Unsubscribe link at the end of every campaign email and the one-click
-\`List-Unsubscribe\` headers. Under the link it shows the workspace's postal address, which US law
+\`List-Unsubscribe\` headers. The link is on ${productName}'s link domain, \`${linkDomain}\`, so
+there is no DNS record to add for it (a self-hosted installation links on its own address instead).
+Under the link it shows the workspace's postal address, which US law
 (CAN-SPAM) requires: set \`postalAddress\` with updateWorkspaceSettings before sending or scheduling a
 campaign (until then both refuse with \`POSTAL_ADDRESS_REQUIRED\`); don't repeat it in the content.
 
@@ -285,6 +287,8 @@ export function validateBlockHtml(html: string, options: { complete?: boolean } 
 // ----- Rendering -----------------------------------------------------------------
 
 const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// Sent mail links no web fonts: a font URL is one more host a blocklist can list, and Gmail and Outlook ignore them.
+// Inter is used where the reader has it installed (and in the dashboard's preview, which supplies it); others get their system's face.
 const FONT = "Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif";
 const TEXT = '#181818', MUTED = '#595959', LINK = '#3156c7', RULE = '#e2e2e2', BUTTON = '#181818';
 const BASE = `font-family:${FONT};letter-spacing:-0.01em;color:${TEXT};`;
@@ -379,11 +383,10 @@ function renderBlock(node: Node): string {
 }
 
 /** Renders validated block HTML as a complete, inline-styled email document. */
-export function renderBlockHtml(html: string, options: { fontBase?: string; title?: string } = {}): string {
+export function renderBlockHtml(html: string, options: { title?: string } = {}): string {
   const fragment = blockFragment(html);
   const body = fragment.childNodes.map(renderBlock).join('\n');
-  const fonts = options.fontBase ? `<style data-bane-fonts>@font-face{font-family:Inter;src:url('${escape(options.fontBase)}inter-variable.woff2') format('woff2');font-style:normal;font-weight:100 900}@font-face{font-family:Inter;src:url('${escape(options.fontBase)}inter-variable-italic.woff2') format('woff2');font-style:italic;font-weight:100 900}</style>` : '';
-  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>${escape(options.title ?? '')}</title>${fonts}<style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style></head><body style="margin:0;padding:0;background-color:#ffffff;${BASE}font-size:16px;-webkit-text-size-adjust:100%"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;background-color:#ffffff"><tr><td align="center" style="padding:0"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:100%;max-width:600px"><tr><td style="padding:24px;text-align:left">\n${body}\n</td></tr></table></td></tr></table></body></html>`;
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="color-scheme" content="light"><meta name="supported-color-schemes" content="light"><title>${escape(options.title ?? '')}</title><style>@media (prefers-color-scheme: dark){li::marker{color:#c4c4c4}}</style></head><body style="margin:0;padding:0;background-color:#ffffff;${BASE}font-size:16px;-webkit-text-size-adjust:100%"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="width:100%;background-color:#ffffff"><tr><td align="center" style="padding:0"><table role="presentation" cellpadding="0" cellspacing="0" border="0" width="600" style="width:100%;max-width:600px"><tr><td style="padding:24px;text-align:left">\n${body}\n</td></tr></table></td></tr></table></body></html>`;
 }
 
 function textInline(node: Node): string {

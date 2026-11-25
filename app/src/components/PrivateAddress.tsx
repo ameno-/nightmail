@@ -1,11 +1,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { PRIVATE_TITLE, maskedParts, nameParts } from '../lib/private-address'
-import { measuredWidth, onRulerChange } from '../lib/text-ruler'
+import { reserveTextWidth } from '../lib/text-ruler'
 import { useMasking } from '../lib/privacy'
 
 // Renders any address by the dashboard's one rule (lib/private-address.ts): a mailbox address is masked after its first
 // two characters until hovered or focused, while privacy mode (lib/privacy.ts) is on; a domain or domain-only label renders
-// as it is. With privacy mode off, the default, every address is revealed, and keeps the same reserved width.
+// as it is. With privacy mode off, the default, the visible address keeps the same reserved width.
 //
 // Masked, the rest of the address is not in the page: the box holds the two characters and an empty, blurred run. The
 // box is given the width of the whole address up front (measured without rendering it, lib/text-ruler.ts) and keeps it
@@ -46,20 +46,19 @@ export function useMasked(text: string) {
   const masking = useMasking()
   const revealed = !masking || hovered || focused || held
   useLayoutEffect(() => {
-    const reserve = () => { if (box.current) box.current.style.inlineSize = `${measuredWidth(box.current, text)}px` }
-    reserve()
-    return onRulerChange(reserve)
+    const element = box.current
+    if (element) return reserveTextWidth(element, text)
   }, [text])
-  // A revealed address that its cell cuts short (privacy mode on or off) says the whole of it on hover, and follows the cell as it resizes.
+  // Only a hovered or focused address needs a clipping tooltip. ResizeObserver
+  // supplies its initial measurement after layout, as well as subsequent resizes.
   useLayoutEffect(() => {
     const element = box.current
-    if (!revealed || !element) { setClipped(false); return }
+    if (!(hovered || focused || held) || !element) { setClipped(false); return }
     const check = () => setClipped(element.scrollWidth > element.clientWidth + 1)
-    check()
     const observer = new ResizeObserver(check)
     observer.observe(element)
     return () => observer.disconnect()
-  }, [revealed, text])
+  }, [hovered, focused, held, text])
   useEffect(() => {
     if (!hovered) return
     // Revealing replaces what is under the pointer, and some browsers then never report the pointer leaving.
@@ -68,9 +67,10 @@ export function useMasked(text: string) {
     return () => document.removeEventListener('pointermove', check, true)
   }, [hovered])
   useLayoutEffect(() => {
+    if (!masking) return
     const parent = root.current?.parentElement
     setAlone(!parent?.closest(TABBABLE) && !parent?.closest(ROW)?.querySelector('.ui-row-link'))
-  }, [])
+  }, [masking])
   return {
     revealed, box: box as RefObject<HTMLSpanElement>,
     root: {

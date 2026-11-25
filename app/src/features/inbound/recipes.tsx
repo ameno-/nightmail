@@ -2,7 +2,7 @@
 // (recipes) grouped by what they do, and the short form a recipe opens to make its rule. Every write goes through the
 // public API (createRuleFromRecipe, updateRule, deleteRule, createEndpoint). A recipe's rule is an ordinary script the
 // API wrote: like every rule it opens as its code (rituals.tsx), and saving a hand edit there makes it a script.
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { Archive, Ban, CodeXml, Forward, Hash, MessageSquare, ShieldAlert, Sparkles, Split, Star, Webhook, X, type LucideIcon } from 'lucide-react'
@@ -22,7 +22,7 @@ import { ritualRecipes } from '../../../../api/src/ritual-schema'
 import { concepts } from './concepts'
 import { useLiveVersion } from './live'
 import { ago, firstOverview, useOverview, type Overview, type OverviewEndpoint, type OverviewRule } from './overview'
-import { AwaitingConfirm, CreatedEndpointDialog, discordUrl, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
+import { AwaitingConfirm, CreatedEndpointDialog, ForwardSenderOffer, discordUrl, forwardSenderNeeded, slackUrl, targetProblem, type Endpoint } from './ritual-connections'
 import { AskAgentLink } from './ritual-agent'
 import type { Condition } from './builder'
 import { addressOption, idempotencyFor, openBuilder, rulePath, splitBuilderPath } from './shared'
@@ -134,10 +134,10 @@ export function RulesTab({ overview, refresh }: { overview: Overview; refresh: (
     <DataTable className="rcv-table recipe-table" rows={overview.rules} rowKey={r => r.key} rowHref={r => rulePath(r.key)}
       empty={<EmptyState title="No rules yet" action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving/rules/new">New rule</Link>} />}
       columns={[
-        { key: 'what', label: 'Rule', width: '50%', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
-        { key: 'on', label: 'Runs on', width: '24%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}</span> },
-        { key: 'last', label: 'Last matched', width: '13%', card: 'hide', render: last },
-        { key: 'actions', label: '', align: 'right', card: 'end', render: r => <span className="recipe-controls">
+        { key: 'what', label: 'Rule', card: 'title', render: r => <span className="recipe-row" data-off={!r.enabled || undefined}><RecipeIcon id={r.recipe?.id ?? null} /><span className="recipe-sentence"><RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} /></span></span> },
+        { key: 'on', label: 'Runs on', width: '26%', card: 'line', render: runsOn, cardRender: r => <span className="recipe-card-line">{runsOn(r)}</span> },
+        { key: 'last', label: 'Last matched', width: 128, card: 'hide', render: last },
+        { key: 'actions', label: '', width: 96, align: 'right', card: 'end', render: r => <span className="recipe-controls">
           <Switch checked={switching[r.key] ?? r.enabled} disabled={r.key in switching} onCheckedChange={v => void toggle(r, v)} label={<span className="sr-only">Run {r.key}</span>} />
           <DropdownMenu label={`Actions for ${r.key}`} title={<RuleLine rule={r} keyName={r.key} endpoints={overview.endpoints} />} items={[
             ...(builderPath(r) ? [{ label: openBuilder, onSelect: () => navigate(builderPath(r)!) }] : []),
@@ -257,6 +257,7 @@ function RecipeForm({ recipeId }: { recipeId: string }) {
     addresses={mergeAddresses(resolvedPreset.items, options.items)} preset={preset} header={header} back={back}
     addressSearch={addressSearch} onAddressSearch={setAddressSearch} addressSearchable={options.hasMore || Boolean(addressSearch)}
     hasMoreAddresses={options.hasMore} loadingMoreAddresses={options.loadingMore} onLoadMoreAddresses={options.loadMore}
+    addressesComplete={!options.isFetching && !addressSearch && !options.hasMore} refetchAddresses={() => void options.refetch()}
     refresh={() => invalidateResources(client, invalidate.rules)} />
 }
 
@@ -286,9 +287,11 @@ const freeName = (base: string, taken: Set<string>) => { const stem = slug(base)
 const splitSenders = (text: string) => [...new Set(text.split(/[\s,;]+/).map(s => s.trim().toLowerCase()).filter(Boolean))]
 type Made = { name: string; type: EndpointType; status: OverviewEndpoint['status']; target: string }
 
-function RecipeEditor({ recipe, overview, addresses, preset, header, back, addressSearch, onAddressSearch, addressSearchable, hasMoreAddresses, loadingMoreAddresses, onLoadMoreAddresses, refresh }: {
+/** `addressesComplete`: `addresses` is a fresh read of every address (no search, no more pages), so a target it lacks is gone. */
+function RecipeEditor({ recipe, overview, addresses, preset, header, back, addressSearch, onAddressSearch, addressSearchable, hasMoreAddresses, loadingMoreAddresses, onLoadMoreAddresses, addressesComplete, refetchAddresses, refresh }: {
   recipe: Recipe; overview: Overview; addresses: AddressOption[]; preset: string | null
-  header: (actions?: ReactNode) => ReactNode; back: string; addressSearch: string; onAddressSearch: (v: string) => void; addressSearchable: boolean; hasMoreAddresses: boolean; loadingMoreAddresses: boolean; onLoadMoreAddresses: () => void; refresh: () => Promise<unknown>
+  header: (actions?: ReactNode) => ReactNode; back: string; addressSearch: string; onAddressSearch: (v: string) => void; addressSearchable: boolean; hasMoreAddresses: boolean; loadingMoreAddresses: boolean; onLoadMoreAddresses: () => void
+  addressesComplete: boolean; refetchAddresses: () => void; refresh: () => Promise<unknown>
 }) {
   const navigate = useNavigate(), toast = useToast()
   const targetsList = addresses.flatMap(a => [{ value: a.id, label: a.address, expires: !!a.expiresAt }, ...a.aliases.map(alias => ({ value: alias, label: alias, expires: false }))])
@@ -310,7 +313,16 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
   const [tried, setTried] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<unknown>(null)
+  // The form opens on the cached address list, which can still hold an address or inbox deleted since (by an agent, through
+  // the API): once a fresh full read arrives, targets it lacks are dropped, and an emptied list starts on the first address.
+  // (ws_b1540cad saved twice on an inbox deleted four minutes before: 422 UNKNOWN_TARGET.)
+  useEffect(() => {
+    if (!addressesComplete) return
+    setTargets(current => { const kept = current.filter(t => targetsList.some(o => o.value === t)); return kept.length === current.length ? current : kept.length ? kept : firstAddress ? [firstAddress] : [] })
+  }, [addressesComplete, addresses]) // eslint-disable-line react-hooks/exhaustive-deps
   const [secret, setSecret] = useState<(Endpoint & { secret?: string }) | null>(null)
+  // The address made to send a forward's confirmation from, when none could (ForwardSenderOffer).
+  const [forwardFrom, setForwardFrom] = useState<string | null>(null)
   const [attempt] = useState({ key: '', body: '' })
 
   const taken = new Set(endpoints.map(e => e.name).concat(overview.endpoints.map(e => e.name)))
@@ -341,7 +353,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
     let created: Endpoint & { secret?: string }
     if (type === 'forward') {
       // On a domain this workspace verified, no confirmation email is needed; anywhere else the recipient agrees first.
-      const body = { type, name, address: url, ...(targets[0] ? { from: targets[0] } : {}) }
+      const sender = forwardFrom ?? targets[0]
+      const body = { type, name, address: url, ...(sender ? { from: sender } : {}) }
       try { created = await post({ ...body, preverify: true }) }
       catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
     } else created = await post({ type, name, url })
@@ -367,7 +380,11 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
       await refresh()
       toast(`${recipe.name} is on`, 'success')
       if (webhook) setSecret(webhook); else navigate(LIST)
-    } catch (e) { setError(e) } finally { setBusy(false) }
+    } catch (e) {
+      // A target gone since the list was read: read it again, which drops it (above); the message lists the valid ones.
+      if (e instanceof ApiError && e.code === 'UNKNOWN_TARGET') refetchAddresses()
+      setError(e)
+    } finally { setBusy(false) }
   }, recipe.id)
   function submit(event: FormEvent) {
     event.preventDefault(); setTried(true); setError(null)
@@ -391,6 +408,7 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
           {remaining.length > 0 && targets.length < 10 && <Select className="address-select-trigger recipe-targets__add" menuClassName="address-select" aria-label="Add an address" value="" placeholder={targets.length ? 'Add another' : 'Choose an address'}
             onValueChange={v => { if (v) setTargets([...targets, v]) }} options={remaining.map(t => addressOption(t.value, t.label))} />}
         </div>
+        {addressesComplete && !targetsList.length && <p className="muted recipe-targets__empty">A rule runs on mail to one of your addresses or agent inboxes, and this workspace has none yet. <Link to="/receiving?new=address">Create an address</Link> or <Link to="/receiving/inboxes">an agent inbox</Link>, then come back.</p>}
         {addressSearchable && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={addressSearch} onChange={event => onAddressSearch(event.target.value)} />}
         {hasMoreAddresses && <Button variant="ghost" size="sm" loading={loadingMoreAddresses} onClick={onLoadMoreAddresses}>Load more addresses</Button>}
       </Field>
@@ -420,7 +438,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
         </Field>
       })}
       {waiting && <AwaitingConfirm address={waiting.target} />}
-      {general && <Alert tone="danger">{general}</Alert>}
+      {general && !forwardSenderNeeded(error) && <Alert tone="danger">{general}</Alert>}
+      <ForwardSenderOffer error={error} onCreated={box => { setForwardFrom(box.id); setError(null); refetchAddresses(); return save() }} />
       <div className="recipe-form__actions">
         <Link className="ui-button ui-button--ghost ui-button--md" to={back}>Cancel</Link>
         <Button variant="primary" type="submit" loading={busy} disabled={!!waiting}>Save</Button>

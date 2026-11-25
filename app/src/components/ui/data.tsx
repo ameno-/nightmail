@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { ChevronDown } from 'lucide-react';
 import { DropdownMenu, type MenuItem, type Tone } from './primitives';
+import { Icon } from './icon';
 
 // Data display (Signal Log): flat, hairline-drawn pieces for dense pages. Labels are small and muted, values mono with
 // tabular figures, and colour only says how something went (a tone's dot, ink or bar). Every piece has a fixed height in
@@ -13,6 +14,14 @@ export function Meter({ value, max = 1, mark, tone = 'neutral', label, title, cl
   const share = clamp(value / max), at = mark === undefined ? undefined : clamp(mark / max);
   return <span className={cx('ui-meter', `ui-tone--${tone}`, className)} title={title} role={label ? 'meter' : undefined} aria-label={label} aria-valuemin={label ? 0 : undefined} aria-valuemax={label ? max : undefined} aria-valuenow={label ? value : undefined} aria-hidden={label ? undefined : true}
     style={{ '--share': `${share * 100}%`, ...at !== undefined && { '--mark': `${at * 100}%` } } as CSSProperties}><i />{at !== undefined && <b />}</span>;
+}
+
+/** A series as one line, oldest first, from zero to its largest value: a metric row's trend. No axes and no labels; it
+ *  fills the box it is given, so an empty or flat series holds the same space. */
+export function Sparkline({ values, tone, className }: { values: readonly number[]; tone?: Tone; className?: string }) {
+  const max = Math.max(0, ...values), y = (value: number) => max > 0 ? 19 - Math.max(0, value) / max * 18 : 19;
+  const points = values.length === 1 ? `0,${y(values[0]!)} 100,${y(values[0]!)}` : values.map((value, i) => `${i / (values.length - 1) * 100},${y(value)}`).join(' ');
+  return <svg className={cx('ui-spark', tone && `ui-tone--${tone}`, className)} viewBox="0 0 100 20" preserveAspectRatio="none" aria-hidden="true">{values.length > 0 && <polyline points={points} />}</svg>;
 }
 
 /** One metric as a row: label (and a muted hint), its series, the mono value with a muted unit; a meter is the row's rule. */
@@ -43,7 +52,7 @@ export function FacetRail({ groups, label = 'Facets', countSlot }: { groups: Fac
         // Keep the count's slot and the focused control; only the changing value is replaced.
         const value = item.count === null || item.count === undefined ? '–' : `${item.count.toLocaleString()}${item.atLeast ? '+' : ''}`;
         const noChoices = Boolean(item.onMenuOpenChange && item.menu?.length === 0);
-        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`, (item.dot === false || (!item.tone && !item.series)) && 'ui-facet__dot--none')} aria-hidden="true" /><span className="ui-facet__label">{item.label}{item.menu && !noChoices && <ChevronDown size={12} aria-hidden="true" />}</span><span className="ui-facet__count" style={countSlot && { inlineSize: countSlot.width, whiteSpace: 'nowrap' }} title={item.count == null ? undefined : countSlot?.detail}>{countSlot ? <span key={value}>{value}</span> : value}</span></>;
+        const body = <><span className={cx('ui-facet__dot', `ui-tone--${item.tone ?? 'neutral'}`, item.series && `ui-series--${item.series}`, (item.dot === false || (!item.tone && !item.series)) && 'ui-facet__dot--none')} aria-hidden="true" /><span className="ui-facet__label">{item.label}{item.menu && !noChoices && <Icon icon={ChevronDown} size="xs" />}</span><span className="ui-facet__count" style={countSlot && { inlineSize: countSlot.width, whiteSpace: 'nowrap' }} title={item.count == null ? undefined : countSlot?.detail}>{countSlot ? <span key={value}>{value}</span> : value}</span></>;
         const empty = !item.count || undefined;
         return <li key={item.key}>{item.menu ? <DropdownMenu items={item.menu} label={item.menuLabel} align="start" onOpenChange={item.onMenuOpenChange} trigger={<button type="button" className="ui-facet" aria-label={item.menuLabel} aria-disabled={noChoices || undefined} tabIndex={noChoices ? -1 : undefined} aria-pressed={item.selected ?? false} data-empty={empty}>{body}</button>} />
           : item.onSelect ? <button type="button" className="ui-facet" aria-pressed={item.selected ?? false} data-empty={empty} onClick={item.onSelect}>{body}</button> : <span className="ui-facet" data-empty={empty} title={item.title}>{body}</span>}</li>;

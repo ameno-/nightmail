@@ -1,4 +1,5 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
+import { sql } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
@@ -6,7 +7,7 @@ import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-mem
 import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { actor, budgetExhausted, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
+import { actor, agentSetupRefusal, budgetExhausted, restrictedArea, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -17,7 +18,7 @@ import { SLOW_REQUEST_MS } from './log.js';
 import { authenticatedCreates } from './idempotency.js';
 import { addresses, clientIpHeader, headerPrefix, healthService, productName, requestHeaderNames } from './brand.js';
 
-type RouteGroup = 'linked-images' | 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
+type RouteGroup = 'linked-images' | 'analytics' | 'disk-alert' | 'auth-ui' | 'mcp' | 'auth' | 'agent-setup' | 'operator' | 'support' | 'audience' | 'audience-query' | 'newsletters' | 'templates' | 'sending-emails' | 'sending-other' | 'ops-domains' | 'ops-events' | 'ops-other' | 'ses-regions' | 'mailbox' | 'workspaces' | 'provider-connections' | 'public-stats' | 'overview' | 'billing';
 // Internal areas: /v1/operator/* answers only Nightmail operators and /v1/support/* only support grants (src/support.ts).
 const operatorPath = (pathname: string) => pathname === '/v1/operator' || pathname.startsWith('/v1/operator/');
 const supportPath = (pathname: string) => pathname === '/v1/support' || pathname.startsWith('/v1/support/');
@@ -26,7 +27,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if(pathname==='/internal/v1/mail')return 'mailbox';
   if (pathname === '/internal/v1/analytics' || pathname === '/internal/v1/analytics/export') return 'analytics';
   if (pathname === '/internal/v1/database-disk') return 'disk-alert';
-  if (pathname === '/v1/public/stats') return 'public-stats';
+  if (pathname === '/v1/public/stats' || pathname === '/v1/public/signups') return 'public-stats';
   // Billing: balance, usage, ledger, payments, the Stripe webhook and the operator's billing tools (behind the operator gate).
   if (pathname === '/v1/billing' || pathname.startsWith('/v1/billing/') || pathname.startsWith('/v1/operator/billing/')) return 'billing';
   if (operatorPath(pathname) || pathname.startsWith('/v1/ui-notes/')) return 'operator';
@@ -35,6 +36,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (pathname === '/v1/me' || pathname.startsWith('/v1/mcp-connections/') || pathname === '/v1/agents' || pathname.startsWith('/v1/agents/') || pathname === '/api/auth' || pathname.startsWith('/api/auth/') || pathname.startsWith('/.well-known/') || pathname === '/mcp/login' || pathname === '/mcp/consent') return 'auth-ui';
   if (pathname === '/mcp' || pathname.startsWith('/mcp/')) return 'mcp';
   if (pathname === '/v1/api-keys' || pathname.startsWith('/v1/api-keys/') || pathname === '/v1/agent-tokens' || pathname.startsWith('/v1/agent-tokens/')) return 'auth';
+  if (pathname.startsWith('/v1/agent/')) return 'agent-setup';
   if (snsIngress(pathname)) return 'ops-events';
   if (pathname === '/v1/domains' || pathname.startsWith('/v1/domains/')) return 'ops-domains';
   if (/^\/v1\/(?:settings|webhooks|metrics|sender-score|usage)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
@@ -74,6 +76,7 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'analytics': return (await import('./analytics.js')).registerAnalytics;
       case 'disk-alert': return (await import('./disk-alert.js')).registerDiskAlert;
       case 'auth': return registerAuth;
+      case 'agent-setup': return (await import('./agent-setup.js')).registerAgentSetup;
       case 'auth-ui': {
         const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
         return (target: App) => { registerMcpAuth(target); registerDashboardAuth(target); };
@@ -96,8 +99,8 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
       case 'operator':
       case 'support': {
         const [{ registerOperator }, { registerAudit }, { registerSupport, registerSupportOperator }, { registerSupportConversations }, { registerSupportInbox }, { registerUiNotes }] = await Promise.all([import('./operator.js'), import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js')]);
-        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js')]);
-        return (target: App) => { registerOperator(target); registerHealth(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
+        const [{ registerSupportNotes }, { registerSupportActions }, { registerAbuse }, { registerAbuseAlerts }, { registerHealth }, { registerGlass }] = await Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./health.js'), import('./glass.js')]);
+        return (target: App) => { registerOperator(target); registerHealth(target); registerGlass(target); registerAbuse(target); registerAbuseAlerts(target); registerAudit(target); registerSupport(target); registerSupportOperator(target); registerSupportConversations(target); registerSupportInbox(target); registerUiNotes(target); registerSupportNotes(target); registerSupportActions(target); };
       }
       case 'billing': {
         const [{ registerBilling }, { registerStripeWebhook }] = await Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js')]);
@@ -117,6 +120,49 @@ function routeOf(c: Ctx) {
   return (exact.findLast(route => route.method !== 'ALL') ?? exact.findLast(route => route.handler.length < 2)
     ?? routes.findLast(route => route.method !== 'ALL'))?.path ?? 'unmatched';
 }
+/**
+ * An unmatched API path as a template, so the request log shows which endpoints agents guess at without what they put in
+ * them: the query is dropped, and each segment that isn't a short plain word becomes a placeholder: {mbx_id} for a
+ * prefixed ID, {email}, {uuid}, {n}, {host} for a dotted name, {token} for anything long or random, {value} for the rest.
+ */
+/** The endpoint an unmatched request most likely meant: the routes agents guessed at in production, and where they are. */
+const ROUTE_HINTS: [RegExp, RegExp, string][] = [
+  [/^DELETE$/, /^\/v1\/api-keys\/[^/]+$/, 'Revoke a key with POST /v1/api-keys/{id}/revoke.'],
+  [/./, /^\/v1\/inbound\/messages\/[^/]+\/deliver(?:y|ies)$/, 'A message\'s delivery details: GET /v1/inbound/messages/{id}?includeDelivery=true.'],
+  [/./, /^\/v1\/(?:inbound\/routes|forwarding|forwards|inbound\/forwarding)(?:\/|$)/, 'Receiving routes: GET /v1/routing/routes; forward and webhook destinations: GET /v1/endpoints.'],
+  [/./, /^\/v1\/(?:inbound\/rules|automations|inbound\/automations)(?:\/|$)/, 'Receiving rules: GET /v1/rules; routes: GET /v1/routing/routes.'],
+  [/./, /^\/v1\/webhook-endpoints(?:\/|$)/, 'Sending event webhooks: GET /v1/webhooks; received mail webhooks: GET /v1/inbound/webhooks; forward destinations: GET /v1/endpoints.'],
+];
+const routeHint = (method: string, path: string) => { const hint = ROUTE_HINTS.find(([m, p]) => m.test(method) && p.test(path)); return hint ? ` ${hint[2]}` : ''; };
+export function unmatchedTemplate(path: string) {
+  const segments = path.split('?')[0]!.split('/').filter(Boolean);
+  const shown = segments.slice(0, 12).map(raw => {
+    let s: string; try { s = decodeURIComponent(raw); } catch { return '{value}'; }
+    if (s.includes('@')) return '{email}';
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{uuid}';
+    const prefixed = /^([a-z]{2,10})_[A-Za-z0-9]{6,}$/.exec(s);
+    if (prefixed) return `{${prefixed[1]}_id}`;
+    if (/^\d+$/.test(s)) return '{n}';
+    if (/^[a-z0-9-]+\.(?:md|json|txt|xml|yaml|html)$/i.test(s) && s.length <= 40) return s.toLowerCase();
+    if (s.includes('.')) return '{host}';
+    if (s.length > 32 || (/\d/.test(s) && /[a-z]/i.test(s) && s.length >= 16)) return '{token}';
+    return /^[a-z][a-z0-9_-]{0,31}$/i.test(s) ? s.toLowerCase() : '{value}';
+  });
+  return `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+}
+// At most UNMATCHED_PER_WINDOW unmatched paths per workspace (or per anonymous caller) every 10 minutes per isolate: a
+// burst of guesses shows its shape, a crawler doesn't fill the log. The request line itself is written either way.
+const UNMATCHED_PER_WINDOW = 20, UNMATCHED_WINDOW_MS = 10 * 60_000;
+const unmatchedSeen = new Map<string, { since: number; n: number }>();
+function unmatchedPath(c: Ctx, workspace: string | undefined) {
+  if (!/^\/(?:v1|mcp|api)(?:\/|$)/.test(c.req.path)) return undefined;
+  const key = workspace || 'anonymous', now = Date.now(), seen = unmatchedSeen.get(key);
+  const slot = seen && now - seen.since < UNMATCHED_WINDOW_MS ? seen : { since: now, n: 0 };
+  if (slot.n >= UNMATCHED_PER_WINDOW) return undefined;
+  slot.n++; unmatchedSeen.delete(key); unmatchedSeen.set(key, slot);
+  while (unmatchedSeen.size > 1000) unmatchedSeen.delete(unmatchedSeen.keys().next().value!);
+  return unmatchedTemplate(c.req.path);
+}
 function principalOf(c: Ctx, route: string) {
   const actor = c.get('actor') as Ctx['var']['actor'] | undefined;
   if (route === '/internal/v1/mail') return 'gateway';
@@ -133,11 +179,14 @@ function logRequest(c: Ctx, durationMs: number) {
   const refusedOrigin = route === '/internal/v1/analytics' && code === 'ORIGIN_NOT_ALLOWED';
   const origin = refusedOrigin ? c.req.header('origin') : undefined;
   const workspace = c.get('principal')?.workspace ?? (c.get('actor') as Ctx['var']['actor'] | undefined)?.workspaceId ?? c.get('mailboxAccess')?.workspaceId;
-  countRequest({ route, method: c.req.method, status, durationMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
+  const activeMs = Math.max(0, durationMs - (c.get('pollWaitMs') ?? 0));
+  countRequest({ route, method: c.req.method, status, durationMs: activeMs, workspace: workspace || undefined, code, databaseCode: failure?.databaseCode });
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
     code, field: failure?.field, databaseCode: failure?.databaseCode,
-    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : undefined,
+    // Which endpoint a caller expected, scrubbed (unmatchedTemplate): only for a path no route answered.
+    path: route === 'unmatched' ? unmatchedPath(c, workspace || undefined) : undefined,
+    originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : failure?.origin?.originClass, fetchSite: failure?.origin?.fetchSite,
     workspace, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
   });
@@ -187,9 +236,9 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     const start = Date.now();
     const enqueued = await countEnqueued(next);
     // Auth handlers return native Responses, so apply correlation/cache policy after dispatch too. The public docs
-    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set, and a linked campaign image
-    // (src/linked-images.ts) its year; everything else is no-store.
-    const publicDoc = c.res.headers.get('cache-control')?.startsWith('public, ') && (c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/)/.test(c.req.path)
+    // (OpenAPI, Markdown, llms.txt) keep the five-minute public cache their routes set, whether sign-ups are open
+    // (public-stats.ts) its minute, and a linked campaign image (src/linked-images.ts) its year; everything else is no-store.
+    const publicDoc = c.res.headers.get('cache-control')?.startsWith('public, ') && (c.req.method === 'GET' && c.res.status === 200 && /^\/(?:openapi\.json|llms\.txt|docs\.md|docs\/(?:operations|tags)\/|v1\/public\/signups$)/.test(c.req.path)
       || ['GET', 'HEAD'].includes(c.req.method) && [200, 304].includes(c.res.status) && c.req.path.startsWith('/i/'));
     c.header('x-request-id', requestId); if (!publicDoc && !c.res.headers.get('cache-control')?.includes('no-store')) c.header('cache-control','no-store');
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) if (!c.res.headers.has(name)) c.header(name, value);
@@ -197,6 +246,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     if (c.get('actor') && timings.length) c.header('server-timing', timings.map(item => `${item.name};dur=${item.durationMs.toFixed(1)}`).join(', '));
     if (!(snsIngress(c.req.path) && [400,429].includes(c.res.status))) logRequest(c, Date.now() - start);
     // Wake only after this request committed jobs: each wake locks the shared job_schedule row and starts a drain.
+    // SES owns its two lanes: a newly queued inbound receipt starts ingest; sending feedback uses its own queue.
     const wakeJobs = c.get('actor')?.wakeJobs;
     const wake = (wakeJobs || (enqueued > 0 && !['GET', 'HEAD', 'OPTIONS'].includes(c.req.method))) && c.req.path !== '/v1/events/ses' && !/^\/mcp(?:\/|$)/.test(c.req.path) && c.res.status < 300 ? c.env.wake : undefined;
     const actor = c.get('actor'), targets = actor?.dispatchTargets;
@@ -225,10 +275,13 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // A UI note's screenshot link is its own short-lived credential (src/ui-notes.ts), as is a stored preview's (src/preview-images.ts).
     if (['GET', 'HEAD'].includes(c.req.method) && /^\/v1\/preview-images\/[^/]+$/.test(c.req.path)) return next();
     if (c.req.method === 'GET' && /^\/v1\/ui-notes\/screenshots\/[^/]+$/.test(c.req.path)) return next();
-    // The homepage's installation-wide aggregates are public; the route returns nothing workspace-scoped.
-    if (c.req.path === '/v1/public/stats') return next();
+    // An agent's setup token and device code are its credentials (src/agent-setup.ts); the routes check them themselves.
+    if (c.req.method === 'POST' && /^\/v1\/agent\/(?:setup|device|device\/token)$/.test(c.req.path)) return next();
+    // The homepage's installation-wide aggregates, and whether sign-ups are open, are public; neither returns anything
+    // workspace-scoped.
+    if (c.req.path === '/v1/public/stats' || c.req.path === '/v1/public/signups') return next();
     // Forward recipients answer with the emailed link alone; the routes check the token themselves.
-    if (['GET','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
+    if (['GET','HEAD','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
@@ -260,7 +313,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // finished reading the wire bytes, so stalled slow uploads never hold a lease). Check domain scope, editContent
     // permission, and the per-minute preview limit first so rejected callers never queue other workspaces behind them.
     if (c.req.method === 'POST' && c.req.path === '/v1/contact-imports' && c.get('actor')) {
-      if (c.get('actor')?.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
+      if (c.get('actor')?.domains.length) throw unrestrictedRequired(c.get('actor'), restrictedArea(c.req.path), requiredOf(c));
       const identity = actor(c, 'editContent');
       if (await budgetExhausted(c.env, identity.workspaceId, 'imports:preview', IMPORT_PREVIEW_RATE_PER_MINUTE)) {
         c.header('Retry-After', '60');
@@ -293,10 +346,10 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   // A sender-domain grant can edit untargeted drafts, not operate on a workspace audience. Check before idempotency:
   // recorded launch responses also contain audience counts. The MCP listing uses the same predicate (core.ts).
   app.use('/v1/*', (c, next) => {
-    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw unrestrictedRequired(c.req.path.startsWith('/v1/campaigns/')
-      ? 'Campaign audience and delivery operations require an unrestricted credential.' : 'Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
+    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw unrestrictedRequired(c.get('actor'), restrictedArea(c.req.path), requiredOf(c));
     return next();
   });
+  app.use('/v1/*', (c, next) => { const refusal = agentSetupRefusal(c.get('actor'), c.req.path, c.req.method); if (refusal) throw refusal; return next(); });
   // Path guards are shared with the MCP listing (core.ts). Mailbox paths check receiving consent after mailboxAuth.
   app.use('/v1/*', (c, next) => receivingConsentRoute(c.req.path) && !mailboxRoute(c.req.path) ? requireReceivingConsent(c, next) : next());
   // Idempotency-Key on every create that does not handle it itself (inbound paths register their own after inbox auth).
@@ -333,7 +386,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // Messages, record keys and unsupported keys are caller text: log only the schema's own top-level field names.
     const field = responseError.logField !== undefined ? responseError.logField || undefined : schemaFields(responseError.field);
     // The request line (logRequest) carries the code; an unexpected failure also logs its stack.
-    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error) });
+    c.set('failure', { code: responseError.code, field, databaseCode: databaseCodeOf(error), origin: responseError.origin });
     // Best effort, and never this request's failure: limitReached and dailyLimitAlert log what they could not queue.
     if (responseError.limitReachedFor) {
       await (await import('./account-notices.js')).limitReached(c.env, responseError.limitReachedFor).catch(() => {});
@@ -346,7 +399,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     else if (transient || conflict || responseError.code === 'IDEMPOTENCY_IN_PROGRESS') c.header('Retry-After', '1');
     return c.json({ error: apiFailureBody(responseError, requestId) }, responseError.status as ContentfulStatusCode);
   });
-  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: 'Route not found.', requestId: c.get('requestId'), retryable: false } }, 404); });
+  app.notFound(c => { c.set('failure', { code: 'NOT_FOUND', unmatched: true }); return c.json({ error: { code: 'NOT_FOUND', message: `Route not found.${routeHint(c.req.method, c.req.path)} Every endpoint is listed in /llms.txt and /docs.md.`, requestId: c.get('requestId'), retryable: false } }, 404); });
   // origin is PUBLIC_URL's, never the request's Host: the dashboard and Docs build every example and connection URL from it.
   // analytics: whether a signed-out dashboard page records its use (DASHBOARD_ANALYTICS); signed in, /v1/me says so.
   // security.txt (RFC 9116) for the hosted service; a self-hosted installation has its own contact, so it has none.
@@ -357,6 +410,20 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     return c.body(`Contact: mailto:${addresses.security}\nExpires: 2027-11-20T00:00:00.000Z\nPreferred-Languages: en\nCanonical: ${new URL('/.well-known/security.txt', c.env.config.publicUrl).href}\n`);
   });
   app.get('/health', c => c.json({status:'ok',service:healthService,multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin,analytics:c.env.config.dashboardAnalytics===true}));
+  // Deep readiness check: unlike /health (which answers in worker.ts without loading app modules or Postgres),
+  // this exercises the full Worker bundle and runs a bounded read-only query against PostgreSQL.
+  app.get('/health/ready', async c => {
+    c.header('cache-control', 'no-store');
+    try {
+      await c.env.db.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL statement_timeout = '3s'`);
+        await tx.execute(sql`SELECT 1`);
+      }, { accessMode: 'read only' });
+      return c.json({ status: 'ok', service: healthService, multiTenant: c.env.config.multiTenant, database: 'ok' }, 200);
+    } catch {
+      return c.json({ status: 'unready', service: healthService, multiTenant: c.env.config.multiTenant, database: 'unavailable' }, 503);
+    }
+  });
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
@@ -382,14 +449,14 @@ export async function createOpenApiApp(): Promise<App> {
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
     import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js'),
   ]));
-  const [{ registerBilling }, { registerStripeWebhook }, { registerNewsletters }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js'), import('./newsletters.js')]));
-  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAudience(full); registerAudienceQuery(full); registerNewsletters(full);
+  const [{ registerBilling }, { registerStripeWebhook }, { registerNewsletters }, { registerAgentSetup }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js'), import('./newsletters.js'), import('./agent-setup.js')]));
+  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAgentSetup(full); registerAudience(full); registerAudienceQuery(full); registerNewsletters(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
   registerBilling(full); registerStripeWebhook(full);
-  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerLinkedImages }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./linked-images.js')]));
-  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerLinkedImages(full);
+  const [{ registerSupportNotes }, { registerSupportActions }, { registerAnalytics }, { registerAbuse }, { registerAbuseAlerts }, { registerDiskAlert }, { registerHealth }, { registerGlass }, { registerLinkedImages }] = await wrapModuleLoad(() => Promise.all([import('./support-notes.js'), import('./support-actions.js'), import('./analytics.js'), import('./abuse-clusters.js'), import('./abuse-alerts.js'), import('./disk-alert.js'), import('./health.js'), import('./glass.js'), import('./linked-images.js')]));
+  registerSupportNotes(full); registerSupportActions(full); registerAnalytics(full); registerAbuse(full); registerAbuseAlerts(full); registerDiskAlert(full); registerHealth(full); registerGlass(full); registerLinkedImages(full);
   return full;
 }
 

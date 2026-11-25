@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
 import { reservePolls } from './auth.js';
-import { errors, receivingAdmin, response, security, type Actor, type App, type Ctx, type DbExecutor } from './core.js';
+import { errors, receivingAdmin, response, security, waitForPollTick, type Actor, type App, type Ctx, type DbExecutor } from './core.js';
 
 // The dashboard's live view of rules, routes and endpoints, for a person editing next to an agent that saves over MCP.
 // One long poll per open page: each tick is one statement of primary-key reads (the routing version every rule and
@@ -87,6 +87,6 @@ async function poll(c: Ctx) {
       c.header('Cache-Control', 'no-store');
       return c.json({ version: now.version, endpoints: String(latest > mark ? latest : mark), changed, actor }, 200);
     }
-    await new Promise(resolve => setTimeout(resolve, Math.min(TICK_MS, Math.max(0, deadline - Date.now()))));
+    await waitForPollTick(c, Math.min(TICK_MS, Math.max(0, deadline - Date.now())));
   }
 }

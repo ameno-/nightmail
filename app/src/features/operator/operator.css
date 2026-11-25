@@ -1,5 +1,6 @@
 /* The operator console: a review queue, and one workspace's standing, score, limit math and evidence. Tables use the
-   shared 53px rows and render as cards on a phone. */
+   shared one-line rows and render as cards on a phone. Borderless: no rule draws a row, a column, a fact or a control, and
+   no row is striped; a standalone fact is one solid well on the page, with nothing set inside it. */
 .op-page { display: flex; flex-direction: column; gap: var(--page-gap); min-width: 0; }
 .op-page > .ui-tabs + .data-toolbar { margin-top: 0; }
 .op-page > .data-toolbar { padding-bottom: 0; }
@@ -15,10 +16,13 @@
 .op-email { display: block; min-width: 0; }
 .op-email .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .op-email .private-address[data-revealed] > .private-address__value { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* No rule under a row or beside a rail (the shared table and split draw none in the borderless console either). */
+.op-page .ui-table :is(th, td) { border-bottom: 0; }
+.op-page .ui-split > .ui-split__rail { border-right: 0; }
 
-/* Facts: a hairline, a label and the value. 56px tall in every state. */
-.op-facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-24); margin: 0; }
-.op-facts > div { min-width: 0; height: 56px; padding-top: var(--space-12); border-top: 1px solid var(--color-border); }
+/* Facts: each a solid well with its label and the value. 56px tall in every state. */
+.op-facts { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-8); margin: 0; }
+.op-facts > div { min-width: 0; height: 56px; padding: var(--space-6) var(--space-12); border-radius: var(--radius-sm); background: var(--color-well, var(--color-layer-1)); }
 .op-facts dt { height: 16px; color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: var(--leading-xs); }
 /* Sign-ups: four facts in one row; two rows of two on a phone. */
 .op-facts.op-facts--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
@@ -28,9 +32,9 @@
 .op-health-what { font-family: var(--font-mono); font-size: var(--text-xs); }
 .op-health-stale { color: var(--color-danger); }
 
-/* Label and value rows, 32px each. */
+/* Label and value rows, 32px each, apart by alignment alone. */
 .op-rows { margin: 0; }
-.op-rows > div { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; min-height: 32px; padding-block: 6px; border-top: 1px solid var(--color-border-muted); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
+.op-rows > div { display: grid; grid-template-columns: 184px minmax(0, 1fr); gap: var(--space-12); align-items: baseline; min-height: 32px; padding-block: var(--space-6); font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .op-rows dt { color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); }
 .op-rows dd { margin: 0; min-width: 0; font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .op-rows dd :is(.ui-button, .ui-input, .ui-select-trigger, select) { font-family: var(--font-body); }
@@ -39,19 +43,19 @@
 .op-rows--single > div { align-items: center; }
 .op-rows--single dd.op-free { display: flex; align-items: center; gap: var(--space-12); overflow: visible; }
 .op-reasons { display: flex; flex-direction: column; gap: var(--space-8); margin: 0 0 var(--space-12); padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.op-reasons li { display: flex; flex-direction: column; gap: 2px; }
-.op-reason { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: underline; text-decoration-color: var(--color-border); text-underline-offset: 3px; cursor: pointer; }
+.op-reasons li { display: flex; flex-direction: column; gap: var(--space-4); }
+.op-reason { margin: 0; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; text-decoration: underline; text-decoration-color: var(--color-faint); text-underline-offset: 3px; cursor: pointer; }
 @media (hover: hover) { .op-reason:hover { text-decoration-color: currentColor; } }
+.op-reason:focus-visible { text-decoration-color: currentColor; }
 .op-siblings { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
 .op-more { align-self: flex-start; margin-top: var(--space-12); }
 /* The waitlist: its count under the table, and the export at the toolbar's end (its icon alone on a phone). */
 .op-total { margin: calc(var(--space-12) - var(--page-gap)) 0 0; font-size: var(--text-sm); line-height: var(--leading-sm); font-variant-numeric: tabular-nums; }
 .op-dialog-fields { display: flex; flex-direction: column; gap: var(--space-16); }
 .op-dialog-fields .ui-textarea { min-height: 88px; }
-.op-dialog-fields .op-add-date { align-self: flex-start; }
 
-/* UI notes: a 64 × 36 screenshot thumbnail fits the 53px row; the bulk menu keeps its width as the count changes. */
-.op-shot { display: block; width: 64px; height: 36px; overflow: hidden; border-radius: 4px; background: var(--color-layer-2); box-shadow: inset 0 0 0 .5px var(--color-border); }
+/* UI notes: a 52 × 30 screenshot thumbnail fits the one-line row; the bulk menu keeps its width as the count changes. */
+.op-shot { display: block; width: 52px; height: 30px; overflow: hidden; border-radius: var(--radius-xs); background: var(--color-chip, var(--color-layer-2)); }
 .op-shot img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
 .op-notes td[data-col='select'], .op-notes th[data-col='select'] { padding-right: 0; }
 /* The select-all box sits in the header row's text line, so the loaded header is as tall as the skeleton's. */
@@ -59,9 +63,9 @@
 .ui-button.op-bulk { min-width: 132px; justify-content: space-between; }
 .ui-dialog.op-note-dialog { width: min(720px, calc(100vw - 32px)); }
 /* The screenshot at its own size (never enlarged), centred; a tall one scrolls inside its frame. */
-.op-note-shot { display: grid; flex: none; place-items: center; max-height: 360px; min-height: 96px; padding: var(--space-12); overflow: auto; border-radius: var(--radius-sm); background: var(--color-layer-2); }
+.op-note-shot { display: grid; flex: none; place-items: center; max-height: 360px; min-height: 96px; padding: var(--space-12); overflow: auto; border-radius: var(--radius-sm); background: var(--color-well, var(--color-layer-2)); }
 .op-note-shot a { display: block; max-width: 100%; }
-.op-note-shot img { display: block; width: 100%; height: auto; border-radius: 4px; box-shadow: 0 0 0 .5px var(--color-border); }
+.op-note-shot img { display: block; width: 100%; height: auto; border-radius: var(--radius-xs); }
 .op-note-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-12); }
 .op-note-styles, .op-rows code { font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .op-confirm { margin-right: auto; color: var(--color-danger); font-size: var(--text-sm); }
@@ -71,7 +75,7 @@
 .op-key-secret code, .op-key-usage { font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .op-key-usage { display: block; margin-top: var(--space-8); color: var(--color-muted); }
 .op-keys { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); }
-.op-keys li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-12); min-height: 40px; border-top: 1px solid var(--color-border-muted); }
+.op-keys li { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: var(--space-12); min-height: 40px; }
 
 /* Abuse: the facet rail beside the clusters; one cluster beside the list of the others. */
 .ui-split.op-abuse { --facet-width: 176px; }
@@ -79,25 +83,27 @@
 .op-risk { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 0; }
 .op-risk__score { color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
 .op-cluster-rail { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
-.op-cluster-rail__row { display: flex; align-items: center; gap: var(--space-12); height: 32px; margin: 0 calc(-1 * var(--space-6)); padding: 0 var(--space-6); border-radius: 4px; color: inherit; text-decoration: none; }
+.op-cluster-rail__row { display: flex; align-items: center; gap: var(--space-12); height: 32px; margin: 0 calc(-1 * var(--space-6)); padding: 0 var(--space-6); border-radius: var(--radius-xs); color: inherit; text-decoration: none; }
 a.op-cluster-rail__row[aria-current='page'] { background: var(--color-active-bg); }
 @media (hover: hover) and (pointer: fine) { a.op-cluster-rail__row:hover { background: var(--color-hover); } }
+a.op-cluster-rail__row:focus-visible { background: var(--color-hover); text-decoration: none; }
 .op-cluster-rail__why { flex: 1; color: var(--color-muted); font-size: var(--text-sm); }
-/* Reasons: a label, the count it was judged on and its points, 32px a row. */
+/* Reasons: a label, the count it was judged on and its points, 32px a row, apart by alignment alone. */
 .op-why, .op-links { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
-.op-why li { display: grid; grid-template-columns: minmax(0, 1fr) 64px 48px; align-items: center; gap: var(--space-12); min-height: 32px; border-top: 1px solid var(--color-border-muted); font-variant-numeric: tabular-nums; }
+.op-why li { display: grid; grid-template-columns: minmax(0, 1fr) 64px 48px; align-items: center; gap: var(--space-12); min-height: 32px; font-variant-numeric: tabular-nums; }
 .op-why__count, .op-why__points { font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; }
 .op-why__count { color: var(--color-muted); }
-.op-links li { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: center; gap: var(--space-12); min-height: 32px; border-top: 1px solid var(--color-border-muted); }
+.op-links li { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); align-items: center; gap: var(--space-12); min-height: 32px; }
 .op-links .op-muted-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The drawing is as tall as its rows, up to 264px; a larger cluster scales down inside that. */
+/* The drawing is as tall as its rows, up to 264px; a larger cluster scales down inside that. Links are drawn in the
+   neutral series ink, not a rule colour. */
 .op-graph { margin-bottom: var(--space-12); }
 .op-graph svg { display: block; width: 100%; height: 100%; }
-.op-graph__edge { fill: none; stroke: var(--color-border-strong); stroke-width: 1; }
+.op-graph__edge { fill: none; stroke: var(--color-series); stroke-width: 1; }
 .op-graph__edge--strong { stroke: var(--color-series-strong); stroke-width: 1.25; }
 .op-graph__edge--partial { stroke-dasharray: 3 3; }
 .op-graph__node { fill: var(--color-surface); stroke: var(--color-text); stroke-width: 1.25; }
-.op-graph__label { fill: var(--color-muted); font-family: var(--font-mono); font-size: 11px; }
+.op-graph__label { fill: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); }
 /* The Slack card in its dialog, laid out as Slack does: fields two to a row. */
 .op-slack { display: flex; flex-direction: column; gap: var(--space-12); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .op-slack p, .op-slack dl { margin: 0; }
@@ -105,15 +111,192 @@ a.op-cluster-rail__row[aria-current='page'] { background: var(--color-active-bg)
 .op-slack__fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-12); }
 .op-slack code { font-family: var(--font-mono); font-size: var(--text-xs); overflow-wrap: anywhere; }
 .op-slack__actions { display: flex; flex-wrap: wrap; gap: var(--space-8); }
-.op-slack__actions span { padding: 2px var(--space-8); border-radius: 4px; box-shadow: var(--shadow-button); font-size: var(--text-xs); }
+.op-slack__actions span { padding: var(--space-4) var(--space-8); border-radius: var(--radius-xs); background: var(--color-chip, var(--color-layer-2)); font-size: var(--text-xs); }
 .op-slack__context { color: var(--color-muted); font-size: var(--text-xs); }
+
+/* Glass: a live board. The main column (tiles, the funnel, the SES regions, groups of metric rows) beside the activity
+   feed's column; one column, the feed last, below 1100 px. Borderless: a tile, a funnel step and the feed are solid wells
+   one step above the page, parted by space alone. Figures are mono with tabular digits; labels are mono capitals; a
+   tone's colour says only how something went. Every block has a fixed height in every state. */
+.glass-board { --glass-feed: clamp(320px, 22vw, 400px); display: grid; grid-template-columns: minmax(0, 1fr) var(--glass-feed); align-items: start; gap: var(--space-24); min-width: 0; padding-bottom: var(--space-24); }
+.glass-main { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; container-type: inline-size; }
+.glass-section { display: flex; flex-direction: column; min-width: 0; }
+
+/* Tiles: four to a row, five from 1100 px of column, two on a phone. 120px: the head, a 28px figure, its hint and a 24px foot. */
+.glass-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-8); }
+@container (min-width: 1100px) { .glass-tiles { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
+@container (max-width: 559px) { .glass-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .glass-tile__head { letter-spacing: 0; } .glass-tile__figure { font-size: var(--text-figure); } }
+.glass-tile { display: flex; flex-direction: column; min-width: 0; height: 120px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); }
+.glass-tile__head { display: flex; align-items: center; gap: var(--space-8); height: 14px; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 14px; letter-spacing: var(--tracking-label); text-transform: uppercase; white-space: nowrap; }
+.glass-tile__label { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+/* The change is laid out from the head's right edge and pulled back by its own width (a transform), so it never moves a box. */
+.glass-delta { position: relative; flex: 1 0 40px; align-self: stretch; letter-spacing: 0; text-transform: none; font-variant-numeric: tabular-nums; }
+.glass-delta > span { position: absolute; top: 0; left: 100%; transform: translateX(-100%); color: var(--color-faint); }
+.glass-delta > span[class*='ui-tone--']:not(.ui-tone--neutral) { color: var(--tone-ink); }
+.glass-tile__figure { height: 32px; margin-top: var(--space-8); overflow: hidden; color: var(--color-text); font-family: var(--font-mono); font-size: var(--text-display); line-height: 32px; letter-spacing: -.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.glass-tile__figure[class*='ui-tone--'] { color: var(--tone-ink); }
+.glass-tile__hint { display: flex; align-items: center; height: 16px; min-width: 0; overflow: hidden; color: var(--color-faint); font-size: var(--text-xs); line-height: 16px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.glass-tile__foot { display: flex; align-items: flex-end; height: 22px; margin-top: auto; }
+.glass-tile__foot > .ui-spark { width: 100%; height: 20px; }
+.glass-tile__foot > .ui-meter { width: 100%; margin-bottom: var(--space-4); }
+/* Parts of a whole (senders by standing step): one 4px bar, a segment per part in its tone, 2px apart. */
+.glass-parts { display: flex; gap: var(--space-2); width: 100%; height: 4px; margin-bottom: var(--space-4); }
+.glass-parts > i { flex: 0 1 0; min-width: 0; border-radius: var(--radius-2xs); background: var(--tone-marker, var(--color-faint)); }
+.glass-parts > i[style*='flex-grow: 0'] { display: none; }
+
+/* The funnel: six steps in a row (three on a phone), each its figure, its share of the sign-ups and a bar. 72px. */
+.glass-funnel { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--space-8); margin: 0; padding: 0; list-style: none; }
+@container (max-width: 699px) { .glass-funnel { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.glass-funnel > li { display: flex; flex-direction: column; justify-content: space-between; min-width: 0; height: 72px; padding: var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); }
+.glass-funnel__label { overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+.glass-funnel__figure { display: flex; align-items: baseline; gap: var(--space-8); height: 22px; font-family: var(--font-mono); font-size: var(--text-lg); line-height: var(--leading-lg); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.glass-funnel__share { color: var(--color-faint); font-size: var(--text-xs); }
+
+/* SES regions: a 40px row per pool region (at least GLASS_REGION_SLOTS), then the total. On a phone a region is three
+   lines: its name and rate, its states and when it was checked, its quota. */
+.glass-regions { display: flex; flex-direction: column; min-width: 0; }
+.glass-region { display: grid; grid-template-columns: minmax(150px, 1.3fr) 104px 104px 88px minmax(200px, 2.4fr) 96px; grid-template-areas: 'name sending receiving rate quota checked'; align-items: center; column-gap: var(--space-16); height: 40px; font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.glass-region > * { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass-region--head { height: 28px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.glass-region--head > :nth-child(1) { grid-area: name; } .glass-region--head > :nth-child(2) { grid-area: sending; } .glass-region--head > :nth-child(3) { grid-area: receiving; }
+.glass-region--head > :nth-child(4) { grid-area: rate; } .glass-region--head > :nth-child(5) { grid-area: quota; } .glass-region--head > :nth-child(6) { grid-area: checked; }
+.glass-region__name { grid-area: name; display: flex; align-items: baseline; gap: var(--space-8); }
+.glass-region__code { font-family: var(--font-mono); font-size: var(--text-xs); }
+.glass-region__place { overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); text-overflow: ellipsis; }
+.glass-region__sending { grid-area: sending; } .glass-region__receiving { grid-area: receiving; }
+.glass-region__rate { grid-area: rate; font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; }
+.glass-region__quota { grid-area: quota; position: relative; display: flex; align-items: center; gap: var(--space-8); height: 40px; font-family: var(--font-mono); font-size: var(--text-xs); }
+.glass-region__share { margin-left: auto; color: var(--color-muted); }
+.glass-region__quota > .ui-meter { position: absolute; inset: auto 0 8px; }
+.glass-region__checked { grid-area: checked; color: var(--color-muted); font-size: var(--text-xs); text-align: right; }
+.glass-region--total { color: var(--color-text); font-weight: var(--font-weight-medium); }
+.glass-region--total .glass-region__code { font-family: var(--font-body); font-size: var(--text-sm); }
+.glass-state { display: inline-flex; align-items: center; gap: var(--space-6); font-size: var(--text-xs); }
+.glass-state::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--tone-marker, var(--color-faint)); }
+.glass-state.ui-tone--neutral { color: var(--color-muted); }
+.glass-state.ui-tone--neutral::before { background: var(--color-layer-3, var(--color-faint)); }
+@container (max-width: 699px) {
+  .glass-region { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; grid-template-areas: 'name name rate' 'sending receiving checked' 'quota quota quota'; row-gap: 0; height: 92px; padding: var(--space-8) 0; }
+  .glass-region--head { display: none; }
+  .glass-region--total { grid-template-areas: 'name name rate' 'quota quota quota' 'quota quota quota'; }
+}
+
+/* Groups of 40px metric rows in as many columns as fit, one on a phone. A row is a label with a muted hint, a trend and
+   the figure; a slot with nothing in it keeps its row, its label faint. */
+.glass { --metric-spark: 72px; --metric-value: 112px; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); align-items: start; gap: var(--space-24) var(--space-32); min-width: 0; max-width: 100%; }
+.glass-group { display: flex; flex-direction: column; min-width: 0; }
+.glass-empty .ui-metric__label { color: var(--color-faint); }
+/* A long hint (an alert's words, a workspace) gives way before the label does; a label longer than its cell ends in an ellipsis. */
+.glass .ui-metric__label > span:first-child { flex-shrink: 0; max-width: 100%; }
+.glass .ui-metric__hint { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass-grades { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); align-items: center; height: var(--metric-height, 40px); }
+.glass-grades > span { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.glass-grades > span > span { color: var(--color-faint); font-size: var(--text-label); line-height: 12px; }
+.glass-grades b { height: 16px; font-family: var(--font-mono); font-size: var(--text-xs); font-weight: inherit; line-height: 16px; font-variant-numeric: tabular-nums; }
+/* A count that stopped at its cap: its tooltip says "more than"; hover or focus underlines it. */
+.glass-more { cursor: default; text-decoration: underline dotted transparent; text-underline-offset: 3px; }
+.glass-more:is(:hover, :focus-visible) { text-decoration-color: currentColor; }
+
+/* The activity feed: a well as tall as the window (less the header), kept in view while the board scrolls; its rows
+   scroll inside it. Each row is 52px, placed by a transform; a new one fades in at the top while the rest slide down. */
+.glass-feed { position: sticky; top: 0; display: flex; flex-direction: column; height: calc(100dvh - var(--topbar-height) - 96px); min-height: 480px; min-width: 0; border-radius: var(--radius-sm); background: var(--color-well); }
+.glass-feed__head { display: flex; flex: none; align-items: center; justify-content: space-between; height: 44px; padding: 0 var(--space-12); }
+.glass-feed__title { margin: 0; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); font-weight: 400; line-height: 14px; letter-spacing: var(--tracking-label); text-transform: uppercase; }
+.glass-feed__list { position: relative; flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.glass-feed__rows { position: relative; margin: 0; padding: 0; list-style: none; }
+.glass-feed__empty { margin: 0; padding: var(--space-12); color: var(--color-muted); font-size: var(--text-sm); }
+.glass-event { position: absolute; inset: 0 0 auto; height: 52px; transition: transform 360ms var(--ease-swap, ease); }
+.glass-event__link { display: grid; grid-template-columns: 28px minmax(0, 1fr) 40px; align-items: center; gap: var(--space-12); height: 100%; padding: 0 var(--space-12); color: inherit; text-decoration: none; }
+a.glass-event__link:focus-visible { background: var(--color-well-hover); text-decoration: none; }
+@media (hover: hover) and (pointer: fine) { a.glass-event__link:hover { background: var(--color-well-hover); } }
+.glass-event__icon { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--color-surface); color: var(--color-muted); }
+.glass-event__icon[class*='ui-tone--']:not(.ui-tone--neutral) { color: var(--tone-ink); }
+.glass-event__text { display: flex; flex-direction: column; gap: var(--space-4); min-width: 0; }
+.glass-event__title, .glass-event__detail { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass-event__title { font-size: var(--text-sm); line-height: 18px; }
+.glass-event__title b { font-weight: var(--font-weight-medium); }
+.glass-event__detail { color: var(--color-faint); font-size: var(--text-xs); line-height: 16px; }
+.glass-event__detail .private-address { display: inline-flex; max-width: 100%; vertical-align: bottom; }
+.glass-event__time { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-variant-numeric: tabular-nums; text-align: right; }
+.glass-event[data-fresh] .glass-event__link { animation: glass-event-in 600ms var(--ease-swap, ease) both; }
+@keyframes glass-event-in { from { opacity: 0; transform: translateY(-6px); background: var(--color-well-hover); } 40% { opacity: 1; transform: none; background: var(--color-well-hover); } to { opacity: 1; transform: none; background: transparent; } }
+
+/* A text-tall placeholder (skeletons.tsx SkeletonLine). */
+.glass-skel-line { display: inline-flex; align-items: center; height: 1lh; vertical-align: top; }
+/* Glass's two views: Live and Deliverability, tabs under the page header. */
+.glass-views { margin: 0 0 var(--space-16); }
+/* A fixed note in a group: the same words loading and loaded, so the same height. */
+.glass-note { margin: 0; padding-top: var(--space-8); color: var(--color-faint); font-size: var(--text-xs); line-height: 16px; }
+.glass-link { display: inline-flex; align-items: center; gap: var(--space-4); color: var(--color-text); font-family: var(--font-body); font-size: var(--text-xs); text-decoration: none; }
+.glass-link:is(:hover, :focus-visible) { text-decoration: underline; text-underline-offset: 3px; }
+.glass-ws { color: inherit; font-family: var(--font-mono); font-size: var(--text-xs); text-decoration: none; }
+.glass-ws:is(:hover, :focus-visible) { text-decoration: underline; text-underline-offset: 3px; }
+
+/* Deliverability (deliverability.tsx): the control strip, eight tiles (four to a row, all eight from 1500 px of column,
+   two on a phone), the providers' table, groups of rows and Amazon VDM's table. Full width; every block a fixed size.
+   A period on its way keeps the last figures, dimmed. */
+.dlv { display: flex; flex-direction: column; gap: var(--space-24); min-width: 0; padding-bottom: var(--space-24); container-type: inline-size; }
+.dlv[data-stale] :is(.glass-tiles, .dlv-table, .glass) { opacity: .55; transition: opacity 200ms var(--ease-swap, ease); }
+.dlv-controls { display: flex; align-items: center; gap: var(--space-16); height: 36px; min-width: 0; }
+.dlv-controls > .ui-tabs { flex: none; }
+.ui-select-trigger.dlv-region, .dlv-region { flex: none; width: 224px; }
+.dlv-note { display: flex; flex: 1 1 0; align-items: center; height: 20px; min-width: 0; color: var(--color-faint); font-size: var(--text-xs); line-height: 20px; }
+.dlv-note > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.glass-tiles.dlv-tiles { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+@container (min-width: 1500px) { .glass-tiles.dlv-tiles { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
+@container (max-width: 559px) { .glass-tiles.dlv-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); } .dlv .glass-tile__head { letter-spacing: 0; } .dlv .glass-tile__figure { font-size: var(--text-figure); } }
+.dlv-status { display: -webkit-box; height: 32px; margin: 0 0 var(--space-8); overflow: hidden; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+
+/* A table of 40px rows, figures right-aligned in mono; no rules. On a phone each row is a card: the name, then the
+   figures under their labels, five (VDM: four) to a line. */
+.dlv-table { display: flex; flex-direction: column; min-width: 0; }
+.dlv-row { display: grid; align-items: center; column-gap: var(--space-12); height: 40px; padding: 0 var(--space-8); border-radius: var(--radius-sm); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.dlv-table--providers .dlv-row { grid-template-columns: minmax(104px, 1.2fr) repeat(10, minmax(56px, 1fr)); }
+.dlv-table--vdm .dlv-row { grid-template-columns: minmax(112px, 1.4fr) repeat(7, minmax(64px, 1fr)); }
+.dlv-row > * { height: 20px; min-width: 0; overflow: hidden; line-height: 20px; text-overflow: ellipsis; white-space: nowrap; }
+.dlv-row > :not(:first-child) { font-family: var(--font-mono); font-size: var(--text-xs); text-align: right; }
+.dlv-row > [class*='ui-tone--']:not(.ui-tone--neutral) { color: var(--tone-ink); }
+.dlv-row--head { height: 28px; color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); letter-spacing: .02em; text-transform: uppercase; }
+.dlv-row--head > :not(:first-child) { font-size: var(--text-label); }
+.dlv-row:not(.dlv-row--head):nth-child(even) { background: var(--color-well); }
+.dlv-row.glass-empty > * { color: var(--color-faint); }
+@container (max-width: 759px) {
+  .dlv-controls { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-8) var(--space-12); height: auto; align-items: center; }
+  .dlv-controls > .ui-tabs { grid-column: 1 / -1; }
+  .dlv-note { justify-content: flex-start; }
+  .ui-select-trigger.dlv-region, .dlv-region { width: 176px; }
+  .dlv-row--head { display: none; }
+  .dlv-row { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; grid-auto-rows: auto; align-items: start; row-gap: var(--space-8); height: auto; padding: var(--space-8); }
+  .dlv-table--vdm .dlv-row { grid-template-columns: repeat(4, minmax(0, 1fr)) !important; }
+  .dlv-row > :first-child { grid-column: 1 / -1; height: 20px; font-weight: var(--font-weight-medium); }
+  .dlv-row > :not(:first-child) { display: flex; flex-direction: column; gap: var(--space-2, 2px); height: auto; line-height: 16px; text-align: left; white-space: normal; }
+  .dlv-row > :not(:first-child)::before { content: attr(data-label); color: var(--color-faint); font-family: var(--font-body); font-size: var(--text-label); text-transform: none; }
+  .dlv-table--providers .dlv-row > [data-col='change'] { display: none; }
+}
+
+/* Live: the clock of the last read beside a dot that breathes; a stalled refresh turns it the warning colour. */
+.glass-asof { display: inline-flex; align-items: center; gap: var(--space-8); min-width: 120px; justify-content: flex-end; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+.glass-asof__dot { width: 6px; height: 6px; border-radius: 50%; background: var(--color-faint); }
+.glass-asof[data-state='live'] .glass-asof__dot { background: var(--color-success); animation: glass-breathe 2.4s ease-in-out infinite; }
+.glass-asof[data-state='stalled'] .glass-asof__dot { background: var(--color-warning); }
+@keyframes glass-breathe { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) {
+  .glass-event { transition: none; }
+  .glass-event[data-fresh] .glass-event__link, .glass-asof[data-state='live'] .glass-asof__dot { animation: none; }
+}
+/* Narrow: one column, the feed last, its newest 12 rows in a box of their own height. */
+@media (max-width: 1100px) {
+  .glass-board { grid-template-columns: minmax(0, 1fr); }
+  .glass-feed { position: static; height: auto; min-height: 0; }
+  .glass-feed__list { flex: none; height: calc(12 * 52px); overflow: hidden; }
+}
 
 @media (max-width: 1200px) { .op-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .op-grid { grid-template-columns: minmax(0, 1fr); gap: var(--page-gap); } }
 @media (max-width: 640px) {
   .op-key-form { grid-template-columns: minmax(0, 1fr); }
   .op-note-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .op-facts, .op-facts.op-facts--four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-16); }
+  .op-facts, .op-facts.op-facts--four { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-8); }
   .op-rows > div { grid-template-columns: 112px minmax(0, 1fr); }
   .data-toolbar.op-waitlist-tools { flex-wrap: nowrap; gap: var(--space-8); }
   .data-toolbar.op-waitlist-tools > .cluster { flex: 1 1 auto; width: auto; }

@@ -1,6 +1,7 @@
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, type Runtime } from './core.js';
 import { log, logError } from './core.js';
+import { logAnalyticsFailure } from './analytics-traffic.js';
 import { campaignActive } from './states.js';
 import { expireDomainClaims } from './operations.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -283,6 +284,8 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('nightmail_waitlist', 'nightmail_waitlist', at('last_at'), sql`last_at < now() - interval '1 year'`),
     // A sign-in link (migration 466) works 30 minutes; its row is kept a day, for the daily count per address.
     expired('nightmail_signin_links', 'nightmail_signin_links', at('created_at'), sql`created_at < now() - interval '1 day'`),
+    // Agent setup tokens and device codes (migration 469) work 15 minutes; a row is kept a day past that, then removed.
+    expired('agent_setups', 'agent_setups', at('expires_at'), sql`expires_at < now() - interval '1 day'`),
     ...['auth_state_slots', 'nightmail_dpop_proofs', 'nightmail_sessions', 'nightmail_login_flows'].map(table => expired(table, table, at('expires_at'), sql`expires_at <= now()`)),
     // Eight routing versions a year old per statement (migration 124).
     { name: 'mail_routing_versions', size: 8, oldest: sql`SELECT min(created_at) FROM mail_routing_versions WHERE created_at<now()-interval '1 year'`, statement: () => sql`SELECT mail_prune_route_versions() AS n` },
@@ -673,12 +676,21 @@ export async function hourlyUpkeep(runtime: Runtime, mailboxRuntime: () => Promi
     ['SENDING_TALLIES_RECOUNT_FAILED', async () => { await recountSendingTallies(runtime); }],
     // The daily exact recount of every list's counts.
     ['AUDIENCE_LIST_RECOUNT_FAILED', async () => { await recountLists(runtime); }],
+    // List hygiene: classify contacts created before it, and every contact again for a new list or new bounces elsewhere.
+    // List hygiene: the open lists once a day, the domain checks waiting (a bounded slice), then the contacts.
+    ['HYGIENE_LISTS_SYNC_FAILED', async () => { await (await import('./list-hygiene.js')).syncHygieneLists(runtime); }],
+    ['HYGIENE_DOMAINS_FAILED', async () => { await (await import('./list-hygiene.js')).resolvePendingDomains(runtime, 30_000); }],
+    ['AUDIENCE_HYGIENE_FAILED', async () => { await (await import('./list-hygiene.js')).classifyContacts(runtime); }],
     // The sign-ups list: contacts whose address got in by an invitation or staff since (src/signups.ts).
     ['SIGNUPS_RECONCILE_FAILED', async () => { await (await import('./signups.js')).queueSignupsReconcile(runtime); }],
     ['MAINTENANCE_CLEANUP_FAILED', () => cleanup(runtime)],
   ] as const) {
     try { await step(); } catch (error) {
       failed.push(code);
+      if (code === 'ANALYTICS_COMPACT_FAILED') {
+        logAnalyticsFailure(error, code, { step: code });
+        continue;
+      }
       const tables = (error as { tables?: unknown } | null)?.tables;
       log('warn', { code: error instanceof ApiError ? error.code : code, step: code, ...(Array.isArray(tables) ? { tables } : {}) });
     }

@@ -88,6 +88,21 @@ export function selectAccount(id: string | null) {
   if ((previousAccount !== null && accountSelection !== previousAccount) || (previousWorkspace !== null && workspaceSelection !== previousWorkspace)) bumpScope()
   try { if (id) sessionStorage.setItem(accountStorageKey, id); else sessionStorage.removeItem(accountStorageKey) } catch { /* Selection can remain in memory. */ }
 }
+// Whether this browser has a dashboard session, as far as a page can tell without asking (its cookies are httpOnly): 'in'
+// after an expected sign-in return or a successful /v1/me, 'out' after it last said signed out, and before either,
+// a remembered dashboard or account. The hint never authorizes a request.
+// The public pages ask /v1/me only where a session is likely. public/theme.js reads the same keys for its early fetch.
+const sessionHintKey = 'nightmail.session'
+export function rememberSession(signedIn: boolean) { try { localStorage.setItem(sessionHintKey, signedIn ? 'in' : 'out') } catch { /* The tab can still know its account. */ } }
+export function sessionLikely() {
+  try {
+    const hint = localStorage.getItem(sessionHintKey)
+    return hint === 'in' || (hint === null && (localStorage.getItem('nightmail.dashboard-ready') !== null || sessionStorage.getItem(accountStorageKey) !== null))
+  } catch { return selectedAccount() !== null }
+}
+/** Pages a visitor can read without an account. A query string isn't evidence of a session. */
+export const asksOnlyIfLikely = (path: string) => path === '/' || /^\/pricing\/?$/.test(path) || /^\/(?:docs|compare|legal)(?:\/|$)/.test(path)
+
 /** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
  *  other request carries, so the API reads them from the query for its sockets (the campaign room). */
 export function socketUrl(path: string, query: Record<string, string> = {}) {
@@ -193,7 +208,7 @@ export async function request<T = Json>(path: string, options: { method?: string
   analytics().apiResult(options.method ?? 'GET', path, data)
   return data as T
 }
-const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, suppressionReason: r.suppressionReason ?? undefined } as Contact)
+const mapContact = (r: Json): Contact => ({ ...r, name: r.name ?? '', country: typeof r.properties?.country === 'string' ? r.properties.country : '', status: r.suppressed ? 'suppressed' : r.marketingConsent, listIds: r.listIds ?? [], lastOpenedAt: r.lastOpenAt, suppressionReason: r.suppressionReason ?? undefined, risk: r.risk ?? null } as Contact)
 const mapList = (r: Json): AudienceList => ({ ...r, total: r.counts?.total, subscribed: r.counts?.subscribed, unsubscribed: r.counts?.unsubscribed, suppressed: r.counts?.suppressed, unknown: r.counts?.unknown } as AudienceList)
 const mapSegment = (r: Json) => r as Segment
 const mapCampaign = (r: Json): Campaign => ({ ...r, id: r.id, status: r.state, delivery: r.delivery ?? null, createdAt: r.createdAt, updatedAt: r.updatedAt, scheduledAt: r.scheduledAt, archivedAt: r.archivedAt ?? null, revision: r.revision, draft: r.draft, regionId: r.draft.region, name: r.draft.name, fromEmail: r.draft.from ?? '', fromName: r.draft.fromName ?? '', replyTo: r.draft.replyTo ?? [], unsubscribePageUrl: r.draft.unsubscribePageUrl ?? '', requiredNotice: r.draft.requiredNotice === true, subject: r.draft.subject ?? '', previewText: r.draft.previewText ?? '', html: r.draft.html ?? '', listId: r.draft.audience?.listId ?? '', segmentId: r.draft.audience?.segmentId ?? null, attachments: r.draft.attachments ?? [], recipients: r.delivery?.total ?? r.counts?.total, delivered: r.counts?.byStatus?.delivered, bounced: r.counts?.byStatus?.bounced, complaints: r.counts?.byStatus?.complained })
@@ -279,25 +294,34 @@ export function createLiveApi(scope?: RequestScope): Api {
       settings: signal => call<WorkspaceSettings>('/settings/workspace', 'GET', undefined, signal), updateSettings: (input, signal) => call<WorkspaceSettings>('/settings/workspace', 'PATCH', input, signal) },
     senderScore: { get: signal => call<SenderScore>('/sender-score', 'GET', undefined, signal), release: (input, signal) => call<SenderScore>('/sender-score/release', 'POST', input, signal) },
     overview: { get: async (input, signal) => {
-      const end = new Date(), start = new Date(end.getTime() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000)
-      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: start.toISOString(), to: end.toISOString() })
+      // The window ends at the API's now, not this device's: a browser clock ahead of the server can't send a start after
+      // the end, and the chart below is laid out from the from/to the API answers with.
+      const params = new URLSearchParams({ ...(input.regionId ? { region: input.regionId } : {}), from: new Date(Date.now() - ({ '24h': 1, '7d': 7, '30d': 30 }[input.range]) * 86400000).toISOString() })
       if (input.stream) params.set('stream', input.stream)
-      const hourly = input.range !== '30d'
+      // 24h uses 10-minute buckets (sending_metrics_ten_minute); 7d uses 1-hour and 30d folds 1-hour into 4-hour
+      // buckets (sending_metrics_hourly), keeping every range around 144–180 points with zero raw table scans.
+      const granularity = input.range === '24h' ? '10m' : 'hour'
+      const step = input.range === '24h' ? 600_000 : input.range === '7d' ? 3_600_000 : 4 * 3_600_000
       // One request returns the chart buckets and the previous period's totals.
-      const chartParams = new URLSearchParams(params); chartParams.set('granularity', hourly ? 'hour' : 'day'); chartParams.set('include', 'previous')
+      const chartParams = new URLSearchParams(params); chartParams.set('granularity', granularity); chartParams.set('include', 'previous')
       const metrics = await call(`/metrics?${chartParams}`, 'GET', undefined, signal)
       if (!metrics.previous) throw new ApiError('The API did not return the previous period’s totals.', 'INVALID_RESPONSE')
       // The public created-cohort contract defines absent UTC buckets as no emails.
       // Fill that known absence across the selected interval, not across guessed history.
-      const buckets = hourly ? metrics.hourly : metrics.daily
+      const buckets = granularity === '10m' ? metrics.tenMinute : metrics.hourly
       if (!Array.isArray(buckets)) throw new ApiError('The API did not return the requested chart buckets.', 'INVALID_RESPONSE')
-      const series = new Map<number, Json>(buckets.map((row: Json) => [Date.parse(row.date), row]))
-      const step = hourly ? 3600000 : 86400000
+      const series = new Map<number, { sent: number; delivered: number; bounced: number; complaints: number }>()
+      for (const row of buckets as Json[]) {
+        const key = Math.floor(Date.parse(row.date) / step) * step
+        const acc = series.get(key) ?? { sent: 0, delivered: 0, bounced: 0, complaints: 0 }
+        acc.sent += row.count ?? 0; acc.delivered += row.delivered ?? 0; acc.bounced += row.bounced ?? 0; acc.complaints += row.complained ?? 0
+        series.set(key, acc)
+      }
       const startAt = Math.floor(Date.parse(metrics.from) / step) * step, endAt = Date.parse(metrics.to)
       const points = []
       for (let bucket = startAt; bucket < endAt; bucket += step) {
         const at = new Date(bucket).toISOString(), row = series.get(bucket)
-        points.push({at, sent: row?.count ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complained ?? 0})
+        points.push({ at, sent: row?.sent ?? 0, delivered: row?.delivered ?? 0, bounced: row?.bounced ?? 0, complaints: row?.complaints ?? 0 })
       }
       return { periodStart: metrics.from, periodEnd: metrics.to, sent: metrics.totals.emails, delivered: metrics.totals.delivered, bounced: metrics.totals.bounced, complaints: metrics.totals.complained, deferred: metrics.totals.deliveryDelayed, previousSent: metrics.previous.totals.emails, points }
     },
@@ -348,10 +372,10 @@ export function createLiveApi(scope?: RequestScope): Api {
       },
       audience: async (input, signal) => ({ ...await call(`/campaigns/${idPath(input.id)}/audience`, 'GET', undefined, signal), contacts: [] }),
       reviewDisplay: (id, revision, check, signal) => call<import('./types').CampaignReviewDisplay>(
-        `/campaigns/${idPath(id)}/review-display?${new URLSearchParams({ revision: String(revision), check: String(check) })}`, 'GET', undefined, signal),
+        `/campaigns/${idPath(id)}/review-display?${new URLSearchParams({ revision: String(revision), check: String(check), readiness: 'true' })}`, 'GET', undefined, signal),
       send: async (input, signal) => {
         if (!input.revision) throw new ApiError('Reload this campaign before sending.', 'REVISION_REQUIRED')
-        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {}), ...(input.confirmRequiredNotice ? {confirmRequiredNotice: true} : {})}, signal)
+        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {}), ...(input.consent ? {consent: input.consent} : {}), ...(input.confirmRequiredNotice ? {confirmRequiredNotice: true} : {})}, signal)
         return receipt as import('./types').CampaignSendReceipt
       },
       pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),
@@ -376,7 +400,7 @@ export function createLiveApi(scope?: RequestScope): Api {
       remove: async id => { await call(`/template-assets/${idPath(id)}`, 'DELETE') },
     },
     contacts: {
-      list: (input, signal) => page('/contacts', input, mapContact, {email: input.email, search: input.search, listId: input.listId, ...(input.status === 'suppressed' ? {suppressed: true} : input.status ? {consent: input.status, suppressed: false} : {})}, signal),
+      list: (input, signal) => page('/contacts', input, mapContact, {email: input.email, search: input.search, listId: input.listId, ...(input.status === 'suppressed' ? {suppressed: true} : input.status === 'risky' ? {risky: true, suppressed: false} : input.status ? {consent: input.status, suppressed: false} : {})}, signal),
       get: getContact,
       save: async (input, signal) => {
         const current = input.id ? await call(`/contacts/${idPath(input.id)}`, 'GET', undefined, signal) : null
@@ -389,6 +413,7 @@ export function createLiveApi(scope?: RequestScope): Api {
         for (const listId of removed) await call(`/lists/${idPath(listId)}/members/${idPath(result.id)}`, 'DELETE', undefined, signal)
         return added.length || removed.length ? getContact(result.id, signal) : mapContact({ ...result, listIds: oldLists })
       },
+      allowRisk: async (id, allowed, signal) => mapContact(await call(`/contacts/${idPath(id)}`, 'PATCH', {riskAllowed: allowed}, signal)),
     },
     consent: async (id, input) => mapContact(await call(`/contacts/${idPath(id)}/consent`, 'POST', input)),
     imports: { preview: (input, signal) => call<any>('/contact-imports', 'POST', input, signal), commit: (id, input, signal) => call<any>(`/contact-imports/${idPath(id)}/commit`, 'POST', input?.consent ? input : undefined, signal) },

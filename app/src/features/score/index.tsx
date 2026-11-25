@@ -8,41 +8,48 @@ import { number, shortDateTime } from '../../lib/format'
 import { openScoreAbout } from '../../lib/score-about'
 import { standingTitle, standingTone, stepAtLeast, type RaisedStep } from '../../lib/standing'
 import { useTween } from '../../components/motion'
-import { Dial } from './gauge'
-import { evaluationLeft, ScoreAbout } from './about'
+import { evaluationLeft, ScoreAbout, scoreMove } from './about'
 import { productName } from '../../../../api/src/brand'
 export { factorFormats } from './about'
 import './score.css'
 export { StandingCard } from './standing'
 
-// The sender score, from GET /v1/sender-score: one 56px card on every page (the sidebar's; Overview shows it too where
+// The sender score, from GET /v1/sender-score: one 64px card on every page (the sidebar's; Overview shows it too where
 // the sidebar isn't on screen), which keeps one height in every state, so nothing shifts when it loads. It opens the
 // explainer (./about.tsx): the breakdown, the trend, the limit the score sets and how it is graded.
 export function useSenderScore() { return useApiDef(queries.senderScore(), { interval: 60_000 }) }
 const whole = (value: number) => Math.round(value)
-// Before the first grade there is no score to show: a dash beside the dial's progress, never a 0 that reads as a bad grade.
+// Before the first grade there is no score to show: a dash and the progress to it, never a 0 that reads as a bad grade.
 const progressLabel = (report: SenderScore) => `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails. ${evaluationLeft(report)}`
+// The card counts down to the first grade, so its number never reads as a cap on sending (the daily limit is Overview's).
+function toGrade(report: SenderScore) {
+  const left = report.needed - report.emails.firstEmails
+  return left > 0 ? `${number(left)} ${left === 1 ? 'email' : 'emails'} to a grade` : 'Grading soon'
+}
 
 export function SidebarScore() {
   const { data: report, isError } = useSenderScore()
   const shown = useTween(!report ? undefined : report.state === 'graded' ? report.score ?? 0 : 0)
-  // A failed read keeps the card's frame with a dash, instead of an empty box; the explainer it opens has the error and Retry.
-  if (!report && isError) return <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label="Sender score unavailable. About the sender score"><span className="gauge-stack"><span className="gauge-eyebrow">Sender score</span><span className="gauge-readout"><b>—</b></span></span></button>
-  if (!report) return <div className="gauge-card gauge-card--compact" aria-hidden="true"><span className="gauge-skeleton" /></div>
+  // A failed read keeps the card with a dash, instead of an empty box; the explainer it opens has the error and Retry.
+  if (!report && isError) return <button type="button" onClick={() => openScoreAbout()} className="score-card" aria-label="Sender score unavailable. About the sender score"><span className="score-card__label">Sender score</span><span className="score-card__row"><span className="score-card__figure"><b>—</b></span></span></button>
+  if (!report) return <div className="score-card" data-loading aria-hidden="true" />
   const graded = report.state === 'graded'
   // A dot from Warn up, and the card then goes to Overview's standing card; otherwise it opens the explainer.
   const raised = stepAtLeast(report.standing?.step, 'warn') ? report.standing!.step as RaisedStep : null
   const label = (graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Sender score not graded yet: ${progressLabel(report)}`) + (raised ? `. ${standingTitle[raised]}` : '. About the sender score')
+  const note = graded ? scoreMove(report) : toGrade(report)
+  // The tile takes the score's colour as the number moves (score.css): the tweened value, not the final one.
+  const props = { className: 'score-card', 'data-scored': graded || undefined, style: graded ? { '--score': shown } as CSSProperties : undefined, 'aria-label': label }
   const inner = <>
-    {raised && <span className={`gauge-alert ui-tone--${standingTone(raised)}`} aria-hidden="true" />}
-    <Dial report={report} />
-    <span className="gauge-stack">
-      <span className="gauge-eyebrow">Sender score</span>
-      <span className="gauge-readout">{graded ? <><b>{whole(shown)}</b><span className="gauge-grade">{report.grade}</span></> : <b>—</b>}</span>
+    {raised && <span className={`score-card__alert ui-tone--${standingTone(raised)}`} aria-hidden="true" />}
+    <span className="score-card__label">Sender score</span>
+    <span className="score-card__row">
+      <span className="score-card__figure">{graded ? <><b>{whole(shown)}</b><span className="score-card__grade">{report.grade}</span></> : <b>—</b>}</span>
+      {note && <span className="score-card__note">{note}</span>}
     </span>
   </>
-  return raised ? <Link to="/overview#standing" className="gauge-card gauge-card--compact" aria-label={label}>{inner}</Link>
-    : <button type="button" onClick={() => openScoreAbout()} className="gauge-card gauge-card--compact" aria-label={label} title={graded ? undefined : `Not graded yet: ${progressLabel(report)}`}>{inner}</button>
+  return raised ? <Link to="/overview#standing" {...props}>{inner}</Link>
+    : <button type="button" onClick={() => openScoreAbout()} {...props} title={graded ? undefined : `Not graded yet: ${progressLabel(report)}`}>{inner}</button>
 }
 /** The explainer, mounted once by the shell: the same cached score as every other view of it. */
 export function ScoreAboutHost() {

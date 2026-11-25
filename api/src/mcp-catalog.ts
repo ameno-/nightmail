@@ -234,7 +234,7 @@ const INBOX_PERMISSIONS: Record<string, McpOperation['inbox']> = {
 };
 /** Better descriptions for directly published receiving tools, where the operation summary alone is thin. */
 const DESCRIPTIONS: Record<string, string> = {
-  updateWorkspaceSettings: 'Rename the workspace or set its postal address (plain text, up to 6 lines and 300 characters, no HTML; null removes it). Every campaign email and marketing send shows the address under Unsubscribe, as US law (CAN-SPAM) requires; sendCampaign and scheduleCampaign refuse with POSTAL_ADDRESS_REQUIRED until it is set. Confirm the exact address with the user.',
+  updateWorkspaceSettings: 'Rename the workspace, set its focus (marketing, newsletter, developer, agents; the first leads) or its postal address (plain text, up to 6 lines and 300 characters, no HTML; null removes it). Campaigns and marketing sends show the address under Unsubscribe (CAN-SPAM); sendCampaign and scheduleCampaign refuse with POSTAL_ADDRESS_REQUIRED until it is set. Confirm the address with the user.',
   createNewsletter: 'Make a newsletter: a contact list with a sender. Pass name to create a new list, or listId to make an existing list one. Its issues are ordinary campaigns to that list: createCampaign with audience.listId set to the newsletter ID, then test and send it as any campaign. There are no issue operations.',
   getNewsletter: 'Read a newsletter (a contact list with a sender) and its readers: subscribed, unsuppressed members, with how many joined each day for 182 days. Its issues are the campaigns to its list: listCampaigns with listId.',
   deleteNewsletter: 'Stop a list being a newsletter. The list, its contacts and its campaigns stay; deleteContactList deletes the list itself.',
@@ -402,6 +402,14 @@ export const HUMAN_STEPS: Record<string, string> = {
   completeDomainDnsSetup: 'Human step: the DNS provider redirects the person’s browser back.',
   sendDomainTestEmail: 'Human step: sends only to the signed-in person’s own address. Agents use sendEmail.',
   contactSupport: `Human step: a signed-in person contacts ${productName} support from the dashboard.`,
+  createAgentSetupToken: 'Human step: the dashboard mints it when an owner or admin copies the agent prompt.',
+  getAgentSetupToken: 'Dashboard step: shows the person who copied the prompt that their agent connected.',
+  exchangeAgentSetupToken: 'An agent without credentials exchanges the setup token in its prompt for an API key, over HTTP; with the key it connects here.',
+  startAgentDeviceAuthorization: 'An agent without credentials starts the device flow over HTTP; a person approves at /connect.',
+  pollAgentDeviceToken: 'The device flow’s poll, over HTTP, until the person approves; it returns the agent’s API key.',
+  lookUpAgentDevice: 'Human step: the /connect page shows a signed-in person the agent behind a code.',
+  approveAgentDevice: 'Human step: a signed-in owner or admin approves an agent’s code at /connect.',
+  denyAgentDevice: 'Human step: a signed-in person denies an agent’s code at /connect.',
   createBillingTopUp: 'Human step: only a signed-in owner or admin charges the saved card or opens Checkout from the dashboard. Agents create a link a person pays (billing · topUpLink).',
   updateBillingAutoRecharge: 'Human step: auto-recharge spends from the saved card, so only a signed-in owner or admin sets it in the dashboard.',
   createBillingCardSetup: `Human step: a person saves a card in Stripe Checkout from the dashboard; card details never reach ${productName} or an agent.`,

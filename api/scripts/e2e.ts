@@ -1,8 +1,9 @@
-// Public client only: no database, dashboard session, provider credentials or test-mode shortcuts.
+// Exercise the public client with no dashboard session. The dev fixture reads SES quota; a
+// quota-limited run uses an explicitly simulated inbox message for storage checks, never as proof of delivery.
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile, execFileSync } from 'node:child_process';
-import { appendFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendFileSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { assertResponse, contract } from './e2e-contract.js';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -44,7 +45,7 @@ const safeModeSkips: Partial<Record<Op, string>> = {
   addReceivingHost: hostChange, updateReceivingHost: hostChange, removeReceivingHost: hostChange,
   refreshConnectionScan: byoV2, importConnectionDomains: byoV2, getConnectionRegionStatus: byoV2, requestConnectionProductionAccess: byoV2, updateConnectionStack: byoV2,
 };
-const destructive = process.env.BANE_E2E_ALLOW_DESTRUCTIVE === '1';
+const destructive = (process.env.NIGHTMAIL_E2E_ALLOW_DESTRUCTIVE ?? process.env.BANE_E2E_ALLOW_DESTRUCTIVE) === '1';
 const SKIP: Partial<Record<Op,string>> = destructive ? {
   createWorkspace: 'OIDC dashboard only; no public delete for a newly created workspace.',
   createConnection: 'Would replace or reconfigure the sole shared Hosted connection; happy path requires a dashboard owner.',
@@ -138,13 +139,13 @@ Object.assign(SKIP, {
 const started = Date.now();
 const prefix = `e2e-${started}-${randomUUID().slice(0, 12)}`;
 // Workflows supply the verified domain and ID for their own installation.
-const setting = (suffix: string) => process.env[`BANE_E2E_${suffix}`] ?? process.env[`OPENSEND_E2E_${suffix}`];
+const setting = (suffix: string) => process.env[`NIGHTMAIL_E2E_${suffix}`] ?? process.env[`BANE_E2E_${suffix}`] ?? process.env[`OPENSEND_E2E_${suffix}`];
 const domain = setting('DOMAIN') ?? 'e2e.bane.mx', domainId = setting('DOMAIN_ID') ?? 'dom_1aa89a5a687348e89699f5cd97f5496b', region = setting('REGION') ?? 'us-east-2';
 const from = `${prefix}@${domain}`, inbox = `${prefix}-in@${domain}`;
 // SES supports +labels on all three mailboxes. Never reuse a real contact or retained suppression.
 const simulator = (kind: 'success' | 'bounce' | 'complaint', label = '') => `${kind}+${prefix}${label}@simulator.amazonses.com`;
 const success = simulator('success'), singleSuccess = simulator('success', '-single'), bounce = simulator('bounce'), complaint = simulator('complaint');
-const subject = `Bane E2E ${prefix}`, text = `Bane delivery check ${prefix}.`;
+const subject = `Nightmail E2E ${prefix}`, text = `Nightmail delivery check ${prefix}.`;
 const html = `<p>${text}</p>`;
 // Synthetic: the E2E workspace's postal address, which its campaigns' footers show.
 const E2E_POSTAL_ADDRESS = 'Nightmail E2E\n1 Fixture Way\nTest City, CA 94000';
@@ -161,7 +162,17 @@ const successResponses = new Set<Op>();
 const errorResponses = new Set<Op>();
 const providerAccepted = new Set<string>();
 let sendBudget = 0;
-type Step = { name: string; operationIds: Op[]; status: 'pass' | 'fail'; ms: number; requestId?: string | null; error?: string };
+type Step = { name: string; operationIds: Op[]; status: 'pass' | 'fail' | 'skip'; ms: number; requestId?: string | null; error?: string; reason?: string };
+class DevSandboxQuotaSkip extends Error { constructor() { super('dev SES sandbox quota exhausted'); } }
+let quota: Awaited<ReturnType<typeof import('./dev-e2e-fixture.js').devSandboxSendPreflight>> = [];
+const quotaExhausted = () => quota.some(q => q.exhausted);
+// Only operations that belong to a deliberately skipped live step may be missing from coverage.
+const quotaSkippedOps = new Set<Op>();
+function requireSendCapacity(...ops: Op[]) {
+  if (!quotaExhausted()) return;
+  for (const op of ops) quotaSkippedOps.add(op);
+  throw new DevSandboxQuotaSkip();
+}
 const steps: Step[] = [];
 const ctx = new AsyncLocalStorage<{ last?: string; requestId: string | null; ops: Set<Op> }>();
 const cleanups: { name: string; fn: () => Promise<unknown> }[] = [];
@@ -237,6 +248,11 @@ async function step<T>(name: string, work: () => Promise<T>) {
       console.log(`✓ ${name} (${Date.now() - start} ms)`);
       return result;
     } catch (error) {
+      if (error instanceof DevSandboxQuotaSkip) {
+        steps.push({ name, operationIds: [...trace.ops], status: 'skip', ms: Date.now() - start, requestId: trace.requestId, reason: error.message });
+        console.log(`↷ ${name}: ${error.message}`);
+        return;
+      }
       failures++;
       const message = error instanceof Error ? error.message : 'unexpected failure';
       steps.push({ name, operationIds: [...trace.ops], status: 'fail', ms: Date.now() - start, requestId: trace.requestId, error: `${ctx.getStore()?.last ?? 'local'}: ${message}` });
@@ -319,6 +335,16 @@ async function devBoundaries() {
   await denied('bindMcpConnection',{path:fake,body:{workspaceId:prefix,receiving:false}});
   await denied('createAgentToken',{body:{permissions:['read'], domains:[domain], expiresInSeconds:30, purpose:prefix}},403,'MCP_AUTHORIZATION_REQUIRED');
   await denied('revokeAgentToken',{path:fake},404,'NOT_FOUND');
+  // Agent setup: an agent's side runs live without approving anything; minting and deciding are a signed-in person's.
+  await step('exchangeAgentSetupToken: refuses a token it never issued',()=>expectDenial(()=>api('exchangeAgentSetupToken',{body:{token:`${secretPrefixes.agentSetup}${'0'.repeat(32)}.${'0'.repeat(64)}`}}),400,'SETUP_TOKEN_INVALID'));
+  await step('startAgentDeviceAuthorization: a device code waits for a person',async()=>{
+    const started=await api('startAgentDeviceAuthorization',{body:{client_name:prefix}});
+    check(/^[A-Z]{4}-[A-Z]{4}$/.test(started.user_code)&&started.verification_uri_complete===`${started.verification_uri}?code=${started.user_code}`&&started.interval>=1,'unexpected device authorization');
+    await expectDenial(()=>api('pollAgentDeviceToken',{body:{device_code:started.device_code}}),400,'AUTHORIZATION_PENDING');
+  });
+  await denied('createAgentSetupToken',{});
+  await denied('getAgentSetupToken',{path:fake});
+  for (const op of ['lookUpAgentDevice','approveAgentDevice','denyAgentDevice'] as const) await denied(op,{body:{userCode:'BCDF-GHJK'}});
   for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');
   await denied('verifyConnection',{body:{awsAccountId:'000000000000'}},403,'PERMISSION_DENIED');
   await denied('importConnectionDomains',{body:{revision:1,candidateIds:[prefix],confirm:true}},403,'PERMISSION_DENIED');
@@ -348,14 +374,6 @@ async function devBoundaries() {
   await denied('createContact',{body:{email:'not-an-email'}},422,'VALIDATION_FAILED');
 }
 
-async function regionalSend() {
-  const va = 'e2e-va.bane.mx', sendRegion = 'us-east-1', sender = `${prefix}@${va}`, to = simulator('success','-va');
-  const page = await api('listDomains',{query:{region:sendRegion,refresh:'false',limit:10}});
-  check(page.data.some(d => d.name === va && d.region === sendRegion && d.ready),'Virginia verified sending fixture not ready');
-  const receipt = await api('sendEmail',{headers:idKey('virginia'),body:{from:sender,to:[to],region:sendRegion,subject,text}});
-  await outcome(receipt.id,to,'delivered',sender,sendRegion);
-}
-
 async function mcpChallenge() {
   const trace = ctx.getStore()!;
   const get = async <T>(url: URL) => { trace.last = `GET ${url.href}`; trace.requestId = null; const res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(12000) }); trace.requestId = res.headers.get('x-request-id'); check(res.ok, `${url.pathname} returned ${res.status}`); return await res.json() as T; };
@@ -373,7 +391,7 @@ async function mcpChallenge() {
       && /scope="(nightmail|bane):read \1:send \1:manage"/.test(challenge), 'MCP OAuth discovery challenge changed');
   }
   const resource = await get<{ resource?: string; authorization_servers?: string[]; scopes_supported?: string[] }>(new URL('/.well-known/oauth-protected-resource/mcp', base));
-  check(resource.resource === `${base.origin}/mcp` && resource.authorization_servers?.length === 1 && ['nightmail', 'bane'].every(prefix => ['read', 'send', 'manage'].every(p => resource.scopes_supported?.includes(`${prefix}:${p}`))), 'MCP protected resource metadata changed');
+  check(resource.resource === `${base.origin}/mcp` && resource.authorization_servers?.length === 1 && ['nightmail', 'bane'].some(prefix => resource.scopes_supported?.join(' ') === `${prefix}:read ${prefix}:send ${prefix}:manage`), 'MCP protected resource metadata changed');
   // The account service is the authorization server. OpenCode signs in with a client metadata document as its client_id.
   const issuer = resource.authorization_servers[0]!;
   const server = await get<{ issuer?: string; client_id_metadata_document_supported?: boolean; code_challenge_methods_supported?: string[] }>(new URL('/.well-known/oauth-authorization-server', issuer));
@@ -397,26 +415,26 @@ async function outcome(id: string, recipient: string, status: 'delivered' | 'bou
   const events = await api('listEmailEvents', { path: { id } });
   check(events.data.some(e => e.type === event && !e.simulated && e.emailId === id), `${id}: no live ${event} event`);
 }
-async function direct() {
-  const options = { body: message(singleSuccess), headers: idKey('send') };
-  const a = await api('sendEmail', options);
-  check(!a.simulated && a.status === 'queued', 'expected a live queued receipt');
-  const b = await api('sendEmail', options);
-  check(a.id === b.id, 'idempotency replay created another email');
-  if (destructive) await expectDenial(() => api('sendEmail', { ...options, body: { ...options.body, subject: `${subject}-conflict` } }), 409, 'IDEMPOTENCY_CONFLICT');
-  await outcome(a.id, singleSuccess, 'delivered');
+async function campaignTest(path: { id: string }, sender: string, sendRegion: string) {
+  requireSendCapacity('testCampaign');
+  const a = await api('testCampaign', { path, body: { to: singleSuccess }, headers: idKey('campaign-test') });
+  check(!a.simulated && a.status === 'queued', 'test email not live');
+  await outcome(a.id, singleSuccess, 'delivered', sender, sendRegion);
   const content = await api('getEmailContent', { path: { id: a.id } });
-  check(content.text === text && content.subject === subject && !content.simulated, 'stored email content differs');
+  check(content.text?.includes(text) && content.subject === subject && !content.simulated, 'stored campaign test content differs');
   const detail = await api('getEmailDetail', { path: { id: a.id } });
-  check(detail.email.id === a.id && detail.content.text === text && detail.events.data.some(e => e.type === 'delivery'), 'email detail differs from the email, its content or its events');
-  const logs = await api('listEmails', { query: { search: singleSuccess, region } });
+  check(detail.email.id === a.id && detail.content.text === content.text && detail.events.data.some(e => e.type === 'delivery'), 'email detail differs from the email, its content or its events');
+  const logs = await api('listEmails', { query: { search: singleSuccess, region: sendRegion } });
   check(logs.nextCursor === null && logs.data.length === 1 && hasId(logs, a.id), 'email missing or duplicated in log');
 }
 // A send scheduled a day out never reaches SES here: it is found as scheduled, moved a day later and canceled.
 async function scheduledSend() {
-  const to = simulator('success', '-scheduled'), scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
-  const receipt = await api('sendEmail', { headers: idKey('scheduled'), body: { region, from, to: [to], subject, text, scheduledAt } });
+  const to = success, scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
+  const options = { headers: idKey('scheduled'), body: { region, from, to: [to], kind: 'marketing' as const, subject, text, scheduledAt } };
+  const receipt = await api('sendEmail', options);
   defer(`cancel scheduled email ${receipt.id}`, async () => check((await api('cancelEmail', { path: { id: receipt.id } })).status === 'canceled', 'scheduled email not canceled'));
+  check((await api('sendEmail', options)).id === receipt.id, 'idempotency replay created another email');
+  if (destructive) await expectDenial(() => api('sendEmail', { ...options, body: { ...options.body, subject: `${subject}-conflict` } }), 409, 'IDEMPOTENCY_CONFLICT');
   check(receipt.status === 'queued' && receipt.scheduledAt === scheduledAt && !receipt.simulated, 'scheduled receipt differs');
   const email = await api('getEmail', { path: { id: receipt.id } });
   check(email.scheduled && email.status === 'queued' && email.scheduledAt !== null && Date.parse(email.scheduledAt) === Date.parse(scheduledAt) && !email.providerId, 'scheduled email is not waiting for its time');
@@ -429,8 +447,16 @@ async function scheduledSend() {
   await expectDenial(() => api('rescheduleEmail', { path: { id: receipt.id }, body: { scheduledAt: later } }), 409, 'EMAIL_NOT_SCHEDULED');
   const events = await api('listEmailEvents', { path: { id: receipt.id } });
   check(['scheduled', 'rescheduled', 'canceled'].every(type => events.data.some(e => e.type === type)), 'scheduled email events missing');
+  const detail = await api('getEmailDetail', { path: { id: receipt.id } });
+  check(detail.email.id === receipt.id && detail.content.text?.includes(text) && detail.events.data.some(e => e.type === 'canceled'), 'stored fixture detail differs');
+  return receipt.id; // Its real opt-out token was created at admission, without a provider send.
 }
 async function batch() {
+  if (quotaExhausted()) {
+    await step('SES bounce feedback', async () => requireSendCapacity());
+    await step('SES complaint feedback', async () => requireSendCapacity());
+    requireSendCapacity('sendEmailBatch');
+  }
   // SES feedback upserts a suppressed contact. Own it before sending so cleanup never has
   // to sweep by name or race late feedback; deleting the profile keeps its suppression tombstone.
   for (const email of [bounce, complaint]) {
@@ -612,8 +638,14 @@ async function cleanCampaign(id: string) {
 }
 type Audience = { listId: string; segmentId: string };
 async function scheduledCampaign(audience: Audience) {
-  const item = await api('createCampaign', { body: { name: `${prefix}-schedule`, audience, from, region, subject, html, tracking: false } });
+  const sendRegion = destructive ? 'us-east-1' : region, sender = destructive ? `${prefix}@e2e-va.bane.mx` : from;
+  if (destructive) {
+    const page = await api('listDomains', { query: { region: sendRegion, refresh: 'false', limit: 10 } });
+    check(page.data.some(d => d.name === 'e2e-va.bane.mx' && d.region === sendRegion && d.ready), 'Virginia verified sending fixture not ready');
+  }
+  const item = await api('createCampaign', { body: { name: `${prefix}-schedule`, audience, from: sender, region: sendRegion, subject, html, tracking: false } });
   const path = retireCampaign(item.id);
+  await step('Campaign test email: regional SES delivery, stored content and email log', () => campaignTest(path, sender, sendRegion));
   const eligible = await api('previewCampaignAudience', { path });
   check(item.draft.audience?.listId === audience.listId && item.draft.audience.segmentId === audience.segmentId && eligible.matched === 1 && eligible.eligible === 1, 'refusing unexpected scheduled audience');
   const scheduledAt = new Date(Date.now() + 86_400_000).toISOString();
@@ -658,49 +690,58 @@ async function campaign(audience: Audience, templateId?: string) {
   await step('Render campaign PNG', async () => checkScreenshot(await api('renderCampaignPreviewImage', { client: previews, path })));
   const allowed = await api('previewCampaignAudience', { path });
   check(saved.draft.audience?.listId === audience.listId && saved.draft.audience.segmentId === audience.segmentId && allowed.matched === 1 && allowed.eligible === 1, 'refusing campaign: not the verified one-member exact-email audience');
-  const test = await api('testCampaign', { path, body: { to: success }, headers: idKey('campaign-test') });
-  check(!test.simulated && test.status === 'queued', 'test email not live');
+  requireSendCapacity('sendCampaign');
   const sent = await api('sendCampaign', { path, body: { revision: saved.revision }, headers: idKey('campaign') });
   check(!sent.simulated && sent.queued === 1 && sent.id === item.id, 'expected one live campaign recipient');
-  await until(`campaign ${item.id} done`, () => api('getCampaignState', { path }), c => {
-    check(!['failed', 'canceled', 'paused'].includes(c.state), `campaign ${item.id} ${c.state}`);
-    return c.state === 'done';
-  }, async c => {
-    // State polling is intentionally cheap. Read the hold before cleanup clears it.
-    const stats = await api('getCampaignStats', { path }).catch(() => null);
-    const d = stats?.delivery;
-    return d ? `${c.state}, released ${d.expanded}/${d.total}${d.waiting ? `, ${d.waiting.reason} until ${d.waiting.until}` : ''}` : c.state;
-  });
-  const stats = await api('getCampaignStats', { path });
+  let checkedUntil: string | undefined;
+  const stats = await until(`campaign ${item.id} done`, async () => {
+    const row = await api('getCampaignStats', { path }), d = row.delivery;
+    check(row.id === item.id && !['failed', 'canceled', 'paused'].includes(row.state), `campaign ${item.id} ${row.state}`);
+    if (destructive && row.state === 'sending' && row.counts.total === 0 && d?.total === 1 && d.prepared === 1 && d.expanded === 0 && d.canceled === 0 && !d.error
+      && d.waiting?.reason === 'ses_daily_quota' && Date.parse(d.waiting.until) > Date.now() && d.waiting.until !== checkedUntil) {
+      checkedUntil = d.waiting.until;
+      if (await (await import('./dev-e2e-fixture.js')).devSandboxMarketingQuotaExhausted(item.id)) {
+        const canceled = await api('cancelCampaign', { path });
+        check(canceled.state === 'canceled' && canceled.canceled === 1 && canceled.inFlight === 0, 'quota-held campaign did not cancel before dispatch');
+        throw new DevSandboxQuotaSkip();
+      }
+    }
+    return row;
+  }, c => c.state === 'done', c => c.delivery ? `${c.state}, released ${c.delivery.expanded}/${c.delivery.total}${c.delivery.waiting ? `, ${c.delivery.waiting.reason} until ${c.delivery.waiting.until}` : ''}` : c.state);
   check(stats.totals.accepted === 1 && stats.counts.total === 1 && stats.totals.simulated === 0, 'campaign done without one live acceptance');
   const logs = await api('listEmails', { query: { campaignId: item.id } });
   check(logs.data.length === 1 && logs.data[0].to[0] === success, 'wrong campaign recipient');
   await outcome(logs.data[0].id, success, 'delivered');
-  await step('Read unsubscribe confirmation without changing consent', async () => {
-    // The footer ends the text: the recipient's Unsubscribe link, then the workspace's postal address under it.
-    const { text } = await api('getEmailContent', { path: { id: logs.data[0].id } });
-    const footer = text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
-    check(footer, 'no unsubscribe capability in run-owned marketing email');
-    check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
-    const token = footer[1]!;
-    const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
-    check(page.includes('<form method="post">'), 'GET must display a confirmation form');
-    check((await api('previewCampaignAudience', { path })).eligible === 1, 'GET changed audience consent');
-    if (destructive) {
-      const page = await api('unsubscribeOneClick',{path:{token},parseAs:'text'});
-      check(page.includes('unsubscribed'),'one-click did not confirm opt-out');
-      const [row] = (await api('listContacts',{query:{email:success}})).data;
-      check(row?.email === success && row.marketingConsent === 'unsubscribed','one-click did not opt out this run’s contact');
-    }
-  });
-  await outcome(test.id, success, 'delivered');
   // Cancellation must not retroactively retract a finished, delivered campaign.
-  try { await api('cancelCampaign', { path }); }
-  catch (error) {
-    if (!(error instanceof ApiFailure && error.status === 409 && error.code === 'CAMPAIGN_ALREADY_DISPATCHED')) throw error;
-    return;
+  await expectDenial(() => api('cancelCampaign', { path }), 409, 'CAMPAIGN_ALREADY_DISPATCHED');
+  return { emailId: logs.data[0].id, path };
+}
+async function unsubscribe(emailId: string, campaignPath?: { id: string }) {
+  // The footer ends the text: the recipient's Unsubscribe link, then the workspace's postal address under it.
+  const content = await api('getEmailContent', { path: { id: emailId } });
+  const footer = content.text?.match(/\n\nUnsubscribe: \S*\/unsubscribe\/(u_[a-f0-9]{64})\n([^]*)$/);
+  check(footer, 'no unsubscribe capability in run-owned marketing email');
+  check(footer[2] === E2E_POSTAL_ADDRESS, 'the footer lacks the postal address under the unsubscribe link');
+  const token = footer[1]!;
+  const page = await api('unsubscribeByLink', { path: { token }, parseAs: 'text' });
+  check(page.includes('<form method="post">'), 'GET must display a confirmation form');
+  if (campaignPath) check((await api('previewCampaignAudience', { path: campaignPath })).eligible === 1, 'GET changed audience consent');
+  else {
+    const [row] = (await api('listContacts', { query: { email: success } })).data;
+    check(row?.email === success && row.marketingConsent === 'subscribed', 'GET changed the fixture recipient’s consent');
   }
-  throw new Error('cancelCampaign accepted a completed campaign');
+  if (destructive) {
+    const page = await api('unsubscribeOneClick',{path:{token},parseAs:'text'});
+    check(page.includes('unsubscribed'),'one-click did not confirm opt-out');
+    const [row] = (await api('listContacts',{query:{email:success}})).data;
+    check(row?.email === success && row.marketingConsent === 'unsubscribed','one-click did not opt out this run’s contact');
+    if (quotaExhausted()) await step('Stored opt-out rejects sends without queueing a sibling', async () => {
+      const deniedSubject = `${subject}-optout`, refused = { region, from, to: [success], kind: 'marketing' as const, subject: deniedSubject, text };
+      await expectDenial(() => api('sendEmail', { body: { ...refused, scheduledAt: new Date(Date.now()+86_400_000).toISOString() }, headers: idKey('optout-single') }), 422, 'RECIPIENT_INELIGIBLE');
+      await expectDenial(() => api('sendEmailBatch', { body: { emails: [{ ...message(singleSuccess), subject: deniedSubject }, refused] }, headers: idKey('optout-batch') }), 422, 'RECIPIENT_INELIGIBLE');
+      check(!(await api('listEmails', { query: { search: deniedSubject, region } })).data.length, 'an ineligible send queued mail');
+    });
+  }
 }
 
 async function webhook() {
@@ -837,6 +878,12 @@ async function inboundWebhook(addressId: string, threadId: string) {
   }
 }
 
+async function importFixturePng(url: string, bytes: Uint8Array) {
+  const imported=await api('importTemplateImage',{body:{url,contentId:prefix,filename:`${prefix}.png`}});
+  const path={id:imported.asset.id}; defer(`delete imported PNG ${path.id}`,()=>api('deleteTemplateAsset',{path}));
+  check(imported.src===`cid:${prefix}` && hash(Buffer.from((await api('getTemplateAssetContent',{path})).content,'base64'))===hash(bytes),'import changed image bytes or CID');
+}
+
 async function inbound() {
   const d = { id: domainId };
   check(hasId(await api('listInboundDomains', {}), domainId), 'inbound domain not listed');
@@ -854,7 +901,7 @@ async function inbound() {
     return row;
   }
   const sender = await address(from), receiver = await address(inbox);
-  const addressId = receiver.id;
+  let addressId = receiver.id;
   const hosts = await api('listReceivingHosts', { path: d });
   check(hosts.data.some(h => h.name === domain && h.domainId === domainId && h.status !== 'removed'), 'receiving host list misses the domain itself');
   const children = await api('listInboundSubdomains', { path: d, query: { limit: 1 } });
@@ -874,37 +921,58 @@ async function inbound() {
     const b = await api('listInboundAddresses',{query:{...query,cursor:a.nextCursor}});
     check(b.data.length===1 && !b.nextCursor && [a.data[0].id,b.data[0].id].sort().join() === [sender.id,receiver.id].sort().join(),'cursor duplicated, skipped or leaked an address');
   }
-  const events = await api('listInboundEvents', { query: { addressId, types: 'message.received' } });
-  const sent = await api('createInboundThread', {
-    headers: idKey('self-loop'), body: { addressId: sender.id, from, to: [inbox], subject, text,
-      attachments: [{ filename: `${prefix}.png`, contentType:'image/png', content: pixelPng().toString('base64') }] },
-  });
-  check(sent.direction === 'outbound' && sent.from.address === from && sent.to.length === 1 && sent.to[0].address === inbox, 'wrong self-loop envelope');
-  // SES is delivering the run-owned message. The key probes only need the two verified addresses.
-  await step('Verify inbound read key is restricted to one address', () => inboundKey(addressId, sender.id));
-  const arrival = await until('new inbound message event', () => api('listInboundEvents', { query: { addressId, types: 'message.received', after: events.cursor } }), e => e.data.some(v => v.addressId === addressId && v.type === 'message.received'), e => `${e.data.length} matching events`);
-  const event = arrival.data.find(v => v.addressId === addressId && v.type === 'message.received')!;
-  check(event.threadId && event.messageId, 'receipt missing thread/message IDs');
-  const path = { threadId: event.threadId };
-  const msg = await api('getInboundMessage', { path: { messageId: event.messageId }, query: { addressId } });
-  check(msg.direction === 'inbound' && msg.from.address === from && msg.subject === subject && msg.text.includes(text) && msg.to.some(a => a.address === inbox), 'inbound message differs from sent content');
-  check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.png`, 'inbound attachment missing');
-  const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
-  check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
-  // The webhook payload's downloadUrl answers the same reader with a redirect to the same file.
-  const followed = await api('downloadInboundAttachment', { client: unfollowed, path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } }) as unknown as Output<'getInboundAttachment'>;
-  check(new URL(followed.url).protocol === 'https:' && Date.parse(followed.expiresAt) > Date.now(), 'expected the webhook attachment link to redirect to a temporary HTTPS URL');
-  if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
-    // S3 presigned while mail stays in S3; a Bane-signed /v1/objects link on this origin once it is in R2.
-    const url = new URL(link.url), own = url.origin === base.origin && /^\/v1\/objects\/[A-Za-z0-9_.-]+$/.test(url.pathname);
-    check((own || /(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port) && !url.username && !url.password,'refusing an attachment URL that is neither S3 nor this deployment’s object link');
-    const res=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(12000)});
-    const trace=ctx.getStore()!; trace.last=own?'GET /v1/objects':'S3 GetObject'; trace.requestId=res.headers.get(own?'x-request-id':'x-amz-request-id');
-    check(res.ok && hash(new Uint8Array(await res.arrayBuffer()))===hash(pixelPng()),'inbound attachment SHA-256 mismatch');
-    const imported=await api('importTemplateImage',{body:{url:link.url,contentId:prefix,filename:`${prefix}.png`}});
-    const path={id:imported.asset.id}; defer(`delete imported PNG ${path.id}`,()=>api('deleteTemplateAsset',{path}));
-    check(imported.src===`cid:${prefix}` && hash(Buffer.from((await api('getTemplateAssetContent',{path})).content,'base64'))===hash(pixelPng()),'import changed image bytes or CID');
-  });
+  await step('Verify inbound read key is restricted to one address', () => inboundKey(receiver.id, sender.id));
+  let messageId: string, eventThread: string | undefined, recipient = inbox, sent: Output<'createInboundThread'> | undefined;
+  if (quotaExhausted()) {
+    await step('SES inbound self-loop and threaded reply', async () => requireSendCapacity('createInboundThread', 'replyToInboundThread'));
+    const box = await api('createInbox', { body: { type: 'sandbox', name: prefix, ttlSeconds: 600, graceHours: 0 } });
+    defer(`delete sandbox inbox ${box.id}`, () => api('deleteInbox', { path: { id: box.id } }));
+    addressId = box.id; recipient = box.address;
+    const stored = await api('simulateInboxMessage', { path: { id: box.id }, body: { from, subject, text } });
+    check(stored.simulated, 'expected a stored sandbox message, not an SES delivery');
+    messageId = stored.messageId;
+  } else {
+    const events = await api('listInboundEvents', { query: { addressId, types: 'message.received' } });
+    sent = await api('createInboundThread', {
+      headers: idKey('self-loop'), body: { addressId: sender.id, from, to: [inbox], subject, text,
+        attachments: [{ filename: `${prefix}.png`, contentType:'image/png', content: pixelPng().toString('base64') }] },
+    });
+    check(sent.direction === 'outbound' && sent.from.address === from && sent.to.length === 1 && sent.to[0].address === inbox, 'wrong self-loop envelope');
+    const arrival = await until('new inbound message event', () => api('listInboundEvents', { query: { addressId, types: 'message.received', after: events.cursor } }), e => e.data.some(v => v.addressId === addressId && v.type === 'message.received'), e => `${e.data.length} matching events`);
+    const event = arrival.data.find(v => v.addressId === addressId && v.type === 'message.received')!;
+    check(event.threadId && event.messageId, 'receipt missing thread/message IDs');
+    messageId = event.messageId; eventThread = event.threadId;
+  }
+  const msg = await api('getInboundMessage', { path: { messageId }, query: { addressId } }), path = { threadId: msg.threadId };
+  if (eventThread) check(msg.threadId === eventThread, 'receipt and message thread differ');
+  check(msg.direction === 'inbound' && msg.from.address === from && msg.subject === subject && msg.text.includes(text) && msg.to.some(a => a.address === recipient), 'inbound message differs from fixture content');
+  if (!sent) {
+    check(msg.simulated === true, 'sandbox message lost its simulated marker');
+    await step('Download the inbound SES attachment and follow its webhook link', async () => requireSendCapacity('getInboundAttachment', 'downloadInboundAttachment'));
+    const absent = { path: { messageId, attachmentId: prefix }, query: { addressId } };
+    await expectDenial(() => api('getInboundAttachment', absent), 404, 'NOT_FOUND');
+    await expectDenial(() => api('downloadInboundAttachment', { ...absent, client: unfollowed }), 404, 'NOT_FOUND');
+    // The sandbox API stores text, not MIME attachments. Still exercise the image import with the PNG at this revision.
+    const sha = execFileSync('git', ['rev-parse','HEAD'], { encoding: 'utf8' }).trim();
+    check(/^[a-f0-9]{40}$/.test(sha), 'invalid checkout SHA for fixture PNG');
+    await step('Import stored fixture PNG', () => importFixturePng(`https://raw.githubusercontent.com/anomalyco/nightmail/${sha}/app/public/icon-192.png`, readFileSync(new URL('../../app/public/icon-192.png', import.meta.url))));
+  } else {
+    check(msg.attachments.length === 1 && msg.attachments[0].filename === `${prefix}.png`, 'inbound attachment missing');
+    const link = await api('getInboundAttachment', { path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } });
+    check(new URL(link.url).protocol === 'https:' && Date.parse(link.expiresAt) > Date.now(), 'expected a temporary HTTPS attachment URL');
+    // The webhook payload's downloadUrl answers the same reader with a redirect to the same file.
+    const followed = await api('downloadInboundAttachment', { client: unfollowed, path: { messageId: msg.id, attachmentId: msg.attachments[0].id }, query: { addressId } }) as unknown as Output<'getInboundAttachment'>;
+    check(new URL(followed.url).protocol === 'https:' && Date.parse(followed.expiresAt) > Date.now(), 'expected the webhook attachment link to redirect to a temporary HTTPS URL');
+    if (destructive) await step('Download and import the run-owned inbound PNG',async()=>{
+      // S3 presigned while mail stays in S3; a Nightmail-signed /v1/objects link on this origin once it is in R2.
+      const url = new URL(link.url), own = url.origin === base.origin && /^\/v1\/objects\/[A-Za-z0-9_.-]+$/.test(url.pathname);
+      check((own || /(?:^|\.)s3[.-][a-z0-9-]+\.amazonaws\.com$/.test(url.hostname) && !url.port) && !url.username && !url.password,'refusing an attachment URL that is neither S3 nor this deployment’s object link');
+      const res=await fetch(url,{redirect:'error',signal:AbortSignal.timeout(12000)});
+      const trace=ctx.getStore()!; trace.last=own?'GET /v1/objects':'S3 GetObject'; trace.requestId=res.headers.get(own?'x-request-id':'x-amz-request-id');
+      check(res.ok && hash(new Uint8Array(await res.arrayBuffer()))===hash(pixelPng()),'inbound attachment SHA-256 mismatch');
+      await importFixturePng(link.url,pixelPng());
+    });
+  }
   check(hasId(await api('listInboundThreads', { query: { addressId, q: prefix } }), path.threadId), 'arrived thread not listed');
   check(hasId(await api('listInboundMessages', { query: { addressId, direction: 'inbound', q: prefix } }), msg.id), 'arrived message not listed');
   // The unified logs list received mail next to sent mail for the same credential.
@@ -912,28 +980,28 @@ async function inbound() {
   check(unified.received && unified.data.some(row => row.id === msg.id && row.direction === 'received' && row.threadId === msg.threadId), 'arrived message missing from the unified logs');
   check((await api('getInboundThread', { path, query: { addressId } })).messages.some(m => m.id === msg.id), 'message absent from thread');
   check((await api('updateInboundThread', { path, body: { addressId, starred: true } })).starred, 'thread edit failed');
-  const reply = await api('replyToInboundThread', { path, headers: idKey('reply'), body: {
+  const reply = sent ? await api('replyToInboundThread', { path, headers: idKey('reply'), body: {
     addressId, replyToMessageId: msg.id, text, expectedRecipients: { to: [from], cc: [], bcc: [] },
-  } });
-  check(reply.threadId === msg.threadId && reply.direction === 'outbound' && reply.to[0]?.address === from && reply.emailId, 'reply not bound to original conversation');
-  // The reply is on its way back to the sender. Exercise the receiver's scoped hook (including its own new
-  // label event and HTTP delivery) in the meantime; still verify the actual reply, its bytes and In-Reply-To.
+  } }) : undefined;
   await step('Scoped inbound webhook, rotation and thread metadata delivery', () => inboundWebhook(addressId, path.threadId));
-  const replies = await until('reply received by original test sender', () => api('listInboundMessages', { query: { addressId: sender.id, direction: 'inbound', q: prefix } }), page => page.data.some(m => m.from.address === inbox && m.threadId === sent.threadId), page => `${page.data.length} messages`);
-  const received = replies.data.find(m => m.from.address === inbox && m.threadId === sent.threadId)!;
-  const delivered = await api('getInboundMessage', { path: { messageId: received.id }, query: { addressId: sender.id } });
-  check(delivered.text.includes(text) && msg.messageId && delivered.inReplyTo === msg.messageId, 'reply body or In-Reply-To differs');
-  for (const emailId of [sent.emailId,reply.emailId]) {
-    check(emailId,'inbound send missing email ID');
-    const email = await api('getEmail',{path:{id:emailId}});
-    check(!email.simulated && email.providerId,'inbound loop missing provider acceptance'); providerAccepted.add(email.providerId);
+  if (sent && reply) {
+    check(reply.threadId === msg.threadId && reply.direction === 'outbound' && reply.to[0]?.address === from && reply.emailId, 'reply not bound to original conversation');
+    const replies = await until('reply received by original test sender', () => api('listInboundMessages', { query: { addressId: sender.id, direction: 'inbound', q: prefix } }), page => page.data.some(m => m.from.address === inbox && m.threadId === sent.threadId), page => `${page.data.length} messages`);
+    const received = replies.data.find(m => m.from.address === inbox && m.threadId === sent.threadId)!;
+    const delivered = await api('getInboundMessage', { path: { messageId: received.id }, query: { addressId: sender.id } });
+    check(delivered.text.includes(text) && msg.messageId && delivered.inReplyTo === msg.messageId, 'reply body or In-Reply-To differs');
+    for (const emailId of [sent.emailId,reply.emailId]) {
+      check(emailId,'inbound send missing email ID');
+      const email = await api('getEmail',{path:{id:emailId}});
+      check(!email.simulated && email.providerId,'inbound loop missing provider acceptance'); providerAccepted.add(email.providerId);
+    }
   }
-  if (destructive) await step('A temporary address is an inbox: its mail and folders through the inbox routes', () => addressInbox(receiver.id, sender.id, msg.id, sent.id));
+  if (destructive) await step('Read and change the run-owned inbox and verify scoped access', () => addressInbox(addressId, sender.id, msg.id, sent?.id));
 }
 
 // Every address is an inbox: its received and sent mail is filed in folders, and the inbox routes read and change it by
 // the address ID. Run-owned temporary addresses and their own messages only; deleting the addresses ends it.
-async function addressInbox(id: string, otherId: string, messageId: string, sentId: string) {
+async function addressInbox(id: string, otherId: string, messageId: string, sentId?: string) {
   const folders = async () => Object.fromEntries((await api('listInboxFolders', { path: { id } })).data.map(f => [f.role, f]));
   const state = (await api('listInboxFolders', { path: { id } })).state, before = await folders();
   const listed = (await api('listInboxMessages', { path: { id }, query: { folder: 'inbox', limit: 100 } })).data.find(m => m.id === messageId);
@@ -955,16 +1023,17 @@ async function addressInbox(id: string, otherId: string, messageId: string, sent
   const key = await api('createApiKey', { body: { name: `${prefix}-other`, access: { type: 'addresses', addressIds: [otherId], mail: ['read'] } } });
   defer(`revoke limited key ${key.id}`, async () => check((await api('revokeApiKey', { path: { id: key.id } })).revoked, 'limited key not revoked'));
   const other = createClient({ baseUrl: base.origin, redirect: 'error', headers: { Authorization: `Bearer ${key.secret}` } });
-  check((await api('listInboxMessages', { client: other, path: { id: otherId }, query: { folder: 'sent', limit: 100 } })).data.some(m => m.id === sentId), 'sent mail not filed in Sent');
+  const sentFolder = await api('listInboxMessages', { client: other, path: { id: otherId }, query: { folder: 'sent', limit: 100 } });
+  check(sentId ? sentFolder.data.some(m => m.id === sentId) : sentFolder.data.length === 0, 'unexpected contents of the run-owned Sent folder');
   await expectDenial(() => api('listInboxMessages', { client: other, path: { id } }), 404, 'NOT_FOUND');
   await expectDenial(() => api('getInboxMessage', { client: other, path }), 404, 'NOT_FOUND');
   await expectDenial(() => api('listInboxFolders', { client: other, path: { id } }), 404, 'NOT_FOUND');
 }
 
 async function prepare() {
-  check(base.protocol === 'https:' && base.href === base.origin + '/', 'BANE_E2E_URL must be a bare HTTPS origin');
+  check(base.protocol === 'https:' && base.href === base.origin + '/', 'NIGHTMAIL_E2E_URL must be a bare HTTPS origin');
   check(!destructive || (['https://dev.nightmail.dev', 'https://dev.bane.mx'].includes(base.origin) && domain === 'e2e.bane.mx' && domainId === 'dom_e53755830a0141a5bd6e71e45e942f06' && region === 'us-east-2'),'destructive tests require the exact dev fixture');
-  check(key && domain && domainId, 'missing BANE_E2E_API_KEY, DOMAIN or DOMAIN_ID');
+  check(key && domain && domainId, 'missing NIGHTMAIL_E2E_API_KEY, DOMAIN or DOMAIN_ID');
   const settings = await api('getWorkspaceSettings',{});
   check(settings.name === 'E2E','refusing non-E2E workspace');
   // Campaigns need the workspace's postal address (CAN-SPAM); the campaign steps run after this one.
@@ -995,7 +1064,7 @@ async function prepare() {
 // must be exactly one minted by this suite (including the pre-rename form), and
 // both its embedded timestamp and the server's creation timestamp must be old.
 function staleRun(label: string | null | undefined, createdAt: string) {
-  const m = label?.match(/^(?:(?:Bane|OpenSend MX) E2E )?(e2e-(\d{13})-[a-f0-9]{8}-[a-f0-9]{3})(?:-(?:cli|schedule|attachment|import|newsletter))?$/);
+  const m = label?.match(/^(?:(?:Nightmail|Bane|OpenSend MX) E2E )?(e2e-(\d{13})-[a-f0-9]{8}-[a-f0-9]{3})(?:-(?:cli|schedule|attachment|import|newsletter))?$/);
   if (!m) return null;
   const minted = Number(m[2]), created = Date.parse(createdAt), cutoff = started - 30*60_000;
   return minted < cutoff && created < cutoff && Math.abs(created-minted) < 5*60_000 ? m[1] : null;
@@ -1034,7 +1103,8 @@ async function sweepStaleObjects() {
   // dispatch history is immutable; listCampaigns defaults to unarchived rows only.
   for (const c of await pages(cursor=>api('listCampaigns',{query:{...q,cursor}}))) {
     const run=staleRun(c.draft.name,c.createdAt);
-    if (run && c.draft.from===`${run}@${domain}` && c.draft.region===region) await cleanCampaign(c.id);
+    if (run && ((c.draft.from===`${run}@${domain}` && c.draft.region===region) ||
+      (destructive && c.draft.name===`${run}-schedule` && c.draft.from===`${run}@e2e-va.bane.mx` && c.draft.region==='us-east-1'))) await cleanCampaign(c.id);
   }
   for (const archived of ['true','false'] as const) {
     for (const t of await pages(cursor=>api('listCampaignTemplates',{query:{...q,cursor,archived}}))) {
@@ -1062,11 +1132,16 @@ async function run() {
   try {
     const ready = await step('Live identity and verified domain', prepare);
     if (!ready) return;
+    if (destructive) {
+      const samples = await step('Read dev SES sandbox quotas', async () => (await import('./dev-e2e-fixture.js')).devSandboxSendPreflight());
+      if (!samples) return; // A denied or broken quota read is a failure, never permission to skip.
+      quota = samples;
+      console.log('Dev SES quota:', samples.map(q => `${q.region} ${q.used}/${q.max}, ${q.needed} needed`).join('; '));
+      if (quotaExhausted()) { delete SKIP.createInbox; delete SKIP.simulateInboxMessage; delete SKIP.deleteInbox; }
+    }
     if (!await step('Retire interrupted E2E fixtures older than 30 minutes',sweepStaleObjects)) return;
     await Promise.all([
-      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('Virginia delivery and feedback',regionalSend),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
-      step('Single send, replay, delivery and email log', direct),
-      step('Schedule, reschedule and cancel a single send before it goes', scheduledSend),
+      ...(destructive ? [step('Dev fixture contracts',devBoundaries),step('SDK binary upload CLI',cliUpload),step('MCP authorization discovery',mcpChallenge)] : []),
       step('Preview run-owned HTML without sending', async () => {
         const report = await api('checkEmail', { body: { from, subject:prefix, text:'Confirm your shipping address.', stream:'transactional' } });
         check(Number.isInteger(report.score) && report.findings.some((f:{ruleId:string})=>f.ruleId==='screen-bytes'),'missing sendability score or byte measurement');
@@ -1090,10 +1165,16 @@ async function run() {
           }),
         ]);
         // A template permission failure does not hide campaign dispatch regressions.
-        if (selection && guide) await Promise.all([
-          step('Preview exact audience, send campaign and observe done + delivery', () => campaign(selection, tpl)),
-          step('Schedule, pause, pace, resume and cancel without dispatch', () => scheduledCampaign(selection)),
-        ]);
+        if (selection) {
+          const [sent, fixture] = await Promise.all([
+            guide ? step('Preview exact audience, send campaign and observe done + delivery', () => campaign(selection, tpl)) : undefined,
+            step('Schedule, reschedule and cancel a single send before it goes', scheduledSend),
+            step('Schedule, pause, pace, resume and cancel without dispatch', () => scheduledCampaign(selection)),
+          ]);
+          // Opt out only after both campaigns are finished with this one subscribed contact.
+          const emailId = sent?.emailId ?? fixture;
+          if (emailId) await step('Read unsubscribe confirmation without changing consent', () => unsubscribe(emailId, sent?.path));
+        }
       })(),
     ]);
     await step('Regional metrics, sender score and plan usage for this run window', async () => {
@@ -1102,7 +1183,7 @@ async function run() {
       // Plan & usage: the price, this run's sends are in the month, a manage key sees the received count (members and
       // read-only keys get null), and the daily limit names its one step, the evaluation.
       const usage = await api('getUsage', {});
-      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= 3 && typeof usage.month.received === 'number' && usage.steps.length === 1 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
+      check(usage.billing.enabled === (usage.billing.enforcement === 'enforce') && usage.pricing.perThousand > 0 && usage.month.sent >= (quotaExhausted() ? 0 : 3) && typeof usage.month.received === 'number' && usage.steps.length === 1 && (usage.daily === null || usage.daily.step === null || usage.steps[usage.daily.step]?.cap === usage.daily.cap), 'invalid plan and usage summary');
       // Billing as a manage key reads it: the balance and state, the sent and received allowances, today's metered usage,
       // and the ledger and payments pages.
       const bill = await api('getBilling', {});
@@ -1111,7 +1192,11 @@ async function run() {
       check(Array.isArray(metered.data) && metered.data.every(p => /^\d+$/.test(p.quantity)), 'billing usage is not a list of integer quantities');
       for (const list of [await api('listBillingLedger', { query: { limit: 5 } }), await api('listBillingPayments', { query: { limit: 5 } })]) check(Array.isArray(list.data) && list.data.length <= 5, 'billing page over its limit');
       const m = await api('getMetrics', { query: { from: new Date(started).toISOString(), region, granularity: 'hour' } });
-      check(m.basis === 'created-cohort' && m.region === region && m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
+      check(m.basis === 'created-cohort' && m.region === region, 'wrong regional metrics');
+      await step('Regional metrics include this run’s delivery, bounce and complaint', async () => {
+        requireSendCapacity();
+        check(m.totals.emails >= 3 && m.totals.bounced >= 1 && m.totals.complained >= 1 && m.totals.delivered >= 1, 'regional metrics do not include expected simulator outcomes');
+      });
     });
   } finally {
     deadline = Date.now() + 35_000;
@@ -1121,6 +1206,7 @@ async function run() {
 
 function finish() {
   const ended = Date.now();
+  for (const op of quotaSkippedOps) if (!attempted.has(op)) SKIP[op] = new DevSandboxQuotaSkip().message;
   const missing = [...contract].filter(op => !attempted.has(op as Op) && !Object.hasOwn(SKIP, op));
   const stale = Object.keys(SKIP).filter(op => !contract.has(op));
   if (missing.length || stale.length) {
@@ -1131,11 +1217,11 @@ function finish() {
   }
   const skipped = Object.keys(SKIP).length;
   const covered = new Set(steps.filter(s => s.status === 'pass').flatMap(s => s.operationIds));
-  const headline = `Bane E2E ${failures ? 'FAIL' : 'PASS'} — ${covered.size}/${contract.size} operations in passing steps, ${attempted.size} attempted, ${skipped} intentionally skipped, ${missing.length} not reached (${((ended - started) / 1000).toFixed(1)} s)`;
+  const headline = `Nightmail E2E ${failures ? 'FAIL' : 'PASS'} — ${covered.size}/${contract.size} operations in passing steps, ${attempted.size} attempted, ${skipped} intentionally skipped, ${missing.length} not reached (${((ended - started) / 1000).toFixed(1)} s)`;
   console.log(headline);
   const commit = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const report = { commit, targetUrl: base.origin, run: prefix, start: new Date(started).toISOString(), end: new Date(ended).toISOString(), ms: ended - started,
-    status: failures ? 'fail' : 'pass', destructive, ses: { observedProviderAcceptances:providerAccepted.size, reservedRecipientBudget:sendBudget }, steps,
+    status: failures ? 'fail' : 'pass', destructive, ses: { quota, observedProviderAcceptances:providerAccepted.size, reservedRecipientBudget:sendBudget }, steps,
     coverage: { total: contract.size, passed: [...covered].sort(), attempted: [...attempted].sort(), successResponses:[...successResponses].sort(), negativeOnly:[...errorResponses].filter(op=>!successResponses.has(op)).sort(), notReached: missing.sort(), skipped: SKIP, staleSkips: stale } };
   // Atomic replacement also makes a shared working directory safe for concurrent invocations.
   const tmp = `.${prefix}-report.tmp`;
@@ -1146,7 +1232,8 @@ function finish() {
     const failed = steps.filter(s => s.status === 'fail');
     const md = [`## ${headline}`, '', `Commit: \`${commit}\`. ${successResponses.size} operations returned a validated success; ${report.coverage.negativeOnly.length} exercised only their error contract.`,
       `SES: ${providerAccepted.size} distinct provider IDs observed; ${sendBudget}/25 recipient admissions reserved (including replays, suppressed and canceled sends).`, '',
-      ...failed.map(s => `- **${escape(s.name)}**: ${s.name === 'OpenAPI coverage' ? 'See unaccounted operations in the JSON artifact.' : escape(s.error!)} (request ID: \`${s.requestId ?? 'unavailable'}\`)`), '', '<details><summary>Every step</summary>', '', '| Step | Result | ms |', '|---|---|---:|', ...steps.map(s => `| ${escape(s.name)} | ${s.status} | ${s.ms} |`), '', '</details>', ''];
+      ...failed.map(s => `- **${escape(s.name)}**: ${s.name === 'OpenAPI coverage' ? 'See unaccounted operations in the JSON artifact.' : escape(s.error!)} (request ID: \`${s.requestId ?? 'unavailable'}\`)`),
+      ...steps.filter(s => s.status === 'skip').map(s => `- **${escape(s.name)}**: skipped — ${escape(s.reason!)}`), '', '<details><summary>Every step</summary>', '', '| Step | Result | ms |', '|---|---|---:|', ...steps.map(s => `| ${escape(s.name)} | ${s.status} | ${s.ms} |`), '', '</details>', ''];
     appendFileSync(process.env.GITHUB_STEP_SUMMARY, md.join('\n') + '\n');
   }
   if (failures) process.exitCode = 1;

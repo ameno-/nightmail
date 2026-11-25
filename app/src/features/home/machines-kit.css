@@ -8,7 +8,9 @@
 .mx-floor { background: url('./kit/floor.webp') 0 0 / 192px 48px repeat-x; }
 .mx-screen { border-image: url('./kit/housing-screen.webp') 64 fill / 32px round; }
 .mx-base { border-image: url('./kit/housing.webp') 64 fill / 32px round; }
-.mx-plate { background: none; border-image: url('./kit/label-plate.webp') 20 fill / 10px stretch; }
+/* (The plate's own dark stays under its letters, hidden by the picture's opaque middle, so a contrast check reads the
+   letters against the plate rather than the cabinet.) */
+.mx-plate { background: rgb(28 31 36) content-box; border-image: url('./kit/label-plate.webp') 20 fill / 10px stretch; }
 .mx-lamp { background: url('./kit/lamp-on.webp') 0 0 / 32px 32px; }
 .mx-feet i { background: url('./kit/foot.webp') 0 0 / 64px 20px; }
 .mx-pipes { filter: drop-shadow(4px 9px 5px rgb(0 0 0 / 50%)); }

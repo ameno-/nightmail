@@ -3,14 +3,15 @@ import { Link, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Email, EmailEvent } from '../../data/types'
-import { Alert, Button, CopyButton, elapsed, ErrorState, PageHeader, Sheet, Tooltip, Waterfall, type Tone } from '../../components/ui'
+import { pendingEmailStatuses as pendingStatuses, type Email, type EmailEvent } from '../../data/types'
+import { Alert, Button, CopyButton, elapsed, ErrorState, Icon, Identifier, PageHeader, Sheet, Tooltip, Waterfall, type Fact, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
+import { mentionsRemoteImage } from '../../lib/html-scan'
 import { Checks, ChecksChip, ChecksToggle, EmailViews, useSendability, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, Sender } from '../../components/PrivateAddress'
 import { AddressText } from '../../components/AddressText'
 import { date, label, shortDateTime, time } from '../../lib/format'
-import { EmailDetailSkeleton } from './skeletons'
+import { EmailBar, EmailDetailSkeleton, EmailFactsStrip } from './skeletons'
 import { useDetailLayout } from './detail-layout'
 import { ThreadChip, ThreadRows, ThreadTimeline, threaded, threadItems, useThreadPrefetch } from './thread'
 import { reasonOf, type Reason } from './reason'
@@ -19,12 +20,12 @@ import { errorText } from '../../data/types'
 
 // A sent email, in the order people come for: did it arrive (the status and its delivery, and why when it didn't), what it looked like (the
 // preview: as sent and in each client, side by side where there is room), and how to do better (Checks: at most three
-// things to fix), and the conversation it is part of. The window decides where each sits (detail-layout.ts).
+// things to fix), and the conversation it is part of. The window decides where each sits (detail-layout.ts). On a
+// desktop it is a console: a 44px bar (back, the kind, the subject, its status and ID), one 36px bar of facts, then the
+// preview beside a 320px inspector with the delivery and the checks.
 
 // A scheduled email reads queued, with scheduled true, until it goes; the page calls it scheduled.
 const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
-// Statuses that can still change without user action; terminal emails are not polled.
-const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
   // Moving to another message of its thread keeps this one up until that one arrives (thread.tsx reads it ahead).
@@ -53,8 +54,15 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const text = email.text ?? ''
   const source = useMemo<InsightSource>(() => ({ kind: 'email', id: email.id, html: hasHtml }), [email.id, hasHtml])
   const check = useSendability(source)
-  // The email as its recipients saw it: its own fonts, styles and image sizes, and its remote images (tracking pixels removed).
-  const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: true, respectStyles: true, asSent: true })
+  // The email as its recipients saw it: its own fonts, styles and image sizes. Its remote images (tracking pixels removed)
+  // wait for Load images, as received mail's do (ReceivedEmailPreview): a reply or forward can quote an outside
+  // sender's images, and loading them would tell that sender when, and from which address, it was opened.
+  const [imagesFor, setImagesFor] = useState<string | null>(null)
+  const remote = useMemo(() => mentionsRemoteImage(email.html), [email.html]), loadImages = imagesFor === email.html
+  const original = useEmailDocument({ html: email.html, attachmentIds: email.attachments, remoteImages: loadImages, respectStyles: true, asSent: true, dark: true })
+  const images = remote && !loadImages && <Tooltip content="Remote images are hidden so whoever wrote them can’t tell when this email is opened.">
+    <Button variant="ghost" size="sm" onClick={() => setImagesFor(email.html)}>Load images</Button>
+  </Tooltip>
   // A poll that brings new events starts the line over from them.
   // A phone says why under its status line; its Details sheet then adds only the receiving server's reply.
   const compact = mode === 'stack'
@@ -65,17 +73,17 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
     {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<ChecksChip check={check} onOpen={openSheet('checks')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
-      : <PageHeader title={subject} backTo="/logs" subtitle={<EmailFacts email={email} />} />}
+      : <><EmailBar title={subject} end={<><StatusCue email={email} /><Identifier value={email.id} copyLabel="Copy email ID" /></>} /><EmailFacts email={email} /></>}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
         {thread && mode === 'panel' && <ThreadRows items={items} part="before" open={open} />}
-        <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, error: original.error, html: email.html, text }}
+        <EmailViews source={source} previewSource={hasHtml ? { emailId: email.id } : null} check={check} original={{ doc: original.complete ? original.doc : null, dark: original.darkDoc === undefined ? undefined : original.complete ? original.darkDoc : null, error: original.error, html: email.html, text }}
           fill={!compact} wide={!compact} compact={compact}
-          toolbarEnd={mode === 'panel' && <ChecksToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />} />
+          toolbarEnd={<>{images}{mode === 'panel' && <ChecksToggle check={check} open={panel} onToggle={() => setPanel(!panel)} controls={panelId} />}</>} />
         {thread && mode === 'panel' && <ThreadRows items={items} part="after" open={open} />}
       </section>
-      {mode === 'column' && <aside className="email-detail__side ui-scroll-fade" aria-label="Details">
+      {mode === 'column' && <aside className="email-detail__side ui-scroll-fade" aria-label="Delivery and checks">
         {thread && <ThreadTimeline thread={thread} items={items} open={open} />}
         <section className="email-detail__delivery" aria-labelledby={deliveryId}><h2 id={deliveryId} className="ss__title">Delivery</h2>{delivery}</section>
         {checks}
@@ -122,6 +130,11 @@ function Clamped({ className, text, children }: { className: string; text: strin
 // A phone's subject: two lines at most; a longer one opens in place.
 const Subject = ({ text }: { text: string }) => <Clamped className="email-subject" text={text}>{text}</Clamped>
 
+// Where it stands now, as a dot and a word: the cue beside the ID.
+function StatusCue({ email }: { email: Email }) {
+  return <span className="email-bar__status"><span className={`delivery__dot ui-tone--${toneOf(eventKey(email.status))}`} aria-hidden="true" />{label(statusOf(email))}</span>
+}
+
 // A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and
 // (on a tablet) the stream, opening the delivery and the facts; and the checks' chip. The Details sheet names the stream.
 function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; onOpen: (opener: HTMLElement) => void }) {
@@ -155,19 +168,19 @@ function FactList({ email }: { email: Email }) {
   </dl>
 }
 
-// To on one line; From, the stream, the date and the ID on the next. The recipient opens its contact when there is one.
+// A desktop's facts under the bar, in one 36px row: from whom, to whom (opening its contact when there is one), then over
+// the details column the stream, when and the region (the ID is in the bar); EmailDetailSkeleton draws the same strip.
 function EmailFacts({ email }: { email: Email }) {
   const { multiTenant } = useWorkspaceAccess()
   const to = email.to.split(', ').filter(Boolean)
-  return <div className="email-facts">
-    <div className="email-facts__line"><span className="email-facts__item"><span className="email-facts__label">To</span>{email.contact ? <Link className="email-facts__contact" to={`/audience/contacts/${encodeURIComponent(email.contact.id)}`} aria-label="Open contact"><AddressList values={to} /><ArrowUpRight size={12} aria-hidden="true" /></Link> : <AddressList values={to} />}</span></div>
-    <div className="email-facts__line"><span className="email-facts__item email-facts__from"><span className="email-facts__label">From</span><Sender name={email.fromName} address={email.from} /></span>
-    <span className="email-facts__item">{label(email.stream)}</span>
-    <span className="email-facts__item"><time dateTime={email.sentAt}>{date(email.sentAt)}</time></span>
-    {!multiTenant && <span className="email-facts__item">{email.regionId}</span>}
-    {email.simulated && <Tooltip content="Simulated: never sent to SES."><span className="email-facts__item" tabIndex={0}>Simulated</span></Tooltip>}
-    <span className="email-facts__item email-facts__id"><code className="identifier">{email.id}</code><CopyButton value={email.id} label="Copy email ID" /></span></div>
-  </div>
+  const facts: Record<string, Omit<Fact, 'label'>> = {
+    From: { value: <Sender name={email.fromName} address={email.from} /> },
+    To: { value: email.contact ? <Link className="email-facts__contact" to={`/audience/contacts/${encodeURIComponent(email.contact.id)}`} aria-label="Open contact"><AddressList values={to} /><Icon icon={ArrowUpRight} size="xs" /></Link> : <AddressList values={to} /> },
+    Stream: { value: <>{label(email.stream)}{email.simulated && <>{' · '}<Tooltip content="Simulated: never sent to SES."><span className="email-facts__note" tabIndex={0}>Simulated</span></Tooltip></>}</> },
+    Sent: { value: <time dateTime={email.sentAt}>{shortDateTime(email.sentAt)} UTC</time>, mono: true },
+    Region: { value: email.regionId, mono: true },
+  }
+  return <EmailFactsStrip multiTenant={multiTenant} label="Email details" fact={name => facts[name]} />
 }
 
 // ── Delivery: every event, oldest first, with what each means on hover ──

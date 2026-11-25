@@ -2,7 +2,7 @@ import {gatewayLane} from './protocol-admission.js';
 import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { getPath } from 'hono/utils/url';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { flushCounters } from './health-counters.js';
@@ -10,6 +10,7 @@ import { nodeLogFacetLane, nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
+import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -30,7 +31,8 @@ async function dashboardFile(request: Request, path: string, response: Response)
   if (!html && !asset && !font) return response;
   const headers = new Headers(response.headers);
   // A missing /assets/ file falls back to the HTML shell: never cache that answer.
-  headers.set('cache-control', asset ? 'public, max-age=31536000, immutable' : font ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-cache');
+  // (HTML is never transformed on the way, as on Cloudflare: src/worker.ts, untransformed.)
+  headers.set('cache-control', asset ? 'public, max-age=31536000, immutable' : font ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-cache, no-transform');
   if (!asset || !/\.(?:js|css|svg|json|map)$/.test(path)) return new Response(response.body, { status: 200, headers });
   return encode(request, path, response, headers, '');
 }
@@ -60,6 +62,7 @@ try {
   const { runtime, close: closeApi } = nodeRuntime(process.env);
   const facets=nodeLogFacetLane(runtime,process.env.DATABASE_URL);
   runtime.startLogFacetFold=facets.nudge;
+  runtime.startLogFacetAggregate=facets.aggregate;
   const close=async()=>{await facets.close();await closeApi();};
   runtime.dispatch = async (region, account, _count, _kind, priority) => {
     if (priority) await runtime.db.execute(sql`SELECT pg_notify('bane_priority', ${dispatchWakeKey(region, account)})`);
@@ -73,6 +76,8 @@ try {
   const pages = serveStatic({ root: publicRoot, rewriteRequestPath: path => `${path.replace(/\/+$/, '')}.html` });
   // "/" on a multi-tenant installation is the homepage: home.html, as the Worker answers it (src/worker.ts).
   const homepage = runtime.config.multiTenant && existsSync(`${publicRoot}home.html`) ? serveStatic({ path: `${publicRoot}home.html` }) : null;
+  // The website's own pages for /llms.txt, as the Worker adds them (src/site-index.ts).
+  const siteIndex = existsSync(`${publicRoot}${SITE_INDEX.slice(1)}`) ? readFileSync(`${publicRoot}${SITE_INDEX.slice(1)}`, 'utf8') : '';
   const app = createApp({ fallback: async (c, next) => {
     // API failures must remain JSON, never an apparently successful SPA response.
     if (!['GET', 'HEAD'].includes(c.req.method) || /^\/(?:health|v1|api|mcp|\.well-known|unsubscribe|i|docs\/(?:operations|tags))(?:\/|$)/.test(c.req.path) || ['/openapi.json', '/docs.md', '/llms.txt'].includes(c.req.path)) return next();
@@ -80,7 +85,8 @@ try {
     return assets(c, async () => {
       const response = await pages(c, async () => {
         const shell = await dashboard(c, next);
-        if (shell) c.res = shell;
+        // A comparison with no page of its own is not found, as on the Worker (src/worker.ts).
+        if (shell) c.res = isMissingComparePage(c.req.path) ? new Response(shell.body, { status: 404, headers: shell.headers }) : shell;
       });
       if (response) c.res = response;
     });
@@ -104,7 +110,9 @@ try {
     headers.set(clientIpHeader, address);
     headers.delete(clientNetworkHeader);
     const path = getPath(request);
-    const response = await dashboardFile(request, path, await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), path === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: { ip: connection.incoming.socket.remoteAddress ?? '' } } : runtime)));
+    let answer = await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), path === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: { ip: connection.incoming.socket.remoteAddress ?? '' } } : runtime));
+    if (path === '/llms.txt' && request.method === 'GET' && answer.ok && siteIndex) { const head = new Headers(answer.headers); head.delete('content-length'); answer = new Response(withSiteIndex(await answer.text(), siteIndex), { status: answer.status, headers: head }); }
+    const response = await dashboardFile(request, path, answer);
     // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
     if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
     return response;

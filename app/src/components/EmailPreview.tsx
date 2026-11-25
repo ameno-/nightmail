@@ -65,11 +65,21 @@ function fontSource(path: string) {
 /** inlineImages maps a received message's Content-IDs to its signed https attachment links. asSent lays the email out as
  *  its own HTML does (a sent email's Original): images keep their declared sizes instead of shrinking to the frame. */
 export type EmailPreviewProps = { html: string; title?: string; className?: string; attachmentIds?: string[]; attachmentApi?: AttachmentApi; respectStyles?: boolean; remoteImages?: boolean; inlineImages?: Record<string, string>; asSent?: boolean };
-type DocumentOptions = { respectStyles: boolean; remoteImages: boolean; inline: Map<string, URL>; asSent: boolean };
+type DocumentOptions = { respectStyles: boolean; remoteImages: boolean; inline: Map<string, URL>; asSent: boolean; scheme: 'light' | 'dark' };
+
+/** Whether an email opts in to dark mode, as Apple Mail reads it: a color-scheme meta that names dark and isn't "light
+ *  only" (api/src/email-preview's emulation reads the same). Only then does a dark mail client show it dark. */
+export function declaresDark(html: string) {
+  const schemes = [...new DOMParser().parseFromString(html, 'text/html').querySelectorAll('meta[name]')]
+    .filter(meta => /^(?:supported-)?color-scheme$/i.test(meta.getAttribute('name') ?? '')).map(meta => (meta.getAttribute('content') ?? '').toLowerCase().trim());
+  return schemes.some(scheme => scheme.split(/\s+/).includes('dark')) && !schemes.some(scheme => /^(?:light only|only light)$/.test(scheme));
+}
 
 // The preview's document: sanitized, every URL dropped but the images it may show, a CSP that blocks everything else,
 // and the frame's base styles. Images load at once (no lazy loading), so a frame measured once they have is final.
-function emailDocument(html: string, { respectStyles, remoteImages, inline, asSent }: DocumentOptions, sources: Map<string, string> | undefined, fontFaces: string) {
+// `scheme`: its canvas, light or a dark one (Apple Mail's); the frame it loads in has the same color-scheme, which
+// decides whether its `prefers-color-scheme: dark` styles apply (components/EmailFrame.tsx).
+function emailDocument(html: string, { respectStyles, remoteImages, inline, asSent, scheme }: DocumentOptions, sources: Map<string, string> | undefined, fontFaces: string) {
   // Authenticated, validated raster data is assigned from the attachment map
   // after DOMPurify; the opaque sandbox never needs access to parent Blob URLs.
   const clean = DOMPurify.sanitize(html, {
@@ -90,6 +100,10 @@ function emailDocument(html: string, { respectStyles, remoteImages, inline, asSe
     else if (remoteImages && element.tagName === 'IMG' && /^https?:\/\//i.test(source) && isTrackingPixel(element)) element.remove();
     else if (element.tagName !== 'IMG' || !(isRasterDataUrl(source) || (remoteImages && /^https:\/\//i.test(source)))) element.removeAttribute('src');
   });
+  // A frame's `prefers-color-scheme` follows the system, not the frame's color-scheme, in Chrome: the email's light and
+  // dark media queries are settled here for the document's scheme, so its dark styles never land on the light canvas.
+  const settle = (media: string) => media.replace(/\(\s*prefers-color-scheme\s*:\s*(light|dark)\s*\)/gi, (_, wanted: string) => wanted.toLowerCase() === scheme ? '(min-width:0px)' : '(max-width:0px)');
+  email.querySelectorAll('style').forEach(style => { style.textContent = settle(style.textContent ?? ''); if (style.media) style.media = settle(style.media); });
   const csp = email.createElement('meta');
   csp.httpEquiv = 'Content-Security-Policy';
   const inlineOrigins = [...new Set([...inline.values()].map(url => url.origin))].join(' ');
@@ -102,14 +116,15 @@ function emailDocument(html: string, { respectStyles, remoteImages, inline, asSe
   const tokens = getComputedStyle(document.documentElement);
   const style = email.createElement('style');
   // Reuse the browser's cached font files without opening network access inside the sandbox.
-  style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue('--color-email-text')}; --color-surface: ${tokens.getPropertyValue('--color-email-surface')}; } :where(html) { color-scheme: light; background: var(--color-surface); color: var(--color-text); scrollbar-width: none; } ::-webkit-scrollbar { display: none; } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'}${asSent ? '' : ' :where(img) { max-width: 100%; height: auto; }'}`;
+  style.textContent = `${fontFaces} :root { --font-email: ${tokens.getPropertyValue('--font-email')}; --tracking-email: ${tokens.getPropertyValue('--tracking-email')}; --color-text: ${tokens.getPropertyValue(scheme === 'dark' ? '--color-email-dark-text' : '--color-email-text')}; --color-surface: ${tokens.getPropertyValue(scheme === 'dark' ? '--color-email-dark-surface' : '--color-email-surface')}; } :where(html) { color-scheme: ${scheme}; background: var(--color-surface); color: var(--color-text); scrollbar-width: none; } ::-webkit-scrollbar { display: none; } :where(body) { margin: 24px; line-height: 1.5; overflow-wrap: anywhere; font-family: var(--font-email); letter-spacing: var(--tracking-email); } ${respectStyles ? '' : 'body, body * { font-family: var(--font-email) !important; letter-spacing: var(--tracking-email) !important; }'}${asSent ? '' : ' :where(img) { max-width: 100%; height: auto; }'}`;
   email.head.append(style);
   return `<!doctype html>${email.documentElement.outerHTML}`;
 }
 
 /** An email's sandboxed document (`doc`, null until the frame's fonts are read, once per session), whether its inline
- *  images are in it yet (`complete`), and why some of them can't be shown. */
-export function useEmailDocument({ html, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false, inlineImages, asSent = false }: Omit<EmailPreviewProps, 'title' | 'className'>) {
+ *  images are in it yet (`complete`), and why some of them can't be shown. With `dark`, also `darkDoc`: the document
+ *  on a dark canvas when the email opts in to dark mode (declaresDark), otherwise undefined. */
+export function useEmailDocument({ html, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false, inlineImages, asSent = false, dark = false }: Omit<EmailPreviewProps, 'title' | 'className'> & { dark?: boolean }) {
   const api = useApi();
   const attachmentApi = providedAttachmentApi ?? api.attachments;
   const attachmentKey = [...new Set(attachmentIds)].sort().join(',');
@@ -142,8 +157,10 @@ export function useEmailDocument({ html, attachmentIds = [], attachmentApi: prov
   }, [html, attachmentKey, attachmentApi, needed]);
   const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined;
   const options = useMemo(() => ({ respectStyles, remoteImages, inline, asSent }), [respectStyles, remoteImages, inline, asSent]);
-  const doc = useMemo(() => fontFaces === null ? null : emailDocument(html, options, sources, fontFaces), [html, options, sources, fontFaces]);
-  return { doc, complete: Boolean(sources) || error !== '', error };
+  const doc = useMemo(() => fontFaces === null ? null : emailDocument(html, { ...options, scheme: 'light' }, sources, fontFaces), [html, options, sources, fontFaces]);
+  const hasDark = useMemo(() => dark && declaresDark(html), [dark, html]);
+  const darkDoc = useMemo(() => !hasDark ? undefined : fontFaces === null ? null : emailDocument(html, { ...options, scheme: 'dark' }, sources, fontFaces), [hasDark, html, options, sources, fontFaces]);
+  return { doc, darkDoc, complete: Boolean(sources) || error !== '', error };
 }
 
 export function EmailPreview({ title = 'Email preview', className, ...props }: EmailPreviewProps) {

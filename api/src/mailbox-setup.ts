@@ -1,7 +1,7 @@
 import { setTimeout as delay } from 'node:timers/promises';
 import { and, eq, inArray, isNull, sql } from 'drizzle-orm';
 import type { SESClient as SESClientType, ReceiptRule } from '@aws-sdk/client-ses';
-import type { S3Client as S3ClientType } from '@aws-sdk/client-s3';
+import type { LifecycleRule, S3Client as S3ClientType } from '@aws-sdk/client-s3';
 import type { SNSClient as SNSClientType } from '@aws-sdk/client-sns';
 import type { STSClient as STSClientType } from '@aws-sdk/client-sts';
 import { ApiError, assertSesConfigured, lazyModule, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
@@ -12,7 +12,7 @@ import { checkMx } from './mailbox-dns.js';
 import { copyWorkspaceRaw } from './mailbox-mime.js';
 import { getRegionSettings } from './ses-region-state.js';
 import { awsError, canonical, feedbackUrl, policyReady, POOL_INSTALLATION, setupResources } from './ses-setup.js';
-import { bucketPolicy, deliveryPolicy, inboundPolicy, lifecycleRules, publicAccessBlock, receiptRule, redrivePolicy, STAGING_PREFIX } from './mail-controls.js';
+import { bucketPolicy, copiedMailExpiryRules, deliveryPolicy, inboundPolicy, lifecycleRules, publicAccessBlock, receiptRule, redrivePolicy, STAGING_PREFIX } from './mail-controls.js';
 import { platformCredentials, workspaceConnection, workspaceCredentials,type ReadyConnection } from './provider-credentials.js';
 import { activateReceiving, claimReceivable, connectionReady, noteReconcileFailure } from './states.js';
 
@@ -202,6 +202,16 @@ async function poolRead<T>(resource:string,work:()=>Promise<T>) {
 function jsonMatches(value:string|undefined,want:unknown) {
   try {return !!value && canonical(JSON.parse(value))===canonical(want);} catch {return false;}
 }
+export function poolLifecycleMatches(bucket:string,actual:LifecycleRule[]|undefined) {
+  // S3 may return an empty Filter instead of Prefix:"", and the SDK returns a Date rather than its wire timestamp.
+  const rules=actual?.map(r=>({...r,...(r.Filter && !Object.keys(r.Filter).length?{Filter:{Prefix:''}}:{}),
+    ...(r.Expiration?.Date instanceof Date?{Expiration:{...r.Expiration,Date:r.Expiration.Date.toJSON()?.replace(/\.000Z$/,'Z')??null}}:{})}));
+  const oldRules=lifecycleRules(true);
+  if (!bucket.startsWith('nightmail-')) return canonical(rules)===canonical(oldRules);
+  const renamed=oldRules.map(r=>({...r,ID:r.ID.replace(/^bane-/,'nightmail-')}));
+  const mirrors=renamed.flatMap(r=>'Tag' in r.Filter?[{...r,ID:r.ID+'-renamed-tag',Filter:{Tag:{...r.Filter.Tag,Key:'nightmail-kind'}}}]:[]);
+  return canonical(rules)===canonical([...renamed,...mirrors,...copiedMailExpiryRules(bucket)]);
+}
 async function verifyPoolRegion(runtime:Runtime,region:string,account:string,signal:AbortSignal,{sdk,s3,sns,ses}:Omit<Clients,'sts'>,register:(account:string,bucket:string,topic:string)=>Promise<void>) {
   const {bucket,rulePrefix,topicName,ruleSetName}=mailboxResources(POOL_INSTALLATION,region,account);
   const topicArn=`arn:aws:sns:${region}:${account}:${topicName}`, endpoint=feedbackUrl(runtime.config), opts={abortSignal:signal}, b={Bucket:bucket,ExpectedBucketOwner:account};
@@ -210,11 +220,7 @@ async function verifyPoolRegion(runtime:Runtime,region:string,account:string,sig
   const block=await poolRead(`${bucket} PublicAccessBlock`,()=>s3.send(new sdk.s3.GetPublicAccessBlockCommand(b),opts));
   if (canonical(block.PublicAccessBlockConfiguration)!==canonical(publicAccessBlock)) throw receivingDrift(`${bucket} PublicAccessBlock`);
   const lifecycle=await poolRead(`${bucket} LifecycleConfiguration`,()=>s3.send(new sdk.s3.GetBucketLifecycleConfigurationCommand(b),opts));
-  // S3/terraform can represent the all-objects filter as <Filter/> rather than <Prefix/>.
-  const rules=lifecycle.Rules?.map(r=>({...r,Filter:r.Filter && !Object.keys(r.Filter).length?{Prefix:''}:r.Filter}));
-  const oldRules=lifecycleRules(true), renamed=oldRules.map(r=>({...r,ID:r.ID.replace(/^bane-/,'nightmail-')}));
-  const expectedRules=TAG_PREFIX==='bane'?oldRules:[...renamed,...renamed.flatMap(r=>'Tag' in r.Filter?[{...r,ID:r.ID+'-renamed-tag',Filter:{Tag:{...r.Filter.Tag,Key:'nightmail-kind'}}}]:[])];
-  if (canonical(rules)!==canonical(expectedRules)) throw receivingDrift(`${bucket} LifecycleConfiguration`);
+  if (!poolLifecycleMatches(bucket,lifecycle.Rules)) throw receivingDrift(`${bucket} LifecycleConfiguration`);
   const {Attributes:a}=await poolRead(topicArn,()=>sns.send(new sdk.sns.GetTopicAttributesCommand({TopicArn:topicArn}),opts));
   if (a?.Owner!==account || a.TopicArn!==topicArn || !policyReady(a.Policy,inboundPolicy(topicArn,region,account,rulePrefix))) throw receivingDrift(`${topicArn} Policy`);
   if (!jsonMatches(a.DeliveryPolicy,deliveryPolicy)) throw receivingDrift(`${topicArn} DeliveryPolicy`);
@@ -375,7 +381,7 @@ const scheduleDnsPage:JobHandler=async(runtime,payload)=>{
     ), due AS (SELECT dc.token,dc.workspace_id,d.domain_id AS id,coalesce(j.created_at,dc.created_at) AS last_attempt,pc.legacy AND dc.identity ? 'adopted' AS attested FROM page d
       JOIN domain_claims dc ON d.workspace_id=dc.workspace_id AND d.name=dc.name AND d.connection_id=dc.connection_id
       JOIN regional_connections pc ON pc.id=d.connection_id AND pc.region=d.region AND ${connectionReady()}
-      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.identity IS NOT NULL AND (${claimReceivable()} OR dc.sending_state IN ('verified','lost')) AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
+      LEFT JOIN jobs j ON j.id='domain.mx:'||dc.token WHERE dc.identity IS NOT NULL AND NOT dc.identity ? 'builtin' AND (${claimReceivable()} OR dc.sending_state IN ('verified','lost')) AND (j.id IS NULL OR (j.status NOT IN ('pending','running') AND j.created_at<=now()-interval '50 minutes'))
       ORDER BY last_attempt,j.created_at NULLS FIRST,dc.token LIMIT ${dnsBatch}), verify AS (
       INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.verify:'||dc.token,'domain.verify',d.workspace_id,jsonb_build_object('domainId',d.id,'token',dc.token) FROM due d JOIN domain_claims dc ON dc.token=d.token JOIN provider_connections pc ON pc.id=dc.connection_id
       -- The adopted platform root re-checks its pinned SES fingerprint daily even before it receives.

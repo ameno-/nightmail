@@ -2,7 +2,7 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Effect": "Allow", "Action": ["ses:GetAccount", "cloudwatch:GetMetricData"], "Resource": "*",
+      "Effect": "Allow", "Action": ["ses:GetAccount", "ses:BatchGetMetricData", "cloudwatch:GetMetricData"], "Resource": "*",
       "Condition": {"StringEquals": {"aws:RequestedRegion": ["us-east-1", "us-east-2"]}}
     },
     {
@@ -24,9 +24,14 @@
       "Condition": { "StringLike": { "ses:TenantName": ["bane-ws_????????????????????????????????", "bane-probation-ws_????????????????????????????????"] }, "Null": { "ses:MultiRegionEndpointId": "true" } }
     },
     {
-      "Effect": "Allow", "Action": ["ses:DeleteEmailIdentity", "ses:PutEmailIdentityMailFromAttributes", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:ListResourceTenants"],
+      "Effect": "Allow", "Action": ["ses:DeleteEmailIdentity", "ses:PutEmailIdentityMailFromAttributes", "ses:PutEmailIdentityFeedbackAttributes", "ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation", "ses:ListResourceTenants"],
       "Resource": "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*",
       "Condition": { "StringLike": { "aws:ResourceTag/bane:domain-claim": "????????-????-4???-????-????????????" } }
+    },
+    {
+      "Effect": "Allow", "Action": ["ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation"],
+      "Resource": "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/bane:purpose": "builtin-domains" } }
     },
     {
       "Effect": "Allow",

@@ -7,20 +7,22 @@ import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRefreshListsOnChange } from '../../data/invalidation'
 import { request } from '../../data/live'
-import type { DnsRecord, DnsRecordPurpose, Domain, ReceivingIssue } from '../../data/types'
+import type { DnsRecord, DnsRecordPurpose, Domain, PublicDns, ReceivingIssue } from '../../data/types'
 import { settingsColumns } from './skeletons'
 import { receivingIssueTitle } from './receiving-issue-title'
 import './settings.css'
 import './domain-records.css'
 import { expectAccount } from '../../data/accounts'
 import { productName } from '../../../../api/src/brand'
+import { checkKey, RECORDS_CORRECT, type DnsChecks } from './domain-setup-alert'
 
 // Hosted reads are DB-only, so poll briskly while visible; self-hosted reads call SES and stay slow.
-export function useDomain(id: string, recheckUntil = 0) {
+// `enabled` false: the domain was just deleted, so nothing may read it again (forgetDomain in data/invalidation.ts).
+export function useDomain(id: string, recheckUntil = 0, enabled = true) {
   const api = useApi()
   const { multiTenant } = useWorkspaceAccess()
   const query = useQuery({
-    queryKey: ['nightmail', ...queries.domain(id).key],
+    queryKey: ['nightmail', ...queries.domain(id).key], enabled,
     queryFn: ({ signal }) => queries.domain(id).read(api, signal),
     refetchInterval: query => query.state.status === 'error' ? false : query.state.data?.status === 'pending' || query.state.data?.mailFromStatus === 'pending' || (multiTenant && Date.now() < recheckUntil) ? multiTenant ? 3000 : 60_000 : false,
     refetchIntervalInBackground: false,
@@ -93,9 +95,59 @@ export function zoneLines(records: DnsRecord[]) {
 export type RecordRow = { record: DnsRecord; purpose: string; status: { label: string; tone: Tone; detail?: string }; actions?: MenuItem[] }
 const purposeLabel = (record: DnsRecord) => {
   const purpose = purposeOf(record)
-  return purpose === 'sending' ? record.type === 'CNAME' ? 'DKIM' : 'Ownership' : purpose === 'mail_from' ? record.type === 'MX' ? 'MAIL FROM' : 'SPF' : purpose === 'dmarc' ? 'DMARC' : 'Receiving'
+  return purpose === 'sending' ? record.type === 'CNAME' ? 'DKIM' : 'Ownership' : purpose === 'mail_from' ? record.type === 'MX' ? 'MAIL FROM' : 'SPF' : purpose === 'dmarc' ? 'DMARC' : purpose === 'links' ? 'Links' : 'Receiving'
 }
-export const recordRow = (record: DnsRecord, status?: RecordRow['status']): RecordRow => ({ record, purpose: purposeLabel(record), status: status ?? (record.status === 'verified' ? { label: 'Verified', tone: 'success', detail: record.note } : { label: 'Missing', tone: 'warning', detail: record.note }) })
+export const recordRow = (record: DnsRecord, status?: RecordRow['status']): RecordRow => ({ record, purpose: purposeLabel(record), status: status ?? (record.status === 'verified' ? { label: 'Verified', tone: 'success', detail: record.note } : { label: 'Pending', tone: 'warning', detail: record.note }) })
+
+// Check now (verifyDomain) looks each pending sending and MAIL FROM record up in public DNS. Its answers are kept by
+// record, since the page's polls read the domain without them (reads carry only the background check's, once it runs).
+export { checkKey, type DnsChecks }
+export const dnsChecks = (domain: Domain): DnsChecks => new Map(domain.records.flatMap(record => record.publicDns !== undefined ? [[checkKey(record), record.publicDns] as const] : []))
+const required = (record: DnsRecord) => record.status !== 'verified' && (purposeOf(record) === 'sending' || purposeOf(record) === 'links' || purposeOf(record) === 'mail_from')
+function checkedStatus(record: DnsRecord, check: PublicDns | null | undefined): RecordRow['status'] | undefined {
+  // The link record before any check of it: a domain set up before link records has never had one.
+  if (check === undefined && required(record) && purposeOf(record) === 'links') return { label: 'Missing', tone: 'danger', detail: record.note }
+  if (!required(record) || check === undefined) return undefined
+  if (check === null) return { label: 'Pending', tone: 'warning', detail: 'Public DNS didn’t answer. Check again in a minute.' }
+  if (check.state === 'found') return { label: 'Found', tone: 'info', detail: purposeOf(record) === 'links' ? record.note : `Public DNS has this record. ${RECORDS_CORRECT}` }
+  if (check.state === 'missing') return { label: 'Missing', tone: 'danger', detail: `Public DNS has no ${record.type} record at ${record.name}.` }
+  return { label: 'Wrong value', tone: 'danger', detail: `Expected ${record.value}. Public DNS has ${check.values.join(', ')}.` }
+}
+
+const ordinals = ['first', 'second', 'third', 'fourth', 'fifth']
+const recordNoun = (record: DnsRecord) => ({ DKIM: 'DKIM CNAME', Ownership: 'ownership TXT', Links: 'links CNAME', 'MAIL FROM': 'MAIL FROM MX', SPF: 'SPF TXT' } as Record<string, string>)[purposeLabel(record)] ?? `${purposeLabel(record)} ${record.type}`
+// A DKIM name starts with a 32-character token: its first characters are enough to find it in a DNS provider's list.
+const shortHost = (name: string, domain: string) => { const host = relativeHost(name, domain); return host.length > 28 ? `${host.slice(0, 12)}…` : host }
+const list = (items: string[]) => items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items.at(-1)}`
+const sentence = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)
+
+/** One plain line that leads with what to fix after Check now: null before a check or once nothing is pending. */
+export function checkSummary(domain: Domain, checks: DnsChecks): { text: string; tone: Tone } | null {
+  const pending = domain.records.filter(required)
+  const checked = pending.filter(record => checks.has(checkKey(record)))
+  if (!checked.length) return null
+  const nouns = new Map(domain.records.map(record => [record, recordNoun(record)]))
+  const name = (record: DnsRecord) => {
+    const same = domain.records.filter(other => nouns.get(other) === nouns.get(record))
+    return `the ${same.length > 1 ? `${ordinals[same.indexOf(record)] ?? same.indexOf(record) + 1} ` : ''}${nouns.get(record)}`
+  }
+  const missing = checked.filter(record => checks.get(checkKey(record))?.state === 'missing')
+  const wrong = checked.filter(record => checks.get(checkKey(record))?.state === 'wrong_value')
+  const unknown = checked.filter(record => checks.get(checkKey(record)) === null)
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`
+  if (missing.length + wrong.length === 1) {
+    const record = missing[0] ?? wrong[0]!, host = shortHost(record.name, domain.name)
+    return { tone: 'danger', text: missing.length
+      ? `1 record missing: ${name(record)} (${host}).`
+      : `${sentence(name(record))} (${host}) has another value: ${checks.get(checkKey(record))!.values[0]}.` }
+  }
+  if (missing.length || wrong.length) return { tone: 'danger', text: [
+    missing.length && `${plural(missing.length, 'record')} missing: ${list(missing.map(name))}.`,
+    wrong.length && `${plural(wrong.length, 'record')} with another value: ${list(wrong.map(name))}.`,
+  ].filter(Boolean).join(' ') }
+  if (unknown.length) return { tone: 'warning', text: `Public DNS didn’t answer for ${plural(unknown.length, 'record')}. Check again in a minute.` }
+  return { tone: 'info', text: checked.length === pending.length ? 'Public DNS has every record.' : 'Public DNS has these records.' }
+}
 
 // Every record in one table: what it is for, its type, name and value (each with Copy), its status when not done, and the row's
 // actions (a menu, only on rows that have any). On a phone each record is a card: what it is for and its type as the
@@ -115,7 +167,7 @@ export function DnsRecordTable({ domain, rows }: { domain: string; rows: RecordR
   // A row says its status only while it isn't done; once every row is, the Status column goes (the header says Verified).
   const done = rows.every(row => row.status.tone === 'success')
   const menu = (row: RecordRow, items: MenuItem[]) => <DropdownMenu label={`Actions for ${row.purpose} ${row.record.type} record`} title={`${row.record.type} ${relativeHost(row.record.name, domain)}`} items={items} />
-  return <DataTable className="domain-records" rows={rows} rowKey={row => row.record.id} columns={[
+  return <DataTable className="domain-records ui-table--two-line" rows={rows} rowKey={row => row.record.id} columns={[
     { ...purpose, render: row => row.purpose, cardRender: row => <>{titles.get(row)} <span className="domain-record-type">{row.record.type}</span></> },
     { ...type, render: row => row.record.type },
     { ...name, render: ({ record }) => <div className="settings-copy-cell"><code title={record.name}>{breakable(relativeHost(record.name, domain))}</code><CopyButton value={record.name} label={`Copy full ${record.type} name`} /></div>, cardRender: ({ record }) => <code>{breakable(relativeHost(record.name, domain))}</code> },
@@ -199,9 +251,20 @@ export function DnsWaitNote({ domain }: { domain: Domain }) {
  */
 function receivingWarning(domain: string, receiving: DnsRecord[]) {
   const host = receiving.find(record => record.type === 'MX')?.name ?? receiving[0]?.name
-  return host === domain && !receiving.every(record => record.status === 'verified')
-    ? `This MX record sends all mail for ${domain} to ${productName}, including mailboxes hosted elsewhere today.`
-    : null
+  return host === domain && !receiving.every(record => record.status === 'verified') ? rootMxWarning(domain) : null
+}
+// Two-label public suffixes, so acme.co.uk counts as a registered domain and not a subdomain of co.uk.
+const SECOND_LEVEL = /^(?:co|com|net|org|gov|edu|ac|ltd|plc|me|ne|or|go|gen|nom|sch)\.[a-z]{2}$/
+/** Whether a name is a subdomain of a registered domain (nightmail.acme.dev), not a registered domain (acme.dev, acme.co.uk). */
+export function isSubdomainName(name: string) { const labels = name.split('.'); return labels.length > (SECOND_LEVEL.test(labels.slice(-2).join('.')) ? 3 : 2) }
+/**
+ * What receiving at a domain's own name takes over, worded for the case: a registered domain usually has mailboxes
+ * elsewhere today; a subdomain such as nightmail.acme.dev usually exists for exactly this, and its parent keeps its mail.
+ */
+export function rootMxWarning(host: string) {
+  return isSubdomainName(host)
+    ? `This MX record sends all mail for ${host} to ${productName}. ${host.slice(host.indexOf('.') + 1)} and its other subdomains keep their own mail.`
+    : `This MX record sends all mail for ${host} to ${productName}, including mailboxes hosted elsewhere today.`
 }
 
 // The domain page's receiving records (hosted): Off until the domain receives (publishing the record turns it on), and its own host's row offers
@@ -217,11 +280,16 @@ export function ReceivingIssueAlert({ issue }: { issue: ReceivingIssue }) {
 
 const NO_RECORDS = 'DNS records are not available yet.'
 // Onboarding: sending and receiving records in guided groups. The domain page: every record in one table, custom MAIL FROM last.
-export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, mailFrom }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; mailFrom?: MailFromView }) {
-  const sending = recordsFor(domain, 'sending'), receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
+export function DomainRecords({ domain, actions, guided = false, setup = null, receivingView, mailFrom, checks }: { domain: Domain; actions?: ReactNode; guided?: boolean; setup?: DnsSetup | null; receivingView?: ReceivingView; mailFrom?: MailFromView; checks?: DnsChecks }) {
+  // An own link record (links.<domain>, when own link hosts are on) is one of the sending records.
+  const sending = [...recordsFor(domain, 'sending'), ...recordsFor(domain, 'links')], receiving = recordsFor(domain, 'receiving'), issue = domain.receivingIssue ?? null
   const alert = issue && <ReceivingIssueAlert issue={issue} />
   const warning = receivingWarning(domain.name, receiving)
   const { copy } = useCopy()
+  const { multiTenant } = useWorkspaceAccess()
+  // Hosted: unsubscribe links go on the link domain unless the domain has a link record of its own (own link hosts).
+  const linkNote = multiTenant && !domain.records.some(record => record.purpose === 'links')
+    ? `Unsubscribe links in campaign and marketing mail from ${domain.name} use ${productName}'s link domain, so they need no DNS record.` : null
   // Stays in place (invisible) once every record verifies, so nothing below moves.
   const connect = setup && <DnsConnect setup={setup} open={domain.records.some(record => record.purpose !== 'dmarc' && record.status !== 'verified')} />
   if (guided) {
@@ -245,13 +313,20 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   })
   const mailFromRecords = recordsFor(domain, 'mail_from'), dmarc = dmarcRow(domain)
   const change: MenuItem[] = mailFrom ? [{ label: 'Change custom MAIL FROM', icon: <Pencil size={16} />, onSelect: mailFrom.onEdit }, { label: 'Remove custom MAIL FROM', icon: <Trash2 size={16} />, destructive: true, onSelect: mailFrom.onRemove }] : []
-  const rows = [...sending.map(record => recordRow(record)), ...dmarc ? [dmarc] : [], ...receivingRows, ...mailFromRecords.map(record => ({ ...recordRow(record), actions: change }))]
+  const checked = (record: DnsRecord) => recordRow(record, checkedStatus(record, checks?.get(checkKey(record))))
+  const rows = [...sending.map(checked), ...dmarc ? [dmarc] : [], ...receivingRows, ...mailFromRecords.map(record => ({ ...checked(record), actions: change }))]
+  // While sending records are pending, one line leads the records: what Check now does, then what it found to fix. Its
+  // space is there from the first frame (clamped, the full text on hover), so the answer never moves the table.
+  const summary = checks && domain.records.some(required) ? checkSummary(domain, checks) ?? { text: 'Check now looks up each record in public DNS.', tone: 'neutral' as const } : null
   // Copy all: every record the table lists, but not a DMARC policy that is already published.
   const all = rows.flatMap(row => row.record.id === 'dmarc-policy' ? [] : [row.record])
   const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
   const policy = domain.dmarc
   return <section className="section stack domain-records-section">
-    {(actions || all.length > 0) && <div className="domain-records-actions">{actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}</div>}
+    {(summary || actions || all.length > 0) && <div className="domain-records-actions">
+      {summary && <p className="domain-check-summary" data-tone={summary.tone} title={summary.text} role="status">{summary.text}</p>}
+      {actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}
+    </div>}
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
     {receivingView && alert}
@@ -260,6 +335,7 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
     {rows.length > 0 && <div className="domain-records-list">
       <DnsRecordTable domain={domain.name} rows={rows} />
       {mailFrom && !domain.mailFromDomain && mailFromRecords.length === 0 && <div className="domain-records-add"><Button variant="ghost" onClick={mailFrom.onEdit}><Plus size={14} aria-hidden />Add custom MAIL FROM</Button></div>}
+      {linkNote && <p className="muted">{linkNote}</p>}
     </div>}
   </section>
 }

@@ -3,6 +3,7 @@ import { ApiError, log, type Runtime } from './core.js';
 import { claimReceives, connectionReady, poolReceives } from './states.js';
 import { mailJson } from './mailbox-text.js';
 import { STAGING_PREFIX } from './mailbox-setup.js';
+import { builtinApex } from './builtin-limits.js';
 import {TAG_PREFIX} from './resource-tags.js';
 
 export type ReceivedNotification = {
@@ -20,14 +21,21 @@ export const sesIdPattern=/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/;
 // route statements take window, receipt and backlog rows in one order, and the global hold release
 // never waits on any of them (156).
 async function route(runtime:Runtime,source:SQL,replay:boolean) {
-  const hosted=runtime.config.multiTenant;
+  const hosted=runtime.config.multiTenant, apex=builtinApex(runtime.config);
   const result=await runtime.db.execute<{trusted:boolean;n:number;held:number;seen:number}>(sql`WITH source AS MATERIALIZED (${source}), bound AS MATERIALIZED (
     SELECT s.*,b.wid,b.kind FROM source s CROSS JOIN LATERAL (${hosted ? sql`SELECT NULL::text AS wid,'shared' AS kind FROM provider_pool_regions p
       WHERE p.aws_account_id=split_part(s.topic_arn,':',5) AND p.region=s.region AND p.inbound_topic_arn=s.topic_arn AND p.inbound_bucket=s.bucket AND ${poolReceives()}
       UNION ALL SELECT c.workspace_id,'byo' FROM provider_connections c JOIN mailbox_regions r ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
       WHERE c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND c.region=s.region AND c.aws_account_id=split_part(s.topic_arn,':',5) AND r.topic_arn=s.topic_arn AND r.bucket=s.bucket` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions r WHERE r.workspace_id=${runtime.config.workspaceId} AND r.region=s.region AND r.topic_arn=s.topic_arn AND r.bucket=s.bucket`}) b
     WHERE NOT s.fenced OR s.binding_workspace IS NOT DISTINCT FROM b.wid
-  ), env AS (SELECT b.*,addr,split_part(addr,'@',2) AS host FROM bound b CROSS JOIN jsonb_array_elements_text(b.recipients) e(addr)), matched AS MATERIALIZED (
+  ), env AS (SELECT b.*,addr,split_part(addr,'@',2) AS host FROM bound b CROSS JOIN jsonb_array_elements_text(b.recipients) e(addr)
+    -- Spam and viruses to a built-in domain (builtin-domain.ts) are dropped here, before a receipt takes a slot of the
+    -- workspace's receive budget or is metered: anyone can write to any address at it (the wildcard MX), wanted or not.
+    -- With built-in domains off (NIGHTMAIL_BUILTIN_DOMAIN unset, the kill switch) everything to them is dropped.
+    -- The parent's own name receives only its role addresses (builtinApex), for the platform workspace: anything else to it is dropped.
+    ${hosted ? sql`WHERE (NOT EXISTS (SELECT FROM builtin_domains bd WHERE bd.name=split_part(addr,'@',2))
+      OR (${!!runtime.config.builtinDomain} AND NOT (coalesce(b.notification#>>'{receipt,spamVerdict,status}','') IN ('FAIL','GRAY') OR coalesce(b.notification#>>'{receipt,virusVerdict,status}','') IN ('FAIL','GRAY'))))
+      AND NOT coalesce(lower(split_part(addr,'@',2))=${apex.parent}::text AND lower(split_part(addr,'@',1))<>ALL(${sql.param(apex.locals)}::text[]),false)` : sql``}), matched AS MATERIALIZED (
     SELECT e.bucket,e.mid,m.workspace_id,e.addr FROM env e CROSS JOIN LATERAL (SELECT * FROM mailbox_domains m WHERE ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=e.region AND (e.wid=m.workspace_id OR e.kind='shared') OFFSET 0) m
     WHERE ${replay?sql`e.expires_at>now() AND (e.owners->e.addr) ? m.workspace_id` : sql`NOT EXISTS (SELECT FROM mail_receipt_holds h WHERE h.bucket=e.bucket AND h.ses_message_id=e.mid AND h.binding_workspace IS NOT DISTINCT FROM e.wid AND h.topic_arn=e.topic_arn AND h.recipients ? e.addr AND (h.expires_at<=now() OR NOT (h.owners->e.addr) ? m.workspace_id))`} AND ${hosted ? sql`
       -- The recipient's host routes (each host of a domain on its own row, unique while it routes: mailbox_domains_routing_host),
@@ -40,7 +48,9 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
       WHERE d.id=m.domain_id AND d.workspace_id=m.workspace_id AND d.created_at<=e.at AND dc.created_at<=e.at
         -- A host routes only for the domain it is part of: the domain itself or one of its subdomains. The primary host's MX
         -- grace is the claim's receiving_lost_since (the fence above); every other host's is its row's.
-        AND (e.host=d.name OR right(e.host,length(d.name)+1)='.'||d.name)
+        AND (e.host=d.name OR right(e.host,length(d.name)+1)='.'||d.name
+          -- The parent's role addresses, through the platform workspace's own built-in domain (builtin-domain.ts builtinApex).
+          OR (lower(e.host)=${apex.parent}::text AND lower(split_part(e.addr,'@',1))=ANY(${sql.param(apex.locals)}::text[]) AND d.workspace_id=${apex.workspace}::text AND dc.identity ? 'builtin'))
         AND (m.receiving_host=dc.receiving_host OR m.lost_since IS NULL OR m.lost_since>now()-interval '2 hours') AND (d.region=m.region OR
         (c.kind='shared' AND m.region='us-east-2' AND m.status='active' AND EXISTS
           (SELECT FROM domain_sending_bindings sb WHERE sb.domain_id=d.id AND sb.connection_id=c.id AND sb.region=d.region))))` : sql`m.status IN ('provisioning','waiting_for_mx','active') AND (m.parent_id IS NULL OR EXISTS (SELECT 1 FROM mailbox_domains parent WHERE parent.id=m.parent_id AND parent.workspace_id=m.workspace_id AND parent.status IN ('provisioning','waiting_for_mx','active')))`}
@@ -94,6 +104,37 @@ export async function acceptInboundNotification(runtime:Runtime,input:{topicArn:
   if(!r.trusted) throw new ApiError(403,'MAILBOX_NOTIFICATION_UNTRUSTED','Unknown receiving account, topic or bucket.');
   if(r.held) log('warn',{code:'MAILBOX_NOTIFICATION_UNROUTED_HOST',region:input.region});
   return r.n;
+}
+
+/** A committed receipt shouldn't wait for delivery of a shared work-queue hint. Elect one Worker across
+ * isolates per second. Claim immediately and check again at the end of the window for coalesced commits.
+ * The ordinary consumer and cron keep the durable leases, retries and overflow moving. */
+export async function wakeReceivedMail(runtime:Runtime, runnable:number) {
+  if (!runnable) return;
+  if (!runtime.detach) { await runtime.wake?.(runnable,'ingest'); return; }
+  const key='scheduler:inbound-receipts';
+  const elected=await runtime.db.execute(sql`INSERT INTO job_schedule(workspace_id,wake_not_before)
+    SELECT ${key},clock_timestamp()+interval '1 second' WHERE NOT EXISTS (
+      SELECT FROM job_schedule WHERE workspace_id=${key} AND wake_not_before>clock_timestamp())
+    ON CONFLICT(workspace_id) DO UPDATE SET wake_not_before=clock_timestamp()+interval '1 second'
+    WHERE job_schedule.wake_not_before IS NULL OR job_schedule.wake_not_before<=clock_timestamp() RETURNING 1`);
+  if (!elected.rowCount) return;
+  void runtime.detach(async worker=>{
+    try {
+      const closes=Date.now()+1000, limit=24;
+      const [{drainJobs},{nextWakeDelay}]=await Promise.all([import('./dispatch.js'),import('./jobs.js')]);
+      const ran=await drainJobs(worker,limit,3,5000,'ingest');
+      const remaining=closes-Date.now();
+      if (remaining>0) await new Promise(resolve=>setTimeout(resolve,remaining));
+      const due=await nextWakeDelay(worker,'ingest');
+      if (due===null) return;
+      if (due===0 && ran<limit) {
+        await drainJobs(worker,limit-ran,3,5000,'ingest');
+        if (await nextWakeDelay(worker,'ingest')===null) return;
+      }
+    } catch { log('warn',{code:'MAILBOX_RECEIPT_DRAIN_FAILED'}); }
+    await worker.wake?.(1,'ingest');
+  }).catch(()=>log('warn',{code:'QUEUE_WAKE_FAILED',message:'Mailbox ingestion remains durable.'}));
 }
 
 export async function recoverHeldReceipts(runtime:Runtime) {

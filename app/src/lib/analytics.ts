@@ -12,8 +12,8 @@ export type ElementLike = { tagName: string; parentElement: ElementLike | null; 
 type Listener = (event: any) => void
 export type TrackerHost = {
   document: { addEventListener(type: string, listener: Listener, options?: boolean | AddEventListenerOptions): void; removeEventListener(type: string, listener: Listener, options?: boolean | EventListenerOptions): void; readonly visibilityState: string }
-  /** Posts one batch; false (or a throw) drops it. */
-  send(body: string): boolean
+  /** Posts one immutable batch without blocking the page. */
+  send(body: string): void
   now(): number
   width(): number
   id(): string
@@ -96,7 +96,7 @@ export function createTracker(host: TrackerHost) {
       let count = Math.min(queue.length, ANALYTICS_LIMITS.events), body = JSON.stringify({ ...envelope, events: queue.slice(0, count) })
       while (count > 1 && body.length > BATCH_BYTES) { count = Math.ceil(count / 2); body = JSON.stringify({ ...envelope, events: queue.slice(0, count) }) }
       queue = queue.slice(count)
-      try { host.send(body) } catch { /* Dropped: analytics never retries or blocks. */ }
+      try { host.send(body) } catch { /* Analytics never blocks the page. */ }
     }
   }
   const visibleMs = () => visible + (host.document.visibilityState === 'visible' ? host.now() - since : 0)
@@ -158,7 +158,7 @@ export function createTracker(host: TrackerHost) {
     },
     dialog(open: boolean, title: unknown, name?: string, ms?: number) { push(open ? 'dialog_open' : 'dialog_close', { name, role: 'dialog', label: typeof title === 'string' ? title : null, ms }) },
     /** A field showing a validation error the dashboard wrote (components/ui Field). */
-    fieldError(label: unknown, field?: string) { push('form_invalid', { role: 'field', label: typeof label === 'string' ? label : null, field, reason: 'customError' }) },
+    fieldError(label: unknown, field?: string, code?: string) { push('form_invalid', { role: 'field', label: typeof label === 'string' ? label : null, field, reason: 'customError', ...(code && /^[a-z][a-z_]{0,31}$/.test(code) ? { code } : {}) }) },
     /** A failed API request. The same error from the same request is reported once every 30 seconds. */
     apiError(method: string, path: string, status: number | undefined, code: string, field?: string) {
       // /v1/me answering 401 is how a signed-out page learns it is signed out, not an error anyone sees.
@@ -186,7 +186,7 @@ export function createTracker(host: TrackerHost) {
         else if (/^\/v1\/domains\/[^/]+$/.test(p) && body.ready === true) once('domain_verified')
       }
     },
-    track(step: FunnelStep) { push('track', { step }) },
+    track(step: FunnelStep, name?: string) { push('track', { step, name }) },
     flush,
   }
 }
@@ -202,7 +202,12 @@ export function analytics(): Tracker {
         const value = query.get('utm_'+key); return value && /^[\w-]{1,48}$/.test(value) ? value : null
       }) }
     },
-    send: body => navigator.sendBeacon(ANALYTICS_PATH, new Blob([body], { type: 'text/plain;charset=UTF-8' })),
+    send: body => {
+      void fetch(ANALYTICS_PATH, { method: 'POST', mode: 'same-origin', keepalive: true, body }).then(response => {
+        const retry = response.status === 503 && response.headers.get('NM-R')
+        if (retry) setTimeout(() => navigator.sendBeacon(ANALYTICS_PATH + retry, body), 500 * Math.random())
+      }).catch(() => { /* No receipt: don't replay an unknown outcome. */ })
+    },
     now: () => Date.now(), width: () => window.innerWidth, id: () => crypto.randomUUID().replaceAll('-', ''),
     optedOut: () => navigator.doNotTrack === '1' || (navigator as { globalPrivacyControl?: boolean }).globalPrivacyControl === true,
     every: (ms, run) => { const timer = window.setInterval(run, ms); return () => window.clearInterval(timer) },

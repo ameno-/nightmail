@@ -1,12 +1,14 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
 import { useGuardedMutation } from '../../lib/single-flight'
 import { Send } from 'lucide-react'
 import { Alert, Button, ErrorText, SectionHeader, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { useApiQuery, usePublicOrigin, useSession } from '../../data/context'
+import { useApiDef, useApiQuery, usePublicOrigin, useSession } from '../../data/context'
 import { request } from '../../data/live'
-import type { Domain } from '../../data/types'
+import { queries } from '../../data/queries'
+import { pendingEmailStatuses, type Domain } from '../../data/types'
+import { label } from '../../lib/format'
 import './developer.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { MaskedText } from './agent-setup'
@@ -28,20 +30,48 @@ export function sendSnippets({ origin, apiKey, from, to }: { origin: string; api
 
 const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'TypeScript' }]
 
-// Sends a clearly labelled test from hello@<domain> to the signed-in user's own address. The server picks the
+// Sends a first email from hello@<domain> to the signed-in user's own address. The server picks the
 // recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
-export function TestSend({ domain, onSent, primary = false }: { domain: Domain; onSent?: (id: string) => void; primary?: boolean }) {
+/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. */
+export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string) => void) {
+  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
+    onSuccess: data => onSent?.(data.id) })
+}
+/** A just-sent email's status, read alone every 1.5 s while it is on its way and less than two minutes old (a deferral
+ *  past that is Logs' to show). `onSettled` runs once it has a final status (delivered, bounced…). */
+export function useSettlingEmail(id: string | undefined, onSettled?: () => void) {
+  const email = useApiDef(queries.email(id ?? ''), { enabled: Boolean(id),
+    interval: data => data && pendingEmailStatuses.includes(data.status) && Date.now() - Date.parse(data.sentAt) < 120_000 ? 1500 : false })
+  const status = email.data?.status
+  const settled = status !== undefined && !pendingEmailStatuses.includes(status)
+  useEffect(() => { if (settled) onSettled?.() }, [settled]) // eslint-disable-line react-hooks/exhaustive-deps
+  return status
+}
+
+/** What a test send says once sent: queued, then delivered or how else it went, as soon as it does, and the link to Logs. */
+export function TestSentLine({ id, to, simulated, onLeave, onSettled }: { id: string; to: string; simulated?: boolean; onLeave?: () => void; onSettled?: () => void }) {
+  const status = useSettlingEmail(id, onSettled)
+  const address = <PrivateAddress value={to} />
+  const line = !status || pendingEmailStatuses.includes(status) ? <>First email queued to {address}</>
+    : status === 'delivered' ? <>First email delivered to {address}</> : <>First email to {address}: {label(status).toLowerCase()}</>
+  return <>{line}{simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(id)}`} onClick={onLeave}>View in Logs</Link></>
+}
+
+// `onLeave` runs before View in Logs opens the email: onboarding finishes there, so the dashboard opens instead of sending
+// the browser back to the step it came from. `ready`: whether it can send, where the caller knows better than the domain's
+// status (a new built-in domain still being set up sends: its send waits for the setup). `onSettled`: the test has its outcome.
+export function TestSend({ domain, onSent, onSettled, primary = false, onLeave, ready }: { domain: Domain; onSent?: (id: string) => void; onSettled?: () => void; primary?: boolean; onLeave?: () => void; ready?: boolean }) {
   const identity = useSession()?.identity
   const to = identity?.email
   const from = `hello@${domain.name}`
-  const verified = domain.status === 'verified'
-  const test = useGuardedMutation({ target: domain.id, mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
-    onSuccess: data => onSent?.(data.id) })
+  const verified = ready ?? domain.status === 'verified'
+  const test = useTestSend(domain, onSent)
   if (!to) return null
   return <>
     <div className="first-send-test">
-      <Button variant={primary ? 'primary' : undefined} loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send a test email</Button>
-      <span className="muted" role="status">{test.isSuccess ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></> : `Available once ${domain.name} is verified.`}</span>
+      <Button variant={primary ? 'primary' : undefined} loading={test.isPending} disabled={!verified || test.isSuccess} onClick={() => test.mutate()}><Send size={14} aria-hidden />Send your first email</Button>
+      <span className="muted" role="status">{test.isSuccess ? <TestSentLine id={test.data.id} to={to} simulated={test.data.simulated} onLeave={onLeave} onSettled={onSettled} /> : verified ? <>From <PrivateAddress value={from} /> to <PrivateAddress value={to} /></>
+        : domain.builtIn ? `Available in a moment, once ${domain.name} is ready.` : `Available once ${domain.name} is verified.`}</span>
     </div>
     {test.error ? <Alert tone="danger"><ErrorText error={test.error} /></Alert> : null}
   </>

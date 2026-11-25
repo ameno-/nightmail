@@ -2,11 +2,18 @@ import { createHmac, randomBytes } from 'node:crypto';
 import { z } from 'zod';
 import type { AnalyticsRow } from './analytics.js';
 import { analyticsId, viewportClass } from './analytics-events.js';
-import type { Runtime, Storage } from './core.js';
+import { ApiError, logError, platformMessage, type Runtime, type Storage } from './core.js';
 
 export const ANALYTICS_ROOT = 'analytics/v1/';
 export const analyticsStore = (runtime: Runtime): Storage => runtime.analyticsStorage ?? runtime.storage;
-const publicRoute = (x: unknown) => typeof x === 'string' && x.length <= 128 && /^\/(?:pricing|(?:compare|legal|docs)(?:\/(?:api\/)?[A-Za-z][\w-]{0,63})?)?\/?$/.test(x) ? x.replace(/\/$/, '') || '/' : null;
+/** Keep platform detail and SQLSTATEs, never SQL parameters or JSON.parse snippets from an event. */
+export function logAnalyticsFailure(error: unknown, code: string, fields: Record<string, unknown>) {
+  const cause = error instanceof ApiError ? error.code : error instanceof SyntaxError ? 'Invalid analytics JSON' : platformMessage(error);
+  logError(error, { code, ...fields, cause }, 'warn');
+}
+/** The public pages the public hook reports (the homepage, pricing, comparisons, legal and the docs), by their own path. */
+export const PUBLIC_ROUTE = /^\/(?:pricing|(?:compare|legal|docs)(?:\/(?:api\/)?[A-Za-z][\w-]{0,63})?)?\/?$/;
+const publicRoute = (x: unknown) => typeof x === 'string' && x.length <= 128 && PUBLIC_ROUTE.test(x) ? x.replace(/\/$/, '') || '/' : null;
 const host = (x: unknown) => typeof x === 'string' && x.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,32}$/i.test(x) ? x.toLowerCase() : null;
 const tag = (x: unknown) => typeof x === 'string' && /^[\w-]{1,48}$/.test(x) ? x : null;
 export const attribution = (r: unknown, u: unknown) => {
@@ -14,7 +21,7 @@ export const attribution = (r: unknown, u: unknown) => {
   return { referrer: host(r), source: tag(tags[0]), medium: tag(tags[1]), campaign: tag(tags[2]) };
 };
 const PublicEvent = z.object({ p: z.string().max(128), s: z.string().max(40), c: z.string().max(253).optional(), w: z.number().int().min(0).max(65535), r: z.unknown().optional(), u: z.unknown().optional() });
-export function publicRows(body: unknown, now: number): AnalyticsRow[] {
+export function publicRows(body: unknown, now: number, eventId: string): AnalyticsRow[] {
   const parsed = PublicEvent.safeParse(body);
   if (!parsed.success) return [];
   const { p, s, c, w, r, u } = parsed.data, route = publicRoute(p), sid = analyticsId(s);
@@ -22,7 +29,7 @@ export function publicRows(body: unknown, now: number): AnalyticsRow[] {
   const target = c === undefined ? null : publicRoute(c) ?? host(c) ?? (['sign-in','outbound','link'].includes(c) ? c : null);
   if (c !== undefined && !target) return [];
   const at = new Date(now).toISOString();
-  return [{ v: 1, id: crypto.randomUUID(), received: at, t: at, seq: 0, sid, ws: null, uid: null, app: null, vp: viewportClass(w),
+  return [{ v: 1, id: eventId, received: at, t: at, seq: 0, sid, ws: null, uid: null, app: null, vp: viewportClass(w),
     type: target ? 'click' : 'page_view', route, target, public: true, ...attribution(r,u), width: w,
     ref: null, name: null, role: null, label: null, field: null, reason: null, code: null, op: null, status: null, ms: null, step: null }];
 }

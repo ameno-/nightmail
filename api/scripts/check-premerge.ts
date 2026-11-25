@@ -251,7 +251,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
 // vendor's page it was read on, the day and the text. The pages are rendered as React renders them for a browser (in a
 // child process with the app's JSX settings), at their own sizes and at inputs a visitor might type.
 {
-  const before = failed, file = 'app/src/features/pricing/prices.ts'
+  const before = failed, file = 'app/src/features/pricing/compare/index.ts'
   const { RATES, CREDIT, STORAGE_AFTER_DAYS, perThousandUsd } = await import('../src/billing/rates.js')
   const n = (value: number) => value.toLocaleString('en-US')
   // Written again here, apart from the pages' own code: micro-cents to dollars, half up, four places under a cent, and
@@ -269,14 +269,14 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   ]
   const script = [
     "import { createElement as h, Fragment } from 'react'", "import { renderToStaticMarkup } from 'react-dom/server'", "import { MemoryRouter } from 'react-router'",
-    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts')",
+    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts'), compare = await import('./src/features/pricing/compare/index.ts')",
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(scene.Scene, {})) } })`,
     // Each comparison's page (scene.tsx: the board in its hall, and the page's end, whose Sources has its small print), and every
     // size its fader can reach, with the competitor's price there.
-        "const boards = Object.entries(prices.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
-    "const reach = Object.entries(prices.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
-    'const { OFFERS, comparisons, resendOverage, resendReceived } = prices',
+        "const boards = Object.entries(compare.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
+    "const reach = Object.entries(compare.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
+    'const { OFFERS, comparisons, resendOverage, resendReceived } = compare',
     "process.stdout.write(JSON.stringify({ calculator, boards, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
   ].join('\n')
   type Rendered = { calculator: { input: Record<string, string>; path: string; html: string }[]; boards: { id: string; html: string }[]; reach: { id: string; sizes: { size: number; sent: number; received: number; theirs: number | null }[] }[]; data: unknown }
@@ -297,7 +297,7 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     }
     // The rates and terms the pages quote, as the billing code has them.
     const minTopUp = '$' + n(CREDIT.minTopUpCents / 100)
-    const terms = ['$' + perThousandUsd(RATES.emailUc) + ' per 1,000', n(RATES.freeSentEmails) + ' of each free', dollarsOf(RATES.storageUcPerGbMonth) + ' per GB a month after ' + Number(RATES.freeStorageBytes / 1_000_000_000n) + ' GB free',
+    const terms = ['$' + perThousandUsd(RATES.emailUc) + ' per 1,000', n(RATES.freeSentEmails) + ' sent and ' + n(RATES.freeReceivedEmails) + ' received free', dollarsOf(RATES.storageUcPerGbMonth) + ' per GB a month after ' + Number(RATES.freeStorageBytes / 1_000_000_000n) + ' GB free',
       'past ' + STORAGE_AFTER_DAYS + ' days', 'Top-ups start at ' + minTopUp + ' and expire ' + CREDIT.expiresAfterMonths + ' months after purchase']
     for (const { input, path, html } of out.calculator) {
       const page = text(html), want = { sent: typed(input.sent ?? '100000'), received: typed(input.received ?? '0') }
@@ -312,13 +312,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     }
     // Every competitor figure (a tier, a per-email rate, a fact that names a price) and its source: the vendor's page
     // (https), the day it was read (not in the future) and the text it was read from. Facts without a source are
-    // Nightmail's own (a comparison's \`ours\`).
+    // Nightmail's own (a comparison's \`rows\`).
     const sources: [string, Record<string, unknown>][] = []
     const walk = (value: unknown, at: string) => {
       if (!value || typeof value !== 'object') return
       if (Array.isArray(value)) return value.forEach((item, i) => walk(item, `${at}[${i}]`))
       const record = value as Record<string, unknown>, cited = Object.keys(record).some(key => key === 'source' || key.endsWith('Source'))
-      const price = 'cents' in record || 'ucPerEmail' in record || ('text' in record && /\$\d/.test(String(record.text)) && !/\.ours\[\d+\]$/.test(at))
+      const price = 'cents' in record || 'ucPerEmail' in record || ('text' in record && /\$\d/.test(String(record.text)) && !/\.rows\[\d+\]$/.test(at))
       if (price && !cited) fail('Price pages', `${at} is a competitor price with no source.`, file)
       for (const [key, item] of Object.entries(record)) {
         if (key === 'source' || key.endsWith('Source') || key === 'resendOverage' || key === 'resendReceived') sources.push([`${at}.${key}`, (item ?? {}) as Record<string, unknown>])
@@ -343,19 +343,124 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     // there (a size where it doesn't must not be offered); its Nightmail figure is the billed price for the emails a
     // month written beside it, the competitor's price is dated and linked, and the terms are in its small print.
     for (const { id, sizes } of out.reach) for (const s of sizes) {
-      if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (prices.ts).`, file)
-      else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (prices.ts, steps).`, file)
+      if (s.theirs === null) fail('Price pages', `The ${id} control reaches ${n(s.size)}, a size ${id}'s page doesn't price: take it out of the comparison's steps (compare/${id}.ts).`, file)
+      else if (charged(s.sent, s.received) >= BigInt(s.theirs) * 1_000_000n) fail('Price pages', `The ${id} control reaches ${n(s.size)}, where Nightmail (${dollarsOf(charged(s.sent, s.received))}) isn't cheaper than ${id} (${dollarsOf(BigInt(s.theirs) * 1_000_000n)}): the control must not offer it (compare/${id}.ts, steps).`, file)
     }
     for (const { id, html } of out.boards) {
       const page = text(html), where = `Nightmail vs ${id}`
       checkFigures(where, html, 1)
-      for (const f of figures(html)) if (!page.includes(`${n(f.sent)} emails a month`) || f.received) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
+      // The emails a month beside each figure: sent, or (a comparison of inboxes) received and sent.
+      for (const f of figures(html)) if (!page.includes(f.received ? `${n(f.received)} received and ${n(f.sent)} sent a month` : `${n(f.sent)} emails a month`)) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
       for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)
     }
     if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.boards.length} comparison pages match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
+}
+
+// 10. Design rules (app/design-lint.config.ts): borderless, no focus rings, one surface step, tokens for colour, spacing,
+// radius and type, Inter and OpenTUI Mono, Lucide icons, full-width pages, whole labels. app/scripts/design-lint prints
+// the counts by rule and the first violations, each with why and what to use instead. Rules at level 'report' never
+// fail; one set to 'error' fails here on its first violation.
+{
+  try {
+    console.log(execFileSync('node', ['--import', import.meta.resolve('tsx'), 'app/scripts/design-lint/index.ts', '--limit', '10'], { cwd: root, encoding: 'utf8', maxBuffer: 64 << 20, stdio: ['ignore', 'pipe', 'pipe'] }).trimEnd());
+  } catch (error) {
+    const { status, stdout, stderr } = error as { status?: number; stdout?: string; stderr?: string };
+    if (/Cannot find (module|package) 'stylelint'/.test(String(stderr))) warn('Design rules', 'Skipped: run bun install in app/ to check the design rules.');
+    else if (status === 1 && stdout) { console.log(stdout.trimEnd()); fail('Design rules', 'A design rule at level error has violations (above). Fix them as each one says, or allowlist a sanctioned exception with its reason in app/design-lint.config.ts.', 'app/design-lint.config.ts'); }
+    else fail('Design rules', `app/scripts/design-lint failed: ${String(stderr ?? error).slice(0, 600)}`, 'app/scripts/design-lint/index.ts');
+  }
+}
+
+// 11. Job handlers. Every job type enqueued into the jobs table and every key exported from a job-handler map must
+// resolve through dispatch.ts resolveJobHandler(), so a missing branch never fails jobs with JOB_HANDLER_MISSING.
+{
+  const before = failed;
+  const { resolveJobHandler } = await import('../src/dispatch.js');
+  const types = new Map<string, string>();
+  const record = (type: string, where: string) => { if (!types.has(type)) types.set(type, where); };
+  // A job's type in an INSERT INTO jobs statement (TypeScript sql`…` or a migration's SQL function): its quoted dotted names.
+  const INSERT_JOBS = /INSERT\s+INTO\s+(?:public\.)?jobs\s*(?:AS\s+\w+\s*)?\(([^)]+)\)\s*([\s\S]*?)(?=\bON\s+CONFLICT\b|\bRETURNING\b|\)\s*,\s*[a-z_]+\s+AS\s*\(|`$|;)/gi;
+  const insertedTypes = (raw: string, where: string) => {
+    for (const ins of raw.matchAll(INSERT_JOBS)) {
+      const cols = ins[1]!.split(',').map(c => c.trim().toLowerCase()), body = ins[2]!;
+      if (cols.includes('status') && /'completed'/.test(body)) continue;
+      for (const m of body.matchAll(/'([a-z][a-z0-9]*\.[a-zA-Z0-9_]+)'/g)) if (!/^(?:public|pg_catalog)\./.test(m[1]!)) record(m[1]!, where);
+    }
+  };
+  const walkFiles = (dir: URL, rel: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) walkFiles(new URL(entry.name + '/', dir), `${rel}${entry.name}/`);
+      else if (entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
+        const file = `${rel}${entry.name}`, text = readFileSync(new URL(entry.name, dir), 'utf8');
+        const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
+        const consts = new Map<string, string>();
+        const evalStr = (node: ts.Node): string | null => {
+          if (ts.isStringLiteralLike(node)) return node.text;
+          if (ts.isIdentifier(node)) return consts.get(node.text) ?? null;
+          return null;
+        };
+        const collectConsts = (node: ts.Node) => {
+          if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.initializer && ts.isStringLiteralLike(node.initializer)) consts.set(node.name.text, node.initializer.text);
+          ts.forEachChild(node, collectConsts);
+        };
+        collectConsts(sf);
+        const visit = (node: ts.Node) => {
+          if (ts.isCallExpression(node)) {
+            const callee = node.expression.getText(sf);
+            // A job enqueue takes (db, job); a stream controller's enqueue(chunk) takes one argument and is no job.
+            if ((callee === 'enqueue' || callee.endsWith('.enqueue')) && node.arguments.length >= 2) {
+              const arg = node.arguments[1]!;
+              const prop = ts.isObjectLiteralExpression(arg) ? arg.properties.find(p => ts.isPropertyAssignment(p) && ts.isIdentifier(p.name) && p.name.text === 'type') as ts.PropertyAssignment | undefined : undefined;
+              const val = prop && evalStr(prop.initializer);
+              if (val) record(val, file);
+              // A type this check can't read could be one with no handler: name it with a literal or a const in the file.
+              else fail('Job handlers', `${file}: enqueue's job type isn't a string literal or a const in this file, so this check can't verify it has a handler.`, file, sf.getLineAndCharacterOfPosition(node.getStart(sf)).line + 1);
+            }
+            // Jobs inserted with Drizzle: insert(jobs).values(…), each row's literal type.
+            if (ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'values' && /\binsert\(jobs\)$/.test(node.expression.expression.getText(sf))) {
+              const types = (n: ts.Node): void => { if (ts.isPropertyAssignment(n) && ts.isIdentifier(n.name) && n.name.text === 'type') { const val = evalStr(n.initializer); if (val) record(val, file); } ts.forEachChild(n, types); };
+              node.arguments.forEach(types);
+            }
+          }
+          if (ts.isTaggedTemplateExpression(node) && node.tag.getText(sf) === 'sql') {
+            // Inspect only each INSERT INTO jobs(...) statement up to its ON CONFLICT / RETURNING / CTE end,
+            // ignoring sibling CTEs (audit events, webhook events) and state-marker rows inserted as completed.
+            insertedTypes(node.template.getText(sf), file);
+          }
+          ts.forEachChild(node, visit);
+        };
+        visit(sf);
+      }
+    }
+  };
+  walkFiles(new URL('src/', api), 'api/src/');
+  // Jobs a migration's SQL function inserts (triggers, send_admission and the like) need handlers too.
+  for (const name of readdirSync(new URL('migrations/', api)).filter(n => n.endsWith('.sql')).sort()) insertedTypes(readFileSync(new URL(`migrations/${name}`, api), 'utf8'), `api/migrations/${name}`);
+  const registries = await Promise.all([
+    import('../src/sending.js').then(m => ['api/src/sending.ts', m.jobHandlers] as const),
+    import('../src/operations.js').then(m => ['api/src/operations.ts', m.operationJobs] as const),
+    import('../src/ses-regions.js').then(m => ['api/src/ses-regions.ts', m.sesRegionJobs] as const),
+    import('../src/reputation-alerts.js').then(m => ['api/src/reputation-alerts.ts', m.reputationAlertJobs] as const),
+    import('../src/operator-alerts.js').then(m => ['api/src/operator-alerts.ts', m.operatorAlertJobs] as const),
+    import('../src/mailbox-events.js').then(m => ['api/src/mailbox-events.ts', m.mailboxEventJobs] as const),
+    import('../src/mailbox-setup.js').then(m => ['api/src/mailbox-setup.ts', m.mailboxSetupJobs] as const),
+    import('../src/mailbox-ingest.js').then(m => ['api/src/mailbox-ingest.ts', m.mailboxIngestJobs] as const),
+    import('../src/standing.js').then(m => ['api/src/standing.ts', m.standingJobs] as const),
+    import('../src/newsletters.js').then(m => ['api/src/newsletters.ts', m.newsletterJobs] as const),
+    import('../src/billing/jobs.js').then(m => ['api/src/billing/jobs.ts', m.billingJobs] as const),
+    import('../src/account-notices.js').then(m => ['api/src/account-notices.ts', m.accountNoticeJobs] as const),
+    import('../src/signups.js').then(m => ['api/src/signups.ts', m.signupJobs] as const),
+    import('../src/byo-regional.js').then(m => ['api/src/byo-regional.ts', m.regionalByoJobs] as const),
+  ]);
+  for (const [file, map] of registries) for (const type of Object.keys(map)) record(type, file);
+  for (const [type, file] of [...types.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const handler = await resolveJobHandler(type);
+    if (typeof handler !== 'function') fail('Job handlers', `Job type '${type}' (from ${file}) has no handler in api/src/dispatch.ts resolveJobHandler(). Add a route for it there.`, 'api/src/dispatch.ts');
+  }
+  if (failed === before) console.log(`Job handlers: all ${types.size} enqueued and registered job types resolve through dispatch.ts.`);
 }
 
 if (failed) {

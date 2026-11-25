@@ -63,7 +63,8 @@
 .fac-cta { position: absolute; z-index: 1; display: flex; align-items: center; justify-content: center; padding: 0; border: 0; background: none; color: var(--srt-on-cta); font-family: var(--font-body); font-weight: 600; line-height: 1; letter-spacing: -.012em; white-space: nowrap; text-decoration: none; cursor: pointer; container-type: inline-size; }
 .fac-cta .srt-cta-label { --fac-ems: 7.6; font-size: max(min(13px, 100cqw / var(--fac-ems)), 100cqw * var(--fac-label) / var(--fac-plate)); }
 a.fac-cta .srt-cta-label { --fac-ems: 10.2; }
-@container (width < 99px) { .fac-cta .srt-cta-arrow { display: none; } .fac-cta .srt-cta-label { --fac-ems: 5.9; } }
+.fac-cta .srt-cta-wait { --fac-ems: 10; }
+@container (width < 99px) { .fac-cta .srt-cta-arrow { display: none; } .fac-cta .srt-cta-label { --fac-ems: 5.9; } .fac-cta .srt-cta-wait { --fac-ems: 8.2; } }
 @container (width < 133px) { a.fac-cta .srt-cta-arrow { display: none; } a.fac-cta .srt-cta-label { --fac-ems: 8.4; } }
 .fac-cta::before { content: ''; position: absolute; inset: 0; background: rgb(255 255 255); opacity: 0; pointer-events: none; transition: opacity 150ms var(--srt-ease), background-color 90ms var(--srt-ease); }
 .fac-cta svg { width: 1em; height: 1em; }

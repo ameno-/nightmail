@@ -1,7 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, sql } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
-import { ApiError, dashboardSession, denied, digest, errors, id, IdParams, json, memberAdminRefusal, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
+import { ApiError, dashboardSession, denied, digest, errors, id, IdParams, json, logError, memberAdminRefusal, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type DbExecutor } from './core.js';
+import type { WorkspaceFocus } from './workspace-focus.js';
 import { INVITATION_EMAILS, inviteByEmail } from './account-notices.js';
 import { baneUsers } from './db/users.js';
 import { workspaceMembers, workspaces } from './db/workspaces.js';
@@ -10,6 +11,7 @@ import { accountSessionPolicy } from './account-login.js';
 import { operatorRoleOf, type OperatorRole } from './operator-identity.js';
 import { productName } from './brand.js';
 import { shownName } from './notices.js';
+import type { Config } from './core.js';
 
 export const WorkspaceRole = z.enum(['owner', 'admin', 'member']);
 type Role = z.infer<typeof WorkspaceRole>;
@@ -61,16 +63,28 @@ export async function pendingInvitation(db: DbExecutor, email: string, invitatio
 // refreshes and dispatch cannot bootstrap a removed member or create a second organization.
 // Nobody joins during sign-in (M9). An account whose only way in is the invitation it followed is
 // created with no membership; its session can only review and accept that invitation.
-export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null) {
+// Returns the new workspace's ID, true for an account that joins by its invitation instead, or false.
+export async function onboardNewUser(db: DbExecutor, user: { id: string; name: string; email: string | null }, allowSignup: boolean, region: string, invitationId: string | null, config?: BuiltinConfig): Promise<string | boolean> {
   if (!allowSignup) return !!invitationId && !!user.email && await pendingInvitation(db, user.email, invitationId);
-  await insertOwnedWorkspace(db, user.id, `${(user.name.trim() || user.email?.split('@')[0] || productName).slice(0, 105)}'s workspace`, region);
-  return true;
+  const row = await insertOwnedWorkspace(db, user.id, `${ownerName(user.name, user.email).slice(0, 105)}'s workspace`, region, undefined, undefined, config);
+  return row?.id ?? true;
+}
+/** Whose workspace it is, for its first name: the person's name, or their address's local part without a +tag when the
+ * name is only an address or its local part ("ryan+test@acme.com" names "ryan's workspace"). */
+export function ownerName(name: string, email: string | null) {
+  const given = name.trim(), local = email?.split('@')[0] ?? '';
+  const address = !given || given.includes('@') || given.toLowerCase() === local.toLowerCase();
+  if (!address) return given;
+  return (given ? given.split('@')[0]! : local).replace(/\+.*$/, '') || productName;
 }
 
 // One statement: the workspace, its regional settings and the owner membership. With `ownedBelow`,
 // nothing is inserted once the user already owns that many workspaces (the caller holds the user lock)
 // or is no longer a member of `memberOf`, the workspace the request authenticated through.
-async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }, audit?: AuditContext) {
+type BuiltinConfig = Pick<Config, 'multiTenant' | 'builtinDomain'>;
+// The built-in domain's label is given in the same transaction (builtin-domain.ts); the domain itself follows the workspace's
+// Hosted connection (provider-connections.ts).
+async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string, region: string, limit?: { ownedBelow: number; memberOf: string }, audit?: AuditContext, config?: BuiltinConfig) {
   const workspaceId = id('ws');
   const slug = `${name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0,30).replace(/^-|-$/g, '') || 'workspace'}-${workspaceId.slice(3)}`;
   const result = await db.execute<{ id: string; name: string; slug: string }>(sql`WITH created AS (
@@ -85,17 +99,18 @@ async function insertOwnedWorkspace(db: DbExecutor, userId: string, name: string
     INSERT INTO workspace_members(id, workspace_id, user_id, role) SELECT ${id('mem')}, id, ${userId}, 'owner' FROM created
   )${audit ? sql`, audit AS (${auditInsert(audit, { action: 'workspace.create', workspaceId: sql`created.id`, target: { type: 'workspace', id: sql`created.id` }, after: { name, region } }, { from: sql`created` })})` : sql``}
   SELECT id, name, slug FROM created`);
-  return result.rows[0];
+  const row = result.rows[0];
+  if (row && config?.multiTenant && config.builtinDomain) await (await wrapModuleLoad(() => import('./builtin-domain.js'))).allocateBuiltinDomain(db, config, row.id, row.name);
+  return row;
 }
 const maxOwnedWorkspaces = 10;
 
-/** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Nightmail operator role (if any). */
-export async function sessionMemberships(db: DbExecutor, userId: string) {
-  // One row even with no memberships, so an operator who belongs to no workspace still gets the role.
-  const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
-    coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces`);
-  return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null };
-}
+export type SessionMembershipRow = { workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null; focus: WorkspaceFocus[] | null; ageSeconds: number | null; byo: boolean };
+/** One row even with no memberships: the person's roles and the selected workspace's onboarding flags. */
+export const sessionMembershipsQuery = (userId: string, current: string) => sql`SELECT ${operatorRoleOf(userId)} AS operator,
+  coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces,
+  cw.focus, extract(epoch FROM now()-cw.created_at)::float8 AS "ageSeconds", coalesce(cw.byo_v2_enabled,false) AS byo
+  FROM (SELECT 1) one LEFT JOIN workspaces cw ON cw.id=${current}`;
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:
 // concurrent demotions cannot authorize each other on an old snapshot or remove both owners.
@@ -169,21 +184,25 @@ async function invite(c: Ctx, input: z.infer<typeof Invite>) {
 
 export function registerWorkspaces(app: App) {
   app.openapi(createRoute({ method: 'post', path: '/v1/workspaces', operationId: 'createWorkspace', tags, security,
-    description: `Create another workspace you own. Hosted: staff only (decided at sign-in), up to ${maxOwnedWorkspaces} per account. Select it with X-Nightmail-Workspace.`,
+    description: `Create another workspace you own. Hosted: staff only for now (decided at sign-in; everyone else gets 403 WORKSPACE_LIMIT, and GET /v1/me says so in canCreateWorkspace), up to ${maxOwnedWorkspaces} per account. Select it with X-Nightmail-Workspace.`,
     request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 201: response(Workspace), ...errors } }), async c => {
     const a = dashboardSession(c), { name } = c.req.valid('json'), policy = await accountSessionPolicy(c.env, c.req.raw.headers);
     const created = await c.env.db.transaction(async db => {
       // Lock the user so concurrent creates count each other's workspaces.
       const [user] = await db.select({id:baneUsers.id}).from(baneUsers).where(eq(baneUsers.id,a.userId)).for('update');
       // Decided by the sign-in, never by an address: hosted staff (the provider identity), or a self-hosted allowed subject.
-      const allowed = user && (c.env.config.multiTenant ? policy?.staff === true : !!policy && c.env.config.allowedSubjects.includes(policy.subject));
-      if (!allowed) throw new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
-      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c));
+      // Hosted, everyone else is an approved account limited to the workspace it signed up with, not an unapproved one.
+      if (c.env.config.multiTenant ? !user || policy?.staff !== true : !user || !policy || !c.env.config.allowedSubjects.includes(policy.subject))
+        throw c.env.config.multiTenant ? new ApiError(403, 'WORKSPACE_LIMIT', 'Your account can have one workspace for now.') : new ApiError(403, 'SIGNUP_NOT_APPROVED', 'This account is not approved to create workspaces.');
+      const row = await insertOwnedWorkspace(db, a.userId, name, c.env.config.regions[0]!, { ownedBelow: maxOwnedWorkspaces, memberOf: a.workspaceId }, auditContext(c), c.env.config);
       if (row) return row;
       const [member] = await db.select({ id: workspaceMembers.id }).from(workspaceMembers).where(and(eq(workspaceMembers.userId, a.userId), eq(workspaceMembers.workspaceId, a.workspaceId)));
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
+    // With a built-in domain, its Hosted mail starts right after this answers, as a sign-up's does (startHostedMailAfter);
+    // onboarding starts it if it couldn't.
+    if (c.env.config.multiTenant && c.env.config.builtinDomain) void (await wrapModuleLoad(() => import('./provider-connections.js'))).startHostedMailAfter(c.env, created.id, auditContext(c));
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
   });
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {
