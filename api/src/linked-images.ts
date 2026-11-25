@@ -1,15 +1,21 @@
 import { timingSafeEqual } from 'node:crypto';
 import { sql } from 'drizzle-orm';
 import { ApiError, type App } from './core.js';
+import { servesWorkspace } from './link-domains.js';
 
-// Campaign mail links its inline pictures instead of carrying them. Each is served at PUBLIC_URL/i/<name>, the same
-// bytes for every recipient, so a message is its HTML (a few KB) rather than its HTML plus every picture: November's
-// 1.8M-recipient newsletter carried a 272 KB PNG in every copy, and SES billed 632 GB of attachment data that month.
+// Campaign mail links its inline pictures instead of carrying them. Each is served at <link origin>/i/<name>, on the same
+// host as the message's unsubscribe link (src/link-domains.ts: the link domain, links.nightmailedge.com, on Hosted;
+// PUBLIC_URL without link hosts; never Hosted's own domain), the same bytes for every recipient, so a message is its HTML
+// (a few KB) rather than its HTML plus every picture: November's 1.8M-recipient newsletter carried a 272 KB PNG in every
+// copy, and SES billed 632 GB of attachment data that month.
 // The name is the attachment's ID and the first half of its SHA-256, with the type's extension: it can't be guessed
-// without both, a secret rotation doesn't change it, and it names no recipient. A link works while the attachment
-// exists, and its draft, review and sent mail keep it (sending_attachment_links): as long as the campaign does, and for
-// the sending-log retention after it is deleted. Only PNG, JPEG, GIF and WebP whose bytes open as their type are linked,
-// here and when served: nothing else (no SVG, no document) can be published through the route.
+// without both, a secret rotation doesn't change it, and it names no recipient. It answers only on a host that serves its
+// workspace's links (servesWorkspace, as the unsubscribe page): this installation's own origins, the link domain once the
+// workspace has linked there, or the workspace's own link host (and a retired one for 30 days after its domain is
+// deleted). A link works while the attachment exists, and its draft, review and sent mail keep it
+// (sending_attachment_links): as long as the campaign does, and for the sending-log retention after it is deleted. Only
+// PNG, JPEG, GIF and WebP whose bytes open as their type are linked, here and when served: nothing else (no SVG, no
+// document) can be published through the route.
 
 const TYPES = new Map([['image/png', 'png'], ['image/jpeg', 'jpg'], ['image/gif', 'gif'], ['image/webp', 'webp']]);
 const EXTENSION_TYPES = new Map([...TYPES].map(([type, extension]) => [extension, type]));
@@ -69,10 +75,10 @@ export function registerLinkedImages(app: App) {
     const match = NAME.exec(c.req.param('name'));
     if (!match) throw missing();
     const [, id, hash, extension] = match as unknown as [string, string, string, string];
-    const { rows: [row] } = await c.env.db.execute<{ storage_key: string; checksum: string; content_type: string; size: number; disposition: string }>(
-      sql`SELECT storage_key, checksum, content_type, size, disposition FROM sending_attachments WHERE id = ${`attachment_${id}`}`);
+    const { rows: [row] } = await c.env.db.execute<{ workspace_id: string; storage_key: string; checksum: string; content_type: string; size: number; disposition: string }>(
+      sql`SELECT workspace_id, storage_key, checksum, content_type, size, disposition FROM sending_attachments WHERE id = ${`attachment_${id}`}`);
     if (!row || row.disposition !== 'inline' || extensionOf(row.content_type) !== extension || row.size > LINKED_IMAGE_BYTES || row.checksum.length !== 64
-      || !timingSafeEqual(Buffer.from(row.checksum.slice(0, 32)), Buffer.from(hash))) throw missing();
+      || !timingSafeEqual(Buffer.from(row.checksum.slice(0, 32)), Buffer.from(hash)) || !await servesWorkspace(c.env, c.req.url, row.workspace_id)) throw missing();
     const etag = `"${row.checksum}"`, headers: Record<string, string> = {
       'Content-Type': EXTENSION_TYPES.get(extension)!, 'Cache-Control': 'public, max-age=31536000, immutable', ETag: etag,
       'Content-Security-Policy': "default-src 'none'; sandbox", 'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline',

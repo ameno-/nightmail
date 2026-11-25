@@ -41411,7 +41411,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
-  test('campaign images: linked from PUBLIC_URL/i/ instead of attached, the message is its HTML, and a link serves only its own picture', async t => {
+  test('campaign images: linked from the host of the message\'s links (PUBLIC_URL here, the link domain on Hosted) instead of attached, the message is its HTML, and a link serves only its own picture, only on a host that serves its workspace', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, fetch, run }) => {
       const { crc32, deflateSync } = await import('node:zlib'), { inlineMessage } = await import('./src/sending.js');
       // November's newsletter as it was sent: an editor body and one 272,311-byte PNG shown 100 px wide, under its bane- content ID.
@@ -41487,6 +41487,29 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(tested.includes(`<img src="${url}" alt="logo" width="100"`) && tested.includes('<img src="cid:fake" alt="fake"') && tested.includes('Content-ID: <fake>') && !tested.includes(`Content-ID: <${contentId}>`), tested.slice(0, 4000));
       const fakeChecksum: string = (await db.query('SELECT checksum FROM sending_attachments WHERE id=$1', [fake.id])).rows[0].checksum;
       assert.equal((await get(`/i/${fake.id.slice('attachment_'.length)}${fakeChecksum.slice(0, 32)}.png`)).status, 404);
+
+      // With the link domain (Hosted's links.nightmailedge.com), a campaign's pictures are linked from it, the host of its
+      // unsubscribe link, alt text and size kept; they answer there only for a workspace that has linked there, and on
+      // this installation's own origin as before.
+      const linkDomain = 'links.image-fixture.example', onLinkDomain = `https://${linkDomain}${path}`;
+      runtime.config.linkHost = linkDomain;
+      try {
+        const hosted = await campaign('On the link domain', true), body = hosted.sent.Content.Simple.Body.Html.Data as string;
+        assert.ok(body.includes(`<img src="${onLinkDomain}" alt="logo" width="100"`) && body.includes(`https://${linkDomain}/unsubscribe/`) && !body.includes(`${PUBLIC_ORIGIN}/i/`), body);
+        assert.equal(hosted.sent.Content.Simple.Attachments?.length ?? 0, 0);
+        const there = await fetch(new Request(onLinkDomain));
+        assert.equal(there.status, 200); assert.equal(there.headers.get('cache-control'), 'public, max-age=31536000, immutable');
+        assert.ok(Buffer.from(await there.arrayBuffer()).equals(png));
+        const wid = runtime.config.workspaceId;
+        await db.query('DELETE FROM link_fallback_days WHERE workspace_id=$1 AND host=$2', [wid, linkDomain]);
+        assert.equal((await fetch(new Request(onLinkDomain))).status, 404, 'A workspace that never linked on the link domain has nothing served there.');
+        assert.equal((await get(path)).status, 200);
+        // A campaign's test on the link domain records its use, so its pictures answer there too.
+        const tested = ok(await local('POST', `/v1/campaigns/${mixed.id}/test`, { to: address() }), 202);
+        await run('email.dispatch');
+        assert.ok(readable(input(tested.id)).includes(`<img src="${onLinkDomain}" alt="logo" width="100"`));
+        assert.equal((await fetch(new Request(onLinkDomain))).status, 200);
+      } finally { runtime.config.linkHost = undefined; }
 
       // An email sent through the API keeps the parts its caller attached.
       const direct = ok(await local('POST', '/v1/emails/send', mail({ html: `<img src="cid:${contentId}">`, attachments: [image.id] })), 202);

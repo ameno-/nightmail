@@ -2715,8 +2715,10 @@ export function registerSending(app: App) {
       await admitCampaignTest(c.env, a, input.to);
       // The footer as recipients get it, its link the placeholder on the link host they get: a test is transactional,
       // without List-Unsubscribe, and refused as the launch would be when there is no link host.
-      const snapshot = { ...message, testCampaignId: campaignId };
-      footerParts(snapshot, unsubscribePlaceholder(footer.requiredNotice ? c.env.config.publicUrl : foundLinkOrigin(c.env.config, row.draft.from, footer.linkOrigin)), footer);
+      // Its pictures are linked from that host too, as recipients' are (src/linked-images.ts); a required notice's stay attached.
+      const origin = footer.requiredNotice ? undefined : foundLinkOrigin(c.env.config, row.draft.from, footer.linkOrigin);
+      const snapshot = { ...message, testCampaignId: campaignId, ...origin ? { linkOrigin: origin } : {} };
+      footerParts(snapshot, unsubscribePlaceholder(origin ?? c.env.config.publicUrl), footer);
       const out: Outgoing[] = [{ snapshot, recipients: hostedCost(input.to), marketing: false }];
       if (mayScreenAtAccept(c.env, out)) await prepareFrontDoor(c.env, a, out, false);
       return { out, campaign: { id: campaignId, revision: row.revision } };
@@ -3413,7 +3415,8 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
     : await (await loadOpsUnsub()).createUnsubscribeLink(origin, a.workspaceId, customer.to[0]!);
   const page = review.draft.unsubscribePageUrl;
-  const snapshot = withoutLegacyFonts(withUnsubscribe(runtime, customer, unsubscribe.url, { ...review.draft, linkOrigin: origin }));
+  // Its inline pictures are linked from the same host as its unsubscribe link (src/linked-images.ts).
+  const snapshot = { ...withoutLegacyFonts(withUnsubscribe(runtime, customer, unsubscribe.url, { ...review.draft, linkOrigin: origin })), linkOrigin: origin };
   sizeCheck(snapshot, rows);
   // Persist only the compact stub plus the unsubscribe URL: the body is reproducible from the frozen review and
   // recipient (verified by contentHash), so storing ~2-3 KB of rendered HTML per recipient bought nothing.
