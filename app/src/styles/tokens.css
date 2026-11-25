@@ -181,6 +181,9 @@
   --radius-sheet: 14px;
   --control-height: 28px;
   --control-height-sm: 24px;
+  /* A control's side inset: a field's text and a button's label sit this far in (a touch button adds --space-4, a small
+     button uses --space-8). Off the spacing scale on purpose, as the controls were drawn (Ryan, A152, 25 Nov). */
+  --control-pad-x: 10px;
   /* The dashboard draws no focus rings: focus shows the hover cue (ui.css). The homepage and price pages keep rings of
      their own, from --focus-width and --color-focus. --focus-reach is the room a scroll area keeps at its edges. */
   --focus-width: 2px;
