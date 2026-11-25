@@ -69,7 +69,7 @@ export function linksPaused(domain: string) {
 const linkDay = sql`(now() AT TIME ZONE 'UTC')::date`;
 /** Whether the workspace may link on the link domain: not paused (a paused connection, an operator's pause or the abuse
  *  path, or the standing ladder's pause step). */
-const mayLink = (workspaceId: string) => sql`(NOT EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=${workspaceId} AND pc.paused_at IS NOT NULL)
+export const mayLink = (workspaceId: string) => sql`(NOT EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=${workspaceId} AND pc.paused_at IS NOT NULL)
   AND NOT EXISTS (SELECT 1 FROM sender_standing s WHERE s.workspace_id=${workspaceId} AND s.step='pause'))`;
 /** Where a message's links go: `shared` when on the link domain, whose use the sender records (recordLinkUse). */
 export type LinkChoice = { origin: string; shared?: { host: string } };
