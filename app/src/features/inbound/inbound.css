@@ -85,8 +85,9 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 
 /* The reply box stays reachable at the bottom of long conversations; it grows when focused. */
 .mailbox-composer { position: sticky; bottom: 0; z-index: 1; display: grid; gap: var(--space-8); margin-top: auto; padding: var(--space-12) 0 var(--space-16); background: var(--color-surface); }
-.mailbox-composer textarea { min-height: 44px; height: 44px; resize: none; transition: height var(--motion-duration, 120ms), background var(--motion-duration) var(--ease-standard); }
-.mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; resize: vertical; }
+/* Collapsed, its one line sits centred like a field's; it settles to the textarea's own padding as it opens. */
+.mailbox-composer textarea { min-height: 44px; height: 44px; padding-block: calc((44px - var(--textarea-leading)) / 2); resize: none; transition: height var(--motion-duration, 120ms), padding var(--motion-duration, 120ms), background var(--motion-duration) var(--ease-standard); }
+.mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; padding-block: calc((var(--control-height) - var(--textarea-leading)) / 2); resize: vertical; }
 .mailbox-composer__to { font-size: var(--text-xs); color: var(--color-muted); overflow-wrap: anywhere; }
 .mailbox-composer__to.muted { margin: 0; }
 .inbound-composer__target { display: flex; align-items: center; gap: var(--space-4); min-height: 24px; }
@@ -251,7 +252,8 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .rule-runs__order { grid-column: 1 / -1; color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-sm); overflow-wrap: anywhere; }
 .rule-runs__order [data-self] { color: var(--color-text); }
 .rule-runs li > .ui-check-field { grid-column: 1 / -1; }
-.rule-shared textarea { font-family: var(--font-mono); font-size: var(--text-sm); }
+.rule-shared .ui-textarea { --textarea-leading: var(--leading-sm); font-family: var(--font-mono); font-size: var(--text-sm); }
+@media (pointer: coarse), (max-width: 899px) { .rule-shared .ui-textarea { --textarea-leading: 22px; font-size: 16px; } }
 @media (max-width: 640px) {
   .stack.rule-page { min-height: auto; }
   /* The header stays one row: a long name shortens, and Undo takes its room from the name only while there is something to undo. */

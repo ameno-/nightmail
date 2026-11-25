@@ -15,11 +15,7 @@
 .onboarding-surface .ui-button:active:not(:disabled) { transform: scale(.97); }
 .onboarding-surface .ui-button--md { height: 32px; padding-inline: var(--space-12); }
 .onboarding-surface .copy-action.ui-button--sm:not(.copy-action--compact) { height: 26px; padding-left: 9px; }
-.onboarding-surface .ui-input { height: 36px; padding-inline: var(--space-12); background: var(--color-control, var(--color-layer-1)); font-size: var(--text-md); }
-@media (hover: hover) and (pointer: fine) { .onboarding-surface .ui-input:hover:not(:disabled, :focus, [aria-invalid='true']) { background: var(--color-control-hover, var(--color-layer-2)); } }
-.onboarding-surface .ui-input:is(:focus, :focus-visible) { background: var(--color-control-focus, var(--color-layer-2)); }
-.onboarding-surface .ui-input:disabled { background: var(--color-layer-1); }
-.onboarding-surface .ui-input[aria-invalid='true'] { background: var(--color-control-invalid, var(--color-danger-bg)); }
+.onboarding-surface .ui-input { height: 36px; padding-inline: var(--space-12); font-size: var(--text-md); }
 .onboarding-surface .ui-field__label { line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .onboarding-surface .ui-field__hint { line-height: 18px; }
 /* Loading keeps the button's width: the label stays laid out (invisible) and the spinner sits on top. */
