@@ -17,6 +17,7 @@ export function builtinStatus(builtin: BuiltinDomain) {
   switch (builtin.sending) {
     case 'closed': return 'Your own domain is verified, so this one only receives now.'
     case 'off': return `${productName} turned this domain off.`
+    case 'paused': return `Sending from built-in domains is paused for every workspace while ${productName} looks into a delivery problem. Email that was still queued from this one when it paused was canceled. It keeps receiving.`
     case 'pending': return 'It’s being set up and sends in a few minutes.'
     default: return builtinSending(builtin)
   }

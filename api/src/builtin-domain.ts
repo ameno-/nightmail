@@ -144,43 +144,73 @@ async function pauseBuiltinClaims(db: DbExecutor) {
 }
 
 /**
- * The circuit breaker's lines: SES's own warning levels for an account, 5% bounces or 0.1% complaints, over the real
- * recipients of built-in mail sent in the last 48 hours (complaints often come a day late) and since the last reset. It
- * judges nothing under 1,000 recipients, and never trips on fewer than 3 complaints, so one or two can't stop every workspace.
+ * The circuit breaker's lines: SES's own warning levels for an account, 5% permanent bounces or 0.1% complaints, over the
+ * real recipients of built-in mail sent in the last 48 hours (complaints often come a day late) and since the last reset.
+ * It judges nothing under 1,000 recipients, and never trips on fewer than 3 complaints, so one or two can't stop every
+ * workspace. One workspace alone never trips it either (breakerDecision).
  */
 export const BUILTIN_BREAKER = { windowHours: 48, minRecipients: 1000, bounceRate: 0.05, complaintRate: 0.001, minComplaints: 3, everyMinutes: 60 } as const;
 export type BuiltinReputation = { recipients: number; bounces: number; complaints: number };
+export type BuiltinLine = 'bounces' | 'complaints';
+const LINES = ['bounces', 'complaints'] as const;
+const crossed = (m: BuiltinReputation, line: BuiltinLine) => m.recipients >= BUILTIN_BREAKER.minRecipients && (line === 'bounces'
+  ? m.bounces / m.recipients >= BUILTIN_BREAKER.bounceRate
+  : m.complaints >= BUILTIN_BREAKER.minComplaints && m.complaints / m.recipients >= BUILTIN_BREAKER.complaintRate);
 /** The line the built-in domains' mail crossed, if any. */
-export function breakerVerdict(m: BuiltinReputation): 'bounces' | 'complaints' | null {
-  if (m.recipients < BUILTIN_BREAKER.minRecipients) return null;
-  if (m.bounces / m.recipients >= BUILTIN_BREAKER.bounceRate) return 'bounces';
-  if (m.complaints >= BUILTIN_BREAKER.minComplaints && m.complaints / m.recipients >= BUILTIN_BREAKER.complaintRate) return 'complaints';
-  return null;
+export const breakerVerdict = (m: BuiltinReputation): BuiltinLine | null => LINES.find(line => crossed(m, line)) ?? null;
+/** One workspace's share of the built-in mail in the breaker's window. */
+export type WorkspaceReputation = BuiltinReputation & { workspaceId: string; revoked: boolean };
+const sum = (rows: BuiltinReputation[]): BuiltinReputation => rows.reduce((a, r) => ({ recipients: a.recipients + r.recipients, bounces: a.bounces + r.bounces, complaints: a.complaints + r.complaints }), { recipients: 0, bounces: 0, complaints: 0 });
+/**
+ * What the breaker does with the window's mail. It trips only when a line is still crossed without the workspace that
+ * contributes most to it, so one workspace (at its cap, while built-in volume is small) can't stop everyone: when that
+ * one workspace is what crosses the line, the operator is alerted about it, to revoke it, instead.
+ */
+export function breakerDecision(rows: WorkspaceReputation[]) {
+  const counted = sum(rows), lines = LINES.filter(line => crossed(counted, line));
+  if (!lines.length) return null;
+  const worstFor = (line: BuiltinLine) => rows.reduce((w, r) => r[line] > w[line] || (r[line] === w[line] && r.workspaceId < w.workspaceId) ? r : w);
+  for (const line of lines) {
+    const worst = worstFor(line);
+    if (crossed(sum(rows.filter(r => r !== worst)), line)) return { action: 'trip', line, counted, worst: worst.workspaceId } as const;
+  }
+  return { action: 'alert', line: lines[0]!, counted, worst: worstFor(lines[0]!) } as const;
 }
 /**
- * Every built-in domain's mail in the breaker's window, revoked ones included (their mail signed as the parent too), by
- * real recipient: SES accepted it, not simulated, never the SES mailbox simulator. A complaint is one person reporting one
- * email, so it counts once per email, not once per recipient: one report on a 50-recipient email is one complaint. Each domain is read through its
+ * Each workspace's built-in mail in the breaker's window, revoked domains included (their mail signed as the parent too),
+ * by real recipient: SES accepted it, not simulated, never the SES mailbox simulator. Each domain is read through its
  * workspace's sender-domain index, so a workspace's own domains' mail is never scanned.
+ * - Bounces: the recipients SES bounced permanently, from the bounce events, each once, as hosted_health_projection counts
+ *   them (an event that names none counts one); a transient bounce or the rest of a bounced email's recipients don't count.
+ * - Complaints: a complaint is one person reporting one email, so it counts once per email, not once per recipient: one
+ *   report on a 50-recipient email is one complaint.
  */
-async function builtinReputation(db: DbExecutor, parent: string): Promise<BuiltinReputation> {
-  const { rows: [r] } = await db.execute<BuiltinReputation>(sql`WITH p AS (
+async function builtinReputation(db: DbExecutor, parent: string): Promise<WorkspaceReputation[]> {
+  return (await db.execute<WorkspaceReputation>(sql`WITH p AS (
       SELECT greatest(now()-make_interval(hours=>${BUILTIN_BREAKER.windowHours}),coalesce(reset_at,'-infinity')) AS since FROM builtin_parent WHERE name=${parent}
-    ), mail AS (
-      SELECT e.id,e.to_addresses||e.cc_addresses||e.bcc_addresses AS rcpt,(e.status='bounced' OR e.event_outcomes & 4 <> 0) AS bounced,(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained
-      FROM p CROSS JOIN builtin_domains b CROSS JOIN LATERAL (SELECT e.id,e.to_addresses,e.cc_addresses,e.bcc_addresses,e.status,e.event_outcomes FROM sending_emails e
-        WHERE e.workspace_id=b.workspace_id AND ((reverse(lower(split_part(e.from_address,'@',2)))||'.') COLLATE "C")=((reverse(b.name)||'.') COLLATE "C")
+    ), mail AS MATERIALIZED (
+      SELECT b.workspace_id,b.revoked_at IS NOT NULL AS revoked,e.id,e.recipients,e.complained
+      FROM p CROSS JOIN builtin_domains b CROSS JOIN LATERAL (SELECT e.id,(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,
+          (SELECT count(*) FROM jsonb_array_elements_text(e.to_addresses||e.cc_addresses||e.bcc_addresses) x WHERE lower(x) NOT LIKE '%@simulator.amazonses.com')::int AS recipients
+        FROM sending_emails e WHERE e.workspace_id=b.workspace_id AND ((reverse(lower(split_part(e.from_address,'@',2)))||'.') COLLATE "C")=((reverse(b.name)||'.') COLLATE "C")
           AND e.created_at>p.since AND NOT e.simulated AND (e.provider_id IS NOT NULL OR e.event_outcomes & 1 <> 0)) e
-    ) SELECT count(*)::int AS recipients,count(*) FILTER (WHERE bounced)::int AS bounces,count(DISTINCT mail.id) FILTER (WHERE complained)::int AS complaints
-    FROM mail CROSS JOIN LATERAL jsonb_array_elements_text(mail.rcpt) x WHERE lower(x) NOT LIKE '%@simulator.amazonses.com'`);
-  return { recipients: r?.recipients ?? 0, bounces: r?.bounces ?? 0, complaints: r?.complaints ?? 0 };
+      WHERE e.recipients>0
+    ), bounced AS (
+      SELECT m.workspace_id,m.id,least(m.recipients,greatest(count(DISTINCT h.hash),max(CASE WHEN v.recipient_hashes IS NULL THEN 1 ELSE 0 END)))::int AS n
+      FROM mail m JOIN sending_email_events v ON v.workspace_id=m.workspace_id AND v.email_id=m.id LEFT JOIN LATERAL unnest(v.recipient_hashes) h(hash) ON true
+      WHERE v.type='bounce' AND v.data->>'bounceType'='Permanent' AND NOT v.simulated AND (v.recipient_hashes IS NULL OR cardinality(v.recipient_hashes)>0)
+      GROUP BY m.workspace_id,m.id,m.recipients
+    ) SELECT m.workspace_id AS "workspaceId",bool_or(m.revoked) AS revoked,sum(m.recipients)::int AS recipients,coalesce(sum(bo.n),0)::int AS bounces,
+      count(*) FILTER (WHERE m.complained)::int AS complaints
+    FROM mail m LEFT JOIN bounced bo ON bo.workspace_id=m.workspace_id AND bo.id=m.id GROUP BY m.workspace_id ORDER BY m.workspace_id`)).rows;
 }
 /**
  * The parent's circuit breaker, hourly from builtinDomainTick. All built-in domains sign as one parent, so their combined
- * bounces and complaints are its reputation, which per-workspace pauses never see. Over a line (BUILTIN_BREAKER) it
- * trips: built-in sending stops everywhere, as when the parent fails its check (every built-in claim back to pending),
- * receiving continues, and the reputation alert channel is told. It stays tripped until an operator resets it
- * (resetBuiltinBreaker). Returns whether it tripped now.
+ * bounces and complaints are its reputation, which per-workspace pauses never see. Over a line without its worst
+ * workspace (breakerDecision) it trips: built-in sending stops everywhere, as when the parent fails its check (every
+ * built-in claim back to pending, so mail still queued from them is canceled at dispatch), receiving continues, and the
+ * reputation alert channel is told. It stays tripped until an operator resets it (resetBuiltinBreaker). When one
+ * workspace alone crosses a line, it only alerts about that workspace, at most once a day. Returns whether it tripped now.
  */
 export async function builtinBreaker(runtime: Runtime) {
   const parent = runtime.config.builtinDomain;
@@ -189,9 +219,21 @@ export async function builtinBreaker(runtime: Runtime) {
   const due = await runtime.db.execute(sql`UPDATE builtin_parent SET rates_checked_at=now() WHERE name=${parent} AND tripped_at IS NULL
     AND (rates_checked_at IS NULL OR rates_checked_at<=now()-make_interval(mins=>${BUILTIN_BREAKER.everyMinutes - 5})) RETURNING 1`);
   if (!due.rowCount) return false;
-  const counted = await builtinReputation(runtime.db, parent), line = breakerVerdict(counted);
-  if (!line) return false;
-  const trip = { line, ...counted, windowHours: BUILTIN_BREAKER.windowHours };
+  const decision = breakerDecision(await builtinReputation(runtime.db, parent));
+  if (!decision) return false;
+  const windowHours = BUILTIN_BREAKER.windowHours;
+  if (decision.action === 'alert') {
+    const { worst, line, counted } = decision;
+    // A revoked workspace needs nothing more; its mail still counts toward the parent's.
+    if (worst.revoked) return false;
+    const payload = { code: 'BUILTIN_WORKSPACE_OVER_LINE', parent, line, ...counted, windowHours, workspace: { recipients: worst.recipients, bounces: worst.bounces, complaints: worst.complaints } };
+    const { rowCount } = await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload)
+      VALUES('builtin-breaker-worst:'||${parent}::text||':'||${worst.workspaceId}::text||':'||${line}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${worst.workspaceId},${JSON.stringify(payload)}::jsonb)
+      ON CONFLICT(id) DO NOTHING`);
+    if (rowCount) log('error', { code: 'BUILTIN_WORKSPACE_OVER_LINE', parent, workspaceId: worst.workspaceId, line, ...counted });
+    return false;
+  }
+  const trip = { line: decision.line, ...decision.counted, windowHours, worst: decision.worst };
   const paused = await runtime.db.transaction(async tx => {
     const { rows: [row] } = await tx.execute<{ at: string }>(sql`UPDATE builtin_parent SET ok=false,problem=coalesce(problem,'reputation'),tripped_at=now(),trip=${JSON.stringify(trip)}::jsonb
       WHERE name=${parent} AND tripped_at IS NULL RETURNING tripped_at::text AS at`);

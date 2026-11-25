@@ -212,7 +212,7 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
     content = <PendingDomain name={regionalDomain} onFound={id => { chooseRegional(null); setDomainStep(workspaceId, id ?? '') }} />
   }
   else if (choosingDomain && flow === 'shared' && builtin === undefined && readingIdentity) { view = 'loading'; content = <BootLoader inline /> }
-  else if (choosingDomain && flow === 'shared' && builtin?.id && builtin.sending !== 'off' && !addAnother) {
+  else if (choosingDomain && flow === 'shared' && builtin?.id && builtin.sending !== 'off' && builtin.sending !== 'paused' && !addAnother) {
     const builtinId = builtin.id
     view = 'imported'
     content = <BuiltinReady builtin={builtin} onContinue={() => setDomainStep(workspaceId, agentStep(builtinId))} onAddOwn={() => setAddAnother(true)} />
