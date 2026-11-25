@@ -136,7 +136,6 @@
 .onboarding-imported { margin: 0; padding: 0; list-style: none; }
 .onboarding-imported li { display: flex; align-items: center; justify-content: space-between; gap: var(--space-16); min-height: var(--row-height-lg); padding-block: var(--space-8); }
 .onboarding-imported code { min-width: 0; font-size: var(--text-sm); line-height: var(--leading-sm); overflow-wrap: anywhere; }
-.onboarding-builtin-copy { margin: 0; }
 
 /* DNS step */
 .onboarding-domain-title { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8) var(--space-12); }
@@ -157,10 +156,9 @@
 .onboarding-surface .ui-button--primary > .onb-kbd { background: color-mix(in oklab, var(--color-on-accent) 16%, transparent); color: var(--color-on-accent-muted); }
 
 
-/* Get started (get-started.tsx): the built-in domain's one line, two tabs whose panels share one cell (the taller sets the
+/* Get started (get-started.tsx): two tabs whose panels share one cell (the taller sets the
    height, so switching moves nothing below), the optional test email, then Go to dashboard. The shown panel comes in from
    the side of its tab. */
-.onb-start-line a { color: var(--color-text); }
 .onb-start { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 .onb-panels { display: grid; min-width: 0; }
 .onb-panel { grid-area: 1 / 1; display: flex; flex-direction: column; gap: var(--space-12); min-width: 0; }

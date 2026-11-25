@@ -1,16 +1,13 @@
 import { useEffect, useRef, useState, type UIEvent } from 'react'
-import { Link } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, Send } from 'lucide-react'
 import { Button, CopyButton, ErrorText, SecretCode, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
-import { PrivateAddress } from '../../components/PrivateAddress'
 import { useApiMutation, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { invalidate, resourceOf } from '../../data/invalidation'
 import { usePrefetchRoute } from '../../data/prefetch'
 import type { ApiKeyInput, Domain } from '../../data/types'
 import { analytics } from '../../lib/analytics'
-import { number } from '../../lib/format'
 import { AgentSetupStatus, MaskedText, agentPrompt, useAgentSetup } from '../docs/agent-setup'
 import { TestSentLine, sendLanguages, sendSnippets, useTestSend } from '../docs/first-send'
 import { useDomain } from '../settings/domain-records'
@@ -65,8 +62,8 @@ export function GetStarted({ domainId, onFinish }: { domainId: string | null; on
   // Hosted sends from its built-in domain, which /v1/me describes before the domain itself is read.
   const onBuiltin = !domainId || builtin?.id === domainId
   const name = onBuiltin ? builtin?.name ?? null : domain.data?.name ?? null
-  // Members only (the built-in domain's scope until 25 Dec 2026, and what an installation falls back to): the line says so
-  // from the first frame, and /v1/me's own scope once it is read.
+  // Members only (the built-in domain's scope until 25 Dec 2026, and what an installation falls back to) until /v1/me's own
+  // scope is read: the prompt states the limits.
   const scope = builtin?.scope ?? 'members', perDay = builtin?.perDay ?? BUILTIN_CAPS[scope].perDay
 
   // The prompt names the domain: as read, else as /v1/me describes the built-in one. A copy carries a fresh setup token
@@ -98,9 +95,6 @@ export function GetStarted({ domainId, onFinish }: { domainId: string | null; on
   return <div className="onboarding onboarding--narrow onb-get-started">
     <div className="onboarding-intro">
       <h1 className="onboarding-title">Get started</h1>
-      {onBuiltin && <p className="muted onboarding-builtin-copy onb-start-line">
-        Your built-in domain sends {scope === 'members' ? 'only to your own address' : 'to anyone'}, up to {number(perDay)}{scope === 'members' ? '' : ' recipients'} a day, until you <Link to="/domains?add" onClick={onFinish} data-analytics="onboarding/start/domain">add a domain</Link>.
-      </p>}
     </div>
     <div className="onb-start">
       <Tabs label="How to start" value={tab} onValueChange={pick} items={tabs} />
@@ -110,7 +104,7 @@ export function GetStarted({ domainId, onFinish }: { domainId: string | null; on
           <div className="onb-panel__actions">
             <CopyAction value={copyPrompt} label="Copy agent prompt" text="Copy agent prompt" variant="primary" />
           </div>
-          {setup ? <AgentSetupStatus setup={setup} idle="Paste it into your coding agent; it gets its own key and sets up email in your project." /> : <p className="muted onb-panel__line">Paste it into your coding agent: it connects with a device code.</p>}
+          {setup ? <AgentSetupStatus setup={setup} idle="Paste it into your coding agent." /> : <p className="muted onb-panel__line">Paste it into your coding agent: it connects with a device code.</p>}
           <Prompt text={preview} />
         </section>
         <section className="onb-panel" {...panel('hand')}>
@@ -162,7 +156,6 @@ function TestEmail({ domain, sends, recheck, onLeave, onSent, onSettled }: { dom
     <div className="first-send-test">
       <Button loading={busy} disabled={sent} onClick={press} data-analytics="onboarding/start/test"><Send size={14} aria-hidden />Send a test email</Button>
       <span className="muted onboarding-slot onb-test-line" role="status">
-        <span data-active={line === 'idle' || undefined} aria-hidden={line !== 'idle' || undefined}>{domain ? <>From <PrivateAddress value={`hello@${domain.name}`} /> to <PrivateAddress value={to} /></> : <>To <PrivateAddress value={to} /></>}</span>
         <span data-active={line === 'busy' || undefined} aria-hidden={line !== 'busy' || undefined}>Sending…</span>
         <span data-active={line === 'sent' || undefined} aria-hidden={line !== 'sent' || undefined}>{state.phase === 'sent' && <TestSentLine id={state.id} to={to} simulated={state.simulated} onLeave={onLeave} onSettled={onSettled} />}</span>
         <span data-active={line === 'failed' || undefined} aria-hidden={line !== 'failed' || undefined}>{state.phase === 'failed' && <>
