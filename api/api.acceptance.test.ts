@@ -24581,8 +24581,25 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const listed = async () => ok(await local('GET', '/v1/inbound/overview')).domains.find((d: Json) => d.id === own.id);
       assert.deepEqual(await listed(), { id: own.id, name: own.name, domain: own.name, hosts: [own.name, `help.${own.name}`], status: 'waiting_for_mx', catchAll: 'store' });
       await db.query("UPDATE mailbox_domains SET status='disabled' WHERE workspace_id=$1 AND domain_id=$2 AND parent_id IS NULL", [wid, own.id]);
-      assert.deepEqual([(await listed()).status, (await listed()).hosts], ['disabled', [`help.${own.name}`]]);
+      assert.deepEqual(await listed(), { id: own.id, name: `help.${own.name}`, domain: own.name, hosts: [`help.${own.name}`], status: 'waiting_for_mx', catchAll: 'store' });
       assert.equal(ok(await create(`more@help.${own.name}`), 201).address, `more@help.${own.name}`);
+
+      // The reported case: receiving was set up at reply.<domain>, the owner removed that host and wants the domain itself.
+      // Creating an address there turns it on at the domain and names its MX; the removed host stays removed (its 409
+      // names the call that adds it back), and the overview shows the domain receiving at its own name.
+      const sub2 = await claim('rx-moved', true), hostsPath = `/v1/inbound/domains/${sub2.id}/hosts`;
+      ok(await local('POST', `/v1/inbound/domains/${sub2.id}/enable`, {}), 202);
+      const reply = ok(await local('GET', hostsPath)).data.find((h: Json) => h.name === `reply.${sub2.name}`);
+      assert.ok(reply, 'Receiving starts at reply.<domain>.');
+      assert.equal(ok(await local('DELETE', `${hostsPath}/${reply.id}`)).status, 'removed');
+      const removedNow = ok(await local('GET', '/v1/inbound/overview')).domains.find((d: Json) => d.id === sub2.id);
+      assert.deepEqual([removedNow.status, removedNow.hosts], ['disabled', []]);
+      const hermes = ok(await create(`hermes@${sub2.name}`), 201);
+      assert.deepEqual([hermes.receiving.host, hermes.receiving.turnedOn, hermes.receiving.dns[0].name], [sub2.name, true, sub2.name]);
+      const movedNow = ok(await local('GET', '/v1/inbound/overview')).domains.find((d: Json) => d.id === sub2.id);
+      assert.deepEqual([movedNow.name, movedNow.status, movedNow.hosts], [sub2.name, 'waiting_for_mx', [sub2.name]]);
+      assert.deepEqual([ok(await local('GET', `/v1/inbound/domains/${sub2.id}`)).name, ok(await local('GET', `/v1/inbound/domains/${sub2.id}`)).status], [sub2.name, 'waiting_for_mx']);
+      assert.match(error(await create(`late@reply.${sub2.name}`), 409, 'MAILBOX_DOMAIN_NOT_ENABLED').message, new RegExp(escape(`Add it back with POST ${hostsPath} and {"name":"reply.${sub2.name}"}`)));
     });
   });
 

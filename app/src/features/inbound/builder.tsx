@@ -14,8 +14,9 @@ import { Alert, Button, ConfirmDialog, Dialog, Field, Input, SearchField, Select
 import { mergeAddresses, useAddressOptions, useResolvedAddresses } from '../../data/addresses'
 import { useDebounced } from '../../lib/pagination'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useApi, useRequestScope, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
+import { rootMxWarning } from '../settings/domain-records'
 import { isAbortError, request } from '../../data/live'
 import { invalidate, invalidateResources } from '../../data/invalidation'
 import { ApiError, errorText, type InboundAddress, type MailboxDomain } from '../../data/types'
@@ -31,6 +32,19 @@ import { RuleLine } from './recipes'
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const FULL = 'Enter a full email address.'
 const onDomains = (names: string[]) => `Use an address on one of your domains: ${names.join(', ')}.`
+/**
+ * An address on one of the workspace's domains where nothing receives yet: creating it turns receiving on there
+ * (createInboundAddress), so the address step offers that, with the MX record to add and, at a domain's own name, what
+ * that record takes over.
+ */
+function TurnOnReceiving({ host, domainId }: { host: string; domainId: string }) {
+  const domain = useApiDef(queries.domain(domainId))
+  const value = domain.data?.records.find(record => record.purpose === 'receiving' && record.type === 'MX')?.value
+  return <Alert tone="info" title={`Turn on receiving for ${host}`}>
+    Creating this address turns receiving on at {host}. Then add this MX record at your DNS provider: <code>{host}</code> MX <code>{value ?? '…'}</code>.
+    {host === domain.data?.name && <> {rootMxWarning(host)}</>}
+  </Alert>
+}
 type CreatedReceiving = { domainId: string; host: string; turnedOn: boolean; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
 /** After an address is created on a host that doesn't route mail here yet: the MX record that makes it receive. */
 function ReceivingSetupNote({ setup }: { setup: CreatedReceiving }) {
@@ -173,6 +187,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   // Hosted, an address on one of the workspace's domains (or a subdomain of one) where nothing receives yet turns
   // receiving on there when it is created (createInboundAddress), so the address step takes it and says so.
   const roots = [...new Set(domains.flatMap(d => 'domain' in d && typeof d.domain === 'string' ? [d.domain] : []))]
+  // The domain an address at a host belongs to (the longest of the workspace's domains it is on), for its MX record.
+  const domainOf = (host: string) => domains.flatMap(d => 'domain' in d && typeof d.domain === 'string' && (host === d.domain || host.endsWith(`.${d.domain}`)) ? [{ id: d.id, name: d.domain }] : []).sort((a, b) => b.name.length - a.name.length)[0]
   // Every host addresses can be made at: a domain's first host and any it receives at beside it (an added host).
   const hosts = [...new Set([...receiving.map(d => d.name), ...domains.flatMap(d => 'hosts' in d && Array.isArray(d.hosts) ? d.hosts : [])])]
   const turnsOn = (host: string) => multiTenant && !hosts.includes(host) && roots.some(root => host === root || host.endsWith(`.${root}`))
@@ -444,9 +460,10 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   </div>
   let body: ReactNode
   if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
-    <Field label="Address" htmlFor="builder-address-input" error={errors.address} hint={!errors.address && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) ? `${typed.split('@')[1]} doesn’t receive mail yet. Creating this address turns receiving on there; then publish its MX record.` : undefined}>
+    <Field label="Address" htmlFor="builder-address-input" error={errors.address}>
       <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
+    {!errors.address && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) && domainOf(typed.split('@')[1]!) && <TurnOnReceiving host={typed.split('@')[1]!} domainId={domainOf(typed.split('@')[1]!)!.id} />}
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
     <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Name" /></Field>

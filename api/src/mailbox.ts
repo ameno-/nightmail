@@ -482,7 +482,7 @@ function registerAddresses(app: App) {
     // (receiving-hosts.ts receiveForAddress), and the answer says which MX record to publish.
     if (!domain && c.env.config.multiTenant) { await receiveForAddress(c, value.workspaceId, host, input.address, admits(() => lasting(c, RECEIVING_HOST_CHANGE))); domain = await receivingRow(); turnedOn = true; }
     if (!domain) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} doesn’t receive mail yet. Turn it on with POST /v1/inbound/domains/{id}/hosts, then create the address.` : `Enable receiving for ${host}'s domain first: POST /v1/inbound/domains/{id}/enable, then create the address.`, 'address');
-    if (['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} no longer receives mail. Add it back as a receiving host before creating addresses on it.` : `Verify ${host}'s domain in this workspace before creating addresses on it.`, 'address');
+    if (['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} no longer receives mail: its receiving host was removed. Add it back with POST /v1/inbound/domains/${domain.domainId}/hosts and {"name":"${host}"}, then create the address.` : `Verify ${host}'s domain in this workspace before creating addresses on it.`, 'address');
     const publicAddress = input.publicAddress;
     if (publicAddress) {
       if (input.ttlSeconds !== undefined) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes cannot have a public sender address.', 'publicAddress');
