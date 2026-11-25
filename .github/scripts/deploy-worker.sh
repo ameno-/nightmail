@@ -16,6 +16,22 @@ trap 'rm -f -- "$secrets_file"' EXIT
 # without them, so fail here, before secrets sync or migrations, instead of deploying a 503.
 acr=$(node -e "const ts=require('typescript');const c=ts.parseConfigFileTextToJson('w',require('fs').readFileSync(process.argv[1],'utf8')).config;process.stdout.write(String(c?.vars?.MULTI_TENANT)+' '+String(c?.vars?.ACCOUNT_REQUIRED_ACR))" "$config")
 [[ $acr =~ ^true\ urn:anomaly:acr:(github|google|email|password)(\ urn:anomaly:acr:(github|google|email|password))*$ ]] || { echo "::error::$config must set MULTI_TENANT=true and ACCOUNT_REQUIRED_ACR to the account service's methods (urn:anomaly:acr:github, google, email, password)"; exit 1; }
+# Link hosts (api/src/link-domains.ts): the custom hostnames token, nightmail/<stage>/NIGHTMAIL_LINK_SAAS_TOKEN, follows the
+# committed NIGHTMAIL_LINK_SAAS_ZONE_ID, since config.ts takes both or neither (one without the other answers every
+# request 503 CONFIG_INVALID). With the zone set, the token is required: missing, unreadable or malformed stops the deploy
+# here, before anything changes; it is bound with the app secrets below. Without the zone, a token left on the Worker is
+# deleted below. The value never reaches argv or the log.
+link_zone=$(node -e "const ts=require('typescript');const c=ts.parseConfigFileTextToJson('w',require('fs').readFileSync(process.argv[1],'utf8')).config;process.stdout.write(String(c?.vars?.NIGHTMAIL_LINK_SAAS_ZONE_ID??''))" "$config")
+unset link_token
+if [[ -n $link_zone ]]; then
+  [[ $link_zone =~ ^[0-9a-f]{32}$ ]] || { echo "::error::NIGHTMAIL_LINK_SAAS_ZONE_ID in $config must be a Cloudflare zone id"; exit 1; }
+  link_token=$(aws secretsmanager get-secret-value --secret-id "nightmail/${STAGE:-}/NIGHTMAIL_LINK_SAAS_TOKEN" --query SecretString --output text) ||
+    { echo "::error::$config sets NIGHTMAIL_LINK_SAAS_ZONE_ID, but nightmail/${STAGE:-}/NIGHTMAIL_LINK_SAAS_TOKEN could not be read"; exit 1; }
+  # Check before masking: a workflow command masks one line and unescapes %XX.
+  [[ $link_token =~ ^[A-Za-z0-9._~+/=-]{20,}$ && ${#link_token} -le 500 ]] ||
+    { unset link_token; echo "::error::nightmail/${STAGE:-}/NIGHTMAIL_LINK_SAAS_TOKEN must be one line of 20 to 500 characters from [A-Za-z0-9._~+/=-]"; exit 1; }
+  echo "::add-mask::$link_token"
+fi
 for name in BANE_ROOT_SECRET ACCOUNT_CLIENT_PRIVATE_KEY TYPESAFE_API_KEY; do
   [[ -n ${!name:-} ]] || { echo "::error::Missing required app secret: $name"; exit 1; }
 done
@@ -164,6 +180,19 @@ if [[ $jevf_key == off || $jevf_key == 'not set' ]]; then
   fi
 fi
 echo "Second classifier: nightmail/$STAGE/JEVF_API_KEY is $jevf_key."
+if [[ -n ${link_token:-} ]]; then
+  # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
+  with_link=$(NIGHTMAIL_LINK_SAAS_TOKEN=$link_token jq '. + ($ENV | {NIGHTMAIL_LINK_SAAS_TOKEN})' "$secrets_file") && printf '%s\n' "$with_link" > "$secrets_file"
+  unset with_link link_token
+  echo "Link hosts: zone $link_zone; binding nightmail/$STAGE/NIGHTMAIL_LINK_SAAS_TOKEN."
+elif bound NIGHTMAIL_LINK_SAAS_TOKEN; then
+  # Before the deploy, so a failed deploy still leaves the Worker without a token its zone setting doesn't match.
+  WRANGLER_LOG=error "$wrangler" secret delete NIGHTMAIL_LINK_SAAS_TOKEN --config "$config" >/dev/null
+  if bound NIGHTMAIL_LINK_SAAS_TOKEN; then echo "::error::NIGHTMAIL_LINK_SAAS_TOKEN is still bound to the Worker"; exit 1; fi
+  echo "Link hosts: off; removed NIGHTMAIL_LINK_SAAS_TOKEN from the Worker."
+else
+  echo "Link hosts: off."
+fi
 args+=(--secrets-file "$secrets_file")
 # Every log line names the commit it runs (core.ts setLogContext), for the nightly report's 5xx-by-deploy table; Glass
 # shows the commit and when it went out.
