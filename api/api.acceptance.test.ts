@@ -28075,6 +28075,41 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     }));
   });
 
+  test('the dashboard test email carries a platform screen verdict and goes at once; other words or another recipient are screened', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('platform verdict', async t => {
+      const acct = '112223330041', { wid, screened, delivered } = await hostedScreenFixture(t, runtime, db, acct, 'platform.invalid');
+      const { dispatch } = await campaignHarness(runtime, db, local, run, jobs, wid, acct, 'news@platform.invalid');
+      const domain = unique('test-send-platform');
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'platform.invalid',$3)", [domain, wid, REGION]);
+      // The test email: no classifier call, a verdict recorded as the platform's (not a skip), and the mail room sends it on
+      // its next run instead of holding it for the screen (production: 51 s, #740).
+      const sent = ok(await local('POST', `/v1/domains/${domain}/test-send`, undefined, 'live', { 'idempotency-key': unique('test-send') }), 202);
+      assert.deepEqual(screened, []);
+      const row = (await db.query(`SELECT screened, snapshot->'screenVerdict'->>'status' AS status, snapshot->'screenVerdict'->>'reason' AS reason FROM sending_emails WHERE id=$1`, [sent.id])).rows[0];
+      assert.deepEqual(row, { screened: true, status: 'platform', reason: 'platform test email' });
+      assert.equal((await dispatch()).sent, 1);
+      assert.ok(delivered.has(manager!.email), 'Sent to the signed-in user, on the first run.');
+      // The verdict is for exactly that email: a changed word, another or a further recipient, a header, HTML, an attachment
+      // or a display name gets none, so it goes to the classifier like any other send.
+      const { platformTestEmail, platformTestVerdict } = await import('./src/sending.js');
+      const me = manager!.email, fixed = platformTestEmail('platform.invalid');
+      const exact = { ...fixed, to: [me], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional' as const, attachments: [], headers: [], tracking: false };
+      assert.deepEqual(platformTestVerdict(exact, me.toUpperCase(), 'standard'), { status: 'platform', reason: 'platform test email', rules: 'standard' });
+      for (const [what, changed] of [
+        ['body', { text: fixed.text + ' Claim your prize: https://example.invalid' }], ['subject', { subject: 'Urgent: verify your account' }],
+        ['recipient', { to: ['someone-else@example.invalid'] }], ['second recipient', { to: [me, 'someone-else@example.invalid'] }],
+        ['cc', { cc: ['someone-else@example.invalid'] }], ['bcc', { bcc: ['someone-else@example.invalid'] }], ['reply-to', { replyTo: ['someone-else@example.invalid'] }],
+        ['html', { html: '<p>Click here</p>' }], ['header', { headers: [{ Name: 'X-Campaign', Value: '1' }] }], ['attachment', { attachments: ['att_fixture'] }],
+        ['display name', { fromName: 'Your bank' }], ['another domain', { from: 'hello@other.invalid' }], ['marketing', { kind: 'marketing' as const }],
+      ] as [string, Partial<typeof exact> & { html?: string; fromName?: string }][]) assert.equal(platformTestVerdict({ ...exact, ...changed }, me, 'standard'), undefined, what);
+      // The same words through the API, to the same person: an ordinary send, screened.
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('platform-key'), permissions: ['send'] }), 201).secret;
+      const copied = ok(await local('POST', '/v1/emails/send', { from: fixed.from, to: me, subject: fixed.subject, text: fixed.text }, 'live', { authorization: `Bearer ${key}` }), 202);
+      assert.equal(screened.length, 1);
+      assert.equal((await db.query(`SELECT snapshot->'screenVerdict'->>'status' AS status FROM sending_emails WHERE id=$1`, [copied.id])).rows[0].status, 'passed');
+    }));
+  });
+
   test('hosted screen rollback to Jev: JevF gates on billing and auth errors, leaves SES capacity, and returns to the primary after cool-off', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('classifiers', async t => {
       const { loadConfig } = await import('./src/config.js'), { screenWindow } = await import('./src/screen.js');

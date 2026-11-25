@@ -30,8 +30,10 @@ export type EmailSnapshot = {
   untrustedContent?: boolean;
   /** Live transactional only: ask the outbound content classifier before accepting into the queue. */
   screen?: boolean;
-  /** Content-screen verdict recorded at accept time so the dispatcher never re-screens queued mail. */
-  screenVerdict?: { status: 'passed' | 'skipped'; spam?: number; model?: string; digest?: string; rules?: 'probation' | 'standard' | null };
+  /** Content-screen verdict recorded at accept time so the dispatcher never re-screens queued mail. 'platform': the
+   *  dashboard's test email, whose words are fixed by us and which goes only to the signed-in person (sending.ts
+   *  platformTestVerdict); reason says so. */
+  screenVerdict?: { status: 'passed' | 'skipped' | 'platform'; reason?: 'platform test email'; spam?: number; model?: string; digest?: string; rules?: 'probation' | 'standard' | null };
   /** Sent campaign emails keep only their unsubscribe URL; the body is re-rendered from the frozen review on read. */
   unsubscribeUrl?: string;
   /** A sent required notice's email, which has no unsubscribe URL to keep: its body is re-rendered the same way. */
