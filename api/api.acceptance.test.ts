@@ -20680,8 +20680,13 @@ describe('List hygiene', () => {
       const committed = ok(await local('POST', `/v1/contact-imports/${preview.id}/commit`, { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
       const afterCommit = { total: 4, byReason: { ...NONE, disposable: 1, typo_domain: 1, role: 1, dead: 1 } };
       assert.deepEqual(committed.risky, afterCommit);
-      assert.deepEqual(ok(await local('GET', `/v1/contact-imports/${preview.id}`)).risky, afterCommit);
+      // Retained receipts from before domain checks have no no_mail_domain count.
+      await db.query("UPDATE audience_imports SET risk_summary=risk_summary #- '{byReason,no_mail_domain}' WHERE id=$1", [preview.id]);
       assert.deepEqual(ok(await local('GET', '/v1/contact-imports')).data.find((i: Json) => i.id === preview.id).risky, afterCommit);
+      assert.deepEqual(ok(await local('GET', `/v1/contact-imports/${preview.id}`)).risky, afterCommit);
+      assert.deepEqual(ok(await local('POST', `/v1/contact-imports/${preview.id}/commit`, {})).risky, afterCommit);
+      await db.query('UPDATE audience_imports SET risk_summary=NULL WHERE id=$1', [preview.id]);
+      assert.equal(ok(await local('GET', `/v1/contact-imports/${preview.id}`)).risky, null);
 
       // A campaign to the list skips the risky contacts, except the one its owner allowed; the review and the launch say so.
       const members = Object.fromEntries(ok(await local('GET', `/v1/lists/${list.id}/members?limit=100`)).data.map((m: Json) => [m.email, m]));
