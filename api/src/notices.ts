@@ -96,6 +96,7 @@ export type NoticeInput =
   | Workspace & { kind: 'resumed'; limit?: boolean; /** Marketing stays on hold after this resume. */ marketingHeld?: boolean }
   | Workspace & { kind: 'campaign_paused'; campaign: { id: string; name: string } }
   | Workspace & { kind: 'domain_unverified'; domain: { id: string; name: string } }
+  | Workspace & { kind: 'domain_released'; domain: { name: string } }
   /** missing: of the domain's `total` sending records, the ones public DNS lacks or has with another value. host: where its DNS is hosted, when known. */
   /** noDns: nobody serves DNS for the domain, so the email asks to check its name instead of listing records. */
   | Workspace & { kind: 'domain_setup'; domain: { id: string; name: string }; noDns?: boolean; /** A wildcard (*.domain), and the parking host it points to, answering its missing CNAMEs. */ wildcard?: string; parking?: { owner: string; target: string }; missing: SetupRecord[]; total: number; wrong: boolean; host: { name: string; url: string | null } | null; releasesAt: Date | null }
@@ -164,6 +165,13 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
         `${productName} can no longer find the DNS records that verify ${name}.`,
         `Mail from addresses at ${name} is refused until the records are back. Your other domains are not affected.`,
         'The domain’s page lists the records to publish.'] });
+    }
+    case 'domain_released': {
+      const host = hostName(n.domain.name), name = host ?? 'the domain';
+      return notice({ subject: `${host ?? 'A domain'} was released from ${w}`, action: { label: 'Open domains', url: `${base}/domains` }, why: members, lines: [
+        `${productName} removed ${name} from ${w}: the DNS records that verified it have been gone for over 30 days.`,
+        `Mail from addresses at ${name} can’t be sent from ${w}, and another workspace can now add the domain. Your other domains are not affected.`,
+        `If ${name} is still yours, add it again and publish the records it lists.`] });
     }
     case 'domain_setup': {
       const host = hostName(n.domain.name), name = host ?? 'the domain', provider = n.host?.name ?? null;

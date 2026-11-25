@@ -645,11 +645,13 @@ async function releaseClaim(db:DbExecutor,wid:string,row:{token:string}) {
 /** Each release holds one lock through the tag check, SES deletion and database cleanup. On SES
  * failure retain the claim for the next sweep, without letting it block other expired names. */
 export async function expireDomainClaims(runtime:Runtime,deadline:number) {
-  // Revisit exclusive claims whose ownership has not been observed in a month, including disconnected claims.
-  // The first definite miss starts a fresh grace period; only a second definite miss after it releases the namespace.
+  // Revisit exclusive claims whose ownership has not been observed for a week, including disconnected claims, so a miss
+  // is noticed within a week. The first definite miss starts a 30-day grace period; only a second definite miss after it
+  // releases the namespace (what the DOMAIN_CLAIMED refusal tells the domain's owner, domain-claims.ts domainClaimed).
   const due = sql`dc.ever_proven AND dc.claim_scope <> 'account' AND NOT coalesce(dc.identity ?| array['adopted','builtin'], false)
     AND (dc.connection_id IS NULL OR pc.id IS NOT NULL)
-    AND coalesce(dc.receiving_proof_missed_at, dc.receiving_proved_at, dc.created_at) <= now() - interval '30 days'`;
+    AND CASE WHEN dc.receiving_proof_missed_at IS NULL THEN coalesce(dc.receiving_proved_at, dc.created_at) <= now() - interval '7 days'
+      ELSE dc.receiving_proof_missed_at <= now() - interval '30 days' END`;
   let released=0;
   // Expired claims first: a due claim whose authority keeps failing must never hold back their cleanup.
   for (const pending of [sql`domain_claim_expired(dc)`, sql`(${due})`]) {
@@ -696,7 +698,10 @@ export async function expireDomainClaims(runtime:Runtime,deadline:number) {
             }
           }
           if (row.connection?.kind==='shared') await deleteClaimIdentity(runtime,row.workspace_id,{...row,region:row.connection.region,connection:row.connection});
-          await releaseClaim(db,row.workspace_id,row); return true;
+          await releaseClaim(db,row.workspace_id,row);
+          // A proven name the workspace held is gone: its owners and admins are told (an abandoned setup is not).
+          if (!row.expired) await (await wrapModuleLoad(() => import('./account-notices.js'))).domainReleased(db,row.workspace_id,{name:row.name,token:row.token});
+          return true;
         });
         if (!found) break;
         if (found === true) released++;
