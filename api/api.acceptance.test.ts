@@ -24555,7 +24555,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // No recipient, subject or body is accepted: extra fields are ignored and the server picks the signed-in user.
       const sent = ok(await local('POST', `/v1/domains/${domain}/test-send`, { to: ['someone-else@example.net'], subject: 'Not this' }, 'live', { 'idempotency-key': unique('test-send') }), 202);
       const row = (await db.query('SELECT from_address, to_addresses, cc_addresses, bcc_addresses, subject FROM sending_emails WHERE id=$1', [sent.id])).rows[0];
-      assert.deepEqual(row, { from_address: 'hello@example.com', to_addresses: [manager!.email], cc_addresses: [], bcc_addresses: [], subject: 'Test email from Nightmail' });
+      assert.deepEqual(row, { from_address: 'hello@example.com', to_addresses: [manager!.email], cc_addresses: [], bcc_addresses: [], subject: 'Your first email from Nightmail' });
       // An API key, even with send permission, can't use it: only a dashboard session has a "yourself".
       const key = ok(await local('POST', '/v1/api-keys', { name: unique('test-send-key'), permissions: ['send'] }), 201).secret;
       error(await local('POST', `/v1/domains/${domain}/test-send`, undefined, 'live', { authorization: `Bearer ${key}` }), 403, 'DASHBOARD_SESSION_REQUIRED');

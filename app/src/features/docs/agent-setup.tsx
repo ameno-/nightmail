@@ -61,7 +61,7 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
   const to = email ?? 'an address I control (ask me which)'
   lines.push(
     `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
-    `- Send a test email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. 202 means queued, not delivered.`,
+    `- Send a first email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. Give it a short, real subject and plain text: "test" or placeholder words in either send it to spam. 202 means queued, not delivered.`,
   )
   // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.
   if (domain.builtIn) lines.push(`- ${domain.name} is this workspace's built-in domain. ${domain.limits?.summary ?? builtinLimitsText()} A send that uses any of them is refused once with 422 BUILTIN_DOMAIN_UNSUPPORTED, listing them in error.details[0].unsupported; GET /v1/domains/${domain.id} has the same limits. It stops sending once a domain of my own verifies: then send from that domain (a send from ${domain.name} gets 409 OWN_DOMAIN_VERIFIED with the address to use in error.details[0].suggestedFrom).`)

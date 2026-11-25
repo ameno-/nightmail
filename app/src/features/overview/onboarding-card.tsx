@@ -108,7 +108,7 @@ function FirstSendCard({ domain, onSent }: { domain?: Domain; onSent?: () => voi
       <p data-tone={test.error ? 'danger' : undefined} role="status">{line}</p>
     </div>
     <div className="ov-onboarding__actions">
-      <Button variant="primary" loading={test.isPending} disabled={!domain || !to || test.isSuccess} onClick={() => test.mutate()} data-analytics="overview/first-send/test"><Send size={14} aria-hidden />Send a test to yourself</Button>
+      <Button variant="primary" loading={test.isPending} disabled={!domain || !to || test.isSuccess} onClick={() => test.mutate()} data-analytics="overview/first-send/test"><Send size={14} aria-hidden />Send it to yourself</Button>
       <span className="ov-onboarding__copy" data-pending={!origin || !domain || undefined} inert={!origin || !domain}>
         <CopyAction value={origin && domain ? setup ? setup.copy(promptFor) : promptFor(undefined) : ''} label="Copy agent prompt" text="Copy agent prompt" />
       </span>
