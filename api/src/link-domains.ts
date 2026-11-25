@@ -50,13 +50,13 @@ export function linkFallbackSpent(domain: string) {
 
 /**
  * The shared fallback link host's guardrails. Only a workspace in good standing past the new-sender checks uses it: graded,
- * a score of GOOD_STANDING or more at step ok, out of the growth pace, and no paused connection (an operator's pause or
- * the abuse path takes it off at once, as every use asks again). Its campaign and marketing recipients linked there are
+ * a score of GOOD_STANDING or more with no warning (step ok or notice), out of the growth pace, and no paused connection
+ * (an operator's pause or the abuse path takes it off at once, as every use asks again). Its campaign and marketing recipients linked there are
  * capped a UTC day at the ramp's first daily batch (RAMP.plan.firstBatch), counted in link_fallback_days.
  */
 export const LINK_FALLBACK = { dailyRecipients: RAMP.plan.firstBatch } as const;
 const fallbackDay = sql`(now() AT TIME ZONE 'UTC')::date`;
-const fallbackEligible = (workspaceId: string) => sql`(coalesce((SELECT s.phase='graded' AND s.score>=${GOOD_STANDING} AND s.step='ok' AND (s.growth_until IS NULL OR s.growth_until<=now())
+const fallbackEligible = (workspaceId: string) => sql`(coalesce((SELECT s.phase='graded' AND s.score>=${GOOD_STANDING} AND s.step IN ('ok','notice') AND (s.growth_until IS NULL OR s.growth_until<=now())
     FROM sender_standing s WHERE s.workspace_id=${workspaceId}),false)
   AND NOT EXISTS (SELECT 1 FROM provider_connections pc WHERE pc.workspace_id=${workspaceId} AND pc.paused_at IS NOT NULL))`;
 /** Where a message's links go: `fallback` when on the shared host, with how many more campaign and marketing recipients

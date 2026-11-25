@@ -153,6 +153,7 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
       // Link hosts on, as production has them: each domain's page lists its link record (missing: the fixture's domains
       // were set up before it). Reads never call Cloudflare; only a domain's check does.
       NIGHTMAIL_LINK_SAAS_ZONE_ID: '0'.repeat(32), NIGHTMAIL_LINK_SAAS_TOKEN: randomBytes(24).toString('hex'), NIGHTMAIL_LINK_SAAS_TARGET: 'edge.northwind.example',
+      NIGHTMAIL_LINK_FALLBACK_HOST: 'links.edge.northwind.example',
     });
     execFileSync('node', ['--import', 'tsx', 'src/migrate.ts'], { cwd: api, env: envFor(0), stdio: ['ignore', 'ignore', 'inherit'] });
     log('postgres: migrated');
@@ -748,6 +749,9 @@ export async function seed(fx) {
   const conn = await hosted(db, 'ws_northwind');
   const nw = await domain(db, 'ws_northwind', conn, 'northwind.example', { receiving: true });
   const sendingDomain = await domain(db, 'ws_northwind', conn, 'mail.northwind.example', { mailFrom: true, dmarc: 'none' });
+  // Its link record in place while link hosts are at capacity: the page says its links use a shared link host meanwhile.
+  await db.query(`INSERT INTO link_hosts(workspace_id,domain,hostname,status,detail,public_dns,quota_full_at) VALUES ('ws_northwind','mail.northwind.example','links.mail.northwind.example','pending',$1,$2::jsonb,now())`,
+    ['The CNAME is in place. Link hosts are at capacity right now; this one is set up automatically when there is room, with nothing to do on your side.', JSON.stringify({ state: 'found', values: [], checkedAt: new Date().toISOString() })]);
   await db.query("INSERT INTO nightmail_users (id,name,email,email_verified) VALUES ('user_sam','Sam Okafor','sam@northwind.example',true),('user_lee','Lee Park','lee@northwind.example',true)");
   await db.query("INSERT INTO workspace_members (id,workspace_id,user_id,role) VALUES ('wm_sam','ws_northwind','user_sam','admin'),('wm_lee','ws_northwind','user_lee','member')");
   await dana.api('POST', '/v1/api-keys', { name: 'Production', permissions: ['send'], domains: ['mail.northwind.example'] }, 201);
