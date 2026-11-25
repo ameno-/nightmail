@@ -32879,6 +32879,68 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('SES receipt wake: coalesced ingest stores agent inbox mail without a shared queue turn; feedback never starts it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, fetch }) => {
+      const { S3Client } = await import('@aws-sdk/client-s3'), { setupResources } = await import('./src/ses-setup.js');
+      const { feedbackSink } = await import('./src/adapters/feedback-queue.js');
+      const wid=runtime.config.workspaceId, host=unique('receipt')+'.invalid', addr='agent@'+host, dom=unique('domain'), box=unique('mbx');
+      const acct='111122223333', bucket='fixture-receipt', certUrl=`https://sns.${REGION}.amazonaws.com/${snsCertName()}`;
+      const installation=(await db.query('SELECT installation_id FROM ses_installation_settings WHERE workspace_id=$1',[wid])).rows[0].installation_id;
+      const feedback=`arn:aws:sns:${REGION}:${acct}:${setupResources(installation).topicName}`, inbound=feedback.replace(/-feedback$/,'-inbound');
+      await db.query('INSERT INTO ses_region_discovery(workspace_id,region,trusted_account_id,trusted_topic_arn) VALUES($1,$2,$3,$4)',[wid,REGION,acct,feedback]);
+      await db.query('INSERT INTO mailbox_regions(workspace_id,region,account_id,bucket,topic_arn) VALUES($1,$2,$3,$4,$5)',[wid,REGION,acct,bucket,inbound]);
+      await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status,catch_all) VALUES($1,$2,$1,$3,$4,'active','store')",[dom,wid,host,REGION]);
+      await db.query(`INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode,create_request) VALUES($1,$2,$3,$4,'inbox','forever','{"type":"persistent"}')`,[box,wid,dom,addr]);
+      await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,addr,box]);
+      await db.query('INSERT INTO inbox_state(inbox_id,workspace_id) VALUES($1,$2) ON CONFLICT DO NOTHING',[box,wid]);
+      await db.query('SELECT inbox_seed_folders($1)',[box]);
+      runtime.config.aws={accessKeyId:'fixture',secretAccessKey:'fixture'};
+      const key=generateKeyPairSync('rsa',{modulusLength:2048}).privateKey, pem=await selfSignedPem(key);
+      t.mock.method(globalThis,'fetch',async (u:RequestInfo|URL)=>{assert.equal(String(u),certUrl);return new Response(pem);});
+      const raw=Buffer.from(`From: sender@example.invalid\r\nTo: ${addr}\r\nSubject: receipt wake\r\n\r\nFixture`);
+      t.mock.method(S3Client.prototype,'send',async (cmd:any)=>{
+        if(cmd.constructor.name==='HeadObjectCommand')return {ContentLength:raw.length,ETag:'"fixture"'};
+        if(cmd.constructor.name==='GetObjectCommand')return {Body:{transformToByteArray:async()=>raw}};
+        assert.ok(['CopyObjectCommand','PutObjectCommand','DeleteObjectCommand'].includes(cmd.constructor.name));return {};
+      });
+      const notify=async (topic:string, message:Json)=>{
+        const fields={Message:JSON.stringify(message),MessageId:randomUUID(),Timestamp:new Date().toISOString(),TopicArn:topic,Type:'Notification'};
+        const body={...fields,SigningCertURL:certUrl,SignatureVersion:'2',Signature:Buffer.from(sign('RSA-SHA256',Buffer.from(Object.entries(fields).map(([k,v])=>k+'\n'+v+'\n').join('')),key)).toString('base64')};
+        const res=await fetch(new Request(PUBLIC_ORIGIN+'/v1/events/ses',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body)}));
+        assert.equal(res.status,202,await res.text());
+      };
+      const tasks:Promise<void>[]=[], starts:number[]=[], hints:string[]=[];
+      runtime.detach=work=>{starts.push(performance.now());const p=work(runtime);tasks.push(p);return p;};
+      runtime.wake=async (_n,pool)=>{hints.push(pool??'work');};
+      let priority=0;
+      runtime.feedback=feedbackSink({sendBatch:async()=>assert.fail('Expected priority feedback')} as never,runtime.config.authSecret,
+        {sendBatch:async (items:unknown[])=>{priority+=items.length;}} as never);
+      const feedbackCount=BENCH?1000:8;
+      const report=(i:number)=>notify(feedback,{eventType:i%2?'Bounce':'Complaint',mail:{messageId:unique('provider'),sendingAccountId:acct}});
+      await report(0); // The first signed callback fills the certificate cache before the burst.
+      for(let i=1;i<feedbackCount;i+=8)await Promise.all(Array.from({length:Math.min(8,feedbackCount-i)},(_,j)=>report(i+j)));
+      assert.deepEqual([priority,starts.length,hints.length],[feedbackCount,0,0]);
+      const receipts=Array.from({length:BENCH?20:3},()=>unique('receipt'));
+      const incoming=(mid:string)=>({notificationType:'Received',mail:{messageId:mid,source:'sender@example.invalid'},
+        receipt:{timestamp:new Date().toISOString(),...cleanScans,recipients:[addr],action:{type:'S3',topicArn:inbound,bucketName:bucket,objectKey:'staging/'+mid}}});
+      const sentinel=unique('sentinel');
+      await db.query("INSERT INTO jobs(id,workspace_id,type,payload) VALUES($1,$2,'fixture.unrelated','{}')",[sentinel,wid]);
+      const first=performance.now();
+      await Promise.all(receipts.map(mid=>notify(inbound,incoming(mid))));
+      assert.ok(starts.length<=1+Math.floor((performance.now()-first)/1000),'At most one ingest wake per second');
+      const beforeReplay=starts.length;
+      await notify(inbound,incoming(receipts[0]!)); // redelivery of the same receipt
+      assert.equal(starts.length,beforeReplay,'An unchanged receipt does not start another drain');
+      await Promise.all(tasks);
+      const stored=await db.query(`SELECT m.ses_message_id FROM mailbox_messages l JOIN mail_messages m ON m.id=l.message_id
+        WHERE l.mailbox_id=$1 AND m.ses_message_id=ANY($2)`,[box,receipts]);
+      assert.deepEqual(stored.rows.map(r=>r.ses_message_id).sort(),[...receipts].sort());
+      assert.ok(starts.length>0);
+      assert.equal((await db.query('SELECT status FROM jobs WHERE id=$1',[sentinel])).rows[0].status,'pending');
+      t.diagnostic(`${priority} signed feedback notifications: zero ingest wakes; ${receipts.length} receipts stored, ${starts.length} elected wake(s).`);
+    });
+  });
+
   test('batched inbound ingest: burst ordering, threading, quota fallback, unread/IMAP exactness and cross-workspace fairness', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { S3Client, GetObjectCommand } = await import('@aws-sdk/client-s3');
