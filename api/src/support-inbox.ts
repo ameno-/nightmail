@@ -92,7 +92,8 @@ const Message = z.object({
 const Event = z.object({ id: z.string(), kind: z.enum(EVENT_KINDS), by: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('The staff member, or null for the support platform or the customer.'),
   details: z.record(z.string(), z.unknown()), at: z.string() }).openapi('SupportInboxEvent');
 const Item = z.object({
-  id: z.string(), channel: z.enum(['chat', 'email']), mode: z.enum(['member', 'non_member', 'pending_signin', 'unverified']), verification: z.enum(['handoff', 'dmarc', 'signin', 'none']),
+  id: z.string(), channel: z.enum(['chat', 'email', 'agent_feedback']).describe('agent_feedback: a report an agent filed with sendFeedback (src/feedback.ts), bound to its credential\u2019s workspace; nobody to reply to.'),
+  mode: z.enum(['member', 'non_member', 'pending_signin', 'unverified']), verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'credential']),
   status: z.enum(['open', 'ticketed', 'closed']), subject: z.string().nullable(),
   customer: z.object({ userId: z.string(), name: z.string().nullable(), email: z.string().nullable() }).nullable().describe('The person Nightmail bound the conversation to, or null.'),
   sender: z.string().nullable().describe('An email conversation’s sender address, whether or not it proved who it is.'),
@@ -144,7 +145,7 @@ const State = z.object({
 
 // ---------- reading conversations ----------
 
-type ItemRow = { id: string; channel: 'chat' | 'email'; mode: z.infer<typeof Item>['mode']; verification: z.infer<typeof Item>['verification']; status: z.infer<typeof Item>['status']; subject: string | null;
+type ItemRow = { id: string; channel: z.infer<typeof Item>['channel']; mode: z.infer<typeof Item>['mode']; verification: z.infer<typeof Item>['verification']; status: z.infer<typeof Item>['status']; subject: string | null;
   pending_address: string | null; user_id: string | null; user_name: string | null; user_email: string | null; workspace_id: string | null; workspace_name: string | null;
   ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; ticket_resolved_at: string | null; agent_state: 'active' | 'paused'; paused_by: string | null;
   paused_by_name: string | null; paused_at: string | null; messages: number; turns: number; cost_usd: number | string; blocked_work: number; created_at: string; last_message_at: string | null;
@@ -180,9 +181,10 @@ const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN nightmail
 const triageCandidates = sql`(c.status <> 'closed' OR c.closed_at > now() - interval '90 days' OR c.blocked_work > 0 OR (c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL))`;
 /** Answered: the last message is the agent's (sent) or staff's, so the customer has the next word. */
 const answered = sql`(last.author IN ('agent','staff') AND last.held IS NOT TRUE)`;
-const handling = sql`c.status <> 'closed' AND c.agent_state = 'active' AND NOT triage.needs_you AND c.done_at IS NULL AND NOT ${answered}`;
-const waitingOnCustomer = sql`c.status <> 'closed' AND NOT triage.needs_you AND c.done_at IS NULL AND ${answered}`;
-const finished = sql`NOT triage.needs_you AND (c.done_at IS NOT NULL OR c.status = 'closed')`;
+// Agent feedback has no agent behind it, and nobody to reply to: it needs you or it is done.
+const handling = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND c.agent_state = 'active' AND NOT triage.needs_you AND c.done_at IS NULL AND NOT ${answered}`;
+const waitingOnCustomer = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND NOT triage.needs_you AND c.done_at IS NULL AND ${answered}`;
+const finished = sql`NOT triage.needs_you AND (c.done_at IS NOT NULL OR c.status = 'closed' OR (c.channel = 'agent_feedback' AND c.ticket_resolved_at IS NOT NULL))`;
 const firstLine = (text: string | null) => text?.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 200) ?? null;
 /** A message as one line for the list: its own words, white space folded, the first 200 characters. */
 const oneLine = (text: string) => text.replace(/\s+/g, ' ').trim().slice(0, 200);
@@ -194,7 +196,7 @@ const item = (r: ItemRow): z.infer<typeof Item> => ({
   workspace: r.workspace_id ? { id: r.workspace_id, name: r.workspace_name ?? r.workspace_id } : null, ticket: ticketOf(r),
   agentState: r.agent_state, pausedAt: isoTime(r.paused_at),
   pausedBy: r.agent_state !== 'paused' ? null : r.paused_by === 'ticket' ? { kind: 'ticket', userId: null, name: null } : { kind: 'staff', userId: r.paused_by, name: r.paused_by_name },
-  lastAuthor: r.last_author, needsReply: r.status !== 'closed' && r.last_author === 'customer',
+  lastAuthor: r.last_author, needsReply: r.status !== 'closed' && r.channel !== 'agent_feedback' && r.last_author === 'customer',
   preview: r.last_author && r.last_text !== null ? { author: r.last_author, text: oneLine(r.last_text), held: r.last_held === true } : null,
   messageCount: r.messages, queuedReplies: r.queued, turns: r.turns, costUsd: Number(r.cost_usd), blockedWork: r.blocked_work, firstLine: firstLine(r.opening),
   needsYou: r.needs_you ? { reasons: TRIAGE_REASONS.filter(reason => r[`why_${reason}`]), urgent: r.urgency <= 2, since: isoTime(r.since)! } : null,
@@ -286,6 +288,8 @@ async function staff(c: Ctx, level: OperatorRole) {
 }
 const staffContext = (c: Ctx, operator: OperatorIdentity) => operatorContext(c, { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId });
 const closedConversation = () => new ApiError(409, 'SUPPORT_CONVERSATION_CLOSED', 'This conversation is closed.');
+/** Agent feedback (src/feedback.ts) has no support platform or agent behind it: nobody to reply to, pause or wake. */
+const noAgent = () => new ApiError(409, 'SUPPORT_AGENT_FEEDBACK', 'This is agent feedback: there is no customer to reply to and no support agent to pause, hand back or wake. Resolve its ticket or mark it done.');
 
 export function registerSupportInbox(app: App) {
   const operatorSecurity: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -443,8 +447,8 @@ export function registerSupportInbox(app: App) {
     description: 'Every support conversation, most recent activity first (needs_you: most urgent and longest waiting first). replyAvailable: whether staff can reply now (the support platform pulled replies in the last 10 minutes). counts: how many conversations need you, how many the agent is handling and how many wait on the customer.',
     request: { query: z.object({
       view: z.enum(['all', 'needs_you', 'agent', 'waiting', 'done', 'tickets', 'needs_reply', 'paused', 'attention']).default('all')
-        .describe('needs_you: what staff must handle (see needsYou); agent: open conversations the agent is handling and owes the next message in; waiting: answered by the agent or staff, waiting on the customer; done: marked done with nothing new since, or closed; tickets: an unresolved ticket; needs_reply: not closed, the customer wrote last; paused: the agent is paused; attention: blocked work.'),
-      channel: z.enum(['chat', 'email']).optional(), status: z.enum(['open', 'ticketed', 'closed']).optional(),
+        .describe('needs_you: what staff must handle (see needsYou); agent: open conversations the agent is handling and owes the next message in; waiting: answered by the agent or staff, waiting on the customer; done: marked done with nothing new since, or closed (agent feedback: once its ticket is resolved); tickets: an unresolved ticket; needs_reply: not closed, the customer wrote last; paused: the agent is paused; attention: blocked work.'),
+      channel: z.enum(['chat', 'email', 'agent_feedback']).optional(), status: z.enum(['open', 'ticketed', 'closed']).optional(),
       q: z.string().trim().min(1).max(200).optional().describe('A conversation, ticket or user ID, or part of a name, address or subject.'),
       cursor: z.string().max(2000).optional(), limit: z.coerce.number().int().min(1).max(100).default(50),
     }) },
@@ -455,7 +459,7 @@ export function registerSupportInbox(app: App) {
     const pattern = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null, triaged = q.view === 'needs_you';
     const filters: SQL[] = [{
       all: sql`true`, needs_you: sql`${triageCandidates} AND triage.needs_you`, agent: handling, waiting: waitingOnCustomer, done: finished,
-      tickets: sql`c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL`, needs_reply: sql`c.status <> 'closed' AND last.author = 'customer'`,
+      tickets: sql`c.ticket_id IS NOT NULL AND c.ticket_resolved_at IS NULL`, needs_reply: sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND last.author = 'customer'`,
       paused: sql`c.agent_state = 'paused'`, attention: sql`c.blocked_work > 0`,
     }[q.view]];
     if (q.channel) filters.push(sql`c.channel = ${q.channel}`);
@@ -537,18 +541,18 @@ export function registerSupportInbox(app: App) {
         activity: r.activity.map(({ n: _n, ...e }) => ({ ...e, at: at(e.at)! })) as z.infer<typeof Detail>['customer']['activity'],
         notes: r.notes.map(n => ({ ...n, createdAt: at(n.createdAt)! })) as z.infer<typeof Detail>['customer']['notes'],
       },
-      replyAvailable: r.available,
+      replyAvailable: r.available && r.item.channel !== 'agent_feedback',
     }, 200);
   });
 
   // Every staff change is one transaction with its internal audit row, and repeats safely with an Idempotency-Key.
-  type Locked = { status: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null; done_at: string | null; done_by: string | null; undoable: boolean };
+  type Locked = { status: string; channel: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null; done_at: string | null; done_by: string | null; undoable: boolean };
   const changeHeaders = z.object({ 'idempotency-key': z.string().min(1).max(200).optional() });
   async function change<T>(c: Ctx, id: string, action: string, work: (tx: DbExecutor, operator: OperatorIdentity, conversation: Locked) => Promise<{ result: T; message?: string }>, body?: unknown) {
     const operator = await staff(c, 'operator');
     let subject: string | null = null, messageId: string | undefined;
     return mutate(c, operator, '', body, async tx => {
-      const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at,
+      const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, channel, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at,
           done_by, done_at > now() - ${UNDO_WINDOW} AS undoable
         FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
       if (!conversation) notFound('Support conversation');
@@ -567,6 +571,7 @@ export function registerSupportInbox(app: App) {
     const id = c.req.valid('param').id, body = c.req.valid('json');
     const reply = await change(c, id, 'support.reply', async (tx, operator, conversation) => {
       if (conversation.status === 'closed') throw closedConversation();
+      if (conversation.channel === 'agent_feedback') throw noAgent();
       if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
         throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
       const messageId = newMessageId();
@@ -591,6 +596,7 @@ export function registerSupportInbox(app: App) {
     const id = c.req.valid('param').id;
     return c.json(await change(c, id, 'support.pause', async (tx, operator, conversation) => {
       if (conversation.status === 'closed') throw closedConversation();
+      if (conversation.channel === 'agent_feedback') throw noAgent();
       if (conversation.agent_state === 'paused') throw new ApiError(409, 'ALREADY_PAUSED', 'The agent is already paused here.');
       await tx.execute(sql`UPDATE support_conversations SET agent_state = 'paused', paused_by = ${operator.userId}, paused_at = now(), done_at = NULL, done_by = NULL WHERE id = ${id}`);
       await tx.execute(event(id, 'paused', operator.userId, { by: 'staff' }));
@@ -603,6 +609,7 @@ export function registerSupportInbox(app: App) {
     const id = c.req.valid('param').id;
     return c.json(await change(c, id, 'support.resume', async (tx, operator, conversation) => {
       if (conversation.status === 'closed') throw closedConversation();
+      if (conversation.channel === 'agent_feedback') throw noAgent();
       if (conversation.agent_state !== 'paused') throw new ApiError(409, 'NOT_PAUSED', 'The agent is not paused here.');
       await tx.execute(sql`UPDATE support_conversations SET agent_state = 'active', paused_by = NULL, paused_at = NULL WHERE id = ${id}`);
       await tx.execute(event(id, 'resumed', operator.userId));
@@ -731,7 +738,9 @@ export function registerSupportInbox(app: App) {
     request: { params: ConversationParam }, responses: { 200: response(z.object({ id: z.string(), woken: z.boolean() })), ...errors } }), async c => {
     await staff(c, 'operator');
     const id = c.req.valid('param').id;
-    if (!(await c.env.db.execute(sql`SELECT FROM support_conversations WHERE id = ${id}`)).rowCount) notFound('Support conversation');
+    const { rows: [found] } = await c.env.db.execute<{ channel: string }>(sql`SELECT channel FROM support_conversations WHERE id = ${id}`);
+    if (!found) notFound('Support conversation');
+    if (found!.channel === 'agent_feedback') throw noAgent();
     return c.json({ id, woken: await wakeSupport(c.env.config, id) }, 200);
   });
 }

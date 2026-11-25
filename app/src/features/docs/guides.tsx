@@ -187,6 +187,9 @@ export const guides: Guide[] = [
         ]} />
       </Section>
       <McpSetup />
+      <Section title="Feedback">
+        <p>Agents can tell us what got in their way with <Link to="/docs/api/sendFeedback">sendFeedback</Link>: a severity from low (a confusing message, an extra step) to critical (blocked, wrong data, a security worry), what would have made it easier, and the request ID if there is one. Every connection that can read lists it, and the server’s instructions ask agents to report each distinct problem once and carry on. We read every report; nobody is emailed and no reply comes back.</p>
+      </Section>
     </>,
   },
   {

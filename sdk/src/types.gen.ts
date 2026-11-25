@@ -6812,6 +6812,47 @@ export type BillingAutoRecharge = {
     monthlyCapCents: number;
 };
 
+export type FeedbackReceipt = {
+    /**
+     * The support ticket it was filed as.
+     */
+    ticketId: string;
+    severity: 'low' | 'medium' | 'high' | 'critical';
+    kind: 'bug' | 'friction' | 'feature' | 'docs' | 'other';
+    /**
+     * How many values that looked like keys, tokens or passwords were removed from message and context.
+     */
+    redacted: number;
+    createdAt: string;
+};
+
+export type FeedbackRequest = {
+    /**
+     * low: a confusing message or an extra step. medium: needed a workaround. high: a task done only partly or the long way. critical: blocked, wrong data, or a security worry.
+     */
+    severity: 'low' | 'medium' | 'high' | 'critical';
+    /**
+     * bug: something behaved wrongly. friction: it worked but took more than it should. feature: something missing. docs: documentation or an error message was wrong or unclear. other: anything else.
+     */
+    kind: 'bug' | 'friction' | 'feature' | 'docs' | 'other';
+    /**
+     * What happened and what would have made it easier. Plain text. Anything that looks like a key, token or password is removed before it is stored.
+     */
+    message: string;
+    /**
+     * The request ID of a call that went wrong: its x-request-id header, or error.requestId.
+     */
+    requestId?: string;
+    /**
+     * The operation or MCP tool involved, such as sendEmail.
+     */
+    operation?: string;
+    /**
+     * What you were trying to do, in a sentence or two.
+     */
+    context?: string;
+};
+
 export type BindMcpConnectionData = {
     body: McpConnectionBinding;
     path: {
@@ -26546,3 +26587,64 @@ export type CreateBillingCardSetupResponses = {
 };
 
 export type CreateBillingCardSetupResponse = CreateBillingCardSetupResponses[keyof CreateBillingCardSetupResponses];
+
+export type SendFeedbackData = {
+    body: FeedbackRequest;
+    path?: never;
+    query?: never;
+    url: '/v1/feedback';
+};
+
+export type SendFeedbackErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type SendFeedbackError = SendFeedbackErrors[keyof SendFeedbackErrors];
+
+export type SendFeedbackResponses = {
+    /**
+     * Success
+     */
+    201: FeedbackReceipt;
+};
+
+export type SendFeedbackResponse = SendFeedbackResponses[keyof SendFeedbackResponses];

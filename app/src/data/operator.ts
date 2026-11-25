@@ -106,7 +106,7 @@ export interface Deliverability {
   top: Record<'complaints' | 'bounces', { workspaceId: string; accepted: number; bounced: number; complained: number }[]>
 }
 /** Glass's activity feed (GET /v1/operator/glass/activity): the newest 50 events, newest first, each once by its id. */
-export type GlassEventKind = 'signup' | 'first_send' | 'domain_verified' | 'builtin_ready' | 'campaign_launched' | 'campaign_paused' | 'standing' | 'breaker' | 'alert' | 'link_fallback'
+export type GlassEventKind = 'signup' | 'first_send' | 'domain_verified' | 'builtin_ready' | 'campaign_launched' | 'campaign_paused' | 'standing' | 'breaker' | 'alert' | 'link_fallback' | 'agent_feedback'
 export interface GlassEvent { id: string; at: string; kind: GlassEventKind; workspace: { id: string; name: string } | null; subject: string | null; detail: string | null
   place: 'open' | 'waitlist' | null; email: string | null; tone: 'neutral' | 'success' | 'warning' | 'danger' }
 export interface GlassActivity { events: GlassEvent[]; generatedAt: string }
