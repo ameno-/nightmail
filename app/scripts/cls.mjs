@@ -36,8 +36,9 @@
 //
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
-// cold desktop load, hovering the first few reveals them without anything moving, and so does turning privacy mode off
-// with ⇧P (then on again, which masks them as before). Privacy mode is off by default; every page here starts with it on.
+// cold desktop load, pointing at the first few reveals nothing until ⇧ is held, which reveals them without anything
+// moving, and so does turning privacy mode off with ⇧P (then on again, which masks them as before). Privacy mode is off
+// by default; every page here starts with it on.
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
@@ -513,7 +514,7 @@ const maskedLeaks = () => {
   }
   return found;
 };
-// Where to hover the first few masked addresses in view that the pointer can reach, and what must stay where it is.
+// Where to point at the first few masked addresses in view that the pointer can reach, and what must stay where it is.
 const maskedTargets = () => [...document.querySelectorAll('.private-address:not([data-revealed])')].map((el, index) => {
   const r = el.getBoundingClientRect(), x = r.left + 3, y = r.top + r.height / 2;
   return r.width > 0 && r.top >= 0 && r.bottom <= innerHeight && el.contains(document.elementFromPoint(x, y)) ? { index, x, y } : null;
@@ -526,19 +527,25 @@ async function masking(page, hover, shell) {
   const problems = await page.evaluate(maskedLeaks);
   if (!hover) return problems;
   const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  // ⇧ is ignored while typing in a field, so leave whatever field has focus first.
+  await page.evaluate(() => document.activeElement?.blur());
   for (const { index, x, y } of await page.evaluate(maskedTargets)) {
     const before = await page.evaluate(maskedState, index);
     await page.mouse.move(x, y); await frame();
+    const pointed = await page.evaluate(maskedState, index);
+    await page.keyboard.down('Shift'); await frame();
     const shown = await page.evaluate(maskedState, index);
+    await page.keyboard.up('Shift'); await frame();
+    const released = await page.evaluate(maskedState, index);
     await page.mouse.move(1, 1); await frame();
-    const after = await page.evaluate(maskedState, index);
-    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`hovering ${before.text}… did not reveal it`);
+    if (pointed.revealed || pointed.text !== before.text) problems.push(`pointing at ${before.text}… without ⇧ revealed it`);
+    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`⇧ over ${before.text}… did not reveal it`);
     else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
-    if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
+    if (released.revealed || released.text !== before.text || released.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after ⇧ was released`);
   }
   // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
   // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a page without the shell (the signed-out waitlist,
-  // onboarding) reveals by hover only.
+  // onboarding) reveals one address at a time only.
   const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
   if (!count || !shell || !await page.evaluate(() => !!document.querySelector('.privacy-toggle'))) return problems;
   const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };

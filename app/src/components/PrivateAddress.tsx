@@ -1,17 +1,21 @@
 import { useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore, type FocusEvent, type MouseEvent, type PointerEvent, type ReactNode, type RefObject } from 'react'
 import { PRIVATE_TITLE, maskedParts, nameParts } from '../lib/private-address'
 import { reserveTextWidth } from '../lib/text-ruler'
-import { useMasking } from '../lib/privacy'
+import { useMasking, usePeek } from '../lib/privacy'
 
 // Renders any address by the dashboard's one rule (lib/private-address.ts): a mailbox address is masked after its first
-// two characters until hovered or focused, while privacy mode (lib/privacy.ts) is on; a domain or domain-only label renders
-// as it is. With privacy mode off, the default, the visible address keeps the same reserved width.
+// two characters while privacy mode (lib/privacy.ts) is on; a domain or domain-only label renders as it is. With privacy
+// mode off, the default, the visible address keeps the same reserved width.
+//
+// Revealing one is deliberate, so a shared screen never shows an address by accident: hold ⇧ and point at it (pointing
+// alone, or moving across a list, reveals nothing); with a keyboard, focus the row or control that holds it; on a touch
+// screen, tap an address that isn't part of a link. ⇧P turns privacy mode off and shows them all.
 //
 // Masked, the rest of the address is not in the page: the box holds the two characters and an empty, blurred run. The
 // box is given the width of the whole address up front (measured without rendering it, lib/text-ruler.ts) and keeps it
 // when the text arrives, so revealing never moves anything.
 
-// What reveals a masked address besides its own hover: keyboard focus on a control or row that holds it, as before.
+// What reveals a masked address besides ⇧ and the pointer on it: keyboard focus on a control or row that holds it.
 // A row with a link (DataTable rowHref, or a card on a phone) is focused through that link.
 const ROW = '.ui-table__linked, .ui-card', TABBABLE = 'a[href], button, [role="option"], [role="menuitem"], [tabindex]:not([tabindex="-1"]), .ui-table__clickable'
 const focusHolds = (element: Element | null) => {
@@ -44,7 +48,10 @@ export function useMasked(text: string) {
   const blurred = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => clearTimeout(blurred.current), [])
   const masking = useMasking()
-  const revealed = !masking || hovered || focused || held
+  // Only the address under the pointer follows ⇧: the rest don't re-render when it is pressed.
+  const peek = usePeek(on => on && hovered)
+  const pointer = useRef('')
+  const revealed = !masking || peek || focused || held
   useLayoutEffect(() => {
     const element = box.current
     if (element) return reserveTextWidth(element, text)
@@ -53,12 +60,12 @@ export function useMasked(text: string) {
   // supplies its initial measurement after layout, as well as subsequent resizes.
   useLayoutEffect(() => {
     const element = box.current
-    if (!(hovered || focused || held) || !element) { setClipped(false); return }
+    if (!revealed || !masking || !element) { setClipped(false); return }
     const check = () => setClipped(element.scrollWidth > element.clientWidth + 1)
     const observer = new ResizeObserver(check)
     observer.observe(element)
     return () => observer.disconnect()
-  }, [hovered, focused, held, text])
+  }, [revealed, masking, text])
   useEffect(() => {
     if (!hovered) return
     // Revealing replaces what is under the pointer, and some browsers then never report the pointer leaving.
@@ -75,12 +82,13 @@ export function useMasked(text: string) {
     revealed, box: box as RefObject<HTMLSpanElement>,
     root: {
       ref: root as RefObject<HTMLSpanElement>, title: revealed ? clipped ? text : undefined : PRIVATE_TITLE, 'data-revealed': revealed || undefined, tabIndex: alone && masking ? 0 : undefined,
-      // A mouse or pen reveals by hovering. A finger has no hover: it reveals an address that takes focus by tapping it
-      // (not every browser moves focus on a tap, so the click does).
+      // A mouse or pen reveals while ⇧ is held over it. A finger has no hover: it reveals an address that takes focus by
+      // tapping it (not every browser moves focus on a tap, so the click does). A mouse click focuses it without revealing.
       onPointerEnter: (event: PointerEvent) => { if (event.pointerType !== 'touch') setHovered(true) },
       onPointerLeave: () => setHovered(false),
-      onClick: alone && masking ? (event: MouseEvent<HTMLElement>) => event.currentTarget.focus() : undefined,
-      onFocus: (event: FocusEvent) => { if (event.target === event.currentTarget) { clearTimeout(blurred.current); setFocused(true) } },
+      onPointerDown: (event: PointerEvent) => { pointer.current = event.pointerType },
+      onClick: alone && masking ? (event: MouseEvent<HTMLElement>) => { if (pointer.current === 'touch') event.currentTarget.focus() } : undefined,
+      onFocus: (event: FocusEvent<HTMLElement>) => { if (event.target === event.currentTarget && (pointer.current === 'touch' || event.currentTarget.matches(':focus-visible'))) { clearTimeout(blurred.current); setFocused(true) } },
       onBlur: (event: FocusEvent) => { if (event.target === event.currentTarget) { clearTimeout(blurred.current); blurred.current = setTimeout(() => setFocused(false), 0) } },
     },
   }

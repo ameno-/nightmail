@@ -110,10 +110,10 @@ button svg:not(:where(.ui-icon)), .ui-button svg:not(:where(.ui-icon)) { width: 
 /* Privacy mode (components/PrivacyToggle.tsx): the whole row is the button; the switch only shows its state. */
 .privacy-toggle { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); width: 100%; padding: 0; border: 0; border-radius: var(--radius-xs); background: none; color: var(--color-text); font: inherit; font-size: var(--text-xs); line-height: var(--leading-xs); text-align: left; cursor: pointer; }
 .privacy-toggle:focus-visible { background: var(--color-hover); color: var(--color-text); }
-/* Fields that hold addresses (sender lists, a dry run's recipient): blurred like every address, revealed by hover or focus,
-   and in the clear with privacy mode off (the default). */
-html[data-privacy='on'] .private-field:not(:hover, :focus) { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
-html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color: transparent; text-shadow: 0 0 .31em var(--color-muted); }
+/* Fields that hold addresses (sender lists, a dry run's recipient): blurred like every address, revealed by focus or by
+   pointing at them with ⇧ held (lib/privacy.ts), and in the clear with privacy mode off (the default). */
+html[data-privacy='on']:not([data-peek]) .private-field:not(:focus), html[data-privacy='on'][data-peek] .private-field:not(:hover, :focus) { color: transparent; text-shadow: 0 0 .31em var(--color-text); }
+html[data-privacy='on']:not([data-peek]) .private-field:not(:focus)::placeholder, html[data-privacy='on'][data-peek] .private-field:not(:hover, :focus)::placeholder { color: transparent; text-shadow: 0 0 .31em var(--color-muted); }
 /* "By continuing you agree to…" under a sign-in button. */
 .sign-in-consent a { color: inherit; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: color var(--motion-duration); }
 .sign-in-consent a:is(:hover, :focus-visible) { color: var(--color-text); }
@@ -239,14 +239,16 @@ html[data-privacy='on'] .private-field:not(:hover, :focus)::placeholder { color:
 .logs-table .ui-table td:last-child svg { display: block; }
 .logs-table + .ui-pagination, .logs-table .ui-pagination { min-height: 48px; padding-block: var(--space-8); }
 /* Every mailbox address (PrivateAddress): its first two characters, then a blurred run where the rest will be. The rest
-   is not in the page until the address is hovered or focused; the run is drawn from filler, never from the address.
+   is not in the page until the address is revealed (⇧ and the pointer, or focus); the run is drawn from filler, never
+   from the address. The run fades in after the readable characters and out at its end and its top and bottom, inside
+   its own box, so no cell or line edge cuts the blur off square.
    The box is given the whole address's width up front (kerning and ligatures off, so the width is the sum of its
    characters') and keeps it once the text arrives, so revealing moves nothing. */
 .private-address { display: inline-flex; max-width: 100%; white-space: nowrap; }
 .private-address__value { display: flex; flex: none; font-kerning: none; font-variant-ligatures: none; }
 .private-address[data-revealed] > .private-address__value { display: block; }
 /* A filtered box paints above a card's link, which covers the card: let a press through to it. */
-.private-address__rest { flex: 1 1 0; min-width: 0; filter: blur(.31em); pointer-events: none; }
+.private-address__rest { flex: 1 1 0; min-width: 0; filter: blur(.22em); pointer-events: none; mask-image: linear-gradient(to right, transparent, #000 .6em, #000 calc(100% - 1.2em), transparent), linear-gradient(transparent, #000 32%, #000 68%, transparent); mask-composite: intersect; }
 .private-address__rest::before { content: 'mnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetaxmnesaroucinetax'; display: block; overflow: hidden; }
 .private-address[tabindex] { border-radius: var(--radius-xs); cursor: default; }
 /* A sender (components/PrivateAddress.tsx): the name, then the address with its brackets, which wraps to its own line as one piece. */
@@ -429,9 +431,6 @@ html:has(.app-shell--compact) { scroll-padding-bottom: calc(56px + env(safe-area
 .account-sheet__account { min-height: 60px; }
 .account-sheet__account[aria-current] { cursor: default; }
 .account-sheet__workspace { padding-left: calc(var(--space-16) + var(--space-28) + var(--space-12)); }
-/* The open menu has focus as a whole; an address in it shows only while its own row is pointed at or highlighted. */
-.account-menu:focus-visible .private-address__rest, .account-sheet :focus-visible .private-address__rest { filter: blur(4px); }
-.account-menu [data-highlighted] .private-address__rest, .account-menu .private-address:hover .private-address__rest { filter: blur(0); }
 /* Help (components/SupportChat.tsx): a row at the foot of the sidebar on a desktop, with the chat docked in the page's
    bottom-right corner (notices move to its left while it is open); in the top bar on a phone or tablet. A dot marks a
    reply that arrived while the chat was closed. --launcher-size and --launcher-inset place the corner's floating controls
