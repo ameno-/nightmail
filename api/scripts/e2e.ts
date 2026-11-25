@@ -383,7 +383,7 @@ async function mcpChallenge() {
       && /scope="(nightmail|bane):read \1:send \1:manage"/.test(challenge), 'MCP OAuth discovery challenge changed');
   }
   const resource = await get<{ resource?: string; authorization_servers?: string[]; scopes_supported?: string[] }>(new URL('/.well-known/oauth-protected-resource/mcp', base));
-  check(resource.resource === `${base.origin}/mcp` && resource.authorization_servers?.length === 1 && ['nightmail', 'bane'].every(prefix => ['read', 'send', 'manage'].every(p => resource.scopes_supported?.includes(`${prefix}:${p}`))), 'MCP protected resource metadata changed');
+  check(resource.resource === `${base.origin}/mcp` && resource.authorization_servers?.length === 1 && ['nightmail', 'bane'].some(prefix => resource.scopes_supported?.join(' ') === `${prefix}:read ${prefix}:send ${prefix}:manage`), 'MCP protected resource metadata changed');
   // The account service is the authorization server. OpenCode signs in with a client metadata document as its client_id.
   const issuer = resource.authorization_servers[0]!;
   const server = await get<{ issuer?: string; client_id_metadata_document_supported?: boolean; code_challenge_methods_supported?: string[] }>(new URL('/.well-known/oauth-authorization-server', issuer));
