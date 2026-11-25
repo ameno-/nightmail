@@ -22979,12 +22979,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       let parentIdentity:Json|null=null;const sent:Json[]=[],writes:string[]=[];
       const verifiedParent={IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningAttributesOrigin:'AWS_SES',SigningEnabled:true,Status:'SUCCESS',Tokens:['a','b','c']},
         MailFromAttributes:{MailFromDomain:`bounce.${parent}`,MailFromDomainStatus:'SUCCESS'},Tags:[{Key:'bane:purpose',Value:'builtin-domains'}],Policies:{},FeedbackForwardingStatus:false};
-      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+      // One mock for the whole test (a second t.mock.method on the prototype would outlive it): the race below swaps the handler.
+      let onSend=async(cmd:any):Promise<Json>=>{
         if(cmd instanceof GetAccountCommand)return {SendingEnabled:true,SendQuota:{MaxSendRate:1000,Max24HourSend:100000,SentLast24Hours:0}};
         if(cmd instanceof GetEmailIdentityCommand){assert.equal(cmd.input.EmailIdentity,parent);if(!parentIdentity)throw Object.assign(new Error('missing'),{name:'NotFoundException'});return parentIdentity;}
         if(cmd instanceof CreateTenantResourceAssociationCommand||cmd instanceof DeleteTenantResourceAssociationCommand){writes.push(`${cmd.constructor.name}:${cmd.input.TenantName}:${cmd.input.ResourceArn}`);return {};}
         assert.ok(cmd instanceof SendEmailCommand,cmd.constructor.name);sent.push(cmd.input);return {MessageId:unique('ses')};
-      });
+      };
+      t.mock.method(SESv2Client.prototype,'send',(cmd:any)=>onSend(cmd));
       const pace=()=>db.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
 
       // 1. Names: the workspace name in DNS letters, filler dropped, a protected brand or reserved word replaced, never reissued.
@@ -23122,11 +23124,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       await builtin.builtinDomainTick(runtime);
       assert.equal((await db.query("SELECT status FROM jobs WHERE id=$1",['domain.builtin:'+other.wid])).rows[0]?.status,'pending');
       const late:string[]=[],raced:string[]=[];
-      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+      onSend=async(cmd:any)=>{
         if(cmd instanceof GetEmailIdentityCommand)return parentIdentity;
         if(cmd instanceof CreateTenantResourceAssociationCommand&&!raced.length){raced.push(String(cmd.input.TenantName));await builtin.revokeBuiltinDomain(runtime.db,other.wid,'Revoked mid-association','arn:aws:sts::111122225555:assumed-role/operator/fixture');}
         late.push(`${cmd.constructor.name}:${cmd.input.TenantName}:${cmd.input.ResourceArn}`);return {};
-      });
+      };
       await pace();await builtin.builtinDomainJob(runtime,{},{id:'domain.builtin:'+other.wid,attempts:1,workspaceId:other.wid});
       assert.deepEqual(late,[`CreateTenantResourceAssociationCommand:bane-${other.wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`,`DeleteTenantResourceAssociationCommand:bane-${other.wid}:arn:aws:ses:${oh}:${acct}:identity/${parent}`]);
       assert.equal((await db.query('SELECT FROM domain_claims WHERE workspace_id=$1 AND name=$2',[other.wid,other.name])).rowCount,0,'Nothing of the revoked domain stays.');
