@@ -2324,9 +2324,10 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Nightmail-
     assert.ok(manager);
     await db.query('INSERT INTO nightmail_oidc_identities VALUES($1,$2,$3)',[issuer,claims.sub,manager.userId]);
     const described={read:'Read workspace data.',send:'Send email from the workspace.',manage:'Manage workspace mail and resources.'};
-    const both=['bane:read','bane:send','bane:manage','nightmail:read','nightmail:send','nightmail:manage'];
-    // Both scope sets are published until the rename cleanup; the requested ones (bane:* by default) come first.
-    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Nightmail',authorization_servers:[issuer],scopes_supported:both,bearer_methods_supported:['header'],scope_descriptions:Object.fromEntries(both.map(s=>[s,described[s.split(':')[1] as keyof typeof described]]))});
+    const asked=['bane:read','bane:send','bane:manage'];
+    // Only the scopes the installation asks for (bane:* by default) are published, so a client that requests every listed
+    // scope doesn't ask for each permission twice.
+    assert.deepEqual(protectedResourceMetadata(runtime),{resource,resource_name:'Nightmail',authorization_servers:[issuer],scopes_supported:asked,bearer_methods_supported:['header'],scope_descriptions:Object.fromEntries(asked.map(s=>[s,described[s.split(':')[1] as keyof typeof described]]))});
     assert.deepEqual(await (await run(token())).json(),['read']);
     // nightmail:* and bane:* scopes grant the same; OAUTH_SCOPE_PREFIX only picks the names the server asks for.
     assert.deepEqual(await (await run(token({client_id:'fixture-nightmail',scope:'nightmail:read nightmail:send',jti:randomUUID()}))).json(),['read','send']);
@@ -2334,7 +2335,7 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Nightmail-
     assert.equal((await run(token({client_id:'fixture-unknown',scope:'opensend:read nightmail:live',jti:randomUUID()}))).status,403);
     runtime.config.oauthScopePrefix='nightmail';
     try {
-      const switched=protectedResourceMetadata(runtime),order=['nightmail:read','nightmail:send','nightmail:manage','bane:read','bane:send','bane:manage'];
+      const switched=protectedResourceMetadata(runtime),order=['nightmail:read','nightmail:send','nightmail:manage'];
       assert.deepEqual([switched.scopes_supported,Object.keys(switched.scope_descriptions)],[order,order]);
       assert.match((await run('not-a-token')).headers.get('www-authenticate')??'',/scope="nightmail:read nightmail:send nightmail:manage"/);
       assert.deepEqual(await (await run(token({jti:randomUUID()}))).json(),['read'],'A bane:read token keeps working after the switch.');
@@ -2346,6 +2347,9 @@ test('MCP account resource validates issuer JWT, per-call workspaces, Nightmail-
     try {
       const at=(url:string,access:string)=>authorizeResource(runtime,new Request(url,{method:'POST',headers:{authorization:`Bearer ${access}`}}),async a=>Response.json(a.permissions));
       assert.equal(protectedResourceMetadata(runtime,earlierResource).resource,earlierResource);
+      // The earlier origin still lists bane:* after the requested set: the account service checks the scopes of the grants
+      // made there against this list at every refresh.
+      assert.deepEqual(protectedResourceMetadata(runtime,earlierResource).scopes_supported,['bane:read','bane:send','bane:manage','nightmail:read','nightmail:send','nightmail:manage']);
       assert.equal(protectedResourceMetadata(runtime,'https://elsewhere.example.org/mcp').resource,resource,'An unknown host gets PUBLIC_URL\'s resource.');
       assert.deepEqual(await (await at(earlierResource,token({aud:earlierResource,jti:randomUUID()}))).json(),['read']);
       assert.equal((await at(resource,token({aud:earlierResource,jti:randomUUID()}))).status,401);

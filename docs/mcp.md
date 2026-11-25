@@ -91,7 +91,7 @@ The client's sign-in ends with a redirect to `http://127.0.0.1:<port>/callback` 
 
 ## Permissions
 
-OAuth scopes map to the existing API permissions:
+OAuth scopes map to the existing API permissions. Hosted Nightmail asks for `nightmail:*`; an installation asks for the prefix set in `OAUTH_SCOPE_PREFIX` (`bane` by default), and its resource metadata lists only those three. Tokens with either prefix work.
 
 | Scope | Access |
 | --- | --- |
@@ -217,6 +217,6 @@ Receiving tools (routing, rules, endpoints, inbound addresses and domains) follo
 
 Set `ACCOUNT_ISSUER` to the HTTPS issuer that signs access tokens for this installation. Resource discovery is available at `${PUBLIC_URL}/.well-known/oauth-protected-resource/mcp`. The resource indicator is the absolute `${PUBLIC_URL}/mcp` URI, including `/mcp`. Clients discover and request authorization at the issuer. During cutover each user authorizes their client again; grants issued before the rename cannot be exchanged at the new issuer.
 
-`nightmail:read`, `nightmail:send` and `nightmail:manage` request the corresponding Nightmail permissions; a 401 challenge names all three, and you narrow them when approving. The resource verifies the JWT signature and audience (`${PUBLIC_URL}/mcp`, with any query string such as `?codemode=false`). It requires a matching Nightmail `(issuer, subject)` identity and checks live workspace membership and role on every tool call. Members cannot use `manage`. Hosted Nightmail also requires every access token to come from one of the account service's sign-in methods it accepts (`acr` is one of `ACCOUNT_REQUIRED_ACR`: GitHub, Google, email link or password); other tokens get a 401 `insufficient_user_authentication` challenge. A sender-constrained access token requires its matching DPoP proof on every request.
+`nightmail:read`, `nightmail:send` and `nightmail:manage` (or the `bane:` names) request the corresponding Nightmail permissions; a 401 challenge names the three the installation asks for, and you narrow them when approving. The resource verifies the JWT signature and audience (`${PUBLIC_URL}/mcp`, with any query string such as `?codemode=false`). It requires a matching Nightmail `(issuer, subject)` identity and checks live workspace membership and role on every tool call. Members cannot use `manage`. Hosted Nightmail also requires every access token to come from one of the account service's sign-in methods it accepts (`acr` is one of `ACCOUNT_REQUIRED_ACR`: GitHub, Google, email link or password); other tokens get a 401 `insufficient_user_authentication` challenge. A sender-constrained access token requires its matching DPoP proof on every request.
 
 For hosted Nightmail, the resource identifiers are `https://dev.nightmail.dev/mcp` and `https://nightmail.dev/mcp`. The account issuer supplies the same public subject on dashboard sign-in and on MCP access tokens. Nightmail maintains one approval per user and client ID, including across token refreshes. In **Settings → Account**, revoke a client to block the tokens of its current consent in Nightmail. Use the **Connected apps** link to revoke the grant at the issuer. The cutover shows legacy approvals as expired and revokes their tokens and derived credentials. Reconnect through the account service to authorize again.
