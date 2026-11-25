@@ -26,6 +26,15 @@ const ACCESS_TTL_S = 300;
 interface CredState {
   revoked: boolean;
   exp: number;
+  // An api_keys row revoked (revokeApiKey, or its approval's revocation): its requests answer KEY_REVOKED (auth.ts
+  // keyRefusal). An ended approval refuses its key without revoking it: AUTH_INVALID.
+  row?: boolean;
+}
+
+const API_KEY_ROWS = ["key", "dkey", "legacy", "gkey"];
+/** The 401 code for a request with a credential that no longer works. */
+function deadCode(s: AccessState, c: string): string {
+  return s.creds[c]?.row ? "KEY_REVOKED" : "AUTH_INVALID";
 }
 
 interface GrantState {
@@ -294,7 +303,7 @@ function advanceReq(s: AccessState, r: ReqState): AccessObs | null {
           return finishReq(s, r, actualSt, null, false);
         }
       } else if (!authOk(s, r)) {
-        return finishReq(s, r, 401, "AUTH_INVALID", false);
+        return finishReq(s, r, 401, deadCode(s, r.cred), false);
       }
       if (r.what === "list" && r.cred === "dkey") {
         return finishReq(s, r, 403, "UNRESTRICTED_KEY_REQUIRED", false);
@@ -721,7 +730,7 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
           }
         } else if (c === "ikey" || c === "box") {
           if (!credLive(next, "key")) {
-            expected = { status: 401, code: "AUTH_INVALID" };
+            expected = { status: 401, code: deadCode(next, "key") };
           } else if (c === "box") {
             next.inboxes += 1;
             next.creds["bkey"] = { revoked: false, exp: 0 };
@@ -755,6 +764,8 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
               for (const d of ["token", "token3", "gkey", "gikey"]) {
                 if (next.creds[d]) next.creds[d]!.revoked = true;
               }
+              // mail_grant_objects' delete trigger revokes the api_keys row the approval made.
+              if (next.creds["gkey"]) next.creds["gkey"]!.row = true;
             }
           }
           expected = { status };
@@ -763,6 +774,7 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
           const isApiKey = ["key", "dkey", "legacy", "gkey", "ikey", "gikey"].includes(c);
           const status = x.revoked && !isApiKey ? 404 : 200;
           x.revoked = true;
+          if (API_KEY_ROWS.includes(c)) x.row = true;
           expected = { status };
         }
         break;
@@ -853,7 +865,7 @@ export const access = model<AccessState, AccessAction, AccessObs, AccessSnapshot
           } else if (who === "dkey" && how === "lists") {
             expected = credLive(next, who)
               ? { status: 403, code: "UNRESTRICTED_KEY_REQUIRED" }
-              : { status: 401, code: "AUTH_INVALID" };
+              : { status: 401, code: deadCode(next, who) };
           } else {
             expected = { status: credLive(next, who) ? 200 : 401 };
           }

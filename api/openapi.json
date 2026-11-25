@@ -910,6 +910,25 @@
           },
           "lastChange": {
             "$ref": "#/components/schemas/ApiKeyLastChange"
+          },
+          "agent": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "client": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "What the agent said it is (client_name), its claim, never verified. Null when it didn't say."
+              }
+            },
+            "required": [
+              "client"
+            ],
+            "description": "A key an agent got through agent setup (exchangeAgentSetupToken or the device flow): the agent it was made for. Null for every other key."
           }
         },
         "required": [
@@ -924,7 +943,8 @@
           "access",
           "expiresAt",
           "approval",
-          "lastChange"
+          "lastChange",
+          "agent"
         ]
       },
       "CreateApiKey": {
@@ -1481,7 +1501,7 @@
           },
           "name": {
             "type": "string",
-            "description": "Agent (set up <date>), under API keys, where a person revokes it."
+            "description": "\"<client_name>, set up <date>\" (\"Agent, set up <date>\" without one), under API keys, where a person revokes it."
           },
           "workspaceId": {
             "type": "string"
@@ -22878,7 +22898,7 @@
         ],
         "security": [],
         "summary": "Exchange a setup token for the agent's API key",
-        "description": "For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED, and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.",
+        "description": "For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.",
         "requestBody": {
           "required": true,
           "content": {
@@ -22892,6 +22912,12 @@
                     "maxLength": 300,
                     "example": "nm_setup_00000000000000000000000000000000.0000000000000000000000000000000000000000000000000000000000000000",
                     "description": "The setup token from the prompt."
+                  },
+                  "client_name": {
+                    "type": "string",
+                    "maxLength": 100,
+                    "example": "OpenCode",
+                    "description": "What the agent is, shown to the person as its claim and naming its key (\"OpenCode, set up <date>\")."
                   }
                 },
                 "required": [
@@ -23062,7 +23088,7 @@
                     "type": "string",
                     "maxLength": 100,
                     "example": "OpenCode",
-                    "description": "What the agent is, shown to the person as its claim."
+                    "description": "What the agent is, shown to the person as its claim and naming its key (\"OpenCode, set up <date>\")."
                   }
                 },
                 "additionalProperties": false
@@ -23208,7 +23234,7 @@
         ],
         "security": [],
         "summary": "Poll for the agent's API key",
-        "description": "With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. Retry-After gives the seconds to wait.",
+        "description": "With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. A poll after that gets 409 DEVICE_CODE_USED naming the key it gave (error.details: keyId, name, prefix, issuedAt, revokedAt), never the key again and never a second one: use the key you saved. Retry-After gives the seconds to wait.",
         "requestBody": {
           "required": true,
           "content": {

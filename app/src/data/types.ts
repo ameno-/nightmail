@@ -159,7 +159,7 @@ export type MailPermission = 'read' | 'send' | 'modify' | 'create'
 /** One API key type. workspace: permissions and domains. addresses: only mail at chosen receiving addresses (null: every
  *  address, including new ones; [] with create: only the inboxes it creates). inbox: one agent inbox. */
 export interface ApiKeyAccess { type: 'workspace' | 'addresses' | 'inbox'; addressIds: string[] | null; inboxId: string | null; mail: MailPermission[] }
-export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null; lastChange: Pick<AuditEntry, 'at' | 'action' | 'actor'> | null }
+export interface ApiKey { id: string; name: string; prefix: string; permissions: KeyPermission[]; domains: string[]; createdAt: ISODate; lastUsedAt: ISODate | null; revokedAt: ISODate | null; expiresAt: ISODate | null; access: ApiKeyAccess; approval: ApprovalTie | null; lastChange: Pick<AuditEntry, 'at' | 'action' | 'actor'> | null; agent: { client: string | null } | null }
 /** The MCP approvals a key or webhook is tied to: it works only while every one of them is active (active), until the earliest end (endsAt). */
 export interface ApprovalTie { active: boolean; endsAt: ISODate; owners: { id: string; endsAt: ISODate; active: boolean }[] }
 export type CreateApiKeyAccess = { type: 'workspace' } | { type: 'addresses'; addressIds?: string[]; mail?: MailPermission[] } | { type: 'inbox'; inboxId: string; mail?: MailPermission[] }

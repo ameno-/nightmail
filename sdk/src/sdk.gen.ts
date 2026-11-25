@@ -322,7 +322,7 @@ export const getAgentSetupToken = <ThrowOnError extends boolean = false>(options
 /**
  * Exchange a setup token for the agent's API key
  *
- * For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED, and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.
+ * For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED: ask the person to copy the prompt again, or use the device flow (startAgentDeviceAuthorization). The key is shown once.
  */
 export const exchangeAgentSetupToken = <ThrowOnError extends boolean = false>(options: Options<ExchangeAgentSetupTokenData, ThrowOnError>): RequestResult<ExchangeAgentSetupTokenResponses, ExchangeAgentSetupTokenErrors, ThrowOnError> => (options.client ?? client).post<ExchangeAgentSetupTokenResponses, ExchangeAgentSetupTokenErrors, ThrowOnError>({
     url: '/v1/agent/setup',
@@ -350,7 +350,7 @@ export const startAgentDeviceAuthorization = <ThrowOnError extends boolean = fal
 /**
  * Poll for the agent's API key
  *
- * With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. Retry-After gives the seconds to wait.
+ * With the device code from startAgentDeviceAuthorization, every interval seconds until the person decides. Each answer follows RFC 8628: 400 AUTHORIZATION_PENDING (keep polling), 400 SLOW_DOWN (polled too soon: wait five seconds longer from now on), 400 ACCESS_DENIED (the person denied it: stop), 400 EXPIRED_TOKEN (start again), or 201 with the API key, once. A poll after that gets 409 DEVICE_CODE_USED naming the key it gave (error.details: keyId, name, prefix, issuedAt, revokedAt), never the key again and never a second one: use the key you saved. Retry-After gives the seconds to wait.
  */
 export const pollAgentDeviceToken = <ThrowOnError extends boolean = false>(options: Options<PollAgentDeviceTokenData, ThrowOnError>): RequestResult<PollAgentDeviceTokenResponses, PollAgentDeviceTokenErrors, ThrowOnError> => (options.client ?? client).post<PollAgentDeviceTokenResponses, PollAgentDeviceTokenErrors, ThrowOnError>({
     url: '/v1/agent/device/token',

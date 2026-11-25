@@ -28,7 +28,7 @@ function keyLines(origin: string, token: string | null | undefined) {
   const keep = `Save the key it returns as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit; it's shown once. It sends email and manages domains, inboxes and receiving; it can't create API keys, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords, and can't manage members or billing.`
   if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device} ${keep}`]
   return [
-    `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}"}. ${keep}`,
+    `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}","client_name":"<your name>"}. ${keep}`,
     `- If the setup token was already used or has expired, use a device code instead: ${device}`,
   ]
 }
@@ -148,11 +148,12 @@ export function useAgentSetup(enabled: boolean): AgentSetup | null {
 }
 
 // Every state is laid out in one cell, so the line never changes the section's height.
-const sampleKey = 'Agent (set up 0000-00-00)'
+// The line reserves this name's width: a longer one (an agent's own name) is cut to it, so the line never wraps further.
+const sampleKey = 'Agent, set up 0000-00-00'
 const setupLines: Record<AgentSetupState, (keyName: string) => ReactNode> = {
   idle: () => 'Copying adds a one-time setup token, so your agent gets its own API key. Revoke it any time under API keys.',
   waiting: () => 'Waiting for your agent to use the setup token. It works once, for 15 minutes.',
-  connected: keyName => <>Your agent connected. Its key is <strong>{keyName}</strong>, under API keys.</>,
+  connected: keyName => <>Your agent connected. Its key is <strong className="agent-setup-status__key" title={keyName}>{keyName}</strong>, under API keys.</>,
   expired: () => 'The setup token expired before your agent used it. Copy the prompt again for a new one.',
   replaced: () => 'A newer copy replaced this setup token. Use the prompt you copied last.',
   failed: () => 'Couldn’t add a setup token, so the copied prompt connects with a device code instead.',
