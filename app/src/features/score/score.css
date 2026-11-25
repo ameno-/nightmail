@@ -1,16 +1,18 @@
 /* Sender score. Flat: solid cards (no edge line), mono figures, colour only on the score card, the grades and the parts' states.
    Every block has a fixed height in every state (loading, calibrating, graded), so loading never shifts layout. */
 /* The score card (the sidebar's, and Overview's where there is no sidebar): one tile, its colour the score's on the ramp
-   in tokens.css (--score-*): red to 50, amber at 75, green from 95, under Arc's film grain. Before a grade, while it
-   loads and when it can't be read, the same tile in neutral. 64px in every state, so nothing moves when it loads. */
+   in tokens.css (--score-*), under Arc's film grain: 220px (two screen pixels a grain on a 2× screen), at half that on
+   a 3× phone, where the full size read as blotches. Before a grade, while it loads and when it can't be read, the same
+   tile in neutral. 64px in every state, so nothing moves when it loads. */
 .score-card {
-  --hue: calc(var(--score-hue-poor) + clamp(0, (var(--score, 0) - 50) / 25, 1) * (var(--score-hue-mid) - var(--score-hue-poor)) + clamp(0, (var(--score, 0) - 75) / 20, 1) * (var(--score-hue-high) - var(--score-hue-mid)));
+  --hue: calc(var(--score-hue-poor) + clamp(0, (var(--score, 0) - 25) / 50, 1) * (var(--score-hue-mid) - var(--score-hue-poor)) + clamp(0, (var(--score, 0) - 75) / 20, 1) * (var(--score-hue-high) - var(--score-hue-mid)));
   --soft: var(--color-muted);
   position: relative; display: flex; flex-direction: column; justify-content: space-between; width: 100%; height: 64px; padding: 10px 12px 8px; overflow: hidden;
   border: 0; border-radius: var(--radius-md); background-color: var(--score-neutral); background-image: url('./noise-light.png');
   color: var(--color-text); font: inherit; text-align: left; text-decoration: none; font-variant-numeric: tabular-nums;
   transition: background-color var(--motion-duration) var(--ease-standard), transform 160ms var(--ease-out-strong);
 }
+@media (resolution >= 3dppx) { .score-card { background-size: 110px; } }
 .score-card[data-scored] { --soft: oklch(var(--score-soft-l) var(--score-soft-c) var(--hue)); background-color: oklch(var(--score-tile-l) var(--score-tile-c) var(--hue)); color: oklch(var(--score-ink-l) var(--score-ink-c) var(--hue)); }
 :is(a, button).score-card { cursor: pointer; }
 :is(a, button).score-card:active { transform: scale(.98); }
