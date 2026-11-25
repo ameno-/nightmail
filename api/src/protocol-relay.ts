@@ -5,7 +5,7 @@ import { mailboxKeys } from './db/mailbox.js';
 import { API_KEY, checkBudget, credentialCtes } from './auth.js';
 import { tieAllows } from './approval-ties.js';
 import { submittedHeaders } from './custom-headers.js';
-import { submissionParties } from './mailbox-mime.js';
+import { stripBlindRecipients, submissionParties } from './mailbox-mime.js';
 import { envelopeParts } from './mailbox-send.js';
 import { sealedPassthrough, submittedFile, type Submitted } from './protocol-submit.js';
 import { SEND_LIMITS } from './send-limits.js';
@@ -70,7 +70,7 @@ export async function relayLogin(runtime: Runtime, user: string, password: strin
  * more. An envelope past 50 recipients is admitted as one batch of emails of up to 50 each, To and Cc first.
  */
 export async function relaySubmit(c: Ctx, p: Submitted) {
-  const rt = c.env, kind = relayKind(p.kid)!, table = kind === 'api_key' ? apiKeys : mailboxKeys, raw = p.raw;
+  const rt = c.env, kind = relayKind(p.kid)!, table = kind === 'api_key' ? apiKeys : mailboxKeys, raw = stripBlindRecipients(p.raw, true);
   const parsed = await parseSubmission(raw);
   if (!parsed) throw new ApiError(422, 'MIME_LIMIT', 'Message could not be safely parsed.');
   const m = parsed.mail;
