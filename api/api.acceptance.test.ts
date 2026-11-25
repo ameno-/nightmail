@@ -1092,8 +1092,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.ok(notice.startsWith(`__Host-nightmail.waitlist=${encodeURIComponent(approved)};`) && /Max-Age=600/.test(notice) && /Secure/.test(notice) && !/HttpOnly/i.test(notice),notice);
     assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
   }
-  // Every code exchange proved a DPoP key and fetched the server's nonce first (production failed with invalid_dpop_proof).
-  assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
+  // Every code exchange proved a DPoP key (production failed with invalid_dpop_proof). Only the first had to fetch the
+  // server's nonce: each later sign-in's new key starts with the nonce the service last gave, a round trip saved.
+  assert.deepEqual(exchanges,{refused:0,nonce:1,issued:5});
   // Abuse monitoring (src/abuse.ts): each verified sign-in, refused ones included, adds what it observed to the row the
   // sign-in log writes anyway, hashed in the request. It writes nothing else; the hourly job reads the log later.
   const observedBy=async(sub:string)=>((await db.query('SELECT observed FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,sub])).rows[0]?.observed ?? null) as {kind:string;value:string}[]|null;
@@ -23631,6 +23632,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const t1=Date.now(),early=ok(await local('POST','/v1/emails/send',{from:`hello@${host}`,to:AUTH_EMAIL,subject:'Early',text:'Sent while its domain was set up.'}),202);
       t.diagnostic(`A send in the domain's first seconds waited ${Date.now()-t1} ms for its setup`);
       assert.ok(early.id);assert.equal(await claim(own),'verified');await rc.started;
+
+      // 4. The sign-up answers before its Hosted mail is even written (startHostedMailAfter): the new workspace's /v1/me waits
+      //    for the rows instead of showing no connection or no domain, and any other workspace without them answers at once.
+      const {settledConnectionSummary,startHostedMailAfter,HOSTED_START_WAIT}=await import('./src/provider-connections.js');
+      const d=await signUp(),late=new Promise(resolve=>setTimeout(resolve,300)).then(()=>startHostedMailAfter(runtime,d.wid,d.context));
+      const t2=Date.now(),settled=await settledConnectionSummary(runtime,d.wid),waited=Date.now()-t2;
+      t.diagnostic(`A new workspace's first /v1/me waited ${waited} ms for the Hosted mail its sign-up wrote after answering`);
+      assert.ok(settled?.builtinDomain,'It answers with the built-in domain.');assert.ok(waited>=250&&waited<HOSTED_START_WAIT.ms,String(waited));
+      await late;assert.equal(await claim(d.wid),'verified');
+      const old=await signUp();await db.query("UPDATE workspaces SET created_at=now()-interval '1 minute' WHERE id=$1",[old.wid]);
+      const t3=Date.now();assert.equal(await settledConnectionSummary(runtime,old.wid),null);assert.ok(Date.now()-t3<250,'An older workspace answers at once.');
     }));
   });
 

@@ -464,7 +464,7 @@ const FALLBACK_AFTER_SECONDS = 60;
  * when they find the work done. Without `start` (choosing Hosted mail, createConnection) the jobs do it, due now: `wake`.
  * `started` settles when that work has ended (tests wait for it; callers don't).
  */
-export async function startHostedMail(runtime: Runtime, wid: string, context: AuditContext, input: z.infer<typeof Create> = { kind: 'shared' }, start = false) {
+export async function startHostedMail(runtime: Runtime, wid: string, context: AuditContext, input: z.infer<typeof Create> = { kind: 'shared' }, start = false, here = false) {
   const inline = start && !isSimulatedSes(runtime), after = inline ? FALLBACK_AFTER_SECONDS : 0;
   const row = await create(runtime, wid, input, context, after);
   let wake = 'queued' in row && !!row.queued;
@@ -496,9 +496,44 @@ export async function startHostedMail(runtime: Runtime, wid: string, context: Au
       log(e instanceof JobDeferred ? 'info' : 'warn', { code: 'HOSTED_MAIL_DEFERRED', workspaceId: wid, ms: Date.now() - started, availableAt: at, error: e instanceof JobDeferred ? undefined : e instanceof ApiError ? e.code : awsError(e).code });
     }
   };
-  // Never awaited here: the request answers now, and the work goes on (on Node, on the server's own pool).
-  const started = runtime.detach ? runtime.detach(work) : work(runtime);
+  // Never awaited here: the request answers now, and the work goes on (on Node, on the server's own pool). `here`: this
+  // already runs after an answer (startHostedMailAfter), so it goes on in the same place.
+  const started = runtime.detach && !here ? runtime.detach(work) : work(runtime);
   return { connection: row, wake: false, started };
+}
+/**
+ * A new workspace's Hosted mail, started after the request that made it has answered (the sign-up callback, a new
+ * workspace): its connection and built-in domain rows, then its SES setup, all on the Worker's waitUntil (runtime.detach),
+ * on Node without being awaited. The jobs startHostedMail queues are the fallback, and onboarding starts Hosted mail
+ * itself if even the rows were never written. Until they are, the workspace's /v1/me waits for them (awaitHostedStart).
+ */
+export function startHostedMailAfter(runtime: Runtime, wid: string, context: AuditContext) {
+  const run = async (rt: Runtime) => {
+    try { const result = await startHostedMail(rt, wid, context, { kind: 'shared' }, true, true); if ('started' in result) await result.started; }
+    catch (e) { logError(e, { code: 'HOSTED_MAIL_START_FAILED', workspaceId: wid }); }
+  };
+  return runtime.detach ? runtime.detach(run) : run(runtime);
+}
+/** How long a new workspace's first reads wait for the Hosted mail its sign-up starts after answering, and for how long
+ *  after the workspace was made. */
+export const HOSTED_START_WAIT = { ms: 2000, freshSeconds: 15 } as const;
+/**
+ * connectionSummary for /v1/me, which a new workspace reads while its sign-up's Hosted mail is still being written
+ * (startHostedMailAfter, a few hundred ms): a workspace made in the last 15 s without its connection or built-in domain
+ * waits for them, up to 2 s, re-reading every 100 ms, so onboarding opens on "Your domain is ready" rather than a choice
+ * or a form. Any other workspace answers at once (one more read only when its summary has no built-in domain).
+ */
+export async function settledConnectionSummary(runtime: Runtime, wid: string) {
+  const summary = await connectionSummary(runtime, wid);
+  if (!runtime.config.multiTenant || !runtime.config.builtinDomain || (summary && summary.builtinDomain)) return summary;
+  const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+  for (const deadline = Date.now() + HOSTED_START_WAIT.ms; Date.now() < deadline; await sleep(100)) {
+    const { rows: [row] } = await runtime.db.execute<{ fresh: boolean; ready: boolean }>(sql`SELECT w.created_at > now() - make_interval(secs => ${HOSTED_START_WAIT.freshSeconds}) AS fresh,
+      EXISTS (SELECT FROM provider_connections c WHERE c.workspace_id=w.id) AND EXISTS (SELECT FROM builtin_domains b WHERE b.workspace_id=w.id) AS ready FROM workspaces w WHERE w.id=${wid}`);
+    if (!row?.fresh) return summary;
+    if (row.ready) return connectionSummary(runtime, wid);
+  }
+  return connectionSummary(runtime, wid);
 }
 export function registerProviderConnections(app: App) {
   const path = '/v1/connection';

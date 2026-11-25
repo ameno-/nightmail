@@ -5,7 +5,7 @@ import {lists} from './db/audience.js';
 import {ApiError,denied,digest,errors,isSimulatedSes,response,security,type App,type Runtime} from './core.js';
 import {accountBrowserRoute,accountSessionActor,accountSessionUser,migrateLegacyCookies,requireDashboardOrigin,settleDefaultAccount} from './account-login.js';
 import {Workspace,WorkspaceRole,sessionMemberships} from './workspaces.js';
-import {ConnectionSummary,connectionSummary} from './provider-connections.js';
+import {ConnectionSummary,settledConnectionSummary} from './provider-connections.js';
 import { clientIpHeader, productName, requestedScopes } from './brand.js';
 import { MAIL_PORTS } from './mail-servers.js';
 import { WORKSPACE_FOCUS } from './workspace-focus.js';
@@ -50,7 +50,7 @@ export function registerDashboardAuth(app: App) {
     // At most four rows through the newsletters partial index, only for a credential that can read lists.
     const sidebarSource=readsLists?sql`FROM ${lists} WHERE ${and(eq(lists.workspaceId,identity.workspaceId),isNotNull(lists.newsletterFrom))}
       ORDER BY ${asc(lists.createdAt)}, ${asc(lists.id)} LIMIT 4`:null;
-    const [connection,session,standaloneNewsletters]=await Promise.all([hosted?connectionSummary(c.env,identity.workspaceId):null,
+    const [connection,session,standaloneNewsletters]=await Promise.all([hosted?settledConnectionSummary(c.env,identity.workspaceId):null,
       dashboardUserId?sessionMemberships(c.env.db,dashboardUserId,identity.workspaceId):null,
       sidebarSource && !dashboardUserId?c.env.db.execute<Newsletter>(sql`SELECT ${lists.id}, ${lists.name} ${sidebarSource}`).then(({rows})=>rows):null]);
     // Staff UI notes: an operator in UI_NOTES_SUBJECTS only (operator-identity.ts); no query when the list is empty.
