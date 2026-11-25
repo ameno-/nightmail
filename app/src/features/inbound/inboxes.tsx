@@ -104,7 +104,7 @@ export function AgentInboxesPage() {
   const pagination = useCursorPagination()
   const q = search.trim(), cursor = pagination.cursor
   const inboxes = useApiQuery(['agent-inboxes', q, cursor ?? null], (api, signal) => api.inboxes.list({ search: q || undefined, cursor }, signal), { interval: 30_000, keepPrevious: true })
-  return <div className="stack inbound-stack measure-list">
+  return <div className="stack inbound-stack">
     <PageHeader title="Agent inboxes" backTo="/receiving?kind=inbox" actions={<>
       <Input className="receiving-search" type="search" aria-label="Search inboxes" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />
       {canAdminister && <ConnectAgentButton />}

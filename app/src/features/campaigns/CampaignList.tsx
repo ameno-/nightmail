@@ -52,7 +52,7 @@ export function CampaignsPage() {
       return next
     })
   }
-  return <div className="campaigns-page measure-list">
+  return <div className="campaigns-page">
     <CampaignsHeader actions={<>{canAdminister && <Button onClick={() => navigate('/newsletters/new')}>New newsletter</Button>}<Button variant="primary" onClick={() => navigate('/campaigns/new')}>Create campaign</Button></>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search campaigns" placeholder="Search campaigns" value={draft} onChange={event => type(event.target.value)} /><Select aria-label="Filter by status" value={archived ? 'archived' : status} onValueChange={selectTab} options={[
       { value: 'all', label: 'All campaigns' }, { value: 'draft', label: 'Drafts' }, { value: 'scheduled', label: 'Scheduled' },

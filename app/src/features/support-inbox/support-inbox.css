@@ -42,7 +42,6 @@
 
 /* One conversation. Its title and facts hold one line each, so the header is as tall loaded as loading. On a wide window
    it keeps the wide measure, left-aligned, so the transcript's lines stay readable beside the customer panel. */
-.sinbox-conversation-page { width: 100%; max-width: var(--measure-wide); }
 .sinbox-conversation-page .ui-page-header { flex-wrap: nowrap; }
 .sinbox-conversation-page .ui-page-header > .cluster:first-child { flex: 1 1 auto; flex-wrap: nowrap; min-width: 0; }
 .sinbox-conversation-page .ui-page-header > .cluster:last-child:not(:first-child) { flex: none; flex-wrap: nowrap; }

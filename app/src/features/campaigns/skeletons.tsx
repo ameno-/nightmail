@@ -69,7 +69,7 @@ export function CampaignRouteSkeleton({ kind, isNew = false }: { kind: 'list' | 
   const [search] = useSearchParams(), issueOf = isNew ? search.get('newsletter') : null
   if (kind === 'list' || kind === 'templates') {
     const templates = kind === 'templates'
-    return <div className="campaigns-page measure-list">
+    return <div className="campaigns-page">
       <CampaignsHeader actions={<>{!templates && canAdminister && <Button disabled>New newsletter</Button>}<Button variant="primary" disabled>{templates ? 'Create template' : 'Create campaign'}</Button></>} />
       <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label={templates ? 'Search templates' : 'Search campaigns'} placeholder={templates ? 'Search templates' : 'Search campaigns'} disabled /><Select aria-label={templates ? 'Filter templates' : 'Filter by status'} value="all" onValueChange={() => {}} options={[{ value: 'all', label: templates ? 'Active' : 'All campaigns' }]} disabled /></div></div>
       <TableSkeleton className="campaigns-table ui-table--two-line" columns={templates ? templateColumns : campaignColumns} rows={4} pagination />
