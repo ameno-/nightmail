@@ -8,7 +8,7 @@
 //
 // From app/: bun run cls (builds first), or node scripts/cls.mjs against an existing build.
 //   CLS_ONLY=<regex>   only pages whose name matches
-//   CLS_WORKERS=<n>    pages measured at once (default: 5 per CPU, at most 32; most of a page's time is network wait)
+//   CLS_WORKERS=<n>    override the number of pages measured at once (default: 2 per CPU, at most 8)
 //   CLS_PG_URL=<url>   Postgres admin URL (CI); otherwise Docker or a local initdb (see cls-fixture.mjs)
 //   CLS_CHROME=<path>  Chrome executable; otherwise the installed Google Chrome
 //   CLS_SHOTS=1        screenshot every page, not only failing ones
@@ -43,8 +43,8 @@
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
 // no request is in flight, fonts are loaded and the page has rendered and gone idle twice in a row; there are no
 // fixed sleeps, and polling pages settle between polls.
-import { mkdirSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
-import { availableParallelism } from 'node:os';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
+import { availableParallelism, tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
@@ -53,7 +53,8 @@ import { liveSource, seed, start } from './cls-fixture.mjs';
 const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls');
 const only = process.env.CLS_ONLY ? new RegExp(process.env.CLS_ONLY, 'i') : null;
-const workers = Number(process.env.CLS_WORKERS) || Math.min(32, availableParallelism() * 5);
+// Each in-flight page owns a renderer. Leave room for the fixture API, other shards and their databases.
+const workers = Number(process.env.CLS_WORKERS) || Math.min(8, availableParallelism() * 2);
 const shard = Number(process.env.CLS_SHARD_INDEX ?? 0), shards = Number(process.env.CLS_SHARD_COUNT ?? 1);
 if (!Number.isSafeInteger(shards) || shards < 1 || !Number.isSafeInteger(shard) || shard < 0 || shard >= shards)
   throw new Error('CLS_SHARD_INDEX must be a zero-based integer below CLS_SHARD_COUNT.');
@@ -945,7 +946,36 @@ function summarize(results, seconds) {
 rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 // No request leaves the machine: every host but the fixture's fails to resolve.
-const browserPromise = chromium.launch({ ...process.env.CLS_CHROME ? { executablePath: process.env.CLS_CHROME } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] });
+// All measured traffic is loopback. On Linux, creating an unrelated Docker interface makes Chromium
+// cancel even these requests with ERR_NETWORK_CHANGED. A canceled route stylesheet triggers the
+// app's stale-build reload, destroying the measured document. Keep host route notifications out of
+// this browser only; its HTTP sockets, cache, rendering, and the fixture's throttling are unchanged.
+let chrome = process.env.CLS_CHROME, launcherDir;
+if (process.platform === 'linux') {
+  launcherDir = mkdtempSync(join(tmpdir(), 'nightmail-cls-chrome-'));
+  const launcher = join(launcherDir, 'chrome');
+  writeFileSync(launcher, `#!/usr/bin/python3
+import ctypes as c, errno, os, socket, sys
+lib = c.CDLL("libseccomp.so.2")
+class Arg(c.Structure):
+    _fields_ = [("arg", c.c_uint), ("op", c.c_uint), ("a", c.c_uint64), ("b", c.c_uint64)]
+lib.seccomp_init.argtypes = [c.c_uint32]
+lib.seccomp_init.restype = c.c_void_p
+lib.seccomp_rule_add_array.argtypes = [c.c_void_p, c.c_uint32, c.c_int, c.c_uint, c.POINTER(Arg)]
+lib.seccomp_load.argtypes = lib.seccomp_release.argtypes = [c.c_void_p]
+policy = lib.seccomp_init(0x7fff0000)  # SCMP_ACT_ALLOW
+# Refuse only socket(AF_NETLINK, *, NETLINK_ROUTE); SCMP_CMP_EQ is 4.
+args = (Arg * 2)(Arg(0, 4, socket.AF_NETLINK, 0), Arg(2, 4, socket.NETLINK_ROUTE, 0))
+if not policy or lib.seccomp_rule_add_array(policy, 0x00050000 | errno.EAFNOSUPPORT, lib.seccomp_syscall_resolve_name(b"socket"), 2, args) or lib.seccomp_load(policy):
+    sys.exit("CLS: could not isolate Chromium from host route changes")
+lib.seccomp_release(policy)
+chrome = os.environ.get("CLS_CHROME") or "/opt/google/chrome/chrome"
+os.execv(chrome, [chrome, *sys.argv[1:]])
+`, { mode: 0o700 });
+  chrome = launcher;
+}
+const browserPromise = chromium.launch({ ...chrome ? { executablePath: chrome } : { channel: 'chrome' }, args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1'] })
+  .finally(() => { if (launcherDir) rmSync(launcherDir, { recursive: true, force: true }); });
 browserPromise.catch(() => {});
 const fx = await start(repo, { servers: Math.min(2, Math.ceil(workers / 8)), delay: apiDelay, fontDelay: lateFonts ? FONT_DELAY_MS : 0, throttle, log: message => console.log(`${elapsed()} ${message}`) }).catch(async error => {
   await browserPromise.then(b => b.close(), () => {});
