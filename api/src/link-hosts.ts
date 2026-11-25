@@ -6,6 +6,12 @@
  */
 /** The label of a domain's link host. */
 export const LINK_LABEL = 'links';
+/**
+ * How long a deleted domain's link host goes on answering the links in mail it already sent (src/link-domains.ts retires
+ * it): an opt-out has to keep working for 30 days after a message is sent (CAN-SPAM), and no mail links on the host once
+ * its domain is gone, so 30 days from the deletion covers every message.
+ */
+export const LINK_RETENTION_DAYS = 30;
 // Unsubscribe links (the page and the one-click POST), forwarding's confirm and stop pages, linked images (/i/), and the
 // fonts the unsubscribe page uses. One segment after each prefix: nothing else is a link.
 const LINK_PATH = /^\/(?:unsubscribe|v1\/forwarding\/(?:confirm|stop)|i|fonts)\/[^/]+$/;
