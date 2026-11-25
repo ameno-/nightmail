@@ -38,6 +38,7 @@ import { checkMx,expectedMx } from './mailbox-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, establishedHost, hostOwners, inspectReceivingHost, observeReceiving, refusedCodes, takenIssue, type DomainObservation, type ReceivingHostRow, type ReceivingIssue } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, type PublishedEvent, type EventType } from './db/operations.js';
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
+import { BUILTIN_CAPS, BUILTIN_UNSUPPORTED, builtinLimitsText } from './builtin-limits.js';
 import { hasTags, tagKey, TAG_PREFIX } from './resource-tags.js';
 import { PostalAddress, postalAddressText, unsubscribePageLink } from './outbound-content.js';
 export type { PublishedEvent } from './db/operations.js';
@@ -81,7 +82,11 @@ const domainSchema = z.object({ id: z.string(), name: z.string(), region: z.stri
     .nullable().optional().describe(`Where this domain\u2019s DNS is hosted, from its zone\u2019s NS records, alongside publicDns: null when the provider is not one ${productName} recognizes.`),
   releasesAt: z.string().nullable().optional().describe('Hosted only: when this domain is released if its records are still unproven (72 hours after it was added). Null once ownership has been proven.'),
   receivingIssue: receivingIssueSchema.nullable().optional().describe('Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear.'),
-  builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`) }).openapi('DomainReadiness');
+  builtIn: z.boolean().optional().describe(`Hosted only: the workspace\u2019s built-in domain, a subdomain of ${productName}\u2019s own domain that needs no DNS. It sends until a domain of the workspace\u2019s own verifies (limits here and connection.builtinDomain in GET /v1/me say what it sends), receives at every address, and can\u2019t be deleted or changed (409 BUILTIN_DOMAIN).`),
+  limits: z.object({ scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\u2019s members.'), perDay: z.number().int().describe('Recipients in a rolling 24 hours.'), perMinute: z.number().int().describe('Recipients in a minute.'),
+    unsupported: z.array(z.enum(BUILTIN_UNSUPPORTED)).describe('Request fields a send from it can\u2019t use (refused together, as error.details[].unsupported of 422 BUILTIN_DOMAIN_UNSUPPORTED): from (a subdomain of it), replyTo (elsewhere), headers, attachments, template, scheduledAt, kind (marketing) and campaign.'),
+    summary: z.string().describe('The same, in one sentence.') })
+    .optional().describe('Built-in domain only: what it sends, before a send finds out. GET /v1/domains/{id} and listDomains.') }).openapi('DomainReadiness');
 const accountSchema = z.object({ region: z.string(), productionAccess: z.boolean(), sendingEnabled: z.boolean(), enforcementStatus: z.string(), quota: z.object({ max24HourSend: z.number(), maxSendRate: z.number(), sentLast24Hours: z.number() }) }).openapi('SesAccount');
 const Focus = z.enum(WORKSPACE_FOCUS);
 const FOCUS_NOTE = 'What the workspace is here for, the first leading: marketing emails, a newsletter, developer (transactional) emails or agent inboxes. The dashboard tailors its first steps and Overview to it. Null until chosen; empty when skipped.';
@@ -404,15 +409,16 @@ export async function verifyHostedDomain(runtime: Runtime, a: Actor, domainId: s
   const row=await hostedDomain(runtime.db,a.workspaceId,domainId,false,{domains:a.domains,mode:'manual',platformAccount:runtime.config.platformAccount}) ?? notFound('Domain'); allowedDomain(a,row.name);
   assertSharedAccount(runtime,row.connection);
   if (row.queued) a.wakeJobs=1;
-  return derivedReadiness(row);
+  return derivedReadiness(row, runtime.config);
 }
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
-export function derivedReadiness(row: ClaimRow): Readiness {
+export function derivedReadiness(row: ClaimRow, config?: Pick<Config, 'builtinScope'>): Readiness {
   const facts=row.identity, held=sends(row);
   // The built-in domain has no DNS records of its own: it sends under its parent's identity and receives on its name.
   if (facts?.builtin) return { id:row.id, name:row.name, region:row.region, verificationStatus:held ? 'SUCCESS' : 'PENDING', verified:held, dkimStatus:held ? 'SUCCESS' : 'PENDING', dmarc:null, ready:held, sending:state(held),
     receiving:state(row.receiving_state==='active' || row.receiving_state==='lost'), mailFromDomain:facts.ses.MailFromAttributes?.MailFromDomain ?? null, mailFromStatus:facts.ses.MailFromAttributes?.MailFromDomainStatus ?? null,
-    dnsStatus:'available', dnsUnavailableReason:null, dns:[], releasesAt:null, receivingIssue:null, builtIn:true };
+    dnsStatus:'available', dnsUnavailableReason:null, dns:[], releasesAt:null, receivingIssue:null, builtIn:true,
+    ...(config ? { limits: { scope: config.builtinScope, ...BUILTIN_CAPS[config.builtinScope], unsupported: [...BUILTIN_UNSUPPORTED], summary: builtinLimitsText(config.builtinScope) } } : {}) };
   const report=readiness(row,facts?.ses ?? {VerificationStatus:'PENDING'},claimProof(row,(facts?.proven ?? false) || held),facts?.mx,facts?.note,facts?.dmarc);
   if(row.dns_first && !row.ever_proven){
     if(!report.dns.some(record=>record.name===proofRecordName(row.proof_label,row.name))) report.dns.unshift({name:proofRecordName(row.proof_label,row.name),type:'TXT',value:row.token,purpose:'sending',status:'pending'});
@@ -921,7 +927,7 @@ export async function domainPage(c: Ctx, a: Actor, q: DomainQuery): Promise<z.in
       .innerJoin(domainClaims,and(eq(domainClaims.name,domains.name),eq(domainClaims.workspaceId,domains.workspaceId)))
       .innerJoin(sql`regional_connections pc`,sql`pc.id=${domainClaims.connectionId} AND pc.workspace_id=${domains.workspaceId} AND pc.region=${domains.region} AND ${connectionReady()}`)
       .where(where).orderBy(desc(domains.id)).limit(q.limit+1),a.domains.length || q.countedElsewhere ? undefined : domainQuota(c.env.db,a.workspaceId)]);
-    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}})),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null,...quota && quota.limit !== null ? {quota:{used:quota.used,limit:quota.limit}} : {}};
+    return {data:rows.slice(0,q.limit).map(r=>derivedReadiness({...r,...r.row,connection:{kind:r.kind,legacy:r.legacy}},c.env.config)),nextCursor:rows.length>q.limit?rows[q.limit-1]!.row.id:null,...quota && quota.limit !== null ? {quota:{used:quota.used,limit:quota.limit}} : {}};
   }
   const rows = await c.env.db.select({row:domains,mx:mailboxDomains.mx,status:mailboxDomains.status}).from(domains).leftJoin(mailboxDomains,and(eq(mailboxDomains.workspaceId,domains.workspaceId),eq(mailboxDomains.domainId,domains.id),isNull(mailboxDomains.parentId))).where(where).orderBy(desc(domains.id)).limit(q.limit + 1);
   if (q.refresh === 'false') {
@@ -1194,7 +1200,7 @@ export function registerOperations(app: App) {
       const row=await hostedDomain(c.env.db,a.workspaceId,c.req.valid('param').id,false,mode ? {domains:a.domains,mode,platformAccount:c.env.config.platformAccount} : undefined) ?? notFound('Domain'); allowedDomain(a,row.name);
       // A stale dashboard may read persisted facts; its opportunistic recheck was fenced in SQL.
       if (row.queued) a.wakeJobs=1;
-      return c.json(derivedReadiness(row),200);
+      return c.json(derivedReadiness(row,c.env.config),200);
     }
     const [row] = await c.env.db.select().from(domains).where(and(scoped(domains, a), eq(domains.id, c.req.valid('param').id))); if (!row) return notFound('Domain'); allowedDomain(a, row.name);
     const report = await domainReadiness(c.env,row,undefined,verifyRoute?'verify':'read');

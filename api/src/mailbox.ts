@@ -673,7 +673,7 @@ export function registerMailbox(app: App) {
       attachments: await resolveAttachments(c.env, mailbox, body.attachments,from), inReplyTo, references, autoSubmitted: body.autoSubmitted, headers: rest };
   }
   async function prepareReply(c: Ctx, db: DbExecutor, mailbox: typeof mailboxes.$inferSelect, original: MessageRow, body: z.infer<typeof ReplyInbound>) {
-    if(mailbox.kind==='inbox' && !mailbox.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Sending is not enabled for this inbox.');
+    if(mailbox.kind==='inbox' && !mailbox.sendLimits.perDay)throw new ApiError(403,'EPHEMERAL_SEND_DISABLED','Replies are off for this inbox: it was created without send: {"enabled": true}, and sandbox inboxes never send. Reply from an address or inbox that sends, or create one with send enabled.');
     const from = await senderAddress(c, mailbox, body.from, db);
     // The chosen sender is ours too: never copy it back on a reply-all.
     const own = [...(await db.select({ address: mailboxAddresses.address }).from(mailboxAddresses).where(eq(mailboxAddresses.mailboxId, mailbox.id))).map(row => row.address), from];

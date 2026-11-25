@@ -12,6 +12,7 @@ import { McpSignInSetup } from './connect-agent'
 import { mcpServerUrl } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { apiKeyEnv, productName, productSlug, sdkPackage, secretPrefixes } from '../../../../api/src/brand'
+import { builtinLimitsText } from '../../../../api/src/builtin-limits'
 
 function receivingMx(domain: Domain) {
   const record = recordsFor(domain, 'receiving').find(row => row.type === 'MX')
@@ -59,6 +60,8 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     `- Sending domain: ${domain.name} (${multiTenant ? '' : `region ${domain.regionId}, `}status: ${verified ? 'verified' : 'pending; its DNS records verify automatically, and sending works once verified'}).`,
     `- Send a test email from hello@${domain.name} to ${to} with sendEmail (POST /v1/emails/send)${multiTenant ? '' : `, region "${domain.regionId}"`} and an Idempotency-Key header. 202 means queued, not delivered.`,
   )
+  // The built-in domain's limits up front, so the agent doesn't find them one refused send at a time.
+  if (domain.builtIn) lines.push(`- ${domain.name} is this workspace's built-in domain. ${domain.limits?.summary ?? builtinLimitsText()} A send that uses any of them is refused once with 422 BUILTIN_DOMAIN_UNSUPPORTED, listing them in error.details[0].unsupported; GET /v1/domains/${domain.id} has the same limits.`)
   const mx = receivingMx(domain)
   // Hosted suggests reply.<domain>; never tell an agent to change the root MX, which would move the domain's existing mail.
   if (mx) lines.push(multiTenant

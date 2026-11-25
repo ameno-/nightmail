@@ -23481,6 +23481,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(error(await local('DELETE',`/v1/domains/${row.id}`),409,'BUILTIN_DOMAIN').code,'BUILTIN_DOMAIN');
       error(await local('POST',`/v1/domains/${row.id}/mail-from`,{mailFromDomain:`mail.${host}`}),409,'BUILTIN_DOMAIN');
       assert.equal(ok(await local('GET','/v1/me')).connection.domains.total,0,'Own domains only.');
+      // Its limits up front, on the domain itself: what a send can't use and the caps, before a send finds out.
+      const one=ok(await local('GET',`/v1/domains/${row.id}`));
+      assert.deepEqual({...one.limits,summary:undefined},{scope:'anyone',perDay:100,perMinute:10,unsupported:['from','replyTo','headers','attachments','template','scheduledAt','kind','campaign'],summary:undefined});
+      assert.match(one.limits.summary,/^Built-in domains send plain transactional mail: no Reply-To elsewhere, custom headers, attachments, stored templates, scheduling, marketing or campaigns, up to 100 recipients a day \(10 a minute\)\. Add your own domain to use them\.$/);
+      assert.deepEqual(row.limits,one.limits,'listDomains says the same.');
 
       // 4. Sending: anyone, 10 a minute, transactional only, screened as a new sender, from its own tenant.
       const { screen } = (await import('./src/config.js')).loadConfig({ BANE_ROOT_SECRET: AUTH_SECRET, PUBLIC_URL: PUBLIC_ORIGIN,
@@ -23494,6 +23499,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         for (const [extra,field] of [[{kind:'marketing'},'kind'],[{scheduledAt:new Date(Date.now()+3600_000).toISOString()},'scheduledAt'],[{headers:[{name:'X-Entity-Ref-ID',value:'1'}]},'headers'],[{replyTo:['me@elsewhere.example']},'replyTo'],[{from:`x@deep.${host}`},'from']] as const)
           assert.equal(error(await local('POST','/v1/emails/send',mail(2,extra)),422,'BUILTIN_DOMAIN_UNSUPPORTED').field,field,field);
         assert.equal(error(await local('POST','/v1/emails/batch',{emails:[mail(3),mail(4,{replyTo:['me@elsewhere.example']})]}),422,'BUILTIN_DOMAIN_UNSUPPORTED').field,'emails.1.replyTo');
+        // Everything a send uses that it can't send is refused at once, with the limits, so an agent learns them in one try.
+        const all=error(await local('POST','/v1/emails/send',mail(5,{replyTo:['me@elsewhere.example'],headers:[{name:'X-Entity-Ref-ID',value:'1'}],attachments:['attachment_0123456789abcdef0123456789abcdef']})),422,'BUILTIN_DOMAIN_UNSUPPORTED');
+        assert.deepEqual([all.field,all.details],['replyTo',[{unsupported:['replyTo','headers','attachments']}]]);
+        assert.equal(all.message,`${host} can’t send this email: it uses a Reply-To elsewhere, custom headers and attachments. Built-in domains send plain transactional mail: no Reply-To elsewhere, custom headers, attachments, stored templates, scheduling, marketing or campaigns, up to 100 recipients a day (10 a minute). Add your own domain to use them.`);
+        const several=error(await local('POST','/v1/emails/batch',{emails:[mail(6),mail(7,{kind:'marketing',headers:[{name:'X-Entity-Ref-ID',value:'1'}]}),mail(8,{replyTo:['me@elsewhere.example']})]}),422,'BUILTIN_DOMAIN_UNSUPPORTED');
+        assert.deepEqual([several.field,several.details],['emails.1.headers',[{index:1,unsupported:['headers','kind']},{index:2,unsupported:['replyTo']}]]);
         ok(await local('POST','/v1/emails/batch',{emails:[1,2,3,4,5,6,7,8,9].map(n=>mail(n))}),202); // 10 this minute.
         const minute=error(await local('POST','/v1/emails/send',mail(10)),429,'BUILTIN_DOMAIN_LIMIT');assert.equal(minute.retryable,true);assert.ok(Date.parse(minute.resetAt)>Date.now());
         await runDispatcher(runtime,{region:oh,accountId:acct});
@@ -23546,6 +23557,15 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const anyone=`order-4821@${host}`,caught=await deliver([anyone]);
       assert.deepEqual([caught.boxes,caught.envelope,caught.plan.recipients[0]!.tier],[[inbox.id],[anyone],'catchall'],'A new address lands in the default inbox with its own address.');
       assert.deepEqual((await deliver([`support@${host}`])).boxes,[support.id],'An address of its own keeps its mail.');
+      // Replies from the default inbox send, within the same caps. One whose sending is off says why and what to do.
+      const thread=(await db.query('SELECT thread_id FROM mailbox_messages WHERE workspace_id=$1 AND mailbox_id=$2 LIMIT 1',[wid,inbox.id])).rows[0].thread_id;
+      await db.query('UPDATE mailbox_messages SET reply_author_verified=true WHERE workspace_id=$1 AND mailbox_id=$2',[wid,inbox.id]); // As an aligned DMARC pass marks its author.
+      await db.query("UPDATE sending_emails SET created_at=created_at-interval '25 hours' WHERE workspace_id=$1",[wid]); // Yesterday's recipients no longer count.
+      await db.query("UPDATE mailboxes SET send_limits='{}' WHERE id=$1",[inbox.id]);
+      assert.match(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),403,'EPHEMERAL_SEND_DISABLED').message,/^Replies are off for this inbox: it was created without send: \{"enabled": true\}/);
+      await db.query("UPDATE mailboxes SET send_limits='{\"perDay\":20}' WHERE id=$1",[inbox.id]);
+      ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
+      assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
       assert.equal((await db.query("SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND origin='auto'",[wid])).rows[0].n,0,'The catch-all never creates addresses.');
 
       // 6. A pause stops sending (receiving goes on); an own domain closes it; a revoke stops everything for good.
