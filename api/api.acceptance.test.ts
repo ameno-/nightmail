@@ -22664,6 +22664,19 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.ok(!logs.some(line => line.includes(email)));
     });
   });
+  test('API key names: any text up to 100 characters once trimmed, spaces and emoji included, not unique; an empty or long name says which rule failed', async t => {
+    await simulatedSesFixture(t, async ({ local }) => {
+      for (const name of ['Order notifications', '  Zapier → Slack 🚀  ', 'Order notifications', 'x'.repeat(100)]) {
+        const key = ok(await local('POST', '/v1/api-keys', { name, permissions: ['read'] }), 201); secrets.add(key.secret);
+        assert.equal(key.name, name.trim());
+      }
+      const empty = error(await local('POST', '/v1/api-keys', { name: '   ', permissions: ['read'] }), 422);
+      assert.equal(empty.field, 'name'); assert.match(empty.message, /Enter a name for this key\./);
+      const long = error(await local('POST', '/v1/api-keys', { name: 'x'.repeat(101), permissions: ['read'] }), 422);
+      assert.equal(long.field, 'name'); assert.match(long.message, /Use at most 100 characters\./);
+    });
+  });
+
   test('request logs: an unmatched API path is logged as a scrubbed template (IDs, addresses, tokens and names replaced), at most 20 per workspace per 10 minutes', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, request }) => {
       const { unmatchedTemplate } = await import('./src/app.js');

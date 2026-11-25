@@ -365,6 +365,9 @@ export type ApiKey = {
 };
 
 export type CreateApiKey = {
+    /**
+     * Any text, 1 to 100 characters once trimmed. Need not be unique.
+     */
     name: string;
     /**
      * Workspace keys: read, send and manage. Defaults to send.
@@ -484,6 +487,9 @@ export type AuditEntry = {
 };
 
 export type UpdateApiKey = {
+    /**
+     * Any text, 1 to 100 characters once trimmed. Need not be unique.
+     */
     name?: string;
     /**
      * Workspace keys: replaces its permissions.

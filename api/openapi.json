@@ -953,7 +953,8 @@
           "name": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 100
+            "maxLength": 100,
+            "description": "Any text, 1 to 100 characters once trimmed. Need not be unique."
           },
           "permissions": {
             "type": "array",
@@ -1284,7 +1285,8 @@
           "name": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 100
+            "maxLength": 100,
+            "description": "Any text, 1 to 100 characters once trimmed. Need not be unique."
           },
           "permissions": {
             "type": "array",

@@ -49,6 +49,7 @@ const forms: Partial<Record<Kind, { title: string; id: string; submit: string }>
 }
 /** sendExample: a workspace key's first send. agent: an API key, which also connects an agent over MCP. mail: the
  *  server settings a mail app or an app's SMTP needs, with the username it signs in with. */
+const NAME_MAX = 100
 export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean; agent?: boolean; mail?: { username: ReactNode; imap: boolean; smtp: boolean } }
 
 /** Create key: the type first (API key, SMTP login, agent token, app password), then what it can reach. An agent token
@@ -228,7 +229,11 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   const chosenInbox = inboxId || activeInboxes(inboxes)[0]?.id || ''
   const finalMail = mailOrder(purpose === 'create' ? [...new Set<MailPermission>(['create', ...mail])] : mail)
   const failed = (...fields: string[]) => fields.map(field => fieldError(write.error, field)).find(Boolean)
-  const nameError = errors.name || failed('name')
+  // The name's one rule: some text, up to 100 characters once trimmed (any characters; names needn't be unique). Each
+  // refusal says which part failed and records it as a code for analytics, never the name.
+  const serverName = failed('name')
+  const nameError = errors.name || (serverName && (name.trim().length > NAME_MAX ? `Use at most ${NAME_MAX} characters: this name has ${name.trim().length}.` : serverName))
+  const nameCode = errors.name ? 'empty' : serverName ? (name.trim().length > NAME_MAX ? 'too_long' : 'invalid') : undefined
   const domainError = errors.domains || failed('domains', 'addDomains', 'removeDomains')
   const addressError = errors.addressIds || failed('access.addressIds', 'access.addAddressIds', 'access.removeAddressIds')
   const inboxError = errors.inboxId || failed('access.inboxId')
@@ -282,7 +287,7 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   async function submit(event: FormEvent) {
     event.preventDefault()
     const next: Record<string, string> = {}
-    if (!name.trim()) next.name = 'Enter a name for this key.'
+    if (!name.trim()) next.name = `Enter a name for this key, such as ${placeholder}.`
     if (workspace && !allDomains && !selectedDomains.length) next.domains = 'Select at least one domain, or choose All domains.'
     else if (workspace && !allDomains && selectedDomains.length > 50) next.domains = tooManyDomains
     if (purpose === 'addresses' && !allAddresses && !addressIds.length) next.addressIds = chooseAddress
@@ -334,7 +339,9 @@ function ApiKeyForm({ open, onOpenChange, onPending, onCreated, initial, editing
   return <>
     <form id={formId} className="stack" onSubmit={submit} noValidate>
       <MutationError error={write.error} />
-      <Field label="Name" htmlFor="key-name" error={nameError}><Input id="key-name" value={name} maxLength={100} onChange={event => setName(event.target.value)} autoFocus={!editing} required disabled={pending} placeholder={placeholder} /></Field>
+      <Field label="Name" htmlFor="key-name" error={nameError} errorCode={nameCode} hint={`Any text up to ${NAME_MAX} characters, such as what the key is for. It doesn’t have to be unique.`}><Input id="key-name" value={name} maxLength={NAME_MAX} onChange={event => { setName(event.target.value); if (errors.name) setErrors(({ name: _, ...rest }) => rest) }} autoFocus={!editing} required disabled={pending} placeholder={placeholder} /></Field>
+      {/* The grey example reads as filled in; an empty name offers it as the name. */}
+      {nameCode === 'empty' && <div className="cluster"><Button size="sm" onClick={() => { setName(placeholder); setErrors(({ name: _, ...rest }) => rest) }} disabled={pending}>Use “{placeholder}”</Button></div>}
       <fieldset className="keys-purpose" disabled={pending}>
         <legend className="ui-field__label">What it can reach</legend>
         {editing ? choices.map(choice) : <>

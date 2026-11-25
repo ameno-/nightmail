@@ -271,7 +271,8 @@ const KeyAccessInput = z.discriminatedUnion('type', [
     mail: z.array(MailPermission).min(1).max(4).default(['read']).describe('read, send and modify, as for addresses; with create it also reaches the inboxes it creates, until its own inbox ends.') }).strict(),
 ]).openapi('CreateApiKeyAccess');
 const KeyExpiry = z.iso.datetime().nullable().describe('When the key stops working, a time to come (UTC). Null: it never expires; an inbox key then ends with its inbox. Requests with an expired key get 401 AUTH_INVALID saying when it ended, and a later expiry brings it back with the same secret.');
-const KeyName = z.string().trim().min(1).max(100), KeyPermissions = z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3);
+// Any text, 1 to 100 characters once trimmed; names needn't be unique (the dashboard says the same under the field).
+const KeyName = z.string().trim().min(1, 'Enter a name for this key.').max(100, 'Use at most 100 characters.').describe('Any text, 1 to 100 characters once trimmed. Need not be unique.'), KeyPermissions = z.array(z.enum(['read', 'send', 'manage'])).min(1).max(3);
 const SenderDomains = z.array(z.string().trim().toLowerCase().regex(/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/)).max(50);
 const KeyInput = z.object({ name: KeyName,
   permissions: KeyPermissions.optional().describe('Workspace keys: read, send and manage. Defaults to send.'),
