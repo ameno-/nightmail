@@ -27,8 +27,8 @@
 .limits-ladder > li { display: flex; flex-direction: column; gap: var(--space-6); padding: var(--space-12) 0; }
 .limits-ladder__head { display: flex; align-items: center; gap: var(--space-8); }
 .limits-ladder > li > p + p { margin-top: calc(-1 * var(--space-4)); }
-.limits-ladder__mark { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--color-layer-2); color: var(--tone-ink); font-family: var(--font-mono); font-size: 10px; line-height: 1; }
-.limits-ladder > li > ul { display: flex; flex-direction: column; gap: 2px; margin: 0; padding-inline-start: var(--space-20); font-size: var(--text-xs); line-height: var(--leading-xs); font-variant-numeric: tabular-nums; }
+.limits-ladder__mark { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--color-layer-2); color: var(--tone-ink); font-family: var(--font-mono); font-size: var(--text-label); line-height: 1; }
+.limits-ladder > li > ul { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); font-size: var(--text-xs); line-height: var(--leading-xs); font-variant-numeric: tabular-nums; }
 /* Overview's dialog: the warning lines and the campaign probe open from their headings, one rule between them. */
 .limits-guide[data-compact] { gap: 0; }
 .limits-guide[data-compact] > section { padding-bottom: var(--space-16); }
