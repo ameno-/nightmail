@@ -8,11 +8,13 @@ import type { Domain } from '../../data/types'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { sendSnippets, useTestSend } from '../docs/first-send'
 import { productName } from '../../../../api/src/brand'
+import { builtinSending } from '../settings/builtin-domain'
 import './onboarding-card.css'
 
 // Overview's one onboarding card, first in the main column, for a hosted owner or admin:
 // - no domain at all (onboarding's domain step skipped or never reached): "Add your domain to start sending", which opens
-//   that step in one click. The API's no-domain email says the same (api/src/domain-setup.ts, NO_DOMAIN_REMINDER).
+//   that step in one click, or "Add your own domain" while its built-in domain sends. The API's no-domain email says the
+//   same (api/src/domain-setup.ts, NO_DOMAIN_REMINDER).
 // - a verified domain but no email sent yet: "You're verified. Send your first email", with a test to yourself from the
 //   domain (POST /v1/domains/{id}/test-send, as the setup steps' test button), Create an API key (its dialog shows the
 //   examples with the new key) and the cURL example to copy.
@@ -57,11 +59,14 @@ function DismissButton({ kind }: { kind: OnboardingCardKind }) {
 
 const noDomainWhy = `${productName} sends from your own domain. Setting one up takes about 5 minutes of DNS.`
 function NoDomainCard() {
-  const workspaceId = useSession()?.identity?.workspaceId ?? ''
+  const identity = useSession()?.identity, workspaceId = identity?.workspaceId ?? ''
+  // With a built-in domain the workspace already sends: the card asks for its own domain to send more, and says to whom it sends now.
+  const builtin = identity?.connection?.builtinDomain, sends = builtin && (builtin.sending === 'ready' || builtin.sending === 'pending')
+  const text = sends ? `You can send from ${builtin.name} now. ${builtinSending(builtin)} Your own domain lifts the limit.` : noDomainWhy
   return <section className="ov-onboarding" data-kind="no-domain" aria-labelledby="ov-onboarding-title">
     <div className="ov-onboarding__text">
-      <h2 id="ov-onboarding-title">Add your domain to start sending</h2>
-      <p title={noDomainWhy}>{noDomainWhy}</p>
+      <h2 id="ov-onboarding-title">{sends ? 'Add your own domain' : 'Add your domain to start sending'}</h2>
+      <p title={text}>{text}</p>
     </div>
     {/* The onboarding domain step: an empty step opens it, and the dashboard's gate goes there. */}
     <Button variant="primary" className="ov-onboarding__action" onClick={() => setDomainStep(workspaceId, '')} data-analytics="overview/no-domain/add">Add domain<ArrowRight size={16} aria-hidden /></Button>

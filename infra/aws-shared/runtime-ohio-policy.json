@@ -29,6 +29,11 @@
       "Condition": { "StringLike": { "aws:ResourceTag/bane:domain-claim": "????????-????-4???-????-????????????" } }
     },
     {
+      "Effect": "Allow", "Action": ["ses:CreateTenantResourceAssociation", "ses:DeleteTenantResourceAssociation"],
+      "Resource": "arn:aws:ses:us-east-2:YOUR_AWS_ACCOUNT_ID:identity/?*.??*",
+      "Condition": { "StringEquals": { "aws:ResourceTag/bane:purpose": "builtin-domains" } }
+    },
+    {
       "Effect": "Allow",
       "Action": [
         "ses:CreateTenantResourceAssociation",

@@ -2,6 +2,7 @@ import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, id, isSimulatedSes, log, ModuleLoadError, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { RATES } from './billing/money.js';
+import { SEND_LIMITS } from './send-limits.js';
 import { customerNotice, plainAddress, type Notice, type NoticeInput } from './notices.js';
 import { LINK_MINUTES, signinLinkUrl } from './signups.js';
 
@@ -121,7 +122,7 @@ export async function noDomainNotices(runtime: Runtime) {
   const { rows } = await runtime.db.execute(sql`WITH made AS (INSERT INTO account_notices(id,workspace_id,kind,dedupe_key,data)
       SELECT 'ant_'||replace(gen_random_uuid()::text,'-',''),w.id,'no_domain','no-domain:'||w.id,'{}'::jsonb FROM workspaces w
       WHERE w.created_at<=now()-interval '1 hour' AND w.created_at>now()-interval '3 days' AND w.id IS DISTINCT FROM ${runtime.config.platformDomainWorkspace ?? null}
-        AND NOT EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=w.id) AND NOT EXISTS (SELECT FROM account_notices p WHERE p.dedupe_key='no-domain:'||w.id)
+        AND NOT EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=w.id AND NOT coalesce(dc.identity ? 'builtin',false)) AND NOT EXISTS (SELECT FROM account_notices p WHERE p.dedupe_key='no-domain:'||w.id)
       ORDER BY w.created_at LIMIT 100
       ON CONFLICT (dedupe_key) DO NOTHING RETURNING id,workspace_id),
     queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'account.notify:'||id,'account.notify',workspace_id,jsonb_build_object('noticeId',id) FROM made ON CONFLICT (id) DO NOTHING)
@@ -202,7 +203,7 @@ export const signinLink = (workspaceId: string, linkId: string) => noticeInsert(
 
 type Row = { id: string; kind: AccountNoticeKind; data: Record<string, unknown>; name: string | null; exempt: boolean | null; recipients: string[];
   standing: { phase: string; step: string; daily: number | null } | null; paused: boolean | null; position: { mode?: string; enforcement?: string; availableUc?: string; freeSentLeft?: number } | null;
-  domain: string | null; hasDomain: boolean | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string } | null };
+  domain: string | null; hasDomain: boolean | null; builtin: string | null; invitation: { email: string; role: 'owner' | 'admin' | 'member'; expiresAt: string; inviterEmail: string } | null; link: { email: string } | null };
 
 /** What the row says now, or null when the moment has passed (fixed, revoked, or told by a more serious email). */
 function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: string[]; input: NoticeInput } | null {
@@ -217,7 +218,8 @@ function noticeOf(row: Row, origin: string, config: Runtime['config']): { to: st
         missing: d.missing, total: Number(d.total), wrong: d.wrong === true, host: d.host ?? null, releasesAt: d.releasesAt ? new Date(d.releasesAt) : null } } : null;
     }
     // Still no domain: one added meanwhile, in any state, needs no email.
-    case 'no_domain': return row.hasDomain ? null : { to: row.recipients, input: { kind: 'no_domain', workspace } };
+    case 'no_domain': return row.hasDomain ? null : { to: row.recipients, input: { kind: 'no_domain', workspace,
+      builtin: row.builtin && config.multiTenant && config.builtinDomain ? { name: row.builtin, scope: config.builtinScope, perDay: SEND_LIMITS.builtin[config.builtinScope].perDay } : null } };
     case 'limit_reached': {
       const p = row.position ?? {}, available = BigInt(p.availableUc ?? '0');
       const unpaid = p.enforcement === 'enforce' && p.mode === 'prepaid' && (available < 0n || (available < RATES.emailUc && (p.freeSentLeft ?? 0) === 0));
@@ -247,7 +249,8 @@ export const accountNotifyJob: JobHandler = retryDatabaseFailures(async (runtime
       (SELECT pc.paused_at IS NOT NULL FROM provider_connections pc WHERE pc.workspace_id=l.workspace_id AND pc.kind='shared') AS paused,
       CASE WHEN l.kind='limit_reached' THEN billing_position(l.workspace_id) END AS position,
       (SELECT dc.sending_state FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id AND dc.name=l.data->>'name') AS domain,
-      CASE WHEN l.kind='no_domain' THEN EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id) END AS "hasDomain",
+      CASE WHEN l.kind='no_domain' THEN EXISTS (SELECT FROM domain_claims dc WHERE dc.workspace_id=l.workspace_id AND NOT coalesce(dc.identity ? 'builtin',false)) END AS "hasDomain",
+      CASE WHEN l.kind='no_domain' THEN (SELECT b.name FROM builtin_domains b WHERE b.workspace_id=l.workspace_id AND b.revoked_at IS NULL) END AS builtin,
       (SELECT json_build_object('email',i.email,'role',i.role,'expiresAt',i.expires_at,'inviterEmail',u.email) FROM workspace_invitations i JOIN nightmail_users u ON u.id=i.inviter_id
         WHERE i.id=l.data->>'invitationId' AND i.workspace_id=l.workspace_id AND i.status='pending' AND i.expires_at>now()) AS invitation,
       (SELECT json_build_object('email',sl.email) FROM nightmail_signin_links sl WHERE l.kind='signin_link' AND sl.id=l.data->>'linkId' AND sl.expires_at>now()) AS link

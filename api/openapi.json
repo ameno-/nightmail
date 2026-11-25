@@ -513,11 +513,62 @@
               "total",
               "verified"
             ],
-            "description": "Domains claimed in this workspace and how many can send."
+            "description": "Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them."
           },
           "sent": {
             "type": "boolean",
             "description": "Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days)."
+          },
+          "builtinDomain": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "id": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Its ID in listDomains, once it is set up on this connection."
+              },
+              "name": {
+                "type": "string"
+              },
+              "sending": {
+                "type": "string",
+                "enum": [
+                  "ready",
+                  "pending",
+                  "closed",
+                  "off"
+                ],
+                "description": "ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: turned off by the operator."
+              },
+              "scope": {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "members"
+                ],
+                "description": "Who it sends to: anyone, or the verified addresses of the workspace's members."
+              },
+              "perDay": {
+                "type": "integer"
+              },
+              "perMinute": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "sending",
+              "scope",
+              "perDay",
+              "perMinute"
+            ],
+            "description": "Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one."
           },
           "attention": {
             "type": "string",
@@ -4311,7 +4362,8 @@
           "from": {
             "type": "string",
             "maxLength": 254,
-            "pattern": "^[\\x21-\\x7e]+$"
+            "pattern": "^[\\x21-\\x7e]+$",
+            "description": "An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies."
           },
           "fromName": {
             "type": "string",
@@ -4557,7 +4609,8 @@
           "from": {
             "type": "string",
             "maxLength": 254,
-            "pattern": "^[\\x21-\\x7e]+$"
+            "pattern": "^[\\x21-\\x7e]+$",
+            "description": "An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies."
           },
           "fromName": {
             "type": "string",
@@ -7831,6 +7884,10 @@
               "message"
             ],
             "description": "Hosted only: receiving needs attention. Set by the DNS checks that run when a receiving host is suggested or chosen, on Check now and in the hourly recheck. Null when the receiving record is clear."
+          },
+          "builtIn": {
+            "type": "boolean",
+            "description": "Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN)."
           }
         },
         "required": [
@@ -31727,7 +31784,7 @@
     "/v1/emails/send": {
       "post": {
         "operationId": "sendEmail",
-        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).",
+        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch). Built-in domain (Hosted): every workspace has a subdomain of Nightmail's own domain (connection.builtinDomain in GET /v1/me) that sends until the workspace verifies a domain of its own: plain transactional email sent now, without attachments, custom headers or a Reply-To elsewhere (422 BUILTIN_DOMAIN_UNSUPPORTED), to the recipients the installation allows (422 BUILTIN_DOMAIN_RECIPIENT), within a per-minute and a daily recipient cap (429 BUILTIN_DOMAIN_LIMIT), screened like a new sender's mail. Once a domain of its own verifies it answers 409 OWN_DOMAIN_VERIFIED.",
         "tags": [
           "Emails"
         ],
@@ -31903,7 +31960,7 @@
     "/v1/emails/batch": {
       "post": {
         "operationId": "sendEmailBatch",
-        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch).",
+        "description": "Front-door admission and content screening: Hosted sending checks validation, recipient suppression/consent, balance, limits, and the content screen (Jev with JevF failover) synchronously before queueing. Failing messages return an immediate error (422 RECIPIENT_INELIGIBLE, 422 CONTENT_REJECTED_SPAM, 422 CONTENT_TOO_LARGE_TO_SCREEN, or retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After when no mandatory classifier is configured) and nothing is queued; during a temporary outage of both classifiers, eligible mail is accepted (202) and held unscreened until a classifier answers. Screened-text limits: at most 65,536 UTF-8 bytes per message (installation default) and 150 distinct link hosts (3,000 bytes of host names), counting link labels that name another host; over either limit, error.details[0] holds { screenedBytes, limitBytes } or { linkHosts, linkHostLimit } (plus index in a batch). Built-in domain (Hosted): every workspace has a subdomain of Nightmail's own domain (connection.builtinDomain in GET /v1/me) that sends until the workspace verifies a domain of its own: plain transactional email sent now, without attachments, custom headers or a Reply-To elsewhere (422 BUILTIN_DOMAIN_UNSUPPORTED), to the recipients the installation allows (422 BUILTIN_DOMAIN_RECIPIENT), within a per-minute and a daily recipient cap (429 BUILTIN_DOMAIN_LIMIT), screened like a new sender's mail. Once a domain of its own verifies it answers 409 OWN_DOMAIN_VERIFIED.",
         "tags": [
           "Emails"
         ],

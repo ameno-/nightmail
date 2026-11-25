@@ -10,6 +10,7 @@ import { credentialFingerprint, discoveryTarget } from './ses-region-state.js';
 import type { ReadyConnection } from './provider-credentials.js';
 import type { SendScope } from './send-scope.js';
 import { productName } from './brand.js';
+import { builtinPolicy, builtinRefusal } from './builtin-domain.js';
 
 /**
  * Send admission: one decision for every kind of send, made by send_admission (migration 323) in the statement or
@@ -22,11 +23,13 @@ import { productName } from './brand.js';
  */
 export type Stage = 'send' | 'launch' | 'reserve' | 'release' | 'prepare';
 /** One message as admission sees it. `invalid` and `oversize` are TypeScript's own findings, reported after every rule. */
-export type AdmissionMail = { host: string; region?: string; kind: 'transactional' | 'marketing'; attachments: string[]; bodyBytes: number; duplicate?: boolean; invalid?: boolean; oversize?: boolean };
+export type AdmissionMail = { host: string; region?: string; kind: 'transactional' | 'marketing'; attachments: string[]; bodyBytes: number; duplicate?: boolean; invalid?: boolean; oversize?: boolean;
+  /** A built-in domain's mail (builtin-domain.ts): every recipient, lowercased, for its send scope and caps. */
+  recipients?: string[] };
 export type AdmittedAsset = { id: string; size: number; contentId: string | null; contentType: string };
 export type Admitted = { allowed: true; mails: { region: string; binding: SendingBinding | null; connection: ReadyConnection | null }[]; billing: BillingGate | null; assets: AdmittedAsset[]; shared: boolean };
 export type Released = { allowed: true; hostedLeft: number | null; nextChangeAt: string | null; billing: { enforced: boolean; freeSentLeft: number; affordable: number; availableUc: string } | null };
-export type Refused = { allowed: false; code: string; item?: number; reason?: string | null; cap?: number; window?: 'hour' | 'day'; reserved?: boolean;
+export type Refused = { allowed: false; code: string; item?: number; reason?: string | null; cap?: number; window?: 'hour' | 'day' | 'minute'; reserved?: boolean; field?: string; resetAt?: string;
   allowance?: HostedAllowance; incoming?: number; marketing?: number; regional?: boolean; failed?: boolean; host?: string; billing: BillingGate | null };
 
 /** The installation's side of every decision: limits, sending mode and policy. */
@@ -34,7 +37,7 @@ async function policy(runtime: Runtime) {
   const cfg = runtime.config, sim = isSimulatedSes(runtime), platform = platformPolicy(cfg);
   return { limits: SEND_LIMITS, simulated: sim, multiTenant: cfg.multiTenant, regional: regionalSending(runtime), trustedPool: !!cfg.trustedPool,
     requireDmarc: cfg.multiTenant && !!cfg.requireDmarcForBulk, platform: platform ? JSON.parse(platform) : null, platformWorkspace: cfg.platformDomainWorkspace ?? null,
-    caps: cfg.hostedSendCaps, headroom: cfg.dispatch.dailyHeadroomPercent, emailUc: RATES.emailUc.toString(),
+    caps: cfg.hostedSendCaps, headroom: cfg.dispatch.dailyHeadroomPercent, emailUc: RATES.emailUc.toString(), builtin: builtinPolicy(cfg),
     readiness: !cfg.multiTenant && !sim ? { fingerprint: await credentialFingerprint(cfg), target: discoveryTarget(cfg) } : null };
 }
 /** Recipients a send charges against the Hosted limit (none when SES is simulated), how many of them are marketing, and
@@ -116,6 +119,8 @@ export function refusal(runtime: Runtime, d: Refused, local: { batch?: boolean; 
     case 'NOT_FOUND': return new ApiError(404, d.code, 'Campaign was not found.');
     case 'CAMPAIGN_ARCHIVED': return new ApiError(409, d.code, 'Restore this campaign before sending a test.');
     case 'CAMPAIGN_LOCKED': return new ApiError(409, d.code, 'The campaign changed while it was being sent; fetch it and try again.', undefined, true);
+    case 'BUILTIN_DOMAIN_RECIPIENT': case 'BUILTIN_DOMAIN_LIMIT': case 'BUILTIN_DOMAIN_UNSUPPORTED': case 'BUILTIN_DOMAIN_UNAVAILABLE': case 'BUILTIN_DOMAIN_REVOKED': case 'OWN_DOMAIN_VERIFIED':
+      return item(builtinRefusal(runtime.config, d));
     case 'INVALID_CONTENT': return local.invalid!(d.item!);
     case 'CONTENT_TOO_LARGE_TO_SCREEN': return local.oversize!(d.item!);
   }

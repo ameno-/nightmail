@@ -182,7 +182,7 @@ export type ConnectionSummary = {
         marketingHeld: boolean;
     } | null;
     /**
-     * Domains claimed in this workspace and how many can send.
+     * Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.
      */
     domains?: {
         total: number;
@@ -192,6 +192,26 @@ export type ConnectionSummary = {
      * Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).
      */
     sent?: boolean;
+    /**
+     * Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.
+     */
+    builtinDomain?: {
+        /**
+         * Its ID in listDomains, once it is set up on this connection.
+         */
+        id: string | null;
+        name: string;
+        /**
+         * ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: turned off by the operator.
+         */
+        sending: 'ready' | 'pending' | 'closed' | 'off';
+        /**
+         * Who it sends to: anyone, or the verified addresses of the workspace's members.
+         */
+        scope: 'anyone' | 'members';
+        perDay: number;
+        perMinute: number;
+    } | null;
     /**
      * A connected AWS account's most pressing health finding, for a banner; absent when nothing needs attention.
      */
@@ -1332,6 +1352,9 @@ export type RecipientWarning = {
 };
 
 export type SendEmailInput = {
+    /**
+     * An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.
+     */
     from: string;
     fromName?: string;
     to: string | Array<string>;
@@ -1413,6 +1436,9 @@ export type SendEmailBatchInput = {
 };
 
 export type BatchSendEmailItem = {
+    /**
+     * An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace’s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.
+     */
     from: string;
     fromName?: string;
     to: string | Array<string>;
@@ -2463,6 +2489,10 @@ export type DomainReadiness = {
          */
         suggestion?: string | null;
     } | null;
+    /**
+     * Hosted only: the workspace’s built-in domain, a subdomain of Nightmail’s own domain that needs no DNS. It sends until a domain of the workspace’s own verifies (connection.builtinDomain in GET /v1/me has its limits), receives at every address, and can’t be deleted or changed (409 BUILTIN_DOMAIN).
+     */
+    builtIn?: boolean;
 };
 
 export type CreateDomain = {

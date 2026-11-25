@@ -8,6 +8,7 @@ import { useApiMutation, useApiDef, useApiQuery, useRegion, useSession, useWorks
 import { queries } from '../../data/queries'
 import { usePrefetchQueries } from '../../data/prefetch'
 import { ApiError, type DnsRecord, type Domain, type MailboxDomain, type ReceivingHost } from '../../data/types'
+import { productName } from '../../../../api/src/brand'
 import { request } from '../../data/live'
 import { domainPattern, normalizeDomain } from '../../lib/domain'
 import { mxTone, receivingStatus } from '../inbound/status'
@@ -15,9 +16,10 @@ import { receivingIssueReason, receivingIssueTitle } from './receiving-issue-tit
 import { AdminOnlyPage } from './admin-only'
 import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, checkSummary, dnsChecks, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines, type DnsChecks } from './domain-records'
-import { forgetDomain, invalidate } from '../../data/invalidation'
+import { cancelDomainQueries, forgetDomain, invalidate } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
 import { DomainSetupAlert, RecordsCorrectAlert, recordsCorrect, setupGap } from './domain-setup-alert'
+import { BuiltinBadge, builtinFirst, builtinStatus } from './builtin-domain'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
   const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${zoneLines(records)}\n`
@@ -105,7 +107,7 @@ function DomainsList() {
   const receivingOf = (id: string) => inbound.data?.find(d => d.id === id)
   const quota = domains.data?.quota
   const create = useApiMutation((api, input: { regionId: string; name: string }) => api.domains.create(input), 'Domain added', true, invalidate.domains)
-  const [open, setOpen] = useState(() => Boolean(params.get('add')))
+  const [open, setOpen] = useState(() => params.has('add'))
   const [name, setName] = useState(() => params.get('add') ?? '')
   const [invalid, setInvalid] = useState('')
   function openCreate() { create.reset(); setName(''); setInvalid(''); setOpen(true) }
@@ -124,8 +126,8 @@ function DomainsList() {
   return <div className="stack measure-list measure-list--narrow">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
-      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
-        { ...columns[0], render: row => <span className="domain-name" title={row.name}>{row.name}</span> },
+      <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={builtinFirst(domains.data?.items ?? [])} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
+        { ...columns[0], render: row => <span className="domain-name-cell"><span className="domain-name" title={row.name}>{row.name}</span>{row.builtIn && <BuiltinBadge />}</span> },
         { ...columns[1], render: row => <SendingCell domain={row} /> },
         { ...columns[2], render: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} />, cardRender: row => <ReceivingCell domain={row} receiving={receivingOf(row.id)} unknown={!!inbound.error} card /> },
         { ...columns[3], render: row => { const r = receivingOf(row.id); return r && r.status !== 'off' && r.status !== 'disabled' ? <Link to={`/receiving?domain=${encodeURIComponent(r.name)}`} onClick={event => event.stopPropagation()}>{r.addressCount.toLocaleString('en-US')}</Link> : <span className="muted" title={inbound.error ? 'Couldn’t load receiving status' : undefined}>—</span> } },
@@ -156,8 +158,9 @@ function DomainDetail() {
   const { multiTenant } = useWorkspaceAccess()
   const hosted = useSession()?.identity?.connection?.kind === 'shared'
   const [recheckUntil, setRecheckUntil] = useState(0)
-  // Set the moment the domain is deleted: every read of it below stops (no poll, no focus refetch), so dropping its cache
-  // entries on the way back to Domains starts nothing that would answer 404.
+  // Set when Delete is confirmed, before the DELETE goes out: every read of the domain below stops (no poll, no focus
+  // refetch), so nothing reaches the API after the domain is gone, and dropping its cache entries on the way back to
+  // Domains starts nothing either. Cleared again if the delete fails.
   const [deleted, setDeleted] = useState(false)
   const domain = useDomain(id, recheckUntil, !deleted)
   // Receiving set up through the API checks the domain in the background: follow it until it settles.
@@ -222,6 +225,15 @@ function DomainDetail() {
     const summary = checkSummary(current, found)
     return summary?.tone === 'danger' ? summary.text : null
   }
+  // The reads stop before the DELETE is sent, not once it answers: it takes a second or more (SES included), and a poll
+  // that fired meanwhile reached the API after the domain was gone and answered 404. A read already in flight is cancelled.
+  async function deleteDomain() {
+    flushSync(() => setDeleted(true))
+    void cancelDomainQueries(client, id).catch(() => {})
+    try { await remove.mutateAsync(id) } catch (error) { setDeleted(false); throw error }
+    navigate('/domains', { replace: true })
+    void forgetDomain(client, id).catch(() => {})
+  }
   if (domain.isPending || (!domain.error && (dns.pending || (multiTenant && ((receiving.isPending && !receiving.error) || (hosts.isPending && !hosts.error)))))) return <DomainDetailSkeleton />
   if (domain.error) return <div className="stack domain-page"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
@@ -233,6 +245,7 @@ function DomainDetail() {
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   // Check now's answers, or until it is pressed the background check's that the domain's reads carry (domain-setup-alert.tsx).
   const pressed = checks?.id === id ? checks.found : undefined, gap = setupGap(current, pressed)
+  if (current.builtIn) return <BuiltinDomainDetail domain={current} backTo={then || '/domains'} />
   return <div className="stack domain-page">
     <PageHeader title={current.name} backTo={then || '/domains'} actions={<>
       <StatusBadge status={state.status} tone={state.tone} />
@@ -252,7 +265,7 @@ function DomainDetail() {
     <ConfirmDialog open={!!moveMail} onOpenChange={open => { if (!open) setMoveMail(null) }} title={`Move mail for ${moveMail?.host ?? current.name}?`}
       description={`${moveMail?.message ?? ''} Mail stops arriving there once the MX record changes.`} confirmLabel={`Use ${moveMail?.host ?? current.name} anyway`} danger
       onConfirm={() => choose.mutateAsync({ host: moveMail!.host, confirm: true })} />
-    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={async () => { await remove.mutateAsync(id); flushSync(() => setDeleted(true)); navigate('/domains', { replace: true }); void forgetDomain(client, id).catch(() => {}) }} />
+    <ConfirmDialog open={deleteOpen} onOpenChange={setDeleteOpen} title={`Delete ${current.name}?`} description="Sending from it stops. Its DNS records stay at your DNS provider until you remove them." confirmLabel="Delete domain" danger pending={remove.isPending} onConfirm={deleteDomain} />
     <ConfirmDialog open={removingMailFrom.open} onOpenChange={open => setRemovingMailFrom(state => ({ ...state, open }))} title="Remove custom MAIL FROM?"
       description={`Mail from ${current.name} goes back to the default MAIL FROM, amazonses.com. You can then delete the MX and SPF records for ${removingMailFrom.name} at your DNS provider.`} confirmLabel="Remove" danger pending={removeMailFrom.isPending} onConfirm={() => removeMailFrom.mutateAsync(id)} />
     <Dialog open={mailFromOpen} onOpenChange={next => {if (!configureMailFrom.isPending) setMailFromOpen(next)}} title={current.mailFromDomain ? 'Change custom MAIL FROM' : 'Add custom MAIL FROM'} footer={<><Button disabled={configureMailFrom.isPending} onClick={() => setMailFromOpen(false)}>Cancel</Button><Button variant="primary" loading={configureMailFrom.isPending} type="submit" form="configure-mail-from">Save</Button></>}>
@@ -263,6 +276,25 @@ function DomainDetail() {
     </Dialog>
   </div>
 }
+
+// The built-in domain has no records, MAIL FROM, hosts or Delete: what it is, who it sends to, and where its mail goes. Its
+// catch-all is a route to the default inbox (api/src/builtin-domain.ts), which Receiving shows with its addresses.
+function BuiltinDomainDetail({ domain, backTo }: { domain: Domain; backTo: string }) {
+  const builtin = useSession()?.identity?.connection?.builtinDomain
+  const state = domainState(domain)
+  return <div className="stack domain-page">
+    <PageHeader title={domain.name} backTo={backTo} actions={<><BuiltinBadge /><StatusBadge status={state.status} tone={state.tone} /></>} />
+    <div className="domain-sections">
+      <section className="section stack" aria-label="Built-in domain">
+        <SectionHeader title="Built-in domain" />
+        <p className="muted domain-builtin-copy">{[`${productName} set this domain up for your workspace, so it needs no DNS.`, builtin?.name === domain.name ? builtinStatus(builtin) : null,
+          'Once a domain of your own verifies, it stops sending and keeps receiving.', `Mail to an address with no inbox or route of its own goes to ${BUILTIN_INBOX}@${domain.name}.`].filter(Boolean).join(' ')}</p>
+        <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--md" to={`/receiving?domain=${encodeURIComponent(domain.name)}`}>Open in Receiving</Link><Link className="ui-button ui-button--secondary ui-button--md" to="/domains?add">Add your own domain</Link></div>
+      </section>
+    </div>
+  </div>
+}
+const BUILTIN_INBOX = 'hello'
 
 // Self-hosted receiving. Enabling it on a domain that isn't verified yet is refused by the API, which says so inline.
 function MailboxReceiving({ domainId, domainName }: { domainId: string; domainName: string }) {

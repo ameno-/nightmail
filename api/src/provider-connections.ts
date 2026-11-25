@@ -1,10 +1,11 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { auditContext, auditInsert, recordAudit, type AuditContext } from './audit.js';
-import { ApiError, assertSesConfigured, denied, isSimulatedSes, errors, id, json, log, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
+import { ApiError, assertSesConfigured, denied, isSimulatedSes, errors, id, json, log, logError, ModuleLoadError, notFound, response, wrapModuleLoad, type App, type Ctx, type Runtime, type JobHandler } from './core.js';
 import { caller, assume, platformCredentials } from './provider-credentials.js';
 import { awsError, discoverSes, feedbackUrl, loadSetupSdk, POOL_INSTALLATION, poolTenantName, provisionSes, provisionTenant, setupResources, verifiedByoDomains, type SesDiscovery, byoStackName } from './ses-setup.js';
-import { importByoClaims } from './domain-claims.js';
+import { builtinClaim, importByoClaims } from './domain-claims.js';
+import { SEND_LIMITS } from './send-limits.js';
 import { regionPattern, getRegionSettings } from './ses-region-state.js';
 import { JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures } from './jobs.js';
 import { loadMailboxSetupSdk, preparePoolReceiving } from './mailbox-setup.js';
@@ -34,8 +35,12 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   }).nullable().optional().describe('Hosted only: the daily limit (set by the sender score) that POST /v1/emails/send enforces with 429 SEND_LIMIT_REACHED.'),
   standing: z.object({ step: z.enum(['ok', 'notice', 'warn', 'restrict', 'pause']), marketingHeld: z.boolean() }).nullable().optional()
     .describe('Hosted only: the enforcement step summary. GET /v1/sender-score has the reasons, the limit math and what an owner can release.'),
-  domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains claimed in this workspace and how many can send.'),
+  domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.'),
   sent: z.boolean().optional().describe('Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).'),
+  builtinDomain: z.object({ id: z.string().nullable().describe('Its ID in listDomains, once it is set up on this connection.'), name: z.string(),
+    sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now. pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: turned off by the operator.'),
+    scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\'s members.'), perDay: z.number().int(), perMinute: z.number().int() })
+    .nullable().optional().describe('Hosted only: the subdomain of the installation\'s own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.'),
   attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
 }).openapi('ConnectionSummary');
 type Row = { id: string; stack_name?: string | null; workspace_id: string; kind: 'shared' | 'byo'; region: string; state: ConnectionState; tenant_state: TenantState; aws_account_id: string | null; role_arn: string | null; external_id: string | null; platform_principal_arn: string | null; template_version: string | null; confirmed_message_id: string | null; imported_domains?: number; stack_template_version?: string | null; stack_deleted_at?: string | null; stack_error?: string | null; stack_id?: string | null; health?: { checkedAt: string; issues: { code: string; region?: string; message: string }[] } | null };
@@ -90,11 +95,15 @@ async function get(runtime: Runtime, wid: string) {
 }
 export async function connectionSummary(runtime: Runtime, wid: string): Promise<z.infer<typeof ConnectionSummary> | null> {
   // One statement: the same allowance admission charges against (incoming=1 reads the current usage), read without row locks.
-  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null}>(sql`
+  const builtin = runtime.config.multiTenant && runtime.config.builtinDomain ? runtime.config.builtinScope : null;
+  const row = (await runtime.db.execute<Pick<Row, 'kind' | 'region' | 'state' | 'tenant_state'> & {attention: string | null; paused_at: string | null; pause_reason: string | null; domains: number; verified_domains: number; sent: boolean; allowance: HostedAllowance | null; builtin: { id: string | null; name: string; sending: 'ready' | 'pending' | 'off' } | null}>(sql`
     SELECT c.kind, c.region, c.state, c.tenant_state, c.paused_at, c.pause_reason, c.health->'issues'->0->>'message' AS attention,
-      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id) AS domains,
-      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost')) AS verified_domains,
+      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
+      (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
       EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
+      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL THEN 'off' WHEN dc.sending_state='verified' THEN 'ready' ELSE 'pending' END)
+        FROM builtin_domains b LEFT JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
+        LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
     FROM provider_connections c WHERE c.workspace_id=${wid}`)).rows[0];
   if (!row) return null;
@@ -103,7 +112,9 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
   return { kind: row.kind, region: row.region, state: row.state, tenant: row.tenant_state, sendingPause: row.paused_at ? { at: new Date(row.paused_at).toISOString(), reason: row.pause_reason! } : null,
     sendingLimit: allowance ? { cap: allowance.cap, used: Number(allowance.used), resetAt: iso(allowance.resetAt), nextCap: allowance.nextCap ?? null, nextCapAt: iso(allowance.nextCapAt) } : null,
     standing: allowance ? { step: (allowance.step ?? 'ok') as 'ok', marketingHeld: !!allowance.marketingHeld } : null,
-    domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, ...(row.attention ? { attention: row.attention } : {}) };
+    domains: { total: row.domains, verified: row.verified_domains }, sent: row.sent, ...(row.attention ? { attention: row.attention } : {}),
+    // Sending from the built-in domain closes once a domain of the workspace's own verifies (send_admission).
+    ...(builtin ? { builtinDomain: row.builtin ? { ...row.builtin, sending: row.builtin.sending !== 'off' && row.verified_domains > 0 ? 'closed' : row.builtin.sending, scope: builtin, ...SEND_LIMITS.builtin[builtin] } : null } : {}) };
 }
 function checkProvisioned(report: SesDiscovery, pooled: boolean, allowSandbox = false) {
   // Domain verification and a BYO customer's production-access request are separate onboarding steps.
@@ -452,6 +463,12 @@ export function registerProviderConnections(app: App) {
       if (input.awsAccountId!==undefined) throw new ApiError(422,'VALIDATION_ERROR','Account ID is only accepted for regional BYO enrollment.');
       const row = await create(c.env, wid, input, auditContext(c));
       if ('queued' in row && row.queued) c.get('actor').wakeJobs=1;
+      // Hosted: the workspace's built-in domain is ready with the connection, so onboarding can skip DNS. If this fails
+      // the sweep creates it (builtin-domain.ts builtinDomainTick).
+      if (row.kind === 'shared' && row.state === 'ready' && c.env.config.builtinDomain) {
+        try { if (await (await wrapModuleLoad(() => import('./builtin-domain.js'))).ensureBuiltinDomain(c.env, wid)) c.get('actor').wakeJobs=1; }
+        catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'BUILTIN_DOMAIN_SETUP_FAILED', workspaceId: wid }); }
+      }
       return c.json(view(c.env, row), 201);
     } catch (e) { if (e instanceof ModuleLoadError) throw e; throw awsError(e); }
   });

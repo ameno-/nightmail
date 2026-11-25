@@ -55,6 +55,9 @@ export const SEND_LIMITS = {
    * kept, so a scheduled email is visible for its whole wait (longer plans are campaigns, up to a year); up to a minute
    * in the past for a sender's clock (it then sends at once); and how many may wait per workspace. */
   schedule: { horizonSeconds: 30 * 86_400, skewSeconds: 60, workspace: 100_000 },
+  /** A built-in domain's recipients in a minute and in a rolling 24 hours (builtin-domain.ts), for each send scope
+   * (NIGHTMAIL_BUILTIN_SEND_SCOPE): anyone, or only the workspace members' own verified addresses. */
+  builtin: { anyone: { perDay: 100, perMinute: 10 }, members: { perDay: 10, perMinute: 3 } },
 } as const;
 
 /** UTF-8 bytes of the parts a message's MIME carries, counted without copying them. A message sent as written (mime)
