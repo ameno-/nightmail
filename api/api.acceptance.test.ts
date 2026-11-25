@@ -967,6 +967,42 @@ test('OIDC migration links only connected subjects; nobody is adopted by email',
   }
 });
 
+test('optional Worker secrets disable only their feature on a partial rollout; core auth and live SES stay fail-closed', async t => {
+  const {loadConfig} = await import('./src/config.js'), {createApp} = await import('./src/app.js'), {drizzle} = await import('drizzle-orm/node-postgres');
+  const base = {PUBLIC_URL:PUBLIC_ORIGIN, BANE_ROOT_SECRET:AUTH_SECRET, MULTI_TENANT:'true', ACCOUNT_REQUIRED_ACR:'urn:anomaly:acr:google', ACCOUNT_ISSUER:process.env.ACCOUNT_ISSUER, ACCOUNT_CLIENT_ID:'fixture', ACCOUNT_CLIENT_PRIVATE_KEY:'unused-in-session-fixture'};
+  const zone = 'a'.repeat(32), token = 'fixture-private-value-never-log', lines:string[]=[];
+  t.mock.method(console,'error',(line:string)=>{lines.push(line);});
+  const app=createApp(), db=drizzle(await fixtureDatabase(t));
+  // The old version after token deletion, and the reverse transition with an inherited token on new code.
+  for (const link of [{NIGHTMAIL_LINK_SAAS_ZONE_ID:zone},{NIGHTMAIL_LINK_SAAS_TOKEN:token}]) {
+    const config=loadConfig({...base,...link,NIGHTMAIL_LINK_HOST:'links.example.net',NIGHTMAIL_POSTMASTER_CREDENTIALS:token,
+      NIGHTMAIL_SUPPORT_URL:'https://support.example.org',NIGHTMAIL_SUPPORT_SIGNING_KEY:token,CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:'bad',
+      ANALYTICS_PUSH_SECRET:token,DOMAIN_NS_CHECK:'typo',NIGHTMAIL_PLACEMENT_SHADOW:'typo',STRIPE_SECRET_KEY:'not-a-key',STRIPE_WEBHOOK_SECRET:'whsec_fixture',DOMAIN_CONNECT_KEY_ID:'_dck1'});
+    assert.deepEqual([config.linkHosts,config.linkHost,config.postmaster,config.support?.url,config.support?.signingKey,
+      config.observability,config.analyticsPush,config.billing?.stripe,config.domainConnect],[undefined,'links.example.net',undefined,undefined,undefined,undefined,undefined,undefined,undefined]);
+    assert.deepEqual([config.domainNsCheck,config.placementShadow],[false,false]);
+    const runtime={config,db,snsCertificateState:new SnsCertificateState(),storage:{async put(){throw Error('unused');},async delete(){throw Error('unused');},async get(){return null;}}};
+    assert.equal((await app.fetch(new Request(PUBLIC_ORIGIN+'/health'),runtime)).status,200);
+    const me=await app.fetch(new Request(PUBLIC_ORIGIN+'/v1/me'),runtime); assert.deepEqual([me.status,(await me.json() as Json).error?.code],[401,'AUTH_REQUIRED']);
+  }
+  const errors=lines.map(line=>JSON.parse(line)).filter(line=>line.code==='OPTIONAL_FEATURE_DISABLED');
+  for (const feature of ['linkHosts','postmaster','supportChat','supportLogs','analyticsPush','stripe','domainConnect']) {
+    assert.ok(errors.some(e=>e.feature===feature && e.level==='error'), feature);
+    assert.equal(errors.filter(e=>e.feature===feature).length,1,feature+' is logged once');
+  }
+  assert.ok(!lines.join('').includes(token));
+  const invalidBuiltin=loadConfig({...base,PUBLIC_URL:'https://app.example.org',NIGHTMAIL_BUILTIN_DOMAIN:'example.org'});
+  assert.equal(invalidBuiltin.builtinDomain,undefined,'An overlapping built-in parent uses its existing off switch.');
+  const badScope=loadConfig({...base,NIGHTMAIL_BUILTIN_DOMAIN:'mail.example.org',NIGHTMAIL_BUILTIN_SEND_SCOPE:'typo',NIGHTMAIL_HYGIENE_DNS:'invalid',NIGHTMAIL_HYGIENE_LISTS:'invalid'});
+  assert.deepEqual([badScope.builtinDomain,badScope.builtinScope,badScope.hygieneDnsUrl,badScope.hygieneLists],[undefined,'members',null,false]);
+  const healthy=loadConfig({...base,NIGHTMAIL_LINK_SAAS_ZONE_ID:zone,NIGHTMAIL_LINK_SAAS_TOKEN:token,
+    NIGHTMAIL_POSTMASTER_CREDENTIALS:JSON.stringify({clientId:'id',clientSecret:token,refreshToken:'refresh'}),
+    CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:zone,CF_OBSERVABILITY_SCRIPT:'nightmail-dev'});
+  assert.deepEqual([healthy.linkHosts?.zoneId,healthy.postmaster?.clientId,healthy.observability?.script],[zone,'id','nightmail-dev']);
+  for(const bad of [{BANE_ROOT_SECRET:'short'},{ACCOUNT_CLIENT_PRIVATE_KEY:''},{ACCOUNT_REQUIRED_ACR:''},{AWS_RUNTIME_CREDENTIALS:'{}'},{ENABLE_LIVE_SES:'true'}])
+    assert.throws(()=>loadConfig({...base,...bad,NIGHTMAIL_POSTMASTER_CREDENTIALS:'bad'}),{code:'CONFIG_INVALID'});
+});
+
 test('OIDC dashboard callback verifies the token, consumes bound state once and creates a revocable session', async t => {
   const {drizzle} = await import('drizzle-orm/node-postgres');
   const {loadConfig} = await import('./src/config.js');
@@ -3872,7 +3908,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const pem=privateKey.export({type:'pkcs1',format:'pem'}).toString().replaceAll('\n','\\n');
           for(const invalid of [{DOMAIN_CONNECT_KEY_ID:'_dck1'},{DOMAIN_CONNECT_PRIVATE_KEY:pem},
             ...['invalid-pem',generateKeyPairSync('rsa',{modulusLength:1024}).privateKey.export({type:'pkcs1',format:'pem'}),generateKeyPairSync('ec',{namedCurve:'prime256v1'}).privateKey.export({type:'pkcs8',format:'pem'})].map(k=>({DOMAIN_CONNECT_KEY_ID:'_dck1',DOMAIN_CONNECT_PRIVATE_KEY:k.toString()}))]) {
-            assert.throws(()=>loadConfig({...env,...invalid}),{code:'CONFIG_INVALID'});
+            assert.equal(loadConfig({...env,...invalid}).domainConnect, undefined);
           }
           runtime.config.domainConnect=loadConfig({...env,DOMAIN_CONNECT_PRIVATE_KEY:pem,DOMAIN_CONNECT_KEY_ID:'_dck1'}).domainConnect;
           const {getDashboardActor}=await import('./src/dashboard-auth.js');
@@ -29938,7 +29974,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const hosted = { MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google' };
       assert.deepEqual([settings({ NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T00:00:00Z' }).abuseMonitoring, settings(hosted).abuseMonitoring, settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: '2026-11-23T01:00:00+01:00' }).abuseMonitoring],
         [undefined, undefined, { since: '2026-11-23T00:00:00.000Z' }]);
-      assert.throws(() => settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: 'true' }), { code: 'CONFIG_INVALID' });
+      assert.equal(settings({ ...hosted, NIGHTMAIL_ABUSE_MONITORING: 'true' }).abuseMonitoring, undefined);
       assert.deepEqual([settings(hosted).abuseEnforce, settings({ ...hosted, NIGHTMAIL_ABUSE_ENFORCE: 'true' }).abuseEnforce], [false, true]);
       const wrangler = async (file: string, key: string) => new RegExp(`^\\s*"${key}"\\s*:`, 'm').test(await readFile(new URL(file, import.meta.url), 'utf8'));
       assert.deepEqual([await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.dev.jsonc', 'NIGHTMAIL_ABUSE_MONITORING'), await wrangler('./wrangler.prod.jsonc', 'NIGHTMAIL_ABUSE_ENFORCE')], [true, true, false], 'Monitoring is on in production, monitor-only.');
@@ -30368,7 +30404,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ...extra });
       assert.deepEqual([settings({}).abuseSlackWebhookUrl, settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T0/B0/fixture' }).abuseSlackWebhookUrl, loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ABUSE_SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T0/B0/fixture' }).abuseSlackWebhookUrl],
         [undefined, 'https://hooks.slack.com/services/T0/B0/fixture', undefined]);
-      assert.throws(() => settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://example.com/hook' }), { code: 'CONFIG_INVALID' });
+      assert.equal(settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://example.com/hook' }).abuseSlackWebhookUrl, undefined);
       assert.deepEqual([runtime.config.abuseSlackWebhookUrl, /ABUSE_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8'))], [undefined, false], 'Unset here and in production.');
 
       // Two accounts on one mailbox: watch, no alert. The same card on both workspaces: review, one alert.
@@ -40164,7 +40200,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://alerts.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ...extra });
       assert.deepEqual([settings({}).operatorSlackWebhookUrl, settings({ OPERATOR_SLACK_WEBHOOK_URL: OPERATOR_HOOK }).operatorSlackWebhookUrl,
         loadConfig({ PUBLIC_URL: 'https://alerts.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), OPERATOR_SLACK_WEBHOOK_URL: OPERATOR_HOOK }).operatorSlackWebhookUrl], [undefined, OPERATOR_HOOK, undefined]);
-      assert.throws(() => settings({ OPERATOR_SLACK_WEBHOOK_URL: 'https://example.com/hook' }), { code: 'CONFIG_INVALID' });
+      assert.equal(settings({ OPERATOR_SLACK_WEBHOOK_URL: 'https://example.com/hook' }).operatorSlackWebhookUrl, undefined);
       assert.equal(/OPERATOR_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8')), false);
 
       const f = await hostedHoldFixture(runtime, db), wid = f.wid;
@@ -44918,15 +44954,15 @@ test('Database disk alert: a PlanetScale storage event with the derived Authoriz
   // changed after signing, gets the same 404. Hosted only, like the Slack webhook.
   const signedRuntime = runtime({ PLANETSCALE_WEBHOOK_SECRET: signing }), sign256 = (body: string, key = signing) => createHmac('sha256', key).update(body).digest('hex');
   assert.deepEqual([signedRuntime.config.planetscaleWebhookSecret, loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: signing }).planetscaleWebhookSecret], [signing, undefined]);
-  // A secret too short or too long to be PlanetScale's never stops the installation: it is left unused, as if unset,
-  // and said once, without its value.
+  // An invalid configured signer closes the webhook, not the API, and is reported once without its value.
   const warned: string[] = [];
-  await t.test('a signing secret of the wrong length is ignored with one warning', st => {
-    st.mock.method(console, 'warn', (line: string) => { warned.push(line); });
-    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [undefined, undefined, undefined, undefined]);
+  await t.test('a signing secret of the wrong length closes the webhook with one error', st => {
+    st.mock.method(console, 'error', (line: string) => { warned.push(line); });
+    assert.deepEqual(['too-short-fixture', 'x'.repeat(31), 'y'.repeat(201), 'too-short-fixture'].map(value => runtime({ PLANETSCALE_WEBHOOK_SECRET: value }).config.planetscaleWebhookSecret), [null, null, null, null]);
     assert.equal(loadConfig({ PUBLIC_URL: origin, BANE_ROOT_SECRET: secret, PLANETSCALE_WEBHOOK_SECRET: 'too-short-fixture' }).planetscaleWebhookSecret, undefined, 'Self-hosted, it is never read.');
   });
-  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['PLANETSCALE_WEBHOOK_SECRET_IGNORED']);
+  assert.deepEqual(warned.map(line => (JSON.parse(line) as Json).code), ['OPTIONAL_FEATURE_DISABLED']);
+  assert.deepEqual(await deliver(storageEvent(86), { authorization: setup.authorization }, runtime({ PLANETSCALE_WEBHOOK_SECRET: 'invalid' })), [404, 'NOT_FOUND']);
   assert.ok(!warned[0]!.includes('too-short-fixture') && !warned[0]!.includes('x'.repeat(31)));
   const body = JSON.stringify(storageEvent(86));
   for (const signature of [undefined, sign256(body, 'e'.repeat(64)), sign256(body.replace('86', '87')), sign256(body).slice(1)])
