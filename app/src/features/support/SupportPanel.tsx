@@ -3,6 +3,8 @@ import { ArrowUp, Check, CircleAlert, Image as ImageIcon, ImagePlus, Square, Use
 import { Button, DropdownMenu, IconButton, Skeleton } from '../../components/ui'
 import { SheetOpenEffects, useSheetDrag } from '../../components/ui/sheet'
 import { useSession } from '../../data/context'
+import { supportApi } from '../../data/support'
+import { consumePendingSupportOpen } from '../../components/SupportChat'
 import { TOUCH, matches, usePhone, useTouch } from '../../lib/media'
 import { Markdown, settled } from './markdown'
 import { createDemoTransport } from './demo'
@@ -44,7 +46,26 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
   }, { read: () => loadDraft(mode, userId, workspaceId), write: draft => saveDraft(mode, userId, workspaceId, draft) }), [mode, userId, workspaceId])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const panel = useRef<HTMLElement>(null), input = useRef<HTMLTextAreaElement>(null)
-  useEffect(() => { store.setVisible(open); if (open) store.start() }, [store, open])
+  const pendingShare = useRef(false)
+  useEffect(() => {
+    store.setVisible(open)
+    if (!open) return
+    store.start()
+    const applyHandoff = () => {
+      const pending = consumePendingSupportOpen()
+      if (!pending) return
+      if (pending.shareContent) pendingShare.current = true
+      if (pending.message) { store.setDraft(pending.message); store.send() }
+    }
+    applyHandoff()
+    window.addEventListener('nightmail:support-handoff', applyHandoff)
+    return () => window.removeEventListener('nightmail:support-handoff', applyHandoff)
+  }, [store, open])
+  useEffect(() => {
+    if (!pendingShare.current || !state.hello?.conversationId) return
+    pendingShare.current = false
+    if (!state.hello.contentAccess && store.transport.kind === 'live') void supportApi.allowContent(state.hello.conversationId).catch(() => {})
+  }, [state.hello?.conversationId, state.hello?.contentAccess, store])
   useEffect(() => { onUnread(state.unread) }, [state.unread])
   // Opening moves focus in (to the message box, or the panel itself on a touch screen, so the keyboard doesn't jump up);
   // closing with focus inside returns it to the Help button.

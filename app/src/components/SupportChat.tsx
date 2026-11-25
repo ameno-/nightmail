@@ -19,6 +19,26 @@ const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'nightmail.support'
 export type SupportMode = 'demo' | 'live'
+export type PendingSupportOpen = { message?: string; shareContent?: boolean }
+
+let pendingOpen: PendingSupportOpen | null = null
+let activeOpener: (() => void) | null = null
+
+/** Opens the in-dashboard Help panel when support chat is enabled for this session; returns false otherwise. */
+export function openSupportChat(detail?: PendingSupportOpen): boolean {
+  if (!activeOpener) return false
+  if (detail?.message || detail?.shareContent) pendingOpen = detail
+  activeOpener()
+  window.dispatchEvent(new CustomEvent('nightmail:support-handoff'))
+  return true
+}
+
+/** Consumes any message/content-sharing request queued by openSupportChat(). */
+export function consumePendingSupportOpen(): PendingSupportOpen | null {
+  const next = pendingOpen
+  pendingOpen = null
+  return next
+}
 
 function readMode(hosted: boolean, staff: boolean) {
   const param = new URLSearchParams(window.location.search).get('support')
@@ -40,6 +60,12 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)
+  useEffect(() => {
+    if (!mode) return
+    const openPanel = () => { setUsed(true); setOpen(true) }
+    activeOpener = openPanel
+    return () => { if (activeOpener === openPanel) activeOpener = null }
+  }, [mode])
   // The panel's code loads when the page is idle, so Help opens at once even on a first tap (a touch has no hover).
   useEffect(() => {
     if (!mode) return

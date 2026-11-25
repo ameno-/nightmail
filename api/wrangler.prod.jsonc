@@ -101,7 +101,7 @@
     // CF_OBSERVABILITY_TOKEN secret (api/README.md "Support integration").
     "CF_OBSERVABILITY_ACCOUNT_ID": "15d29c8639fd3733b1b5486a2acfd968",
     "CF_OBSERVABILITY_SCRIPT": "nightmail-production",
-    // The support agent (support/): "Contact support" hands off here, and staff sign-in returns to its /staff/callback.
+    // The support agent (support/): Nightmail wakes its /hooks/nightmail-wake on this origin, and "Contact support" returns this URL.
     // The handoff's Ed25519 key is the BANE_SUPPORT_SIGNING_KEY secret.
     "BANE_SUPPORT_URL": "https://support.nightmail.dev/chat",
     // Email support conversations (src/support-conversations.ts): mail to support@nightmail.dev. On since 2026-11-25 (Ryan approved).
