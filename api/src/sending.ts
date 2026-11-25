@@ -1399,7 +1399,10 @@ async function endRelease(runtime: Runtime, wid: string, emailId: string, run: u
 
 /** One message of a send, as built before admission: what TypeScript alone found wrong with it waits in `invalid`. */
 type ScreenSummaryValue = { status: 'passed' | 'skipped' };
-type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError; emailId?: string; screenSummary?: ScreenSummaryValue; countScreened?: boolean; heldForScreen?: boolean };
+type Outgoing = { snapshot: EmailSnapshot; recipients: number; marketing: boolean; template?: SendRequest['template']; token?: { hash: string; email: string }; duplicate?: boolean; invalid?: unknown; oversize?: ApiError; emailId?: string; screenSummary?: ScreenSummaryValue; countScreened?: boolean; heldForScreen?: boolean;
+  /** The dashboard's test email to this address (admitTestEmail): the screen records a platform verdict for it instead of
+   *  asking the classifier, if and only if the message is that email, word for word, to that one address. */
+  platformTestTo?: string };
 /** A direct send's messages, built and checked without the database: URLs, headers, duplicates and the batch's size.
  *  `postalAddress`: the workspace's, for the footer of its marketing mail (admitEmails reads it). */
 async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boolean, postalAddress?: string | null): Promise<Outgoing[]> {
@@ -1527,6 +1530,13 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
     }
     if (shouldScreen) {
       m.emailId ??= rowId('email');
+      const verdict = m.platformTestTo ? platformTestVerdict(m.snapshot, m.platformTestTo, rules) : undefined;
+      if (verdict) {
+        // The local rules above still ran (the copy a probation sender's mail goes out as); only the classifier is spared.
+        if (rules === 'probation') m.snapshot = copy;
+        m.snapshot.screenVerdict = verdict;
+        continue;
+      }
       tasks.push({ index: i, message: m, copy, hosted, required: hosted && (!trusted || m.snapshot.kind === 'marketing'), rules, region: route.region });
     }
   }
@@ -1758,7 +1768,7 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
   }
 }
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
-async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false, screen = true) {
+async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false, platformTestTo?: string) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
   for (const [i, m] of mails.entries()) assertBuiltinInput(call.runtime.config, m, batch ? i : undefined);
   if (mails.some(m => isBuiltinHost(call.runtime.config, m.from.split('@')[1]!))) await awaitBuiltinSetup(call.runtime, a.workspaceId);
@@ -1767,9 +1777,10 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   const address = mails.some(m => m.kind === 'marketing') ? await workspacePostalAddress(call.runtime, call.db ?? call.runtime.db, a.workspaceId) : null;
   const out = await directMessages(call.runtime, mails, batch, address);
   if (sealed) for (const m of out) m.snapshot.sealed = true;
+  if (platformTestTo) for (const m of out) m.platformTestTo = platformTestTo;
   // A reply by header joins the conversation it answers only when its sender can read that message.
   await joinReplies(call.db ?? call.runtime.db, actorMailAccess(a), out.map(m => m.snapshot));
-  const screened = screen && mayScreenAtAccept(call.runtime, out), needsPrep = out.some(m => m.template) || screened;
+  const screened = mayScreenAtAccept(call.runtime, out), needsPrep = out.some(m => m.template) || screened;
   if (!needsPrep) return admitSends(call, input, out, { actor: a }, { batch, scheduledAt });
   return claimedSend(call, a, input, async () => {
     if (out.some(m => m.template)) await renderTemplates(call.runtime, a, out, batch);
@@ -2112,12 +2123,26 @@ async function campaignMessage(runtime: Runtime, draft: CampaignDraft, contact: 
   }
 }
 
-/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain> to the signed-in user only.
- * Its words are the platform's, never the workspace's, so the spam screen (a classifier call, most of the send's time) has
- * nothing to judge and is skipped; every other check of a send applies. */
-export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
+/** The dashboard's test email (POST /v1/domains/{id}/test-send): fixed content from hello@<domain>, to the signed-in user. */
+export const platformTestEmail = (domain: string) => {
   const from = `hello@${domain}`;
-  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ from, to: [to], subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` }), undefined, false, false));
+  return { from, subject: `Test email from ${productName}`, text: `This is a test email from the ${productName} dashboard, sent from ${from}. You can reply to it or ignore it.` };
+};
+/**
+ * The content screen's verdict for the dashboard's test email: its words are ours and it goes only to the person who
+ * asked for it, so there is nothing for the classifier to judge, and Hosted dispatch (which sends nothing without a
+ * verdict) takes this one, recorded as such. Anything else, a changed word, another or a further recipient, a header, an
+ * attachment or HTML, gets no verdict here and is screened as usual.
+ */
+export function platformTestVerdict(s: EmailSnapshot, to: string, rules: 'probation' | 'standard' | null): EmailSnapshot['screenVerdict'] {
+  const fixed = platformTestEmail(s.from.split('@')[1] ?? '');
+  const exact = s.from === fixed.from && s.subject === fixed.subject && s.text === fixed.text && s.html === undefined && s.kind === 'transactional'
+    && s.to.length === 1 && s.to[0]!.toLowerCase() === to.toLowerCase() && !s.cc.length && !s.bcc.length && !s.replyTo.length && !s.attachments.length
+    && !s.headers.length && !s.template && !s.raw && !s.mime && !s.fromName;
+  return exact ? { status: 'platform', reason: 'platform test email', rules } : undefined;
+}
+export async function admitTestEmail(c: Ctx, a: Actor, domain: string, to: string) {
+  return Receipt.parse(await admitEmails(sendCall(c), a, SingleSendInput.parse({ ...platformTestEmail(domain), to: [to] }), undefined, false, to));
 }
 
 export function registerSending(app: App) {

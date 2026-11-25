@@ -203,10 +203,9 @@ export function registerWorkspaces(app: App) {
       if (!member) throw new ApiError(401, 'AUTH_REQUIRED', 'Sign in with your OIDC account.');
       throw new ApiError(409, 'WORKSPACE_LIMIT', `You already own ${maxOwnedWorkspaces} workspaces, the most one account can have.`);
     });
-    // With a built-in domain, its Hosted mail starts in this request, as a sign-up's does (startHostedMail); onboarding
-    // starts it if it couldn't.
-    if (c.env.config.multiTenant && c.env.config.builtinDomain) try { await (await wrapModuleLoad(() => import('./provider-connections.js'))).startHostedMail(c.env, created.id, auditContext(c), undefined, true); }
-      catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'HOSTED_MAIL_START_FAILED', workspaceId: created.id }); }
+    // With a built-in domain, its Hosted mail starts right after this answers, as a sign-up's does (startHostedMailAfter);
+    // onboarding starts it if it couldn't.
+    if (c.env.config.multiTenant && c.env.config.builtinDomain) void (await wrapModuleLoad(() => import('./provider-connections.js'))).startHostedMailAfter(c.env, created.id, auditContext(c));
     return c.json(Workspace.parse({ ...created, role: 'owner' }), 201);
   });
   app.openapi(createRoute({ method: 'patch', path: base, operationId: 'renameCurrentWorkspace', tags, security, request: { body: json(z.object({ name: z.string().trim().min(1).max(120) }).strict()) }, responses: { 200: response(Workspace), ...errors } }), async c => {

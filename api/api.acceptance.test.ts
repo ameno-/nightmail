@@ -1092,8 +1092,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
     assert.ok(notice.startsWith(`__Host-nightmail.waitlist=${encodeURIComponent(approved)};`) && /Max-Age=600/.test(notice) && /Secure/.test(notice) && !/HttpOnly/i.test(notice),notice);
     assert.ok(!refused.headers.getSetCookie().some(c=>c.startsWith('__Host-nightmail.session_token=')));
   }
-  // Every code exchange proved a DPoP key and fetched the server's nonce first (production failed with invalid_dpop_proof).
-  assert.deepEqual(exchanges,{refused:0,nonce:5,issued:5});
+  // Every code exchange proved a DPoP key (production failed with invalid_dpop_proof). Only the first had to fetch the
+  // server's nonce: each later sign-in's new key starts with the nonce the service last gave, a round trip saved.
+  assert.deepEqual(exchanges,{refused:0,nonce:1,issued:5});
   // Abuse monitoring (src/abuse.ts): each verified sign-in, refused ones included, adds what it observed to the row the
   // sign-in log writes anyway, hashed in the request. It writes nothing else; the hourly job reads the log later.
   const observedBy=async(sub:string)=>((await db.query('SELECT observed FROM nightmail_signin_attempts WHERE issuer=$1 AND subject=$2',[issuer,sub])).rows[0]?.observed ?? null) as {kind:string;value:string}[]|null;
@@ -23653,6 +23654,17 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const t1=Date.now(),early=ok(await local('POST','/v1/emails/send',{from:`hello@${host}`,to:AUTH_EMAIL,subject:'Early',text:'Sent while its domain was set up.'}),202);
       t.diagnostic(`A send in the domain's first seconds waited ${Date.now()-t1} ms for its setup`);
       assert.ok(early.id);assert.equal(await claim(own),'verified');await rc.started;
+
+      // 4. The sign-up answers before its Hosted mail is even written (startHostedMailAfter): the new workspace's /v1/me waits
+      //    for the rows instead of showing no connection or no domain, and any other workspace without them answers at once.
+      const {settledConnectionSummary,startHostedMailAfter,HOSTED_START_WAIT}=await import('./src/provider-connections.js');
+      const d=await signUp(),late=new Promise(resolve=>setTimeout(resolve,300)).then(()=>startHostedMailAfter(runtime,d.wid,d.context));
+      const t2=Date.now(),settled=await settledConnectionSummary(runtime,d.wid),waited=Date.now()-t2;
+      t.diagnostic(`A new workspace's first /v1/me waited ${waited} ms for the Hosted mail its sign-up wrote after answering`);
+      assert.ok(settled?.builtinDomain,'It answers with the built-in domain.');assert.ok(waited>=250&&waited<HOSTED_START_WAIT.ms,String(waited));
+      await late;assert.equal(await claim(d.wid),'verified');
+      const old=await signUp();await db.query("UPDATE workspaces SET created_at=now()-interval '1 minute' WHERE id=$1",[old.wid]);
+      const t3=Date.now();assert.equal(await settledConnectionSummary(runtime,old.wid),null);assert.ok(Date.now()-t3<250,'An older workspace answers at once.');
     }));
   });
 
@@ -28094,6 +28106,41 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       configure({ JEV_SCREEN_THRESHOLD: '0.68', JEVF_SCREEN_THRESHOLD: '0.52' }); jevf = 0.51;
       assert.equal(ok(await send('Private fixture 0.51'), 202).screen.status, 'passed');
       outage = 'http_503'; error(await send('Overridden fallback cutoff'), 422, 'CONTENT_REJECTED_SPAM');
+    }));
+  });
+
+  test('the dashboard test email carries a platform screen verdict and goes at once; other words or another recipient are screened', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, run, jobs }) => t.test('platform verdict', async t => {
+      const acct = '112223330041', { wid, screened, delivered } = await hostedScreenFixture(t, runtime, db, acct, 'platform.invalid');
+      const { dispatch } = await campaignHarness(runtime, db, local, run, jobs, wid, acct, 'news@platform.invalid');
+      const domain = unique('test-send-platform');
+      await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,'platform.invalid',$3)", [domain, wid, REGION]);
+      // The test email: no classifier call, a verdict recorded as the platform's (not a skip), and the mail room sends it on
+      // its next run instead of holding it for the screen (production: 51 s, #740).
+      const sent = ok(await local('POST', `/v1/domains/${domain}/test-send`, undefined, 'live', { 'idempotency-key': unique('test-send') }), 202);
+      assert.deepEqual(screened, []);
+      const row = (await db.query(`SELECT screened, snapshot->'screenVerdict'->>'status' AS status, snapshot->'screenVerdict'->>'reason' AS reason FROM sending_emails WHERE id=$1`, [sent.id])).rows[0];
+      assert.deepEqual(row, { screened: true, status: 'platform', reason: 'platform test email' });
+      assert.equal((await dispatch()).sent, 1);
+      assert.ok(delivered.has(manager!.email), 'Sent to the signed-in user, on the first run.');
+      // The verdict is for exactly that email: a changed word, another or a further recipient, a header, HTML, an attachment
+      // or a display name gets none, so it goes to the classifier like any other send.
+      const { platformTestEmail, platformTestVerdict } = await import('./src/sending.js');
+      const me = manager!.email, fixed = platformTestEmail('platform.invalid');
+      const exact = { ...fixed, to: [me], cc: [], bcc: [], replyTo: [], region: REGION, kind: 'transactional' as const, attachments: [], headers: [], tracking: false };
+      assert.deepEqual(platformTestVerdict(exact, me.toUpperCase(), 'standard'), { status: 'platform', reason: 'platform test email', rules: 'standard' });
+      for (const [what, changed] of [
+        ['body', { text: fixed.text + ' Claim your prize: https://example.invalid' }], ['subject', { subject: 'Urgent: verify your account' }],
+        ['recipient', { to: ['someone-else@example.invalid'] }], ['second recipient', { to: [me, 'someone-else@example.invalid'] }],
+        ['cc', { cc: ['someone-else@example.invalid'] }], ['bcc', { bcc: ['someone-else@example.invalid'] }], ['reply-to', { replyTo: ['someone-else@example.invalid'] }],
+        ['html', { html: '<p>Click here</p>' }], ['header', { headers: [{ Name: 'X-Campaign', Value: '1' }] }], ['attachment', { attachments: ['att_fixture'] }],
+        ['display name', { fromName: 'Your bank' }], ['another domain', { from: 'hello@other.invalid' }], ['marketing', { kind: 'marketing' as const }],
+      ] as [string, Partial<typeof exact> & { html?: string; fromName?: string }][]) assert.equal(platformTestVerdict({ ...exact, ...changed }, me, 'standard'), undefined, what);
+      // The same words through the API, to the same person: an ordinary send, screened.
+      const key = ok(await local('POST', '/v1/api-keys', { name: unique('platform-key'), permissions: ['send'] }), 201).secret;
+      const copied = ok(await local('POST', '/v1/emails/send', { from: fixed.from, to: me, subject: fixed.subject, text: fixed.text }, 'live', { authorization: `Bearer ${key}` }), 202);
+      assert.equal(screened.length, 1);
+      assert.equal((await db.query(`SELECT snapshot->'screenVerdict'->>'status' AS status FROM sending_emails WHERE id=$1`, [copied.id])).rows[0].status, 'passed');
     }));
   });
 

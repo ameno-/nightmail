@@ -76,9 +76,12 @@ export function AgentInboxStep({ domain, onBack, onFinish }: { domain: string; o
   const inbox = useQuery(agentInboxQuery(domain))
   const mail = useArrivingMail(inbox.data?.id)
   const setup = useAgentSetup(canAdminister)
-  const promptFor = (setupToken: string | null | undefined) => agentInboxPrompt({ origin: origin!, address, inboxId: inbox.data?.id, setupToken })
-  // The copy waits for the inbox, so the prompt always names it.
-  const copy = async () => { await inbox.refetch({ cancelRefetch: false }).catch(() => {}); return setup ? setup.copy(promptFor)() : promptFor(undefined) }
+  const promptFor = (inboxId: string | undefined) => (setupToken: string | null | undefined) => agentInboxPrompt({ origin: origin!, address, inboxId, setupToken })
+  // The prompt names the inbox: the one already read, else the copy waits for it to be found or made.
+  const copy = async () => {
+    const id = inbox.data?.id ?? (await inbox.refetch({ cancelRefetch: false }).catch(() => undefined))?.data?.id
+    return setup ? setup.copy(promptFor(id))() : promptFor(id)(undefined)
+  }
   const messages = mail.data ?? []
   return <div className="onboarding onboarding--narrow">
     <div className="onboarding-intro onb-rise" style={rise(0)}>
@@ -93,7 +96,7 @@ export function AgentInboxStep({ domain, onBack, onFinish }: { domain: string; o
       <div className="onboarding-connect-actions" data-pending={!origin || undefined} inert={!origin}>
         <CopyAction value={copy} label="Copy agent prompt" text="Copy agent prompt" variant="primary" />
         <a className="ui-button ui-button--ghost ui-button--md" href="/docs/inboxes" target="_blank" rel="noopener" data-analytics="onboarding/inbox/docs">Read the docs<ArrowUpRight size={16} aria-hidden /></a>
-        <Button variant="ghost" data-analytics="onboarding/inbox/download" onClick={() => origin && downloadText(`${productSlug}-agent-inbox-prompt.txt`, promptFor(undefined))}><Download size={16} aria-hidden />Download</Button>
+        <Button variant="ghost" data-analytics="onboarding/inbox/download" onClick={() => origin && downloadText(`${productSlug}-agent-inbox-prompt.txt`, promptFor(inbox.data?.id)(undefined))}><Download size={16} aria-hidden />Download</Button>
       </div>
       {setup ? <AgentSetupStatus setup={setup} idle="Paste it into your coding agent: it gets its own key and connects over MCP." /> : <p className="muted onboarding-agent-line">Paste it into your coding agent: it connects with a device code.</p>}
     </section>
