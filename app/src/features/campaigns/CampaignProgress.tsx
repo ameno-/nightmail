@@ -22,7 +22,7 @@ type Progress = Pick<Campaign, 'status' | 'delivery'>
 const releasing = (campaign: Progress) => ['preparing', 'sending'].includes(campaign.status) && (campaign.delivery?.expanded ?? 0) < (campaign.delivery?.total ?? 0)
 // Paused or waiting for a pacing window / SES quota: nothing new is released for a while.
 export const sendingHeld = (campaign: Progress) => campaign.status === 'paused' || (releasing(campaign) && Boolean(campaign.delivery?.waiting))
-const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity', list_probe: 'Waiting for test batch feedback', balance: 'Waiting for account credit', feedback_lag: 'Waiting for delivery reports to catch up' } as const
+const waitingLabel = { pacing_window: 'Waiting for the next daily slice', ses_daily_quota: 'Holding for the SES daily quota', hosted_daily_quota: 'Waiting for Hosted sending capacity', list_probe: 'Waiting for test batch feedback', balance: 'Waiting for account credit', feedback_lag: 'Waiting for delivery reports to catch up', link_record: 'Waiting for the link record' } as const
 const atUtc = (value: string) => `${date(value)} · ${time(value)} UTC`
 /** What people see as the state: a launch still checking messages for a future send is already "scheduled" to them. */
 export const campaignDisplayStatus = (campaign: Pick<Campaign, 'status' | 'scheduledAt' | 'archivedAt'>) => campaign.archivedAt ? 'archived' : campaign.status === 'preparing' && campaign.scheduledAt && Date.parse(campaign.scheduledAt) > Date.now() ? 'scheduled' : campaign.status
@@ -79,6 +79,9 @@ export function CampaignProgress({ campaign }: { campaign: Campaign }) {
   const statusText = wait
     ? wait.reason === 'feedback_lag'
       ? 'Waiting for delivery reports to catch up.'
+      // Launched before link hosts: it continues by itself once the sending domain's link record verifies.
+      : wait.reason === 'link_record'
+        ? `Add links.${campaign.fromEmail.split('@')[1] ?? 'your domain'} on the domain's page to continue. Sending resumes once it verifies.`
       : wait.reason === 'list_probe'
         ? `Test batch${expanded > 0 ? ` of ${number(expanded)}` : ''} sent. Rest release at ${localTime(wait.until)} if bounces stay low.`
         : `${waitingLabel[wait.reason] ?? 'Waiting to release more recipients'} · ${approxRelativeTime(wait.until)}`

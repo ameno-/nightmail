@@ -153,10 +153,19 @@ export async function checkLinkHost(runtime: Runtime, workspaceId: string, domai
     log('warn', { code: 'LINK_HOST_CHECK_UNAVAILABLE', workspaceId, status: error.status });
     detail = 'Cloudflare didn\u2019t answer. Check again in a minute.';
   }
+  const woke = status === 'active' && row?.status !== 'active';
   await runtime.db.execute(sql`INSERT INTO link_hosts(workspace_id, domain, hostname, custom_hostname_id, status, detail, public_dns, verified_at)
     VALUES(${workspaceId}, ${domain}, ${hostname}, ${id}, ${status}, ${detail}, ${seen ? JSON.stringify(seen) : null}::jsonb, CASE WHEN ${status}='active' THEN now() END)
     ON CONFLICT (workspace_id, domain) DO UPDATE SET custom_hostname_id=excluded.custom_hostname_id, status=excluded.status, detail=excluded.detail,
       public_dns=excluded.public_dns, checked_at=now(), verified_at=CASE WHEN excluded.status='active' THEN coalesce(link_hosts.verified_at, now()) END`);
+  if (woke) await wakeLinkRecordHolds(runtime, workspaceId);
+}
+/** A link host just became active: the workspace's campaigns waiting for a link record (releaseStep, 'link_record') look
+ *  again now instead of at their next 15-minute check. */
+async function wakeLinkRecordHolds(runtime: Runtime, workspaceId: string) {
+  const { rowCount } = await runtime.db.execute(sql`UPDATE jobs SET available_at=now() WHERE workspace_id=${workspaceId} AND status='pending' AND available_at>now()
+    AND id IN (SELECT 'campaign.run:'||id FROM sending_campaigns WHERE workspace_id=${workspaceId} AND state='sending' AND waiting_reason='link_record')`);
+  if (rowCount) try { await runtime.wake?.(rowCount); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'The campaign run is durable; the scheduler will run it.' }); }
 }
 
 type Readable = { name: string; dns: { name: string; type: 'CNAME' | 'TXT' | 'MX'; value: string; purpose: string; status: 'pending' | 'verified'; note?: string; publicDns?: Seen | null }[] };

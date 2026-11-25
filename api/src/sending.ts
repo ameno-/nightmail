@@ -231,7 +231,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   pacing: z.object({ perDay: z.number().int().nullable().describe('Maximum recipients released per rolling 24-hour window; null means no daily cap.'), autoPause: z.boolean().describe('Pause automatically when bounce or complaint rates exceed safe thresholds.'), rateShare: z.number().describe('Maximum fraction of the SES per-second send rate this campaign uses; 1 is the full rate.'), windowStartedAt: z.string().nullable(), windowExpanded: z.number().int().describe('Recipients released in the current 24-hour window.'), nextWindowAt: z.string().nullable().describe('When the next 24-hour window opens, when a daily cap is set.') }),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.'),
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'link_record']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. link_record: a campaign launched before link hosts waits until its sending domain\'s link record (links.<domain>) verifies, then continues by itself.'),
   feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
   if (!row.reviewId) return null;
@@ -3659,6 +3659,8 @@ async function frozenPostalAddress(runtime: Runtime, a: Actor, row: RunRow) {
   log('info', { code: 'CAMPAIGN_POSTAL_ADDRESS_FROZEN', campaignId: row.id });
   return found.address;
 }
+/** How long a campaign launched before link hosts, and its queued email, wait before looking for their link host again. */
+export const LINK_RECORD_RECHECK_MS = 15 * 60_000;
 // sending: release the next recipients into the dispatch queue within the buffer, pacing, rate share and SES quota.
 // Returns 'again' when another release can start at once, 'done' when this run has nothing more to do, and waits in
 // place (JobDeferred on the same job row) otherwise.
@@ -3679,10 +3681,17 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND campaign_id IS NOT NULL AND status IN ('queued','attempting') LIMIT ${limits.total}) e) AS total,
     (SELECT count(*)::int FROM (SELECT 1 FROM sending_emails WHERE workspace_id=${a.workspaceId} AND campaign_id=${row.id} AND status IN ('queued','attempting') LIMIT ${limits.campaign}) c) AS campaign`)).rows;
   // Record why releasing is held (shown on the campaign), then wait in place.
-  const hold = async (reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'feedback_lag', until: string): Promise<never> => {
+  const hold = async (reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'feedback_lag' | 'link_record', until: string): Promise<never> => {
     await runtime.db.execute(holdCampaign(ref, reason, until));
     throw new JobDeferred(until, payload);
   };
+  // A campaign launched before link hosts froze none: it waits, without releasing anyone, until its sending domain's link
+  // host is active (src/link-domains.ts). The check that makes it active wakes the run (wakeLinkRecordHolds); otherwise
+  // it looks again every 15 minutes, as the background link check does.
+  if (!row.reviewDraft!.linkOrigin && !row.reviewDraft!.requiredNotice) {
+    const missing = await linkOrigin(runtime, runtime.db, a.workspaceId, row.reviewDraft!.from).then(() => false, error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return true; throw error; });
+    if (missing) return hold('link_record', new Date(nowMs + LINK_RECORD_RECHECK_MS).toISOString());
+  }
   // A stale/nonexistent sample is not an unlimited allowance. When a known quota (or a
   // previously held campaign) needs a new sample, use the dispatcher's elected cache refresher.
   // This works with an empty queue and does not release a probe/buffer of speculative emails.
@@ -4077,7 +4086,15 @@ export async function screenHeldMail(runtime: Runtime, limit = HELD_SCREEN_LIMIT
         };
         const materialized = await materializeCampaignEmail(scopedRt, a, mailRow, {
           version: r.review_version ?? 1, draft: r.review_draft, rendered: r.review_rendered, contentHash: r.review_content_hash, recipient: r.review_recipient,
-        });
+        }).catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return null; throw error; });
+        // A campaign launched before link hosts whose sending domain has none active yet: the email waits, as its campaign
+        // does (releaseStep), and is screened once the link host is active. Not an outage: the sweep goes on.
+        if (!materialized) {
+          deferred++;
+          await runtime.db.execute(sql`UPDATE sending_emails SET lease_until = clock_timestamp() + ${LINK_RECORD_RECHECK_MS}::float8 * interval '1 millisecond'
+            WHERE workspace_id = ${wid} AND id = ${id} AND dispatch_version = ${ver} AND status IN ('queued', 'scheduled') AND NOT screened`);
+          return;
+        }
         const delivery = rules ? await import('./screened-html.js') : undefined;
         let copy = { ...materialized.keyed, to: [] as string[] };
         if (delivery) copy = delivery.hostedCopy(copy, rules === 'probation');
