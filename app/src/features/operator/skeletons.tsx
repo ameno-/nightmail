@@ -116,7 +116,7 @@ export const SetLimitTrigger = (props: ButtonProps) => <Button {...props}>Set li
 // phone's card shows the note, its status, page, type and age, with its selection checkbox at the end for the bulk menu.
 export const noteColumnDefs: SkeletonColumn[] = [
   { key: 'select', label: '', width: 40, card: 'end' },
-  { key: 'shot', label: 'Screenshot', width: 96, card: 'hide' },
+  { key: 'shot', label: 'Screenshot', width: 92, card: 'hide' },
   { key: 'note', label: 'Note', card: 'title' },
   { key: 'status', label: 'Status', width: 124, card: 'aside' },
   { key: 'page', label: 'Page', width: '20%', card: 'line' },

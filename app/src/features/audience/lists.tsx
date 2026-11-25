@@ -16,7 +16,7 @@ import { useAdaptivePageSize, useDebounced, useSearchDraft } from '../../lib/pag
 // A list's phone card: each consent count with its name, Subscribed and Unknown on one line, the other two below.
 const consentCount = (status: 'subscribed' | 'unknown' | 'unsubscribed' | 'suppressed') => (row: AudienceList) => `${number(row[status] ?? 0)} ${status}`
 export function ListsPage() {
-  const { pageSize, tableRef } = useAdaptivePageSize()
+  const { pageSize, tableRef } = useAdaptivePageSize(5, 100)
   const [search, setSearch] = useState('')
   const [page, setPage] = useState(1)
   const [create, setCreate] = useState(false)
@@ -24,9 +24,9 @@ export function ListsPage() {
   const params = { page, pageSize, search: useDebounced(search.trim()) }
   const query = useApiQuery(['lists', params], (api, signal) => api.lists.list(params, signal))
   const count = (row: AudienceList, status: 'subscribed' | 'unknown' | 'unsubscribed' | 'suppressed') => row[status] ? <Link to={`/audience/lists/${row.id}?status=${status}`} title={`Show ${status} members of ${row.name}`}>{number(row[status])}</Link> : number(row[status] ?? 0)
-  return <div className="audience-page"><AudienceHeader actions={<Button variant="primary" onClick={() => setCreate(true)}>Create list</Button>} />
+  return <div className="audience-page measure-list"><AudienceHeader actions={<Button variant="primary" onClick={() => setCreate(true)}>Create list</Button>} />
     <div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search lists" placeholder="Search lists" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>
-    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rowKey={row => row.id} rowHref={row => `/audience/lists/${row.id}`} empty={search ? <EmptyState title="No matching lists" /> : <EmptyState title="No lists yet" action={<Button onClick={() => setCreate(true)}>Create list</Button>} />} columns={[{ ...listColumns[0], render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { ...listColumns[1], render: row => count(row, 'subscribed'), cardRender: consentCount('subscribed') }, { ...listColumns[2], render: row => count(row, 'unknown'), cardRender: consentCount('unknown') }, { ...listColumns[3], render: row => count(row, 'unsubscribed'), cardRender: consentCount('unsubscribed') }, { ...listColumns[4], render: row => count(row, 'suppressed'), cardRender: consentCount('suppressed') }, { ...listColumns[5], render: row => number(row.total), cardRender: row => `${number(row.total)} total` }, { ...listColumns[6], render: row => date(row.createdAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
+    {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable className="audience-lists" tableRef={tableRef} rows={query.data?.items || []} loading={query.isPending} skeletonRows={pageSize} minRows={pageSize} rowKey={row => row.id} rowHref={row => `/audience/lists/${row.id}`} empty={search ? <EmptyState title="No matching lists" /> : <EmptyState title="No lists yet" action={<Button onClick={() => setCreate(true)}>Create list</Button>} />} columns={[{ ...listColumns[0], render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { ...listColumns[1], render: row => count(row, 'subscribed'), cardRender: consentCount('subscribed') }, { ...listColumns[2], render: row => count(row, 'unknown'), cardRender: consentCount('unknown') }, { ...listColumns[3], render: row => count(row, 'unsubscribed'), cardRender: consentCount('unsubscribed') }, { ...listColumns[4], render: row => count(row, 'suppressed'), cardRender: consentCount('suppressed') }, { ...listColumns[5], render: row => number(row.total), cardRender: row => `${number(row.total)} total` }, { ...listColumns[6], render: row => date(row.createdAt) }]} />{query.isPending ? <PaginationSkeleton /> : <Pagination page={page} pageSize={pageSize} total={query.data.total} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}
     {create && <CreateListDialog onClose={() => setCreate(false)} />}
   </div>
 }
@@ -49,7 +49,7 @@ export function ListDetailPage() {
   async function deleteList() { await remove.mutateAsync(id); if (newsletter) void cache.invalidateQueries({ queryKey: ['identity'] }); navigate('/audience/lists') }
   const missingOrDenied = query.error instanceof ApiError && [401, 403, 404].includes(query.error.status ?? 0)
   const degraded = query.isError && !query.data && !missingOrDenied
-  return <div className="audience-page"><PageHeader title={query.isPending ? <SkeletonText width={96} lineHeight={24} /> : query.data?.name || 'List'} backTo="/audience/lists" actions={query.isPending ? <><ControlSkeleton width={85} /><ControlSkeleton width={120} /></> : (query.data || degraded) && <><Button variant="danger" onClick={() => {remove.reset(); setConfirmDelete(true)}}>Delete list</Button><Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button></>} />
+  return <div className="audience-page measure-list measure-list--narrow"><PageHeader title={query.isPending ? <SkeletonText width={96} lineHeight={24} /> : query.data?.name || 'List'} backTo="/audience/lists" actions={query.isPending ? <><ControlSkeleton width={85} /><ControlSkeleton width={120} /></> : (query.data || degraded) && <><Button variant="danger" onClick={() => {remove.reset(); setConfirmDelete(true)}}>Delete list</Button><Button variant="primary" onClick={() => setImporting(true)}>Import contacts</Button></>} />
     {query.isPending ? <ListDetailBodySkeleton /> : missingOrDenied ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <ListMembers key={id} listId={id} list={query.data} countsFailed={degraded} countsRefreshing={query.isFetching} onRetryCounts={() => void query.refetch()} />}
     {importing && <ImportContactsDialog listId={id} onClose={() => setImporting(false)} />}
     <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title={`Delete ${query.data?.name ?? 'list'}?`} description="Deletes the list, not its contacts." confirmLabel="Delete list" danger pending={remove.isPending} onConfirm={deleteList} />
@@ -57,7 +57,7 @@ export function ListDetailPage() {
 }
 // The consent tab and search are in the URL (status, q): campaign review links straight to /audience/lists/<id>?status=unknown.
 function ListMembers({ listId, list, countsFailed = false, countsRefreshing = false, onRetryCounts }: { listId: string; list?: AudienceList; countsFailed?: boolean; countsRefreshing?: boolean; onRetryCounts?: () => void }) {
-  const { pageSize, tableRef } = useAdaptivePageSize()
+  const { pageSize, tableRef } = useAdaptivePageSize(5, 100)
   const [params, setParams] = useSearchParams()
   const status = statusOptions.some(option => option.value === params.get('status')) ? params.get('status')! : '', search = params.get('q') ?? ''
   const [page, setPage] = useState(1)

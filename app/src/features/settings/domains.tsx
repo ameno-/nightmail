@@ -121,7 +121,7 @@ function DomainsList() {
       navigate(`/domains/${domain.id}${then ? `?then=${encodeURIComponent(then)}` : ''}`)
     } catch { /* Shown inline. */ }
   }
-  return <div className="stack">
+  return <div className="stack measure-list measure-list--narrow">
     <PageHeader title="Domains" actions={<Button variant="primary" onClick={openCreate} data-analytics="domains/add">Add domain</Button>} />
     {domains.error ? <ErrorState error={domains.error} onRetry={() => void domains.refetch()} /> : <>
       <DataTable className="domains-table" loading={domains.isPending || (inbound.isPending && !inbound.error)} skeletonRows={3} minRows={3} rows={domains.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/domains/${row.id}`} onRowIntent={row => void warm([queries.domain(row.id)])} empty={<EmptyState title={multiTenant ? 'No domains' : 'No domains in this region'} action={<Button onClick={openCreate}>Add domain</Button>} />} columns={[
@@ -223,7 +223,7 @@ function DomainDetail() {
     return summary?.tone === 'danger' ? summary.text : null
   }
   if (domain.isPending || (!domain.error && (dns.pending || (multiTenant && ((receiving.isPending && !receiving.error) || (hosts.isPending && !hosts.error)))))) return <DomainDetailSkeleton />
-  if (domain.error) return <div className="stack"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
+  if (domain.error) return <div className="stack domain-page"><PageHeader title="Domain" backTo="/domains" /><ErrorState error={domain.error} onRetry={() => void domain.refetch()} /></div>
   const current = domain.data
   const state = domainState(current)
   const receivingRecord = recordsFor(current, 'receiving')[0]
@@ -233,7 +233,7 @@ function DomainDetail() {
   const sesUrl = `https://${current.regionId}.console.aws.amazon.com/ses/home?region=${encodeURIComponent(current.regionId)}#/identities/${encodeURIComponent(current.name)}`
   // Check now's answers, or until it is pressed the background check's that the domain's reads carry (domain-setup-alert.tsx).
   const pressed = checks?.id === id ? checks.found : undefined, gap = setupGap(current, pressed)
-  return <div className="stack">
+  return <div className="stack domain-page">
     <PageHeader title={current.name} backTo={then || '/domains'} actions={<>
       <StatusBadge status={state.status} tone={state.tone} />
       <Button className="domain-check" disabled={resting} aria-busy={verify.isPending || undefined} onClick={() => void checkNow()} data-analytics="domains/check"><span data-active={!resting || undefined}>Check now</span><span data-active={resting || undefined} aria-hidden={!resting || undefined}>Checking…</span></Button>

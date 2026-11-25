@@ -1,6 +1,11 @@
+/* Campaigns and Templates: the header, toolbar, table and pager in one column that fills the page (the pager keeps to
+   its bottom) and stops widening on a wide window (.measure-list). */
+.campaigns-page { display: flex; flex: 1; flex-direction: column; min-width: 0; }
 .campaign-row-name { display: flex; flex-direction: column; justify-content: center; gap: var(--space-4); min-height: 40px; padding: 0; line-height: 18px; }
-/* Names and subjects stay on one line, so every row is the shared 53 px; the full text is in the cell's title. */
+/* A name over its subject: each stays on one line, so every row is the two-line 52 px; the full text is in the cell's title. */
 .campaigns-table .ui-table td[data-col='name'] { overflow: clip; text-overflow: ellipsis; white-space: nowrap; }
+/* The figures keep their widths: a narrow window scrolls the table sideways before the name gets too short. */
+.campaigns-table .ui-table { min-width: 760px; }
 /* Last activity and Updated read as data: mono, a size down, like the counts beside them. */
 .campaigns-table .ui-table td[data-col='updated'] { font-family: var(--font-mono); font-size: var(--text-xs); }
 .campaign-row-name > span { min-width: 0; overflow: clip; text-overflow: ellipsis; white-space: nowrap; }

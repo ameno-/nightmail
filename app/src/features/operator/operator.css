@@ -1,5 +1,5 @@
 /* The operator console: a review queue, and one workspace's standing, score, limit math and evidence. Tables use the
-   shared 53px rows and render as cards on a phone. Borderless: no rule draws a row, a column, a fact or a control, and
+   shared one-line rows and render as cards on a phone. Borderless: no rule draws a row, a column, a fact or a control, and
    no row is striped; a standalone fact is one solid well on the page, with nothing set inside it. */
 .op-page { display: flex; flex-direction: column; gap: var(--page-gap); min-width: 0; }
 .op-page > .ui-tabs + .data-toolbar { margin-top: 0; }
@@ -54,8 +54,8 @@
 .op-dialog-fields { display: flex; flex-direction: column; gap: var(--space-16); }
 .op-dialog-fields .ui-textarea { min-height: 88px; }
 
-/* UI notes: a 64 × 36 screenshot thumbnail fits the 53px row; the bulk menu keeps its width as the count changes. */
-.op-shot { display: block; width: 64px; height: 36px; overflow: hidden; border-radius: 4px; background: var(--color-chip, var(--color-layer-2)); }
+/* UI notes: a 52 × 30 screenshot thumbnail fits the one-line row; the bulk menu keeps its width as the count changes. */
+.op-shot { display: block; width: 52px; height: 30px; overflow: hidden; border-radius: 4px; background: var(--color-chip, var(--color-layer-2)); }
 .op-shot img { display: block; width: 100%; height: 100%; object-fit: cover; object-position: center; }
 .op-notes td[data-col='select'], .op-notes th[data-col='select'] { padding-right: 0; }
 /* The select-all box sits in the header row's text line, so the loaded header is as tall as the skeleton's. */

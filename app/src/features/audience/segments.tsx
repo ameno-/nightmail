@@ -5,7 +5,7 @@ import { useApiMutation, useApiQuery } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { ApiError, type Segment } from '../../data/types'
 import { SearchField, Button, DataTable, EmptyState, ErrorState, Field, IconButton, Input, LoadingRegion, PageHeader, Pagination, SectionHeader, Select, Textarea, fieldError, MutationError } from '../../components/ui'
-import { AudienceRouteSkeleton, AudienceSummarySkeleton } from './skeletons'
+import { AudienceRouteSkeleton, AudienceSummarySkeleton, segmentColumns } from './skeletons'
 import { date, ListPicker, number, ruleSummary } from './shared'
 import { useAdaptivePageSize } from '../../lib/pagination'
 import { AudienceHeader } from './header'
@@ -16,12 +16,12 @@ function SegmentsEmpty({ search, onClear }: { search: string; onClear: () => voi
 }
 
 export function SegmentsPage() {
-  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize()
+  const { pageSize: adaptivePageSize, tableRef } = useAdaptivePageSize(5, 100)
   const [page, setPage] = useState(1)
   const [search, setSearch] = useState('')
   useEffect(() => setPage(1), [adaptivePageSize])
   const query = useApiQuery(['segments', { page, search, pageSize: adaptivePageSize }], (api, signal) => api.segments.list({ page, search, pageSize: adaptivePageSize }, signal))
-  return <div className="audience-page"><AudienceHeader actions={<Link className="ui-button ui-button--primary ui-button--md" to="/audience/segments/new">Create segment</Link>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} rowHref={row => `/audience/segments/${row.id}`} empty={<SegmentsEmpty search={search} onClear={() => { setSearch(''); setPage(1) }} />} columns={[{ key: 'name', label: 'Name', card: 'title', render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { key: 'rule', label: 'Conditions', width: '50%', card: 'line', render: row => { const text = ruleSummary(row.rule); return <span className="audience-cell-text" title={text}>{text}</span> } }, { key: 'updatedAt', label: 'Updated', card: 'hide', render: row => date(row.updatedAt) }]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
+  return <div className="audience-page measure-list"><AudienceHeader actions={<Link className="ui-button ui-button--primary ui-button--md" to="/audience/segments/new">Create segment</Link>} /><div className="data-toolbar"><SearchField className="search-box--list" aria-label="Search segments" placeholder="Search segments" value={search} onChange={event => { setSearch(event.target.value); setPage(1) }} /></div>{query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <><DataTable tableRef={tableRef} rows={query.data?.items ?? []} loading={query.isPending} skeletonRows={adaptivePageSize} minRows={adaptivePageSize} rowKey={row => row.id} rowHref={row => `/audience/segments/${row.id}`} empty={<SegmentsEmpty search={search} onClear={() => { setSearch(''); setPage(1) }} />} columns={[{ ...segmentColumns[0], render: row => <span className="audience-cell-text" title={row.name}>{row.name}</span> }, { ...segmentColumns[1], render: row => { const text = ruleSummary(row.rule); return <span className="audience-cell-text" title={text}>{text}</span> } }, { ...segmentColumns[2], render: row => date(row.updatedAt) }]} />{query.data && <Pagination page={query.data.page} pageSize={adaptivePageSize} nextCursor={query.data.nextCursor} onPageChange={setPage} />}</>}</div>
 }
 
 // The editor for the API's public segment rule: a leaf {field, operator, value}, {field, operator, days} or a property's
@@ -119,7 +119,7 @@ export function SegmentEditorPage() {
   const loadId = id && id !== created ? id : undefined
   const query = useApiQuery(['segments', loadId ?? 'new'], (api, signal) => api.segments.get(loadId!, signal), { enabled: Boolean(loadId) })
   if (!loadId) return <SegmentEditor key="new" initial={null} onCreated={setCreated} />
-  return query.isPending ? <AudienceRouteSkeleton kind="segment" /> : query.isError ? <div className="audience-page"><PageHeader title="Segment" backTo="/audience/segments" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></div> : <SegmentEditor key={loadId} initial={query.data} onCreated={setCreated} />
+  return query.isPending ? <AudienceRouteSkeleton kind="segment" /> : query.isError ? <div className="audience-page audience-page--measure"><PageHeader title="Segment" backTo="/audience/segments" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></div> : <SegmentEditor key={loadId} initial={query.data} onCreated={setCreated} />
 }
 function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCreated: (id: string) => void }) {
   const navigate = useNavigate()
@@ -180,7 +180,7 @@ function SegmentEditor({ initial, onCreated }: { initial: Segment | null; onCrea
   }
   // Counts describe the saved rule; say so once the conditions on screen differ from it.
   const ruleChanged = Boolean(saved) && (json !== null ? (() => { try { return signature(JSON.parse(json)) !== saved!.rule } catch { return true } })() : canonical(fromBuilder(builder)) !== saved!.rule)
-  return <div className="audience-page"><PageHeader title={saved ? 'Edit segment' : 'Create segment'} backTo="/audience/segments" actions={<Button variant="primary" type="submit" form="segment-editor" loading={save.isPending}>Save segment</Button>} />
+  return <div className="audience-page audience-page--measure"><PageHeader title={saved ? 'Edit segment' : 'Create segment'} backTo="/audience/segments" actions={<Button variant="primary" type="submit" form="segment-editor" loading={save.isPending}>Save segment</Button>} />
     <form id="segment-editor" className="stack audience-editor" noValidate onSubmit={event => { event.preventDefault(); void submit() }}>
       <div className="audience-name"><Field label="Segment name" htmlFor="segment-name" error={checked && !name.trim() ? 'Name this segment, for example “Engaged customers”.' : fieldError(save.error, 'name')}><Input id="segment-name" maxLength={200} value={name} onChange={event => { setName(event.target.value); save.reset() }} /></Field></div>
       <section className="section stack"><SectionHeader title="Conditions" actions={<Button variant="ghost" size="sm" onClick={toggleJson}>{json === null ? <><Braces size={14} aria-hidden="true" />Edit as JSON</> : <><ListFilter size={14} aria-hidden="true" />Use the rule builder</>}</Button>} />

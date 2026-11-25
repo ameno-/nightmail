@@ -104,24 +104,24 @@ export function AgentInboxesPage() {
   const pagination = useCursorPagination()
   const q = search.trim(), cursor = pagination.cursor
   const inboxes = useApiQuery(['agent-inboxes', q, cursor ?? null], (api, signal) => api.inboxes.list({ search: q || undefined, cursor }, signal), { interval: 30_000, keepPrevious: true })
-  return <div className="stack inbound-stack">
+  return <div className="stack inbound-stack measure-list">
     <PageHeader title="Agent inboxes" backTo="/receiving?kind=inbox" actions={<>
       <Input className="receiving-search" type="search" aria-label="Search inboxes" placeholder="Search address or name" value={search} onChange={event => { setSearch(event.target.value); pagination.reset() }} />
       {canAdminister && <ConnectAgentButton />}
       {canAdminister && <Button variant="primary" onClick={() => setCreating(true)} data-analytics="inboxes/create">New agent inbox</Button>}
     </>} />
     {inboxes.error ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} /> : <>
-      <DataTable loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}
+      <DataTable className="inbox-table" loading={inboxes.isPending} skeletonRows={4} rows={inboxes.data ?? []} rowKey={row => row.id} rowHref={row => `${route}/${row.id}`}
         empty={<EmptyState title={q ? 'No matching inboxes' : 'No agent inboxes yet'} action={!q && canAdminister ? <Button onClick={() => setCreating(true)}>New agent inbox</Button> : undefined} />}
         columns={[
           // An inbox's card: its address and status, its name or type, then expiry and mail counts.
-          { key: 'address', label: 'Address', width: '26%', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
-          { key: 'name', label: 'Name', width: '26%', card: 'line', render: row => row.name ? <span className="inbox-clip" title={row.name}>{row.name}</span> : <span className="muted">—</span>, cardRender: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
-          { key: 'status', label: 'Status', width: '11%', card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
-          { key: 'expires', label: 'Expires', width: '13%', card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? expiresIn(row.expiresAt)!.replace(/^Expires /, '') : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? expiresIn(row.expiresAt) : 'Never expires' },
-          { key: 'messages', label: 'Messages', align: 'right', card: 'inline', render: row => number(row.usage.messages), cardRender: row => `${number(row.usage.messages)} ${row.usage.messages === 1 ? 'message' : 'messages'}` },
-          { key: 'unread', label: 'Unread', align: 'right', card: 'inline', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span>, cardRender: row => `${number(row.usage.unread)} unread` },
-          { key: 'held', label: 'Held', align: 'right', card: 'hide', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
+          { key: 'address', label: 'Address', card: 'title', render: row => <span className="mailbox-address"><span className="receiving-clip"><PrivateAddress value={row.address} /></span>{row.type === 'sandbox' && <StatusBadge status="Sandbox" tone="neutral" />}</span>, cardRender: row => <PrivateAddress value={row.address} /> },
+          { key: 'name', label: 'Name', width: '20%', card: 'line', render: row => row.name ? <span className="inbox-clip" title={row.name}>{row.name}</span> : <span className="muted">—</span>, cardRender: row => [row.name, row.type === 'sandbox' ? 'Sandbox' : null].filter(Boolean).join(' · ') || 'Agent inbox' },
+          { key: 'status', label: 'Status', width: 112, card: 'aside', render: row => <StatusBadge status={statusLabel[row.status]} tone={statusTone[row.status]} /> },
+          { key: 'expires', label: 'Expires', width: 112, card: 'line', render: row => row.status === 'deleting' ? <span className="muted">Now</span> : row.expiresAt ? expiresIn(row.expiresAt)!.replace(/^Expires /, '') : <span className="muted">Never</span>, cardRender: row => row.status === 'deleting' ? 'Deleting now' : row.expiresAt ? expiresIn(row.expiresAt) : 'Never expires' },
+          { key: 'messages', label: 'Messages', width: 88, align: 'right', card: 'inline', render: row => number(row.usage.messages), cardRender: row => `${number(row.usage.messages)} ${row.usage.messages === 1 ? 'message' : 'messages'}` },
+          { key: 'unread', label: 'Unread', width: 72, align: 'right', card: 'inline', render: row => row.usage.unread ? <strong>{number(row.usage.unread)}</strong> : <span className="muted">0</span>, cardRender: row => `${number(row.usage.unread)} unread` },
+          { key: 'held', label: 'Held', width: 64, align: 'right', card: 'hide', render: row => row.usage.held ? number(row.usage.held) : <span className="muted">0</span> },
         ]} />
       {inboxes.isPending ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={inboxes.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, inboxes.data?.nextCursor)} />}
     </>}
@@ -251,15 +251,15 @@ function InboxDetail({ id }: { id: string }) {
       <SectionHeader title={<span id="agent-inbox-messages">Messages</span>} actions={!folders.error && <Select className="inbox-folder" aria-label="Folder" value={folder||'deliveries'} onValueChange={value=>{setFolder(value==='deliveries'?'':value);pagination.reset()}} options={[{value:'deliveries',label:'All deliveries'},...(folders.data?.data??[]).map(f=>({value:f.id,label:`${f.path} · ${number(f.total)}${f.subscribed?' · subscribed':''}`}))]}/>} />
       {folders.error && <ErrorState error={folders.error} onRetry={()=>void folders.refetch()}/>}
       {messages.error ? <ErrorState error={messages.error} onRetry={() => void messages.refetch()} /> : <>
-        <DataTable loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
+        <DataTable className="inbox-table" loading={!settled} skeletonRows={3} minRows={3} rows={messages.data?.data ?? []} rowKey={row => row.id} onRowClick={row => setSelected(row.id)}
           empty={<EmptyState title="No mail yet" action={b?.type === 'sandbox' && b.status === 'active' && canAdminister ? <Button loading={simulate.isPending} onClick={() => void simulate.mutateAsync().catch(() => undefined)}>Send test mail</Button> : undefined} />}
           columns={[
             // A message's card: its subject and status, then the sender and any code it carries.
-            { key: 'from', label: 'From', width: '24%', card: 'line', render: row => <span className="inbox-clip"><Sender name={row.from.name} address={row.from.address} nameOnly /></span> },
-            { key: 'subject', label: 'Subject', width: '40%', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
-            ...(codes ? [{ key: 'code', label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline' as const, render: (row: InboxMessage) => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: (row: InboxMessage) => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' }] : []),
-            { key: 'state', label: 'Status', card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
-            { key: 'received', label: 'Received', align: 'right', render: row => when(row.receivedAt) },
+            { key: 'from', label: 'From', width: '22%', card: 'line', render: row => <span className="inbox-clip"><Sender name={row.from.name} address={row.from.address} nameOnly /></span> },
+            { key: 'subject', label: 'Subject', card: 'title', render: row => <span className="inbox-clip" title={row.snippet ? `${row.subject || '(no subject)'}: ${row.snippet}` : undefined}>{row.subject || '(no subject)'}{row.snippet && <span className="muted"> · {row.snippet}</span>}</span>, cardRender: row => row.subject || '(no subject)' },
+            ...(codes ? [{ key: 'code', width: 128, label: <span title={`A one-time code ${productName} found in the message, such as a sign-up code`}>Code found</span>, card: 'inline' as const, render: (row: InboxMessage) => row.extract.codes[0] ? <code>{row.extract.codes[0]}</code> : <span className="muted">—</span>, cardRender: (row: InboxMessage) => row.extract.codes[0] ? <>Code <code>{row.extract.codes[0]}</code></> : 'No code' }] : []),
+            { key: 'state', label: 'Status', width: 120, card: 'aside', render: row => { const state = messageState(row); return <StatusBadge status={state.label} tone={state.tone} /> } },
+            { key: 'received', label: 'Received', width: 112, align: 'right', card: 'field', render: row => when(row.receivedAt) },
           ]} />
         {!settled ? <PaginationSkeleton /> : <Pagination page={pagination.page} pageSize={50} nextCursor={next} onPageChange={page => pagination.onPageChange(page, next)} />}
       </>}
@@ -272,9 +272,9 @@ function InboxDetail({ id }: { id: string }) {
         columns={[
           // A key's card: its name and when it was last used, what it can do, and Revoke in the row menu.
           { key: 'name', label: 'Name', width: '30%', card: 'title', render: key => key.name },
-          { key: 'prefix', label: 'Key', width: '18%', card: 'line', render: key => <code>{key.prefix}…</code> },
-          { key: 'permissions', label: 'Can', card: 'field', render: key => key.access.mail.map(p => permissionWords[p] ?? p).join(' · ') },
-          { key: 'used', label: 'Last used', align: 'right', card: 'aside', render: key => key.lastUsedAt ? date(key.lastUsedAt) : <span className="muted">Never</span> },
+          { key: 'prefix', label: 'Key', width: 160, card: 'line', render: key => <code>{key.prefix}…</code> },
+          { key: 'permissions', label: 'Can', card: 'field', render: key => { const can = key.access.mail.map(p => permissionWords[p] ?? p).join(' · '); return <span className="inbox-clip" title={can}>{can}</span> }, cardRender: key => key.access.mail.map(p => permissionWords[p] ?? p).join(' · ') },
+          { key: 'used', label: 'Last used', width: 128, align: 'right', card: 'aside', render: key => key.lastUsedAt ? date(key.lastUsedAt) : <span className="muted">Never</span> },
           { key: 'revoke', label: '', align: 'right', width: 100, card: 'end', render: key => <Button variant="danger" size="sm" aria-label={`Revoke ${key.name}`} onClick={() => setRevoking(key)}>Revoke</Button>,
             cardRender: key => <DropdownMenu label={`Actions for ${key.name}`} title={key.name} items={[{ label: 'Revoke key', destructive: true, onSelect: () => setRevoking(key) }]} /> },
         ]} />}

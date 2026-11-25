@@ -192,13 +192,16 @@ a.ui-tab { text-decoration: none; }
 .ui-kv__id code { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-kv__id .ui-icon-button { width: 24px; height: 24px; }
 .ui-table-scroll { --table-row-height: var(--row-height); width: 100%; overflow-x: auto; }
+/* A table whose cells stack two lines (a name over its caption, a status over its response) takes the roomier row; set on
+   the table and its route skeleton alike. */
+.ui-table-scroll.ui-table--two-line { --table-row-height: var(--row-height-two-line); }
 .ui-table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; text-align: left; font-size: var(--text-md); line-height: var(--leading-md); font-variant-numeric: tabular-nums; }
 /* Tables draw no rules: the head is a solid bar (6px ends), and rows part by their rhythm and a solid hover fill, drawn on
    the cells so the fill keeps the bar's rounded ends. */
 .ui-table th { height: 28px; padding: var(--space-4) var(--space-12); background: var(--color-thead); color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); white-space: nowrap; }
 /* An empty table keeps its header row's height but shows neither its labels nor its bar. */
 .ui-table--empty thead { visibility: hidden; }
-.ui-table td { height: var(--table-row-height); padding: var(--space-6) var(--space-12); vertical-align: middle; overflow-wrap: anywhere; }
+.ui-table td { height: var(--table-row-height); padding: var(--space-4) var(--space-12); vertical-align: middle; overflow-wrap: anywhere; }
 .ui-table :is(th, td):first-child { border-start-start-radius: var(--radius-sm); border-end-start-radius: var(--radius-sm); }
 .ui-table :is(th, td):last-child { border-start-end-radius: var(--radius-sm); border-end-end-radius: var(--radius-sm); }
 .ui-table td[data-skeleton-align='right'] > * { margin-left: auto; }
@@ -240,7 +243,7 @@ a.ui-tab { text-decoration: none; }
 .ui-disclosure > summary > svg { flex-shrink: 0; margin-left: auto; color: var(--color-muted); transition: transform var(--motion-duration) ease-out; }
 .ui-disclosure[open] > summary > svg { transform: rotate(90deg); }
 .ui-disclosure__body { display: flex; flex-direction: column; gap: var(--space-12); padding-bottom: var(--space-12); }
-.ui-section-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin-bottom: var(--space-12); }
+.ui-section-header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: var(--space-8) var(--space-16); margin-bottom: var(--space-8); }
 .ui-section-header > .cluster > .ui-button--ghost:not(.ui-icon-button):last-child { margin-inline-end: calc(-1 * var(--button-pad-x)); }
 /* A section's title is a sentence-case heading in the text colour; its actions sit at the right. */
 .ui-section-header h2 { display: flex; flex: 1; align-items: center; gap: var(--space-12); min-width: 0; color: var(--color-text); font-family: var(--font-body); font-size: var(--text-section); line-height: var(--leading-section); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-section); }
@@ -313,7 +316,7 @@ a.ui-tab { text-decoration: none; }
 .ui-tooltip { position: fixed; z-index: 120; max-width: min(300px, calc(100vw - 16px)); padding: var(--space-6) var(--space-8); border: 0; border-radius: var(--radius-sm); background: var(--color-overlay-surface); box-shadow: var(--shadow-popover); color: var(--color-text); font-size: var(--text-xs); line-height: var(--leading-xs); overflow-wrap: anywhere; pointer-events: none; animation: tooltip-in 150ms ease-out; }
 .ui-tooltip[data-instant] { animation: none; }
 @keyframes tooltip-in { from { opacity: 0; } }
-.stack { display: flex; flex-direction: column; gap: var(--space-16); }
+.stack { display: flex; flex-direction: column; gap: var(--space-12); }
 .cluster { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-8); }
 .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-16); }
 .muted { color: var(--color-muted); }
@@ -321,9 +324,9 @@ a.ui-tab { text-decoration: none; }
 .data-toolbar { padding: 0 0 var(--page-gap); }
 .data-toolbar > .cluster { flex-wrap: nowrap; min-width: 0; }
 .data-toolbar .ui-select-trigger { width: auto; min-width: 144px; max-width: 240px; flex-shrink: 0; }
-.section { margin-block: var(--space-24); }
+.section { margin-block: var(--space-16); }
 .section.stack { gap: var(--space-12); }
-.section--bordered { padding-top: var(--space-24); }
+.section--bordered { padding-top: var(--space-16); }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 @keyframes ui-spin { to { transform: rotate(360deg); } }
 @keyframes ui-pulse { to { opacity: .5; } }
@@ -391,7 +394,9 @@ button.ui-card__link { display: block; max-width: 100%; overflow: hidden; text-o
 /* An address wider than its cell or card line shrinks to it (its first two characters and the blur stay in view; a revealed one is cut with an ellipsis and says the whole of it, PrivateAddress.tsx) instead of overflowing into the next column. */
 :is(.ui-table td, .ui-card__segment, .ui-select-trigger) .private-address__value { flex: 0 1 auto; min-width: 0; overflow: clip; text-overflow: ellipsis; }
 .ui-card__segment:has(> .private-address) { display: flex; white-space: pre; }
-.ui-table td .settings-cell-stack { min-width: 0; }
+.ui-table td .settings-cell-stack { min-width: 0; max-width: 100%; }
+/* A stacked cell is two lines at most: each of its lines ends in an ellipsis rather than wrapping past the row. */
+:where(.ui-table td .settings-cell-stack) > * { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-card :is(a, button, input, select, label, [role='checkbox'], [role='switch']):not(.ui-card__link) { position: relative; z-index: 1; }
 .ui-card:has(.ui-card__link:focus-visible)::before { background: var(--color-hover); }
 /* An empty list keeps a page of cards' height (filtering to nothing doesn't collapse the page), but its message sits at

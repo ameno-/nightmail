@@ -1,11 +1,23 @@
 .audience-page { display: flex; flex-direction: column; min-width: 0; min-height: 100%; }
 .audience-page > * { flex-shrink: 0; }
+/* A contact or a segment reads as label/value rows and a form: it keeps a readable width on a wide window. */
+.audience-page.audience-page--measure { width: 100%; max-width: var(--measure); }
+/* The head of Audience reads as one block: the title, its sections a short step under it, then search and filters. */
+.audience-page .ui-page-header { margin-bottom: var(--space-8); }
 .audience-cell-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* A contact's row: the address, then its name muted on the same line. Tight, the name gives way well before the address. */
+.audience-contact { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; white-space: nowrap; }
+.audience-contact__email { display: flex; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.audience-contact__email > .private-address { min-width: 0; }
+.audience-contact__name { flex: 0 12 auto; min-width: 0; overflow: hidden; color: var(--color-muted); text-overflow: ellipsis; }
+.audience-contact__name::before { content: '·'; margin-right: var(--space-8); color: var(--color-faint); }
+/* Lists: the counts keep their widths, so a narrow window scrolls the table sideways before the name gets too short. */
+.audience-lists .ui-table { min-width: 800px; }
 .data-toolbar .ui-select-trigger.audience-status-filter { width: 170px; }
 .audience-summary > .ui-skeleton-line { width: auto; }
 .audience-page > .data-toolbar > .cluster { flex-wrap: wrap; }
 .ui-select-trigger.audience-match { width: 220px; max-width: 100%; flex-shrink: 0; }
-.audience-page > .section { margin-block: var(--space-40) 0; }
+.audience-page > .section { margin-block: var(--space-32) 0; }
 .audience-page > .ui-alert { margin-top: var(--space-16); }
 .audience-summary { min-height: var(--space-20); gap: var(--space-8) var(--space-24); }
 .section > .audience-summary { margin-bottom: var(--space-12); }
