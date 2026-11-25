@@ -856,10 +856,11 @@ export async function seed(fx) {
   const campaign = await dana.api('POST', '/v1/campaigns', { name: 'November product update', subject: 'What shipped in November', from: 'news@mail.northwind.example', html: '<p>Hello</p>' });
   const contact = contacts[0];
 
-  // Northwind's standing: graded B with a notice (a first complaint). Dana is also a Bane operator, so the operator
+  // Northwind's standing: graded B with a notice (two complaints in 10,000 accepted). Dana is also a Bane operator, so the operator
   // console has a signed-in user.
+  const { noticeReasons } = await tsImport(join(apiDir, 'src/standing-model.ts'), import.meta.url);
   await standing(db, 'ws_northwind', { score: 86.4, limit: null, step: 'notice', since: ago(90), factors: [factor('complaints', 'Complaints', 30, 0.0003, 93.1), factor('content', 'Spam screen', 20, null, null), factor('bounces', 'Bounces', 15, 0.009, 91.1), factor('hygiene', 'List quality', 15, 0.012, 97.5), factor('auth', 'Authentication', 10, 0.85, 85), factor('engagement', 'Engagement', 10, 0.0031, 93.9)],
-    reasons: [{ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: 0.0011, count: 1, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: '1 accepted email was marked as spam in 24 hours.' }] });
+    reasons: noticeReasons({ accepted: 10_000, complaints: 2, bounces: 0 }, 'notice') });
   await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES('user_dana','operator','CLS fixture')");
   // The waitlist (Operator · waitlist): refused sign-ins to email when Nightmail opens, one without a name.
   await db.query(`INSERT INTO nightmail_waitlist(email,name,attempts,first_at,last_at) VALUES

@@ -199,28 +199,64 @@ export const stepRank = (s: Step) => STEPS.indexOf(s);
 export type Window = { accepted: number; bounces: number; complaints: number; marketingAccepted: number; marketingBounces: number; marketingComplaints: number };
 export type LadderInput = { day: Window; week: Window; screened: number; rejected: number };
 export type Reason = { code: string; metric: 'complaints' | 'bounces' | 'marketing_bounces' | 'transactional_bounces' | 'screen' | 'external'; value: number; count: number; threshold: number; minimum: number; window: '24h' | '7d' | null; step: Step; message: string };
-/** Ladder lines. Every line is a count and a rate together, so a few events never trip a small sender. Published. */
+type LadderLine = { rate: number; count: number; window: '24h' | '7d' };
+// Published account-standing lines. Both the event floor and the unrounded rate are inclusive.
+// Feedback uses accepted mail of the same stream, with an extra day for late feedback (24h/48h or 7d/8d).
+// Screening uses rejections / screened mail in 24h. Zero volume cannot establish a rate.
+// SES references: complaints 0.1%/0.5%, bounces 5%/10%. The warn, restrict and pause lines below are Nightmail's.
 export const LADDER = {
-  complaints: { warn: [{ rate: 0.0005, count: 2, window: '24h' }, { rate: 0.0005, count: 3, window: '7d' }], restrict: [{ rate: 0.001, count: 3, window: '24h' }], pause: [{ rate: 0.003, count: 5, window: '24h' }, { rate: 0.0015, count: 10, window: '7d' }] },
-  bounces: { warn: [{ rate: 0.02, count: 10, window: '24h' }, { rate: 0.015, count: 10, window: '7d' }] },
+  complaints: {
+    notice: [{ rate: 0.0001, count: 2, window: '24h' }],
+    warn: [{ rate: 0.0005, count: 2, window: '24h' }, { rate: 0.0005, count: 3, window: '7d' }],
+    restrict: [{ rate: 0.001, count: 3, window: '24h' }],
+    pause: [{ rate: 0.003, count: 5, window: '24h' }, { rate: 0.0015, count: 10, window: '7d' }],
+  },
+  bounces: {
+    notice: [{ rate: 0.01, count: 3, window: '24h' }],
+    warn: [{ rate: 0.02, count: 10, window: '24h' }, { rate: 0.015, count: 10, window: '7d' }],
+    // Pool emergency across all mail. Bounces stop transactional mail only on its own pause line below.
+    restrict: [{ rate: 0.08, count: 50, window: '24h' }],
+  },
   marketingBounces: { restrict: [{ rate: 0.04, count: 25, window: '24h' }] },
-  // The pool-emergency line: any mail at 8%. Bounces alone hold marketing; they stop transactional mail only below.
-  anyBounces: { restrict: [{ rate: 0.08, count: 50, window: '24h' }] },
   transactionalBounces: { pause: [{ rate: 0.05, count: 50, window: '24h' }] },
-  screen: { warn: [{ rate: 0.02, count: 3 }], restrict: [{ rate: 0.05, count: 10 }], pause: [{ rate: 0.1, count: 25 }] },
-  notice: { complaints: 1, bounces: 3, bounceRate: 0.01 },
-} as const;
-/** A rate as the published lines write it: 0.0005 is 0.05%. */
-export const pct = (v: number) => `${(100 * v).toFixed(2).replace(/\.?0+$/, '')}%`;
+  screen: {
+    warn: [{ rate: 0.02, count: 3, window: '24h' }],
+    restrict: [{ rate: 0.05, count: 10, window: '24h' }],
+    pause: [{ rate: 0.10, count: 25, window: '24h' }],
+  },
+} as const satisfies Record<string, Partial<Record<Exclude<Step, 'ok'>, readonly LadderLine[]>>>;
+const percentage = new Intl.NumberFormat('en-US', { style: 'percent', maximumSignificantDigits: 4 });
+export const pct = (rate: number) => percentage.format(rate);
+const reaches = (count: number, volume: number, line: LadderLine, fraction = 1) =>
+  volume > 0 && count >= line.count * fraction && count / volume >= line.rate * fraction;
 
-/** The highest ladder line the windows cross, and every line crossed. `pause_kind` says what a pause is for. */
+/** A measured notice, or a quiet explanation for the standing card. An OK explanation never raises a step. */
+export function noticeReasons(day: Pick<Window, 'accepted' | 'complaints' | 'bounces'>, step: 'notice' | 'ok'): Reason[] {
+  if (day.accepted <= 0) return [];
+  const reasons: Reason[] = [];
+  for (const metric of ['complaints', 'bounces'] as const) {
+    const count = day[metric], line = LADDER[metric].notice[0];
+    if (!count || reaches(count, day.accepted, line) !== (step === 'notice')) continue;
+    const noun = metric === 'complaints' ? 'complaint' : 'hard bounce', code = metric === 'complaints' ? 'COMPLAINT' : 'BOUNCE';
+    const rate = count / day.accepted, measured = pct(rate), threshold = pct(line.rate);
+    const shown = rate < line.rate && measured === threshold ? `<${threshold}` : measured;
+    const why = rate < line.rate ? `, under the notice line of ${threshold}`
+      : `; the ${threshold} notice line ${step === 'ok' ? 'also ' : ''}needs at least ${line.count} ${noun}s`;
+    reasons.push({ code: `${code}_${step === 'ok' ? 'BELOW_NOTICE' : 'NOTICE'}`, metric, step, window: line.window, count, value: rate, threshold: line.rate, minimum: line.count,
+      message: `${count.toLocaleString('en-US')} ${noun}${count === 1 ? '' : 's'} in 24 hours (${shown})${why}.` });
+  }
+  return reasons;
+}
+
+/** The highest crossed step, with the highest applicable reason per metric. No below-line evidence enforces a step. */
 export function evaluateLadder(input: LadderInput): { level: Step; reasons: Reason[]; pauseKind: 'bounce' | 'full' | null } {
   const reasons: Reason[] = [];
-  const check = (metric: Reason['metric'], step: Step, lines: readonly { rate: number; count: number; window?: string }[], count: (w: '24h' | '7d') => number, total: (w: '24h' | '7d') => number, what: string) => {
+  const check = (metric: Reason['metric'], step: Step, lines: readonly LadderLine[], count: (w: '24h' | '7d') => number, total: (w: '24h' | '7d') => number, what: string) => {
     for (const line of lines) {
-      const w = (line.window ?? '24h') as '24h' | '7d', n = count(w), d = total(w), rate = d > 0 ? n / d : n > 0 ? 1 : 0;
-      if (n >= line.count && rate >= line.rate) {
-        reasons.push({ code: `${metric.toUpperCase()}_${step.toUpperCase()}`, metric, value: round(rate, 6), count: n, threshold: line.rate, minimum: line.count, window: metric === 'screen' ? '24h' : w, step,
+      const w = line.window, n = count(w), d = total(w);
+      if (reaches(n, d, line)) {
+        const rate = n / d;
+        reasons.push({ code: `${metric.toUpperCase()}_${step.toUpperCase()}`, metric, value: round(rate, 6), count: n, threshold: line.rate, minimum: line.count, window: w, step,
           message: `${n.toLocaleString('en-US')} of ${d.toLocaleString('en-US')} ${what} in ${w === '24h' ? '24 hours' : '7 days'} (${pct(rate)}; the ${step} line is ${pct(line.rate)} and ${line.count}).` });
         return;
       }
@@ -228,23 +264,20 @@ export function evaluateLadder(input: LadderInput): { level: Step; reasons: Reas
   };
   const win = (w: '24h' | '7d') => w === '24h' ? input.day : input.week;
   for (const step of ['pause', 'restrict', 'warn'] as const) {
-    const lines = LADDER.complaints[step as keyof typeof LADDER.complaints];
-    if (lines) check('complaints', step, lines, w => win(w).complaints, w => win(w).accepted, 'accepted emails were marked as spam');
+    check('complaints', step, LADDER.complaints[step], w => win(w).complaints, w => win(w).accepted, 'accepted emails were marked as spam');
     const screen = LADDER.screen[step];
     check('screen', step, screen, () => input.rejected, () => input.screened, 'screened emails were rejected as spam');
   }
   check('transactional_bounces', 'pause', LADDER.transactionalBounces.pause, w => win(w).bounces - win(w).marketingBounces, w => win(w).accepted - win(w).marketingAccepted, 'transactional emails hard-bounced');
   check('marketing_bounces', 'restrict', LADDER.marketingBounces.restrict, w => win(w).marketingBounces, w => win(w).marketingAccepted, 'marketing emails hard-bounced');
-  check('bounces', 'restrict', LADDER.anyBounces.restrict, w => win(w).bounces, w => win(w).accepted, 'emails hard-bounced');
+  check('bounces', 'restrict', LADDER.bounces.restrict, w => win(w).bounces, w => win(w).accepted, 'emails hard-bounced');
   check('bounces', 'warn', LADDER.bounces.warn, w => win(w).bounces, w => win(w).accepted, 'emails hard-bounced');
   const top = reasons.reduce<Step>((s, r) => stepRank(r.step) > stepRank(s) ? r.step : s, 'ok');
   // Keep only the highest line per metric.
   const kept = reasons.filter(r => !reasons.some(o => o !== r && o.metric === r.metric && stepRank(o.step) > stepRank(r.step)));
   if (top === 'ok') {
-    const d = input.day;
-    if (d.complaints >= LADDER.notice.complaints) kept.push({ code: 'COMPLAINT_NOTICE', metric: 'complaints', value: d.accepted ? round(d.complaints / d.accepted, 6) : 1, count: d.complaints, threshold: 0, minimum: 1, window: '24h', step: 'notice', message: `${d.complaints} accepted ${d.complaints === 1 ? 'email was' : 'emails were'} marked as spam in 24 hours.` });
-    else if (d.bounces >= LADDER.notice.bounces && d.accepted && d.bounces / d.accepted >= LADDER.notice.bounceRate) kept.push({ code: 'BOUNCE_NOTICE', metric: 'bounces', value: round(d.bounces / d.accepted, 6), count: d.bounces, threshold: LADDER.notice.bounceRate, minimum: LADDER.notice.bounces, window: '24h', step: 'notice', message: `${d.bounces} of ${d.accepted} accepted emails hard-bounced in 24 hours (${pct(d.bounces / d.accepted)}).` });
-    return { level: kept.length ? 'notice' : 'ok', reasons: kept, pauseKind: null };
+    const notices = noticeReasons(input.day, 'notice');
+    return { level: notices.length ? 'notice' : 'ok', reasons: notices, pauseKind: null };
   }
   const pauseKind = top !== 'pause' ? null : kept.some(r => r.step === 'pause' && r.metric !== 'transactional_bounces') ? 'full' : 'bounce';
   return { level: top, reasons: kept, pauseKind };
@@ -274,11 +307,10 @@ export function nextStanding(prev: StandingState, input: LadderInput, now: Date)
   if (evaluation.level !== prev.step) return { step: evaluation.level, reasons: evaluation.reasons, since: at, clearSince: null, pauseKind: null };
   return { ...prev, reasons: evaluation.reasons };
 }
-/** Every metric under 80% of its warn line (rate and count alike). */
+/** No metric still meets both 80% floors of a warn line. */
 export function belowClearLine(input: LadderInput) {
   const f = 0.8, d = input.day, w = input.week;
-  const rate = (n: number, total: number) => total > 0 ? n / total : n > 0 ? 1 : 0;
-  const under = (n: number, total: number, line: { rate: number; count: number }) => n < line.count * f || rate(n, total) < line.rate * f;
+  const under = (n: number, total: number, line: LadderLine) => !reaches(n, total, line, f);
   return under(d.complaints, d.accepted, LADDER.complaints.warn[0]) && under(w.complaints, w.accepted, LADDER.complaints.warn[1])
     && under(d.bounces, d.accepted, LADDER.bounces.warn[0]) && under(w.bounces, w.accepted, LADDER.bounces.warn[1])
     && under(input.rejected, input.screened, LADDER.screen.warn[0]);

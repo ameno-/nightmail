@@ -16429,12 +16429,19 @@ describe('Dashboard API capabilities', () => {
     // The ladder: counts and rates together; bounces alone hold marketing and stop transactional mail only at 5% and 50.
     const w = (o: Partial<import('./src/standing-model.js').Window> = {}) => ({ accepted: 1000, bounces: 0, complaints: 0, marketingAccepted: 0, marketingBounces: 0, marketingComplaints: 0, ...o });
     const level = (day: ReturnType<typeof w>, extra: Partial<import('./src/standing-model.js').LadderInput> = {}) => { const r = m.evaluateLadder({ day, week: day, screened: 0, rejected: 0, ...extra }); return [r.level, r.pauseKind]; };
-    assert.deepEqual(level(w({ complaints: 1 })), ['notice', null]);
-    assert.deepEqual(level(w({ accepted: 300, complaints: 1 })), ['notice', null], 'One complaint never warns a small sender.');
+    assert.deepEqual(level(w({ accepted: 50_000, complaints: 1 })), ['ok', null]);
+    assert.deepEqual(level(w({ accepted: 100, complaints: 1 })), ['ok', null], 'The rate alone is not enough.');
+    assert.deepEqual(level(w({ accepted: 20_001, complaints: 2 })), ['ok', null], 'The count alone is not enough; do not compare rounded percentages.');
+    assert.deepEqual(level(w({ accepted: 20_000, complaints: 2 })), ['notice', null], 'Both floors are inclusive.');
+    assert.deepEqual(level(w({ accepted: 100, complaints: 2 })), ['warn', null]);
     assert.deepEqual(level(w({ complaints: 2 })), ['warn', null]);
     assert.deepEqual(level(w({ complaints: 3 })), ['restrict', null]);
     assert.deepEqual(level(w({ complaints: 5 })), ['pause', 'full']);
     assert.deepEqual(level(w({ bounces: 9 })), ['ok', null]); assert.deepEqual(level(w({ bounces: 20 })), ['warn', null]);
+    assert.deepEqual(level(w({ accepted: 100, bounces: 2 })), ['ok', null]);
+    assert.deepEqual(level(w({ accepted: 301, bounces: 3 })), ['ok', null]);
+    assert.deepEqual(level(w({ accepted: 300, bounces: 3 })), ['notice', null]);
+    assert.deepEqual(level(w({ accepted: 0, complaints: 10, bounces: 50 }), { screened: 0, rejected: 25 }), ['ok', null], 'No accepted or screened volume cannot supply a rate.');
     assert.deepEqual(level(w({ bounces: 30, marketingAccepted: 600, marketingBounces: 30 })), ['restrict', null], 'Marketing at 5% holds marketing.');
     assert.deepEqual(level(w({ bounces: 90, marketingAccepted: 900, marketingBounces: 90 })), ['restrict', null], 'Pool emergency from marketing alone still only holds marketing.');
     assert.deepEqual(level(w({ bounces: 60, marketingAccepted: 0 })), ['pause', 'bounce'], 'Transactional mail itself at 6% and 60 stops everything.');
@@ -16543,6 +16550,44 @@ describe('Dashboard API capabilities', () => {
       assert.deepEqual([stale.status, stale.headers.get('x-nightmail-sender-score-cache'), stale.body.standing.step], [200, 'stale', 'warn']);
       const unseen = await local('GET', `/v1/metrics?from=2026-01-01T00:00:00.000Z&to=2026-01-02T00:00:00.000Z`);
       assert.equal(error(unseen, 429).code, 'DASHBOARD_RATE_LIMITED');
+    });
+  });
+
+  test('sender standing: the card explains one complaint in 50,000 without a notice; two in 100 warn', async t => {
+    await simulatedSesFixture(t, async ({ db, runtime, local, jobs }) => {
+      const { refreshStanding } = await import('./src/standing.js');
+      const wid = runtime.config.workspaceId;
+      runtime.config.multiTenant = true;
+      await db.query("INSERT INTO provider_connections(id,workspace_id,kind,region,state) VALUES ($1,$1,'shared',$2,'ready')", [wid, REGION]);
+      await db.query("INSERT INTO platform_operators(user_id,role,reason) VALUES($1,'operator:read','Synthetic standing fixture')", [manager!.userId]);
+      const inspect = async (accepted: number, complaints: number) => {
+        await db.query(`INSERT INTO hosted_health_hourly(workspace_id,epoch,hour,accepted,bounces,complaints)
+          VALUES($1,'-infinity',date_trunc('hour',now(),'UTC'),$2,0,$3)
+          ON CONFLICT(workspace_id,epoch,hour) DO UPDATE SET accepted=excluded.accepted,complaints=excluded.complaints`, [wid, accepted, complaints]);
+        await refreshStanding(runtime, { only: wid });
+        return ok(await local('GET', `/v1/operator/workspaces/${wid}`)).standing;
+      };
+      const large = await inspect(50_000, 1);
+      assert.equal(large.step, 'ok');
+      assert.deepEqual(large.reasons, [{ code: 'COMPLAINT_BELOW_NOTICE', metric: 'complaints', step: 'ok', window: '24h',
+        count: 1, value: 0.00002, threshold: 0.0001, minimum: 2, message: '1 complaint in 24 hours (0.002%), under the notice line of 0.01%.' }]);
+      const belowCount = await inspect(100, 1);
+      assert.equal(belowCount.step, 'ok'); assert.equal(belowCount.version, large.version);
+      assert.match(belowCount.reasons[0].message, /\(1%\).*needs at least 2 complaints/);
+      assert.equal((await jobs('standing.notify')).length, 0);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM standing_events WHERE workspace_id=$1 AND kind='step'", [wid])).rows[0].n, 0);
+
+      const notice = await inspect(20_000, 2);
+      assert.equal(notice.step, 'notice'); assert.equal(notice.reasons[0].code, 'COMPLAINT_NOTICE');
+      const updated = await inspect(10_000, 3);
+      assert.equal(updated.version, notice.version); assert.match(updated.reasons[0].message, /3 complaints in 24 hours \(0\.03%\)/);
+      const cleared = await inspect(50_000, 1);
+      assert.equal(cleared.step, 'ok'); assert.deepEqual(cleared.reasons, large.reasons);
+      assert.deepEqual((await inspect(50_000, 0)).reasons, []);
+
+      const small = await inspect(100, 2);
+      assert.equal(small.step, 'warn');
+      assert.deepEqual(small.reasons.map((r: Json) => [r.code, r.value, r.count, r.threshold, r.minimum, r.window]), [['COMPLAINTS_WARN', 0.02, 2, 0.0005, 2, '24h']]);
     });
   });
 
@@ -25127,11 +25172,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
           [wid,type,data,simulated,age,recipients.slice(start,end).map((r:Json)=>r.id)]);
       };
       const standing = async () => (await db.query('SELECT step,pause_kind,reasons,strikes FROM sender_standing WHERE workspace_id=$1',[wid])).rows[0];
+      await event('accepted',0,recipients.length); // Real feedback rates need real accepted volume in the window.
       await event('bounce',0,9,{bounceType:'Permanent'}); await event('bounce',0,1,{bounceType:'Permanent'}); // duplicate
       await event('bounce',9,10,{bounceType:'Transient'}); await event('complaint',0,1); await event('complaint',1,2,{},'25 hours');
       await event('bounce',9,10,{bounceType:'Permanent'},'0 hours',true);
       await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated) VALUES(gen_random_uuid()::text,$1,$2,'complaint',false)`,[wid,sim.id]);
-      await checkHostedHealth(runtime); assert.equal(await pause(),null); assert.equal((await standing()).step,'notice','One complaint in 24 hours is a notice.');
+      await checkHostedHealth(runtime); assert.equal(await pause(),null);
+      assert.deepEqual([(await standing()).step,(await standing()).reasons.map((r:Json)=>r.code)],['notice',['BOUNCE_NOTICE']],'Nine hard bounces qualify; a single complaint does not.');
       await db.query(`UPDATE sending_emails SET region='eu-west-1' WHERE id=$1`,[recipients[9].id]); // The final hard bounce is in another region.
       await event('bounce',9,10,{bounceType:'Permanent'});
       await checkHostedHealth(runtime);

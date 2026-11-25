@@ -31,13 +31,13 @@ type Line = { rate: number; count: number; window?: string }
 const at = (lines: readonly Line[], window = true) => lines.map((line, i) => `${i && line.rate === lines[i - 1].rate ? '' : `${pct(line.rate)} and `}${line.count}${window ? ` in ${line.window === '7d' ? '7 days' : '24 h'}` : ''}`).join(', or ')
 const lines: [what: string, warn: string, restrict: string, pause: string][] = [
   ['Complaints', at(LADDER.complaints.warn), at(LADDER.complaints.restrict), at(LADDER.complaints.pause)],
-  ['Hard bounces', at(LADDER.bounces.warn), `Marketing ${at(LADDER.marketingBounces.restrict, false)}; any mail ${at(LADDER.anyBounces.restrict, false)}`, `Transactional ${at(LADDER.transactionalBounces.pause, false)}`],
+  ['Hard bounces', at(LADDER.bounces.warn), `Marketing ${at(LADDER.marketingBounces.restrict, false)}; any mail ${at(LADDER.bounces.restrict, false)}`, `Transactional ${at(LADDER.transactionalBounces.pause, false)}`],
   ['Spam-screen rejections', at(LADDER.screen.warn), at(LADDER.screen.restrict, false), at(LADDER.screen.pause, false)],
   ['Other', '–', '–', 'AWS paused sending, or confirmed abuse'],
 ]
 // What each step does, then how it ends.
 const ladder: { step: string; mark: string; tone: string; does: string; recovery: string }[] = [
-  { step: 'Notice', mark: '·', tone: 'neutral', does: 'A first complaint or a few bounces adds a dashboard note.', recovery: 'It clears by itself.' },
+  { step: 'Notice', mark: '·', tone: 'neutral', does: `A dashboard note for complaints (${at(LADDER.complaints.notice)}) or hard bounces (${at(LADDER.bounces.notice)}).`, recovery: 'It clears by itself.' },
   { step: 'Warn', mark: '1', tone: 'warning', does: `The limit is frozen (without one, at the last 24 hours’ accepted mail, at least ${FREEZE_FLOOR.toLocaleString('en-US')}). Owners and admins get an email.`, recovery: 'Clears after 24 hours under 80% of the line.' },
   { step: 'Restrict', mark: '2', tone: 'warning', does: 'Marketing is held; receipts and resets still send.', recovery: 'After 24 hours owners and admins can release it from Overview: 50% for 48 hours, once per 14 days.' },
   { step: 'Pause', mark: '3', tone: 'danger', does: 'Sending stops. Queued mail is canceled after 72 hours.', recovery: 'A pause from transactional bounces alone: owners can resume it at 50% for 48 hours, once per 30 days. Others need a review.' },
@@ -62,7 +62,7 @@ export function SendingLimitsGuide({ headings = 'h3', limit, compact = false }: 
       </ul>
     </section>
     <Part title="Warnings and holds" H={H} compact={compact}>
-      <p>Checked every 10 minutes. A line needs its rate and its count; any one line is enough.</p>
+      <p>Checked every 10 minutes. A line needs its rate and its count; any one line is enough. Lines use 24 hours unless marked 7 days.</p>
       <div className="limits-table-scroll"><table className="limits-table limits-table--lines">
         <thead><tr><th scope="col"><span className="sr-only">Signal</span></th><th scope="col">Warn</th><th scope="col">Restrict</th><th scope="col">Pause</th></tr></thead>
         <tbody>{lines.map(([what, ...steps]) => <tr key={what}><th scope="row">{what}</th>{steps.map((cell, i) => <td key={i}>{cell}</td>)}</tr>)}</tbody>
