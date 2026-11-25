@@ -14,7 +14,7 @@ import { DISPOSABLE_SOURCE, disposableDomains } from './disposable-domains.js';
 //  - dead: hard-bounced in another workspace in the last year. A bounce in its own workspace suppresses it already.
 export const RISKS = ['invalid', 'disposable', 'typo_domain', 'role', 'dead'] as const;
 export type Risk = (typeof RISKS)[number];
-export const RiskReason = z.enum(RISKS).describe('invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: hard-bounced in another workspace in the last year.');
+export const RiskReason = z.enum(RISKS).describe('invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce).');
 export const RiskBreakdown = z.object({ total: z.number().int(), byReason: z.object(Object.fromEntries(RISKS.map(r => [r, z.number().int()])) as Record<Risk, z.ZodNumber>) }).openapi('RiskBreakdown');
 /** Recipients of a send whose address alone looks risky: transactional mail goes anyway, with these in its receipt. */
 export const RecipientWarning = z.object({ email: z.string(), risk: RiskReason.exclude(['dead']), suggestion: z.string().nullable() }).openapi('RecipientWarning');

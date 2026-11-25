@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown } from 'lucide-react'
-import { useApiDef, useApiMutation, useApiQuery } from '../../data/context'
+import { useApiDef, useApiMutation, useApiQuery, useWorkspaceAccess } from '../../data/context'
 import { invalidate } from '../../data/invalidation'
 import { queries } from '../../data/queries'
 import { errorText, type AudienceList, type Contact } from '../../data/types'
@@ -100,8 +100,9 @@ function listsText(row: Contact, lists: AudienceList[]) {
 const listsTitle = (row: Contact, lists: AudienceList[]) => listNames(row, lists).join(', ') || undefined
 export function ContactTable({ contacts, lists = [], members = false, status, loading = false, minRows = pageSize, listsLoading = false, tableRef, empty }: { contacts: Contact[]; lists?: AudienceList[]; members?: boolean; status?: string; loading?: boolean; minRows?: number; listsLoading?: boolean; tableRef?: (node: HTMLDivElement | null) => void; empty?: ReactNode }) {
   const columns = members ? memberColumnsFor(status ?? '') : contactColumnsFor(status ?? '')
-  const allow = useAllowRisk()
-  const riskMenu = (row: Contact) => row.risk && <DropdownMenu label="Actions for this contact" title={<PrivateAddress value={row.email} />} items={[row.risk.allowed ? { label: 'Skip again', hint: 'Campaigns skip this address', onSelect: () => void allow.run(row.id, false) } : { label: 'Send anyway', hint: 'Campaigns send to this address', onSelect: () => void allow.run(row.id, true) }]} />
+  const allow = useAllowRisk(), { canAdminister } = useWorkspaceAccess()
+  // Send anyway is an owner's or admin's call (the API wants manage for it).
+  const riskMenu = (row: Contact) => canAdminister && row.risk && <DropdownMenu label="Actions for this contact" title={<PrivateAddress value={row.email} />} items={[row.risk.allowed ? { label: 'Skip again', hint: 'Campaigns skip this address', onSelect: () => void allow.run(row.id, false) } : { label: 'Send anyway', hint: 'Campaigns send to this address', onSelect: () => void allow.run(row.id, true) }]} />
   // Why campaigns skip a contact: its suppression, else its risk.
   const reason = (row: Contact) => suppressionText(row.suppressionReason) ?? (riskSkipped(row) ? riskLabels[row.risk!.reason] : undefined)
   return <DataTable className="audience-contacts" tableRef={tableRef} rows={contacts} loading={loading} skeletonRows={minRows} minRows={minRows} rowKey={row => row.id} rowHref={row => `/audience/contacts/${row.id}`} empty={empty} columns={columns.map(column => ({ ...column, cardRender: column.key === 'email' ? (row: Contact) => <span className="audience-cell-text"><PrivateAddress value={row.email} /></span>

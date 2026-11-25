@@ -1026,7 +1026,7 @@ function CampaignReview({ campaign: latest, stats, settings, stale, refreshing, 
     finally { guard.current = false }
   }
   const confirmSend = () => confirmation ? send(confirmation) : undefined
-  const noticeNote = campaign.requiredNotice ? ' People who unsubscribed get it too; suppressed addresses never do.' : ''
+  const noticeNote = campaign.requiredNotice ? ' People who unsubscribed get it too; suppressed and risky addresses never do.' : ''
   const scheduledView = !draft && !campaign.archivedAt && unreleasedSchedule(campaign)
   const sentSomething = (campaign.counts?.total ?? 0) > 0
   const finished = campaignFinished(campaign)

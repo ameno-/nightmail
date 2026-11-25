@@ -1686,7 +1686,7 @@
               "role",
               "dead"
             ],
-            "description": "invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: hard-bounced in another workspace in the last year."
+            "description": "invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce)."
           },
           "suggestion": {
             "type": [
@@ -6867,7 +6867,7 @@
           },
           "risky": {
             "type": "integer",
-            "description": "Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address that bounced elsewhere): the send skips them. Not in eligible."
+            "description": "Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible."
           },
           "riskyByReason": {
             "type": "object",
@@ -6905,7 +6905,7 @@
           "risky",
           "riskyByReason"
         ],
-        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
+        "description": "Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch."
       },
       "CampaignPreviewImage": {
         "type": "object",
@@ -23595,7 +23595,7 @@
                   },
                   "riskAllowed": {
                     "type": "boolean",
-                    "description": "true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise)."
+                    "description": "true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise)."
                   }
                 },
                 "additionalProperties": false

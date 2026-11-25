@@ -45,7 +45,7 @@ const Email = mailAddress(z.string().trim()).transform(v => v.toLowerCase()).ope
 const Properties = z.record(z.string().min(1).max(80), z.union([z.string().max(2000), z.number().finite(), z.boolean(), z.null()])).refine(v => Object.keys(v).length <= CONTACT_PROPERTIES_MAX_KEYS, 'At most 50 properties are supported.');
 export const PropertiesInput = Properties.refine(v => propertiesByteLength(v) <= CONTACT_PROPERTIES_MAX_BYTES, 'Contact properties must total at most 16 KiB of JSON.').describe('Up to 50 key/value pairs, at most 16 KiB of JSON total.');
 export const ContactInput = z.object({ email: Email, name: z.string().trim().max(200).optional(), properties: PropertiesInput.default({}) }).strict();
-const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional(), riskAllowed: z.boolean().optional().describe('true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).') }).strict();
+const ContactPatch = z.object({ name: z.string().trim().max(200).nullable().optional(), properties: PropertiesInput.optional(), riskAllowed: z.boolean().optional().describe('true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).') }).strict();
 export function withAudienceReadMemory(c: Ctx, work: () => Promise<Response>): Promise<Response> {
   return withBoundedRead(c, () => work(), { route: 'audience.read' });
 }
@@ -946,6 +946,8 @@ export function registerAudience(app: App) {
   });
   app.openapi(createRoute({ method: 'patch', path: '/v1/contacts/{id}', operationId: 'updateContact', tags: ['Audience'], security, request: { params: IdParams, body: json(ContactPatch) }, responses: { 200: response(Contact), ...errors } }), async c => {
     const identity = actor(c, 'editContent'), contactId = c.req.valid('param').id, input = c.req.valid('json'), found = await findContact(c.env.db, identity, contactId);
+    // Sending to a risky address anyway is an owner's or admin's call (manage), not every member's who edits contacts.
+    if (input.riskAllowed !== undefined) actor(c, 'manage');
     if (input.riskAllowed !== undefined && !found.risk) throw new ApiError(409, 'CONTACT_NOT_RISKY', 'This contact is not flagged as risky, so there is nothing to allow.', 'riskAllowed');
     let contact: typeof contacts.$inferSelect | undefined;
     try {

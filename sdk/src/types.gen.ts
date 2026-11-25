@@ -628,7 +628,7 @@ export type ContactRead = Contact & {
  */
 export type ContactRisk = {
     /**
-     * invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: hard-bounced in another workspace in the last year.
+     * invalid: not a deliverable address. disposable: a public temporary inbox. typo_domain: a mistyped mailbox provider (gmial.com). role: abuse@, postmaster@, noreply@ and the like. dead: known to be undeliverable (a recent permanent bounce).
      */
     reason: 'invalid' | 'disposable' | 'typo_domain' | 'role' | 'dead';
     /**
@@ -2143,7 +2143,7 @@ export type CampaignPreview = {
 };
 
 /**
- * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
+ * Live counts for the saved audience: matched contacts, those eligible for marketing, and the suppressed, unsubscribed or risky remainder. For a required notice everyone not suppressed or risky is eligible and unsubscribed is 0. Read-only; sending freezes its own snapshot and rechecks consent at dispatch.
  */
 export type CampaignAudienceCounts = {
     matched: number;
@@ -2151,7 +2151,7 @@ export type CampaignAudienceCounts = {
     suppressed: number;
     unsubscribed: number;
     /**
-     * Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address that bounced elsewhere): the send skips them. Not in eligible.
+     * Contacts who could receive it but are flagged as risky (a disposable inbox, a mistyped provider, a role address, an address known to be undeliverable): the send skips them. Not in eligible.
      */
     risky: number;
     riskyByReason: {
@@ -7937,7 +7937,7 @@ export type UpdateContactData = {
             [key: string]: string | number | boolean | null;
         };
         /**
-         * true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).
+         * true sends campaigns and marketing to a contact flagged as risky anyway; false skips it again. Owners and admins only (manage permission). Only for a contact with a risk (409 CONTACT_NOT_RISKY otherwise).
          */
         riskAllowed?: boolean;
     };

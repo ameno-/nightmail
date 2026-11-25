@@ -10,8 +10,8 @@ const legend: Record<string, string> = { subscribed: 'can receive campaigns', un
 export const consentTitle = (status: string) => `${statusOptions.find(option => option.value === status)?.label ?? status}: ${legend[status] ?? ''}`
 
 // Why list hygiene flagged an address, as a status (riskLabels) and as a count's noun (riskWords: "290 mistyped").
-export const riskLabels: Record<RiskReason, string> = { invalid: 'Invalid address', disposable: 'Disposable domain', typo_domain: 'Mistyped domain', role: 'Role address', dead: 'Bounced elsewhere' }
-const riskWords: Record<RiskReason, string> = { invalid: 'invalid', disposable: 'disposable', typo_domain: 'mistyped', role: 'role', dead: 'bounced elsewhere' }
+export const riskLabels: Record<RiskReason, string> = { invalid: 'Invalid address', disposable: 'Disposable domain', typo_domain: 'Mistyped domain', role: 'Role address', dead: 'Undeliverable' }
+const riskWords: Record<RiskReason, string> = { invalid: 'invalid', disposable: 'disposable', typo_domain: 'mistyped', role: 'role', dead: 'undeliverable' }
 const riskOrder = Object.keys(riskLabels) as RiskReason[]
 /** "3,100 disposable, 290 mistyped, 22 role": the reasons with a count, largest first. */
 export const riskBreakdown = (byReason: Partial<Record<RiskReason, number>> | undefined, format: (count: number) => string) =>
