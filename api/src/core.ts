@@ -75,6 +75,9 @@ export interface Storage {
   /** Up to 1,000 objects in key order after `after`; `cursor` continues the listing and is absent at its end. */
   list?(prefix: string, after?: string): Promise<{ objects: { key: string; uploaded: Date }[]; cursor?: string }>;
 }
+export type ScreenClassifier = 'jevf' | 'jev';
+export type ScreenModel = { apiKey: string; endpoint: string; model: string; threshold: number };
+type JevFModel = ScreenModel & { deadlineMs: number; maxConcurrency: number };
 export interface Config {
   /** Requests per minute per credential. */
   apiRateLimitPerMinute: number;
@@ -172,11 +175,10 @@ export interface Config {
   // Subset of snsTopicArns that carries SES inbound receipt notifications for mailboxes.
   inboundTopicArns?: string[];
   reputationAlertUrl?: string;
-  // Opt-in Jev content screen for live transactional sends with `screen: true`; undefined without TYPESAFE_API_KEY.
-  screen?: { apiKey: string; endpoint: string; model: string; mode: 'reject' | 'flag'; threshold: number; failover?: Config['shadow'] };
-  // The second classifier that repeats the screen's requests after the fact (src/screen-shadow.ts); undefined without
-  // JEVF_API_KEY (or without a screen), and then nothing of it runs.
-  shadow?: { apiKey: string; endpoint: string; model: string; deadlineMs: number; maxConcurrency: number };
+  // Outbound harm screening. Inbound Ritual questions always use the Jev entry.
+  screen?: { primary: ScreenClassifier; mode: 'reject' | 'flag'; jev: ScreenModel; jevf?: JevFModel };
+  // JevF comparisons run only with Jev primary; a successful JevF gate needs no second call.
+  shadow?: JevFModel;
   // Screened-text limits (src/screen.ts): one message, and one campaign screened once for all its recipients.
   screenLimits: { messageBytes: number; campaignBytes: number };
   aws?: { accessKeyId: string; secretAccessKey: string; sessionToken?: string };

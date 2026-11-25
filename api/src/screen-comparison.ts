@@ -8,14 +8,14 @@ import type { Database } from './core.js';
 const Count = z.number().int();
 const Quantiles = z.object({ requests: Count.describe('Requests that were made and timed.'), p50: z.number().nullable(), p95: z.number().nullable(), p99: z.number().nullable() });
 const Agreement = z.object({ compared: Count.describe('Both classifiers answered.'), bothFlag: Count, bothPass: Count,
-  jevFlagJevfPass: Count.describe('The screen was at or above the threshold, the second classifier below it.'),
-  jevPassJevfFlag: Count.describe('The screen was below the threshold, the second classifier at or above it.') });
+  jevFlagJevfPass: Count.describe('Jev was at or above its cutoff, JevF below its own.'),
+  jevPassJevfFlag: Count.describe('Jev was below its cutoff, JevF at or above its own.') });
 const Tokens = z.object({ reported: Count.describe('Requests whose answer reported input tokens.'), total: Count, mean: z.number().nullable(), max: Count.nullable() });
 const Hour = z.object({ calls: Count.describe('Requests made.'), rateLimited: Count, timeouts: Count, errors: Count.describe('Every other failure: network, another HTTP status, an invalid answer.'),
   rateLimitedRate: z.number().nullable(), timeoutRate: z.number().nullable(), errorRate: z.number().nullable() });
 export const ScreenComparison = z.object({
   since: z.string(), until: z.string(),
-  configured: z.boolean().describe('Whether this installation has the second classifier on (JEVF_API_KEY).'),
+  configured: z.boolean().describe('Whether this installation is running JevF shadow comparisons.'),
   counts: z.object({ pairs: Count.describe('Requests the screen made, each with what became of its repeat.'), digests: Count.describe('Distinct messages and campaign copies.'),
     email: Count, campaignTest: Count, campaignCopy: Count, jevAnswered: Count, jevfAnswered: Count, bothAnswered: Count }),
   coverage: z.object({ called: Count.describe('Requests repeated to the second classifier.'), answered: Count, refusedTooLarge: Count.describe('Refused as over its input limit.'),
@@ -23,7 +23,7 @@ export const ScreenComparison = z.object({
     lost: Count.describe('Its queue message was delivered again and no row had been written: never asked a second time.'),
     answeredShare: z.number().nullable().describe('Of the screen\'s requests, the share the second classifier answered.') }),
   outcomes: z.object({ jev: z.record(z.string(), Count), jevf: z.record(z.string(), Count) }),
-  agreement: z.object({ threshold: z.object({ min: z.number().nullable(), max: z.number().nullable() }).describe('The thresholds in force on the compared requests.'),
+  agreement: z.object({ threshold: z.object({ min: z.number().nullable(), max: z.number().nullable() }).describe('The Jev thresholds in force on the compared requests.'),
     requests: Agreement, messages: Agreement.describe('Per message or campaign copy whose every request both answered: the highest score of each, as the screen decides.') }),
   scoreDifference: z.object({ mean: z.number().nullable().describe('Second classifier minus screen.'), meanAbsolute: z.number().nullable(), p50Absolute: z.number().nullable(), p95Absolute: z.number().nullable(), p99Absolute: z.number().nullable(),
     histogram: z.array(z.object({ from: z.number(), to: z.number(), count: Count })).describe('Second classifier minus screen, in steps of 0.1 from -1 to 1; empty steps are left out.') }),
