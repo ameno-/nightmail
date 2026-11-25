@@ -967,19 +967,33 @@ export async function seed(fx) {
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
   // Its built-in domain sends meanwhile: Overview's card asks for a domain of its own, and Domains lists the built-in one.
   const builtinDomain = await builtin(db, 'ws_skipped', await hosted(db, 'ws_skipped'), 'pine-studio-k7');
-  // A verified domain of its own and nothing sent yet: Overview's first card offers the first send, from that domain, not the built-in one.
+  // A verified domain of its own and nothing sent yet: Overview's get-started strip has that step done, and its test email
+  // goes from that domain, not the built-in one.
   await fx.signIn('ren', 'ren@rowanbakery.example', 'Ren Okafor', { id: 'ws_verified', name: 'Rowan Bakery' });
   const verifiedConn = await hosted(db, 'ws_verified');
   await builtin(db, 'ws_verified', verifiedConn, 'rowan-bakery-m2');
   await domain(db, 'ws_verified', verifiedConn, 'rowanbakery.example');
+  // Ash & Elm: every step of the strip done: its own domain verified, its test email delivered, and an agent connected with
+  // the key its setup token made (the agent's own exchange, as an agent runs it).
+  const ash = await fx.signIn('ash', 'ash@ashelm.example', 'Ash Lane', { id: 'ws_all_set', name: 'Ash & Elm' });
+  const allSetConn = await hosted(db, 'ws_all_set');
+  await builtin(db, 'ws_all_set', allSetConn, 'ash-elm-a5');
+  await domain(db, 'ws_all_set', allSetConn, 'ashelm.example');
+  const firstEmail = rid('email');
+  await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
+    VALUES ($1,'ws_all_set','${REGION}','fixture','hello@ashelm.example','["ash@ashelm.example"]','[]','[]','Your first email from Nightmail',$2::jsonb,false,'delivered','provider-'||$1,3,now()-interval '20 minutes')`,
+    [firstEmail, JSON.stringify({ kind: 'transactional', region: REGION, subject: 'Your first email from Nightmail', text: 'Hi,\n\nashelm.example is set up.\n', attachments: [] })]);
+  const setupToken = await ash.api('POST', '/v1/agent/setup-tokens', undefined, 201);
+  const exchanged = await fetch(fx.apiOrigin + '/v1/agent/setup', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ token: setupToken.token, client_name: 'OpenCode' }) });
+  if (exchanged.status !== 201) throw new Error(`CLS seed: agent setup → ${exchanged.status} ${await exchanged.text()}`);
   // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: Get started.
   await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
   await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
   // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
   await fx.signIn('ula', 'ula@ulmus.example', 'Ula Berg', { id: 'ws_builtin_pending', name: 'Ulmus' });
   await builtin(db, 'ws_builtin_pending', await hosted(db, 'ws_builtin_pending'), 'ulmus-r8', { pending: true });
-  // What each workspace said it is here for (Settings, or a landing link's focus): the Overview card each focus leads to.
-  // Alder: agent inboxes, its agent@ inbox made and two emails in it. Aspen: the same focus, nothing received yet (Overview's card).
+  // What each workspace said it is here for (Settings, or a landing link's focus). Alder: agent inboxes, its agent@ inbox
+  // made and two emails in it.
   const focused = async (user, email, name, workspace, label, focus) => {
     await fx.signIn(user, email, name, { id: workspace, name: label })
     const made = await builtin(db, workspace, await hosted(db, workspace), label.toLowerCase() + '-' + user.slice(0, 1) + '3')
@@ -988,9 +1002,6 @@ export async function seed(fx) {
   }
   const alder = await focused('ada', 'ada@alder.example', 'Ada Moss', 'ws_focus_agents', 'Alder', ['agents', 'developer'])
   await agentInbox(db, 'ws_focus_agents', { mdom: 'mdom_builtin_ws_focus_agents', host: alder.name }, 'Agent', 24 * 30, mix(2))
-  await focused('abe', 'abe@aspen.example', 'Abe Lowe', 'ws_focus_agents_new', 'Aspen', ['agents'])
-  await focused('mae', 'mae@maple.example', 'Mae Ford', 'ws_focus_marketing', 'Maple', ['marketing', 'newsletter'])
-  await focused('noa', 'noa@linden.example', 'Noa Hart', 'ws_focus_newsletter', 'Linden', ['newsletter'])
   await focused('pam', 'pam@poplar.example', 'Pam Reid', 'ws_focus_personal', 'Poplar', ['personal'])
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');

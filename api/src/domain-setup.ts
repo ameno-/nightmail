@@ -12,7 +12,8 @@ import { LINK_RETENTION_DAYS } from './link-hosts.js';
 // missing at Cloudflare"). With DOMAIN_SETUP_REMINDER=on, a check that finds a sending record missing or different also
 // queues the one email to the workspace's owners and admins (account-notices.ts domainSetup), at most once per domain.
 // The same tick, with NO_DOMAIN_REMINDER=on, emails a new workspace that has added no domain at all an hour after it was
-// created (noDomainNotices), once; Overview asks for one either way (features/overview/onboarding-card.tsx).
+// created (noDomainNotices), once; Overview asks for one either way (its get-started strip and the daily limit's line,
+// features/overview/first-run.tsx and setup.tsx).
 // With link hosts on (src/link-domains.ts), it also queues a domain.linkCheck for each domain whose link host isn't
 // active yet: every 15 minutes for its first day, then every 6 hours; an active one, daily. The check makes the host a custom hostname once its
 // CNAME resolves, so a link record published after the domain verified needs no Check now. It never emails.
