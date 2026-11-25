@@ -11,6 +11,7 @@ import { MEMORY_LIMITS, reserveMemory, runInMemoryScope, type MemoryLease } from
 import { buildBoundedPageJson, PAGE_MAX_BYTES, READ_MAX_WAITERS, READ_RESERVATION_BYTES, streamTextPartsResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { mailAddress, validMailAddressSql } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
+import { RAMP } from './standing-model.js';
 import { bouncedElsewhere, classifyAddress, contactRisk, noRisks, RiskBreakdown, RiskReason, RISKS, riskCounts, riskSql, skippedRisk, validAddress, type Risk, type RiskCounts } from './list-hygiene.js';
 
 export const CONTACT_PROPERTIES_MAX_KEYS = 50;
@@ -362,7 +363,7 @@ async function previewSegmentCounts(db: DbExecutor, identity: Actor, rule: Segme
 // One INSERT ... SELECT captures membership, consent and only referenced personalization values.
 // Keyset-paging the live audience across transactions would not be a review snapshot.
 // The audience's lists and segments, locked for share when the caller snapshots, and the matching conditions over contacts.
-async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean) {
+async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, lock: boolean, joined = false) {
   if (identity.domains.length) throw unrestrictedRequired(identity, 'The workspace audience needs', { permission: 'audience', level: 'read' });
   const listIds = [...new Set([spec.listId, ...(spec.excludeListIds ?? [])])].sort();
   const segmentIds = [...new Set([...(spec.segmentId ? [spec.segmentId] : []), ...(spec.excludeSegmentIds ?? [])])].sort();
@@ -373,11 +374,47 @@ async function audienceConditions(db: DbExecutor, identity: Actor, spec: z.infer
   if (lockedSegments.length !== segmentIds.length) notFound('Segment');
   // Set-based membership (no OFFSET 0 fence) lets the planner hash-join millions of members instead of probing per contact.
   const member = (listId: string) => sql`EXISTS (SELECT 1 FROM ${listMembers} WHERE ${scope(listMembers, identity)} AND ${listMembers.listId} = ${listId} AND ${listMembers.contactId} = ${contacts.id})`;
-  const conditions = [member(spec.listId)];
+  // joined: the caller joins the list's memberships (memberJoin) for when each contact joined, instead of this test.
+  const conditions = joined ? [] : [member(spec.listId)];
   if (spec.segmentId) conditions.push(compileRule(lockedSegments.find(row => row.id === spec.segmentId)!.rule));
   for (const listId of spec.excludeListIds ?? []) conditions.push(sql`NOT (${member(listId)})`);
   for (const segmentId of spec.excludeSegmentIds ?? []) conditions.push(sql`NOT (${compileRule(lockedSegments.find(row => row.id === segmentId)!.rule)})`);
   return conditions;
+}
+/** The main list's memberships, joined to its contacts: `lm.created_at` is when each joined the list. */
+const memberJoin = (identity: Pick<Actor, 'workspaceId'>, listId: string) => sql`JOIN audience_list_members lm ON lm.workspace_id = ${contacts.workspaceId} AND lm.list_id = ${listId} AND lm.contact_id = ${contacts.id} AND lm.workspace_id = ${identity.workspaceId}`;
+/** When the list was last sent to: the capture of its latest real campaign that released anyone (null: never). */
+export async function listLastSent(db: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string): Promise<string | null> {
+  const [row] = (await db.execute<{ at: string | null }>(sql`SELECT max(coalesce(r.captured_at, c.updated_at))::text AS at FROM sending_campaigns c
+    LEFT JOIN sending_campaign_reviews r ON r.workspace_id = c.workspace_id AND r.id = c.review_id
+    WHERE c.workspace_id = ${identity.workspaceId} AND c.list_id = ${listId} AND c.expanded > 0 AND NOT c.simulated`)).rows;
+  return row?.at ?? null;
+}
+/** Engagement tiers for a campaign's order (RAMP.plan): 0 opened or clicked within engagedDays, 1 mailed before (any open
+ *  or click on record, or on the list when it was last sent to), 2 never mailed: joined since, with nothing on record. */
+const engagedAt = sql`greatest(${contacts.lastOpenAt}, ${contacts.lastClickAt})`;
+const neverMailed = (lastSent: string | null) => sql`(${contacts.observedSince} IS NULL AND ${lastSent === null ? sql`true` : sql`lm.created_at > ${lastSent}::timestamptz`})`;
+const tierSql = (lastSent: string | null) => sql`(CASE WHEN ${engagedAt} >= now() - make_interval(days => ${RAMP.plan.engagedDays}::int) THEN 0 WHEN ${neverMailed(lastSent)} THEN 2 ELSE 1 END)::smallint`;
+/** Of the audience a campaign would reach, how many were never mailed (tier 2); null when counting takes over a second. */
+export async function countNeverMailed(db: DbExecutor, identity: Actor, spec: z.infer<typeof AudienceSpec>, requiredNotice: boolean, lastSent: string | null): Promise<number | null> {
+  const conditions = await audienceConditions(db, identity, spec, false, true);
+  return (db as Database).transaction(async tx => {
+    await tx.execute(sql`SAVEPOINT never_mailed`);
+    try {
+      await tx.execute(sql`SET LOCAL statement_timeout = '1s'`);
+      await tx.execute(sql`SET LOCAL enable_nestloop = off`);
+      const [row] = (await tx.execute<{ n: number }>(sql`SELECT count(*)::int AS n FROM ${contacts} ${memberJoin(identity, spec.listId)}
+        WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} AND ${reachable(requiredNotice)} AND ${neverMailed(lastSent)}`)).rows;
+      return row?.n ?? 0;
+    } catch (error) {
+      if (!statementTimedOut(error)) throw error;
+      return null;
+    } finally {
+      // The settings end with the savepoint, never leaking into the caller's transaction.
+      await tx.execute(sql`ROLLBACK TO SAVEPOINT never_mailed`);
+      await tx.execute(sql`RELEASE SAVEPOINT never_mailed`);
+    }
+  });
 }
 // Who a campaign may reach: subscribers, or for a required notice everyone who is not suppressed (bounced, complained),
 // people who unsubscribed from marketing or never subscribed included.
@@ -457,6 +494,8 @@ export type SnapshotOptions = {
   staticStamp?: StaticStampSpec;
   sliceRows?: number;
   onProgress?: (progress: SnapshotProgress) => Promise<'continue' | 'abort'>;
+  /** How many of the first recipients are a uniform sample of the whole audience (the Hosted list probe's size). */
+  leading?: (eligible: number) => number;
 };
 
 /** O(SYNC_CAPTURE_MAX_LIST_MEMBERS) PK Index-Only Scan (~0.5 ms regardless of whether the list has 2M or 20M members). */
@@ -473,13 +512,20 @@ export async function isSmallAudienceList(db: DbExecutor, identity: Pick<Actor, 
  * 4. Only then 0.
  * Always validates list/segment existence before the savepoint so 404 errors remain synchronous.
  */
+/** At most how many subscribers a campaign to `listId` reaches (a segment of it or exclusions reach fewer): the list's
+ *  counts (audience_list_counts), 0 without them. Constant time: the launch's readiness bound when counting timed out. */
+export async function listSubscribedBound(db: DbExecutor, identity: Pick<Actor, 'workspaceId'>, listId: string) {
+  if (!(await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok) return 0;
+  const [row] = (await db.execute<{ n: number }>(sql`SELECT coalesce(sum(subscribed), 0)::int AS n FROM audience_list_counts WHERE workspace_id = ${identity.workspaceId} AND list_id = ${listId}`)).rows;
+  return Number(row?.n ?? 0);
+}
 export async function estimateCampaignAudience(
   db: DbExecutor,
   identity: Actor,
   spec: z.infer<typeof AudienceSpec>,
   requiredNotice: boolean,
   cachedEstimate: number | null,
-): Promise<{ queued: number; definitive?: 'empty' | 'over_limit'; risky?: { total: number; byReason: RiskCounts } }> {
+): Promise<{ queued: number; definitive?: 'empty' | 'over_limit'; risky?: { total: number; byReason: RiskCounts }; approximate?: true }> {
   const conditions = await audienceConditions(db, identity, spec, true);
   if (!spec.segmentId && !spec.excludeListIds?.length && !spec.excludeSegmentIds?.length) {
     const hasTally = (await db.execute<{ ok: boolean }>(sql`SELECT to_regclass('public.audience_list_counts') IS NOT NULL AS ok`)).rows[0]?.ok;
@@ -509,7 +555,7 @@ export async function estimateCampaignAudience(
     return { queued: eligible };
   } catch (error) {
     if (!statementTimedOut(error)) throw error;
-    return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0 };
+    return { queued: cachedEstimate !== null && cachedEstimate > 0 ? cachedEstimate : 0, approximate: true };
   } finally {
     // Always roll back the read-only savepoint (even on success) so SET LOCAL statement_timeout=200ms and
     // enable_nestloop=off NEVER leak into the rest of the launch transaction.
@@ -548,8 +594,11 @@ export async function snapshotCampaignAudience(
   requiredNotice = false,
   options?: SnapshotOptions,
 ) {
-  const conditions = await audienceConditions(db, identity, spec, true);
+  const conditions = await audienceConditions(db, identity, spec, true, true);
   const rankExpr = priorityRankSql(spec.priority, sql`${contacts.properties}`);
+  // The order (RAMP.plan): the most engaged first, never-mailed last, in the order they joined the list.
+  const lastSent = await listLastSent(db, identity, spec.listId);
+  const order = sql`${tierSql(lastSent)} AS tier, ${engagedAt} AS engaged, lm.created_at AS joined, hashtextextended(${contacts.id}, 0) AS h`;
   const counts = sql`count(*)::int AS matched,count(*) FILTER (WHERE eligible)::int AS eligible,
     count(*) FILTER (WHERE suppressed)::int AS suppressed,count(*) FILTER (WHERE NOT eligible AND NOT suppressed AND skipped_risk IS NULL)::int AS unsubscribed,
     ${riskyColumns(sql`skipped_risk`)}`;
@@ -576,19 +625,28 @@ export async function snapshotCampaignAudience(
   await db.execute(sql`DROP TABLE IF EXISTS pg_temp.audience_snapshot, pg_temp.audience_ordered`);
   const staged = await wholeJoins(carriesEmail
     ? sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
-        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${contacts.email} AS email, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk
-        FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${contacts.email} AS email, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
+        FROM ${contacts} ${memberJoin(identity, spec.listId)} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`
     : sql`CREATE TEMP TABLE audience_snapshot ON COMMIT DROP AS
-        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk
-        FROM ${contacts} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`);
+        SELECT ${rankExpr} AS rank, ${contacts.id} AS id, ${reachable(requiredNotice)} AS eligible, ${contacts.suppressed} AS suppressed, ${skippedRiskSql} AS skipped_risk, ${order}
+        FROM ${contacts} ${memberJoin(identity, spec.listId)} WHERE ${and(scope(contacts, identity), isNull(contacts.deletedAt), ...conditions)} LIMIT ${SNAPSHOT_MAX_MATCHED + 1}`);
   if ((staged.rowCount ?? 0) > SNAPSHOT_MAX_MATCHED) throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
   const [snapshotRow] = (await db.execute<{ matched: number; eligible: number; suppressed: number; unsubscribed: number } & RiskyRow>(sql`SELECT ${counts} FROM audience_snapshot`)).rows;
   const { matched, eligible, suppressed, unsubscribed } = snapshotRow!, risky = riskyOf(snapshotRow!);
   if (!eligible) throw emptyAudience(requiredNotice, risky.total);
-  // Skinny sort hashed by ID so time-ordered UUIDv7 IDs keep the Hosted list probe uniform; drop audience_snapshot immediately.
+  // The order. The first `leading` recipients (the Hosted list probe) are a uniform sample of the whole audience: the
+  // smallest ID hashes, so time-ordered UUIDv7 IDs and the engagement order below cannot make the probe look cleaner than
+  // the list (an engaged-first probe would hide the never-mailed tail it exists to catch). Then the explicit priority,
+  // the engagement tiers (most recently engaged first), and the order contacts joined the list. One sort, after a top-N
+  // pick of the sample's last hash; drop audience_snapshot immediately.
+  const lead = Math.min(eligible, Math.max(0, Math.floor(options?.leading?.(eligible) ?? 0)));
+  // (Named apart from h: ORDER BY h would sort by the text output column, not the hash.)
+  const [edge] = lead ? (await db.execute<{ edge_h: string; edge_id: string }>(sql`SELECT h::text AS edge_h, id AS edge_id FROM audience_snapshot WHERE eligible ORDER BY h, id OFFSET ${lead - 1} LIMIT 1`)).rows : [];
+  const sampled = edge ? sql`(h, id) <= (${edge.edge_h}::bigint, ${edge.edge_id}::text)` : sql`false`;
+  const ordering = sql`ORDER BY ${sampled} DESC, CASE WHEN ${sampled} THEN h END, rank, tier, engaged DESC NULLS LAST, joined, id`;
   await db.execute(carriesEmail
-    ? sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, id, email FROM audience_snapshot WHERE eligible`
-    : sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (ORDER BY rank, hashtextextended(id, 0), id))::int AS ordinal, id FROM audience_snapshot WHERE eligible`);
+    ? sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (${ordering}))::int AS ordinal, id, email FROM audience_snapshot WHERE eligible`
+    : sql`CREATE TEMP TABLE audience_ordered ON COMMIT DROP AS SELECT (row_number() OVER (${ordering}))::int AS ordinal, id FROM audience_snapshot WHERE eligible`);
   await db.execute(sql`DROP TABLE pg_temp.audience_snapshot`);
   const multiSlice = eligible > sliceRows;
   if (multiSlice) {

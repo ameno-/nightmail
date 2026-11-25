@@ -373,10 +373,10 @@ export function createLiveApi(scope?: RequestScope): Api {
       },
       audience: async (input, signal) => ({ ...await call(`/campaigns/${idPath(input.id)}/audience`, 'GET', undefined, signal), contacts: [] }),
       reviewDisplay: (id, revision, check, signal) => call<import('./types').CampaignReviewDisplay>(
-        `/campaigns/${idPath(id)}/review-display?${new URLSearchParams({ revision: String(revision), check: String(check) })}`, 'GET', undefined, signal),
+        `/campaigns/${idPath(id)}/review-display?${new URLSearchParams({ revision: String(revision), check: String(check), readiness: 'true' })}`, 'GET', undefined, signal),
       send: async (input, signal) => {
         if (!input.revision) throw new ApiError('Reload this campaign before sending.', 'REVISION_REQUIRED')
-        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {}), ...(input.confirmRequiredNotice ? {confirmRequiredNotice: true} : {})}, signal)
+        const receipt = await call(`/campaigns/${idPath(input.id)}/${input.mode === 'schedule' ? 'schedule' : 'send'}`, 'POST', {revision: input.revision, ...(input.mode === 'schedule' ? {scheduledAt: input.scheduledAt} : {}), ...(input.pacing ? {pacing: input.pacing} : {}), ...(input.consent ? {consent: input.consent} : {}), ...(input.confirmRequiredNotice ? {confirmRequiredNotice: true} : {})}, signal)
         return receipt as import('./types').CampaignSendReceipt
       },
       pause: async (id, signal) => mapCampaign(await call(`/campaigns/${idPath(id)}/pause`, 'POST', {}, signal)),

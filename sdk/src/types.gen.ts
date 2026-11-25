@@ -1412,7 +1412,7 @@ export type SendEmailInput = {
      */
     replyMailboxId?: string;
     /**
-     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected). Not with replyAddressId.
+     * Send at this time instead of now: an RFC 3339 instant with Z or an offset, such as 2026-11-20T09:00:00Z; times without an offset are refused, and the time is returned in UTC. From now (up to a minute in the past, which sends at once) to 30 days ahead; up to 100,000 scheduled emails may wait per workspace (SCHEDULED_EMAIL_LIMIT_EXCEEDED). Content screening and suppression are checked at accept time; sending limits and the balance apply at scheduledAt, when an email they refuse is rejected with their code (email.rejected), except Hosted marketing its ramp hour has no room for, which is held until there is (RAMP_LIMIT_REACHED in sendEmail's description). Not with replyAddressId.
      */
     scheduledAt?: string;
 };
@@ -1763,6 +1763,7 @@ export type Campaign = {
         };
     };
     delivery: CampaignDelivery;
+    sendEstimate: CampaignSendEstimate;
 };
 
 /**
@@ -1861,7 +1862,22 @@ export type CampaignDelivery = {
          * When the next 24-hour window opens, when a daily cap is set.
          */
         nextWindowAt: string | null;
+        /**
+         * Sent with the recommended plan: its daily batches (one 24-hour window each; the last repeats). Null otherwise.
+         */
+        plan: Array<number> | null;
+        /**
+         * With a plan: the batch the current window releases, from 1.
+         */
+        batch: number | null;
     };
+    /**
+     * The consent source confirmed at launch, if any.
+     */
+    consent: {
+        source: string;
+        confirmedAt: string;
+    } | null;
     pausedAt: string | null;
     pauseReason: {
         code: string;
@@ -1872,10 +1888,10 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp';
         until: string;
     } | null;
     /**
@@ -1885,6 +1901,55 @@ export type CampaignDelivery = {
         oldestMs: number;
         lane: 'routine' | 'priority';
     } | null;
+} | null;
+
+/**
+ * How long sending takes, for a draft or a campaign that has recipients left to release. Null for a finished or canceled campaign; lists leave it out.
+ */
+export type CampaignSendEstimate = {
+    /**
+     * Recipients still to release: for a draft, the last audience count (previewCampaignAudience; null before one); once launched, those not released yet.
+     */
+    recipients: number | null;
+    /**
+     * The region's send rate the campaign plans at, per second, before its rate share; null until the region's quota was read.
+     */
+    ratePerSecond: number | null;
+    ramp: CampaignRamp;
+    /**
+     * How long releasing the recipients left takes from when it starts (the campaign's last change, updatedAt, or scheduledAt): from the ramp, the daily cap (pacing.perDay), the rate share and the region's send rate. A draft is estimated without a daily cap at the full rate. An estimate: it assumes clean, prompt feedback and leaves out the list probe's wait, quota holds and other mail sharing the rate. Null when it cannot be told (no audience count or send rate yet).
+     */
+    seconds: number | null;
+    /**
+     * A launched campaign: when its last recipient is expected to be released, as of its last change (updatedAt or scheduledAt, plus seconds). Null for a draft, while paused or failed, or when it cannot be told.
+     */
+    finishAt: string | null;
+} | null;
+
+/**
+ * Where the campaign is on the ramp. A Hosted sender's first large campaigns release in hourly steps that grow (1,000 an hour at first), moving to the next step once an hour at this one went out and its delivery results are in and clean; more than 3% bounces or more than 0.08% complaints (at least 2) in a step pause the campaign. The first step not already proven by the workspace's largest clean marketing hour of the last 30 days is where it starts, so an established sender skips it. Null when no ramp applies (self-hosted, your own AWS account, simulated mail, an established sender, or past the last step). Transactional mail never waits for it.
+ */
+export type CampaignRamp = {
+    /**
+     * The step the campaign releases at, from 1.
+     */
+    step: number;
+    /**
+     * How many steps the ramp has; past the last one only the other limits apply.
+     */
+    steps: number;
+    /**
+     * Most recipients this step releases in its hour.
+     */
+    ceilingPerHour: number;
+    /**
+     * When this step's hour started: its first release. Null before it.
+     */
+    startedAt: string | null;
+    /**
+     * Recipients released since this step's hour started.
+     */
+    released: number;
 } | null;
 
 export type CreateCampaignInput = {
@@ -2165,6 +2230,138 @@ export type CampaignAudienceCounts = {
         role: number;
         dead: number;
     };
+    /**
+     * With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.
+     */
+    readiness?: {
+        /**
+         * ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.
+         */
+        verdict: 'ready' | 'ramp_recommended' | 'ramp_required';
+        /**
+         * Why, in one or two plain sentences, when a ramp is recommended or required.
+         */
+        summary: string | null;
+        /**
+         * Every finding behind the verdict.
+         */
+        reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        domain: {
+            name: string;
+            /**
+             * When the From domain (or the domain it is under) was added to this workspace.
+             */
+            firstSeenAt: string | null;
+            ageDays: number | null;
+            /**
+             * The DMARC policy last observed; null when not checked yet.
+             */
+            dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null;
+            /**
+             * The custom MAIL FROM domain (aligned SPF).
+             */
+            mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * A link host of the domain's own for tracked links: not configurable yet.
+             */
+            linkHost: 'not_configured';
+        };
+        history: {
+            /**
+             * Every kind of mail the workspace sent; largestSend counts campaigns.
+             */
+            workspace: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+            /**
+             * Campaigns from this From domain.
+             */
+            domain: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+        };
+        list: {
+            recipients: number;
+            /**
+             * Risky contacts the send skips.
+             */
+            risky: number;
+            /**
+             * Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.
+             */
+            neverMailed: number | null;
+            createdAt: string | null;
+            /**
+             * When a campaign last went to this list.
+             */
+            lastSentAt: string | null;
+            lastImport: {
+                at: string;
+                contacts: number;
+                /**
+                 * The consent evidence it was imported with, if any.
+                 */
+                consent: string | null;
+            } | null;
+        };
+        /**
+         * This send ÷ the largest campaign its domain sent in the last 90 days; null without one.
+         */
+        sizeJump: number | null;
+        /**
+         * The recommended daily batches; null when one day covers everyone.
+         */
+        plan: {
+            /**
+             * Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.
+             */
+            batches: Array<number>;
+            /**
+             * How long the plan takes from its start, the hourly ramp included.
+             */
+            seconds: number | null;
+        } | null;
+        required: {
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * The largest daily limit that counts as a ramp: the plan's first day.
+             */
+            maxPerDay: number;
+        } | null;
+    } | null;
 };
 
 export type CampaignPreviewImage = {
@@ -2282,11 +2479,144 @@ export type CampaignQueued = {
             dead: number;
         };
     } | null;
+    /**
+     * The send review as of the launch (list.neverMailed is not counted then); null for a required notice.
+     */
+    readiness?: {
+        /**
+         * ready: send as you like. ramp_recommended: the plan is suggested. ramp_required: a Hosted send this large, from a new domain or far above anything its domain has sent, goes out with the plan (pacing.plan "recommended"), a daily limit no larger than its first day, or a confirmed consent source (consent); 422 RAMP_REQUIRED otherwise.
+         */
+        verdict: 'ready' | 'ramp_recommended' | 'ramp_required';
+        /**
+         * Why, in one or two plain sentences, when a ramp is recommended or required.
+         */
+        summary: string | null;
+        /**
+         * Every finding behind the verdict.
+         */
+        reasons: Array<{
+            code: 'NEW_DOMAIN' | 'SIZE_JUMP' | 'NO_HISTORY' | 'RISKY_LIST' | 'NEVER_MAILED' | 'NO_DMARC' | 'BOUNCES' | 'COMPLAINTS';
+            message: string;
+        }>;
+        domain: {
+            name: string;
+            /**
+             * When the From domain (or the domain it is under) was added to this workspace.
+             */
+            firstSeenAt: string | null;
+            ageDays: number | null;
+            /**
+             * The DMARC policy last observed; null when not checked yet.
+             */
+            dmarc: 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' | null;
+            /**
+             * The custom MAIL FROM domain (aligned SPF).
+             */
+            mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * A link host of the domain's own for tracked links: not configurable yet.
+             */
+            linkHost: 'not_configured';
+        };
+        history: {
+            /**
+             * Every kind of mail the workspace sent; largestSend counts campaigns.
+             */
+            workspace: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+            /**
+             * Campaigns from this From domain.
+             */
+            domain: {
+                /**
+                 * Most recipients SES accepted from one campaign in the last 90 days.
+                 */
+                largestSend: number;
+                /**
+                 * Recipients SES accepted in the last 30 days.
+                 */
+                sent: number;
+                /**
+                 * Hard bounces ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                bounceRate: number | null;
+                /**
+                 * Complaints ÷ accepted over the last 30 days; null with nothing sent.
+                 */
+                complaintRate: number | null;
+            };
+        };
+        list: {
+            recipients: number;
+            /**
+             * Risky contacts the send skips.
+             */
+            risky: number;
+            /**
+             * Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.
+             */
+            neverMailed: number | null;
+            createdAt: string | null;
+            /**
+             * When a campaign last went to this list.
+             */
+            lastSentAt: string | null;
+            lastImport: {
+                at: string;
+                contacts: number;
+                /**
+                 * The consent evidence it was imported with, if any.
+                 */
+                consent: string | null;
+            } | null;
+        };
+        /**
+         * This send ÷ the largest campaign its domain sent in the last 90 days; null without one.
+         */
+        sizeJump: number | null;
+        /**
+         * The recommended daily batches; null when one day covers everyone.
+         */
+        plan: {
+            /**
+             * Recipients per day, in order: one batch a day, the most engaged first and never-mailed last.
+             */
+            batches: Array<number>;
+            /**
+             * How long the plan takes from its start, the hourly ramp included.
+             */
+            seconds: number | null;
+        } | null;
+        required: {
+            by: 'NEW_DOMAIN' | 'SIZE_JUMP';
+            /**
+             * The largest daily limit that counts as a ramp: the plan's first day.
+             */
+            maxPerDay: number;
+        } | null;
+    } | null;
 };
 
 export type CampaignSendInput = {
     revision: number;
     pacing?: CampaignPacing;
+    consent?: CampaignConsentConfirmation;
     /**
      * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
      */
@@ -2306,11 +2636,27 @@ export type CampaignPacing = {
      * Maximum fraction of the SES per-second send rate this campaign may use; the rest stays free for transactional mail and other campaigns. Defaults to 0.5 for paced campaigns; campaigns sent without pacing use the full rate.
      */
     rateShare?: number;
+    /**
+     * Send in the daily batches previewCampaignAudience recommends (readiness.plan), worked out again at launch: the most engaged contacts first, never-mailed last. Not with perDay.
+     */
+    plan?: 'recommended';
+};
+
+/**
+ * The sender confirms everyone on the list agreed to this mail, and where that consent comes from. Lets a send the review requires a ramp for (readiness.verdict ramp_required) go out without the plan. Stored with the campaign, with who and when, and in the workspace's Activity. An agent asks the person first.
+ */
+export type CampaignConsentConfirmation = {
+    confirmed: true;
+    /**
+     * Where this list's consent comes from, for example "Signed up at checkout on our site since 2023".
+     */
+    source: string;
 };
 
 export type CampaignScheduleInput = {
     revision: number;
     pacing?: CampaignPacing;
+    consent?: CampaignConsentConfirmation;
     /**
      * Required for a required notice (422 REQUIRED_NOTICE_UNCONFIRMED without it): the sender confirms it is a required notice with no promotion. Recorded with who and when. An agent asks the person first.
      */
@@ -12335,7 +12681,12 @@ export type PreviewCampaignAudienceData = {
     path: {
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Also review the send (readiness).
+         */
+        readiness?: 'true' | 'false';
+    };
     url: '/v1/campaigns/{id}/audience';
 };
 
