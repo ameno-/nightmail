@@ -11,7 +11,10 @@ and checked: HTTP 200, a size cap, a floor on its entry count, at least half the
 host names, and no large provider (gmail.com, outlook.com, yahoo.com, icloud.com, proton.me and the like) on a disposable
 list. A source that fails keeps its last good copy (`hygiene_lists`, `source:<name>`); one that has never been fetched is
 covered by the vendored snapshot, `api/src/hygiene-snapshot.ts`, which is also what an installation uses until its first sync
-(or always, with `NIGHTMAIL_HYGIENE_LISTS=off`). Refresh the snapshot with
+(or always, with `NIGHTMAIL_HYGIENE_LISTS=off`). A day's change to the built lists is capped: more than 2,000 (or 2%) new
+disposable domains, more than 25 (or 1%) providers dropped, or more than 10 new disposable mail servers keeps the last built
+lists and logs `HYGIENE_LISTS_CHANGE_REFUSED` until an operator accepts it (`syncHygieneLists(runtime, fetch, true, true)`).
+Refresh the snapshot with
 `node --import tsx scripts/update-hygiene-snapshot.ts` from `api/`.
 
 Only permissively licensed sources. No GPL list is fetched or vendored.
@@ -27,7 +30,8 @@ Only permissively licensed sources. No GPL list is fetched or vendored.
 
 The disposable list is the union of the four disposable sources, less an allowlist kept in
 `api/src/hygiene-sources.ts` (`ALLOWED`: the large providers, privacy relays such as duck.com, Firefox Relay, SimpleLogin
-and Proton Pass, and real providers some lists carry) and less the providers list. A domain under a listed one
+and Proton Pass, and real providers some lists carry), less the providers list, and less the providers in the vendored
+snapshot, which stay allowed even if the providers source later drops them. A domain under a listed one
 (`sub.mailinator.com`) is disposable too.
 
 Only RFC 2142 and no-reply names (abuse@, postmaster@, noreply@, unsubscribe@ …) make a contact risky (`role`). The synced

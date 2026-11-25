@@ -286,7 +286,11 @@ export const resolveDomainsJob: JobHandler = async runtime => {
 // fetched is covered by the vendored snapshot's union. The disposable MX hosts: mail servers that our domain checks found
 // serving at least three listed domains, less the providers' and well-known hosts'. A new version reclassifies everyone.
 const LEGIT_MX = /(^|\.)(google\.com|googlemail\.com|outlook\.com|hotmail\.com|yahoodns\.net|icloud\.com|me\.com|mx\.cloudflare\.net|zoho\.(com|eu|in)|messagingengine\.com|protonmail\.ch|proton\.me|mimecast\.com|pphosted\.com|amazonaws\.com|amazonses\.com|mailgun\.org|sendgrid\.net|secureserver\.net|improvmx\.com|forwardemail\.net|migadu\.com|ovh\.net|ionos\.[a-z.]+|1and1\.[a-z.]+|gmx\.net|web\.de|yandex\.(net|ru)|mail\.ru|qq\.com|163\.com|naver\.com|fastmail\.com|registrar-servers\.com|privateemail\.com|hostinger\.com|titan\.email|emailsrvr\.com|barracudanetworks\.com|messagelabs\.com|trendmicro\.com|sophos\.com|fireeyecloud\.com|iphmx\.com)$/;
-export async function syncHygieneLists(runtime: Pick<Runtime, 'db' | 'config'>, fetcher: typeof fetch = fetch, force = false) {
+// A day's change to the built lists is bounded. An upstream that suddenly lists thousands more domains, drops real
+// providers (which is what keeps them off the disposable union), or makes new mail servers disposable is treated as broken or
+// poisoned: the last built lists stay, with an error to look at, until an operator accepts the change (acceptChange).
+const SYNC_CAP = { added: 2_000, addedShare: 0.02, droppedProviders: 25, droppedShare: 0.01, newMx: 10 } as const;
+export async function syncHygieneLists(runtime: Pick<Runtime, 'db' | 'config'>, fetcher: typeof fetch = fetch, force = false, acceptChange = false) {
   if (!runtime.config.hygieneLists) return null;
   const db = runtime.db;
   const [elected] = (await db.execute<{ ok: number }>(sql`INSERT INTO job_schedule (workspace_id, next_wake_at) VALUES ('maintenance:hygiene-lists', now() + interval '1 day')
@@ -315,18 +319,35 @@ export async function syncHygieneLists(runtime: Pick<Runtime, 'db' | 'config'>, 
       }
     }
   }
+  // The snapshot's providers stay on the allowlist for good: a providers source that drops a real provider (or is emptied)
+  // never puts it on the disposable list. A source never fetched is covered by the snapshot's union.
+  const { HYGIENE_SNAPSHOT } = await import('./hygiene-snapshot.js');
   const missing = SOURCES.filter(s => !copies.some(c => c.name === s.name));
   if (missing.length) {
-    // Never fetched: the snapshot's union stands in for them (it holds every source as of its build).
-    const { HYGIENE_SNAPSHOT } = await import('./hygiene-snapshot.js');
     copies.push({ name: missing.find(s => s.kind === 'disposable')?.name ?? missing[0]!.name, entries: HYGIENE_SNAPSHOT.disposable.split('\n'), sha256: HYGIENE_SNAPSHOT.version, bytes: 0, fetchedAt: HYGIENE_SNAPSHOT.builtAt });
     for (const s of missing.filter(s => s.kind !== 'disposable')) copies.push({ name: s.name, entries: s.kind === 'roles' ? HYGIENE_SNAPSHOT.roles : HYGIENE_SNAPSHOT.providers,
       ...s.kind === 'providers' ? { mx: HYGIENE_SNAPSHOT.providerMx } : {}, sha256: HYGIENE_SNAPSHOT.version, bytes: 0, fetchedAt: HYGIENE_SNAPSHOT.builtAt });
   }
-  const built = buildLists(copies), providerMx = new Set(built.providerMx);
+  const built = buildLists(copies, HYGIENE_SNAPSHOT.providers), providerMx = new Set([...built.providerMx, ...HYGIENE_SNAPSHOT.providerMx]);
   const { rows: hosts } = await db.execute<{ host: string }>(sql`SELECT host FROM hygiene_mail_domains, unnest(mx) host WHERE listed AND verdict = 'ok' GROUP BY host HAVING count(*) >= 3`);
   const disposableMx = hosts.map(h => h.host).filter(h => !providerMx.has(h) && !LEGIT_MX.test(h)).sort();
   const version = `${built.version}.${disposableMx.length ? (await sha16(disposableMx.join('\n'))) : 'nomx'}`;
+  const [prev] = (await db.execute<{ version: string; body: string; meta: { providers?: string[]; disposableMx?: string[] } }>(sql`SELECT version, body, meta FROM hygiene_lists WHERE name = 'built'`)).rows;
+  if (prev && prev.version !== version && !acceptChange) {
+    const had = new Set(prev.body ? prev.body.split('\n') : []), providers = new Set(built.providers), mxHad = new Set(prev.meta.disposableMx ?? []);
+    const added = (built.disposable ? built.disposable.split('\n') : []).filter(d => !had.has(d)).length;
+    const dropped = (prev.meta.providers ?? []).filter(p => !providers.has(p)), newMx = disposableMx.filter(h => !mxHad.has(h));
+    const over = [
+      added > Math.max(SYNC_CAP.added, had.size * SYNC_CAP.addedShare) ? `${added} disposable domains added` : null,
+      dropped.length > Math.max(SYNC_CAP.droppedProviders, (prev.meta.providers?.length ?? 0) * SYNC_CAP.droppedShare) ? `${dropped.length} providers dropped (${dropped.slice(0, 5).join(', ')})` : null,
+      newMx.length > SYNC_CAP.newMx ? `${newMx.length} new disposable mail servers (${newMx.slice(0, 5).join(', ')})` : null,
+    ].filter((x): x is string => x !== null);
+    if (over.length) {
+      const error = `refused, over a day's change: ${over.join('; ')}`;
+      log('error', { code: 'HYGIENE_LISTS_CHANGE_REFUSED', kept: prev.version, refused: version, error, failed: failed.map(f => f.name) });
+      return { version: prev.version, failed: [...failed, { name: 'built', error }] };
+    }
+  }
   await db.execute(sql`INSERT INTO hygiene_lists (name, version, body, meta, updated_at) VALUES ('built', ${version}, ${built.disposable},
       ${JSON.stringify({ providers: built.providers, roles: built.roles, disposableMx, sources: built.sources, failed, builtAt: built.builtAt })}::jsonb, now())
     ON CONFLICT (name) DO UPDATE SET version = excluded.version, body = excluded.body, meta = excluded.meta, updated_at = now() WHERE hygiene_lists.version IS DISTINCT FROM excluded.version`);

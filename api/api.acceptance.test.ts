@@ -20710,7 +20710,7 @@ describe('List hygiene', () => {
         const many = (prefix: string, n: number) => Array.from({ length: n }, (_, i) => `${prefix}${i}.trash${i % 9}.dev`);
         const traps = ['trapmx1.example', 'trapmx2.example', 'trapmx3.example', 'googly1.example', 'googly2.example', 'googly3.example'];
         const sources: Record<string, string> = {
-          'disposable-email-domains': ['# a comment', 'mailinator.com', 'fexpost.com', 'duck.com', 'gmx.de', ...many('a', 5000)].join('\n'),
+          'disposable-email-domains': ['# a comment', 'mailinator.com', 'fexpost.com', 'duck.com', 'gmx.de', '21cn.com', ...many('a', 5000)].join('\n'),
           disposable: [...many('b', 50000), ...traps].join('\n'),
           fakefilter: ['gmail.com', ...many('c', 2000)].join('\n'),
           mailchecker: many('d', 50000).join('\n'),
@@ -20733,8 +20733,8 @@ describe('List hygiene', () => {
         hygiene.forgetHygieneLists();
         let lists = await hygiene.hygieneLists(runtime.db);
         assert.equal(lists.source, 'synced');
-        assert.deepEqual(['x.y.mailinator.com', 'fexpost.com', 'duck.com', 'gmx.de', 'provider7.example', 'yopmail.com', 'b17.trash8.dev', 'gmail.com'].map(d => lists.isDisposable(d)),
-          [true, true, false, false, false, true, true, false], 'Parents match; the allowlist and the providers never do; the snapshot covers the refused source.');
+        assert.deepEqual(['x.y.mailinator.com', 'fexpost.com', 'duck.com', 'gmx.de', 'provider7.example', 'yopmail.com', 'b17.trash8.dev', 'gmail.com', '21cn.com'].map(d => lists.isDisposable(d)),
+          [true, true, false, false, false, true, true, false, false], 'Parents match; the allowlist, the providers and the snapshot\'s providers (21cn.com, not in this providers list) never do; the snapshot covers the refused source.');
         assert.ok(lists.roles.includes('info') && lists.providers.has('gmx.de'));
         // A failing source and one that shrank by more than half keep their last copies.
         failing.add('disposable'); sources.mailchecker = many('d', 21000).join('\n');
@@ -20779,6 +20779,17 @@ describe('List hygiene', () => {
           await hygiene.domainRisks(runtime, await hygiene.hygieneLists(runtime.db), traps, Date.now() + 5_000);
           await hygiene.syncHygieneLists(runtime, fetcher, true);
           assert.deepEqual((await built()).meta.disposableMx, ['mx.trashhost.test']);
+          // A day's change is bounded: a source that suddenly adds 10,000 domains (over 2% of the ~214,000 built) keeps the
+          // last built lists until accepted.
+          const kept = (await built()).version;
+          sources.mailchecker = [...many('d', 50000), ...many('flood', 10000)].join('\n');
+          const flooded = await hygiene.syncHygieneLists(runtime, fetcher, true);
+          assert.match(flooded!.failed.find(f => f.name === 'built')!.error, /10000 disposable domains added/);
+          assert.equal((await built()).version, kept);
+          const accepted = await hygiene.syncHygieneLists(runtime, fetcher, true, true);
+          assert.ok(!accepted!.failed.some(f => f.name === 'built') && (await built()).version !== kept);
+          sources.mailchecker = many('d', 50000).join('\n');
+          await hygiene.syncHygieneLists(runtime, fetcher, true, true);
           hygiene.forgetHygieneLists();
           assert.equal(await create('z@newtrap.example'), 'disposable');
 

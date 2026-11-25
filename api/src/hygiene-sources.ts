@@ -76,16 +76,17 @@ export async function fetchSource(source: Source, previousCount: number | null, 
 
 export type BuiltLists = { version: string; builtAt: string; disposable: string; providers: string[]; providerMx: string[]; roles: string[];
   sources: { name: string; license: string; repository: string; count: number; sha256: string; fetchedAt: string }[] };
-/** The union of the disposable sources less the allowlist and the providers, sorted; the providers, their MX hosts and the roles. */
-export function buildLists(fetched: FetchedSource[]): BuiltLists {
+/** The union of the disposable sources less the allowlist and the providers, sorted; the providers, their MX hosts and the roles.
+ *  `alwaysAllowed`: providers that stay off the disposable list whatever the providers source says now (the snapshot's). */
+export function buildLists(fetched: FetchedSource[], alwaysAllowed: Iterable<string> = []): BuiltLists {
   const by = (kind: SourceKind) => fetched.filter(f => SOURCES.find(s => s.name === f.name)?.kind === kind);
   const providers = [...new Set(by('providers').flatMap(f => f.entries))].sort();
-  const allowed = new Set([...ALLOWED, ...providers]);
+  const allowed = new Set([...ALLOWED, ...alwaysAllowed, ...providers]);
   const disposable = [...new Set(by('disposable').flatMap(f => f.entries))].filter(d => !allowed.has(d)).sort();
   const roles = [...new Set(by('roles').flatMap(f => f.entries))].sort();
   const providerMx = [...new Set(by('providers').flatMap(f => f.mx ?? []))].sort();
   const body = disposable.join('\n');
-  const version = sha([body, providers.join('\n'), roles.join('\n'), [...ALLOWED].sort().join('\n')].join('\u0000')).slice(0, 16);
+  const version = sha([body, providers.join('\n'), roles.join('\n'), [...allowed].sort().join('\n')].join('\u0000')).slice(0, 16);
   return { version, builtAt: new Date().toISOString(), disposable: body, providers, providerMx, roles,
     sources: fetched.map(f => { const s = SOURCES.find(x => x.name === f.name)!; return { name: f.name, license: s.license, repository: s.repository, count: f.entries.length, sha256: f.sha256, fetchedAt: f.fetchedAt }; }) };
 }
