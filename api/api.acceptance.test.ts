@@ -40884,9 +40884,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query("UPDATE sender_standing SET step='warn' WHERE workspace_id=$1",[wid]);
       await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:waits});
       await db.query("UPDATE sender_standing SET step='ok' WHERE workspace_id=$1",[wid]);
-      await db.query('UPDATE provider_connections SET paused_at=now() WHERE id=$1',[wid]);
+      await db.query("UPDATE provider_connections SET paused_at=now(),pause_reason='fixture hold' WHERE id=$1",[wid]);
       await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:waits});
-      await db.query('UPDATE provider_connections SET paused_at=NULL WHERE id=$1',[wid]);
+      await db.query('UPDATE provider_connections SET paused_at=NULL,pause_reason=NULL WHERE id=$1',[wid]);
       runtime.config.linkHosts=saas;
       await assert.rejects(linkChoice(runtime,runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:waits});
       runtime.config.linkHosts={...saas,fallbackHost:shared};
