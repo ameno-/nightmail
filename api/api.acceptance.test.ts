@@ -32226,9 +32226,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.equal(email.subject, `${name} now has a sender score`);
         // What happened, what the score is and what moves it, what it changes, and where to see it.
         assert.ok(email.text.startsWith(card), email.text);
-        for (const line of ['so it now has a sender score and its starting limit is lifted.', 'The sender score works like a credit score for your sending.',
-          'Bounces, spam complaints and mail our content screening flags bring it down; mail people want keeps it up.', 'there is no daily limit. If it drops, a daily limit applies until it recovers.',
-          `See the live score: ${PUBLIC_ORIGIN}/overview#sender-score`, 'sends this once, to the owners and admins of']) assert.ok(email.text.includes(line), `${line}\n\n${email.text}`);
+        // Then one sentence, the button to the live score and one line on why it came.
+        assert.ok(email.text.endsWith(`\n\nIt works like a credit score for your sending: keep it good and there’s no daily limit.\n\nSee the live score: ${PUBLIC_ORIGIN}/overview#sender-score\n\nSent once to the owners and admins of ${name}.\n`), email.text);
         // The score is the one figure: no rate, threshold or provider name, and nothing of the other workspace's.
         assert.doesNotMatch(email.text, HOW_IT_WORKS);
         assert.doesNotMatch(email.text, /\b61\b|\b100 recipients|grade D/);
@@ -32253,6 +32252,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const refused = await get(wrong);
         assert.equal(refused.status, 404, wrong);
       }
+      // As production runs Hosted: with the shared link domain on, this installation's own domain answers no campaign
+      // picture under /i/ (src/linked-images.ts), but it does answer the score card, its own picture.
+      runtime.config.linkHost = 'links.nightmailedge.example';
+      const own = (path: string) => publicFetch(new Request(`https://nightmail.dev${path}`));
+      const cardPath = new URL(first!).pathname, onOwn = await own(cardPath);
+      assert.deepEqual([onOwn.status, Buffer.from(await onOwn.arrayBuffer()).equals(png)], [200, true], 'The card answers on nightmail.dev with the link domain on.');
+      assert.equal((await own(`/i/${'0'.repeat(32)}${'1'.repeat(32)}.png`)).status, 404, 'A campaign picture still never answers there.');
+      // One card, one spelling: a percent-encoded spelling of the same card is 404 before any drawing; a query string is ignored.
+      assert.equal((await own(cardPath.replace('-none-', '%2Dnone-'))).status, 404);
+      assert.ok(Buffer.from(await (await own(`${cardPath}?w=x`)).arrayBuffer()).equals(png), 'A query string serves the same card.');
       // Never again for this workspace: a later run, and the job run once more, send nothing.
       await regrade();
       assert.deepEqual([await deliver(), await fresh(), (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind='evaluation_finished'`, [wid])).rows[0].n], [[], [], 1]);
@@ -32450,10 +32459,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
       assert.equal(evaluation.subject, `${name} now has a sender score`);
-      assert.match(evaluation.text, /so it now has a sender score and its starting limit is lifted\. Over the next day, how much it can send grows on its own\./);
+      assert.match(evaluation.text, /^It works like a credit score for your sending: keep it good and there’s no daily limit\.\n/);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');
-      assert.match(customerNotice(PUBLIC_ORIGIN, { kind: 'evaluation_finished', workspace: 'W', limited: true }).text, /^The first emails from W showed some problems, so its sender score starts low and it keeps a daily limit for now\.\n\nThe sender score works like a credit score/);
+      assert.match(customerNotice(PUBLIC_ORIGIN, { kind: 'evaluation_finished', workspace: 'W', limited: true }).text, /^It works like a credit score for your sending\. It starts low, so a daily limit applies until it rises\.\n/);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':first' WHERE workspace_id=$1 AND kind='evaluation_finished'`, [wid]);
       await evaluationFinished(runtime.db, wid, false);
@@ -32511,8 +32520,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The link's random characters aren't words: the check reads the email without it.
       for (const email of [invitation, limit, evaluation, domain, waitlist, { ...link, text: link.text.replace(signInUrl, '') }]) {
         for (const body of [email.subject, email.text]) assert.doesNotMatch(body, HOW_IT_WORKS);
-        // The HTML part says what the text part says, paragraph for paragraph.
-        for (const line of email.text.split('\n\n').slice(0, 2)) assert.ok(email.html.includes(line.replaceAll('&', '&amp;').replaceAll('"', '&quot;')), line);
+        // The HTML part says what the text part says, paragraph for paragraph (a short email's button line is its link).
+        for (const line of email.text.split('\n\n').slice(0, 2).filter((line: string) => !/: https?:\/\/\S+$/.test(line))) assert.ok(email.html.includes(line.replaceAll('&', '&amp;').replaceAll('"', '&quot;')), line);
       }
     });
   });

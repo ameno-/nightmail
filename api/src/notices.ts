@@ -9,8 +9,8 @@ import { SCORE_CARD, scoreCardPath, scoreTones } from './score-card.js';
 // else (no images). A notice never says how a check works: no score figures, rates, thresholds or provider names. The
 // domain setup reminder alone also lists the DNS records to publish and links the customer's own DNS provider's page.
 // The first grade's email (evaluation_finished) alone shows a figure: it opens with the sender score as the dashboard's
-// card shows it when the email is made (score, grade, the daily limit then, and that moment), adds a paragraph on what
-// the score is and what moves it, and its button opens the live score.
+// card shows it when the email is made (score, grade, the daily limit then, and that moment), says what the score is in
+// one sentence, and its button opens the live score.
 //
 // Words a customer chose (a workspace's name, a campaign's) are shown through shownName, an address through
 // plainAddress and a domain through hostName, and nowhere but where a template puts them. The invitation goes to an
@@ -86,13 +86,14 @@ const fontFace = (origin: string) => /^https?:\/\/[^\s'"()]+$/.test(origin)
   ? `<style>@media screen{@font-face{font-family:'Inter';font-style:normal;font-weight:100 900;font-display:swap;src:url('${origin}/fonts/inter-basic.woff2') format('woff2');unicode-range:U+0020-007E,U+00A0,U+00A9,U+00AB,U+00AE,U+00B7,U+00BB,U+00D7,U+2010-2027,U+2030,U+2039-203A,U+20AC,U+2122,U+2190-2193,U+2212,U+2713,U+FEFF,U+FFFD}}</style>` : '';
 const PAPER = '#ffffff', INK = '#171717', MUTED = '#5d5d5d';
 // The button is the dashboard's primary (app/src/styles/ui.css .ui-button--primary): the text colour as a solid fill,
-// #111111 with white words on light and #F2F2F2 with #111111 on dark, semibold, no edge.
-const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important}.nm-action-cell{background-color:#f2f2f2!important}.nm-action{background-color:#f2f2f2!important;color:#111111!important}';
+// #111111 with white words on light and #F2F2F2 with #111111 on dark, semibold. Its one-pixel edge, a step off the fill,
+// is what keeps it visible in Gmail on Android, whose forced dark leaves a near-black fill on a near-black page.
+const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-why{color:#a3a3a3!important}.nm-action-cell{background-color:#f2f2f2!important;border-color:#f2f2f2!important}.nm-action{background-color:#f2f2f2!important;color:#111111!important}';
 
 // The first grade's card: the sender score as a picture of the dashboard's card (src/score-card.ts), light where the
 // client keeps light colours and dark in a client that asks for dark (Apple Mail, Outlook on the web), on a cell in the
-// tile's colour whose alt text says the same facts when pictures are off. Under it one quiet line says them again in
-// live text, with the moment they were read, which the picture can't carry (its address names only score, grade and state).
+// tile's colour whose alt text says the same facts when pictures are off (the text part says them too). Under it one quiet
+// line says when they were read, which the picture can't carry (its address names only score, grade and state).
 const stateLine = (c: ScoreCard) => c.daily === null ? 'No daily limit' : `Daily limit of ${count(c.daily)} for now`;
 const limitNow = (c: ScoreCard) => c.daily === null ? 'No daily limit' : `A daily limit of ${count(c.daily)} recipients for now`;
 /** The card's words as the text part says them. */
@@ -105,8 +106,7 @@ function cardHtml(c: ScoreCard, origin: string) {
   const inside = lightPath && darkPath ? img(lightPath, 'nm-card-light', false) + img(darkPath, 'nm-card-dark', true)
     : `<p class="nm-card-ink" style="margin:0;padding:22px;font-size:16px;line-height:24px;font-weight:600;color:${light.ink}">${alt}</p>`;
   return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:${width}px"><tr><td class="nm-card" bgcolor="${light.tile}" style="border-radius:16px;background-color:${light.tile};color:${light.ink}">${inside}</td></tr></table>`
-    // Each part keeps its words together (no-break spaces), so a narrow screen breaks the line only between them.
-    + `<p class="nm-why" style="margin:12px 0 28px;font-size:13px;line-height:20px;color:${MUTED}">${[`Score ${c.score}, grade ${c.grade}`, stateLine(c), `As of ${moment(c.at)}`].map(part => escapeHtml(part).replaceAll(' ', '&nbsp;')).join(' · ')}</p>`;
+        + `<p class="nm-why" style="margin:10px 0 20px;font-size:13px;line-height:20px;color:${MUTED}">${escapeHtml(`As of ${moment(c.at)}`).replaceAll(' ', '&nbsp;')}</p>`;
 }
 const cardDark = (c: ScoreCard) => { const t = scoreTones(c.score, 'dark'); return `.nm-card{background-color:${t.tile}!important;color:${t.ink}!important}.nm-card-ink{color:${t.ink}!important}.nm-card-light{display:none!important}.nm-card-dark{display:block!important;color:${t.ink}!important}`; };
 const page = `class="nm-page" bgcolor="${PAPER}"`, ink = (style = '') => `class="nm-text" style="margin:0 0 16px;color:${INK}${style}"`;
@@ -128,8 +128,8 @@ function renderNotice(p: Parts, origin: string): Notice {
     + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px"><tr><td class="nm-text" style="font-family:${FONT};font-size:16px;line-height:26px;color:${INK}">`
     + `${p.card ? cardHtml(p.card, origin) : ''}${paragraphs}`
     // A table cell carries the fill, so Outlook on Windows (which pads no link) still draws the button.
-    + `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:24px 0 0"><tr><td class="nm-action-cell" bgcolor="#111111" style="border-radius:8px;background-color:#111111"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:12px 20px;border-radius:8px;background-color:#111111;color:#ffffff;font-family:${FONT};font-size:15px;line-height:20px;font-weight:600;text-decoration:none">${escapeHtml(p.action.label)}</a></td></tr></table>`
-    + `<p class="nm-why" style="margin:40px 0 0;font-size:13px;line-height:20px;color:${MUTED}">${escapeHtml(p.why)}</p>`
+    + `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 0"><tr><td class="nm-action-cell" bgcolor="#111111" style="border:1px solid #3a3a3a;border-radius:8px;background-color:#111111"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:12px 20px;border-radius:8px;background-color:#111111;color:#ffffff;font-family:${FONT};font-size:15px;line-height:20px;font-weight:600;text-decoration:none">${escapeHtml(p.action.label)}</a></td></tr></table>`
+    + `<p class="nm-why" style="margin:32px 0 0;font-size:13px;line-height:20px;color:${MUTED}">${escapeHtml(p.why)}</p>`
     + '</td></tr></table></td></tr></table></body></html>';
   return { subject: p.subject, text, html };
 }
@@ -190,19 +190,13 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       'Mail over the limit is refused for now. Room frees up over the next 24 hours, and mail already accepted is still delivered.',
       'The dashboard shows the limit and what raises it.'] });
     // The first grade: the one email that says what the sender score is, what moves it and what it changes.
+    // The first grade: the card, one sentence on what the score is and what it changes, the button to the live score.
     case 'evaluation_finished': {
       const limited = n.score ? n.score.daily !== null : n.limited;
-      const score = `The sender score works like a credit score for your sending. Bounces, spam complaints and mail our content screening flags bring it down; mail people want ${limited ? 'brings it up' : 'keeps it up'}. Recent mail counts most.`;
       return notice({ subject: `${w} now has a sender score`, card: n.score ?? undefined, action: { label: 'See the live score', url: `${base}/overview#sender-score` },
-        why: `${productName} sends this once, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: limited ? [
-        `The first emails from ${w} showed some problems, so its sender score starts low and it keeps a daily limit for now.`,
-        score,
-        'Mail within the limit sends as usual. As the score rises the limit goes up, and once the score is good there is no daily limit.',
-        'The dashboard shows the score, the limit and what moves them.'] : [
-        `The first emails from ${w} were delivered well, so it now has a sender score and its starting limit is lifted. Over the next day, how much it can send grows on its own.`,
-        score,
-        'While the score stays good and there are no warnings, there is no daily limit. If it drops, a daily limit applies until it recovers.',
-        'The dashboard shows the score and what moves it.'] });
+        why: `Sent once to the owners and admins of ${w}.`, lines: [limited
+          ? 'It works like a credit score for your sending. It starts low, so a daily limit applies until it rises.'
+          : 'It works like a credit score for your sending: keep it good and there’s no daily limit.'] });
     }
     case 'campaign_paused': {
       const name = shownName(n.campaign.name), campaign = name ? `the campaign "${name}"` : 'a campaign';

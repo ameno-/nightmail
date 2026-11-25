@@ -70,12 +70,15 @@ async function sha256(bytes: Uint8Array) {
 }
 const missing = () => new ApiError(404, 'NOT_FOUND', 'This image does not exist.');
 export function registerLinkedImages(app: App) {
-  // The sender score card's pictures (src/score-card.ts), on every origin this installation answers: drawn from the
-  // address alone (a score, its grade, a limit state and a theme), so 808 can exist and nothing else answers.
+  // The sender score card's pictures (src/score-card.ts), on every origin this installation answers, its own included
+  // (unlike a campaign's pictures below, which Hosted's own domain never serves): drawn from the address alone (a score,
+  // its grade, a limit state and a theme), so 808 can exist and nothing else answers.
   app.get('/i/score-card/:version/:file', async c => {
-    const { drawScoreCard, parseScoreCard } = await import('./score-card.js');
+    const { drawScoreCard, parseScoreCard, scoreCardPath } = await import('./score-card.js');
+    // Checked before any drawing, against the request's own path as sent: a percent-encoded or otherwise different
+    // spelling of a card is 404, so the 808 can't be multiplied into more cache entries (the colo keys on the path alone).
     const card = parseScoreCard(c.req.param('version'), c.req.param('file'));
-    if (!card) throw missing();
+    if (!card || new URL(c.req.url).pathname !== scoreCardPath(card.score, card.state === 'none' ? null : Number(card.state), card.theme)) throw missing();
     const etag = `"${c.req.param('version')}-${c.req.param('file')}"`, headers: Record<string, string> = {
       'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000, immutable', ETag: etag, 'Content-Security-Policy': "default-src 'none'; sandbox",
       'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline', 'Cross-Origin-Resource-Policy': 'cross-origin', 'Access-Control-Allow-Origin': '*', 'X-Robots-Tag': 'noindex',
