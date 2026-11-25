@@ -153,6 +153,36 @@ fi
 unset key
 if [[ $jevf_key == off || $jevf_key == 'not set' ]]; then obsolete+=(JEVF_API_KEY); fi
 echo "Second classifier: nightmail/$STAGE/JEVF_API_KEY is $jevf_key."
+# Glass's Gmail Postmaster Tools grant (api/src/glass-deliverability.ts), optional: nightmail/<stage>/NIGHTMAIL_POSTMASTER_CREDENTIALS,
+# the JSON api/scripts/postmaster-auth.ts writes. As the second classifier's key above. Set and a grant (clientId,
+# clientSecret and refreshToken, at most 4000 characters), it is bound with the app secrets as one line and Glass reads
+# Postmaster Tools. Not set (or scheduled for deletion), the Worker keeps none: one left from before is deleted here, and
+# taking the secret out of Secrets Manager stops the reads at the next deploy. Malformed, the reads stay off. Any other
+# read failure leaves the Worker as it is. None of these fails the deploy; the value never reaches argv or the log.
+postmaster_err="$tmp/postmaster.err"
+postmaster=off
+if grant=$(aws secretsmanager get-secret-value --secret-id "nightmail/$STAGE/NIGHTMAIL_POSTMASTER_CREDENTIALS" --query SecretString --output text 2>"$postmaster_err"); then
+  if grant=$(jq -ce 'select(type=="object" and ([.clientId, .clientSecret, .refreshToken] | all(type=="string" and length>0)))' <<<"$grant" 2>/dev/null) && (( ${#grant} <= 4000 )); then
+    # One line after jq -c; the secret parts are masked on their own too, in case a tool prints them alone.
+    echo "::add-mask::$grant"
+    echo "::add-mask::$(jq -r .clientSecret <<<"$grant")"
+    echo "::add-mask::$(jq -r .refreshToken <<<"$grant")"
+    # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
+    with_grant=$(NIGHTMAIL_POSTMASTER_CREDENTIALS=$grant jq '. + ($ENV | {NIGHTMAIL_POSTMASTER_CREDENTIALS})' "$secrets_file") && printf '%s\n' "$with_grant" > "$secrets_file"
+    unset with_grant
+    postmaster=bound
+  else
+    echo "::warning::nightmail/$STAGE/NIGHTMAIL_POSTMASTER_CREDENTIALS is not a Postmaster grant (JSON with clientId, clientSecret and refreshToken, at most 4000 characters): Glass's Postmaster reads are off."
+  fi
+elif grep -qE 'ResourceNotFoundException|marked for deletion' "$postmaster_err"; then
+  postmaster='not set'
+else
+  postmaster=unknown
+  echo "::warning::nightmail/$STAGE/NIGHTMAIL_POSTMASTER_CREDENTIALS could not be read; the Worker's Postmaster grant is left as it was."
+fi
+unset grant
+if [[ $postmaster == off || $postmaster == 'not set' ]]; then obsolete+=(NIGHTMAIL_POSTMASTER_CREDENTIALS); fi
+echo "Gmail Postmaster: nightmail/$STAGE/NIGHTMAIL_POSTMASTER_CREDENTIALS is $postmaster."
 if [[ -n ${link_token:-} ]]; then
   # shellcheck disable=SC2016 # A jq program: $ENV is jq's, not the shell's.
   with_link=$(NIGHTMAIL_LINK_SAAS_TOKEN=$link_token jq '. + ($ENV | {NIGHTMAIL_LINK_SAAS_TOKEN})' "$secrets_file") && printf '%s\n' "$with_link" > "$secrets_file"
