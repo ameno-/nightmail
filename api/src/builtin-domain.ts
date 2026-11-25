@@ -27,6 +27,8 @@ import type { ReadyConnection } from './provider-credentials.js';
  *   recipients NIGHTMAIL_BUILTIN_SEND_SCOPE allows (anyone, or the members' own verified addresses) within the scope's caps
  *   (SEND_LIMITS.builtin), screened with a new sender's rules, and only until the workspace verifies a domain of its own.
  * - Revoked by an operator (scripts/builtin-domain.ts): it stops sending and receiving at once and its label stays taken.
+ * - The parent's circuit breaker (builtinBreaker): when all built-in domains' mail together bounces or draws complaints
+ *   past SES's warning lines, every built-in domain stops sending until an operator resets it (reset-breaker).
  */
 export type BuiltinScope = keyof typeof SEND_LIMITS.builtin;
 /** The parent identity's region: built-in domains send and receive in Ohio only. */
@@ -120,18 +122,152 @@ async function checkParent(runtime: Runtime, ses: SESv2Client, parent: string) {
   let found: GetEmailIdentityCommandOutput | null = null;
   try { found = await ses.send(new GetEmailIdentityCommand({ EmailIdentity: parent })); }
   catch (e) { if (!['NotFoundException', 'NotFound'].includes(awsName(e))) throw e; }
-  const problem = found ? parentProblem(found) : 'missing', ok = problem === null;
-  const { rows: [was] } = await runtime.db.execute<{ ok: boolean | null }>(sql`WITH previous AS (SELECT ok FROM builtin_parent WHERE name=${parent})
-    INSERT INTO builtin_parent(name,ok,ses,problem,checked_at) VALUES(${parent},${ok},${found ? JSON.stringify(parentFacts(found)) : null}::jsonb,${problem},now())
-    ON CONFLICT(name) DO UPDATE SET ok=excluded.ok,ses=excluded.ses,problem=excluded.problem,checked_at=excluded.checked_at
-    RETURNING (SELECT ok FROM previous) AS ok`);
+  const checked = found ? parentProblem(found) : 'missing';
+  // A tripped breaker (builtinBreaker) keeps the parent down whatever the identity's check finds, until an operator resets it.
+  const { rows: [row] } = await runtime.db.execute<{ was: boolean | null; ok: boolean; problem: string | null }>(sql`WITH previous AS (SELECT ok FROM builtin_parent WHERE name=${parent})
+    INSERT INTO builtin_parent(name,ok,ses,problem,checked_at) VALUES(${parent},${checked === null},${found ? JSON.stringify(parentFacts(found)) : null}::jsonb,${checked},now())
+    ON CONFLICT(name) DO UPDATE SET ok=excluded.ok AND builtin_parent.tripped_at IS NULL,ses=excluded.ses,
+      problem=coalesce(excluded.problem,CASE WHEN builtin_parent.tripped_at IS NOT NULL THEN 'reputation' END),checked_at=excluded.checked_at
+    RETURNING (SELECT ok FROM previous) AS was,ok,problem`);
+  const { ok, problem } = row!;
   if (!ok) {
-    // Built-in sending stops at once; receiving lapses on the claims' 72-hour proof window if the parent stays down.
-    const { rowCount } = await runtime.db.execute(sql`UPDATE domain_claims dc SET sending_state='pending' FROM builtin_domains b
-      WHERE dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin' AND dc.sending_state='verified'`);
-    log(was?.ok === false ? 'warn' : 'error', { code: 'BUILTIN_PARENT_UNAVAILABLE', parent, problem, paused: rowCount ?? 0 });
-  } else if (was?.ok !== true) log('info', { code: 'BUILTIN_PARENT_READY', parent });
+    // Built-in sending stops at once; receiving lapses on the claims' 72-hour proof window if the identity stays down.
+    const paused = await pauseBuiltinClaims(runtime.db);
+    log(row!.was === false ? 'warn' : 'error', { code: 'BUILTIN_PARENT_UNAVAILABLE', parent, problem, paused });
+  } else if (row!.was !== true) log('info', { code: 'BUILTIN_PARENT_READY', parent });
   return { ok, ses: found ? parentFacts(found) : null, problem };
+}
+/** Every built-in domain back to pending: their sending stops at once (send admission wants a verified claim). */
+async function pauseBuiltinClaims(db: DbExecutor) {
+  return (await db.execute(sql`UPDATE domain_claims dc SET sending_state='pending' FROM builtin_domains b
+    WHERE dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin' AND dc.sending_state='verified'`)).rowCount ?? 0;
+}
+
+/**
+ * The circuit breaker's lines: SES's own warning levels for an account, 5% permanent bounces or 0.1% complaints, over the
+ * real recipients of built-in mail sent in the last 48 hours (complaints often come a day late) and since the last reset.
+ * It judges nothing under 1,000 recipients, and never trips on fewer than 3 complaints, so one or two can't stop every
+ * workspace. One workspace alone never trips it either (breakerDecision).
+ */
+export const BUILTIN_BREAKER = { windowHours: 48, minRecipients: 1000, bounceRate: 0.05, complaintRate: 0.001, minComplaints: 3, everyMinutes: 60 } as const;
+export type BuiltinReputation = { recipients: number; bounces: number; complaints: number };
+export type BuiltinLine = 'bounces' | 'complaints';
+const LINES = ['bounces', 'complaints'] as const;
+const crossed = (m: BuiltinReputation, line: BuiltinLine) => m.recipients >= BUILTIN_BREAKER.minRecipients && (line === 'bounces'
+  ? m.bounces / m.recipients >= BUILTIN_BREAKER.bounceRate
+  : m.complaints >= BUILTIN_BREAKER.minComplaints && m.complaints / m.recipients >= BUILTIN_BREAKER.complaintRate);
+/** The line the built-in domains' mail crossed, if any. */
+export const breakerVerdict = (m: BuiltinReputation): BuiltinLine | null => LINES.find(line => crossed(m, line)) ?? null;
+/** One workspace's share of the built-in mail in the breaker's window. */
+export type WorkspaceReputation = BuiltinReputation & { workspaceId: string; revoked: boolean };
+const sum = (rows: BuiltinReputation[]): BuiltinReputation => rows.reduce((a, r) => ({ recipients: a.recipients + r.recipients, bounces: a.bounces + r.bounces, complaints: a.complaints + r.complaints }), { recipients: 0, bounces: 0, complaints: 0 });
+/**
+ * What the breaker does with the window's mail. It trips only when a line is still crossed without the workspace that
+ * contributes most to it, so one workspace (at its cap, while built-in volume is small) can't stop everyone: when that
+ * one workspace is what crosses the line, the operator is alerted about it, to revoke it, instead.
+ */
+export function breakerDecision(rows: WorkspaceReputation[]) {
+  const counted = sum(rows), lines = LINES.filter(line => crossed(counted, line));
+  if (!lines.length) return null;
+  const worstFor = (line: BuiltinLine, among = rows) => among.reduce((w, r) => r[line] > w[line] || (r[line] === w[line] && r.workspaceId < w.workspaceId) ? r : w);
+  for (const line of lines) {
+    const worst = worstFor(line);
+    if (crossed(sum(rows.filter(r => r !== worst)), line)) return { action: 'trip', line, counted, worst: worst.workspaceId } as const;
+  }
+  // The card names the worst workspace that can still send: once the worst is revoked, the next one (a partner it split its
+  // mail with) is named, rather than nothing until the revoked one's mail leaves the window.
+  const line = lines[0]!, sending = rows.filter(r => !r.revoked && r[line] > 0);
+  return { action: 'alert', line, counted, worst: sending.length ? worstFor(line, sending) : null } as const;
+}
+/**
+ * Each workspace's built-in mail in the breaker's window, revoked domains included (their mail signed as the parent too),
+ * by real recipient: SES accepted it, not simulated, never the SES mailbox simulator. Each domain is read through its
+ * workspace's sender-domain index, so a workspace's own domains' mail is never scanned.
+ * - Bounces: the recipients SES bounced permanently, from the bounce events, each once, as hosted_health_projection counts
+ *   them (an event that names none counts one); a transient bounce or the rest of a bounced email's recipients don't count.
+ * - Complaints: a complaint is one person reporting one email, so it counts once per email, not once per recipient: one
+ *   report on a 50-recipient email is one complaint.
+ */
+async function builtinReputation(db: DbExecutor, parent: string): Promise<WorkspaceReputation[]> {
+  return (await db.execute<WorkspaceReputation>(sql`WITH p AS (
+      SELECT greatest(now()-make_interval(hours=>${BUILTIN_BREAKER.windowHours}),coalesce(reset_at,'-infinity')) AS since FROM builtin_parent WHERE name=${parent}
+    ), mail AS MATERIALIZED (
+      SELECT b.workspace_id,b.revoked_at IS NOT NULL AS revoked,e.id,e.recipients,e.complained
+      FROM p CROSS JOIN builtin_domains b CROSS JOIN LATERAL (SELECT e.id,(e.status='complained' OR e.event_outcomes & 8 <> 0) AS complained,
+          (SELECT count(*) FROM jsonb_array_elements_text(e.to_addresses||e.cc_addresses||e.bcc_addresses) x WHERE lower(x) NOT LIKE '%@simulator.amazonses.com')::int AS recipients
+        FROM sending_emails e WHERE e.workspace_id=b.workspace_id AND ((reverse(lower(split_part(e.from_address,'@',2)))||'.') COLLATE "C")=((reverse(b.name)||'.') COLLATE "C")
+          AND e.created_at>p.since AND NOT e.simulated AND (e.provider_id IS NOT NULL OR e.event_outcomes & 1 <> 0)) e
+      WHERE e.recipients>0
+    ), bounced AS (
+      SELECT m.workspace_id,m.id,least(m.recipients,greatest(count(DISTINCT h.hash),max(CASE WHEN v.recipient_hashes IS NULL THEN 1 ELSE 0 END)))::int AS n
+      FROM mail m JOIN sending_email_events v ON v.workspace_id=m.workspace_id AND v.email_id=m.id LEFT JOIN LATERAL unnest(v.recipient_hashes) h(hash) ON true
+      WHERE v.type='bounce' AND v.data->>'bounceType'='Permanent' AND NOT v.simulated AND (v.recipient_hashes IS NULL OR cardinality(v.recipient_hashes)>0)
+      GROUP BY m.workspace_id,m.id,m.recipients
+    ) SELECT m.workspace_id AS "workspaceId",bool_or(m.revoked) AS revoked,sum(m.recipients)::int AS recipients,coalesce(sum(bo.n),0)::int AS bounces,
+      count(*) FILTER (WHERE m.complained)::int AS complaints
+    FROM mail m LEFT JOIN bounced bo ON bo.workspace_id=m.workspace_id AND bo.id=m.id GROUP BY m.workspace_id ORDER BY m.workspace_id`)).rows;
+}
+/**
+ * The parent's circuit breaker, hourly from builtinDomainTick. All built-in domains sign as one parent, so their combined
+ * bounces and complaints are its reputation, which per-workspace pauses never see. Over a line without its worst
+ * workspace (breakerDecision) it trips: built-in sending stops everywhere, as when the parent fails its check (every
+ * built-in claim back to pending, so mail still queued from them is canceled at dispatch), receiving continues, and the
+ * reputation alert channel is told. It stays tripped until an operator resets it (resetBuiltinBreaker). When one
+ * workspace alone crosses a line, it only alerts about that workspace, at most once a day. Returns whether it tripped now.
+ */
+export async function builtinBreaker(runtime: Runtime) {
+  const parent = runtime.config.builtinDomain;
+  if (!runtime.config.multiTenant || !parent) return false;
+  // One count an hour across workers, elected by the parent's own row; none while tripped.
+  const due = await runtime.db.execute(sql`UPDATE builtin_parent SET rates_checked_at=now() WHERE name=${parent} AND tripped_at IS NULL
+    AND (rates_checked_at IS NULL OR rates_checked_at<=now()-make_interval(mins=>${BUILTIN_BREAKER.everyMinutes - 5})) RETURNING 1`);
+  if (!due.rowCount) return false;
+  const decision = breakerDecision(await builtinReputation(runtime.db, parent));
+  if (!decision) return false;
+  const windowHours = BUILTIN_BREAKER.windowHours;
+  if (decision.action === 'alert') {
+    const { worst, line, counted } = decision;
+    // Only revoked workspaces left behind the line: nothing more to do; their mail still counts toward the parent's.
+    if (!worst) return false;
+    const payload = { code: 'BUILTIN_WORKSPACE_OVER_LINE', parent, line, ...counted, windowHours, workspace: { recipients: worst.recipients, bounces: worst.bounces, complaints: worst.complaints } };
+    const { rowCount } = await runtime.db.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload)
+      VALUES('builtin-breaker-worst:'||${parent}::text||':'||${worst.workspaceId}::text||':'||${line}::text||':'||to_char(now() AT TIME ZONE 'UTC','YYYYMMDD'),'reputation.alert',${worst.workspaceId},${JSON.stringify(payload)}::jsonb)
+      ON CONFLICT(id) DO NOTHING`);
+    if (rowCount) log('error', { code: 'BUILTIN_WORKSPACE_OVER_LINE', parent, workspaceId: worst.workspaceId, line, ...counted });
+    return false;
+  }
+  const trip = { line: decision.line, ...decision.counted, windowHours, worst: decision.worst };
+  const paused = await runtime.db.transaction(async tx => {
+    const { rows: [row] } = await tx.execute<{ at: string }>(sql`UPDATE builtin_parent SET ok=false,problem=coalesce(problem,'reputation'),tripped_at=now(),trip=${JSON.stringify(trip)}::jsonb
+      WHERE name=${parent} AND tripped_at IS NULL RETURNING tripped_at::text AS at`);
+    if (!row) return null;
+    const n = await pauseBuiltinClaims(tx);
+    await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) VALUES(${`builtin-breaker:${parent}:${row.at}`},'reputation.alert',${runtime.config.workspaceId},
+      ${JSON.stringify({ code: 'BUILTIN_PARENT_TRIPPED', parent, ...trip, paused: n })}::jsonb) ON CONFLICT(id) DO NOTHING`);
+    return n;
+  });
+  if (paused === null) return false;
+  log('error', { code: 'BUILTIN_PARENT_TRIPPED', parent, ...trip, paused });
+  return true;
+}
+/**
+ * Operator only (scripts/builtin-domain.ts reset-breaker): turns built-in sending back on after the breaker tripped. Each
+ * paused domain's domain.builtin job runs again at once: the first checks the parent identity again, and each marks its
+ * domain verified. The breaker then counts only mail sent from now on. Audited. Returns the trip it cleared, or null
+ * when it wasn't tripped.
+ */
+export async function resetBuiltinBreaker(db: DbExecutor, parent: string, reason: string, operator: string) {
+  const { rows: [row] } = await db.execute<{ trip: Record<string, unknown> }>(sql`WITH old AS (SELECT name,trip,tripped_at FROM builtin_parent WHERE name=${parent} AND tripped_at IS NOT NULL FOR UPDATE),
+    reset AS (UPDATE builtin_parent p SET tripped_at=NULL,trip=NULL,reset_at=now(),rates_checked_at=NULL,checked_at=now()-interval '1 day',
+        problem=CASE WHEN p.problem='reputation' THEN NULL ELSE p.problem END FROM old WHERE p.name=old.name RETURNING old.trip,old.tripped_at),
+    audited AS (INSERT INTO hosted_operator_audit(workspace_id,action,details) SELECT 'platform','builtin-parent-reset',
+      jsonb_build_object('operator',${operator}::text,'reason',${reason}::text,'parent',${parent}::text,'trippedAt',tripped_at,'trip',trip) FROM reset),
+    queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.builtin:'||b.workspace_id,'domain.builtin',b.workspace_id,'{}'::jsonb
+      FROM reset CROSS JOIN builtin_domains b JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
+      WHERE b.revoked_at IS NULL AND dc.sending_state='pending'
+      ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed'))
+    SELECT trip FROM reset`);
+  return row?.trip ?? null;
 }
 
 /** The routing write that sets up the catch-all is audited as the built-in domain, not as a person. */
@@ -248,13 +384,16 @@ export async function builtinDomainTick(runtime: Runtime) {
   if (!config.multiTenant || !parent) return 0;
   const simulated = isSimulatedSes(runtime), stored = await storedParent(runtime.db, parent);
   if (simulated && !stored?.ok) await runtime.db.execute(sql`INSERT INTO builtin_parent(name,ok,ses,checked_at) VALUES(${parent},true,${JSON.stringify(SIMULATED_PARENT)}::jsonb,now())
-    ON CONFLICT(name) DO UPDATE SET ok=true,ses=excluded.ses,problem=NULL,checked_at=now()`);
+    ON CONFLICT(name) DO UPDATE SET ok=builtin_parent.tripped_at IS NULL,ses=excluded.ses,problem=CASE WHEN builtin_parent.tripped_at IS NOT NULL THEN 'reputation' END,checked_at=now()`);
   else if (!simulated && (!stored || Date.parse(stored.checked_at) <= Date.now() - 3600_000)) {
     const { rows: [conn] } = await runtime.db.execute<{ c: SharedConnection }>(sql`SELECT to_jsonb(c) AS c FROM provider_connections c WHERE c.kind='shared' AND c.state='ready' AND c.region=${BUILTIN_REGION}
       AND c.aws_account_id IS NOT NULL ORDER BY c.id LIMIT 1`);
     if (conn) try { await checkParent(runtime, await client(runtime, conn.c), parent); }
     catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'BUILTIN_PARENT_CHECK_FAILED', parent }); }
   }
+  let tripped = false;
+  try { tripped = await builtinBreaker(runtime); }
+  catch (e) { if (e instanceof ModuleLoadError) throw e; logError(e, { code: 'BUILTIN_BREAKER_FAILED', parent }); }
   // The backfill: labels for workspaces created before built-in domains, or while they were off.
   const { rows: unlabeled } = await runtime.db.execute<{ id: string; name: string }>(sql`SELECT w.id,w.name FROM workspaces w WHERE NOT EXISTS (SELECT FROM builtin_domains b WHERE b.workspace_id=w.id)
     ORDER BY w.created_at,w.id LIMIT 200`);
@@ -270,11 +409,12 @@ export async function builtinDomainTick(runtime: Runtime) {
       ORDER BY b.created_at LIMIT 200)
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.builtin:'||workspace_id,'domain.builtin',workspace_id,'{}'::jsonb FROM due
     ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),created_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed') RETURNING 1`);
-  // The parent is the built-in domains' receiving proof: while it verifies, each stays fresh (route() wants 72 hours).
+  // The parent is the built-in domains' receiving proof: while it verifies, each stays fresh (route() wants 72 hours). A
+  // tripped breaker stops their sending, not their receiving: the identity still verifies.
   await runtime.db.execute(sql`UPDATE domain_claims dc SET receiving_proved_at=now(),receiving_identity_at=now(),receiving_proof_missed_at=NULL FROM builtin_domains b
     WHERE dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin' AND b.revoked_at IS NULL AND dc.receiving_state='active'
-      AND dc.receiving_proved_at<now()-interval '12 hours' AND EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND p.ok)`);
-  return queued.length;
+      AND dc.receiving_proved_at<now()-interval '12 hours' AND EXISTS (SELECT FROM builtin_parent p WHERE p.name=${parent} AND (p.ok OR p.problem='reputation'))`);
+  return queued.length + Number(tripped);
 }
 
 /** Operator only (scripts/builtin-domain.ts): stops the workspace's built-in domain sending and receiving at once, keeps

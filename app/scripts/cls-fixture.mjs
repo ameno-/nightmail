@@ -849,7 +849,9 @@ export async function seed(fx) {
   const contacts = [];
   for (const [i, who] of ['ada', 'grace', 'linus', 'margaret', 'ken'].entries()) contacts.push(await dana.api('POST', '/v1/contacts', { email: `${who}@example.net`, name: who[0].toUpperCase() + who.slice(1),
     properties: { plan: who.length > 4 ? 'pro' : 'free', status: i < 3 ? 'waiting' : 'signed_up', joined_at: `2026-11-1${i}T09:30:00.000Z`, mailbox: i % 2 ? 'free' : 'company', attempts: i + 1 } }));
-  await dana.api('POST', `/v1/lists/${list.id}/members`, { contactIds: contacts.map(c => c.id) });
+  // A role address list hygiene flags (Audience · risky): campaigns skip it until someone sends to it anyway.
+  const risky = await dana.api('POST', '/v1/contacts', { email: 'noreply@example.net' });
+  await dana.api('POST', `/v1/lists/${list.id}/members`, { contactIds: [...contacts, risky].map(c => c.id) });
   const segment = await dana.api('POST', '/v1/segments', { name: 'Pro plan', rule: { field: 'plan', operator: 'eq', value: 'pro' } });
   // Property rules (Segment · property rules): a string, a day and a presence check.
   const propertySegment = await dana.api('POST', '/v1/segments', { name: 'Waiting companies', rule: { operator: 'and', rules: [
