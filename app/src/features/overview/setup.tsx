@@ -11,13 +11,13 @@ import { openConnectAgent } from '../../lib/connect-agent'
 import { newIssuePath, readersPath } from '../newsletters/shared'
 import { date, number } from '../../lib/format'
 import { TestSend, TestSentLine } from '../docs/first-send'
-import { Button, Dialog } from '../../components/ui'
+import { Button, Dialog, SkeletonText } from '../../components/ui'
 import { limitNotes } from '../score'
-import { SendingLimitsGuide } from '../score/limits'
+import { LimitStoryList, limitStory } from '../score/limits'
 import './setup.css'
 import { resourceOf } from '../../data/invalidation'
 import { setupGap, type SetupGap } from '../settings/domain-setup-alert'
-import { builtinLimitText, sendsFromBuiltin } from '../settings/builtin-domain'
+import { sendsFromBuiltin } from '../settings/builtin-domain'
 import type { Domain } from '../../data/types'
 
 // The hosted limit as GET /v1/me reports it, refreshed with the overview so usage stays current.
@@ -48,16 +48,16 @@ export function limitSummary(limit: SendingLimit, evaluating = false) {
 
 // Hosted: the daily limit as one line, what's left of it and a meter (or nothing, in good standing), then a note only
 // while one applies (an adjustment, a notice). What's left, not what's used: the used count is close to the Emails figure beside it and
-// would say the same fact twice. The row opens how sending limits work; the next band and the per-minute rate are in
-// the sender score's explainer.
+// would say the same fact twice. The row opens what the limit is now, why and what raises it (score/limits.tsx); every
+// rule is in the docs it links to.
 export function DailyLimit({ report }: { report: SenderScore | undefined }) {
   const limit = useSendingLimit(), builtin = useBuiltinSending()
   const [explaining, setExplaining] = useState(false)
   const notes = limitNotes(report)
-  const guide = <Dialog open={explaining} onOpenChange={setExplaining} title="How limits work" className="limits-dialog">
-    {builtin && <p className="limits-dialog__builtin">{builtinLimitText(builtin)}</p>}
-    <SendingLimitsGuide limit={report?.limit} compact />
-    <Link className="limits-dialog__docs" to="/docs#sending-limits">Open in the docs</Link>
+  const story = limitStory(report, builtin)
+  const guide = <Dialog open={explaining} onOpenChange={setExplaining} title="Daily limit" className="limits-dialog">
+    {story ? <LimitStoryList story={story} /> : <SkeletonText width="80%" />}
+    <Link className="limits-dialog__docs" to="/docs#sending-limits">All the limits, in the docs</Link>
   </Dialog>
   // Sending from the built-in domain: its own cap, which is lower than any other until a domain of the workspace's own verifies.
   if (builtin) {

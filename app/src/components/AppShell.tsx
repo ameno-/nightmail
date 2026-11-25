@@ -7,7 +7,7 @@ import { useRegionCatalog, useRegionDiscovery } from '../data/regions'
 import { label, number, percent } from '../lib/format'
 import { chunk, ChunkFallback } from '../lib/preloadable'
 import { queries } from '../data/queries'
-import { useScoreAbout } from '../lib/score-about'
+import { openScoreAbout, useScoreAbout } from '../lib/score-about'
 import { openConnectAgent, useConnectAgentOpen } from '../lib/connect-agent'
 import { Alert, Button, EmptyState, ErrorState, Icon, Select, Sheet, Skeleton, SkeletonText, useToast, type IconSize } from './ui'
 import { CommandMenu, type Command } from './CommandMenu'
@@ -109,6 +109,12 @@ export function AppShell() {
   const provisioning = current?.provisionStatus === 'pending' || current?.provisionStatus === 'running'
   const needsProvisioning = Boolean(current && !provisioning && (current.discoveryStatus === 'needs_provisioning' || (discovery.data && !discovery.data.provisioned)))
   const navigate = useNavigate()
+  // The first-grade email's button (api/src/notices.ts) opens the sender score explainer: /overview#sender-score, once.
+  useEffect(() => {
+    if (location.hash !== '#sender-score') return
+    openScoreAbout()
+    navigate({ pathname: location.pathname, search: location.search }, { replace: true })
+  }, [location.hash, location.pathname, location.search, navigate])
   const prefetchRoute = usePrefetchRoute()
   const intent = useRouteIntent()
   const prefetchQueries = usePrefetchQueries()

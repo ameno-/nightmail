@@ -228,7 +228,7 @@ test('Cloudflare static files: only files the deployed build has get a cache lif
   const {headers,uncached}=withFileRules(source,[...built,'index.html','constructor/index.js','theme.js',...fonts]);
   assert.deepEqual(uncached,[]);assert.equal(sent(headers,'/constructor/index.js').get('cache-control'),undefined,'Only the directories with a lifetime get rules.');
   for(const file of built)assert.equal(sent(headers,'/'+file).get('cache-control'),'public, max-age=31536000, immutable',file);
-  for(const file of fonts)assert.equal(sent(headers,'/'+file).get('cache-control'),FILE_CACHE.fonts,file);
+  for(const file of fonts)assert.deepEqual([sent(headers,'/'+file).get('cache-control'),sent(headers,'/'+file).get('access-control-allow-origin')],[FILE_CACHE.fonts,'*'],file);
   assert.match(FILE_CACHE.fonts!,/^public, max-age=86400\b/);
   // Another build's file, a longer and a shorter name, the directories, another case, a nested copy, a font no build has yet, dashboard routes.
   for(const path of ['/assets/index-N3xtBu1d.js','/assets/index-CxQdVBrk.js.map','/assets/index-CxQdVBrk.j','/assets/','/assets','/ASSETS/index-CxQdVBrk.js','/assets/x/index-CxQdVBrk.js','/fonts/next.woff2','/fonts/','/index.html','/','/logs']){
@@ -32188,6 +32188,96 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('account notices: a workspace\'s first grade emails its owners and admins what the sender score is, what moves it and what it changes, once: grading again and a retried job send nothing more', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, fetch: publicFetch }) => {
+      const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
+      const { refreshStanding } = await import('./src/standing.js');
+      const { accountNotifyJob } = await import('./src/account-notices.js');
+      const { loadDisplayedStanding, scoreView } = await import('./src/sender-score.js');
+      // Another graded workspace (the platform's own) with a low score and a daily limit: its figures must not reach this email.
+      await db.query(`INSERT INTO sender_standing(workspace_id,phase,first_recipients,score,target,quality,daily_limit,band_limit,computed_at) VALUES ($1,'graded',500,61.4,61.4,61.4,100,100,now())`, [platform]);
+      // Who account emails go to: owners and admins with a verified address. A member and an unverified admin are not told.
+      await db.query(`INSERT INTO nightmail_users(id,name,email,email_verified) VALUES ('user_grade_admin','Ada','ada@first-grade.example',true),('user_grade_member','Mo','mo@first-grade.example',true),('user_grade_unverified','Una','una@first-grade.example',false)`);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ('wm_grade_admin',$1,'user_grade_admin','admin'),('wm_grade_member',$1,'user_grade_member','member'),('wm_grade_unverified',$1,'user_grade_unverified','admin')`, [wid]);
+      // Real mail as the standing job counts it, early today (UTC).
+      const sent = (n: number, status: string, outcomes: number) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+        SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array('r'||n||'@example.net'),'[]','[]','First grade','{}',false,$5::text,'p-'||$1||n,$6,least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n%3000)) FROM generate_series(1,$7::int) n`,
+        [unique('first-grade-'), wid, REGION, 'sender@first-grade.example', status, outcomes, n]);
+      const regrade = async () => { await db.query('UPDATE sender_standing SET evidence_at=NULL WHERE workspace_id=$1', [wid]); await refreshStanding(runtime, { only: wid }); };
+      const standing = async () => (await db.query('SELECT phase,round(score)::int AS score FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0];
+      // Each pending account.notify job run twice (a retry), and how its notice ended.
+      const deliver = async () => {
+        const jobs = (await db.query(`SELECT id,payload FROM jobs WHERE type='account.notify' AND status='pending' AND workspace_id=$1`, [wid])).rows;
+        for (const j of jobs) { for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, j.payload, { id: j.id, attempts: i + 1, workspaceId: wid }); await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [j.id]); }
+        return (await db.query('SELECT kind,status FROM account_notices WHERE id=ANY($1) ORDER BY kind', [jobs.map(j => j.payload.noticeId)])).rows.map(r => `${r.kind}:${r.status}`);
+      };
+
+      // The evaluation: its first 500 real recipients are counted, their results are not in yet. Nothing is said.
+      await sent(500, 'sent', 1);
+      await regrade();
+      assert.deepEqual([(await standing()).phase, await deliver()], ['calibrating', []]);
+      // Their results land and the workspace has its first grade; the next run grades it again.
+      await db.query(`UPDATE sending_emails SET status='delivered',event_outcomes=3 WHERE workspace_id=$1 AND status='sent'`, [wid]);
+      await regrade();
+      await regrade();
+      const graded = await standing();
+      assert.equal(graded.phase, 'graded');
+      // The card shows the score as the dashboard does when the email is made: this workspace's score, grade and limit.
+      const view = scoreView(await loadDisplayedStanding(runtime, wid));
+      assert.deepEqual([view.limit?.daily, view.grade !== null], [null, true]);
+      const card = `Sender score: ${Math.round(view.score!)} (grade ${view.grade}), no daily limit\nAs of `;
+      // One email to each owner and admin, sent once however often the job runs.
+      assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
+      const emails = await fresh();
+      assert.deepEqual(emails.flatMap(e => e.to_addresses).sort(), [AUTH_EMAIL, 'ada@first-grade.example'].sort());
+      for (const email of emails) {
+        assert.equal(email.subject, `${name} now has a sender score`);
+        // What happened, what the score is and what moves it, what it changes, and where to see it.
+        assert.ok(email.text.startsWith(card), email.text);
+        // Then one sentence, the button to the live score and one line on why it came.
+        assert.ok(email.text.endsWith(`\n\nIt works like a credit score for your sending: keep it good and there’s no daily limit.\n\nSee the live score: ${PUBLIC_ORIGIN}/overview#sender-score\n\nSent once to the owners and admins of ${name}.\n`), email.text);
+        // The score is the one figure: no rate, threshold or provider name, and nothing of the other workspace's.
+        assert.doesNotMatch(email.text, HOW_IT_WORKS);
+        assert.doesNotMatch(email.text, /\b61\b|\b100 recipients|grade D/);
+        // The HTML part shows the card as a picture: its address names the score, its grade, the limit state and a theme,
+        // and nothing of the workspace or the recipient.
+        const pictures = [...email.html.matchAll(/<img [^>]*src="([^"]+)"/g)].map(m => m[1]!);
+        const grade = view.grade === 'A+' ? 'a-plus' : view.grade!.toLowerCase();
+        assert.deepEqual(pictures, ['light', 'dark'].map(theme => `${PUBLIC_ORIGIN}/i/score-card/v1/${Math.round(view.score!)}-${grade}-none-${theme}.png`));
+        assert.ok(email.html.includes(`alt="Sender score ${Math.round(view.score!)}, grade ${view.grade}. No daily limit."`), 'Its alt text says the same.');
+      }
+      // The pictures answer for anyone, the same bytes every time, cached a year; nothing but a real card does.
+      const get = (target: string, headers: Record<string, string> = {}) => publicFetch(new Request(target.startsWith('http') ? target : PUBLIC_ORIGIN + target, { headers }));
+      const [first] = [...emails[0]!.html.matchAll(/<img [^>]*src="([^"]+)"/g)].map(m => m[1]!), served = await get(first!);
+      const png = Buffer.from(await served.arrayBuffer());
+      assert.deepEqual([served.status, served.headers.get('content-type'), served.headers.get('cache-control'), png.subarray(1, 4).toString(), png.readUInt32BE(16), png.readUInt32BE(20)],
+        [200, 'image/png', 'public, max-age=31536000, immutable', 'PNG', 1020, 552], 'A 340 × 184 card drawn at 3×.');
+      assert.ok(Buffer.from(await (await get(first!)).arrayBuffer()).equals(png), 'Drawn again, byte for byte.');
+      assert.equal((await get(first!, { 'if-none-match': served.headers.get('etag')! })).status, 304);
+      const head = await publicFetch(new Request(first!, { method: 'HEAD' }));
+      assert.deepEqual([head.status, head.headers.get('content-type'), (await head.arrayBuffer()).byteLength], [200, 'image/png', 0], 'HEAD answers without drawing.');
+      for (const path of ['/i/score-card/v1/0-f-100-dark.png', '/i/score-card/v1/100-a-plus-none-light.png', '/i/score-card/v1/72-c-500-light.png']) assert.equal((await get(path)).status, 200, path);
+      for (const wrong of ['/i/score-card/v1/86-a-none-light.png', '/i/score-card/v1/101-a-plus-none-light.png', '/i/score-card/v1/086-b-none-light.png', '/i/score-card/v1/86-b-300-light.png',
+        '/i/score-card/v1/86-b-none-sepia.png', '/i/score-card/v2/86-b-none-light.png', '/i/score-card/v1/86-b-none-light.png/x', `/i/score-card/v1/86-b-none-light.png?w=${wid}`.replace('?', '%3F'), '/i/score-card/v1/']) {
+        const refused = await get(wrong);
+        assert.equal(refused.status, 404, wrong);
+      }
+      // As production runs Hosted: with the shared link domain on, this installation's own domain answers no campaign
+      // picture under /i/ (src/linked-images.ts), but it does answer the score card, its own picture.
+      runtime.config.linkHost = 'links.nightmailedge.example';
+      const own = (path: string) => publicFetch(new Request(`https://nightmail.dev${path}`));
+      const cardPath = new URL(first!).pathname, onOwn = await own(cardPath);
+      assert.deepEqual([onOwn.status, Buffer.from(await onOwn.arrayBuffer()).equals(png)], [200, true], 'The card answers on nightmail.dev with the link domain on.');
+      assert.equal((await own(`/i/${'0'.repeat(32)}${'1'.repeat(32)}.png`)).status, 404, 'A campaign picture still never answers there.');
+      // One card, one spelling: a percent-encoded spelling of the same card is 404 before any drawing; a query string is ignored.
+      assert.equal((await own(cardPath.replace('-none-', '%2Dnone-'))).status, 404);
+      assert.ok(Buffer.from(await (await own(`${cardPath}?w=x`)).arrayBuffer()).equals(png), 'A query string serves the same card.');
+      // Never again for this workspace: a later run, and the job run once more, send nothing.
+      await regrade();
+      assert.deepEqual([await deliver(), await fresh(), (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind='evaluation_finished'`, [wid])).rows[0].n], [[], [], 1]);
+    });
+  });
+
   test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain, a waitlist admission and a sign-in link are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
@@ -32234,7 +32324,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([mail.subject, mail.from_name, mail.to_addresses], ['You are invited to a Nightmail workspace', 'Nightmail', [`named-${i}@elsewhere.example`]]);
         assert.match(mail.text, new RegExp(`^${literal(`${AUTH_EMAIL} invited you to join a workspace on Nightmail as an admin.\n\nThe invitation is for this address only and expires on `)}[A-Z][a-z]{2} \\d{1,2}${literal(`.\n\nTo accept, sign in with this address.\n\nAccept the invitation: ${made.acceptUrl}\n\nNightmail sent this because ${AUTH_EMAIL} entered your address. If you were not expecting it, ignore it: nothing happens unless you accept.\n`)}$`));
         // The HTML part says the same words and has one link.
-        const words = mail.html.replace(/<style>.*?<\/style>/s, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
+        const words = mail.html.replace(/<style>.*?<\/style>/gs, '').replace(/<[^>]*>/g, '\n').split('\n').map((line: string) => line.trim()).filter(Boolean);
         assert.deepEqual(words, ['You are invited to a Nightmail workspace', ...mail.text.trim().split(/\n+/).map((line: string) => line.replace(`Accept the invitation: ${made.acceptUrl}`, 'Accept the invitation'))]);
         assert.deepEqual(mail.html.match(/href="[^"]*"/g), [`href="${made.acceptUrl.replaceAll('&', '&amp;')}"`]);
       }
@@ -32378,11 +32468,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await evaluationFinished(runtime.db, wid, false), await evaluationFinished(runtime.db, wid, true)], [true, false]);
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
-      assert.equal(evaluation.subject, `${name} has passed its evaluation`);
-      assert.match(evaluation.text, /so its starting limit is lifted\..*Over the next day the amount grows on its own/s);
+      assert.equal(evaluation.subject, `${name} now has a sender score`);
+      assert.match(evaluation.text, /^It works like a credit score for your sending: keep it good and there’s no daily limit\.\n/);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');
-      assert.match(customerNotice(PUBLIC_ORIGIN, { kind: 'evaluation_finished', workspace: 'W', limited: true }).text, /^The first emails from W showed some problems, so it keeps a daily limit for now\./);
+      assert.match(customerNotice(PUBLIC_ORIGIN, { kind: 'evaluation_finished', workspace: 'W', limited: true }).text, /^It works like a credit score for your sending\. It starts low, so a daily limit applies until it rises\.\n/);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':first' WHERE workspace_id=$1 AND kind='evaluation_finished'`, [wid]);
       await evaluationFinished(runtime.db, wid, false);
@@ -32440,8 +32530,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The link's random characters aren't words: the check reads the email without it.
       for (const email of [invitation, limit, evaluation, domain, waitlist, { ...link, text: link.text.replace(signInUrl, '') }]) {
         for (const body of [email.subject, email.text]) assert.doesNotMatch(body, HOW_IT_WORKS);
-        // The HTML part says what the text part says, paragraph for paragraph.
-        for (const line of email.text.split('\n\n').slice(0, 2)) assert.ok(email.html.includes(line.replaceAll('&', '&amp;').replaceAll('"', '&quot;')), line);
+        // The HTML part says what the text part says, paragraph for paragraph (a short email's button line is its link).
+        for (const line of email.text.split('\n\n').slice(0, 2).filter((line: string) => !/: https?:\/\/\S+$/.test(line))) assert.ok(email.html.includes(line.replaceAll('&', '&amp;').replaceAll('"', '&quot;')), line);
       }
     });
   });

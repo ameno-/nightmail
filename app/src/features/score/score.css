@@ -3,16 +3,18 @@
 /* The score card (the sidebar's, and Overview's where there is no sidebar): one tile, its colour the score's on the ramp
    in tokens.css (--score-*), under Arc's film grain: 220px (two screen pixels a grain on a 2× screen), at half that on
    a 3× phone, where the full size read as blotches. Before a grade, while it loads and when it can't be read, the same
-   tile in neutral. 64px in every state, so nothing moves when it loads. */
+   tile flat and neutral: the grain comes with the grade's colour, and a sentence says when the grade appears (grain
+   behind a pending sentence only read as noise nobody could explain). 64px in every state, so nothing moves when it loads. */
 .score-card {
   --hue: calc(var(--score-hue-poor) + clamp(0, (var(--score, 0) - 25) / 50, 1) * (var(--score-hue-mid) - var(--score-hue-poor)) + clamp(0, (var(--score, 0) - 75) / 20, 1) * (var(--score-hue-high) - var(--score-hue-mid)));
   --soft: var(--color-muted);
   position: relative; display: flex; flex-direction: column; justify-content: space-between; width: 100%; height: 64px; padding: var(--space-12) var(--space-12) var(--space-8); overflow: hidden;
-  border: 0; border-radius: var(--radius-md); background-color: var(--score-neutral); background-image: url('./noise-light.png');
+  border: 0; border-radius: var(--radius-md); background-color: var(--score-neutral);
   color: var(--color-text); font: inherit; text-align: left; text-decoration: none; font-variant-numeric: tabular-nums;
   transition: background-color var(--motion-duration) var(--ease-standard), transform 160ms var(--ease-out-strong);
 }
-@media (resolution >= 3dppx) { .score-card { background-size: 110px; } }
+.score-card[data-scored] { background-image: url('./noise-light.png'); }
+@media (resolution >= 3dppx) { .score-card[data-scored] { background-size: 110px; } }
 .score-card[data-scored] { --soft: oklch(var(--score-soft-l) var(--score-soft-c) var(--hue)); background-color: oklch(var(--score-tile-l) var(--score-tile-c) var(--hue)); color: oklch(var(--score-ink-l) var(--score-ink-c) var(--hue)); }
 :is(a, button).score-card { cursor: pointer; }
 :is(a, button).score-card:active { transform: scale(.98); }
@@ -30,6 +32,8 @@
 .score-card__figure b { font-family: var(--font-mono); font-size: var(--text-display); line-height: 28px; font-weight: 400; letter-spacing: -.02em; }
 .score-card__grade { font-family: var(--font-mono); font-size: var(--text-section); line-height: 16px; font-weight: 700; }
 .score-card__note { min-width: 0; overflow: hidden; color: var(--soft); font-size: var(--text-xs); line-height: 16px; text-overflow: ellipsis; white-space: nowrap; }
+/* Before a grade: the sentence in the row's 28px, two lines at most, at the card's foot on a wide card. */
+.score-card__pending { display: -webkit-box; max-height: 28px; overflow: hidden; color: var(--color-text); font-size: var(--text-xs); line-height: 14px; text-wrap: pretty; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 
 /* Next steps: a short list of places to go; rows fade up in sequence. */
 .next-steps { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
@@ -87,7 +91,7 @@
 .score-about__history { display: flex; align-items: flex-end; gap: var(--space-2); width: 98px; height: 20px; }
 .score-about__history > span { flex: 1; height: 100%; border-radius: 0; background: var(--color-series); transform-origin: bottom; }
 .score-about__history > span[data-last] { background: var(--color-series-strong); }
-.score-about__limit { grid-column: 1 / -1; padding-top: var(--space-8); font-family: var(--font-mono); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
+.score-about__limit { grid-column: 1 / -1; padding-top: var(--space-8); font-size: var(--text-xs); line-height: var(--leading-xs); text-wrap: pretty; }
 .score-about__section ul { display: flex; flex-direction: column; gap: var(--space-4); margin: 0; padding-inline-start: var(--space-20); text-wrap: pretty; }
 .score-about__progress { grid-column: 1 / -1; position: relative; display: block; height: 4px; overflow: hidden; border-radius: var(--radius-2xs); background: var(--color-layer-2); }
 .score-about__progress > i { position: absolute; inset: 0 auto 0 0; width: var(--share); border-radius: inherit; background: var(--color-contrast); }
