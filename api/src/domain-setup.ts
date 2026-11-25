@@ -13,7 +13,7 @@ import { log, logError, ModuleLoadError, wrapModuleLoad, type JobHandler, type R
 // The same tick, with NO_DOMAIN_REMINDER=on, emails a new workspace that has added no domain at all an hour after it was
 // created (noDomainNotices), once; Overview asks for one either way (features/overview/onboarding-card.tsx).
 // With link hosts on (src/link-domains.ts), it also queues a domain.linkCheck for each domain whose link host isn't
-// active yet: every 15 minutes for its first day, then every 6 hours. The check makes the host a custom hostname once its
+// active yet: every 15 minutes for its first day, then every 6 hours; an active one, daily. The check makes the host a custom hostname once its
 // CNAME resolves, so a link record published after the domain verified needs no Check now. It never emails.
 
 export async function domainSetupTick(runtime: Runtime) {
@@ -31,8 +31,10 @@ export async function domainSetupTick(runtime: Runtime) {
     RETURNING id`);
   const links = runtime.config.linkHosts ? (await runtime.db.execute<{ id: string }>(sql`WITH due AS (SELECT d.id,dc.workspace_id,dc.token FROM domain_claims dc
       JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name LEFT JOIN link_hosts h ON h.workspace_id=dc.workspace_id AND h.domain=dc.name
-      WHERE dc.sending_state IN ('pending','verified') AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ? 'builtin',false) AND coalesce(h.status,'pending')<>'active'
-        AND coalesce(h.checked_at,'-infinity')<=now()-CASE WHEN h.created_at>now()-interval '1 day' THEN interval '14 minutes' ELSE interval '6 hours' END
+      WHERE dc.sending_state IN ('pending','verified') AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ? 'builtin',false)
+        -- An active host is checked again daily: a custom hostname deleted at Cloudflare (by hand, a cleanup race, or dev's
+        -- checks on the shared zone) is made again instead of leaving every link in the domain's mail unanswered.
+        AND coalesce(h.checked_at,'-infinity')<=now()-CASE WHEN h.status='active' THEN interval '1 day' WHEN h.created_at>now()-interval '1 day' THEN interval '14 minutes' ELSE interval '6 hours' END
       ORDER BY h.checked_at NULLS FIRST LIMIT 100)
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.linkCheck:'||token,'domain.linkCheck',workspace_id,jsonb_build_object('domainId',id,'token',token) FROM due
     ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload=excluded.payload WHERE jobs.status IN ('completed','failed')
