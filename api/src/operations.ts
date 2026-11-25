@@ -1641,15 +1641,14 @@ function registerPublicEvents(app: App) {
   const TOKEN = /^u_[a-f0-9]{64}$/;
   // A person who opens a link that is cut short, mistyped or no longer known gets a page that says so; an API client
   // (no text/html in Accept) and a mailbox's one-click POST still get the JSON error.
-  const browser = (c: Ctx) => c.req.method === 'GET' && /\btext\/html\b/i.test(c.req.header('accept') ?? '');
+  const browser = (c: Ctx) => ['GET', 'HEAD'].includes(c.req.method) && /\btext\/html\b/i.test(c.req.header('accept') ?? '');
   const invalidLink = (c: Ctx) => {
     c.header('Cache-Control', 'no-store, max-age=0'); c.header('Referrer-Policy', 'no-referrer'); c.header('X-Robots-Tag', 'noindex, nofollow'); c.header('Content-Security-Policy', "default-src 'none'; style-src 'unsafe-inline'; font-src 'self'; frame-ancestors 'none'; base-uri 'none'");
     c.set('failure', { code: 'NOT_FOUND' });
     return c.html(unsubscribePage('This unsubscribe link isn’t valid', '<p>It may be incomplete or out of date. To stop these emails, use the unsubscribe link in a more recent email from the sender, or ask the sender to remove you.</p>'), 404);
   };
-  // Hono matches HEAD as GET; intercept the original method before the mutating GET route.
+  // Hono serves HEAD through the read-only GET handler and drops the body.
   app.use('/unsubscribe/:token', async (c, next) => {
-    if (c.req.method === 'HEAD') { c.header('Allow', 'GET, POST'); c.header('Cache-Control', 'no-store'); throw new ApiError(405, 'METHOD_NOT_ALLOWED', 'Use GET or POST to unsubscribe.'); }
     if (browser(c) && !TOKEN.test(c.req.param('token') ?? '')) return invalidLink(c);
     await next();
   });

@@ -268,7 +268,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // workspace-scoped.
     if (c.req.path === '/v1/public/stats' || c.req.path === '/v1/public/signups') return next();
     // Forward recipients answer with the emailed link alone; the routes check the token themselves.
-    if (['GET','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
+    if (['GET','HEAD','POST'].includes(c.req.method) && /^\/v1\/forwarding\/(?:confirm\/fwd_[0-9a-f]{64}|stop\/con_[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)$/.test(c.req.path)) return next();
     // Joining requires a verified session, not an existing membership. This endpoint
     // authenticates the invitation recipient directly and cannot authorize resource access.
     if (c.req.method === 'POST' && /^\/v1\/workspaces\/invitations\/[^/]+\/accept$/.test(c.req.path)) return next();
