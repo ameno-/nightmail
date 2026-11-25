@@ -42,7 +42,7 @@ import { assertResponseWithinLimit, reserveMemory, responseByteLimit, withMemory
 import { buildBoundedPageJson, PAGE_MAX_BYTES, streamBase64JsonResponse, utf8Bytes, withBoundedRead } from './read-bounds.js';
 import { RATES } from './billing/money.js';
 import { RecipientWarning, recipientWarnings, RiskBreakdown } from './list-hygiene.js';
-import { assertBuiltinInput, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
+import { assertBuiltinInput, assertBuiltinStillSends, awaitBuiltinSetup, BUILTIN_NOTE, isBuiltinHost } from './builtin-domain.js';
 import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_REFUSALS_TEXT, ATTACHMENT_RULES_TEXT, UPLOAD_HEADERS } from './attachment-limits.js';
 import { estimateFinish, judgeReadiness, RAMP, RAMP_HOUR_MS, rampPlan, rampStart, READINESS_REASONS, type RampAt, type ReadinessReason } from './standing-model.js';
 
@@ -1838,6 +1838,7 @@ async function renderTemplates(runtime: Runtime, a: Actor, out: Outgoing[], batc
 /** POST /v1/emails/send and /batch after authentication, the dashboard's test email and the platform's notices. */
 async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emails: SendRequest[] }, scheduledAt?: string, sealed = false, platformTestTo?: string) {
   const batch = 'emails' in input, mails = batch ? input.emails : [input];
+  await assertBuiltinStillSends(call.runtime, call.db ?? call.runtime.db, a.workspaceId, mails.map(m => m.from), batch);
   assertBuiltinInput(call.runtime.config, mails.map(m => ({ ...m, scheduledAt })), batch);
   if (mails.some(m => isBuiltinHost(call.runtime.config, m.from.split('@')[1]!))) await awaitBuiltinSetup(call.runtime, a.workspaceId);
   // Marketing mail's footer carries the workspace's postal address when it has one. Unlike a campaign, a marketing send
@@ -2025,7 +2026,8 @@ export type MailboxSendRequest = { protocolEnvelope?:boolean; mime?: string; fro
  * headers. Only sendFromMailbox calls it, under the send locks it holds. */
 export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: SendScope, a: Actor, request: MailboxSendRequest, replyAuthors: string[] | null) {
   sesHeaders(request.headers.length);
-  // A built-in domain's Reply-To stays at its own name, here as on POST /v1/emails/send.
+  // A built-in domain stops sending once the workspace's own verifies, and its Reply-To stays at its own name, here as on POST /v1/emails/send.
+  await assertBuiltinStillSends(runtime, db, a.workspaceId, [request.from]);
   assertBuiltinInput(runtime.config, [{ from: request.from, replyTo: request.replyTo, attachments: request.attachments }]);
   const schema = request.protocolEnvelope ? ProtocolSendInput : SendInput;
   const parsed = schema.safeParse({ from: request.from, ...(request.fromName ? { fromName: request.fromName } : {}), to: request.protocolEnvelope?[...request.to,...request.cc,...request.bcc]:request.to, cc:request.protocolEnvelope?[]:request.cc, bcc:request.protocolEnvelope?[]:request.bcc, replyTo: request.replyTo, region: request.region, kind: 'transactional', subject: request.subject, ...(request.html ? { html: request.html } : {}), ...(request.text ? { text: request.text } : {}), attachments: request.attachments, tracking: request.tracking ?? false, screen: request.screen });
