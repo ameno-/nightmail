@@ -29240,18 +29240,19 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await outbox(), []);
     });
   });
-  test('Glass: everything going on in one read for operators, from rollups and bounded counts; anyone else gets exactly what an operator path that does not exist answers', async t => {
+  test('Glass: everything going on in one read for operators, from rollups and bounded counts, every pool region apart, and a live activity feed; anyone else gets exactly what an operator path that does not exist answers', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const wid = runtime.config.workspaceId, path = '/v1/operator/glass', pool = '444455556666', region = 'eu-glass-1';
+      const wid = runtime.config.workspaceId, path = '/v1/operator/glass', feed = '/v1/operator/glass/activity', pool = '444455556666', region = 'eu-glass-1', quiet = 'eu-glass-2';
       Object.assign(runtime.config, { multiTenant: true, deploy: { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' } });
-      const { readGlass, GLASS_CAP } = await import('./src/glass.js');
+      const { readGlass, readActivity, GLASS_CAP, GLASS_ACTIVITY } = await import('./src/glass.js');
       // Not an operator, by session or by API key: the operator area's one refusal, the same as for a path that doesn't
       // exist but for its request ID, so nothing says Glass is there.
       const refused = (reply: Reply) => { const { requestId: _, ...rest } = error(reply, 403, 'OPERATOR_REQUIRED'); return { status: reply.status, ...rest }; };
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
-      for (const read of [(p: string) => local('GET', p), (p: string) => request('GET', p, key.secret)])
-        assert.deepEqual(refused(await read(path)), refused(await read('/v1/operator/no-such-page')));
-      assert.equal(ok(await local('GET', '/openapi.json')).paths[path], undefined, 'Hidden from the public OpenAPI document.');
+      for (const read of [(p: string) => local('GET', p), (p: string) => request('GET', p, key.secret)]) for (const p of [path, feed])
+        assert.deepEqual(refused(await read(p)), refused(await read('/v1/operator/no-such-page')));
+      const document = ok(await local('GET', '/openapi.json'));
+      assert.deepEqual([document.paths[path], document.paths[feed]], [undefined, undefined], 'Hidden from the public OpenAPI document.');
       const { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic Glass reader']);
 
@@ -29260,6 +29261,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const user = unique('user');
       await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)', [user, 'Glass sign-up', `${user}@example.org`]);
       await db.query("INSERT INTO nightmail_signups(user_id,via) VALUES($1,'waitlist')", [user]);
+      // Its first sign-in was with Google: the feed says so.
+      await db.query(`INSERT INTO nightmail_signin_attempts(issuer,subject,acr,provider,email,outcome,first_at,last_at) VALUES ('https://accounts.google.com',$1,'urn:anomaly:acr:google','google',$2,'signed_in',now(),now())`, [unique('sub'), `${user}@example.org`]);
       // Queued mail held for screening, and an hour of sending outcomes.
       await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,screened)
         VALUES ($1,$2,$3,'fixture','news@example.com','["someone@example.net"]','[]','[]','Held',$4,'queued',false,false)`, [unique('email'), wid, REGION, { kind: 'marketing', subject: 'Held', text: 'Held', attachments: [] }]);
@@ -29268,11 +29271,27 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         ON CONFLICT (minute) DO UPDATE SET accepted=public_stats_minutes.accepted+42`);
       await db.query(`INSERT INTO health_minutes(minute,kind,key,n,errors,ms,slowest,hist) VALUES (date_trunc('minute',now()),'route','POST /v1/emails/send',4,0,200,90,$1)
         ON CONFLICT (minute,kind,key) DO UPDATE SET n=health_minutes.n+4`, [[0, 0, 0, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0]]);
+      // Every request by status class: 6 fine, 3 refused, 1 failed.
+      for (const [status, n] of [['2xx', 6], ['4xx', 3], ['5xx', 1]] as const) await db.query(`INSERT INTO health_minutes(minute,kind,key,n,errors,ms,slowest,hist) VALUES (date_trunc('minute',now()),'status',$1,$2,0,0,40,$3)
+        ON CONFLICT (minute,kind,key) DO UPDATE SET n=health_minutes.n+excluded.n,hist=excluded.hist`, [status, n, [0, 0, n, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]]);
+      // Both classifiers judged one email, apart.
+      await db.query(`INSERT INTO screen_comparisons(created_at,window_index,windows,pair_id,kind,digest,jev_outcome,jevf_outcome,jev_flagged,jevf_flagged) VALUES (now(),0,1,$1,'email','glass','ok','ok',true,false)`, [unique('pair')]);
       // A graded sender, paused, on a pool region with SES limits; a critical alert.
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [region, pool, `arn:aws:sns:${region}:${pool}:glass`]);
-      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),14,50000,1200)`, [pool, region]);
+      await db.query(`INSERT INTO provider_account_limits(aws_account_id,region,refresh_after,checked_at,max_send_rate,max_24_hour_send,sent_last_24_hours) VALUES ($1,$2,now(),now(),14,50000,1200)`, [pool, region]);
+      // A second region that sends but nothing has gone through yet: no quota sample, so it is listed with none.
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [quiet, pool, `arn:aws:sns:${quiet}:${pool}:glass`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state,paused_at,pause_reason) VALUES ($1,$1,$2,'ready','shared',$3,'ready',now(),'Glass fixture hold')`, [wid, region, pool]);
       await db.query(`INSERT INTO sender_standing(workspace_id,phase,score) VALUES ($1,'graded',92)`, [wid]);
+      await db.query(`INSERT INTO standing_events(id,workspace_id,sequence,kind,from_step,to_step,reasons,actor) VALUES ($1,$2,1,'step','ok','warn','[{"code":"BOUNCE_WARN"}]','{"kind":"system"}')`, [unique('stev'), wid]);
+      // A domain of its own verified, a built-in one ready, and a campaign launched then paused: the triggers stamp each.
+      const own = `${unique('glass')}.invalid`, builtin = `${unique('glass')}.nightmail.invalid`, campaign = unique('cmp');
+      await db.query(`INSERT INTO domain_claims(name,workspace_id) VALUES ($1,$3),($2,$3)`, [own, builtin, wid]);
+      await db.query(`UPDATE domain_claims SET identity='{"builtin":true}' WHERE name=$1`, [builtin]);
+      await db.query(`UPDATE domain_claims SET sending_state='verified' WHERE name=ANY($1)`, [[own, builtin]]);
+      await db.query(`INSERT INTO sending_campaigns(id,workspace_id,draft,state,total) VALUES ($1,$2,$3,'draft',0)`, [campaign, wid, JSON.stringify({ name: 'Glass launch' })]);
+      await db.query(`UPDATE sending_campaigns SET state='sending',total=1500 WHERE id=$1`, [campaign]);
+      await db.query(`UPDATE sending_campaigns SET state='paused',paused_at=now(),pause_reason='{"code":"BOUNCE_RATE","message":"Bounces"}' WHERE id=$1`, [campaign]);
       await db.query(`INSERT INTO health_alerts(key,kind,severity,value,unit,words,since) VALUES ('jobs-behind:glass.fixture','jobs-behind','critical',600,'seconds','\`glass.fixture\`: 3 due, oldest 10 min.',now()-interval '10 years')`);
       // Received mail, one of it spam.
       const thread = unique('thr');
@@ -29302,7 +29321,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(after.system.alerts.critical - before.system.alerts.critical, 1);
       assert.deepEqual(after.system.alerts.top.find(a => a.key === 'jobs-behind:glass.fixture'), { key: 'jobs-behind:glass.fixture', label: 'Jobs behind', severity: 'critical', words: 'glass.fixture: 3 due, oldest 10 min.', since: after.system.alerts.top.find(a => a.key === 'jobs-behind:glass.fixture')!.since });
       assert.ok(after.system.status === 'critical' || after.system.status === 'stale');
-      assert.deepEqual([after.system.ses!.maxSendRate - (before.system.ses?.maxSendRate ?? 0), after.system.ses!.max24HourSend - (before.system.ses?.max24HourSend ?? 0), after.system.ses!.sentLast24Hours - (before.system.ses?.sentLast24Hours ?? 0)], [14, 50000, 1200]);
+      // Every pool region by name, each with its own quota or none; the total adds up the regions that send and have one.
+      const sesRegion = (g: typeof after, name: string) => g.system.ses.regions.find(r => r.region === name);
+      assert.deepEqual(sesRegion(after, region), { region, place: region, sending: true, receiving: false, maxSendRate: 14, max24HourSend: 50000, sentLast24Hours: 1200, checkedAt: sesRegion(after, region)!.checkedAt });
+      assert.match(sesRegion(after, region)!.checkedAt!, /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$/);
+      assert.deepEqual(sesRegion(after, quiet), { region: quiet, place: quiet, sending: true, receiving: false, maxSendRate: null, max24HourSend: null, sentLast24Hours: null, checkedAt: null });
+      assert.deepEqual([after.system.ses.total.maxSendRate - before.system.ses.total.maxSendRate, after.system.ses.total.max24HourSend - before.system.ses.total.max24HourSend, after.system.ses.total.sentLast24Hours - before.system.ses.total.sentLast24Hours], [14, 50000, 1200]);
+      assert.deepEqual(after.system.ses.regions.map(r => r.region), [...after.system.ses.regions.map(r => r.region)].sort(), 'Regions in name order.');
+      // The rest of the board: rolling days against the day before, the funnel with built-in domains apart, standing
+      // steps, screening, and every request by status class.
+      assert.deepEqual([after.signups.day.last - before.signups.day.last, after.signups.hourly.at(-1)! - before.signups.hourly.at(-1)!, after.receiving.day.last - before.receiving.day.last], [1, 1, 2]);
+      assert.deepEqual([after.delivery.steps.ok - before.delivery.steps.ok, after.screening.compared.n - before.screening.compared.n, after.screening.jevFlagged - before.screening.jevFlagged, after.screening.jevfFlagged - before.screening.jevfFlagged], [1, 1, 1, 0]);
+      assert.ok(after.screening.agree !== null && after.screening.agree < 1);
+      const apiHour = (g: typeof after) => g.api.hourly.at(-1)!;
+      assert.deepEqual([apiHour(after).requests - apiHour(before).requests, apiHour(after).errors4xx - apiHour(before).errors4xx, apiHour(after).errors5xx - apiHour(before).errors5xx], [10, 3, 1]);
+      assert.ok(after.api.p50Ms !== null && after.api.p95Ms !== null && after.api.p50Ms <= after.api.p95Ms);
+      assert.equal(after.builtin.ready - before.builtin.ready, 1);
+      assert.deepEqual(Object.keys(after.sending.previous), ['accepted', 'marketing', 'delivered', 'bounced', 'complained']);
+      // The minute tick samples the quiet region's quota (the simulated SES's), and leaves the fresh one alone.
+      const { refreshPoolQuotas } = await import('./src/dispatcher.js');
+      await refreshPoolQuotas(runtime);
+      const sampled = await readGlass(runtime);
+      assert.deepEqual([sesRegion(sampled, region)!.maxSendRate, sesRegion(sampled, quiet)!.maxSendRate !== null, sesRegion(sampled, quiet)!.checkedAt !== null], [14, true, true]);
       assert.deepEqual(after.system.deploy, { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' });
       assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors.n - before.visitors.visitors.n, after.visitors.visitors.atLeast, after.visitors.referrers[0]], [1000000, 2, false, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
       assert.ok(after.visitors.referrers.every(r => !r.host.endsWith('dashboard.glass.example') && !r.host.endsWith('template.glass.example')), 'Dashboard page views are not the site’s.');
@@ -29311,17 +29351,39 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The route: an operator reads the same figures, every series its full length, cached for the next read.
       const first = await local('GET', path), page = ok(first);
       assert.deepEqual([first.headers.get('x-nightmail-glass-cache'), first.headers.get('cache-control')], ['miss', 'private, no-store']);
-      assert.deepEqual(Object.keys(page), ['generatedAt', 'signups', 'sending', 'delivery', 'receiving', 'money', 'system', 'visitors']);
-      assert.deepEqual({ ...page, generatedAt: null }, { ...after, generatedAt: null });
+      assert.deepEqual(Object.keys(page), ['generatedAt', 'signups', 'sending', 'delivery', 'receiving', 'builtin', 'support', 'screening', 'api', 'money', 'system', 'visitors']);
+      const steady = (g: typeof after) => ({ ...g, generatedAt: null, api: { ...g.api, hourly: g.api.hourly.at(-1) } });
+      assert.deepEqual(steady(page), steady(sampled));
       const day = new Date().getUTCDate();
-      assert.deepEqual([page.signups.daily.length, page.sending.minutes.length, page.sending.hourly.length, page.receiving.hourly.length, page.visitors.hourly.length, page.money.creditDaily.length], [14, 60, 24, 24, 24, day]);
+      assert.deepEqual([page.signups.daily.length, page.signups.hourly.length, page.sending.minutes.length, page.sending.hourly.length, page.receiving.hourly.length, page.visitors.hourly.length, page.support.hourly.length, page.screening.hourly.length, page.api.hourly.length, page.money.creditDaily.length], [14, 24, 60, 24, 24, 24, 24, 24, 24, day]);
       assert.deepEqual(Object.keys(page.delivery.grades), ['A+', 'A', 'B', 'C', 'D', 'F']);
       assert.ok([page.sending.queued, page.sending.held].every(c => c.n <= GLASS_CAP && typeof c.atLeast === 'boolean'));
       const second = await local('GET', path);
       assert.deepEqual([second.headers.get('x-nightmail-glass-cache'), ok(second).generatedAt], ['hit', page.generatedAt]);
+      // The activity feed: what just happened, newest first, each event once by its ID; no message content.
+      const activity = await readActivity(runtime), event = (id: string) => activity.events.find(e => e.id === id);
+      assert.ok(activity.events.length <= GLASS_ACTIVITY);
+      assert.deepEqual(activity.events.map(e => e.at), [...activity.events.map(e => e.at)].sort().reverse(), 'Newest first.');
+      const workspace = { id: wid, name: event(`first_send:${wid}`)?.workspace?.name ?? event(`domain_verified:${wid}:${own}`)!.workspace!.name };
+      assert.deepEqual(event(`signup:${user}`), { id: `signup:${user}`, at: event(`signup:${user}`)!.at, kind: 'signup', workspace: null, subject: null, detail: 'google', place: 'waitlist', email: `${user}@example.org`, tone: 'neutral' });
+      assert.deepEqual([event(`domain_verified:${wid}:${own}`), event(`builtin_ready:${wid}:${builtin}`)].map(e => e && [e.kind, e.workspace, e.subject, e.tone]), [['domain_verified', workspace, own, 'success'], ['builtin_ready', workspace, builtin, 'success']]);
+      assert.deepEqual(event(`campaign_launched:${campaign}`) && [event(`campaign_launched:${campaign}`)!.subject, event(`campaign_launched:${campaign}`)!.detail], ['Glass launch', '1500']);
+      const pausedEvent = activity.events.find(e => e.kind === 'campaign_paused' && e.id.startsWith(`campaign_paused:${campaign}:`));
+      assert.deepEqual(pausedEvent && [pausedEvent.subject, pausedEvent.detail, pausedEvent.tone], ['Glass launch', 'BOUNCE_RATE', 'warning']);
+      const step = activity.events.find(e => e.kind === 'standing' && e.workspace?.id === wid);
+      assert.deepEqual(step && [step.subject, step.detail, step.tone], ['BOUNCE_WARN', 'ok>warn', 'warning']);
+      assert.ok(activity.events.every(e => !JSON.stringify(e).includes('Held')), 'No message content.');
+      // The route: the same events, cached; `after` keeps the ones at or after the newest time the page has.
+      const read = await local('GET', feed), events = ok(read);
+      assert.deepEqual([read.headers.get('x-nightmail-glass-cache'), read.headers.get('cache-control')], ['miss', 'private, no-store']);
+      assert.deepEqual(events.events.map((e: Json) => e.id), activity.events.map(e => e.id));
+      const newest = events.events[0].at, since = ok(await local('GET', `${feed}?after=${encodeURIComponent(newest)}`));
+      assert.ok(since.events.length >= 1 && since.events.every((e: Json) => e.at >= newest));
+      assert.deepEqual(ok(await local('GET', `${feed}?after=2999-01-01T00:00:00Z`)).events, []);
+      error(await local('GET', `${feed}?after=yesterday`), 422, 'VALIDATION_FAILED');
       // A role taken away is refused again, cache or no cache.
       await db.query('DELETE FROM platform_operators WHERE user_id=$1', [manager!.userId]);
-      assert.deepEqual(refused(await local('GET', path)), refused(await local('GET', '/v1/operator/no-such-page')));
+      for (const p of [path, feed]) assert.deepEqual(refused(await local('GET', p)), refused(await local('GET', '/v1/operator/no-such-page')));
     });
   });
 

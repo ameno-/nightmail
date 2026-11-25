@@ -155,7 +155,7 @@ function observeQuota(gate: GateState, sample: QuotaSnapshot, refreshMs: number,
 }
 // Elect the refresher BEFORE GetAccount, across all DOs/lanes for this account. A failed or
 // interrupted fetch keeps its fence until the next cache period; no DB lock is held over AWS I/O.
-async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'|'transport'>, account: string | undefined, region: string, gate: GateState, refreshMs: number) {
+async function ensureQuota(owner: Pick<Owner, 'runtime'|'ses'|'transport'> & { a: Pick<Actor, 'workspaceId'> }, account: string | undefined, region: string, gate: GateState, refreshMs: number) {
   const { runtime, ses, a, transport } = owner;
   const table = sql.identifier(account ? 'provider_account_limits' : 'sending_region_limits');
   const subject = sql.identifier(account ? 'aws_account_id' : 'workspace_id'), fence = sql.identifier(account ? 'refresh_after' : 'next_allowed_at');
@@ -200,6 +200,34 @@ async function ensureQuota(owner: Pick<Owner, 'runtime'|'a'|'ses'|'transport'>, 
     if (!row) return false;
     return observeQuota(gate, { maxSendRate: row.rate, max24HourSend: account ? row.max : row.max || -1, sentLast24Hours: row.sent, customerSent: Number(row.customer), checkedAt: Date.parse(row.checked) }, refreshMs, row.age_ms);
   }
+}
+
+/** A pool region whose quota sample is older than this gets a new one from the minute tick (refreshPoolQuotas). */
+export const POOL_QUOTA_STALE_MS = 5 * 60_000;
+/**
+ * The shared pool's SES quota in every region it sends from. The dispatcher samples a region only while it sends mail
+ * there (ensureQuota), so a region nothing had gone through yet had no sample at all: Glass and the customer share
+ * didn't see it. The minute tick (worker.ts, runner.ts) fills that in for a region whose sample is missing or older
+ * than POOL_QUOTA_STALE_MS, through the same election as the dispatcher (one GetAccount per account and region at a
+ * time), with the platform's own credentials. A region that sends keeps its fresh sample and costs nothing here. Never
+ * throws: a region that can't be read is logged and tried again the next minute.
+ */
+export async function refreshPoolQuotas(runtime: Runtime) {
+  if (!runtime.config.multiTenant) return;
+  try {
+    const { rows } = await runtime.db.execute<{ region: string; account: string }>(sql`SELECT p.region,p.aws_account_id AS account FROM provider_pool_regions p
+      LEFT JOIN provider_account_limits l ON l.aws_account_id=p.aws_account_id AND l.region=p.region
+      WHERE p.sending_state='ready' AND (l.checked_at IS NULL OR l.checked_at<clock_timestamp()-${POOL_QUOTA_STALE_MS}::int*interval '1 millisecond') ORDER BY p.region`);
+    if (!rows.length) return;
+    const transport = await loadDispatchTransport(runtime);
+    for (const { region, account } of rows) {
+      try {
+        const scoped = { ...runtime, config: { ...runtime.config, regions: [region] } };
+        const pool: ReadyConnection = { id: `pool:${region}`, kind: 'shared', aws_account_id: account, role_arn: '', external_id: '' };
+        await ensureQuota({ runtime: scoped, a: { workspaceId: runtime.config.workspaceId }, transport, ses: transport.clientFor(scoped, region, forDelivery(pool, { purpose: 'quota' })) }, account, region, initialGate(), QUOTA_REFRESH_MS);
+      } catch (error) { logError(error, { code: 'POOL_QUOTA_REFRESH_FAILED', region }, 'warn'); }
+    }
+  } catch (error) { logError(error, { code: 'POOL_QUOTA_REFRESH_FAILED' }, 'warn'); }
 }
 
 // A held campaign can outlive its last queued email. Refresh the same fenced provider cache
