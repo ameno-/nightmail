@@ -117,6 +117,40 @@ function routeOf(c: Ctx) {
   return (exact.findLast(route => route.method !== 'ALL') ?? exact.findLast(route => route.handler.length < 2)
     ?? routes.findLast(route => route.method !== 'ALL'))?.path ?? 'unmatched';
 }
+/**
+ * An unmatched API path as a template, so the request log shows which endpoints agents guess at without what they put in
+ * them: the query is dropped, and each segment that isn't a short plain word becomes a placeholder: {mbx_id} for a
+ * prefixed ID, {email}, {uuid}, {n}, {host} for a dotted name, {token} for anything long or random, {value} for the rest.
+ */
+export function unmatchedTemplate(path: string) {
+  const segments = path.split('?')[0]!.split('/').filter(Boolean);
+  const shown = segments.slice(0, 12).map(raw => {
+    let s: string; try { s = decodeURIComponent(raw); } catch { return '{value}'; }
+    if (s.includes('@')) return '{email}';
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{uuid}';
+    const prefixed = /^([a-z]{2,10})_[A-Za-z0-9]{6,}$/.exec(s);
+    if (prefixed) return `{${prefixed[1]}_id}`;
+    if (/^\d+$/.test(s)) return '{n}';
+    if (/^[a-z0-9-]+\.(?:md|json|txt|xml|yaml|html)$/i.test(s) && s.length <= 40) return s.toLowerCase();
+    if (s.includes('.')) return '{host}';
+    if (s.length > 32 || (/\d/.test(s) && /[a-z]/i.test(s) && s.length >= 16)) return '{token}';
+    return /^[a-z][a-z0-9_-]{0,31}$/i.test(s) ? s.toLowerCase() : '{value}';
+  });
+  return `/${shown.join('/')}${segments.length > 12 ? '/…' : ''}`;
+}
+// At most UNMATCHED_PER_WINDOW unmatched paths per workspace (or per anonymous caller) every 10 minutes per isolate: a
+// burst of guesses shows its shape, a crawler doesn't fill the log. The request line itself is written either way.
+const UNMATCHED_PER_WINDOW = 20, UNMATCHED_WINDOW_MS = 10 * 60_000;
+const unmatchedSeen = new Map<string, { since: number; n: number }>();
+function unmatchedPath(c: Ctx, workspace: string | undefined) {
+  if (!/^\/(?:v1|mcp|api)(?:\/|$)/.test(c.req.path)) return undefined;
+  const key = workspace || 'anonymous', now = Date.now(), seen = unmatchedSeen.get(key);
+  const slot = seen && now - seen.since < UNMATCHED_WINDOW_MS ? seen : { since: now, n: 0 };
+  if (slot.n >= UNMATCHED_PER_WINDOW) return undefined;
+  slot.n++; unmatchedSeen.delete(key); unmatchedSeen.set(key, slot);
+  while (unmatchedSeen.size > 1000) unmatchedSeen.delete(unmatchedSeen.keys().next().value!);
+  return unmatchedTemplate(c.req.path);
+}
 function principalOf(c: Ctx, route: string) {
   const actor = c.get('actor') as Ctx['var']['actor'] | undefined;
   if (route === '/internal/v1/mail') return 'gateway';
@@ -138,6 +172,8 @@ function logRequest(c: Ctx, durationMs: number) {
   log(status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info', {
     event: 'request', requestId: c.get('requestId'), route, method: c.req.method, status, durationMs, slow: durationMs >= SLOW_REQUEST_MS || undefined,
     code, field: failure?.field, databaseCode: failure?.databaseCode,
+    // Which endpoint a caller expected, scrubbed (unmatchedTemplate): only for a path no route answered.
+    path: route === 'unmatched' ? unmatchedPath(c, workspace || undefined) : undefined,
     originClass: refusedOrigin ? !origin ? 'missing' : origin === 'null' ? 'null' : 'cross-site' : undefined,
     workspace, principal: principalOf(c, route),
     timings: timings.length ? Object.fromEntries(timings.map(item => [item.name, Number(item.durationMs.toFixed(1))])) : undefined,
