@@ -115,10 +115,10 @@ struct Failures {
 const WINDOW: Duration = Duration::from_secs(600);
 const LOCKOUT: Duration = Duration::from_secs(900);
 impl Limits {
-    /// Only the sign-in RPC holds this share. Keep at most one live pool per login name.
-    pub fn signin(&mut self, key: u64) -> Option<OwnedSemaphorePermit> {
-        let pool = self
-            .signins
+    /// The sign-in RPCs one login name runs at once: two, the rest wait their turn. Only the sign-in RPC holds a
+    /// permit. Keep at most one live pool per login name.
+    pub fn signin(&mut self, key: u64) -> Arc<Semaphore> {
+        self.signins
             .get(&key)
             .and_then(Weak::upgrade)
             .unwrap_or_else(|| {
@@ -126,8 +126,7 @@ impl Limits {
                 let s = Arc::new(Semaphore::new(2));
                 self.signins.insert(key, Arc::downgrade(&s));
                 s
-            });
-        pool.try_acquire_owned().ok()
+            })
     }
     pub fn success(&mut self, ip: IpAddr, key: u64) {
         self.failures.remove(&(ip, key));
@@ -222,7 +221,8 @@ impl Bucket {
 const ANONYMOUS: u32 = 128;
 // Leave room for other networks during a reconnect burst.
 const PER_SUBNET: u32 = 16;
-const PER_IP: u32 = 4;
+// A mail app opens several connections at once, and an office or an app's servers share one address.
+const PER_IP: u32 = 8;
 pub struct Slot {
     pub accepted: Instant,
     pub after: Instant,
@@ -340,12 +340,12 @@ mod tests {
     #[test]
     fn concurrent_signins_leave_room_for_other_names() {
         let mut limits = Limits::default();
-        let first = limits.signin(1).unwrap();
-        let _second = limits.signin(1).unwrap();
-        assert!(limits.signin(1).is_none());
-        assert!(limits.signin(2).is_some());
+        let first = limits.signin(1).try_acquire_owned().unwrap();
+        let _second = limits.signin(1).try_acquire_owned().unwrap();
+        assert!(limits.signin(1).try_acquire_owned().is_err());
+        assert!(limits.signin(2).try_acquire_owned().is_ok());
         drop(first);
-        assert!(limits.signin(1).is_some());
+        assert!(limits.signin(1).try_acquire_owned().is_ok());
     }
     #[test]
     fn a_short_byte_credit_delays_in_arrival_order() {

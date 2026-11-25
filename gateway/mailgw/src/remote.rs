@@ -436,6 +436,8 @@ fn submit_error(status: u16, code: &str) -> SubmitError {
         _ => SubmitError::Unavailable,
     }
 }
+/// How long a sign-in waits behind others with the same name.
+const SIGNIN_WAIT: Duration = Duration::from_secs(10);
 pub struct Login {
     pub deadline: Instant,
     pub unavailable: std::sync::atomic::AtomicBool,
@@ -468,7 +470,24 @@ impl Identity for Login {
         } else {
             failure_key(u, "")
         };
-        let Some(_share) = self.limits.lock().ok().and_then(|mut l| l.signin(account)) else {
+        // A mail app signs in on several connections at once, and the login cache answers all but the first: a
+        // sign-in past its name's two waits its turn, within the time left to sign in, rather than being refused.
+        let share = self
+            .limits
+            .lock()
+            .ok()
+            .map(|mut l| l.signin(account))
+            .and_then(|pool| {
+                pool.clone().try_acquire_owned().ok().or_else(|| {
+                    let until = self.deadline.min(Instant::now() + SIGNIN_WAIT);
+                    let handle = tokio::runtime::Handle::try_current().ok()?;
+                    handle
+                        .block_on(tokio::time::timeout_at(until.into(), pool.acquire_owned()))
+                        .ok()?
+                        .ok()
+                })
+            });
+        let Some(_share) = share else {
             self.unavailable
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return false;
@@ -2489,6 +2508,44 @@ mod tests {
         assert!(!login.login(Protocol::Imap, b"box@example.invalid", b"secret"));
         assert!(login.locked.load(std::sync::atomic::Ordering::Relaxed));
         assert!(!login.unavailable.load(std::sync::atomic::Ordering::Relaxed));
+    }
+
+    /// A sign-in past the two its name may run at once waits for a turn and then asks the API, rather than being
+    /// refused as if the API were down.
+    #[test]
+    fn a_busy_name_waits_its_turn() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _enter = rt.enter();
+        let limits = Arc::new(Mutex::new(crate::admission::Limits::default()));
+        let pool = limits
+            .lock()
+            .unwrap()
+            .signin(failure_key("box@example.invalid", ""));
+        let held = [
+            pool.clone().try_acquire_owned().unwrap(),
+            pool.try_acquire_owned().unwrap(),
+        ];
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(held);
+        });
+        let login = Login {
+            deadline: Instant::now() + Duration::from_secs(5),
+            unavailable: false.into(),
+            locked: false.into(),
+            limits,
+            ip: "192.0.2.7".parse().unwrap(),
+            api: Arc::new(Api::new("http://127.0.0.1:9".into(), "k".repeat(32)).unwrap()),
+            principal: Mutex::new(None),
+        };
+        let started = Instant::now();
+        assert!(!login.login(Protocol::Imap, b"box@example.invalid", b"secret"));
+        release.join().unwrap();
+        let waited = started.elapsed();
+        assert!(
+            waited >= Duration::from_millis(150) && waited < Duration::from_secs(4),
+            "{waited:?}"
+        );
     }
 
     /// Found by gateway/tear (witness with one credential: B append Work, A append Work,
