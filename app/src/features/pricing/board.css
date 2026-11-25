@@ -299,6 +299,7 @@
 .cb-bill { display: grid; justify-items: center; row-gap: 6px; max-width: 18em; margin: 0; color: var(--cb-caption); font-size: clamp(32px, 1.6cqw + 18px, 52px); font-weight: 600; font-variation-settings: 'opsz' 32; line-height: 1.08; letter-spacing: -.03em; text-wrap: balance; }
 .cb-bill > span:first-child { color: var(--cb-paper); }
 .cb-bill b { font-weight: 700; }
+.cb-without { margin: 8px 0 0; color: var(--cb-caption); font-size: var(--text-sm); line-height: 1.5; text-wrap: balance; }
 .cb-first { margin: 20px 0 0; color: var(--cb-caption); font-size: var(--text-md); line-height: 1.5; text-wrap: balance; }
 .cb-close .cb-key-start { margin-top: 44px; }
 .cb-close .cb-consent { margin-top: 18px; }

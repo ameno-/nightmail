@@ -220,6 +220,9 @@ export type Entry = {
   rows: Row[]
   /** The panels of "Also in the box", in reading order: the first is the lead. */
   panels: PanelId[]
+  /** What the vendor's buyer may count on that Nightmail doesn't do ("signup forms", "a web archive"): said on the page
+   *  and in its twin as "Not in the box", so a comparison on price doesn't stand in for one on features. */
+  without?: string[]
   /** The search result's and the link preview's description. */
   description: string
   /** Questions the page answers, shown on it and given to search engines as an FAQ (FAQPage). */
