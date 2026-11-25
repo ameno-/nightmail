@@ -224,9 +224,10 @@ function cardShape<C extends SkeletonColumn>(columns: C[]): CardShape<C> {
   });
   return shape;
 }
-// Every card of a table is the same height (12 px padding, a 20 px title line, 24 px per further line, or the 44 px
-// end control if taller), so its skeleton, a short page and a full page all hold the same space.
-const cardHeight = (shape: CardShape<unknown>) => 25 + Math.max(20 + 24 * shape.lines.length, shape.end.length ? 44 : 0);
+// Every card of a table is the same height (12 px padding above and below, a 20 px title line, 24 px per further line,
+// or the 44 px end control if taller, and the 6 px to the next card: .ui-card in ui.css), so its skeleton, a short page
+// and a full page all hold the same space.
+const cardHeight = (shape: CardShape<unknown>) => 30 + Math.max(20 + 24 * shape.lines.length, shape.end.length ? 44 : 0);
 const cardLabel = (label: ReactNode) => typeof label === 'string' && label ? <span className="ui-card__label">{label}</span> : null;
 // onRowIntent: a pointer resting on a row (not crossing it) or focus on it, before the click: warm what the row opens.
 // rowHref: rows that open a page are real links. The first cell's content is an <a href> (keyboard, middle-click,
