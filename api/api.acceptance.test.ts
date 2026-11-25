@@ -10073,6 +10073,39 @@ describe('Hosted MCP OAuth and tools', () => {
             error(await send('GET', `${inbox}/${conv}/files/${shot}`, session(reader)), 404);
           } finally { runtime.config.support!.addressIds = configured; }
         });
+
+        await t.test('11 held answers: staff send one as the agent wrote it or edited, as their own queued reply, or discard it; each is decided once, on the trail', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const conv = await stranger(), asIs = msg(), toEdit = msg(), toDrop = msg(), sentAnswer = msg(), question = msg();
+          ok(reply(await platform.mirrorMessages(conv, [{ id: question, author: 'customer', text: 'Why was my email held?' },
+            { id: asIs, author: 'agent', kind: 'held', text: 'It was held for review; it is released now.', delivery: 'held', reason: 'paused' },
+            { id: toEdit, author: 'agent', kind: 'held', text: 'It was held.', delivery: 'held', reason: 'gate' },
+            { id: toDrop, author: 'agent', kind: 'held', text: 'Your account is suspended.', delivery: 'held', reason: 'access' },
+            { id: sentAnswer, author: 'agent', kind: 'reply', text: 'Hello.', delivery: 'sent' }])));
+          const drafts = `${inbox}/${conv}/drafts`;
+          error(await send('POST', `${drafts}/${asIs}/send`, keyed(reader)), 403, 'OPERATOR_REQUIRED');
+          error(await send('POST', `${drafts}/${asIs}/send`, session(operator)), 422);
+          for (const id of [sentAnswer, question, msg()]) error(await send('POST', `${drafts}/${id}/send`, keyed(operator)), 404);
+          const key = unique('draft'), sent = ok(await send('POST', `${drafts}/${asIs}/send`, keyed(operator, key)), 201);
+          assert.deepEqual([sent.author, sent.kind, sent.text, sent.delivery, sent.staff.userId], ['staff', 'reply', 'It was held for review; it is released now.', 'queued', operator.userId]);
+          assert.deepEqual(ok(await send('POST', `${drafts}/${asIs}/send`, keyed(operator, key)), 201), sent, 'The same key answers the same reply.');
+          error(await send('POST', `${drafts}/${asIs}/send`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          error(await send('POST', `${drafts}/${asIs}/discard`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          const edited = ok(await send('POST', `${drafts}/${toEdit}/send`, keyed(operator), { text: 'It was held by our checks; we released it.' }), 201);
+          const dropped = ok(await send('POST', `${drafts}/${toDrop}/discard`, keyed(operator)));
+          assert.deepEqual([dropped.draft.outcome, dropped.draft.by.userId, dropped.draft.replyId, dropped.delivery], ['discarded', operator.userId, null, 'held']);
+          error(await send('POST', `${drafts}/${toDrop}/send`, keyed(operator)), 409, 'SUPPORT_DRAFT_DECIDED');
+          const detail = ok(await send('GET', `${inbox}/${conv}`, session(reader)));
+          assert.deepEqual(detail.messages.filter((m: Json) => m.draft).map((m: Json) => [m.id, m.draft.outcome, m.draft.replyId]), [[asIs, 'sent', sent.id], [toEdit, 'edited', edited.id], [toDrop, 'discarded', null]]);
+          assert.deepEqual(ok(reply(await platform.pullOutbox(conv))).data.map((r: Json) => r.text), ['It was held for review; it is released now.', 'It was held by our checks; we released it.'], 'What goes out is the staff reply, delivered like any other.');
+          assert.deepEqual([ok(reply(await platform.inboxState(conv))).agentState, detail.conversation.lastAuthor], ['paused', 'staff']);
+          assert.deepEqual((await db.query(`SELECT action, count(*)::int AS n FROM audit_events WHERE target_id = $1 AND action LIKE 'support.draft_%' AND internal GROUP BY action ORDER BY action`, [conv])).rows,
+            [{ action: 'support.draft_discard', n: 1 }, { action: 'support.draft_send', n: 2 }]);
+          ok(reply(await platform.closeConversation(conv)));
+          const late = msg();
+          await db.query("INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, delivery) VALUES ($1, $2, 99, 'agent', 'held', 'Late.', 'held')", [late, conv]);
+          error(await send('POST', `${drafts}/${late}/send`, keyed(operator)), 409, 'SUPPORT_CONVERSATION_CLOSED');
+        });
       } finally { globalThis.fetch = previous; }
     });
   });
