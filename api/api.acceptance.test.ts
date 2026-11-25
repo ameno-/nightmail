@@ -31439,6 +31439,57 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('wildcard DNS: DKIM CNAMEs answered by a *.domain address record are called out on reads, Check now, the background check and the reminder; an address at the exact name only is not a wildcard', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const { wid, fresh } = await noticeFixture(runtime, db);
+      const [{ accountNotifyJob }, { domainSetupCheckJob }] = await Promise.all([import('./src/account-notices.js'), import('./src/domain-setup.js')]);
+      const tokens = ['tokena', 'tokenb', 'tokenc'];
+      const add = async (label: string) => {
+        const name = `${unique(label)}.example`, identity = { proven: false, mx: null, note: null, ses: { VerificationStatus: 'PENDING', VerifiedForSendingStatus: false,
+          DkimAttributes: { SigningEnabled: true, Status: 'PENDING', Tokens: tokens, SigningAttributesOrigin: 'AWS_SES', SigningHostedZone: 'dkim.amazonses.com' } } };
+        const { token } = (await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,receiving_state,ever_proven,identity,created_at)
+          VALUES ($1,$2,$2,'pending','off',false,$3,now()-interval '2 hours') RETURNING token`, [name, wid, JSON.stringify(identity)])).rows[0];
+        const id = unique('dom');
+        await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES ($1,$2,$3,$4)', [id, wid, name, REGION]);
+        return { name, id, token: token as string };
+      };
+      // Public DNS on Cloudflare: wild.example has a proxied *.wild.example A record, so every name under it (the DKIM names and
+      // any random one) answers with the same two addresses and no CNAME; exact.example has an A record at one DKIM name only.
+      const wild = await add('wild'), exact = await add('exact'), proxied = ['104.21.9.246', '172.67.189.212'];
+      const networkGuard = globalThis.fetch;
+      t.after(() => { globalThis.fetch = networkGuard; });
+      globalThis.fetch = async (input: RequestInfo | URL) => {
+        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!;
+        if (type === 'NS') return Response.json({ Status: 0, Answer: ['ada', 'bob'].map(ns => ({ name: `${name}.`, type: 2, data: `${ns}.ns.cloudflare.com.` })) });
+        const a = (ips: string[]) => Response.json({ Status: 0, Answer: ips.map(data => ({ name: `${name}.`, type: 1, data })) });
+        if (type === 'A' && name.endsWith(`.${wild.name}`)) return a(proxied);
+        if (type === 'A' && name === `tokena._domainkey.${exact.name}`) return a(['192.0.2.7']);
+        return Response.json({ Status: 0, Answer: [] });
+      };
+      const message = (domain: string) => `A wildcard record (*.${domain}) is answering for these names. Add the CNAME records exactly; Cloudflare uses the specific record over the wildcard.`;
+      const cnames = async (id: string, verify = false) => (verify ? ok(await local('POST', `/v1/domains/${id}/verify`)) : ok(await local('GET', `/v1/domains/${id}`)))
+        .dns.filter((r: Json) => r.purpose === 'sending' && r.type === 'CNAME').map((r: Json) => [r.publicDns?.state, r.publicDns?.wildcard ?? null]);
+
+      // The background check stores it: each CNAME missing, with the wildcard that answers its name, which reads carry.
+      runtime.config.domainSetupReminder = true;
+      for (const d of [wild, exact]) await domainSetupCheckJob(runtime, { domainId: d.id, token: d.token }, { id: `domain.setupCheck:${d.token}`, attempts: 1, workspaceId: wid });
+      assert.deepEqual(await cnames(wild.id), tokens.map(() => ['missing', `*.${wild.name}`]));
+      // An address at one exact name, which a random name beside it doesn't share, is no wildcard.
+      assert.deepEqual(await cnames(exact.id), tokens.map(() => ['missing', null]));
+      // Check now says the same.
+      assert.deepEqual(await cnames(wild.id, true), tokens.map(() => ['missing', `*.${wild.name}`]));
+
+      // The reminder names it, beside the records to add.
+      const jobs = (await db.query(`SELECT id,payload FROM jobs WHERE type='account.notify' AND status='pending' AND workspace_id=$1`, [wid])).rows;
+      for (const j of jobs) for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, j.payload, { id: j.id, attempts: i + 1, workspaceId: wid });
+      const [mail] = (await fresh()).filter(m => m.subject === `Finish setting up ${wild.name}`);
+      assert.ok(mail, 'The wildcard domain\u2019s reminder was sent.');
+      assert.ok(mail.text.includes(message(wild.name)), mail.text);
+      assert.ok(mail.text.includes('CNAME record\nName: tokena._domainkey'), mail.text);
+    });
+  });
+
   test('no-domain reminder: a workspace with no domain an hour after it was created is emailed once to add one, only with NO_DOMAIN_REMINDER on; not one created within the hour or days ago, not one with a domain, not one that adds a domain before the email goes', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const { fresh, platform } = await noticeFixture(runtime, db);

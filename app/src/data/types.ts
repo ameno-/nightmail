@@ -191,7 +191,8 @@ export interface DisconnectSummary {
   stack: { name: string; consoleUrl: string } | null
 }
 /** What public DNS showed for a pending record: when Check now ran (verifyDomain), or at the API's last background check; null when DNS didn't answer. */
-export interface PublicDns { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string }
+/** wildcard: a wildcard record (*.domain) answers this missing CNAME's name with an address. */
+export interface PublicDns { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string; wildcard?: string }
 export interface DnsRecord { id: string; type: 'TXT' | 'CNAME' | 'MX'; name: string; value: string; status: 'verified' | 'pending' | 'not_checked'; purpose?: DnsRecordPurpose; note?: string; publicDns?: PublicDns | null }
 // Why receiving at `host` needs attention, from the API's DNS checks. Blocking issues can't work until DNS or the choice changes.
 export interface ReceivingIssue { code: 'cname' | 'foreign_mx' | 'split' | 'wildcard' | 'bane_record' | 'host_taken' | 'claimed' | 'delegated' | 'mx_missing' | 'wrong_region' | 'null_mx' | 'proof_stale' | 'identity_stale'; host: string; blocking: boolean; message: string; provider?: string | null; target?: string | null; suggestion?: string | null }

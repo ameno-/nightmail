@@ -6,7 +6,8 @@ import { placementRoot } from './domain-registry.js';
 // Cloudflare's resolver (1.1.1.1) over HTTPS, one bounded lookup per record, answers kept for 30 seconds per isolate so
 // pressing Check now again and again costs nothing. A record DNS didn't answer for gets publicDns null.
 
-export type PublicDns = { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string };
+/** wildcard: the name has no record of this type, but a wildcard (`*.<domain>`) answers it with an address, as it answers a random name beside it. */
+export type PublicDns = { state: 'found' | 'missing' | 'wrong_value'; values: string[]; checkedAt: string; wildcard?: string };
 type CheckedRecord = { name: string; type: 'CNAME' | 'TXT' | 'MX'; value: string; purpose: string; status: string; publicDns?: PublicDns | null };
 
 const TTL_MS = 30_000, MAX_ENTRIES = 500, BUDGET_MS = 3_000, MAX_VALUES = 5, MAX_VALUE_LENGTH = 255;
@@ -17,7 +18,7 @@ const cache = new Map<string, { at: number; values: string[] }>();
 const txtText = (data: string) => { const parts = [...data.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(m => m[1]!.replace(/\\(.)/g, '$1')); return parts.length ? parts.join('') : data; };
 const mxHost = (data: string) => fqdn(data.trim().split(/\s+/).at(-1) ?? '');
 
-async function answer(name: string, type: CheckedRecord['type'], signal: AbortSignal) {
+async function answer(name: string, type: CheckedRecord['type'] | 'A', signal: AbortSignal) {
   const key = `${type} ${fqdn(name)}`, hit = cache.get(key), now = Date.now();
   if (hit && now - hit.at < TTL_MS) return hit.values;
   const values = type === 'CNAME' ? await cname(name, signal).then(target => target ? [fqdn(target)] : [])
@@ -79,16 +80,36 @@ export async function dnsZone(name: string, signal: AbortSignal): Promise<DnsZon
 /** One bounded lookup when a domain is added: whether anyone serves DNS for it. Never throws; unknown is false. */
 export const noDnsAt = (name: string, timeoutMs = 2_000) => dnsZone(name, AbortSignal.timeout(timeoutMs)).then(zone => zone.noDns, () => false);
 
+const sameSet = (a: string[], b: string[]) => a.length > 0 && a.length === b.length && a.every(v => b.includes(v));
+/**
+ * A CNAME that is missing at a name which answers with an address anyway: a wildcard (`*.<domain>`) is answering for it,
+ * as it does for a random name beside it (same parent, a label nobody would publish). Cloudflare's proxied `*` record is the
+ * usual one. The record is still missing, and it still needs adding: any exact record wins over the wildcard.
+ */
+async function wildcardFor(name: string, domain: string, sibling: (parent: string) => Promise<string[]>, signal: AbortSignal) {
+  const values = await answer(name, 'A', signal);
+  if (!values.length) return undefined;
+  return sameSet(values, await sibling(name.slice(name.indexOf('.') + 1))) ? `*.${domain}` : undefined;
+}
 /** Adds publicDns to every pending sending and MAIL FROM record (DMARC is a recommendation; receiving has its own MX check). */
-export async function withPublicDns<T extends { dns: CheckedRecord[] }>(report: T): Promise<T> {
+export async function withPublicDns<T extends { name?: string; dns: CheckedRecord[] }>(report: T): Promise<T> {
   const signal = AbortSignal.timeout(BUDGET_MS), checkedAt = new Date().toISOString();
+  // One random name per parent (e.g. _domainkey.<domain>), asked once however many CNAMEs share it.
+  const siblings = new Map<string, Promise<string[]>>();
+  const sibling = (parent: string) => { let probe = siblings.get(parent); if (!probe) siblings.set(parent, probe = answer(`nm-${crypto.randomUUID().slice(0, 12)}.${parent}`, 'A', signal)); return probe; };
   await Promise.all(report.dns.map(async record => {
     if (record.status === 'verified' || (record.purpose !== 'sending' && record.purpose !== 'mail_from')) return;
-    try { record.publicDns = { ...compare(record, await answer(record.name, record.type, signal)), checkedAt }; }
+    try {
+      const seen = compare(record, await answer(record.name, record.type, signal));
+      const wildcard = seen.state === 'missing' && record.type === 'CNAME' ? await wildcardFor(fqdn(record.name), fqdn(report.name ?? record.name.split('.').slice(-2).join('.')), sibling, signal).catch(() => undefined) : undefined;
+      record.publicDns = { ...seen, checkedAt, ...(wildcard ? { wildcard } : {}) };
+    }
     catch { record.publicDns = null; }
   }));
   return report;
 }
+/** The wildcard answering for a domain's missing CNAMEs, if one does (withPublicDns); dns-messages.ts words it. */
+export const wildcardOf = (records: { publicDns?: PublicDns | null }[]) => records.find(r => r.publicDns?.state === 'missing' && r.publicDns.wildcard)?.publicDns?.wildcard;
 
 /**
  * A pending domain's DNS as the background check saw it (domain_claims.setup_check): each pending record's publicDns
