@@ -108,11 +108,12 @@ const maxOwnedWorkspaces = 10;
 /** GET /v1/me for a dashboard session: its memberships and, in the same statement, its Nightmail operator role (if any). */
 export async function sessionMemberships(db: DbExecutor, userId: string, current?: string) {
   // One row even with no memberships, so an operator who belongs to no workspace still gets the role. `current` adds that
-  // workspace's focus (workspace-focus.ts) to the same statement.
-  const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null; focus: WorkspaceFocus[] | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
+  // workspace's focus (workspace-focus.ts) and age in seconds to the same statement.
+  const { rows: [row] } = await db.execute<{ workspaces: { id: string; name: string; slug: string; role: string }[]; operator: OperatorRole | null; focus: WorkspaceFocus[] | null; age: number | null }>(sql`SELECT ${operatorRoleOf(userId)} AS operator,
     coalesce((SELECT json_agg(json_build_object('id',w.id,'name',w.name,'slug',w.slug,'role',m.role) ORDER BY w.name,w.id) FROM workspace_members m JOIN workspaces w ON w.id=m.workspace_id WHERE m.user_id=${userId}),'[]') AS workspaces,
-    ${current ? sql`(SELECT focus FROM workspaces WHERE id=${current})` : sql`NULL::text[]`} AS focus`);
-  return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null, focus: row!.focus ?? null };
+    ${current ? sql`(SELECT focus FROM workspaces WHERE id=${current})` : sql`NULL::text[]`} AS focus,
+    ${current ? sql`(SELECT extract(epoch FROM now()-created_at)::float8 FROM workspaces WHERE id=${current})` : sql`NULL::float8`} AS age`);
+  return { workspaces: row!.workspaces.map(w => Workspace.parse(w)), operator: row!.operator ?? null, focus: row!.focus ?? null, ageSeconds: row!.age ?? null };
 }
 
 // Serialize governance writes per workspace. Read the caller and owner count *after* locking:

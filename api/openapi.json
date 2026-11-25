@@ -20902,6 +20902,17 @@
                     "connection": {
                       "$ref": "#/components/schemas/ConnectionSummary"
                     },
+                    "hostedSetup": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "enum": [
+                        "starting",
+                        null
+                      ],
+                      "description": "A hosted dashboard session in a workspace made seconds ago whose Hosted mail (its connection and built-in domain) is still being written: starting. Read /v1/me again shortly; null otherwise."
+                    },
                     "focus": {
                       "type": [
                         "array",
