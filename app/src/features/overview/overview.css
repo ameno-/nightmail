@@ -91,23 +91,26 @@ a.ov-kpi:focus-visible { background: var(--color-well-hover); text-decoration: n
 .ov-legend { display: flex; flex: none; align-items: center; gap: var(--space-16); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); white-space: nowrap; }
 .ov-legend > span { display: inline-flex; align-items: center; gap: var(--space-6); }
 .ov-legend i { width: 10px; height: 2px; }
+.ov-legend :is(.ov-key--bounces, .ov-key--complaints) { width: 6px; height: 6px; border-radius: 50%; }
 :is(.ov-legend, .ov-readout) .ov-key--sent { background: var(--color-accent-data); }
 :is(.ov-legend, .ov-readout) .ov-key--delivered { background: var(--color-success-marker); }
 :is(.ov-legend, .ov-readout) .ov-key--bounces { background: var(--color-warning-marker); }
 :is(.ov-legend, .ov-readout) .ov-key--complaints { background: var(--color-danger-marker); }
-/* The plot: solid 2px lines over the quiet reference lines, no fill under them; the outcomes on their own scale, dots
-   ringed in the page colour. */
+/* The plot: smooth monotone lines over quiet reference lines with a subtle vertical wash under Emails; outcomes on
+   their own scale in the lower band, markers sitting on their lines and ringed in the page colour. */
 .ov-activity { position: absolute; inset: 0; }
 .ov-activity > svg { display: block; width: 100%; height: 100%; overflow: visible; touch-action: pan-y; }
 .ov-activity [data-point]:focus-visible { outline: none; stroke: var(--color-accent-data); stroke-width: 1; }
-.ov-wash { display: none; }
-.ov-line { fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.ov-wash { pointer-events: none; }
+.ov-wash-stop { stop-color: var(--color-accent-data); }
+.ov-wash-stop--top { stop-opacity: .14; }
+.ov-wash-stop--bot { stop-opacity: 0; }
+:root:not([data-theme='dark']) .ov-wash-stop--top { stop-opacity: .11; }
+.ov-line { fill: none; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
 .ov-line--sent { stroke: var(--color-accent-data); }
-.ov-line--bounces { stroke: var(--color-warning-marker); }
-.ov-line--complaints { stroke: var(--color-danger-marker); }
-/* The bucket under way: what it has so far. */
-.ov-line--partial { stroke-dasharray: 2 4; }
-.ov-dot { stroke: var(--color-surface); stroke-width: 2; }
+.ov-line--bounces { stroke: var(--color-warning-marker); stroke-width: 1.35; }
+.ov-line--complaints { stroke: var(--color-danger-marker); stroke-width: 1.35; }
+.ov-dot { stroke: var(--color-surface); stroke-width: 1.5; }
 .ov-dot--sent { fill: var(--color-accent-data); }
 .ov-dot--bounces { fill: var(--color-warning-marker); }
 .ov-dot--complaints { fill: var(--color-danger-marker); }

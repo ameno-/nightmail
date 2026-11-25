@@ -9675,6 +9675,40 @@
               ]
             }
           },
+          "tenMinute": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "date": {
+                  "type": "string"
+                },
+                "count": {
+                  "type": "number"
+                },
+                "sent": {
+                  "type": "number"
+                },
+                "delivered": {
+                  "type": "number"
+                },
+                "bounced": {
+                  "type": "number"
+                },
+                "complained": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "date",
+                "count",
+                "sent",
+                "delivered",
+                "bounced",
+                "complained"
+              ]
+            }
+          },
           "previous": {
             "type": "object",
             "properties": {
@@ -43726,7 +43760,7 @@
     "/v1/metrics": {
       "get": {
         "operationId": "getMetrics",
-        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
+        "description": "Operational created-cohort metrics, not invoicing or provider reputation. Dashboard sessions may receive a cached result until the workspace creates an email or records an email event (quantized to 10-second buckets during high-volume sending), or for up to 60 seconds, and compute at most 30 such Overview reads a minute: past that they get their last result (cache header stale) or 429 DASHBOARD_RATE_LIMITED. API keys, MCP and agent tokens always get fresh results. Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.",
         "tags": [
           "Metrics"
         ],
@@ -43785,7 +43819,8 @@
               "type": "string",
               "enum": [
                 "day",
-                "hour"
+                "hour",
+                "10m"
               ],
               "default": "day"
             },

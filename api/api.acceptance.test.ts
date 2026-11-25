@@ -17926,7 +17926,7 @@ describe('Sealed Logs facets', () => {
       for(const name of ['mailbox_messages','mail_messages','mailboxes','mail_threads','mailbox_domains','sending_emails','log_facet_changes',
         'log_facet_dirty_messages','log_facet_deadlines','log_facet_message_facts','log_facet_buckets','log_facet_sent_seeds','log_facet_inbound_progress',
         'log_facet_results','log_facet_rolling','log_facet_demands','log_facet_wakes','log_facet_retired_generations','log_facet_generations','log_facet_coverage',
-        'sending_metrics_hourly','jobs','ses_installation_settings','workspace_members'])
+        'sending_metrics_hourly','sending_metrics_ten_minute','jobs','ses_installation_settings','workspace_members'])
         await db.query(`DELETE FROM ${name} WHERE workspace_id=$1`,[wid]);
       await db.query('DELETE FROM workspaces WHERE id=$1',[wid]);
     });
@@ -40762,17 +40762,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Mid-hour boundaries exercising both left edge (inside hour -1) and right edge (now, empty tail -> zero raw scan)
       const qFrom = at(-3_600_000 + 1_800_000), qTo = new Date(Date.now() + 1_000).toISOString();
       const metricsPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=hour&include=previous,streams`;
+      const tenMinPath = `/v1/metrics?from=${encodeURIComponent(qFrom)}&to=${encodeURIComponent(qTo)}&granularity=10m&include=previous,streams`;
       const viaTallies = ok(await request('GET', metricsPath, key));
+      const tenMinTallies = ok(await request('GET', tenMinPath, key));
       const detailViaTallies = ok(await request('GET', `/v1/campaigns/${cid}`, key));
       const statsViaTallies = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
+      assert.ok(Array.isArray(tenMinTallies.tenMinute) && tenMinTallies.tenMinute.length >= 2, '10m granularity returns 10-minute buckets.');
+      error(await request('GET', `/v1/metrics?from=${encodeURIComponent(at(-6 * 86_400_000 - 600_000))}&to=${encodeURIComponent(qTo)}&granularity=10m`, key), 422, 'INVALID_DATE_RANGE');
 
       // 2. Emergency one-statement undo: disabling triggers immediately falls back to live queries, producing exact same answers!
       await db.query('ALTER TABLE sending_emails DISABLE TRIGGER sending_tally_insert, DISABLE TRIGGER sending_tally_update, DISABLE TRIGGER sending_tally_delete');
       assert.equal(await talliesEnabled(runtime.db), false);
       const viaLive = ok(await request('GET', metricsPath, key));
+      const tenMinLive = ok(await request('GET', tenMinPath, key));
       const detailViaLive = ok(await request('GET', `/v1/campaigns/${cid}`, key));
       const statsViaLive = ok(await request('GET', `/v1/campaigns/${cid}/stats`, key));
       assert.deepEqual(viaTallies, viaLive, 'Hourly metrics rollup + partial edge split equals live scan.');
+      assert.deepEqual(tenMinTallies, tenMinLive, '10-minute metrics rollup + partial edge split equals live scan.');
       assert.deepEqual(detailViaTallies.counts, detailViaLive.counts, 'Campaign detail tally equals live scan.');
       assert.deepEqual({ counts: statsViaTallies.counts, totals: statsViaTallies.totals, rates: statsViaTallies.rates },
         { counts: statsViaLive.counts, totals: statsViaLive.totals, rates: statsViaLive.rates }, 'Campaign stats tally equals live scan.');
@@ -40819,6 +40825,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // 5. Daily exact recount detects injected drift, fixes it in one snapshot, and logs *_DRIFT at error level.
       await db.query(`INSERT INTO sending_campaign_tallies(workspace_id,campaign_id,status,simulated,email_count) VALUES ($1,$2,'delivered',false,7)`, [wid, cid]);
       await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails) VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC'),5)`, [wid, REGION]);
+      await db.query(`INSERT INTO sending_metrics_ten_minute(workspace_id,region,kind,bucket,emails) VALUES ($1,$2,'marketing',date_bin('10 minutes',now(),timestamptz '2000-01-01 00:00:00+00'),4)`, [wid, REGION]);
       const errors: string[] = [];
       const errSpy = t.mock.method(console, 'error', (...args: unknown[]) => { errors.push(String(args[0])); });
       try {
@@ -40829,8 +40836,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       } finally { errSpy.mock.restore(); }
       assert.ok(errors.some(line => line.includes('CAMPAIGN_TALLIES_DRIFT')), 'Logs CAMPAIGN_TALLIES_DRIFT at error level.');
       assert.ok(errors.some(line => line.includes('METRICS_HOURLY_DRIFT')), 'Logs METRICS_HOURLY_DRIFT at error level.');
+      assert.ok(errors.some(line => line.includes('METRICS_TEN_MINUTE_DRIFT')), 'Logs METRICS_TEN_MINUTE_DRIFT at error level.');
       // Re-running reconcile produces zero diffs now; raw event_outcomes bit check also finds 0 mismatches.
       assert.equal((await db.query('SELECT * FROM reconcile_sending_campaign_tallies($1,$2)', [wid, cid])).rowCount, 0);
+      assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_ten_minute($1)', [wid])).rowCount, 0);
       assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
       assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
       // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!

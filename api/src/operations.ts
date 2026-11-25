@@ -1659,16 +1659,23 @@ function registerMetrics(app: App) {
   // The window's aggregate is one statement that reads every email in it (a 30-day Overview reads all retained mail):
   // it stops after 5 seconds with READ_TOO_LARGE rather than hold a connection.
   const METRICS_READ = 5;
-  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour']).default('day'), include: z.string().regex(/^(?:previous|streams)(?:,(?:previous|streams))*$/).optional().describe('Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).') }).openapi('MetricsQuery');
+  const query = z.object({ region: z.string().optional(), from: z.string().datetime().optional(), to: z.string().datetime().optional(), stream: z.enum(['transactional', 'marketing']).optional(), granularity: z.enum(['day', 'hour', '10m']).default('day'), include: z.string().regex(/^(?:previous|streams)(?:,(?:previous|streams))*$/).optional().describe('Comma-separated extras computed in the same statement: previous (totals for the window of equal length ending at from) and streams (totals per stream for the window, ignoring the stream filter).') }).openapi('MetricsQuery');
   const bucket = z.object({ date: z.string(), count: z.number(), sent: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number() });
   const totalsSchema = z.object({ emails: z.number(), accepted: z.number(), delivered: z.number(), bounced: z.number(), complained: z.number(), opened: z.number(), clicked: z.number(), failed: z.number(), deliveryDelayed: z.number(), simulated: z.number() });
-  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
-  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour additionally returns hourly UTC creation buckets with canonical ISO dates such as 2026-09-12T01:00:00.000Z, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
-    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString(); if (Date.parse(start) >= Date.parse(end) || Date.parse(end) - Date.parse(start) > 366 * 86400000) throw new ApiError(422, 'INVALID_DATE_RANGE', 'Metrics require an increasing range of at most 366 days.');
+  const schema = z.object({ basis: z.literal('created-cohort'), from: z.string(), to: z.string(), region: z.string().nullable(), stream: z.string().nullable(), totals: totalsSchema, daily: z.array(bucket), hourly: z.array(bucket).optional(), tenMinute: z.array(bucket).optional(), previous: z.object({ from: z.string(), to: z.string(), totals: totalsSchema }).optional().describe('Present with include=previous.'), streams: z.object({ transactional: totalsSchema, marketing: totalsSchema }).optional().describe('Present with include=streams.') }).openapi('Metrics');
+  app.openapi(createRoute({ method: 'get', path: '/v1/metrics', operationId: 'getMetrics', description: 'Operational created-cohort metrics, not invoicing or provider reputation. ' + DASHBOARD_CACHE_NOTE + ' Selects emails created in [from,to), scoped by email region and stream. Outcomes use current email state and all recorded events, including events after to; this is not a historical state snapshot. Each outcome counts distinct emails, so replays do not inflate counts and outcomes may overlap. Accepted (bucket sent) means evidence of provider acceptance, not merely queued/created. Daily UTC creation buckets contain count=created emails. Granularity defaults to day; granularity=hour returns hourly UTC creation buckets and granularity=10m returns 10-minute UTC creation buckets (within the last 6 days) with canonical ISO dates, while preserving daily buckets and totals. Absent buckets mean zero created emails and zero outcomes; no moving averages are applied. Engagement is observed, not verified human activity. ' + readLimitNote(METRICS_READ), tags: ['Metrics'], security, request: { query }, responses: { 200: response(schema), ...errors } }), async c => {
+    const a = workspaceActor(c), q = c.req.valid('query'), end = q.to ?? now(), start = q.from ?? new Date(Date.parse(end) - 30 * 86400000).toISOString();
+    const qStartMs = Date.parse(start), qEndMs = Date.parse(end);
+    if (qStartMs >= qEndMs || qEndMs - qStartMs > (q.granularity === '10m' ? 6 : 366) * 86400000 || (q.granularity === '10m' && qStartMs < Date.now() - 6 * 86400000)) {
+      throw new ApiError(422, 'INVALID_DATE_RANGE', q.granularity === '10m' ? '10-minute metrics require an increasing range within the last 6 days.' : 'Metrics require an increasing range of at most 366 days.');
+    }
     const compute = async () => {
     if (q.region) region(await withRegionSettings(c.env,a.workspaceId),q.region);
     const extras = new Set((q.include ?? '').split(',').filter(Boolean));
-    const date = q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')` : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
+    const date = q.granularity === '10m'
+      ? sql<string | null>`to_char(date_bin('10 minutes', ${emails.createdAt}, timestamptz '2000-01-01 00:00:00+00') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI":00.000Z"')`
+      : q.granularity === 'hour' ? sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"')`
+      : sql<string | null>`to_char(${emails.createdAt} at time zone 'UTC', 'YYYY-MM-DD')`;
     // Outcomes come from the per-email flags kept by the operation_events trigger (migration 031): the same
     // union of public events the old per-query event aggregation produced, without re-reading the events.
     type Row = { date: string; emails: number; accepted: number; delivered: number; bounced: number; complained: number; opened: number; clicked: number; failed: number; deliveryDelayed: number; simulated: number };
@@ -1692,77 +1699,90 @@ function registerMetrics(app: App) {
       return acc;
     };
     let rows: Row[], previous: { from: string; to: string; totals: Totals } | undefined, streams: { transactional: Totals; marketing: Totals } | undefined;
-    const HOUR_MS = 3_600_000;
-    const floorHour = (ms: number) => Math.floor(ms / HOUR_MS) * HOUR_MS;
-    const ceilHour = (ms: number) => (ms % HOUR_MS === 0 ? ms : floorHour(ms) + HOUR_MS);
+    const HOUR_MS = 3_600_000, TEN_MIN_MS = 600_000;
+    const floorStep = (ms: number, step: number) => Math.floor(ms / step) * step;
+    const ceilStep = (ms: number, step: number) => (ms % step === 0 ? ms : floorStep(ms, step) + step);
     const startMs = Date.parse(start), endMs = Date.parse(end);
     const previousFromMs = startMs - (endMs - startMs), previousFrom = new Date(previousFromMs).toISOString();
     const scanFromMs = extras.has('previous') ? previousFromMs : startMs;
+    const useTenMinuteRollup = q.granularity === '10m';
 
     if (await talliesEnabled(c.env.db)) {
-      // Exact at read time: reads sending_metrics_hourly (folded + unfolded deltas) for all whole UTC hours and only
-      // touches raw sending_emails for non-empty partial edge hours (zero raw rows for Overview's right edge to=now()).
+      // Exact at read time: reads sending_metrics_ten_minute (for 10m within the 6-day rolling window) or
+      // sending_metrics_hourly (for hour/day and previous-period totals), touching raw sending_emails only for
+      // non-empty partial edge buckets (zero raw rows for Overview's right edge to=now()).
       const result = await budgetedRead(c.env.db, async db => {
-        const minHour = new Date(floorHour(scanFromMs)).toISOString();
-        const maxHour = new Date(floorHour(endMs - 1) + HOUR_MS).toISOString();
-        const hourlyRows = (await db.execute<KindHourRow>(sql`SELECT
-          to_char(hour AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24":00:00.000Z"') AS hour, kind,
-          sum(emails)::int AS emails, sum(accepted)::int AS accepted, sum(delivered)::int AS delivered,
-          sum(bounced)::int AS bounced, sum(complained)::int AS complained, sum(opened)::int AS opened,
-          sum(clicked)::int AS clicked, sum(failed)::int AS failed,
-          sum(delivery_delayed)::int AS "deliveryDelayed", sum(simulated)::int AS simulated
-          FROM sending_metrics_hourly
-          WHERE workspace_id = ${a.workspaceId} AND hour >= ${minHour}::timestamptz AND hour < ${maxHour}::timestamptz
-            ${q.region ? sql`AND region = ${q.region}` : sql``}
-            ${q.stream && !extras.has('streams') ? sql`AND kind = ${q.stream}` : sql``}
-          GROUP BY 1, 2 HAVING sum(emails) <> 0`)).rows;
-        const byHour = new Map<number, KindHourRow[]>();
-        for (const r of hourlyRows) {
-          const ms = Date.parse(r.hour);
-          const list = byHour.get(ms);
-          if (list) list.push(r); else byHour.set(ms, [r]);
-        }
-        const scanEdge = async (fromMs: number, toMs: number): Promise<KindHourRow[]> => {
-          const hMs = floorHour(fromMs);
-          if (!byHour.has(hMs)) return [];
-          const hourIso = new Date(hMs).toISOString();
-          const filter = and(scoped(emails, a), gte(emails.createdAt, new Date(fromMs).toISOString()), lt(emails.createdAt, new Date(toMs).toISOString()),
-            q.region ? eq(emails.region, q.region) : undefined, q.stream && !extras.has('streams') ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
-          const { rows: edgeRows } = await db.execute<Totals & { kind: string }>(sql`SELECT
-            coalesce(${emails.snapshot}->>'kind', '') AS kind,
-            ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
-            FROM ${emails} WHERE ${filter} GROUP BY 1`);
-          return edgeRows.map(r => ({ ...r, hour: hourIso }));
+        const readRollup = async (table: 'sending_metrics_hourly' | 'sending_metrics_ten_minute', col: 'hour' | 'bucket', fmt: string, fromMs: number, toMs: number, step: number) => {
+          const minAt = new Date(floorStep(fromMs, step)).toISOString();
+          const maxAt = new Date(floorStep(toMs - 1, step) + step).toISOString();
+          const tbl = sql.raw(table), cCol = sql.raw(col), cFmt = sql.raw(fmt);
+          const rollupRows = (await db.execute<KindHourRow>(sql`SELECT
+            to_char(${cCol} AT TIME ZONE 'UTC', '${cFmt}') AS hour, kind,
+            sum(emails)::int AS emails, sum(accepted)::int AS accepted, sum(delivered)::int AS delivered,
+            sum(bounced)::int AS bounced, sum(complained)::int AS complained, sum(opened)::int AS opened,
+            sum(clicked)::int AS clicked, sum(failed)::int AS failed,
+            sum(delivery_delayed)::int AS "deliveryDelayed", sum(simulated)::int AS simulated
+            FROM ${tbl}
+            WHERE workspace_id = ${a.workspaceId} AND ${cCol} >= ${minAt}::timestamptz AND ${cCol} < ${maxAt}::timestamptz
+              ${q.region ? sql`AND region = ${q.region}` : sql``}
+              ${q.stream && !extras.has('streams') ? sql`AND kind = ${q.stream}` : sql``}
+            GROUP BY 1, 2 HAVING sum(emails) <> 0`)).rows;
+          const bySlot = new Map<number, KindHourRow[]>();
+          for (const r of rollupRows) {
+            const ms = Date.parse(r.hour);
+            const list = bySlot.get(ms);
+            if (list) list.push(r); else bySlot.set(ms, [r]);
+          }
+          return bySlot;
         };
-        const collect = async (fromMs: number, toMs: number): Promise<KindHourRow[]> => {
+        const collectFrom = async (bySlot: Map<number, KindHourRow[]>, fromMs: number, toMs: number, step: number): Promise<KindHourRow[]> => {
+          const scanEdge = async (eFrom: number, eTo: number): Promise<KindHourRow[]> => {
+            const sMs = floorStep(eFrom, step);
+            if (!bySlot.has(sMs)) return [];
+            const slotIso = new Date(sMs).toISOString();
+            const filter = and(scoped(emails, a), gte(emails.createdAt, new Date(eFrom).toISOString()), lt(emails.createdAt, new Date(eTo).toISOString()),
+              q.region ? eq(emails.region, q.region) : undefined, q.stream && !extras.has('streams') ? sql`${emails.snapshot}->>'kind' = ${q.stream}` : undefined);
+            const { rows: edgeRows } = await db.execute<Totals & { kind: string }>(sql`SELECT
+              coalesce(${emails.snapshot}->>'kind', '') AS kind,
+              ${counts({ status: sql`${emails.status}`, simulated: sql`${emails.simulated}`, providerId: sql`${emails.providerId}`, outcomes: sql`${emails.eventOutcomes}` })}
+              FROM ${emails} WHERE ${filter} GROUP BY 1`);
+            return edgeRows.map(r => ({ ...r, hour: slotIso }));
+          };
           const out: KindHourRow[] = [];
-          const wStart = ceilHour(fromMs);
-          let wEnd = floorHour(toMs);
-          // If the right edge falls mid-hour (always true for to=now()) and no email exists after toMs in that hour,
-          // the whole hour belongs to this window and comes directly from sending_metrics_hourly with zero raw scan.
+          const wStart = ceilStep(fromMs, step);
+          let wEnd = floorStep(toMs, step);
           if (toMs > wEnd && fromMs <= wEnd) {
-            if (!byHour.has(wEnd)) {
-              wEnd += HOUR_MS;
+            if (!bySlot.has(wEnd)) {
+              wEnd += step;
             } else {
-              const nextHour = new Date(wEnd + HOUR_MS).toISOString();
+              const nextSlot = new Date(wEnd + step).toISOString();
               const { rows: [after] } = await db.execute<{ any: boolean }>(sql`SELECT EXISTS (
                 SELECT 1 FROM sending_emails WHERE workspace_id = ${a.workspaceId}
-                  AND created_at >= ${new Date(toMs).toISOString()}::timestamptz AND created_at < ${nextHour}::timestamptz
+                  AND created_at >= ${new Date(toMs).toISOString()}::timestamptz AND created_at < ${nextSlot}::timestamptz
               ) AS any`);
-              if (!after?.any) wEnd += HOUR_MS;
+              if (!after?.any) wEnd += step;
             }
           }
           if (wStart > wEnd) {
             out.push(...await scanEdge(fromMs, toMs));
             return out;
           }
-          for (const [hMs, list] of byHour) if (hMs >= wStart && hMs < wEnd) out.push(...list);
+          for (const [sMs, list] of bySlot) if (sMs >= wStart && sMs < wEnd) out.push(...list);
           if (fromMs < wStart) out.push(...await scanEdge(fromMs, wStart));
           if (wEnd < toMs) out.push(...await scanEdge(wEnd, toMs));
           return out;
         };
-        const currentItems = await collect(startMs, endMs);
-        const previousItems = extras.has('previous') ? await collect(previousFromMs, startMs) : [];
+        if (useTenMinuteRollup) {
+          const byTen = await readRollup('sending_metrics_ten_minute', 'bucket', 'YYYY-MM-DD"T"HH24:MI":00.000Z"', startMs, endMs, TEN_MIN_MS);
+          const currentItems = await collectFrom(byTen, startMs, endMs, TEN_MIN_MS);
+          const previousItems = extras.has('previous')
+            ? await collectFrom(await readRollup('sending_metrics_hourly', 'hour', 'YYYY-MM-DD"T"HH24":00:00.000Z"', previousFromMs, startMs, HOUR_MS), previousFromMs, startMs, HOUR_MS)
+            : [];
+          return { currentItems, previousItems };
+        }
+        const byHour = await readRollup('sending_metrics_hourly', 'hour', 'YYYY-MM-DD"T"HH24":00:00.000Z"', scanFromMs, endMs, HOUR_MS);
+        const currentItems = await collectFrom(byHour, startMs, endMs, HOUR_MS);
+        const previousItems = extras.has('previous') ? await collectFrom(byHour, previousFromMs, startMs, HOUR_MS) : [];
         return { currentItems, previousItems };
       }, readLimit(METRICS_READ));
 
@@ -1770,7 +1790,7 @@ function registerMetrics(app: App) {
       const byBucket = new Map<string, Totals>();
       for (const item of result.currentItems) {
         if (!matchShown(item)) continue;
-        const key = q.granularity === 'hour' ? item.hour : item.hour.slice(0, 10);
+        const key = q.granularity === 'day' ? item.hour.slice(0, 10) : item.hour;
         const acc = byBucket.get(key) ?? total();
         addTotals(acc, item);
         byBucket.set(key, acc);
@@ -1834,9 +1854,9 @@ function registerMetrics(app: App) {
     for (const row of rows) for (const key of Object.keys(totals) as Array<keyof typeof totals>) totals[key] += row[key];
     const buckets = rows.map(row => ({ date: row.date!, count: row.emails, sent: row.accepted, delivered: row.delivered, bounced: row.bounced, complained: row.complained }));
     let daily = buckets;
-    if (q.granularity === 'hour') {
+    if (q.granularity !== 'day') {
       const days = new Map<string, z.infer<typeof bucket>>();
-      // Every email belongs to one creation hour, so its outcome counts remain additive by day.
+      // Every email belongs to one creation bucket, so its outcome counts remain additive by day.
       for (const row of buckets) {
         const date = row.date.slice(0, 10), day = days.get(date);
         if (day) for (const key of ['count', 'sent', 'delivered', 'bounced', 'complained'] as const) day[key] += row[key];
@@ -1844,7 +1864,7 @@ function registerMetrics(app: App) {
       }
       daily = [...days.values()];
     }
-    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}), ...(previous ? { previous } : {}), ...(streams ? { streams } : {}) };
+    return { basis: 'created-cohort' as const, from: start, to: end, region: q.region ?? null, stream: q.stream ?? null, totals, daily, ...(q.granularity === 'hour' ? { hourly: buckets } : {}), ...(q.granularity === '10m' ? { tenMinute: buckets } : {}), ...(previous ? { previous } : {}), ...(streams ? { streams } : {}) };
     };
     // Dashboards poll this aggregate (older builds every 3 s, in every open tab). Dashboard sessions share a
     // 60-second cache per workspace/filters/window; API keys, MCP and agent tokens stay exact.
