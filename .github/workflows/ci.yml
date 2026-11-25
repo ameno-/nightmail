@@ -127,27 +127,14 @@ jobs:
             # The queue's commit merges one pull request onto dev and the entries ahead of it (its first parent), so
             # compare just that step. Its ref names the pull request: refs/heads/gh-readonly-queue/dev/pr-<n>-<sha>.
             BASE=$(git rev-parse HEAD^1); ALLOWED=false
-            pr=$(sed -nE 's#^refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]+$#\1#p' <<< "$QUEUE_REF")
-            if [[ -n $pr ]] && gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.labels[].name' | grep -qx api-breaking; then ALLOWED=true; fi
             # A batch used to get a second contract check on dev push. Keep that proof: a label on one
-            # PR cannot waive a breaking difference spanning multiple queued entries. It waives exactly the
-            # breaking changes its own step makes (HEAD^1 to HEAD, also checked below); any other breaking
-            # change across the batch fails. Before, the batch check ignored the label, so a labeled PR
-            # queued behind another entry always failed (#733, twice on 25 Nov).
+            # PR cannot waive a breaking difference spanning multiple queued entries.
             if [[ $QUEUE_BASE != "$BASE" ]]; then
               git show "$QUEUE_BASE:api/openapi.json" > "$RUNNER_TEMP/queue-base.json"
-              git show "$BASE:api/openapi.json" > "$RUNNER_TEMP/step-base.json"
-              batch=$(node api/scripts/check-api-contract.mjs "$RUNNER_TEMP/queue-base.json" api/openapi.json --allow-breaking | grep '^BREAKING' || true)
-              waived=''
-              if [[ $ALLOWED == true ]]; then waived=$(node api/scripts/check-api-contract.mjs "$RUNNER_TEMP/step-base.json" api/openapi.json --allow-breaking | grep '^BREAKING' || true); fi
-              left=$(comm -23 <(sort -u <<< "$batch") <(sort -u <<< "$waived") | grep . || true)
-              if [[ -n $left ]]; then
-                printf '%s\n' "$left"
-                echo "::error title=Public API compatibility::The queued batch makes breaking changes that this entry's api-breaking label doesn't cover (above)."
-                exit 1
-              fi
-              echo "Queued batch: no breaking change beyond this entry's own step."
+              node api/scripts/check-api-contract.mjs "$RUNNER_TEMP/queue-base.json" api/openapi.json
             fi
+            pr=$(sed -nE 's#^refs/heads/gh-readonly-queue/[^/]+/pr-([0-9]+)-[0-9a-f]+$#\1#p' <<< "$QUEUE_REF")
+            if [[ -n $pr ]] && gh api "repos/$GITHUB_REPOSITORY/pulls/$pr" --jq '.labels[].name' | grep -qx api-breaking; then ALLOWED=true; fi
           else
             repo="repos/$GITHUB_REPOSITORY"
             prs=$(gh api --paginate --slurp "$repo/commits/$head/pulls?per_page=100")
