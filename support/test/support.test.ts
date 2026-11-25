@@ -2610,6 +2610,9 @@ describe('support Worker', () => {
       assert.equal((await signedHook('msg_unauth_1', 'thr_unauth_1', 'fresh@else.test', { instance, dmarc: 'FAIL' })).status, 200);
       assert.equal((await signedHook('msg_unauth_2', 'thr_unauth_2', 'fresh@else.test', { instance, dmarc: 'FAIL' })).status, 200);
       assert.deepEqual(await ledger('msg_unauth_2'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
+      // Another unverified sender has its own bucket: one sender's unverified mail never holds everyone else's.
+      assert.equal((await signedHook('msg_unauth_3', 'thr_unauth_3', 'other@else.test', { instance, dmarc: 'FAIL' })).status, 200);
+      assert.notDeepEqual(await ledger('msg_unauth_3'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
       assert.equal((await signedHook('msg_dmarc_ok_1', 'thr_dmarc_ok_1', 'fresh@else.test', { instance, dmarc: 'PASS' })).status, 200);
       assert.notDeepEqual(await ledger('msg_dmarc_ok_1'), [{ object: '', state: 'held', reason: 'rate', source: 'webhook' }]);
       // The answered message's row is its object's, mirrored once its work finished.

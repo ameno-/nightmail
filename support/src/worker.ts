@@ -209,9 +209,11 @@ async function inbound(request: Request, env: Env): Promise<Response> {
     if (event.type !== 'message.received' || !messageId || message?.direction === 'outbound') return new Response(null, { status: 200 });
     const threadId = message?.threadId ?? messageId, sender = message?.from?.address?.toLowerCase() ?? 'unknown';
     if (await ledgered(env, 'support', messageId)) return new Response(null, { status: 200 });
-    // Key the per-sender edge limit on DMARC-verified senders; unauthenticated mail shares its own bucket so it never limits a verified sender.
+    // The per-sender edge limit keeps a sender's DMARC-verified mail apart from mail that only claims its address, so
+    // forged mail never limits the real sender; unverified mail is limited per address too, so one forger can't hold
+    // every other unverified sender's mail (EMAIL_IN_GLOBAL bounds them all).
     const dmarcPass = String(message?.authentication?.dmarc ?? '').toUpperCase() === 'PASS';
-    const rateKey = dmarcPass ? `dmarc:${await addressHash(sender)}` : 'unauth:support';
+    const rateKey = `${dmarcPass ? 'dmarc' : 'unauth'}:${await addressHash(sender)}`;
     if (env.EMAIL_IN && !(await env.EMAIL_IN.limit({ key: rateKey })).success) {
       await holdAtEdge(env, { messageId, threadId, sender, subject: typeof message?.subject === 'string' ? message.subject : null, reason: 'rate' });
       return new Response(null, { status: 200 });
