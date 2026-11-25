@@ -24056,6 +24056,14 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // Sending to members only, a reply to someone outside the workspace is refused the same way.
       runtime.config.builtinScope='members';
       assert.deepEqual(error(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['someone@sender.example']}]);
+      // Forwarding's confirmation is an email from the built-in domain too (its links on the link domain): to anyone but a
+      // member, refused the same way while it sends to members only; to a member's own address, sent.
+      runtime.config.linkHost='links.builtin-fixture.example';
+      assert.deepEqual(error(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-outsider',address:'stranger@example.net',from:inbox.id}),422,'BUILTIN_DOMAIN_RECIPIENT').details,[{notMembers:['stranger@example.net']}]);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=$1 AND key='builtin-outsider'",[wid])).rows[0].n,0,'Nothing is kept.');
+      ok(await local('POST','/v1/endpoints',{type:'forward',name:'builtin-member',address:AUTH_EMAIL,from:inbox.id}),201);
+      assert.match((await db.query("SELECT snapshot->>'text' AS text FROM sending_emails WHERE workspace_id=$1 AND subject=$2 ORDER BY created_at DESC LIMIT 1",[wid,`Confirm forwarding from ${from}`])).rows[0].text,/https:\/\/links\.builtin-fixture\.example\/v1\/forwarding\/confirm\/fwd_/);
+      runtime.config.linkHost=undefined;
       runtime.config.builtinScope='anyone';
       ok(await local('POST',`/v1/inbound/threads/${thread}/reply`,{addressId:inbox.id,text:'Thanks, on it.'}),202);
       assert.deepEqual((await db.query("SELECT from_address,to_addresses FROM sending_emails WHERE workspace_id=$1 AND created_at>now()-interval '1 hour'",[wid])).rows,[{from_address:from,to_addresses:['someone@sender.example']}]);
@@ -30668,8 +30676,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Gmail Postmaster Tools through the stored OAuth grant: a token, then the domain's days (Google's answers stubbed).
       const builtin = runtime.config.builtinDomain;
       runtime.config.builtinDomain = 'deliverability.example';
+      // The link domain every customer's campaign links share: its zone's DBL listing is checked with the platform's own.
+      runtime.config.linkHost = 'links.linkzone.example';
       runtime.config.postmaster = { clientId: 'client', clientSecret: 'secret', refreshToken: 'refresh' };
-      t.after(() => { runtime.config.builtinDomain = builtin; delete runtime.config.postmaster; });
+      t.after(() => { runtime.config.builtinDomain = builtin; delete runtime.config.postmaster; delete runtime.config.linkHost; });
       const asked: string[] = [];
       const today = new Date().toISOString().slice(0, 10).replaceAll('-', ''), yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10).replaceAll('-', '');
       // Passed in, never put on the global fetch: concurrent fixtures own that one.
@@ -30701,6 +30711,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([vdm('all').current.send, vdm('gmail').current.send, vdm('yahoo').current.send, vdm('other').current.send, vdm('gmail').previous.send, vdm('gmail').current.deliveryOpen],
         [7000, 3500, 1400, 2100, 3500, 3150]);
       assert.deepEqual(board.blocklist.find(b => b.domain === 'deliverability.example')?.status, 'unconfigured');
+      assert.deepEqual([board.blocklist.find(b => b.domain === 'linkzone.example')?.status, board.postmaster.some(p => p.domain === 'linkzone.example')], ['unconfigured', false], 'It sends no mail: no Postmaster Tools for it.');
       const postmaster = board.postmaster.find(p => p.domain === 'deliverability.example')!;
       assert.deepEqual([postmaster.status, postmaster.url, postmaster.latest, Math.round(postmaster.spamRatio.current! * 1e6) / 1e6], ['ok', 'https://postmaster.google.com/',
         { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, reputation: 'HIGH', spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1 }, 0.0012]);
@@ -41206,7 +41217,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         if(cmd instanceof SendEmailCommand){delivered.push(cmd.input);return Promise.resolve({MessageId:`fixture-link-domain-${++sent}`});}
         return (send as any).call(this,cmd,...rest);
       });
-      const {linkChoice,withLinkRecords}=await import('./src/link-domains.js'),{readActivity}=await import('./src/glass.js');
+      const {linkChoice,withLinkRecords,foundLinkOrigin}=await import('./src/link-domains.js'),{readActivity}=await import('./src/glass.js');
       const wid=runtime.config.workspaceId,pool='111122223333',domain='link-domain.example',from=`news@${domain}`,shared='links.link-fixture.example';
       const saas={zoneId:'0'.repeat(32),token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'};
       // As production: the link domain on, own link hosts off.
@@ -41282,6 +41293,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Neither on (dev, self-hosted): this installation's own origin, as before link hosts.
       Object.assign(runtime.config,{linkHost:undefined,linkHosts:undefined});
       assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),{origin:PUBLIC_ORIGIN.replace(/\/$/,'')});
+      // Hosted production without the link domain refuses, never moving customers' links onto nightmail.dev; dev's own
+      // host isn't production's.
+      const at=(publicUrl:string)=>({...runtime,config:{...runtime.config,publicUrl}});
+      const missing=/link domain isn’t set up, and its links never go on nightmail\.dev/;
+      await assert.rejects(linkChoice(at('https://nightmail.dev'),runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:missing});
+      assert.throws(()=>foundLinkOrigin(at('https://nightmail.dev').config,from,null),{code:'LINK_RECORD_REQUIRED',message:missing});
+      assert.deepEqual(await linkChoice(at('https://dev.nightmail.dev'),runtime.db,wid,from),{origin:'https://dev.nightmail.dev'});
     });
   });
 

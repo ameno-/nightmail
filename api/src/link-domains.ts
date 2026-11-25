@@ -3,7 +3,7 @@ import { ApiError, log, type Config, type DbExecutor, type Runtime } from './cor
 import { builtinRefusal, isBuiltinHost } from './builtin-domain.js';
 import { LINK_LABEL, LINK_RETENTION_DAYS } from './link-hosts.js';
 import { cname, fqdn } from './public-dns.js';
-import { productName } from './brand.js';
+import { productName, servedDomains } from './brand.js';
 
 /**
  * Where the links Nightmail puts in customer mail live: the unsubscribe link (footer, text part and List-Unsubscribe),
@@ -29,6 +29,19 @@ const retained = (h: SQL) => sql`(${h}.status='retired' AND ${h}.retired_at > no
 export const domainOf = (address: string) => address.slice(address.lastIndexOf('@') + 1).trim().toLowerCase().replace(/\.$/, '');
 /** Whether this installation puts the links in customer mail anywhere but PUBLIC_URL. */
 const linksOff = (config: Config) => !config.linkHost && !config.linkHosts;
+/**
+ * Without either, links go on PUBLIC_URL: right for dev and self-hosted, never for Hosted production, whose own domain
+ * (nightmail.dev, a served domain) must carry no customer's links. There, campaign and marketing mail is refused instead,
+ * so a missing NIGHTMAIL_LINK_HOST stops that mail rather than moving every customer's links onto it.
+ */
+function ownOrigin(config: Config, sender: string) {
+  const host = new URL(config.publicUrl).hostname;
+  if (config.multiTenant && servedDomains.includes(host)) {
+    log('error', { code: 'LINK_DOMAIN_MISSING', host });
+    throw new ApiError(409, 'LINK_RECORD_REQUIRED', `Campaign and marketing mail from ${sender} isn\u2019t sent right now: ${productName}\u2019s link domain isn\u2019t set up, and its links never go on ${host}. ${productName} is on it.`, 'from');
+  }
+  return config.publicUrl.replace(/\/$/, '');
+}
 
 /** What the link is for: a campaign (and its test), a `kind: marketing` send, or a forward. */
 export type LinkPurpose = 'campaign' | 'marketing' | 'forward';
@@ -94,7 +107,7 @@ export const linkOrigin = async (runtime: Runtime, db: DbExecutor, workspaceId: 
   (await linkChoice(runtime, db, workspaceId, from, purpose)).origin;
 export async function linkChoice(runtime: Runtime, db: DbExecutor, workspaceId: string, from: string, purpose: LinkPurpose = 'campaign'): Promise<LinkChoice> {
   const sender = domainOf(from), config = runtime.config;
-  if (linksOff(config)) return { origin: config.publicUrl.replace(/\/$/, '') };
+  if (linksOff(config)) return { origin: ownOrigin(config, sender) };
   let name = sender;
   if (config.linkHosts) {
     // A built-in domain has no DNS of its own to publish a link record in: without the link domain, it has no link host.
@@ -129,8 +142,8 @@ export function linkChoices(runtime: Runtime, db: DbExecutor, workspaceId: strin
  *  the installation's own origin when self-hosted. */
 export function foundLinkOrigin(config: Config, from: string, found: string | null | undefined) {
   if (found) return found;
-  if (linksOff(config)) return config.publicUrl.replace(/\/$/, '');
   const sender = domainOf(from);
+  if (linksOff(config)) return ownOrigin(config, sender);
   if (config.linkHost) throw linksPaused(sender);
   if (isBuiltinHost(config, sender)) throw builtinLinkRefusal(config, sender, 'campaign');
   if (config.multiTenant) throw linkRecordRequired(config.linkHosts!.target, sender);

@@ -30,6 +30,8 @@
     "PUBLIC_URL": "https://nightmail.dev",
     // The link domain (src/link-domains.ts): every customer's campaign and marketing links go here. A name of the
     // nightmailedge.com zone, served by the */* route.
+    // Not an off switch: without it (and without own link hosts), production refuses campaign and marketing mail rather
+    // than put customers' links on nightmail.dev (src/link-domains.ts ownOrigin).
     "NIGHTMAIL_LINK_HOST": "links.nightmailedge.com",
     // Own link hosts (customers' links.<domain> as custom hostnames of that zone) are off: Cloudflare's custom hostname quota
     // doesn't allow one per customer yet. To turn them on, set NIGHTMAIL_LINK_SAAS_ZONE_ID to the zone's ID
