@@ -17648,6 +17648,44 @@
               "null"
             ],
             "description": "Receiving address ID at the time of the event; null for workspace events."
+          },
+          "message": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "from": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "address": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "name",
+                  "address"
+                ]
+              },
+              "subject": {
+                "type": "string"
+              },
+              "receivedAt": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "from",
+              "subject",
+              "receivedAt"
+            ],
+            "description": "message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone."
           }
         },
         "required": [
@@ -17658,7 +17696,8 @@
           "threadId",
           "messageId",
           "data",
-          "addressId"
+          "addressId",
+          "message"
         ]
       },
       "InboundWebhookSecret": {

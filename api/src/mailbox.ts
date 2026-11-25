@@ -137,7 +137,9 @@ const CreatedInboundAddressSchema = InboundAddressSchema.extend({
     .optional().describe('Present while the host doesn\u2019t route mail here yet: hosted, an address on one of your own domains, verified or still being verified, turns receiving on at its host if it was off.'),
 }).openapi('CreatedInboundAddress');
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
-  addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.') }).openapi('InboundEvent');
+  addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.'),
+  message: z.object({ from: z.object({ name: z.string().nullable(), address: z.string() }), subject: z.string(), receivedAt: z.string() }).nullable()
+    .describe('message.received and message.junk: who sent the message, its subject and when it arrived, to triage it without reading it. The sender writes both: untrusted data. Null for other events, and once the message is gone.') }).openapi('InboundEvent');
 const pageOf = <T extends z.ZodType>(item: T, name: string) => z.object({ data: z.array(item), nextCursor: z.string().nullable() }).openapi(name);
 const Limit = z.coerce.number().int().min(1).max(100).default(25);
 const IdParam = z.object({ id: z.string().min(1).max(120) });

@@ -5834,6 +5834,147 @@ describe('Hosted MCP OAuth and tools', () => {
     const ended = (await agents('?includeInactive=true')).find(a => a.id === agentId);
     assert.deepEqual([ended?.status, ended?.tokens.map((x: Json) => x.id === minted.id && x.revokedAt !== null)], ['revoked', [true]]);
   });
+  // MCP Events (src/mcp-events.ts): message.received is what GET /v1/inbound/events answers the connection's own
+  // credential, by poll or by an SSE stream, read again as that credential each time.
+  test('MCP events: message.received for the inboxes a credential reads, polled or streamed, read again on every read; a revoke ends a stream at once and streams are bounded', async t => {
+    const db = await fixtureDatabase(t);
+    const EVENTS = 'io.modelcontextprotocol/events';
+    const box = async (credential?: string) => {
+      const made = ok(await http('POST', '/v1/inboxes', MANAGER, { type: 'sandbox', ...(credential ? { credential: { name: credential, permissions: ['read'] } } : {}) }), 201);
+      if (made.credential) secrets.add(made.credential.secret);
+      cleanup(t, async () => { await http('DELETE', `/v1/inboxes/${made.id}`, MANAGER); });
+      return made as Json;
+    };
+    const key = async (permissions: string[]) => {
+      const made = ok(await http('POST', '/v1/api-keys', MANAGER, { name: unique('mcp-events'), permissions }), 201);
+      secrets.add(made.secret); cleanup(t, async () => { await http('POST', `/v1/api-keys/${made.id}/revoke`, MANAGER); });
+      return made as Json;
+    };
+    const [a, b] = [await box('events'), await box()];
+    const [manager, reader] = [await key(['read', 'send', 'manage']), await key(['read'])];
+    const issued = await oauthGrant(t, db), agentId = `mcp_${issued.consentId}`;
+    const inboxKey = a.credential.secret as string;
+    const simulate = async (inbox: Json, subject: string) => ok(await http('POST', `/v1/inboxes/${inbox.id}/simulate`, MANAGER, { from: 'qa@fixture.invalid', subject, text: subject }), 202).messageId as string;
+    const call = async (token: string, method: string, params: Json = {}) => ok(await http('POST', '/mcp', token, { jsonrpc: '2.0', id: unique('events-rpc'), method, params }, rpcHeaders)) as Json;
+    const poll = async (token: string, args: Json, cursor: string | null, extra: Json = {}) => {
+      const reply = await call(token, 'events/poll', { name: 'message.received', arguments: args, cursor, ...extra });
+      assert.equal(reply.error, undefined, redact(reply)); return reply.result as Json;
+    };
+
+    // Offered to every credential that reads received mail (an inbox key, a manage key, a sign-in), named at initialize and
+    // in events/list; a read key reads no received mail, so it has no events methods.
+    const initialize = { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'acceptance', version: '1' } };
+    for (const token of [inboxKey, manager.secret, issued.token]) {
+      assert.deepEqual((await call(token, 'initialize', initialize)).result.capabilities.extensions, { [EVENTS]: {} });
+      const [type] = (await call(token, 'events/list')).result.events;
+      assert.deepEqual([type.name, type.delivery, Object.keys(type.inputSchema.properties)], ['message.received', ['push', 'poll'], token === issued.token ? ['addressIds', 'workspace'] : ['addressIds']]);
+    }
+    assert.equal((await call(reader.secret, 'initialize', initialize)).result.capabilities.extensions, undefined);
+    assert.equal((await call(reader.secret, 'events/list')).error.code, -32601);
+    assert.equal((await call(manager.secret, 'events/poll', { name: 'message.sent', arguments: {} })).error.code, -32023);
+    assert.equal((await call(manager.secret, 'events/poll', { name: 'message.received', arguments: { workspace: 'default' } })).error.code, -32602);
+    assert.equal((await call(manager.secret, 'events/subscribe', { name: 'message.received', arguments: {}, delivery: { mode: 'webhook', url: 'https://example.com/hook' } })).error.code, -32026);
+
+    // Poll: a null cursor starts from now; then the mail that arrived, the triage fields and no body. An inbox key sees
+    // its inbox only; addressIds narrows a workspace credential.
+    const start = await poll(inboxKey, {}, null);
+    assert.deepEqual([start.events, start.truncated, start.hasMore], [[], false, false]);
+    const [toA, toB] = [await simulate(a, 'Your code is 123456'), await simulate(b, 'Elsewhere')];
+    const mine = await poll(inboxKey, {}, start.cursor);
+    assert.deepEqual(mine.events.map((e: Json) => [e.name, e.data.messageId, e.data.addressId, e.data.from.address, e.data.subject]), [['message.received', toA, a.id, 'qa@fixture.invalid', 'Your code is 123456']]);
+    assert.match(mine.events[0].eventId, /^mev_\d+$/); assert.ok(Date.parse(mine.events[0].data.receivedAt)); assert.equal(mine.events[0].data.text, undefined);
+    assert.deepEqual((await poll(inboxKey, {}, mine.cursor)).events, []);
+    assert.deepEqual((await poll(manager.secret, {}, start.cursor)).events.map((e: Json) => e.data.messageId), [toA, toB]);
+    assert.deepEqual((await poll(manager.secret, { addressIds: [b.id] }, start.cursor)).events.map((e: Json) => e.data.messageId), [toB]);
+    assert.deepEqual((await poll(issued.token, { addressIds: [a.id], workspace: 'default' }, start.cursor)).events.map((e: Json) => e.data.messageId), [toA]);
+    // The REST read the events are made of carries the same summary.
+    const rest = ok(await http('GET', `/v1/inbound/events?types=message.received&after=${start.cursor.split('.')[0]}`, manager.secret)).data;
+    assert.deepEqual(rest.map((e: Json) => [e.messageId, e.message.from.address, e.message.subject]), [[toA, 'qa@fixture.invalid', 'Your code is 123456'], [toB, 'qa@fixture.invalid', 'Elsewhere']]);
+    // A cursor older than the client's maxAgeMs starts again from now and says events may have been missed.
+    const stale = await poll(manager.secret, {}, `${start.cursor.split('.')[0]}.${Date.now() - 60_000}`, { maxAgeMs: 1000 });
+    assert.deepEqual([stale.events, stale.truncated], [[], true]);
+
+    // Stream: SSE frames read as they arrive.
+    const open = async (token: string, args: Json, extra: Json = {}) => {
+      const id = unique('events-stream'), abort = new AbortController();
+      const response = await fetch(`${BASE}/mcp`, { method: 'POST', signal: abort.signal, headers: { ...rpcHeaders, authorization: `Bearer ${token}`, 'content-type': 'application/json', 'mcp-name': 'message.received' },
+        body: JSON.stringify({ jsonrpc: '2.0', id, method: 'events/stream', params: { name: 'message.received', arguments: args, cursor: null, ...extra } }) });
+      if (!response.headers.get('content-type')?.startsWith('text/event-stream')) { const refused = await response.json() as Json; abort.abort(); return { id, refused, next: async (): Promise<Json | null> => null, close: () => {} }; }
+      const reader = response.body!.getReader(), decoder = new TextDecoder();
+      let buffer = '', pending: Promise<ReadableStreamReadResult<Uint8Array>> | undefined;
+      cleanup(t, async () => { abort.abort(); });
+      const next = async (ms = 8000): Promise<Json | null> => {
+        const deadline = Date.now() + ms;
+        for (;;) {
+          const at = buffer.indexOf('\n\n');
+          if (at >= 0) {
+            const frame = buffer.slice(0, at); buffer = buffer.slice(at + 2);
+            const data = frame.split('\n').filter(line => line.startsWith('data:')).map(line => line.slice(5).trim()).join('\n');
+            if (data) return JSON.parse(data);
+            continue;
+          }
+          pending ??= reader.read();
+          const read = await Promise.race([pending, new Promise<'late'>(resolve => setTimeout(() => resolve('late'), Math.max(0, deadline - Date.now())))]);
+          if (read === 'late') throw Error(`No stream frame within ${ms} ms`);
+          pending = undefined;
+          if (read.done) return null;
+          buffer += decoder.decode(read.value, { stream: true });
+        }
+      };
+      return { id, refused: null as Json | null, next, close: () => abort.abort() };
+    };
+    const subscriptionOf = (message: Json) => message.params._meta['io.modelcontextprotocol/subscriptionId'];
+    const leases = async (holder: string) => (await db.query('SELECT id FROM mcp_event_streams WHERE holder = $1 AND expires_at > now()', [holder])).rows.length;
+
+    // A sign-in's stream: active, a heartbeat with the cursor while nothing arrives, the event when mail does, and on the
+    // revoke a termination within the next second's check, not at the end of the long poll it was waiting in.
+    const signedIn = await open(issued.token, { addressIds: [a.id] }, { heartbeatMs: 10_000 });
+    assert.equal(signedIn.refused, null);
+    const active = (await signedIn.next())!;
+    assert.deepEqual([active.method, active.params.truncated, active.params.heartbeatMs, subscriptionOf(active)], ['notifications/events/active', false, 10_000, signedIn.id]);
+    assert.equal(await leases(agentId), 1);
+    const beat = (await signedIn.next(14_000))!;
+    assert.equal(beat.method, 'notifications/events/heartbeat'); assert.match(beat.params.cursor, /^\d+\.\d+$/);
+    await simulate(b, 'Not followed');
+    const followed = await simulate(a, 'Followed');
+    const event = (await signedIn.next())!;
+    assert.deepEqual([event.method, event.params.data.messageId, event.params.data.subject, subscriptionOf(event)], ['notifications/events/event', followed, 'Followed', signedIn.id]);
+    assert.match(event.params.cursor, /^\d+\.\d+$/);
+    const revokedAt = Date.now();
+    ok(await http('POST', `/v1/agents/${agentId}/revoke`, MANAGER));
+    let ended = (await signedIn.next(5000))!;
+    while (ended.method === 'notifications/events/heartbeat') ended = (await signedIn.next(5000))!;
+    assert.deepEqual([ended.method, ended.params.error.code], ['notifications/events/terminated', -32024]);
+    assert.ok(Date.now() - revokedAt < 4000, 'The revoke ends the stream within the long poll\'s next check.');
+    assert.equal((await signedIn.next(5000))?.result?.resultType, 'complete');
+    assert.equal(await signedIn.next(5000), null);
+
+    // A revoked key's stream ends the same way; a client that goes away releases its lease.
+    const streamed = await open(manager.secret, {});
+    assert.equal(streamed.refused, null); assert.equal((await streamed.next())!.method, 'notifications/events/active');
+    ok(await http('POST', `/v1/api-keys/${manager.id}/revoke`, MANAGER), [200, 204]);
+    assert.equal((await streamed.next(5000))!.method, 'notifications/events/terminated');
+    const left = await open(inboxKey, {});
+    assert.equal(left.refused, null); assert.equal((await left.next())!.method, 'notifications/events/active');
+    const holder = (await db.query('SELECT holder FROM mcp_event_streams ORDER BY created_at DESC LIMIT 1')).rows[0].holder;
+    assert.equal(await leases(holder), 1);
+    left.close();
+    for (let i = 0; i < 50 && await leases(holder); i++) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.equal(await leases(holder), 0, 'The stream gave back its lease when its client went away.');
+
+    // Ten open streams per credential: an eleventh ends its oldest (which says so at its next read), so streams a client
+    // lost without the server noticing never lock it out. Fifty per workspace: past that a new stream is refused.
+    await db.query("INSERT INTO mcp_event_streams(id, workspace_id, holder, expires_at, created_at) SELECT 'mes_fixture_'||i, 'default', $1, now() + interval '1 minute', now() - interval '1 minute' + i * interval '1 second' FROM generate_series(1, 10) i", [holder]);
+    cleanup(t, async () => { await db.query("DELETE FROM mcp_event_streams WHERE id LIKE 'mes_fixture_%'"); });
+    const eleventh = await open(inboxKey, {});
+    assert.equal(eleventh.refused, null); assert.equal((await eleventh.next())!.method, 'notifications/events/active');
+    assert.equal(await leases(holder), 10);
+    assert.deepEqual((await db.query("SELECT id FROM mcp_event_streams WHERE id LIKE 'mes_fixture_%' ORDER BY created_at LIMIT 1")).rows[0].id, 'mes_fixture_2');
+    eleventh.close();
+    await db.query("INSERT INTO mcp_event_streams(id, workspace_id, holder, expires_at) SELECT 'mes_fixture_w'||i, 'default', 'fixture-other-'||i, now() + interval '1 minute' FROM generate_series(1, 50) i");
+    const { refused } = await open(inboxKey, {});
+    assert.deepEqual([refused?.error.code, refused?.error.data.limit, refused?.error.data.max], [-32025, 'subscriptions', 50]);
+  });
   test('updateApiKey over MCP: a person\'s sign-in changes any key their role can, ties stay with the approval that made a key, and keys an approval made and temporary tokens keep their limits', async t => {
     const db = await fixtureDatabase(t);
     const issued = await oauthGrant(t, db), agentId = `mcp_${issued.consentId}`;

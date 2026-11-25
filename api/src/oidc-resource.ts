@@ -94,6 +94,8 @@ export type McpConnection = {
   defaultWorkspace: { id: string; source: 'set' | 'only' | 'last-used' } | null;
   /** Everything the connection could do in some workspace: what its listing shows. Each call is checked again. */
   listing: Actor;
+  /** When the access token this request presented expires (epoch ms): nothing the request starts outlives it. */
+  tokenExpiresAt?: number;
 };
 export class WorkspaceChoice extends Error {
   constructor(readonly code: 'WORKSPACE_REQUIRED' | 'WORKSPACE_NOT_FOUND' | 'WORKSPACE_AMBIGUOUS' | 'WORKSPACE_ACCESS_DENIED', message: string) { super(message); }
@@ -260,5 +262,6 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   const connection = await mcpConnection(runtime, keyId, allowed);
   if (!connection) return denied(403);
   if (!connection.workspaces.length) return denied(403, undefined, '', `This account belongs to no ${productName} workspace these scopes can act in. Join or create one in ${productName}, then reconnect.`);
+  if (typeof claims.exp === 'number') connection.tokenExpiresAt = claims.exp * 1000;
   return handler(connection);
 }

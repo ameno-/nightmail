@@ -85,6 +85,7 @@ export function agentInboxPrompt({ origin, address, inboxId, setupToken }: { ori
     ...keyLines(origin, setupToken),
     `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index).`,
     `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Its tools list, wait for and read this inbox's mail.`,
+    `- To be told when mail arrives instead of waiting for it, if your MCP client supports MCP Events (OpenCode does): subscribe to the server's message.received event with {"addressIds":["${inboxId ?? '{id}'}"]}, then read each message it names.`,
     `- Or use the REST API with the key as a bearer token: wait for mail with GET ${messages}?wait=30 (it answers as soon as one arrives) and read one with GET ${messages}/{messageId}.${inboxId ? '' : ` Find the inbox's id with GET ${origin}/v1/inboxes?q=${address}.`}`,
     `- Test it: ask me to send an email to ${address}, wait for it, then tell me who sent it and its subject.`,
   ].join('\n')
