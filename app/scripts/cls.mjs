@@ -37,7 +37,8 @@
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
 // cold desktop load, pointing at the first few reveals nothing until ⇧ is held, which reveals them without anything
-// moving, and so does turning privacy mode off with ⇧P (then on again, which masks them as before). Privacy mode is off
+// moving; on a list with row keys, J's highlight reveals none of its row's addresses until ⇧ is held, and releasing ⇧
+// masks them again; and turning privacy mode off with ⇧P reveals them all (then on again, which masks them as before). Privacy mode is off
 // by default; every page here starts with it on.
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
@@ -524,6 +525,13 @@ const maskedState = index => {
   const el = document.querySelectorAll('.private-address')[index], rect = node => { const r = node.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' '); };
   return { revealed: el.hasAttribute('data-revealed'), text: el.querySelector('.private-address__value').textContent, own: rect(el), around: rect(el.closest('tr, li, dd, h1, p, section') ?? el.parentElement) };
 };
+// The row J highlighted (lib/row-keys.ts): how many of its addresses are still masked, and where it is.
+const highlightedRow = () => {
+  const row = document.activeElement?.closest('[data-row-keys] [data-row-key]'), all = row ? [...row.querySelectorAll('.private-address')] : [];
+  if (!all.length) return null;
+  const r = row.getBoundingClientRect();
+  return { masked: all.filter(el => !el.hasAttribute('data-revealed')).length, total: all.length, at: [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' ') };
+};
 async function masking(page, hover, shell) {
   const problems = await page.evaluate(maskedLeaks);
   if (!hover) return problems;
@@ -543,6 +551,24 @@ async function masking(page, hover, shell) {
     if (!shown.revealed || [...shown.text].length <= 2) problems.push(`⇧ over ${before.text}… did not reveal it`);
     else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
     if (released.revealed || released.text !== before.text || released.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after ⇧ was released`);
+  }
+  // J highlights a row without revealing its addresses, as pointing doesn't; ⇧ held while it is highlighted reveals that
+  // row's without moving anything, and releasing ⇧ masks them again. J stops at the first row (of the first six) that holds one.
+  if (await page.evaluate(() => !!document.querySelector('[data-row-keys] [data-row-key][data-clickable] .private-address'))) {
+    await page.evaluate(() => document.activeElement?.blur());
+    let row = null;
+    for (let i = 0; i < 6 && !row; i++) { await page.keyboard.press('j'); await frame(); await frame(); row = await page.evaluate(highlightedRow); }
+    if (row) {
+      await page.keyboard.down('Shift'); await frame(); await frame();
+      const shown = await page.evaluate(highlightedRow);
+      await page.keyboard.up('Shift'); await frame(); await frame();
+      const released = await page.evaluate(highlightedRow);
+      if (row.masked !== row.total) problems.push(`J's highlight revealed ${row.total - row.masked} of its row's addresses`);
+      if (!shown || shown.masked) problems.push('⇧ on the highlighted row did not reveal its addresses');
+      else if (shown.at !== row.at) problems.push(`revealing the highlighted row moved it: ${row.at} → ${shown.at}`);
+      if (!released || released.masked !== released.total) problems.push('the highlighted row stayed revealed after ⇧ was released');
+    }
+    await page.evaluate(() => document.activeElement?.blur());
   }
   // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
   // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a page without the shell (the signed-out waitlist,

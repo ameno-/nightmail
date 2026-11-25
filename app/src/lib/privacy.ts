@@ -31,8 +31,9 @@ export function setPrivacy(on: boolean) {
   publish()
 }
 export const togglePrivacy = () => setPrivacy(!preference)
-// Reading one address while privacy mode is on: hold ⇧ (Shift) and point at it (components/PrivateAddress.tsx). Pointing
-// alone never reveals one, so moving the pointer across a list on a shared screen shows nothing. The root carries data-peek
+// Reading one address while privacy mode is on: hold ⇧ (Shift) and point at it, or hold ⇧ while its row is highlighted by
+// the keys (components/PrivateAddress.tsx). Pointing alone, or J and K alone, never reveals one, so moving across a list
+// on a shared screen shows nothing. The root carries data-peek
 // while ⇧ is held, for fields that blur with CSS (app.css .private-field). ⇧ held to type a capital in a field doesn't count.
 const peekListeners = new Set<() => void>()
 let peeking = false

@@ -1,6 +1,6 @@
 // The dashboard's one rule for email addresses: every mailbox address it shows (in lists, tables, detail headers and
 // search results, ours included) is masked after its first two characters until deliberately revealed (⇧ held while
-// pointing at it, or keyboard focus), by
+// pointing at it, or while its row or control has keyboard focus), by
 // components/PrivateAddress.tsx. Masked means absent: the rest of the address is not in the page's text, a title or
 // a label until it is revealed, so reading, copying or listening to the page gives only what is shown. Domain names
 // and domain-only labels (bane.mx, @bane.mx, *@bane.mx) are not mailbox addresses and stay readable. Forms where an
@@ -22,7 +22,7 @@ export function maskedParts(value: string): { shown: string; hidden: string } | 
   return { shown, hidden: value.slice(shown.length) }
 }
 /** A masked address's hint. It says how to read the address, never the address. */
-export const PRIVATE_TITLE = 'Hidden for privacy. Hold ⇧ and point to read.'
+export const PRIVATE_TITLE = 'Hidden for privacy. Hold ⇧ and point, or hold ⇧ on a highlighted row, to read.'
 /** All of an address that the page holds: its first two characters until it is revealed, then the whole of it. */
 export function addressText(value: string, revealed: boolean) {
   return (!revealed && maskedParts(value)?.shown) || value

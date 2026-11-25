@@ -8,15 +8,18 @@ import { useMasking, usePeek } from '../lib/privacy'
 // mode off, the default, the visible address keeps the same reserved width.
 //
 // Revealing one is deliberate, so a shared screen never shows an address by accident: hold ⇧ and point at it (pointing
-// alone, or moving across a list, reveals nothing); with a keyboard, focus the row or control that holds it; on a touch
-// screen, tap an address that isn't part of a link. ⇧P turns privacy mode off and shows them all.
+// alone, or moving across a list, reveals nothing); with a keyboard, hold ⇧ while the row or control that holds it is
+// focused (J and K, ↓ and ↑ or Tab moving through a list reveal nothing, and releasing ⇧ masks it again), or Tab to an
+// address that is its own stop; on a touch screen, tap an address that isn't part of a link. ⇧P turns privacy mode off
+// and shows them all.
 //
 // Masked, the rest of the address is not in the page: the box holds the two characters and an empty, blurred run. The
 // box is given the width of the whole address up front (measured without rendering it, lib/text-ruler.ts) and keeps it
 // when the text arrives, so revealing never moves anything.
 
-// What reveals a masked address besides ⇧ and the pointer on it: keyboard focus on a control or row that holds it.
-// A row with a link (DataTable rowHref, or a card on a phone) is focused through that link.
+// What reveals a masked address besides ⇧ and the pointer on it: ⇧ held while keyboard focus is on a control or row that
+// holds it. A row with a link (DataTable rowHref, or a card on a phone) is focused through that link. Focus alone doesn't:
+// J and K (lib/row-keys.ts) and Tab move focus row by row, as a pointer moves across a list.
 const ROW = '.ui-table__linked, .ui-card', TABBABLE = 'a[href], button, [role="option"], [role="menuitem"], [tabindex]:not([tabindex="-1"]), .ui-table__clickable'
 const focusHolds = (element: Element | null) => {
   const focused = document.activeElement
@@ -48,10 +51,10 @@ export function useMasked(text: string) {
   const blurred = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => clearTimeout(blurred.current), [])
   const masking = useMasking()
-  // Only the address under the pointer follows ⇧: the rest don't re-render when it is pressed.
-  const peek = usePeek(on => on && hovered)
+  // Only the address under the pointer, or in the focused row or control, follows ⇧: the rest don't re-render when it is pressed.
+  const peek = usePeek(on => on && (hovered || held))
   const pointer = useRef('')
-  const revealed = !masking || peek || focused || held
+  const revealed = !masking || peek || focused
   useLayoutEffect(() => {
     const element = box.current
     if (element) return reserveTextWidth(element, text)

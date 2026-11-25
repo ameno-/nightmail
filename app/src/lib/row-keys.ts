@@ -6,7 +6,8 @@ import { useEffect } from 'react'
 // wears the selected-row fill (ui.css). One list answers at a time: the one holding focus, else the last one pointed at or
 // focused, else the first on screen. Nothing happens while typing, in a dialog or a menu, or with a modifier. ↓ and ↑
 // keep scrolling the page until focus is in a list, unless the page has only the one list (Logs, Domains, API keys…).
-// Each page remembers its last row for this visit, so after opening one and coming back, J picks up there.
+// Each page remembers its last row for this visit, so after opening one and coming back, J picks up there. With privacy
+// mode on, the highlight reveals none of the row's addresses: ⇧ held while it is highlighted does (PrivateAddress).
 const kept = new Map<string, string>()
 const place = () => location.pathname + location.search
 let recent: HTMLElement | null = null, keyed = false
