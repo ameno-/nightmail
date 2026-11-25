@@ -12294,6 +12294,10 @@ describe('Newsletters', () => {
       const writes = (id: string): [string, string, Json?][] => [['POST', '/v1/newsletters', { name: 'Refused', from: sender }], ['PATCH', `/v1/newsletters/${id}`, { name: 'Refused' }], ['DELETE', `/v1/newsletters/${id}`]];
       // A member, and keys with read or read and send: they read newsletters and cannot create, change or delete one.
       const member = await person('member'), admin = await person('admin'), readKey = await key(['read']), readSendKey = await key(['read', 'send']);
+      const listImport = { listId: news.id, csv: 'Email\nreader@example.org', mapping: { email: 'Email' } };
+      error(await request('POST', '/v1/contact-imports', undefined, listImport, member), 403, 'PERMISSION_DENIED');
+      const preview = ok(await request('POST', '/v1/contact-imports', undefined, listImport, admin), 201);
+      error(await request('POST', `/v1/contact-imports/${preview.id}/commit`, undefined, {}, member), 403, 'PERMISSION_DENIED');
       const readers: [string, (method: string, path: string, body?: Json) => Promise<Reply>][] = [
         ['member', (method, path, body) => request(method, path, undefined, body, member)],
         ['read key', (method, path, body) => request(method, path, readKey, body)],
