@@ -288,6 +288,18 @@ export function ReceivingPage() {
     if (change.actor?.self && change.actor.type === 'member') return
     toast(`${change.versionMoved ? 'Addresses and rules' : 'Destinations'} updated by ${actorText(change.actor)}${change.versionMoved ? ` · version ${change.version}` : ''}`, 'info')
   }, { endpoints: true })
+  // Addresses and inboxes an agent makes or deletes don't move that version: coming back to the page (from the agent's
+  // terminal or another tab) reads the lists again, so nothing deleted meanwhile is still there to open.
+  useEffect(() => {
+    let last = 0
+    const catchUp = () => {
+      if (document.visibilityState !== 'visible' || Date.now() - last < 2000) return
+      last = Date.now()
+      void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['inbound-overview', 'inbound-addresses', 'agent-inboxes'].includes(resourceOf(query.queryKey)) })
+    }
+    window.addEventListener('focus', catchUp); document.addEventListener('visibilitychange', catchUp)
+    return () => { window.removeEventListener('focus', catchUp); document.removeEventListener('visibilitychange', catchUp) }
+  }, [client])
   const counts = data && { addresses: kindCount(data.counts, 'all'), rules: data.rules.length, destinations: data.endpoints.length }
   return <div className="stack inbound-stack receiving-page">
     {/* The page's one action. An address's mail is on its own page; every address's mail is in Logs. */}
