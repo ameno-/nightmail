@@ -1,5 +1,5 @@
--- The backfill of deliverability_hourly (migrations 518, 519) from the retained mail (30 days), one page at a time
--- (migration 521 runs it): each page is six hours of emails by creation time, read per workspace through
+-- The backfill of deliverability_hourly (migrations 525, 526) from the retained mail (30 days), one page at a time
+-- (migration 528 runs it): each page is six hours of emails by creation time, read per workspace through
 -- sending_emails_created_page, with their events through sending_events_page (only for emails whose bits say they were
 -- opened or temporarily refused: the only ones that can have such an event). A page inserts (exact - stored) for its
 -- hours. Both triggers are committed, so concurrent writes add their own deltas and nothing is counted twice (as 505);

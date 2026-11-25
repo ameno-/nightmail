@@ -11,7 +11,7 @@ import { poolSends } from './states.js';
 // Glass's Deliverability board (/glass?view=deliverability): is the platform's mail getting into mailboxes, read and
 // clicked, by mailbox provider, for 24 hours, 7 days or 30 days beside the period before. One statement over rollups,
 // cached GLASS_DELIVERABILITY_TTL_SECONDS a window and installation:
-//  - our mail: deliverability_hourly (migrations 518-521), by creation hour, region, kind and recipient provider: at
+//  - our mail: deliverability_hourly (migrations 525-528), by creation hour, region, kind and recipient provider: at
 //    most a few rows an hour, two windows of them (60 days at most);
 //  - the top workspaces by complaints and bounces: sending_metrics_hourly per workspace through its (workspace_id, hour)
 //    index (IDs only);

@@ -1,4 +1,4 @@
--- The event half of deliverability_hourly (migration 518): an email's first soft bounce (non_permanent_bounce), first
+-- The event half of deliverability_hourly (migration 525): an email's first soft bounce (non_permanent_bounce), first
 -- delivery delay (delivery_delay) and first open that SES did not flag as a bot or a privacy proxy (isBotEvent neither
 -- true nor Likely: Apple Mail Privacy Protection and link scanners are flagged), each counted once, in the hour its
 -- email was created. event_outcomes has one bit for both temporary failures and none for a human open, so these come

@@ -36,7 +36,7 @@ export async function foldSendingTallies(runtime: Runtime, budgetMs = 10_000, cl
   let deliverabilityRemoved = 0, deliverabilityKept = 0, deliverabilityUnfolded = 0;
 
   // Alternate bounded slices between campaign tallies, hourly metrics, 10-minute metrics and the platform's
-  // deliverability rollup (migration 518) so a large backlog in one table never starves the others within the budget.
+  // deliverability rollup (migration 525) so a large backlog in one table never starves the others within the budget.
   let campaignMore = true, metricsMore = true, tenMinuteMore = true, deliverabilityMore = true;
   for (let pass = 0; pass < FOLD_MAX_PASSES && (campaignMore || metricsMore || tenMinuteMore || deliverabilityMore) && clock() < until; pass++) {
     if (campaignMore && clock() < until) {
@@ -237,7 +237,7 @@ export async function recountSendingTallies(runtime: Runtime, budgetMs = 60_000,
       logError(error, { code: 'METRICS_TEN_MINUTE_PRUNE_FAILED' }, 'warn');
     }
   }
-  // Glass's deliverability history (migrations 518, 522): 120 days, so the 30-day board always has the 30 days before.
+  // Glass's deliverability history (migrations 525, 529): 120 days, so the 30-day board always has the 30 days before.
   if (clock() < until) {
     try {
       await runtime.db.execute(sql`DELETE FROM deliverability_hourly WHERE hour < now() - interval '120 days'`);

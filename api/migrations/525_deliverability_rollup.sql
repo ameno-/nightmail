@@ -9,7 +9,7 @@
 -- nothing, so the 30-day board can compare with the 30 days before. The daily recount prunes rows older than 120 days.
 --
 -- Columns from sending_emails (this migration): accepted, delivered, hard_bounced, complained, opened, clicked, from
--- the same status and event_outcomes bits as sending_metrics_hourly. Columns from sending_email_events (migration 519):
+-- the same status and event_outcomes bits as sending_metrics_hourly. Columns from sending_email_events (migration 526):
 -- soft_bounced, deferred and human_opened, each an email's first such event.
 --
 -- mail_provider is deliverability.ts providerOf in SQL (the acceptance test keeps them equal).
