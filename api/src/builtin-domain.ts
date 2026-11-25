@@ -3,7 +3,7 @@ import type { GetEmailIdentityCommandOutput, SESv2Client } from '@aws-sdk/client
 import { ApiError, assertSharedAccount, getSes, id, isSimulatedSes, log, logError, ModuleLoadError, type Config, type Ctx, type DbExecutor, type JobHandler, type Runtime } from './core.js';
 import { JobDeferred } from './jobs.js';
 import { SEND_LIMITS } from './send-limits.js';
-import { BUILTIN_UNSUPPORTED, BUILTIN_UNSUPPORTED_WORDS, builtinLimitsText, type BuiltinUnsupported } from './builtin-limits.js';
+import { ADD_OWN_DOMAIN, BUILTIN_UNSUPPORTED, BUILTIN_UNSUPPORTED_WORDS, builtinLimitsText, type BuiltinUnsupported } from './builtin-limits.js';
 import { productName } from './brand.js';
 import { claimTenantName } from './ses-setup.js';
 import { tagKey, hasTags } from './resource-tags.js';
@@ -465,10 +465,15 @@ export async function revokeBuiltinDomain(db: DbExecutor, wid: string, reason: s
 
 const count = (n: number) => n.toLocaleString('en-US');
 /** send_admission's built-in refusals as the API's errors. */
-export function builtinRefusal(config: Pick<Config, 'builtinScope'>, d: { code: string; field?: string; unsupported?: string[]; host?: string; builtin?: string; window?: string; resetAt?: string }) {
+export function builtinRefusal(config: Pick<Config, 'builtinScope'>, d: { code: string; field?: string; unsupported?: string[]; host?: string; builtin?: string; notMembers?: string[]; window?: string; resetAt?: string }) {
   const host = d.host ?? 'This workspace’s built-in domain', limits = SEND_LIMITS.builtin[config.builtinScope];
   switch (d.code) {
-    case 'BUILTIN_DOMAIN_RECIPIENT': return new ApiError(422, d.code, `${host} sends only to the verified addresses of this workspace’s members. Verify a domain of your own to send to anyone.`, 'to');
+    case 'BUILTIN_DOMAIN_RECIPIENT': {
+      // assertBuiltinRecipients names the recipients; send_admission's backstop can't.
+      const others = d.notMembers ?? [], shown = others.length > 3 ? [...others.slice(0, 3), `${others.length - 3} more`] : others;
+      const who = !others.length ? '' : others.length === 1 ? `, and ${others[0]} is not one of them` : `, and ${and(shown)} are not among them`;
+      return new ApiError(422, d.code, `${host} only sends to your workspace members’ own sign-in addresses for now${who}. To email anyone, ${ADD_OWN_DOMAIN}.`, 'to');
+    }
     case 'BUILTIN_DOMAIN_LIMIT': {
       const at = d.resetAt ? new Date(d.resetAt).toISOString() : undefined;
       return new ApiError(429, d.code, `${host} sends to at most ${count(limits.perMinute)} recipients a minute and ${count(limits.perDay)} in 24 hours; this ${d.window === 'minute' ? 'minute’s' : 'day’s'} are used.${at ? ` Try again after ${at}, or` : ''} verify a domain of your own to send more.`, undefined, true, at);
@@ -517,6 +522,27 @@ export async function assertBuiltinStillSends(runtime: Runtime, db: DbExecutor, 
   error.details = found.map(x => ({ ...(batch ? { index: x.index } : {}), from: x.from, suggestedFrom: suggest(x.from), verifiedDomains: own }));
   throw error;
 }
+/**
+ * A send from the built-in domain while it sends to members only (NIGHTMAIL_BUILTIN_SEND_SCOPE=members): refused before
+ * admission (send_admission refuses it too, as the backstop) when any recipient isn't one of the workspace members' own
+ * verified sign-in addresses, naming each such recipient (error.details[].notMembers; a batch: with its index) and the next
+ * step. Nothing is read for a send from any other domain, or while the built-in domain sends to anyone.
+ */
+export async function assertBuiltinRecipients(runtime: Runtime, db: DbExecutor, workspaceId: string, mails: { from: string; recipients: string[] }[], batch = false) {
+  if (runtime.config.builtinScope !== 'members') return;
+  const sent = mails.map((m, index) => ({ index, host: m.from.split('@')[1]!.toLowerCase(), recipients: m.recipients })).filter(m => isBuiltinHost(runtime.config, m.host));
+  if (!sent.length) return;
+  const all = [...new Set(sent.flatMap(m => m.recipients.map(r => r.toLowerCase())))];
+  const { rows: [row] } = await db.execute<{ members: string[] }>(sql`SELECT ARRAY(SELECT DISTINCT lower(u.email) FROM workspace_members wm JOIN nightmail_users u ON u.id=wm.user_id
+    WHERE wm.workspace_id=${workspaceId} AND u.email_verified AND lower(u.email)=ANY(${sql.param(all)}::text[])) AS members`);
+  const members = new Set(row?.members ?? []);
+  const found = sent.map(m => ({ index: m.index, host: m.host, notMembers: [...new Set(m.recipients.filter(r => !members.has(r.toLowerCase())))] })).filter(m => m.notMembers.length);
+  if (!found.length) return;
+  const first = found[0]!, error = builtinRefusal(runtime.config, { code: 'BUILTIN_DOMAIN_RECIPIENT', host: first.host, notMembers: first.notMembers });
+  if (batch) error.field = `emails.${first.index}.to`;
+  error.details = found.map(m => ({ ...(batch ? { index: m.index } : {}), notMembers: m.notMembers }));
+  throw error;
+}
 /** What a send from a built-in domain uses that it can't send, by request field: every one, not only the first. */
 export function builtinUnsupported(config: Pick<Config, 'builtinDomain'>, m: { from: string; replyTo?: string[]; headers?: unknown[]; template?: unknown; attachments?: unknown[]; kind?: string; scheduledAt?: unknown }): BuiltinUnsupported[] {
   const host = m.from.split('@')[1]!.toLowerCase();
@@ -535,4 +561,4 @@ export function assertBuiltinInput(config: Pick<Config, 'builtinDomain' | 'built
   throw error;
 }
 /** The API reference's words, on sendEmail and sendEmailBatch. */
-export const BUILTIN_NOTE = `Built-in domain (Hosted): every workspace has a subdomain of ${productName}'s own domain (connection.builtinDomain in GET /v1/me) that sends until the workspace verifies a domain of its own: plain transactional email sent now, without attachments, custom headers, a stored template or a Reply-To elsewhere (422 BUILTIN_DOMAIN_UNSUPPORTED, once, listing every such field in error.details[].unsupported), to the recipients the installation allows (422 BUILTIN_DOMAIN_RECIPIENT), within a per-minute and a daily recipient cap (429 BUILTIN_DOMAIN_LIMIT), screened like a new sender's mail. Once a domain of its own verifies it stops sending and answers 409 OWN_DOMAIN_VERIFIED, with the same address at that domain to use instead in error.details[0].suggestedFrom (and every verified domain in verifiedDomains).`;
+export const BUILTIN_NOTE = `Built-in domain (Hosted): every workspace has a subdomain of ${productName}'s own domain (connection.builtinDomain in GET /v1/me) that sends until the workspace verifies a domain of its own: plain transactional email sent now, without attachments, custom headers, a stored template or a Reply-To elsewhere (422 BUILTIN_DOMAIN_UNSUPPORTED, once, listing every such field in error.details[].unsupported), to the recipients the installation allows (on hosted ${productName}, for now, only the verified sign-in addresses of the workspace's members: 422 BUILTIN_DOMAIN_RECIPIENT names any other recipient in error.details[0].notMembers; add a domain of your own to email anyone), within a per-minute and a daily recipient cap (429 BUILTIN_DOMAIN_LIMIT), screened like a new sender's mail. Once a domain of its own verifies it stops sending and answers 409 OWN_DOMAIN_VERIFIED, with the same address at that domain to use instead in error.details[0].suggestedFrom (and every verified domain in verifiedDomains).`;
