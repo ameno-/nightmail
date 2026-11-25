@@ -40,6 +40,11 @@
 /* Domains: one line per cell at the shared row height; a long name or host ends in an ellipsis, whole in its title. */
 .ui-table-scroll.domains-table { --table-row-height: 53px; }
 .domains-table .domain-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The built-in domain's name keeps its badge in view: the name gives way first. */
+.domains-table .domain-name-cell { display: flex; align-items: center; gap: var(--space-8); min-width: 0; }
+.domains-table .domain-name-cell .domain-name { min-width: 0; }
+.domain-badge { flex: none; padding: 0 var(--space-6); border-radius: var(--radius-xs); background: var(--color-chip); color: var(--color-muted); font-size: var(--text-label); line-height: 18px; white-space: nowrap; }
+.domain-builtin-copy { max-width: 64ch; margin: 0; }
 .domain-setup-link { text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; text-decoration-color: var(--color-border-strong); }
 @media (hover: hover) and (pointer: fine) { .domain-setup-link:hover { color: var(--color-text); text-decoration-color: currentColor; } }
 .domain-setup-link:focus-visible { color: var(--color-text); text-decoration-color: currentColor; }

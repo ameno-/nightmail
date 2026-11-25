@@ -190,7 +190,8 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
   const [domainCursor, setDomainCursor] = useState<string | undefined>()
   const options = useApiQuery(['campaign-options', { pageSize: 100, domains: domainCursor }], async (api, signal) => {
     const domainPage = await api.domains.list({pageSize: 100, cursor: domainCursor, refresh: false}, signal)
-    return { domains: domainPage.items.filter(domain => domain.status === 'verified'), next: domainPage.nextCursor }
+    // The built-in domain sends no campaigns (send_admission refuses them).
+    return { domains: domainPage.items.filter(domain => domain.status === 'verified' && !domain.builtIn), next: domainPage.nextCursor }
   })
   const previousOptions = useRef<typeof options.data>(undefined)
   if (options.data) previousOptions.current = options.data

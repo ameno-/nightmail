@@ -27,7 +27,11 @@ async function route(runtime:Runtime,source:SQL,replay:boolean) {
       UNION ALL SELECT c.workspace_id,'byo' FROM provider_connections c JOIN mailbox_regions r ON r.workspace_id=c.workspace_id AND r.region=c.region AND r.account_id=c.aws_account_id
       WHERE c.kind='byo' AND c.template_version<>'v5' AND ${connectionReady(sql`c`)} AND c.region=s.region AND c.aws_account_id=split_part(s.topic_arn,':',5) AND r.topic_arn=s.topic_arn AND r.bucket=s.bucket` : sql`SELECT workspace_id AS wid,'self' AS kind FROM mailbox_regions r WHERE r.workspace_id=${runtime.config.workspaceId} AND r.region=s.region AND r.topic_arn=s.topic_arn AND r.bucket=s.bucket`}) b
     WHERE NOT s.fenced OR s.binding_workspace IS NOT DISTINCT FROM b.wid
-  ), env AS (SELECT b.*,addr,split_part(addr,'@',2) AS host FROM bound b CROSS JOIN jsonb_array_elements_text(b.recipients) e(addr)), matched AS MATERIALIZED (
+  ), env AS (SELECT b.*,addr,split_part(addr,'@',2) AS host FROM bound b CROSS JOIN jsonb_array_elements_text(b.recipients) e(addr)
+    -- Spam and viruses to a built-in domain (builtin-domain.ts) are dropped here, before a receipt takes a slot of the
+    -- workspace's receive budget or is metered: anyone can write to any address at it (the wildcard MX), wanted or not.
+    ${hosted ? sql`WHERE NOT (coalesce(b.notification#>>'{receipt,spamVerdict,status}','') IN ('FAIL','GRAY') OR coalesce(b.notification#>>'{receipt,virusVerdict,status}','') IN ('FAIL','GRAY'))
+      OR NOT EXISTS (SELECT FROM builtin_domains bd WHERE bd.name=split_part(addr,'@',2))` : sql``}), matched AS MATERIALIZED (
     SELECT e.bucket,e.mid,m.workspace_id,e.addr FROM env e CROSS JOIN LATERAL (SELECT * FROM mailbox_domains m WHERE ${hosted?sql`m.receiving_host`:sql`m.name`}=e.host AND m.region=e.region AND (e.wid=m.workspace_id OR e.kind='shared') OFFSET 0) m
     WHERE ${replay?sql`e.expires_at>now() AND (e.owners->e.addr) ? m.workspace_id` : sql`NOT EXISTS (SELECT FROM mail_receipt_holds h WHERE h.bucket=e.bucket AND h.ses_message_id=e.mid AND h.binding_workspace IS NOT DISTINCT FROM e.wid AND h.topic_arn=e.topic_arn AND h.recipients ? e.addr AND (h.expires_at<=now() OR NOT (h.owners->e.addr) ? m.workspace_id))`} AND ${hosted ? sql`
       -- The recipient's host routes (each host of a domain on its own row, unique while it routes: mailbox_domains_routing_host),

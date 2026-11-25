@@ -251,7 +251,7 @@ export async function finishAccountLogin(runtime: Runtime, url: URL, binding: st
         log('info', { code: 'SIGN_IN_USER_CREATED', userId, subject: claims.sub, admission: admitted });
         if (signup) { await recordSignup(db, userId, signup, typeof claims.name === 'string' ? claims.name : null); signedUp = true; }
         if (runtime.config.multiTenant) {
-          if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff || !!signup,runtime.config.regions[0]!,invitation)) throw new NotAdmitted('invitation');
+          if (!await onboardNewUser(db,{id:userId,email:staff ? emailAtLogin : mailbox,name},staff || !!signup,runtime.config.regions[0]!,invitation,runtime.config)) throw new NotAdmitted('invitation');
         } else if (runtime.config.defaultWorkspaceOwners === '*' || runtime.config.defaultWorkspaceOwners.includes(claims.sub)) {
           await db.execute(sql`INSERT INTO workspace_members(id,user_id,workspace_id,role) VALUES(${crypto.randomUUID()},${userId},'default','owner')`);
         }

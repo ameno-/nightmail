@@ -9,7 +9,8 @@ import type { ClaimsOnly, SendScope } from './send-scope.js';
 
 export const domainName = z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/);
 // Separate from the PSL: these platform-controlled trees also prohibit child claims.
-const reservedRoots = `opensend.mx amazonses.com amazonaws.com github.io gitlab.io pages.dev workers.dev vercel.app netlify.app herokuapp.com onmicrosoft.com cloudfront.net
+// nightmail.email is the hosted built-in domains' parent (builtin-domain.ts): reserved even while NIGHTMAIL_BUILTIN_DOMAIN is unset.
+const reservedRoots = `opensend.mx nightmail.email amazonses.com amazonaws.com github.io gitlab.io pages.dev workers.dev vercel.app netlify.app herokuapp.com onmicrosoft.com cloudfront.net
   azurewebsites.net web.app firebaseapp.com appspot.com blogspot.com fly.dev onrender.com ngrok.io`.split(/\s+/);
 const notAllowed = () => new ApiError(422,'DOMAIN_NOT_ALLOWED','A public suffix or reserved domain cannot be claimed.','name');
 // Report the same policy error for a bare TLD, before the ordinary DNS syntax validator rejects it.
@@ -19,7 +20,7 @@ export const claimName = z.preprocess(value=>{
 },domainName);
 /** The installation's own domain: PUBLIC_URL's host (bane.mx in production). */
 export const platformHost = (publicUrl:string) => new URL(publicUrl).hostname.toLowerCase().replace(/\.$/,'');
-type PlatformOrigins = { publicUrl:string; previousOrigins?:readonly string[] };
+type PlatformOrigins = { publicUrl:string; previousOrigins?:readonly string[]; builtinDomain?:string };
 /** Every domain the installation owns: PUBLIC_URL's host, then the hosts it served before (PREVIOUS_PUBLIC_URLS). After
  * a domain switch the earlier domain stays the platform's: its adopted claim keeps receiving (support@) and its names
  * stay unclaimable. Sender policy (platformPolicy) follows PUBLIC_URL's host only. */
@@ -51,7 +52,9 @@ export const platformPolicy = (config:PlatformConfig) => config.multiTenant ? JS
   owner:config.regionalSending===true ? config.platformDomainWorkspace ?? null : null,reserved:platformLabel.source,fixtures:fixtureLabel.source}) : null;
 export async function claimNameAllowed(name:string,config:PlatformOrigins,platformOwner=false) {
   const hosts=platformHosts(config), platform=!!platformRoot(name,hosts);
-  return name.includes('.') && (platform ? platformOwner && !reservedPlatformName(name,config) : !hosts.some(host=>host.endsWith('.'+name)))
+  // The built-in domains' parent and every name under it are claimed only as built-in domains (builtin-domain.ts).
+  const builtin=config.builtinDomain, underBuiltin=!!builtin && (name===builtin || name.endsWith('.'+builtin) || builtin.endsWith('.'+name));
+  return name.includes('.') && !underBuiltin && (platform ? platformOwner && !reservedPlatformName(name,config) : !hosts.some(host=>host.endsWith('.'+name)))
     && !reservedRoots.some(root=>name===root || name.endsWith('.'+root)) && (await placementRoot(name)).root!==null;
 }
 const within = (name: SQL, parent: SQL) => sql`right('.' || ${name}, length(${parent}) + 1) = '.' || ${parent}`;
@@ -92,7 +95,9 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
 export const byoWorkspace = (workspace: string) => sql`EXISTS (SELECT FROM provider_connections WHERE workspace_id=${workspace} AND kind='byo')`;
 /** Domains the workspace holds and how many it may hold: 100 unless an operator set another limit, and no total (null) with its own AWS account. */
 export const domainQuota = async (db: DbExecutor, workspace: string) => (await db.execute<{ used: number; limit: number | null; unproven: number }>(sql`SELECT count(*)::int AS used,
-  count(*) FILTER (WHERE NOT ever_proven)::int AS unproven,CASE WHEN ${byoWorkspace(workspace)} THEN NULL ELSE workspace_domain_limit(${workspace}) END AS "limit" FROM domain_claims WHERE workspace_id=${workspace}`)).rows[0]!;
+  count(*) FILTER (WHERE NOT ever_proven)::int AS unproven,CASE WHEN ${byoWorkspace(workspace)} THEN NULL ELSE workspace_domain_limit(${workspace}) END AS "limit" FROM domain_claims WHERE workspace_id=${workspace} AND NOT ${builtinClaim()}`)).rows[0]!;
+/** A workspace's built-in domain (builtin-domain.ts), which no domain total or unproven limit counts. */
+export const builtinClaim = (dc: SQL = sql`domain_claims`) => sql`coalesce(${dc}.identity ? 'builtin',false)`;
 /** The refusal names whichever limit was reached: the workspace's total (its own, which an operator can change) or the 10 unproven domains. */
 export const domainLimitError = (used: number, limit: number | null) => new ApiError(409, 'DOMAIN_LIMIT_REACHED', limit !== null && used >= limit
   ? `This workspace has ${used.toLocaleString('en-US')} of its ${limit.toLocaleString('en-US')} domains. Remove a domain first, or ask ${productName} support for a higher limit.`
@@ -118,8 +123,8 @@ export const releasedClaimCleanup = (wid: string) => sql`retired AS (UPDATE mail
 // Keep independently owned exclusive claims. Send-only imports/adoptions have no TXT proof;
 // their authority cannot survive disconnect. The operator's retained ARN journal does survive.
 export const releaseConnectionClaims = (wid: string, target: SQL) => sql`target AS (${target}), detached AS (UPDATE domain_claims dc SET ${detachedClaim}
-    FROM target t WHERE dc.workspace_id=${wid} AND dc.connection_id=t.id AND dc.claim_scope<>'account' AND NOT coalesce(dc.identity ? 'adopted',false) RETURNING dc.name,dc.token),
-  forgotten AS (DELETE FROM domain_claims dc USING target t WHERE dc.workspace_id=${wid} AND dc.connection_id=t.id AND (dc.claim_scope='account' OR dc.identity ? 'adopted') RETURNING dc.name,dc.token),
+    FROM target t WHERE dc.workspace_id=${wid} AND dc.connection_id=t.id AND dc.claim_scope<>'account' AND NOT coalesce(dc.identity ?| array['adopted','builtin'],false) RETURNING dc.name,dc.token),
+  forgotten AS (DELETE FROM domain_claims dc USING target t WHERE dc.workspace_id=${wid} AND dc.connection_id=t.id AND (dc.claim_scope='account' OR dc.identity ?| array['adopted','builtin']) RETURNING dc.name,dc.token),
   released AS (SELECT * FROM detached UNION ALL SELECT * FROM forgotten),
   dropped AS (DELETE FROM operation_domains d USING released r WHERE d.workspace_id=${wid} AND d.name=r.name), ${releasedClaimCleanup(wid)}`;
 // Used in the existing admission/dispatch statements. The connection join also fences

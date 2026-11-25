@@ -114,7 +114,8 @@ function NewNewsletter() {
   const [pending, setPending] = useState(false), [errors, setErrors] = useState<{ name?: string; from?: string }>({})
   // First page of domains (API caps GET /v1/domains at 10) for autocomplete; submit walks remaining cursors if needed.
   const domains = useApiQuery(['domains', 'newsletter-sender'], (client, signal) => client.domains.list({ pageSize: 10, refresh: false }, signal))
-  const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified').map(domain => domain.name)
+  // The built-in domain sends no newsletters: issues are campaigns, which it refuses.
+  const verified = (domains.data?.items ?? []).filter(domain => domain.status === 'verified' && !domain.builtIn).map(domain => domain.name)
   async function submit(event: FormEvent) {
     event.preventDefault()
     const missing = { name: !name.trim() ? 'Enter a name.' : undefined, from: !sender.email ? 'Enter the address issues are sent from.' : undefined }

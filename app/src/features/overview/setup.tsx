@@ -95,16 +95,18 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
   if (setup.isPending) return { loading: true, steps: null }
   if (setup.error) return { loading: false, steps: null, error: setup.error, retry: () => void setup.refetch() }
   if (!setup.data.domains || !setup.data.apiKeys) return { loading: false, steps: null }
-  const items = setup.data.domains, keyed = setup.data.apiKeys.active > 0
+  // The built-in domain (no DNS of its own) isn't the domain this step asks for, but it can send the first email meanwhile.
+  const all = setup.data.domains, items = all.filter(domain => !domain.builtIn), keyed = setup.data.apiKeys.active > 0
   const hasDomain = items.length > 0
   const stuck = items.flatMap(domain => { const gap = setupGap(domain); return gap ? [{ domain, gap }] : [] })[0] ?? null
-  const verified = items.find(domain => domain.status === 'verified')
+  const verified = items.find(domain => domain.status === 'verified') ?? all.find(domain => domain.builtIn && domain.status === 'verified')
+  const ownVerified = verified && !verified.builtIn
   // The setup read carries the ten newest domains; an older verified one still counts (the session's domain summary).
-  const domainDone = !!verified || (identity?.connection?.domains?.verified ?? 0) > 0
+  const domainDone = !!ownVerified || (identity?.connection?.domains?.verified ?? 0) > 0
   const pending = items.find(domain => domain.status !== 'verified')
   const sent = setup.data.emails.any || !!testId
   // What Overview's onboarding card reads (onboarding-card.tsx): whether any email exists, and the domain to send from.
-  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: verified }
+  const known = { stuck, hasDomain, sent: setup.data.emails.any, verifiedDomain: ownVerified ? verified : undefined }
   if (domainDone && keyed && sent && !testId) return { loading: false, steps: null, ...known }
   const steps: SetupStep[] = [
     { key: 'domain', done: domainDone, title: 'Verify a domain',

@@ -139,6 +139,8 @@ export async function start(repo, { log = () => {}, servers = 1, delay = null, f
     const envFor = (port, publicOrigin = `http://127.0.0.1:${port}`) => ({
       PATH: process.env.PATH, HOME: home, DATABASE_URL: url.href, PUBLIC_URL: publicOrigin, API_BASE_URL: publicOrigin, HOST: '127.0.0.1', PORT: String(port),
       MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', API_RATE_LIMIT_PER_MINUTE: '100000',
+      // Built-in domains (api/src/builtin-domain.ts): the workspaces seeded with one below show it in onboarding, Domains and Overview.
+      NIGHTMAIL_BUILTIN_DOMAIN: 'nightmail.email',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
       UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
@@ -347,6 +349,19 @@ async function domain(db, workspaceId, conn, name, { receiving = false, mailFrom
   await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at,mx,checked_at) VALUES($1,$2,$3,$4,$5,$4,'active','store',now()-interval '20 days',$6::jsonb,now()-interval '12 minutes')",
     [mdom, workspaceId, id, name, REGION, JSON.stringify(mx)]);
   return { id, mdom, host: name };
+}
+
+// A workspace's built-in domain as its Hosted connection leaves it (create_builtin_claim, migration 495): sending, receiving
+// on its own name with no DNS of its own, and its default inbox's catch-all.
+async function builtin(db, workspaceId, conn, label) {
+  const name = `${label}.nightmail.email`, id = 'dom_builtin_' + workspaceId, mdom = 'mdom_builtin_' + workspaceId;
+  await db.query('INSERT INTO builtin_domains(workspace_id,label,name) VALUES($1,$2,$3)', [workspaceId, label, name]);
+  const identity = { builtin: true, proven: true, mx: null, note: null, ses: { VerificationStatus: 'SUCCESS', VerifiedForSendingStatus: true, DkimAttributes: { Status: 'SUCCESS', SigningEnabled: true, SigningAttributesOrigin: 'AWS_SES' } } };
+  await db.query("INSERT INTO domain_claims(workspace_id,name,connection_id,sending_state,receiving_state,receiving_host,identity,receiving_proved_at,receiving_identity_at) VALUES($1,$2,$3,'verified','active',$2,$4::jsonb,now(),now())",
+    [workspaceId, name, conn, JSON.stringify(identity)]);
+  await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)', [id, workspaceId, name, REGION]);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,receiving_host,status,catch_all,enabled_at) VALUES($1,$2,$3,$4,$5,$4,'active','store',now()-interval '1 day')", [mdom, workspaceId, id, name, REGION]);
+  return { id, name };
 }
 
 // A domain added two hours ago whose records never went live, as the background DNS check (api/src/domain-setup.ts) left
@@ -900,10 +915,16 @@ export async function seed(fx) {
   await fx.signIn('ona', 'ona@fieldnotes.example', 'Ona Field', { id: 'ws_new', name: 'Field Notes' });
   // Sending is ready but no domain was added: onboarding's domain step was skipped (cls.mjs `skipped`), so Overview asks for one.
   await fx.signIn('pia', 'pia@pinestudio.example', 'Pia Lund', { id: 'ws_skipped', name: 'Pine Studio' });
-  await hosted(db, 'ws_skipped');
-  // A verified domain and nothing sent yet: Overview's first card offers the first send.
+  // Its built-in domain sends meanwhile: Overview's card asks for a domain of its own, and Domains lists the built-in one.
+  const builtinDomain = await builtin(db, 'ws_skipped', await hosted(db, 'ws_skipped'), 'pine-studio-k7');
+  // A verified domain of its own and nothing sent yet: Overview's first card offers the first send, from that domain, not the built-in one.
   await fx.signIn('ren', 'ren@rowanbakery.example', 'Ren Okafor', { id: 'ws_verified', name: 'Rowan Bakery' });
-  await domain(db, 'ws_verified', await hosted(db, 'ws_verified'), 'rowanbakery.example');
+  const verifiedConn = await hosted(db, 'ws_verified');
+  await builtin(db, 'ws_verified', verifiedConn, 'rowan-bakery-m2');
+  await domain(db, 'ws_verified', verifiedConn, 'rowanbakery.example');
+  // Umber: Hosted mail ready, the built-in domain ready, no domain of its own and onboarding not finished: its domain step.
+  await fx.signIn('uma', 'uma@umber.example', 'Uma Reyes', { id: 'ws_builtin', name: 'Umber' });
+  await builtin(db, 'ws_builtin', await hosted(db, 'ws_builtin'), 'umber-q4');
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');
@@ -980,7 +1001,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportAction, continueConversation, continueMessage,
   };
 }

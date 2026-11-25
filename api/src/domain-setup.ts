@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { log, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
+import { log, logError, ModuleLoadError, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
 
 // The domain setup check. Someone adds a domain, sees its records and leaves, and nothing tells them the records never
 // went live. Every five minutes (elected, from the minute cron and the Node runner) domainSetupTick queues one
@@ -19,7 +19,7 @@ export async function domainSetupTick(runtime: Runtime) {
   if (!elected.rows.length) return;
   const { rows } = await runtime.db.execute<{ id: string }>(sql`WITH due AS (SELECT d.id,dc.workspace_id,dc.token FROM domain_claims dc JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name
       WHERE NOT dc.ever_proven AND dc.sending_state='pending' AND dc.created_at<=now()-interval '1 hour'
-        AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ? 'adopted',false)
+        AND NOT domain_claim_expired(dc) AND NOT coalesce(dc.identity ?| array['adopted','builtin'],false)
         AND coalesce((dc.setup_check->>'checkedAt')::timestamptz,'-infinity')<=now()-CASE WHEN dc.created_at>now()-interval '6 hours' THEN interval '14 minutes' ELSE interval '59 minutes' END
       ORDER BY dc.setup_check->>'checkedAt' NULLS FIRST,dc.created_at LIMIT 100)
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.setupCheck:'||token,'domain.setupCheck',workspace_id,jsonb_build_object('domainId',id,'token',token) FROM due
@@ -27,7 +27,11 @@ export async function domainSetupTick(runtime: Runtime) {
     RETURNING id`);
   // New workspaces with no domain at all an hour on: the one email, with NO_DOMAIN_REMINDER=on.
   const notices = runtime.config.noDomainReminder ? await (await wrapModuleLoad(() => import('./account-notices.js'))).noDomainNotices(runtime) : 0;
-  if (rows.length + notices) try { await runtime.wake?.(rows.length + notices); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Domain setup checks and notices are durable; the scheduler will run them.' }); }
+  // Built-in domains: the parent's check, the label backfill and the domains still to set up (builtin-domain.ts).
+  let builtin = 0;
+  if (runtime.config.builtinDomain) try { builtin = await (await wrapModuleLoad(() => import('./builtin-domain.js'))).builtinDomainTick(runtime); }
+  catch (error) { if (error instanceof ModuleLoadError) throw error; logError(error, { code: 'BUILTIN_DOMAIN_TICK_FAILED' }); }
+  if (rows.length + notices + builtin) try { await runtime.wake?.(rows.length + notices + builtin); } catch { log('warn', { code: 'QUEUE_WAKE_FAILED', message: 'Domain setup checks and notices are durable; the scheduler will run them.' }); }
 }
 
 // A record's name as a DNS provider asks for it: relative to the zone that hosts it, the full name when that is unknown.
