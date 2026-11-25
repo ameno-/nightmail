@@ -5,8 +5,11 @@
  *
  * Bane became Nightmail (nightmail.dev). The hosted service is on nightmail.dev; bane.mx, its earlier domain, is in
  * `previousDomains` and stays served (API, SNS feedback, unsubscribe links; GETs redirect). A name a customer may already
- * have (key prefix, DNS proof, header, scope, cookie) stays accepted until the cutover, which removes them all at once
- * (each site is marked "remove after rename cleanup"). Infrastructure names (Workers, buckets, SES resources) are not here.
+ * have (key prefix, DNS proof, header, scope, cookie) stays accepted, also after the domain cutover (Ryan's decision,
+ * 2026-11-25: keep accepting, stop emitting). The cutover stops emitting the old names that still go out: the Bane-Test
+ * webhook header, the bane_record receiving issue code (a public enum value: give it a deprecation window) and bane:* as
+ * the default OAuth scope prefix. Sites are marked "remove after rename cleanup". Infrastructure names (Workers, buckets,
+ * SES resources) are not here.
  */
 export const productName = 'Nightmail';
 /** Lowercase, for identifiers. */
@@ -110,10 +113,9 @@ export const loopHeaderNames = requestHeaderNames('loop');
  * each DNS provider again, so list it before the current one until providers have it. */
 export const domainConnectProviderIds = ['nightmail.dev'] as const;
 
-// ---------- Earlier public names, accepted until the domain cutover (remove after rename cleanup) ----------
+// ---------- Earlier public names, still accepted (remove after rename cleanup) ----------
 // Only the names above are emitted. Each one here is still accepted where a customer, a stored row or a deployment
-// may use it. The cutover deletes this section (and the other "remove after rename cleanup" sites) and fixes each site
-// the compiler then names.
+// may use it, and stays accepted after the domain cutover; the cutover only stops emitting old names (see the top).
 
 /** Environment variable prefixes before NIGHTMAIL_, newest first. The server's own settings also took MX_. */
 export const legacyEnvPrefixes = ['BANE_'] as const, legacySettingPrefixes = ['BANE_', 'MX_'] as const;
