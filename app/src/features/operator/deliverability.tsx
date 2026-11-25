@@ -110,7 +110,7 @@ function fill(d: Deliverability, stream: DeliverabilityStream, region: string): 
   const vdmRows: DeliverabilityRow[] = (['all', 'gmail', 'microsoft', 'yahoo', 'apple', 'other'] as const).map(p => {
     const v = vdm.get(p)
     if (!v) return { empty: true, cells: [providerNames[p], '—', '—', '—', '—', '—', '—', '—'] }
-    return { cells: [providerNames[p], number(v.send), pct(ratio(v.delivery, v.send)), pct(ratio(v.permanentBounce, v.send)), pct(ratio(v.transientBounce, v.send)),
+    return { cells: [providerNames[p], number(Math.round(v.send)), pct(ratio(v.delivery, v.send)), pct(ratio(v.permanentBounce, v.send)), pct(ratio(v.transientBounce, v.send)),
       p === 'gmail' ? '—' : pct(ratio(v.complaint, v.deliveryComplaint)), pct(ratio(v.open, v.deliveryOpen)), pct(ratio(v.click, v.deliveryClick))],
       tones: [undefined, undefined, undefined, zone(ratio(v.permanentBounce, v.send), HARD), undefined, p === 'gmail' ? undefined : zone(ratio(v.complaint, v.deliveryComplaint), COMPLAINT)] }
   })

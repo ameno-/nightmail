@@ -324,6 +324,8 @@ function GlassRegionRow({ row, total = false }: { row: GlassRegionFill; total?: 
     <span role="cell" className="glass-region__checked">{row.checked}</span>
   </div>
 }
+/** A placeholder one line of text tall, so the text that replaces it takes the same box. */
+const SkeletonLine = ({ width }: { width: number }) => <span className="glass-skel-line"><Skeleton width={width} height={12} /></span>
 type GlassGroupDef = { key: string; title: string; to?: [href: string, label: string]; rows: GlassRowDef[] }
 /** Groups of 40px rows in as many columns as fit: a metric row each, a row of labelled cells, or a fixed note. */
 function GlassGroupList({ groups, row: fillRow }: { groups: GlassGroupDef[]; row?: (group: string, row: string) => GlassFill }) {
@@ -334,7 +336,7 @@ function GlassGroupList({ groups, row: fillRow }: { groups: GlassGroupDef[]; row
       const row = fillRow?.(group.key, def.key)
       if (def.cells) return <div key={def.key} className="glass-grades" role="list" aria-label={def.key === 'grades' ? 'Sender scores' : 'Standing steps'} style={{ gridTemplateColumns: `repeat(${def.cells.length}, minmax(0, 1fr))` }}>{def.cells.map((cell, i) =>
         <span key={cell} role="listitem"><span>{cell}</span><b>{row?.cells?.[i] ?? <Skeleton width={16} height={12} />}</b></span>)}</div>
-      return <MetricRow key={def.key} className={row?.empty ? 'glass-empty' : undefined} label={row ? row.label ?? def.label : def.label ?? <Skeleton width={112} height={12} />} hint={row?.hint}
+      return <MetricRow key={def.key} className={row?.empty ? 'glass-empty' : undefined} label={row ? row.label ?? def.label : def.label ?? <SkeletonLine width={112} />} hint={row?.hint}
         spark={def.spark && <Sparkline values={row?.spark ?? []} />} value={row ? row.value : <Skeleton width={56} height={14} />} unit={row?.unit} tone={row?.tone}
         meter={def.meter && <Meter value={row?.meter?.value ?? 0} max={row?.meter?.max ?? 1} mark={row?.meter?.mark} tone={row?.meter?.tone} label={row?.meter?.label} />} />
     })}
@@ -409,14 +411,14 @@ export function DeliverabilityControls({ window, stream, region, regions = [], n
     <Tabs value={window} onValueChange={value => onChange?.('window', value)} items={DELIVERABILITY_WINDOWS} label="Period" disabled={!onChange} />
     <Tabs value={stream} onValueChange={value => onChange?.('stream', value)} items={streams} label="Mail" disabled={!onChange} />
     <Select className="dlv-region" aria-label="Region" value={region} onValueChange={value => onChange?.('region', value)} options={options} disabled={!onChange} />
-    <span className="dlv-note">{note ?? <Skeleton width={180} height={12} />}</span>
+    <span className="dlv-note"><span>{note ?? <SkeletonLine width={180} />}</span></span>
   </div>
 }
 export const deliverabilityTiles = [['accepted', 'Accepted'], ['delivered', 'Delivered'], ['hard', 'Hard bounces'], ['soft', 'Soft bounces'], ['deferred', 'Deferred'],
   ['complained', 'Complaints'], ['human', 'Opened by people'], ['clicked', 'Clicked']] as const
 export const providerColumns = [['provider', 'Provider'], ['accepted', 'Accepted'], ['delivered', 'Delivered'], ['change', 'vs before'], ['hard', 'Hard bounce'], ['soft', 'Soft bounce'],
-  ['deferred', 'Deferred'], ['complained', 'Complaints'], ['human', 'Opened · people'], ['machine', 'Machines only'], ['clicked', 'Clicked']] as const
-export const vdmColumns = [['isp', 'ISP'], ['send', 'Sent'], ['delivered', 'Delivered'], ['permanent', 'Permanent bounce'], ['transient', 'Transient bounce'], ['complaint', 'Complaints'], ['open', 'Opens'], ['click', 'Clicks']] as const
+  ['deferred', 'Deferred'], ['complained', 'Complaints'], ['human', 'Human opens'], ['machine', 'Bot opens'], ['clicked', 'Clicked']] as const
+export const vdmColumns = [['isp', 'ISP'], ['send', 'Sent'], ['delivered', 'Delivered'], ['permanent', 'Hard bounce'], ['transient', 'Soft bounce'], ['complaint', 'Complaints'], ['open', 'Opens'], ['click', 'Clicks']] as const
 /** Mailbox providers (api/src/deliverability.ts PROVIDERS) and VDM's rows: every provider has a row, mail or none. */
 export const PROVIDER_SLOTS = 7, VDM_SLOTS = 6
 export type DeliverabilityRow = { cells: ReactNode[]; tones?: (Tone | undefined)[]; empty?: boolean }
@@ -436,7 +438,7 @@ function DeliverabilityTable({ label, columns, rows, slots: n, className }: { la
     <div className="dlv-row dlv-row--head" role="row">{columns.map(([key, title]) => <span key={key} role="columnheader" data-col={key}>{title}</span>)}</div>
     {Array.from({ length: n }, (_, i) => { const row = rows?.[i]; return <div key={i} className={row?.empty ? 'dlv-row glass-empty' : 'dlv-row'} role="row">
       {columns.map(([key, title], c) => <span key={key} role="cell" data-col={key} data-label={title} className={row?.tones?.[c] && row.tones[c] !== 'neutral' ? `ui-tone--${row.tones[c]}` : undefined}>
-        {row ? row.cells[c] : <Skeleton width={c ? 40 : 88} height={12} />}</span>)}
+        {row ? row.cells[c] : <SkeletonLine width={c ? 40 : 88} />}</span>)}
     </div> })}
   </div>
 }
