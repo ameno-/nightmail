@@ -85,9 +85,13 @@ a.ui-button:focus-visible { text-decoration: none; }
 /* A search field drops WebKit's own inset; a date reads from the left edge like every other value (iOS centres it). */
 .ui-input::-webkit-search-decoration { -webkit-appearance: none; }
 .ui-input::-webkit-date-and-time-value { text-align: start; }
-/* A textarea's first line sits where a text input's does: the same left edge, and the line centred in the first
-   control height, so the caret never hugs the top edge or the corner. Its own leading (--textarea-leading) sets both. */
-.ui-textarea { --textarea-leading: var(--leading-md); height: auto; min-height: 120px; padding-block: calc((var(--control-height) - var(--textarea-leading)) / 2); line-height: var(--textarea-leading); resize: vertical; }
+/* Number fields drop the native spinner (a white box on the fill); arrow keys still step them. */
+.ui-input[type='number'] { -moz-appearance: textfield; }
+.ui-input::-webkit-inner-spin-button, .ui-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+/* A textarea is padded evenly: its first line starts on the input's 10 px left edge, and 8 px of padding plus the
+   line's leading put the cap height about 10 px under the top edge, so the caret never hugs the top or the corner.
+   Its leading is --textarea-leading (a mono variant sets its own). */
+.ui-textarea { --textarea-leading: var(--leading-md); height: auto; min-height: 120px; padding-block: 8px; line-height: var(--textarea-leading); resize: vertical; }
 .ui-dialog .ui-textarea { resize: none; }
 .ui-field { display: flex; flex-direction: column; gap: var(--space-8); min-width: 0; }
 .ui-field__label { display: block; font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); }

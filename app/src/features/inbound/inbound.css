@@ -87,7 +87,7 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .mailbox-composer { position: sticky; bottom: 0; z-index: 1; display: grid; gap: var(--space-8); margin-top: auto; padding: var(--space-12) 0 var(--space-16); background: var(--color-surface); }
 /* Collapsed, its one line sits centred like a field's; it settles to the textarea's own padding as it opens. */
 .mailbox-composer textarea { min-height: 44px; height: 44px; padding-block: calc((44px - var(--textarea-leading)) / 2); resize: none; transition: height var(--motion-duration, 120ms), padding var(--motion-duration, 120ms), background var(--motion-duration) var(--ease-standard); }
-.mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; padding-block: calc((var(--control-height) - var(--textarea-leading)) / 2); resize: vertical; }
+.mailbox-composer:focus-within textarea, .mailbox-composer[data-filled] textarea { height: 112px; padding-block: 8px; resize: vertical; }
 .mailbox-composer__to { font-size: var(--text-xs); color: var(--color-muted); overflow-wrap: anywhere; }
 .mailbox-composer__to.muted { margin: 0; }
 .inbound-composer__target { display: flex; align-items: center; gap: var(--space-4); min-height: 24px; }
@@ -141,7 +141,7 @@ ul.mailbox-attachments button:focus-visible { background: var(--color-control-fo
 .alias-list .ui-icon-button { margin-inline-end: calc(-1 * var(--space-6)); }
 .alias-list + .alias-add { margin-top: var(--space-4); }
 .alias-add { display: flex; gap: var(--space-8); }
-.alias-input { display: flex; align-items: center; flex: 1; padding: 0 var(--space-8); font-family: var(--font-mono); cursor: text; }
+.alias-input { display: flex; align-items: center; flex: 1; font-family: var(--font-mono); cursor: text; }
 .alias-input:focus-within { background-color: var(--color-control-focus); }
 .alias-input[data-invalid] { background-color: var(--color-control-invalid); }
 .alias-input[data-invalid]:focus-within { background-color: var(--color-control-invalid-focus); }

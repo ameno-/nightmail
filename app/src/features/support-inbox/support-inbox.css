@@ -127,8 +127,8 @@ a.sinbox-list__main:focus-visible { text-decoration: underline; text-underline-o
   .sinbox-panel { margin-top: var(--space-24); padding: var(--space-20) 0 0; }
   .sinbox-composer { bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom)); }
   /* The reply is one line until it is used, so the transcript keeps the screen. */
-  .sinbox-composer .ui-textarea { min-height: 44px; height: 44px; resize: none; transition: height var(--motion-duration, 120ms); }
-  .sinbox-composer:focus-within .ui-textarea, .sinbox-composer[data-filled] .ui-textarea { height: 112px; }
+  .sinbox-composer .ui-textarea { min-height: 44px; height: 44px; padding-block: calc((44px - var(--textarea-leading)) / 2); resize: none; transition: height var(--motion-duration, 120ms), padding var(--motion-duration, 120ms); }
+  .sinbox-composer:focus-within .ui-textarea, .sinbox-composer[data-filled] .ui-textarea { height: 112px; padding-block: 8px; }
   .sinbox-composer:not(:focus-within):not([data-filled]):not([data-unavailable]) .sinbox-composer__actions { display: none; }
 }
 @media (pointer: coarse) { .data-toolbar > .sinbox-shortcuts-button { display: none; } }
