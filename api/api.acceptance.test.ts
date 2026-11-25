@@ -41075,13 +41075,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       runtime.config.multiTenant=true;
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,sending_state,feedback_topic_arn) VALUES($1,$2,'ready',$3)`,[REGION,acct,`arn:aws:sns:${REGION}:${acct}:fixture`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,kind,state,region,aws_account_id,tenant_state) VALUES($1,$1,'shared','ready',$2,$3,'ready')`,[wid,REGION,acct]);
-      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('own.invalid',$1,$1,'verified'),('unproven.invalid',$1,$1,'pending')`,[wid]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state,lost_since) VALUES('own.invalid',$1,$1,'verified',NULL),('unproven.invalid',$1,$1,'pending',NULL),('lapsed.invalid',$1,$1,'lost',now())`,[wid]);
       const draft=ok(await local('POST','/v1/campaigns',{name:'hosted test',from:'news@own.invalid',subject:'Spring sale',html:'<p>Spring sale</p>'}),201);
       const test=(to:string)=>local('POST',`/v1/campaigns/${draft.id}/test`,{to});
       const before=await emails();
-      // Not the workspace's own: a stranger, a domain it has not verified, names that only end like its own, and a member
-      // whose email is unverified.
-      for (const to of ['stranger@example.net','someone@unproven.invalid','x@own.invalid.example','x@notown.invalid']) assert.equal(error(await test(to),422,'TEST_RECIPIENT_NOT_OWNED').field,'to');
+      // Not the workspace's own: a stranger, a domain it has not verified, one whose verification lapsed (still in its grace
+      // period), names that only end like its own, and a member whose email is unverified.
+      for (const to of ['stranger@example.net','someone@unproven.invalid','someone@lapsed.invalid','x@mail.lapsed.invalid','x@own.invalid.example','x@notown.invalid']) assert.equal(error(await test(to),422,'TEST_RECIPIENT_NOT_OWNED').field,'to');
       await db.query('UPDATE nightmail_users SET email_verified=false WHERE id=$1',[manager!.userId]);
       error(await test(AUTH_EMAIL),422,'TEST_RECIPIENT_NOT_OWNED');
       await db.query('UPDATE nightmail_users SET email_verified=true WHERE id=$1',[manager!.userId]);
