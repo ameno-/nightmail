@@ -136,6 +136,9 @@ const values = z.object({
   STRIPE_TAX_CODE: z.string().regex(/^txcd_\d{8}$/).default('txcd_10103001'),
   STRIPE_API_BASE: z.url().default('https://api.stripe.com'),
   NIGHTMAIL_PLACEMENT_SHADOW: z.enum(['true','false']).default('true'),
+  // Hosted only, a secret: Glass's Gmail Postmaster Tools reads, an OAuth grant as JSON {clientId, clientSecret, refreshToken}
+  // (scripts/postmaster-auth.ts makes it, for the Google account that verified the domains in Postmaster Tools).
+  NIGHTMAIL_POSTMASTER_CREDENTIALS: optional(z.string().max(4000)),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   // Links in customer mail (unsubscribe, forwarding) go on the sending domain's own links.<domain> (src/link-domains.ts):
@@ -305,6 +308,12 @@ export function loadConfig(input: Record<string, unknown>): Config {
     if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.d !== 'string' || typeof jwk.x !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_SIGNING_KEY to an Ed25519 private JWK with d and x.');
     supportSigningKey = { kty: 'OKP', crv: 'Ed25519', d: jwk.d, x: jwk.x };
   }
+  let postmaster: Config['postmaster'];
+  if (v.NIGHTMAIL_POSTMASTER_CREDENTIALS) {
+    const grant = (() => { try { return JSON.parse(v.NIGHTMAIL_POSTMASTER_CREDENTIALS!) as Record<string, unknown>; } catch { return null; } })();
+    if (!grant || typeof grant.clientId !== 'string' || typeof grant.clientSecret !== 'string' || typeof grant.refreshToken !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_POSTMASTER_CREDENTIALS to the JSON scripts/postmaster-auth.ts writes: clientId, clientSecret and refreshToken.');
+    postmaster = { clientId: grant.clientId, clientSecret: grant.clientSecret, refreshToken: grant.refreshToken };
+  }
   const supportAddressIds = list(v.NIGHTMAIL_SUPPORT_ADDRESS_IDS ?? '');
   if (supportAddressIds.some(id => !/^mbx_[0-9a-f]{32}$/.test(id))) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_ADDRESS_IDS to inbound address IDs (mbx_…) separated by commas.');
   const url = new URL(v.PUBLIC_URL);
@@ -353,7 +362,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     planetscaleWebhookSecret: v.MULTI_TENANT==='true' ? planetscaleSecret(v.PLANETSCALE_WEBHOOK_SECRET) : undefined,
     billing: v.MULTI_TENANT==='true' ? { stripe: v.STRIPE_SECRET_KEY && v.STRIPE_WEBHOOK_SECRET ? { secretKey: v.STRIPE_SECRET_KEY, webhookSecret: v.STRIPE_WEBHOOK_SECRET, automaticTax: v.STRIPE_AUTOMATIC_TAX === 'true',
       creditProduct: v.STRIPE_CREDIT_PRODUCT_ID, taxCode: v.STRIPE_TAX_CODE, apiBase: v.STRIPE_API_BASE.replace(/\/$/, '') } : undefined } : undefined,
-    placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE,
+    placementShadow: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_PLACEMENT_SHADOW === 'true', placementDblZone: v.NIGHTMAIL_PLACEMENT_DBL_ZONE, postmaster: v.MULTI_TENANT === 'true' ? postmaster : undefined,
     byoV2: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_BYO_V2 === 'true', byoV5TemplateUrl: v.BYO_V5_TEMPLATE_URL, byoEventsOrigin: v.BYO_EVENTS_ORIGIN,
     // The daily limit of a workspace the standing job has not seen yet: the evaluation's (docs/sending-limits.md).
     hostedSendCaps: { firstWeek: EVALUATION.limit },

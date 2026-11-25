@@ -158,6 +158,8 @@ export interface Config {
   billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; creditProduct: string; taxCode: string; apiBase: string } };
   placementShadow?: boolean;
   placementDblZone?: string;
+  /** Glass's Gmail Postmaster Tools reads (NIGHTMAIL_POSTMASTER_CREDENTIALS): an OAuth grant with postmaster.readonly. */
+  postmaster?: { clientId: string; clientSecret: string; refreshToken: string };
   byoTemplateUrl?: string;
   byoV2?: boolean;
   byoV5TemplateUrl?: string;

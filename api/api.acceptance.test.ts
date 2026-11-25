@@ -30585,6 +30585,138 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('Glass deliverability: our mail by mailbox provider, kind and region against the period before, from a rollup the triggers keep and a page backfill rebuilds exactly; SES health and VDM estimates per region; operators only', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const wid = runtime.config.workspaceId, path = '/v1/operator/glass/deliverability', pool = '444455557777', region = 'eu-deliv-1';
+      Object.assign(runtime.config, { multiTenant: true });
+      const { readDeliverability, refreshDeliverabilitySources } = await import('./src/glass-deliverability.js');
+      const { providerOf } = await import('./src/deliverability.js');
+      // Not an operator: the operator area's one refusal, as for a path that doesn't exist; hidden from the public document.
+      const refused = (reply: Reply) => { const { requestId: _, ...rest } = error(reply, 403, 'OPERATOR_REQUIRED'); return { status: reply.status, ...rest }; };
+      assert.deepEqual(refused(await local('GET', path)), refused(await local('GET', '/v1/operator/no-such-page')));
+      assert.equal(ok(await local('GET', '/openapi.json')).paths[path], undefined);
+      const { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic deliverability reader']);
+
+      // The SQL provider map is deliverability.ts providerOf, domain by domain.
+      const domains = ['gmail.com', 'googlemail.com', 'outlook.com', 'hotmail.co.uk', 'live.com.au', 'msn.com', 'yahoo.co.jp', 'aol.com', 'ymail.com', 'icloud.com', 'me.com', 'proton.me', 'gmx.de', 'gmx.net', 'web.de', 'example.org', 'mail.outlook.example', 'yahoo.example.co.uk.evil'];
+      const { rows: mapped } = await db.query('SELECT d, mail_provider(d) AS p FROM unnest($1::text[]) d', [domains]);
+      assert.deepEqual(mapped.map((r: Json) => r.p), domains.map(d => providerOf(d)));
+
+      // A region of our own, so the shared database's other mail doesn't move these figures.
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`, [region, pool, `arn:aws:sns:${region}:${pool}:deliv`]);
+      const mail = async (to: string, kind: 'transactional' | 'marketing', status: string, bits: number, extra: { simulated?: boolean; age?: string; provider?: string } = {}) => {
+        const id = unique('email');
+        await db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,status,simulated,screened,event_outcomes,provider_id,created_at)
+          VALUES ($1,$2,$3,'fixture','news@example.com',$4,'[]','[]','Hello',$5,$6,$7,true,$8,$9,now()-$10::interval)`,
+          [id, wid, region, JSON.stringify([to]), { kind, subject: 'Hello', text: 'Hello', attachments: [] }, status, extra.simulated ?? false, bits, extra.provider ?? null, extra.age ?? '0 seconds']);
+        return id;
+      };
+      const event = (email: string, type: string, data: Json = {}) => db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,data,simulated,created_at) VALUES ($1,$2,$3,$4,'p',$5,false,now())`, [unique('event'), wid, email, type, data]);
+      const gmailTx = await mail('a@gmail.com', 'transactional', 'delivered', 3);
+      const gmailMk = await mail('b@googlemail.com', 'marketing', 'delivered', 3);
+      await mail('c@aol.com', 'marketing', 'bounced', 5);
+      await mail('d@outlook.co.uk', 'transactional', 'complained', 11);
+      const apple = await mail('e@icloud.com', 'marketing', 'delivered', 3);
+      const other = await mail('f@example.org', 'transactional', 'sent', 0, { provider: 'ses-1' });
+      await mail('g@gmail.com', 'transactional', 'delivered', 3, { simulated: true });
+      await mail('h@gmail.com', 'transactional', 'delivered', 3, { age: '30 hours' });
+      // Two human opens in two statements count one opened email; a bot-flagged open is an open, not a human one; two
+      // delays in one statement are one deferred email.
+      await event(gmailMk, 'open', { isBotEvent: 'Unlikely' });
+      await event(gmailMk, 'open', { isBotEvent: 'Unlikely' });
+      await event(apple, 'open', { isBotEvent: 'Likely' });
+      await event(other, 'non_permanent_bounce');
+      await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,data,simulated,created_at) SELECT $1||n,$2,$3,'delivery_delay','p','{}',false,now() FROM generate_series(1,2) n`, [unique('event'), wid, other]);
+      // The most complaints and bounces of any workspace in the period, so this one leads both lists.
+      await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails,accepted,bounced,complained) VALUES ($1,$2,'transactional',date_trunc('hour',now(),'UTC'),0,0,1000000,1000000)`, [wid, region]);
+      // A later complaint moves the first email's figures (the update trigger).
+      await db.query(`UPDATE sending_emails SET status='complained',event_outcomes=event_outcomes|8 WHERE id=$1`, [gmailTx]);
+      await db.query('SELECT * FROM fold_deliverability_hourly(50000)');
+      assert.equal(Number((await db.query(`SELECT count(*) - count(DISTINCT (hour,kind,provider)) AS n FROM deliverability_hourly WHERE region=$1`, [region])).rows[0].n), 0, 'Folded to one row a key.');
+
+      const zero = { accepted: 0, delivered: 0, hardBounced: 0, softBounced: 0, deferred: 0, complained: 0, opened: 0, humanOpened: 0, clicked: 0 };
+      const ours = (b: Awaited<ReturnType<typeof readDeliverability>>) => b.cube.filter(c => c.region === region).map(({ provider, kind, current, previous }) => ({ provider, kind, current, previous }));
+      const day = await readDeliverability(runtime, '24h');
+      assert.deepEqual(ours(day), [
+        { provider: 'apple', kind: 'marketing', current: { ...zero, accepted: 1, delivered: 1, opened: 1 }, previous: zero },
+        { provider: 'gmail', kind: 'marketing', current: { ...zero, accepted: 1, delivered: 1, opened: 1, humanOpened: 1 }, previous: zero },
+        { provider: 'gmail', kind: 'transactional', current: { ...zero, accepted: 1, delivered: 1, complained: 1 }, previous: { ...zero, accepted: 1, delivered: 1 } },
+        { provider: 'microsoft', kind: 'transactional', current: { ...zero, accepted: 1, delivered: 1, complained: 1 }, previous: zero },
+        { provider: 'other', kind: 'transactional', current: { ...zero, accepted: 1, softBounced: 1, deferred: 1 }, previous: zero },
+        { provider: 'yahoo', kind: 'marketing', current: { ...zero, accepted: 1, hardBounced: 1 }, previous: zero },
+      ]);
+      assert.deepEqual([day.window, day.unit, Date.parse(day.until) - Date.parse(day.since), Date.parse(day.since) - Date.parse(day.previousSince)], ['24h', 'hour', 86_400_000, 86_400_000]);
+      assert.ok(day.coverageFrom !== null && day.coverageFrom <= day.since);
+      assert.equal(day.series.filter(s => s.region === region).reduce((n, s) => n + s.accepted, 0), 6, 'The series is the current period only.');
+      // 7 days: both emails in the current period, daily buckets.
+      const week = await readDeliverability(runtime, '7d');
+      assert.deepEqual([week.unit, ours(week).find(c => c.provider === 'gmail' && c.kind === 'transactional')!.current.accepted], ['day', 2]);
+
+      // The backfill rebuilds what the triggers wrote, exactly, and a page run again adds nothing.
+      await db.query('DELETE FROM deliverability_hourly WHERE region=$1', [region]);
+      const pages = (await db.query(`SELECT to_char(date_trunc('hour',now()-interval '30 hours','UTC') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS a,to_char(date_trunc('hour',now(),'UTC') AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS"Z"') AS b`)).rows[0];
+      for (const page of [pages.a, pages.b, pages.b]) await db.query('SELECT deliverability_fill_page($1)', [page]);
+      assert.deepEqual(ours(await readDeliverability(runtime, '24h')), ours(day));
+      assert.equal((await db.query(`SELECT deliverability_fill_page($1) AS next`, [new Date(Date.now() + 3_600_000).toISOString()])).rows[0].next, null, 'Done once a page starts after now.');
+
+      // The top workspaces by complaints and bounces, IDs only.
+      assert.deepEqual([day.top.complaints[0]!.workspaceId, day.top.complaints[0]!.complained, day.top.bounces[0]!.workspaceId, day.top.bounces[0]!.bounced], [wid, 1000002, wid, 1000001]);
+      assert.ok(day.top.complaints.length <= 10 && day.top.complaints.every(w => Object.keys(w).join() === 'workspaceId,accepted,bounced,complained'));
+
+      // Amazon's view: GetAccount every 10 minutes, VDM hourly, each elected once; DBL unconfigured without a DQS zone.
+      // Gmail Postmaster Tools through the stored OAuth grant: a token, then the domain's days (Google's answers stubbed).
+      const builtin = runtime.config.builtinDomain;
+      runtime.config.builtinDomain = 'deliverability.example';
+      runtime.config.postmaster = { clientId: 'client', clientSecret: 'secret', refreshToken: 'refresh' };
+      t.after(() => { runtime.config.builtinDomain = builtin; delete runtime.config.postmaster; });
+      const asked: string[] = [];
+      const today = new Date().toISOString().slice(0, 10).replaceAll('-', ''), yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10).replaceAll('-', '');
+      // Passed in, never put on the global fetch: concurrent fixtures own that one.
+      const google = async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input instanceof Request ? input.url : input);
+        if (url === 'https://oauth2.googleapis.com/token') { asked.push(`token:${new URLSearchParams(String(init?.body)).get('refresh_token')}`); return Response.json({ access_token: 'access', expires_in: 3600 }); }
+        if (url.startsWith('https://gmailpostmastertools.googleapis.com/v1/domains/deliverability.example/trafficStats?')) {
+          asked.push(`stats:${new Headers(init?.headers).get('authorization')}`);
+          return Response.json({ trafficStats: [
+            { name: `domains/deliverability.example/trafficStats/${yesterday}`, domainReputation: 'MEDIUM', userReportedSpamRatio: 0.002, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 0.98 },
+            { name: `domains/deliverability.example/trafficStats/${today}`, domainReputation: 'HIGH', userReportedSpamRatio: 0.0004, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 1 },
+          ] });
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      };
+      await refreshDeliverabilitySources(runtime, { fetch: google as typeof fetch });
+      assert.deepEqual(asked, ['token:refresh', 'stats:Bearer access']);
+      const checks = (await db.query(`SELECT kind,status,detail,checked_at FROM deliverability_checks WHERE subject=$1 ORDER BY kind`, [region])).rows;
+      assert.deepEqual(checks.map((c: Json) => [c.kind, c.status, c.detail]), [
+        ['ses', 'ok', { enforcement: 'HEALTHY', sendingEnabled: true, productionAccess: true, vdm: true, engagement: true }],
+        ['vdm', 'ok', { days: 60 }],
+      ]);
+      await refreshDeliverabilitySources(runtime, { fetch: google as typeof fetch });
+      assert.deepEqual((await db.query(`SELECT checked_at FROM deliverability_checks WHERE subject=$1 ORDER BY kind`, [region])).rows.map((c: Json) => c.checked_at), checks.map((c: Json) => c.checked_at), 'Not due again yet.');
+      const board = await readDeliverability(runtime, '7d'), mine = board.regions.find(r => r.region === region)!;
+      assert.deepEqual([mine.ses.enforcement, mine.ses.vdm, mine.vdm.status, mine.vdm.providers.map(p => p.provider)], ['HEALTHY', true, 'ok', ['all', 'gmail', 'yahoo', 'other']]);
+      // The simulator's day: 1,000 sent in all, half to Gmail, a fifth to Yahoo; seven days of it, and seven before.
+      const vdm = (provider: string) => mine.vdm.providers.find(p => p.provider === provider)!;
+      assert.deepEqual([vdm('all').current.send, vdm('gmail').current.send, vdm('yahoo').current.send, vdm('other').current.send, vdm('gmail').previous.send, vdm('gmail').current.deliveryOpen],
+        [7000, 3500, 1400, 2100, 3500, 3150]);
+      assert.deepEqual(board.blocklist.find(b => b.domain === 'deliverability.example')?.status, 'unconfigured');
+      const postmaster = board.postmaster.find(p => p.domain === 'deliverability.example')!;
+      assert.deepEqual([postmaster.status, postmaster.url, postmaster.latest, Math.round(postmaster.spamRatio.current! * 1e6) / 1e6], ['ok', 'https://postmaster.google.com/',
+        { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, reputation: 'HIGH', spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1 }, 0.0012]);
+      runtime.config.builtinDomain = builtin;
+
+      // The route: the same figures for an operator, cached; a window that isn't one is refused.
+      const first = await local('GET', `${path}?window=24h`), page = ok(first);
+      assert.deepEqual([first.headers.get('x-nightmail-glass-cache'), first.headers.get('cache-control')], ['miss', 'private, no-store']);
+      assert.deepEqual(page.cube.filter((c: Json) => c.region === region).map(({ provider, kind, current, previous }: Json) => ({ provider, kind, current, previous })), ours(day));
+      assert.equal((await local('GET', `${path}?window=24h`)).headers.get('x-nightmail-glass-cache'), 'hit');
+      error(await local('GET', `${path}?window=90d`), 422, 'VALIDATION_FAILED');
+      const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
+      assert.deepEqual(refused(await request('GET', path, key.secret)), refused(await request('GET', '/v1/operator/no-such-page', key.secret)));
+    });
+  });
+
   test('operator API: only platform operators read and act; every action needs a reason and is audited in its transaction', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const wid = runtime.config.workspaceId, pool = '111122223333', base = `/v1/operator/workspaces/${wid}`;

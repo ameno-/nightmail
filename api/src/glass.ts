@@ -7,11 +7,12 @@ import { placesRow, withOpen, type Places } from './signups.js';
 import { alertLabel, quantile } from './health.js';
 import { LATENCY_BUCKETS } from './health-counters.js';
 import { TICK } from './health-thresholds.js';
-import { GRADE_BANDS, GRADES, type Grade } from './standing-model.js';
+import { GRADES, type Grade } from './standing-model.js';
 import { poolReceives, poolSends } from './states.js';
 import { regionLabels } from './region-labels.js';
 import { MicroCentsJson } from './billing/money.js';
 import { PUBLIC_ROUTE } from './analytics-traffic.js';
+import { gradeCounts, registerGlassDeliverability } from './glass-deliverability.js';
 
 // Glass (/glass in the dashboard): everything going on in the installation on one page, for operators. One read that
 // returns every figure, cached GLASS_TTL_SECONDS per installation, so the page's 30-second refresh costs one statement
@@ -125,11 +126,6 @@ const utc = (value: SQL) => sql`to_char((${value}) AT TIME ZONE 'UTC','YYYY-MM-D
 /** n buckets from `start`, oldest first, each `counts`' n for its bucket or 0. `counts` returns (at, n). */
 const series = (start: SQL, unit: 'minute' | 'hour' | 'day', n: number, counts: SQL, end?: SQL) => sql`(SELECT coalesce(json_agg(coalesce(c.n,0) ORDER BY g.at),'[]')
   FROM generate_series(${start},${end ?? sql`${start}+${`${n - 1} ${unit}s`}::interval`},${`1 ${unit}`}::interval) g(at) LEFT JOIN (${counts}) c ON c.at=g.at)`;
-// The grade bands as SQL, best first: A+ from 95, A from 90 below 95, and so on (src/standing-model.ts).
-const gradeCounts = sql.join(GRADE_BANDS.map((band, i) => {
-  const above = GRADE_BANDS[i - 1];
-  return sql`${band.grade}::text,count(*) FILTER (WHERE s.phase='graded' AND s.score>=${band.min}${above ? sql` AND s.score<${above.min}` : sql``})`;
-}), sql`,`);
 
 export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promise<Glass> {
   const cap = GLASS_CAP + 1, own = new URL(runtime.config.publicUrl).hostname;
@@ -356,6 +352,7 @@ export async function readActivity(runtime: Pick<Runtime, 'db'>): Promise<GlassA
 }
 
 export function registerGlass(app: App) {
+  registerGlassDeliverability(app);
   app.openapi(createRoute({ hide: true, tags: ['Operator'], security, method: 'get', path: '/v1/operator/glass', operationId: 'operatorGetGlass',
     description: `Everything going on in the installation, for operators: sign-ups, sending, delivery, receiving, money, the system and visitors. One statement over rollups and bounded heads, cached ${GLASS_TTL_SECONDS} seconds.`,
     responses: { 200: response(Glass), ...errors } }), async c => {
