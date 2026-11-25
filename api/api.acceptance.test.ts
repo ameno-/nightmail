@@ -8507,7 +8507,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // 1. The text keeps everything but what looks like a credential: Nightmail's own IDs stay.
       const jwt = 'eyJhbGciOiJFUzI1NiJ9.eyJzdWIiOiJ1c2VyXzEyMyJ9.c2lnbmF0dXJlX2J5dGVzX2hlcmU';
       for (const [text, redacted] of [[`nm_${hex()}`, 1], [`nm_agent_${hex()}`, 1], [jwt, 1], ['Authorization: Bearer abcdefghij0123456789', 1], ['AKIAABCDEFGHIJKLMNOP', 1], ['password=hunter2hunter2', 1],
-        ['QmFzZTY0U2VjcmV0VmFsdWVXaXRoTWl4ZWRDYXNlMTIz', 1], [`req_${hex().slice(0, 32)} email_${hex().slice(0, 32)} mbx_${hex().slice(0, 32)}`, 0], ['internationalizationlocalizationization', 0], ['the token expired after refreshing; password protected; basic authentication', 0]] as const) {
+        ['QmFzZTY0U2VjcmV0VmFsdWVXaXRoTWl4ZWRDYXNlMTIz', 1], [`os_${hex()}`, 1], [`os_live_${hex()}`, 1], [`nm_${hex().toUpperCase()}`, 1], [`req_${hex().slice(0, 32)} email_${hex().slice(0, 32)} mbx_${hex().slice(0, 32)}`, 0], ['internationalizationlocalizationization', 0], ['the token expired after refreshing; password protected; basic authentication', 0]] as const) {
         const out = redactSecrets(text);
         assert.equal(out.redacted, redacted, text); if (redacted) assert.match(out.text, /\[redacted\]/, text); else assert.equal(out.text, text);
       }
