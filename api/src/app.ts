@@ -6,7 +6,7 @@ import { reserveMemory, runInMemoryScope, type MemoryLease } from './isolate-mem
 import { IMPORT_PREVIEW_RATE_PER_MINUTE, importPreviewReservationBytes } from './audience.js';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
 import { getPath } from 'hono/utils/url';
-import { actor, agentSetupRefusal, budgetExhausted, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
+import { actor, agentSetupRefusal, budgetExhausted, restrictedArea, mailboxRoute, memberRefused, receivingConsentRoute, unrestrictedRoute, ApiError, apiFailureBody, describeApiFailure, denied, requiredHeader, requiredHeaderValue, requiredOf, unrestrictedRequired, databaseCodeOf, errorCodeOf, id, lazyModule, log, logError, ModuleLoadError, newRequestId, secureResponse, SECURITY_HEADERS, timed, wrapModuleLoad } from './core.js';
 import type { App, Runtime } from './core.js';
 import type { AppEnv, Ctx } from './core.js';
 import { authenticate, registerAuth, requireReceivingConsent } from './auth.js';
@@ -262,7 +262,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     // finished reading the wire bytes, so stalled slow uploads never hold a lease). Check domain scope, editContent
     // permission, and the per-minute preview limit first so rejected callers never queue other workspaces behind them.
     if (c.req.method === 'POST' && c.req.path === '/v1/contact-imports' && c.get('actor')) {
-      if (c.get('actor')?.domains.length) throw unrestrictedRequired('Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
+      if (c.get('actor')?.domains.length) throw unrestrictedRequired(c.get('actor'), restrictedArea(c.req.path), requiredOf(c));
       const identity = actor(c, 'editContent');
       if (await budgetExhausted(c.env, identity.workspaceId, 'imports:preview', IMPORT_PREVIEW_RATE_PER_MINUTE)) {
         c.header('Retry-After', '60');
@@ -295,8 +295,7 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
   // A sender-domain grant can edit untargeted drafts, not operate on a workspace audience. Check before idempotency:
   // recorded launch responses also contain audience counts. The MCP listing uses the same predicate (core.ts).
   app.use('/v1/*', (c, next) => {
-    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw unrestrictedRequired(c.req.path.startsWith('/v1/campaigns/')
-      ? 'Campaign audience and delivery operations require an unrestricted credential.' : 'Workspace-wide operations require a key without domain restrictions.', requiredOf(c));
+    if (unrestrictedRoute(c.req.path) && c.get('actor')?.domains.length) throw unrestrictedRequired(c.get('actor'), restrictedArea(c.req.path), requiredOf(c));
     return next();
   });
   app.use('/v1/*', (c, next) => { const refusal = agentSetupRefusal(c.get('actor'), c.req.path, c.req.method); if (refusal) throw refusal; return next(); });
