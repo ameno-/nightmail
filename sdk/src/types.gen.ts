@@ -202,7 +202,7 @@ export type ConnectionSummary = {
         id: string | null;
         name: string;
         /**
-         * ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: turned off by the operator.
+         * ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: turned off by the operator, or paused for every workspace (the built-in domains' circuit breaker) until an operator turns it back on.
          */
         sending: 'ready' | 'pending' | 'closed' | 'off';
         /**

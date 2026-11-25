@@ -114,6 +114,7 @@ const deliver: JobHandler = async (runtime, payload, job) => {
   if (payload.code === 'SES_IDENTITY_QUOTA_EXHAUSTED') return postSlack(url, { text: `SES identity quota exhausted in ${payload.region}. Request regional identity capacity before onboarding more domains.` });
   if (payload.code === 'HOSTED_EXEMPT_OVER_LINE') return postSlack(url, { text: exemptAlertText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl) });
   if (payload.code === 'SES_TENANT_PAUSED') return postSlack(url, { text: tenantPausedText({ ...payload, workspaceId: job.workspaceId }, runtime.config.publicUrl) });
+  if (payload.code === 'BUILTIN_PARENT_TRIPPED') return postSlack(url, { text: builtinTrippedText(payload) });
   const { region, metric, level, previous, value } = payload;
   if (typeof region !== 'string' || !(metric === 'bounceRate' || metric === 'complaintRate') || !LEVELS.includes(level as Level) || !LEVELS.includes(previous as Level) || typeof value !== 'number') throw new ApiError(500, 'JOB_PAYLOAD_INVALID', 'Invalid reputation alert job.');
   await postSlack(url, { text: reputationAlertText({ region, metric, level: level as Level, previous: previous as Level, value, publicUrl: runtime.config.publicUrl }) });
@@ -141,6 +142,14 @@ const operatorPage = (publicUrl: string, wid: unknown) => `${publicUrl.replace(/
 export function tenantPausedText(p: Record<string, unknown>, publicUrl: string) {
   return `:rotating_light: *AWS paused an SES tenant*${p.exempt ? ' of a first-party (exempt) workspace' : ''} · ${String(p.workspaceId ?? '')}\n`
     + `${String(p.tenant ?? '')}: ${String(p.cause ?? 'no cause given')}. ${productName} paused the workspace to match; only an operator resumes it, after AWS reinstates the tenant.\n<${operatorPage(publicUrl, p.workspaceId)}|Open it in ${productName}>`;
+}
+/** The built-in domains' circuit breaker tripped (builtin-domain.ts builtinBreaker): every one stopped sending until a person resets it. */
+export function builtinTrippedText(p: Record<string, unknown>) {
+  const n = (v: unknown) => Number(v ?? 0).toLocaleString('en-US'), of = (v: unknown) => `${percent(Number(v ?? 0) / Math.max(1, Number(p.recipients ?? 0)))} (${n(v)} of ${n(p.recipients)})`;
+  return `:rotating_light: *Built-in domains stopped sending: too many ${p.line === 'complaints' ? 'spam complaints' : 'bounces'}* · ${String(p.parent ?? '')}\n`
+    + `Bounces ${of(p.bounces)}, complaints ${of(p.complaints)} over the last ${n(p.windowHours)} hours; SES warns at 5% and 0.1%. `
+    + `Sending is paused for ${n(p.paused)} built-in ${Number(p.paused) === 1 ? 'domain' : 'domains'}; receiving continues. It stays paused until an operator finds the cause (revoke the senders behind it) and runs `
+    + '`node --import tsx scripts/builtin-domain.ts reset-breaker --apply --reason "…"`.';
 }
 // A storage hiccup or a timed-out post retries like other background work instead of losing the alert on its first failure.
 export const reputationAlertJobs = { [JOB]: retryDatabaseFailures(deliver) };

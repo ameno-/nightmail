@@ -23144,6 +23144,101 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     }));
   });
 
+  test('built-in domain breaker: all built-in mail at 5% bounces or 0.1% complaints stops every built-in domain sending, not receiving, pages the reputation channel, and stays tripped until an operator resets it',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
+      const [{SESv2Client,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand},builtin,{reputationAlertJobs},{JobDeferred}]=await Promise.all([
+        import('@aws-sdk/client-sesv2'),import('./src/builtin-domain.js'),import('./src/reputation-alerts.js'),import('./src/jobs.js')]);
+      const wid=runtime.config.workspaceId,acct='111122225555',oh='us-east-2',parent='nightmail-fixture.email',topic=`arn:aws:sns:${oh}:${acct}:bane-feedback`;
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'fixture',secretAccessKey:'fixture-only'},builtinDomain:parent,builtinScope:'anyone',
+        platformAccount:undefined,reputationAlertUrl:'https://hooks.slack.invalid/builtin-breaker'});
+      await db.query(`UPDATE ses_installation_settings SET default_region=$2,enabled_regions=jsonb_build_array($2::text) WHERE workspace_id=$1`,[wid,oh]);
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket,inbound_topic_arn,receiving_state) VALUES($1,$2,$3,'ready',$4,$5,'ready')`,
+        [oh,acct,topic,'breaker-fixture-mail',`arn:aws:sns:${oh}:${acct}:bane-inbound`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES($1,$1,$2,'ready','shared',$3,'ready')`,[wid,oh,acct]);
+      const verifiedParent={IdentityType:'DOMAIN',VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningAttributesOrigin:'AWS_SES',SigningEnabled:true,Status:'SUCCESS',Tokens:['a','b','c']},
+        MailFromAttributes:{MailFromDomain:`bounce.${parent}`,MailFromDomainStatus:'SUCCESS'},Tags:[{Key:'bane:purpose',Value:'builtin-domains'}],Policies:{},FeedbackForwardingStatus:false};
+      const associated:string[]=[];
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        if(cmd instanceof GetEmailIdentityCommand)return verifiedParent;
+        assert.ok(cmd instanceof CreateTenantResourceAssociationCommand,cmd.constructor.name);associated.push(String(cmd.input.TenantName));return {};
+      });
+      const pace=()=>db.query("UPDATE job_schedule SET wake_not_before=now() WHERE workspace_id='domain.verify:platform'");
+      // A built-in domain that sends: the parent verified and associated with this workspace's tenant.
+      for (let turn=0;turn<20 && !(await db.query('SELECT FROM builtin_domains WHERE workspace_id=$1',[wid])).rowCount;turn++) await builtin.builtinDomainTick(runtime);
+      const host=(await db.query('SELECT name FROM builtin_domains WHERE workspace_id=$1',[wid])).rows[0].name as string,from=`hello@${host}`;
+      await pace();await run('domain.builtin');
+      const claim=async()=>(await db.query("SELECT sending_state FROM domain_claims WHERE workspace_id=$1 AND name=$2",[wid,host])).rows[0]?.sending_state;
+      const me=async()=>ok(await local('GET','/v1/me')).connection.builtinDomain;
+      const stored=async()=>(await db.query('SELECT ok,problem,tripped_at IS NOT NULL AS tripped,trip FROM builtin_parent WHERE name=$1',[parent])).rows[0];
+      assert.equal(await claim(),'verified');assert.equal((await me()).sending,'ready');assert.equal(associated.length,1);
+
+      // The lines, at each edge: nothing under 1,000 recipients, 5% bounces, 0.1% complaints but never fewer than 3.
+      for (const [m,line] of [[{recipients:999,bounces:999,complaints:999},null],[{recipients:1000,bounces:49,complaints:2},null],[{recipients:1000,bounces:50,complaints:0},'bounces'],
+        [{recipients:1000,bounces:0,complaints:2},null],[{recipients:3000,bounces:0,complaints:3},'complaints'],[{recipients:3001,bounces:0,complaints:3},null]] as const)
+        assert.equal(builtin.breakerVerdict(m),line,JSON.stringify(m));
+
+      // Synthetic mail: one email to `n` recipients, sent 25 hours ago (in the breaker's 48 hours, outside the domain's own
+      // 24-hour cap). outcomes: its event bits (8 = a complaint), as feedback sets them.
+      const mail=(sender:string,status:string,n:number,o:{outcomes?:number;at?:string;simulated?:boolean;accepted?:boolean;to?:string}={})=>db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,
+          to_addresses,cc_addresses,bcc_addresses,subject,status,provider_id,event_outcomes,snapshot,simulated,created_at)
+        SELECT $1,$2,$3,'fixture',$4,(SELECT jsonb_agg(format('r%s-%s@%s',$1::text,i,$9::text)) FROM generate_series(1,$5::int) i),'[]','[]','Breaker',$6,CASE WHEN $7 THEN $1 END,$8,'{}',$10,now()-$11::interval`,
+        [unique('email'),wid,oh,sender,n,status,o.accepted??true,o.outcomes??0,o.to??'example.net',o.simulated??false,o.at??'25 hours']);
+      // The breaker counts once an hour; this moves its last count back an hour and runs the sweep.
+      const sweep=async()=>{await db.query("UPDATE builtin_parent SET rates_checked_at=now()-interval '1 hour' WHERE name=$1",[parent]);await builtin.builtinDomainTick(runtime);};
+      // Under the lines: 1,000 recipients, 4.9% bounced, 2 complaints. Never counted: simulated mail, mail SES never accepted,
+      // mail to the SES mailbox simulator, the workspace's own domain's mail, and mail older than 48 hours.
+      await mail(from,'delivered',949);await mail(from,'bounced',49);await mail(from,'delivered',1,{outcomes:9});await mail(from,'delivered',1,{outcomes:9});
+      await mail(from,'bounced',500,{simulated:true});await mail(from,'rejected',500,{accepted:false});await mail(from,'bounced',500,{to:'simulator.amazonses.com'});
+      await mail('news@own-domain.example','bounced',500);await mail(from,'bounced',500,{at:'49 hours'});
+      await sweep();
+      assert.deepEqual(await stored(),{ok:true,problem:null,tripped:false,trip:null});
+      // A third complaint (3 of 1,001, 0.3%) crosses the line, at the next hourly count.
+      await mail(from,'delivered',1,{outcomes:9});
+      await builtin.builtinDomainTick(runtime);
+      assert.equal((await stored()).tripped,false,'Counted at most once an hour.');
+      await sweep();
+      const trip={line:'complaints',recipients:1001,bounces:49,complaints:3,windowHours:48};
+      assert.deepEqual(await stored(),{ok:false,problem:'reputation',tripped:true,trip});
+
+      // Tripped: every built-in domain stops sending at once, as when the parent fails its check.
+      assert.equal(await claim(),'pending');assert.equal((await me()).sending,'off');
+      error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Tripped',text:'Tripped.'}),403,'SENDER_DOMAIN_NOT_VERIFIED');
+      // The reputation channel gets one card saying what tripped it and how to reset it.
+      const alerts=(await db.query("SELECT id,payload,workspace_id FROM jobs WHERE type='reputation.alert' AND payload->>'code'='BUILTIN_PARENT_TRIPPED'")).rows;
+      assert.equal(alerts.length,1);assert.deepEqual(alerts[0].payload,{code:'BUILTIN_PARENT_TRIPPED',parent,...trip,paused:1});
+      const posted:{url:string;text:string}[]=[];
+      t.mock.method(globalThis,'fetch',async(url:string,init:RequestInit)=>{posted.push({url:String(url),text:JSON.parse(String(init.body)).text});return new Response(null,{status:200});});
+      await reputationAlertJobs['reputation.alert']!(runtime,alerts[0].payload,{id:alerts[0].id,attempts:1,workspaceId:alerts[0].workspace_id});
+      assert.equal(posted.length,1);assert.equal(posted[0]!.url,'https://hooks.slack.invalid/builtin-breaker');
+      assert.match(posted[0]!.text,/^:rotating_light: \*Built-in domains stopped sending: too many spam complaints\* · nightmail-fixture\.email\nBounces 4\.9% \(49 of 1,001\), complaints 0\.3% \(3 of 1,001\) over the last 48 hours/);
+      assert.match(posted[0]!.text,/Sending is paused for 1 built-in domain; receiving continues\..*scripts\/builtin-domain\.ts reset-breaker --apply/);
+
+      // Sticky: a healthy identity check doesn't turn it back on, no second card, the domains' job waits, receiving stays.
+      await db.query("UPDATE builtin_parent SET checked_at=now()-interval '2 hours' WHERE name=$1",[parent]);
+      await db.query("UPDATE domain_claims SET receiving_proved_at=now()-interval '13 hours' WHERE workspace_id=$1 AND name=$2",[wid,host]);
+      await sweep();
+      assert.deepEqual(await stored(),{ok:false,problem:'reputation',tripped:true,trip});
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM jobs WHERE type='reputation.alert' AND payload->>'code'='BUILTIN_PARENT_TRIPPED'")).rows[0].n,1);
+      assert.equal((await db.query("SELECT receiving_proved_at>now()-interval '1 minute' AS fresh FROM domain_claims WHERE workspace_id=$1 AND name=$2",[wid,host])).rows[0].fresh,true,'Receiving continues.');
+      await pace();
+      await assert.rejects(builtin.builtinDomainJob(runtime,{},{id:'domain.builtin:'+wid,attempts:1,workspaceId:wid}),JobDeferred);
+      assert.equal(await claim(),'pending');assert.equal(associated.length,1);
+
+      // The operator's reset (scripts/builtin-domain.ts reset-breaker): audited, the domains verify again at once, and the
+      // breaker counts only mail sent after it, so the mail that tripped it can't trip it again.
+      const operator='arn:aws:sts::111122225555:assumed-role/operator/fixture';
+      assert.deepEqual(await builtin.resetBuiltinBreaker(runtime.db,parent,'Revoked the workspace behind the complaints',operator),trip);
+      assert.equal(await builtin.resetBuiltinBreaker(runtime.db,parent,'Nothing to reset',operator),null,'Only a tripped breaker is reset.');
+      assert.deepEqual((await db.query("SELECT workspace_id,details->>'operator' AS operator,details->>'reason' AS reason,details->'trip' AS trip FROM hosted_operator_audit WHERE action='builtin-parent-reset'")).rows,
+        [{workspace_id:'platform',operator,reason:'Revoked the workspace behind the complaints',trip}]);
+      await pace();await run('domain.builtin');
+      assert.equal(await claim(),'verified');assert.equal((await me()).sending,'ready');assert.equal(associated.length,2);
+      assert.deepEqual(await stored(),{ok:true,problem:null,tripped:false,trip:null});
+      await sweep();
+      assert.equal((await stored()).tripped,false,'Mail from before the reset is not counted again.');
+    }));
+  });
+
   test('MX regional campaign editing, controls and disabled queue recovery', async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>{
       const {acquireRegionProvisioning,finishHostedRegion,toggleRegionSending}=await import('./src/states.js');

@@ -38,7 +38,7 @@ export const ConnectionSummary = z.object({ kind: Kind, region: z.string(), stat
   domains: z.object({ total: z.number().int(), verified: z.number().int() }).optional().describe('Domains of its own the workspace claimed and how many can send. The built-in domain is not one of them.'),
   sent: z.boolean().optional().describe('Whether this workspace has any sent email in its log (test sends included; the log keeps 30 days).'),
   builtinDomain: z.object({ id: z.string().nullable().describe('Its ID in listDomains, once it is set up on this connection.'), name: z.string(),
-    sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now. pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: turned off by the operator.'),
+    sending: z.enum(['ready', 'pending', 'closed', 'off']).describe('ready: it sends now. pending: it is being set up. closed: a domain of the workspace\'s own verified, so it only receives now. off: turned off by the operator, or paused for every workspace (the built-in domains\' circuit breaker) until an operator turns it back on.'),
     scope: z.enum(['anyone', 'members']).describe('Who it sends to: anyone, or the verified addresses of the workspace\'s members.'), perDay: z.number().int(), perMinute: z.number().int() })
     .nullable().optional().describe('Hosted only: the subdomain of the installation\'s own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one.'),
   attention: z.string().optional().describe('A connected AWS account\'s most pressing health finding, for a banner; absent when nothing needs attention.'),
@@ -101,7 +101,7 @@ export async function connectionSummary(runtime: Runtime, wid: string): Promise<
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND NOT ${builtinClaim(sql`dc`)}) AS domains,
       (SELECT count(*)::int FROM domain_claims dc WHERE dc.workspace_id=c.workspace_id AND dc.sending_state IN ('verified','lost') AND NOT ${builtinClaim(sql`dc`)}) AS verified_domains,
       EXISTS (SELECT FROM sending_emails e WHERE e.workspace_id=c.workspace_id) AS sent,
-      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL THEN 'off' WHEN dc.sending_state='verified' THEN 'ready' ELSE 'pending' END)
+      ${builtin ? sql`(SELECT jsonb_build_object('id',d.id,'name',b.name,'sending',CASE WHEN b.revoked_at IS NOT NULL OR EXISTS (SELECT FROM builtin_parent p WHERE p.name=${runtime.config.builtinDomain} AND p.tripped_at IS NOT NULL) THEN 'off' WHEN dc.sending_state='verified' THEN 'ready' ELSE 'pending' END)
         FROM builtin_domains b LEFT JOIN domain_claims dc ON dc.workspace_id=b.workspace_id AND dc.name=b.name AND dc.identity ? 'builtin'
         LEFT JOIN operation_domains d ON d.workspace_id=b.workspace_id AND d.name=b.name AND dc.name IS NOT NULL WHERE b.workspace_id=c.workspace_id)` : sql`NULL::jsonb`} AS builtin,
       CASE WHEN c.kind='shared' THEN ${hostedAllowance(runtime.config, wid, 1, 0, true)} END AS allowance
