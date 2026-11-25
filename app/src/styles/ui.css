@@ -72,7 +72,7 @@ a.ui-button:focus-visible { text-decoration: none; }
 @media (hover: hover) and (pointer: fine) { .ui-input:hover:not(:disabled):not([aria-invalid='true']):not(:focus) { background-color: var(--color-control-hover); } }
 .ui-input:is(:focus, :focus-visible) { background-color: var(--color-control-focus); }
 .ui-input::placeholder { color: var(--color-muted); opacity: 1; }
-.ui-input:disabled { background: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
+.ui-input:disabled { background-color: var(--color-layer-1); color: var(--color-muted); cursor: not-allowed; }
 /* On an overlay a disabled field keeps the overlay's control fill (the page's layer-1 would sink below the dialog). */
 :is(.ui-popover, .ui-dialog, .ui-sheet) .ui-input:disabled { background-color: var(--color-control); }
 /* An invalid field: a solid danger-tinted fill (no box), its message in red under it (.ui-field__error). */
