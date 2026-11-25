@@ -48,7 +48,7 @@ In `GET /v1/sender-score`, no daily limit is `limit.daily: null` with `limit.unl
 
 ## When something goes wrong: the ladder
 
-Nightmail checks every 10 minutes. Every line needs a **count and a rate together**, so a few events never trip a small sender. Rates are over accepted mail in the window (24 hours of events against 48 hours of accepted mail, so late feedback is counted fairly).
+Nightmail checks every 10 minutes. Every feedback or screen line needs **both** the minimum event count and the minimum rate. Feedback rates use accepted mail in the same stream, with one extra day to allow for late feedback (24 hours of events against 48 hours of accepted mail, or 7 days against 8). Screen rates use screened mail in 24 hours. Without volume there is no measured rate.
 
 | Signal | ① Warn | ② Restrict | ③ Pause |
 | --- | --- | --- | --- |
@@ -57,7 +57,7 @@ Nightmail checks every 10 minutes. Every line needs a **count and a rate togethe
 | Spam screen rejections ÷ screened | ≥ 2% and ≥ 3 in 24 h | ≥ 5% and ≥ 10 in 24 h | ≥ 10% and ≥ 25 in 24 h |
 | External | – | – | AWS paused the workspace's SES tenant; confirmed abuse |
 
-A **notice** sits below Warn: a first complaint or a few bounces show on the dashboard, with no email.
+A **notice** sits below Warn: in 24 hours, at least 2 complaints at 0.01% or higher, or at least 3 hard bounces at 1% or higher. It adds a dashboard note, with no email or sending hold.
 
 | Step | You see | Mail | Limit |
 | --- | --- | --- | --- |
