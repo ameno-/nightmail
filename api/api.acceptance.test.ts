@@ -41322,7 +41322,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
 
   test('sending tallies: exact campaign & hourly metrics at read time, bounded fold + alert, daily recount drift detection, one-statement undo fallback and 10s high-volume cache bucket', async t => {
     await simulatedSesFixture(t, async ({ runtime, local, request, run, db }) => {
-      const { foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
+      const { auditSendingOutcomePage, foldSendingTallies, recountSendingTallies, talliesEnabled, UNFOLDED_ALERT_THRESHOLD } = await import('./src/sending-tallies.js');
       const { dashboardRevision, DASHBOARD_ACTIVE_SEND_HOUR_THRESHOLD } = await import('./src/dashboard-cache.js');
       const wid = runtime.config.workspaceId;
       // The maintenance folds have no workspace predicate. Exercise the real triggers, indexes and folds
@@ -41436,14 +41436,25 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_ten_minute($1)', [wid])).rowCount, 0);
       assert.equal((await db.query('SELECT * FROM reconcile_sending_metrics_hourly($1)', [wid])).rowCount, 0);
       assert.equal(Number((await db.query('SELECT emails_with_other_bits FROM check_sending_event_outcome_bits($1)', [wid])).rows[0].emails_with_other_bits), 0);
-      // Plant a mis-stamped event_outcomes bit (as old migration 088 did) and confirm daily recount logs SENDING_EVENT_OUTCOMES_DRIFT loudly!
+      // One audited email at a time. A real orphan public event counts, but the public mirror of a raw bounce cannot
+      // change its meaning. Plant an extra bit in the first email and checkpoint it before checking its neighbors.
+      await db.query("INSERT INTO operation_events(id,workspace_id,type,data,created_at) VALUES ($1,$2,'email.opened',jsonb_build_object('emailId','t_seq_val'),now())", [unique('evt'),wid]);
       await db.query("UPDATE sending_emails SET event_outcomes = event_outcomes | 128 WHERE workspace_id=$1 AND id='t_seq_bnc'", [wid]);
       const bitErrors: string[] = [];
       const bitSpy = t.mock.method(console, 'error', (...args: unknown[]) => { bitErrors.push(String(args[0])); });
       try {
-        await db.query("DELETE FROM job_schedule WHERE workspace_id='maintenance:sending-tallies'");
-        const res = await recountSendingTallies(runtime);
-        assert.equal(res.outcomeBitsDrifted, 1);
+        const quiet = Date.UTC(2026,0,1,0,30);
+        await db.query("UPDATE sending_outcome_audit_state SET after_id='t_seq_b',page_size=1,next_at='-infinity',pass_started_at=NULL");
+        assert.deepEqual(await auditSendingOutcomePage(runtime,Date.UTC(2026,0,1,0,7)),{ checked: 0, drifted: 0 });
+        assert.deepEqual(await auditSendingOutcomePage(runtime,quiet),{ checked: 1, drifted: 1 });
+        assert.equal((await db.query('SELECT after_id FROM sending_outcome_audit_state')).rows[0].after_id,'t_seq_bnc');
+        assert.deepEqual(await auditSendingOutcomePage(runtime,quiet),{ checked: 0, drifted: 0 },'Not due: no duplicate audit');
+        await db.query("UPDATE sending_outcome_audit_state SET page_size=2,next_at='-infinity'");
+        assert.deepEqual(await auditSendingOutcomePage(runtime,quiet),{ checked: 2, drifted: 0 });
+        assert.equal((await db.query('SELECT after_id FROM sending_outcome_audit_state')).rows[0].after_id,'t_seq_val');
+        await db.query("UPDATE sending_outcome_audit_state SET after_id=(SELECT max(id) FROM sending_emails),next_at='-infinity'");
+        assert.deepEqual(await auditSendingOutcomePage(runtime,quiet),{ checked: 0, drifted: 0 });
+        assert.deepEqual((await db.query("SELECT after_id,next_at>now()+interval '23 hours' AS resting FROM sending_outcome_audit_state")).rows,[{ after_id:'', resting:true }]);
       } finally { bitSpy.mock.restore(); }
       assert.ok(bitErrors.some(line => line.includes('SENDING_EVENT_OUTCOMES_DRIFT')), 'Logs SENDING_EVENT_OUTCOMES_DRIFT when event_outcomes disagrees with raw events.');
 
