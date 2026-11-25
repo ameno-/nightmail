@@ -428,11 +428,11 @@ function Message({ m, detail, canAct, actions, onEdit }: { m: SupportMessage; de
     </div>
     {m.email ? <EmailBody conversationId={c.id} email={m.email} subject={c.subject} />
       : m.author === 'agent' ? <div className="sinbox-text"><Markdown text={m.text} /></div> : <div className="sinbox-message__body">{m.text}</div>}
+    {m.files.length > 0 && !m.email && <Files conversationId={c.id} files={m.files} />}
+    {m.tools.length > 0 && <ul className="sinbox-tools" aria-label="What the agent checked">{m.tools.map((tool, index) => <li key={index}>{tool.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />}{tool.label}</li>)}</ul>}
     {isHeld && !m.draft && <p className="sinbox-held">{m.heldReason ? heldWhy[m.heldReason] : 'Not sent.'}</p>}
     {isHeld && m.draft && <p className="sinbox-held" data-decided="">{decidedText[m.draft.outcome]} {m.draft.by.name ?? 'staff'} · <time dateTime={m.draft.at} title={when(m.draft.at)}>{shortDateTime(m.draft.at)}</time></p>}
     {isHeld && !m.draft && canAct && c.status !== 'closed' && !m.id.startsWith('pending:') && <DraftActions m={m} c={c} actions={actions} onEdit={onEdit} />}
-    {m.files.length > 0 && !m.email && <Files conversationId={c.id} files={m.files} />}
-    {m.tools.length > 0 && <ul className="sinbox-tools" aria-label="What the agent checked">{m.tools.map((tool, index) => <li key={index}>{tool.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />}{tool.label}</li>)}</ul>}
   </li>
 }
 
