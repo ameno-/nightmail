@@ -302,7 +302,7 @@ export function registerSupportInbox(app: App) {
     tools: z.array(Tool).max(50).default([]).describe('The agent’s tool calls: labels and outcomes only.'),
     attachments: z.array(z.string().regex(ATTACHMENT_ID)).max(20).default([]),
     files: z.array(File).max(20).optional().describe('The attachments’ names, types and sizes, beside their IDs.'),
-    source: z.string().regex(MAIL_MESSAGE_ID).optional().describe('A customer email only: the message it came from at a support address. Kept only when it is one.'),
+    source: z.string().max(100).optional().describe('A customer email only: the message it came from at a support address. Kept only when it is one; anything else is dropped, never refused, so the mirror never stalls on it.'),
     delivery: z.enum(['sent', 'failed', 'held']).optional().describe('An agent answer only: sent, failed, or held (frozen before a staff reply and never sent).'),
     reason: z.enum(HELD_REASONS).optional().describe('A held agent answer only: why it was not sent.'),
     at: z.iso.datetime({ offset: true }).optional().describe('When it was written; default now, at most 5 minutes ahead.'),
@@ -334,7 +334,7 @@ export function registerSupportInbox(app: App) {
         const supportAddresses = c.env.config.support?.addressIds ?? [];
         const { rows: inserted } = await tx.execute<{ id: string }>(sql`INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, tools, attachments, files, source_message_id, delivery, held_reason, created_at)
           SELECT m.id, ${id}, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.files,
-            CASE WHEN EXISTS (SELECT FROM mailbox_messages mb WHERE mb.message_id = m.source AND mb.direction = 'inbound' AND mb.mailbox_id = ANY(${sql.param(supportAddresses)}::text[])) THEN m.source END,
+            CASE WHEN m.source ~ '^msg_[0-9a-f]{32}$' AND EXISTS (SELECT FROM mailbox_messages mb WHERE mb.message_id = m.source AND mb.direction = 'inbound' AND mb.mailbox_id = ANY(${sql.param(supportAddresses)}::text[])) THEN m.source END,
             m.delivery, m.reason, coalesce(m.at, now())
           FROM jsonb_to_recordset(${JSON.stringify(fresh)}::jsonb) AS m(id text, seq int, author text, kind text, text text, tools jsonb, attachments jsonb, files jsonb, source text, delivery text, reason text, at timestamptz)
           ON CONFLICT (id) DO NOTHING RETURNING id`);
