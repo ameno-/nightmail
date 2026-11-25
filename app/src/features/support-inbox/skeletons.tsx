@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { Keyboard, MoreHorizontal } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { Button, FacetRail, IconButton, LoadingRegion, PageHeader, SearchField, Select, Skeleton, SkeletonText, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
-import type { Channel, InboxCounts, InboxView, SupportConversation } from '../../data/support-inbox'
+import { channelLabels, type Channel, type InboxCounts, type InboxView, type SupportConversation } from '../../data/support-inbox'
 import { ActionsTrigger } from '../operator/skeletons'
 import './support-inbox.css'
 
@@ -21,7 +21,7 @@ export const inboxColumnDefs: SkeletonColumn[] = [
 export const inboxViews: { value: InboxView; label: string; count?: keyof InboxCounts }[] = [{ value: 'needs_you', label: 'Needs you', count: 'needsYou' }, { value: 'agent', label: 'AI handling', count: 'agent' },
   { value: 'waiting', label: 'Waiting on customer', count: 'waiting' }, { value: 'done', label: 'Done' }, { value: 'all', label: 'All' }]
 export const viewOf = (search: string): InboxView => { const view = new URLSearchParams(search).get('view'); return inboxViews.some(item => item.value === view && view !== 'needs_you') ? view as InboxView : 'needs_you' }
-export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel === 'chat' || channel === 'email' ? channel : '' }
+export const channelOf = (search: string): Channel | '' => { const channel = new URLSearchParams(search).get('channel'); return channel && Object.hasOwn(channelLabels, channel) ? channel as Channel : '' }
 
 // Where a conversation stands. Needing you, the most pressing reason first: a failed send, blocked work, a customer
 // waiting, a ticket. Otherwise: the agent handling it, waiting on the customer, done or closed.
@@ -31,6 +31,8 @@ export function triageOf(c: SupportConversation): Triage {
   if (!reasons) {
     if (c.done) return { key: 'done', text: 'Done', tone: 'neutral' }
     if (c.status === 'closed') return { key: 'closed', text: 'Closed', tone: 'neutral' }
+    // Agent feedback has nobody to answer: once its ticket is resolved it is finished.
+    if (c.channel === 'agent_feedback') return { key: 'done', text: c.ticket?.resolvedAt ? 'Resolved' : 'Open', tone: 'neutral' }
     if ((c.lastAuthor === 'agent' || c.lastAuthor === 'staff') && !c.preview?.held) return { key: 'customer', text: 'Waiting on customer', tone: 'neutral' }
     return c.agentState === 'active' ? { key: 'agent', text: 'AI handling', tone: 'success' } : { key: 'paused', text: 'Paused', tone: 'neutral' }
   }
@@ -47,7 +49,7 @@ export function inboxFacetGroups(rows: SupportConversation[] | undefined, channe
   const count = (test: (c: SupportConversation) => boolean, list = rows) => list ? list.filter(test).length : null
   return [
     { key: 'why', title: 'Primary reason', items: whyFacets.map(([key, text, tone]) => ({ key, label: text, tone, count: count(c => triageOf(c).key === key) })) },
-    { key: 'channel', title: 'Channel', items: (['chat', 'email'] as const).map(value => ({ key: value, label: value === 'chat' ? 'Chat' : 'Email', count: count(c => c.channel === value, everyChannel),
+    { key: 'channel', title: 'Channel', items: (Object.keys(channelLabels) as Channel[]).map(value => ({ key: value, label: channelLabels[value], count: count(c => c.channel === value, everyChannel),
       ...setChannel ? { selected: channel === value, onSelect: () => setChannel(channel === value ? '' : value) } : {} })) },
     { key: 'ticket', title: 'Open tickets', items: (['P1', 'P2', 'P3'] as const).map(severity => ({ key: severity, label: severity, tone: (severity === 'P1' ? 'danger' : severity === 'P2' ? 'warning' : 'neutral') as Tone,
       count: count(c => Boolean(c.ticket && !c.ticket.resolvedAt && c.ticket.severity === severity)) })) },
@@ -58,7 +60,7 @@ export function InboxTabs({ view, counts, onChange, disabled = false }: { view: 
   return <div className="sinbox-tabs"><Tabs value={view} label="Support views" disabled={disabled} onValueChange={value => onChange?.(value as InboxView)}
     items={inboxViews.map(({ value, label, count }) => ({ value, label, count: !count ? undefined : counts ? counts[count] ?? 0 : null }))} /></div>
 }
-const channelOptions = [{ value: 'all', label: 'All channels' }, { value: 'chat', label: 'Chat' }, { value: 'email', label: 'Email' }]
+const channelOptions = [{ value: 'all', label: 'All channels' }, ...Object.entries(channelLabels).map(([value, label]) => ({ value, label }))]
 /** Search, and the channel filter where the rail is hidden (below 1200 px), so a filter is always visible and can be cleared. */
 export function InboxToolbar({ search = '', onSearch, channel = '', onChannel, onShortcuts, disabled = false }: { search?: string; onSearch?: (value: string) => void; channel?: Channel | ''; onChannel?: (channel: Channel | '') => void; onShortcuts?: () => void; disabled?: boolean }) {
   return <div className="data-toolbar sinbox-toolbar"><div className="cluster sinbox-toolbar__filters">

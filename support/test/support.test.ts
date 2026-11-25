@@ -2077,6 +2077,25 @@ describe('support Worker', () => {
       c.ws.close();
     }, 180_000);
 
+    test('the staff inbox: an email answer the output gate held is mirrored as a held draft with what the agent wrote; the customer gets only the short note', async () => {
+      const thread = 'thr_phish_inbox', path = `/v1/inbound/threads/${thread}/reply`;
+      await outage(path, 503);
+      await hook('msg_phish_inbox_1', thread);
+      const id = await conversationOf(thread);
+      await setInbox({ id, channel: 'email' });
+      let run = await drive(id, { tick: true });
+      assert.equal(states(run)['answer:msg_phish_inbox_1'], 'pending', 'Written, not sent yet.');
+      await outage(path);
+      run = await drive(id, { expire: 'answer:msg_phish_inbox_1', tick: true });
+      assert.equal(states(run)['answer:msg_phish_inbox_1'], 'done');
+      const sent = await eventually(async () => (await replies(thread, instance))[0]);
+      assert.ok(!sent[3].text.includes('bane-mx-security') && /passed this to the Nightmail team to check/.test(sent[3].text), sent[3].text);
+      const box = await eventually(async () => { const b = await inboxOf(id); return b?.messages.some((m: any) => m.author === 'agent' && m.kind === 'reply') ? b : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.kind, m.delivery, m.reason]), [['customer', null, undefined, undefined], ['agent', 'held', 'held', 'gate'], ['agent', 'reply', 'sent', undefined]]);
+      assert.match(box.messages[1].text, /Reset it here: https:\/\/bane-mx-security\.example\/reset/);
+      assert.equal(box.messages[2].text, sent[3].text, 'What was sent is the short note.');
+    }, 180_000);
+
     test('the staff inbox: while staff have paused the agent, a chat records and mirrors what the customer writes, takes no turn and says so once; after hand back it answers', async () => {
       const c = await chat();
       await setInbox({ id: c.id, channel: 'chat', paused: true });

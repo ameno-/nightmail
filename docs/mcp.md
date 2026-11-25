@@ -155,6 +155,12 @@ On an API without the expected-recipient guard, MCP omits reply rather than send
 
 Requests are not retried automatically. `idempotencyKey` is forwarded as `Idempotency-Key`; API replay semantics remain authoritative. A send's key is kept at least 30 days (at least 60 for a scheduled send); after that the same key is a new request. A repeat while the first request with that key is still running gets `409 IDEMPOTENCY_IN_PROGRESS` with `Retry-After`: wait, then retry with the same key. A failed or interrupted write can have an uncertain outcome. Reconcile state before retrying. HTTP 202 means queued, not delivered.
 
+### Feedback
+
+`sendFeedback` (`POST /v1/feedback`) lets an agent tell the Nightmail team what got in its way: `severity` from `low` (a confusing message, an extra step) through `medium` and `high` to `critical` (blocked, wrong data, a security worry), a `kind` (`bug`, `friction`, `feature`, `docs` or `other`), a `message` saying what would have made it easier, and optionally the `requestId` of a call that went wrong, the `operation` involved and a line of `context`. The server instructions ask agents to send one report per distinct problem in a task and then carry on.
+
+Every connection whose credential can read lists it, whatever toolsets it asked for; in plain listings it is the `sendFeedback` tool, whose one action, `send`, may be left out. It needs no `confirm`. A report is filed as a ticket in Nightmail's support inbox, for its workspace; nobody is emailed and nothing replies. Anything that looks like a key, token or password is removed before it is stored (`redacted` counts them). One credential may send 20 reports an hour and one workspace 50 (`429 FEEDBACK_RATE_LIMITED` with `Retry-After`).
+
 ## Hosting and safety
 
 - OAuth discovery is available through the root and resource-path protected-resource metadata URLs. MCP clients register and authorize at the stage's account issuer using its discovery metadata.

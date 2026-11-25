@@ -8,7 +8,7 @@ import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { productName } from '../../../../api/src/brand'
 import { useSession } from '../../data/context'
 import { ApiError } from '../../data/types'
-import { detailQuery, inboxDraft, inboxKeys, listQuery, patchConversation, prefetchConversation, snapshotInbox, subscribeInboxDrafts, supportInboxApi, updateInboxDraft, type Channel, type InboxView, type HeldReason, type SupportAction, type SupportBrief, type SupportConversation, type SupportDetail, type SupportEmail, type SupportEvent, type SupportEventKind, type SupportInboxPage, type SupportMessage } from '../../data/support-inbox'
+import { detailQuery, inboxDraft, inboxKeys, listQuery, patchConversation, prefetchConversation, snapshotInbox, subscribeInboxDrafts, supportInboxApi, updateInboxDraft, channelLabels, type Channel, type InboxView, type HeldReason, type SupportAction, type SupportBrief, type SupportConversation, type SupportDetail, type SupportEmail, type SupportEvent, type SupportEventKind, type SupportInboxPage, type SupportMessage } from '../../data/support-inbox'
 import { ago, label, number, shortDateTime } from '../../lib/format'
 import { useSearchDraft } from '../../lib/pagination'
 import { usePhone } from '../../lib/media'
@@ -150,9 +150,9 @@ function menuItems(c: SupportConversation, { canAct, actions, onConfirm, open, o
     Boolean(open) && { label: 'Open', onSelect: open! },
     canAct && c.needsYou !== null && { label: c.ticket && !c.ticket.resolvedAt ? 'Mark done and resolve ticket' : 'Mark done', onSelect: onDone ?? (() => void actions.done(c)) },
     { label: c.unread ? 'Mark read' : 'Mark unread', onSelect: () => void actions.read(c, c.unread) },
-    canAct && c.status !== 'closed' && (c.agentState === 'paused' ? { label: 'Hand back to the agent…', onSelect: () => onConfirm({ action: 'resume', conversation: c }) } : { label: 'Pause agent…', onSelect: () => onConfirm({ action: 'pause', conversation: c }) }),
+    canAct && c.status !== 'closed' && c.channel !== 'agent_feedback' && (c.agentState === 'paused' ? { label: 'Hand back to the agent…', onSelect: () => onConfirm({ action: 'resume', conversation: c }) } : { label: 'Pause agent…', onSelect: () => onConfirm({ action: 'pause', conversation: c }) }),
     canAct && Boolean(c.ticket && !c.ticket.resolvedAt) && { label: 'Resolve ticket…', onSelect: () => onConfirm({ action: 'resolve', conversation: c }) },
-    canAct && c.blockedWork > 0 && { label: 'Retry now', onSelect: () => void actions.wake(c) },
+    canAct && c.blockedWork > 0 && c.channel !== 'agent_feedback' && { label: 'Retry now', onSelect: () => void actions.wake(c) },
   ]
   return items.filter((item): item is MenuItem => Boolean(item))
 }
@@ -170,7 +170,7 @@ function agentOf(c: SupportConversation): { text: string; by?: string; tone: Ton
   if (c.agentState === 'active') return { text: c.status === 'closed' ? 'Closed' : 'Active', tone: c.status === 'closed' ? 'neutral' : 'success' }
   return { text: 'Paused', by: c.pausedBy?.kind === 'ticket' ? 'the ticket' : c.pausedBy?.name ?? undefined, tone: 'warning' }
 }
-const ChannelIcon = ({ channel }: { channel: SupportConversation['channel'] }) => channel === 'email' ? <Mail size={14} aria-label="Email" /> : <MessageSquare size={14} aria-label="Chat" />
+const ChannelIcon = ({ channel }: { channel: SupportConversation['channel'] }) => channel === 'email' ? <Mail size={14} aria-label="Email" /> : channel === 'agent_feedback' ? <Bot size={14} aria-label="Agent feedback" /> : <MessageSquare size={14} aria-label="Chat" />
 function Who({ c }: { c: SupportConversation }) {
   const address = c.customer?.email ?? c.sender
   return <span className="sinbox-who" data-unread={c.unread || undefined}>
@@ -356,8 +356,8 @@ export function SupportConversationPage() {
 // The facts line under the title, in mono: the channel, why it is here (dot and word) and the agent.
 function Facts({ c }: { c: SupportConversation }) {
   const status = triageOf(c), agent = agentOf(c)
-  return <p className="sinbox-subtitle"><span className="sinbox-fact"><ChannelIcon channel={c.channel} />{c.channel === 'email' ? 'Email' : 'Chat'}</span>
-    <span className="sinbox-fact"><StatusBadge status={status.text} tone={status.tone} /></span><span className="sinbox-fact"><span className="sinbox-fact__key">Agent</span>{agent.text.toLowerCase()}{agent.by ? ` by ${agent.by}` : ''}</span></p>
+  return <p className="sinbox-subtitle"><span className="sinbox-fact"><ChannelIcon channel={c.channel} />{channelLabels[c.channel]}</span>
+    <span className="sinbox-fact"><StatusBadge status={status.text} tone={status.tone} /></span>{c.channel !== 'agent_feedback' && <span className="sinbox-fact"><span className="sinbox-fact__key">Agent</span>{agent.text.toLowerCase()}{agent.by ? ` by ${agent.by}` : ''}</span>}</p>
 }
 
 // ---------------------------------------------------------------- the timeline
@@ -384,8 +384,8 @@ function Message({ m, detail }: { m: SupportMessage; detail: SupportDetail }) {
   const c = detail.conversation, note = m.author === 'staff' && m.kind === 'note', isHeld = held(m)
   // The support platform's own notices (a fixed reply, a pause notice) are a line, like an event.
   if (m.author === 'system') return <li className="sinbox-event"><Info size={14} aria-hidden="true" /><span className="sinbox-event__text">{m.text}</span><time dateTime={m.at} title={when(m.at)}>{shortDateTime(m.at)}</time></li>
-  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? 'Customer' : m.author === 'agent' ? 'Nightmail AI' : m.staff?.name ?? 'Staff'
-  const via = note ? 'Internal note' : m.author === 'customer' ? (m.email || c.channel === 'email' ? 'Email' : 'Chat') : m.author === 'staff' ? `Reply by ${c.channel === 'email' ? 'email' : 'chat'}` : null
+  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? 'Nightmail AI' : m.staff?.name ?? 'Staff'
+  const via = note ? 'Internal note' : m.author === 'customer' ? (m.email ? 'Email' : channelLabels[c.channel]) : m.author === 'staff' ? `Reply by ${c.channel === 'email' ? 'email' : 'chat'}` : null
   const badge = isHeld ? { text: 'Held, not sent', tone: 'warning' as Tone } : m.author === 'agent' ? deliveryBadge[m.delivery ?? 'sent'] : m.author === 'staff' && !note ? deliveryBadge[m.delivery ?? ''] : undefined
   return <li className="sinbox-message" data-author={m.author} data-note={note || undefined} data-held={isHeld || undefined} data-pending={m.id.startsWith('pending:') || undefined}>
     <div className="sinbox-message__meta">
@@ -448,7 +448,7 @@ const eventIcon: Record<SupportEventKind, typeof Info> = { opened: Inbox, ticket
 function eventText(e: SupportEvent, c: SupportDetail['conversation']) {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
-    case 'opened': return `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
+    case 'opened': return c.channel === 'agent_feedback' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
     case 'ticket': return `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
     case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? `${who ?? 'Staff'} replied and took over from the agent` : `${who ?? 'Staff'} paused the agent`
@@ -460,7 +460,7 @@ function eventText(e: SupportEvent, c: SupportDetail['conversation']) {
   }
 }
 function EventLine({ e, c }: { e: SupportEvent; c: SupportDetail['conversation'] }) {
-  const Icon = e.kind === 'opened' && c.channel === 'chat' ? MessageSquare : e.kind === 'opened' ? Mail : eventIcon[e.kind] ?? Info
+  const Icon = e.kind !== 'opened' ? eventIcon[e.kind] ?? Info : c.channel === 'chat' ? MessageSquare : c.channel === 'agent_feedback' ? Bot : Mail
   return <li className="sinbox-event" data-kind={e.kind}><Icon size={14} aria-hidden="true" /><span className="sinbox-event__text">{eventText(e, c)}</span><time dateTime={e.at} title={when(e.at)}>{shortDateTime(e.at)}</time></li>
 }
 
@@ -507,7 +507,8 @@ type ComposeMode = 'reply' | 'note'
 const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Actions }>(function Composer({ detail, actions }, ref) {
   const c = detail.conversation, identity = useSession()?.identity, user = identity?.id ?? ''
   const draft = useSyncExternalStore(subscribeInboxDrafts, () => inboxDraft(user, c.id)), text = draft?.text ?? ''
-  const closed = c.status === 'closed', mode: ComposeMode = closed ? 'note' : draft?.mode ?? 'reply'
+  // Closed, or agent feedback (api/src/feedback.ts, filed by an agent's credential): nobody to reply to, so notes only.
+  const feedback = c.channel === 'agent_feedback', closed = c.status === 'closed' || feedback, mode: ComposeMode = closed ? 'note' : draft?.mode ?? 'reply'
   const [taken, setTaken] = useState(false)
   const field = useRef<HTMLTextAreaElement>(null)
   const setMode = (next: ComposeMode) => updateInboxDraft(user, c.id, () => ({ mode: next }))
@@ -536,7 +537,7 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
         ...now.text ? { text: `${sent.text}\n\n${now.text}`, key: crypto.randomUUID() } : { text: sent.text, key: sent.key } })))
   }
   const name = c.customer?.name ?? 'the customer', me = identity?.name ?? 'you', target = detail.replyTarget
-  const hint = note ? 'Only staff see notes. The customer and the agent never do.'
+  const hint = feedback ? 'An agent filed this report: there’s nobody to reply to. Resolve it or mark it done; notes are for staff.' : note ? 'Only staff see notes. The customer and the agent never do.'
     : offline ? 'The support service is offline, so replies are off.'
     : c.channel === 'email' ? <>Replying as {me} · an email in this thread{target.address ? <> to <PrivateAddress value={target.address} /></> : ''}, from {productName} support{!target.verified && '. Their email didn’t pass DMARC, so it may not be delivered'}{handling ? '. Sending pauses the agent.' : '.'}</>
     : <>Replying as {me} in their chat{target.address ? <> (emailed to <PrivateAddress value={target.address} /> if it’s closed)</> : ''}{handling ? '. Sending pauses the agent.' : '.'}</>
@@ -557,7 +558,7 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
 
 // ---------------------------------------------------------------- the customer panel
 
-const verification: Record<SupportConversation['verification'], string> = { handoff: 'Signed in (chat)', dmarc: 'Email passed DMARC', signin: 'Signed in to claim it', none: 'Not verified' }
+const verification: Record<SupportConversation['verification'], string> = { handoff: 'Signed in (chat)', dmarc: 'Email passed DMARC', signin: 'Signed in to claim it', none: 'Not verified', credential: 'The workspace’s credential' }
 const mode: Record<SupportConversation['mode'], string> = { member: 'Member', non_member: 'No workspace', pending_signin: 'Waiting for sign-in', unverified: 'Unverified' }
 // The customer panel (Signal Log): each section a small caps label with its rule over muted keys and mono values, or a short list.
 const Label = ({ children }: { children: ReactNode }) => <h3 className="ui-label ui-label--rule">{children}</h3>
@@ -593,7 +594,7 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
     </section>}
     <section><Label>Other conversations</Label>
       {others.length ? <ul className="sinbox-list">{others.map(o => <li key={o.id}>
-        <Link to={`/support/${o.id}`} className="sinbox-list__main">{o.subject ?? (o.channel === 'email' ? 'Email' : 'Chat')}</Link>
+        <Link to={`/support/${o.id}`} className="sinbox-list__main">{o.subject ?? channelLabels[o.channel as Channel] ?? 'Chat'}</Link>
         <span className="sinbox-list__meta">{[o.status, o.ticket?.severity, ago(o.lastMessageAt ?? o.createdAt)].filter(Boolean).join(' · ')}</span>
       </li>)}</ul> : <None>No other conversations</None>}
     </section>
