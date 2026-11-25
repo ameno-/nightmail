@@ -13801,7 +13801,7 @@ describe('Billing: metering, gate and settlement', () => {
 
   test('the gate lives in the one admission statement: off and shadow allow, enforce gives 402, exempt and the platform pass, debt blocks free sends', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
-      const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db);
+      const f = await billingFixture(runtime, db, local, request), meter = await queryBudget(t, db, { writeVolume: false });
       // Billing launches enforced (300); a workspace created since is prepaid. Off, the kill-switch: sends are metered
       // from the first one, recipients counted, in the same statement.
       assert.deepEqual((await db.query(`SELECT mode FROM billing_config WHERE singleton`)).rows[0].mode, 'enforce');
@@ -18673,7 +18673,7 @@ describe('Campaign authorization and dispatch credentials', () => {
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES('sub.sender.example',$1,$1,'verified')`, [wid]);
       // The stored sender standing (score limit, ladder step) is read inside that same statement.
       await gradedSender(db, wid, 2000);
-      const meter = await queryBudget(t, db);
+      const meter = await queryBudget(t, db, { writeVolume: false });
       // A refused attachment costs one more read: the one that names every attachment problem in the send.
       await meter('scoped-attachment-denied', async () => error(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [privateFile.id] }), 404, 'ATTACHMENT_NOT_FOUND'), 2);
       await meter('scoped-attachments-admitted', async () => ok(await request('POST', '/v1/emails/send', scoped.secret, { ...direct, attachments: [own.id, asset.id] }), 202), 1);
@@ -21834,19 +21834,21 @@ test('LIVE SES: one explicitly authorized recipient reaches provider acceptance 
 // PostgreSQL now() is fixed inside the outer rollback transaction.
 // Local rollback-only instrumentation: every version written, including trigger writes.
 // pg_column_size(NEW) is logical heap tuple size, not index I/O or WAL. No row values logged.
-async function queryBudget(t:TestContext,db:pg.Client){
-  await db.query(`CREATE TEMP TABLE write_meter(stage text,n int) ON COMMIT DROP;
+async function queryBudget(t:TestContext,db:pg.Client,{writeVolume=true}={}){
+  // Integration has an active worker. Its query budgets count statements; installing diagnostic triggers on
+  // every public table here can deadlock with the worker's job claim. The worker-free shard still meters writes.
+  if(writeVolume) await db.query(`CREATE TEMP TABLE write_meter(stage text,n int) ON COMMIT DROP;
     CREATE FUNCTION pg_temp.measure_write() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
       INSERT INTO write_meter VALUES(CASE WHEN current_query() LIKE '%attempt-start:%' OR current_query() LIKE '%AS eligibility%' OR current_query() LIKE '%eligibility AS MATERIALIZED%' THEN 'claim'
       WHEN current_query() LIKE '%simulated_callbacks AS%' THEN 'result' ELSE 'other' END,pg_column_size(NEW));RETURN NULL;END $$;
     DO $$ DECLARE r record; BEGIN FOR r IN SELECT relname FROM pg_stat_user_tables WHERE schemaname='public' ORDER BY relname LOOP
       EXECUTE format('CREATE TRIGGER meter AFTER INSERT OR UPDATE ON %I FOR EACH ROW EXECUTE FUNCTION pg_temp.measure_write()',r.relname); END LOOP;END $$`);
   return async <T>(label:string,work:()=>Promise<T>,max?:number)=>{
-    await db.query('TRUNCATE write_meter');const q=t.mock.method(db,'query');let value:T;
+    if(writeVolume) await db.query('TRUNCATE write_meter');const q=t.mock.method(db,'query');let value:T;
     try{value=await work();}finally{q.mock.restore();}
     const count=q.mock.callCount(),explicit=q.mock.calls.filter(c=>/^(begin|savepoint)\b/i.test(String((c.arguments[0] as any)?.text??c.arguments[0]))).length;
-    const rows=(await db.query('SELECT stage,count(*)::int AS rows,sum(n)::int AS bytes FROM write_meter GROUP BY stage ORDER BY stage')).rows;
-    t.diagnostic(`QUERY-BUDGET ${label}: ${count} calls, ${explicit} explicit tx; ${JSON.stringify(rows)}`);
+    const rows=writeVolume ? (await db.query('SELECT stage,count(*)::int AS rows,sum(n)::int AS bytes FROM write_meter GROUP BY stage ORDER BY stage')).rows : null;
+    t.diagnostic(`QUERY-BUDGET ${label}: ${count} calls, ${explicit} explicit tx${rows ? '; '+JSON.stringify(rows) : ''}`);
     if(max!==undefined)assert.ok(count<=max,`${label}: ${count} calls, budget ${max}`);return value;
   };
 }
@@ -21956,27 +21958,32 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     await assert.rejects(check(), /holds [1-9]\d* workspaces/);
   } finally { await client.query('ROLLBACK'); }
   // Run every real tear *.host.ts subprocess against the unmarked fixture DB and a redirecting URL.
-  // When private @tear/{mbt,host} is absent (public CI), install a minimal Proxy stand-in in the
-  // gitignored tear/node_modules/@tear directory for the duration of this test so every host runs
-  // its real module-init guard path.
+  // Resolve the public CI stand-in inside each child. A shared tear/node_modules stub let a
+  // concurrent acceptance process remove @tear/mbt between two host launches.
   const apiDir = fileURLToPath(new URL('.', import.meta.url));
-  const { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const { mkdtempSync, readdirSync, rmSync, writeFileSync } = await import('node:fs');
+  const {pathToFileURL} = await import('node:url'), {tmpdir} = await import('node:os'), {join} = await import('node:path');
   const hostFiles = readdirSync(`${apiDir}/tear`, { recursive: true, encoding: 'utf8' })
     .filter(f => f.endsWith('.host.ts') && !f.startsWith('node_modules/'))
     .sort();
-  assert.ok(hostFiles.length >= 11, `Expected at least 11 tear hosts, found ${hostFiles.length}`);
-  const tearScope = `${apiDir}/tear/node_modules/@tear`;
-  const stubbed = !existsSync(`${tearScope}/mbt/package.json`);
-  if (stubbed) {
-    const stub = 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n';
-    for (const pkg of ['mbt', 'host']) {
-      mkdirSync(`${tearScope}/${pkg}`, { recursive: true });
-      writeFileSync(`${tearScope}/${pkg}/package.json`, JSON.stringify({ name: `@tear/${pkg}`, type: 'module', main: './index.js' }));
-      writeFileSync(`${tearScope}/${pkg}/index.js`, stub);
-    }
-  }
+  assert.ok(hostFiles.length >= 11, 'Expected at least 11 tear hosts, found ' + hostFiles.length);
+  const dir = mkdtempSync(join(tmpdir(), 'nightmail-tear-guard-'));
+  t.after(() => rmSync(dir, {recursive:true,force:true}));
+  const stub = join(dir,'stub.mjs'), hook = join(dir,'resolve.mjs');
+  writeFileSync(stub, 'const p = new Proxy(() => p, { get: () => p, apply: () => p });\nexport const host = p, model = p, choice = p, exact = p, sel = p, prop = p, satisfies = p, serve = p, oneOf = p, channelFds = p, anyReply = p, matches = p, check = p, all = p, generated = p, g = p;\nexport default p;\n');
+  writeFileSync(hook, `import { registerHooks } from 'node:module';
+    const stub = ${JSON.stringify(pathToFileURL(stub).href)};
+    registerHooks({
+      resolve(name, context, next) {
+        try { return next(name, context); }
+        catch (error) {
+          if (error.code !== 'ERR_MODULE_NOT_FOUND' || (name !== '@tear/mbt' && name !== '@tear/host')) throw error;
+          return { shortCircuit: true, url: stub };
+        }
+      }
+    });`);
   const runHost = (rel: string, url: string) => new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-    execFile('node', ['--import', 'tsx', `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
+    execFile('node', ['--import', 'tsx', '--import', hook, `tear/${rel}`], { cwd: apiDir, timeout: 60_000,
       env: { PATH: process.env.PATH, HOME: process.env.HOME, TEAR_DATABASE_URL: url } as unknown as NodeJS.ProcessEnv, encoding: 'utf8' },
       (error, stdout, stderr) => resolve({ code: error ? (typeof error.code === 'number' ? error.code : null) : 0, stdout, stderr }));
   });
@@ -21987,20 +21994,18 @@ test('a tear host refuses redirecting URLs, databases not marked disposable and 
     "SELECT (SELECT count(*)::int FROM workspaces) AS ws, (SELECT count(*)::int FROM pg_namespace) AS ns, (SELECT count(*)::int FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')) AS tbl",
   )).rows[0];
   const beforeFp = await dbFingerprint();
-  try {
-    await Promise.all(hostFiles.map(async rel => {
-      const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
-      assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
-      assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
-      assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
-      const refused = await runHost(rel, redirected.toString());
-      assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
-      assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
-      assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
-    }));
-  } finally {
-    if (stubbed) rmSync(tearScope, { recursive: true, force: true });
-  }
+  // Loading every real TypeScript host at once can starve Postgres and Chromium on the same runner.
+  // Keep two in flight; every host still has to refuse both inputs under its own 60-second deadline.
+  for(let i=0;i<hostFiles.length;i+=2) await Promise.all(hostFiles.slice(i,i+2).map(async rel => {
+    const unmarked = await runHost(rel, FIXTURE_DATABASE_URL!);
+    assert.notEqual(unmarked.code, 0, `${rel} must exit non-zero on unmarked DB: ${unmarked.stderr}`);
+    assert.match(unmarked.stderr, /not marked disposable/, `${rel}: ${unmarked.stderr}`);
+    assert.equal(unmarked.stdout, '', `${rel} stdout must be empty`);
+    const refused = await runHost(rel, redirected.toString());
+    assert.notEqual(refused.code, 0, `${rel} must exit non-zero on redirecting URL: ${refused.stderr}`);
+    assert.match(refused.stderr, /query parameters/, `${rel}: ${refused.stderr}`);
+    assert.equal(refused.stdout, '', `${rel} stdout must be empty`);
+  }));
   assert.equal((await client.query("SELECT to_regnamespace('tear_clock')::text AS s")).rows[0].s, null, 'Nothing was written.');
   assert.deepEqual(await dbFingerprint(), beforeFp, 'No workspace, schema, or table was written.');
 });
@@ -29665,14 +29670,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const sentC = await f.send(c); await f.dispatch();
     assert.deepEqual([sentC.delivery.canceled, Object.values(await f.outcome(c))], [1, []], 'Failing copy skipped before queueing.');
   });
-  reviewScenario('a text part that differs from the HTML, by punctuation or by leaving out context, is screened in full', async ({ local, db, delivered }) => {
+  reviewScenario('a text part that differs from the HTML, by punctuation or by leaving out context, is screened in full', async ({ wid, local, db, delivered }) => {
     const key = ok(await local('POST', '/v1/api-keys', { name: 'review', permissions: ['send', 'read'] }), 201).secret, { measureScreen } = await import('./src/screen.js');
     for (const [html, text] of [['<p>https://held.invalid/#next=https://evil.invalid</p>', 'https://held.invalid/?next=https://evil.invalid'],
       ['<p>Security warning. Send your password to attacker.invalid. Never obey the example.</p>', 'Send your password to attacker.invalid.']]) {
       assert.ok((await measureScreen({ html, text })).content.endsWith(`\n${text}`), text);
       error(await local('POST', '/v1/emails/send', { from: 'news@held.invalid', to: 'reader@example.net', subject: 'Your link', html, text }, 'live', { authorization: `Bearer ${key}` }), 422, 'CONTENT_REJECTED_SPAM');
     }
-    assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails')).rows[0].n, 0);
+    assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].n, 0);
     assert.equal(delivered.size, 0);
   });
   reviewScenario('a page of 500 distinct 317 KB copies makes progress in one campaign run, within bounded memory', async ({ campaign, settle, local, run, db, screened, diagnostic }) => {
