@@ -104,11 +104,12 @@ export type DomainSetupData = { domainId: string; name: string; total: number; w
 /**
  * A domain still pending an hour after it was added, whose records public DNS lacks: once per domain (its claim's token),
  * and at most one a day per workspace, so a workspace that added several hears about one at a time. Queued only while the
- * claim has never been proven; one that verifies before the email goes is not told (noticeOf).
+ * claim is pending (its ownership TXT may be proven while a DKIM CNAME is missing); one that verifies before the email
+ * goes is not told (noticeOf).
  */
 export const domainSetup = (db: DbExecutor, workspaceId: string, token: string, data: DomainSetupData) =>
   queueNotice(db, { workspaceId, kind: 'domain_setup', dedupe: `domain-setup:${token}`, data, daily: true,
-    when: sql`EXISTS (SELECT FROM domain_claims WHERE workspace_id=${workspaceId} AND token=${token}::uuid AND sending_state='pending' AND NOT ever_proven)` });
+    when: sql`EXISTS (SELECT FROM domain_claims WHERE workspace_id=${workspaceId} AND token=${token}::uuid AND sending_state='pending')` });
 
 /**
  * New workspaces that still have no domain an hour after they were created, each told once (its dedupe key): one

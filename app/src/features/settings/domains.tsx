@@ -16,7 +16,7 @@ import { DomainDetailSkeleton, domainColumns } from './skeletons'
 import { DnsRecordTable, DnsWaitNote, DomainRecords, checkSummary, dnsChecks, domainState, recordRow, recordsFor, useDnsSetup, useDomain, zoneLines, type DnsChecks } from './domain-records'
 import { invalidate, invalidateResources, resourceOf } from '../../data/invalidation'
 import { ReceivingHosts, useReceivingHosts } from './receiving-hosts'
-import { DomainSetupAlert, setupGap } from './domain-setup-alert'
+import { DomainSetupAlert, RecordsCorrectAlert, recordsCorrect, setupGap } from './domain-setup-alert'
 
 function downloadDnsRecords(domain: string, records: DnsRecord[]) {
   const text = `; DNS records for ${domain}\n; Import into your DNS provider or add each record manually.\n${zoneLines(records)}\n`
@@ -238,7 +238,7 @@ function DomainDetail() {
     </>} />
     <MutationError error={verify.error ?? choose.error} />
     {!multiTenant && regionId !== current.regionId && <Alert tone="info">This domain belongs to {current.regionId}. <Button variant="ghost" onClick={() => setRegionId(current.regionId)}>Switch to {current.regionId}</Button></Alert>}
-    {gap && <DomainSetupAlert domain={current} gap={gap} page />}
+    {gap ? <DomainSetupAlert domain={current} gap={gap} page /> : recordsCorrect(current, pressed) && <RecordsCorrectAlert />}
     <div className="domain-sections">
       <DomainRecords domain={current} setup={dns.setup} checks={pressed ?? dnsChecks(current)} receivingView={multiTenant ? { off: receiving.data?.status === 'off', actions: receivingActions } : undefined} mailFrom={{ onEdit: openMailFrom, onRemove: () => { removeMailFrom.reset(); setRemovingMailFrom({ open: true, name: current.mailFromDomain ?? '' }) } }} actions={current.records.length > 0 && <Button onClick={() => downloadDnsRecords(current.name, current.records)}>Download .txt</Button>} />
       <DnsWaitNote domain={current} />
