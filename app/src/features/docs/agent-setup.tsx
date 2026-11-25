@@ -9,6 +9,7 @@ import { request } from '../../data/live'
 import { errorText, type Domain } from '../../data/types'
 import { recordsFor } from '../settings/domain-records'
 import { McpSignInSetup } from './connect-agent'
+import { mcpServerUrl } from '../../../../api/src/mcp-clients'
 import './developer.css'
 import { apiKeyEnv, productName, productSlug, sdkPackage, secretPrefixes } from '../../../../api/src/brand'
 
@@ -65,6 +66,36 @@ export function agentPrompt({ origin, domain, email, multiTenant, setupToken }: 
     : `- Receiving: enable it with POST /v1/inbound/domains/${domain.id}/enable, then point the MX record for ${mx.name} to ${mx.host} (priority ${mx.priority}).`)
   lines.push('- Inbound mail arrives as message.received webhooks (subscribe with POST /v1/inbound/webhooks); fetch full messages with GET /v1/inbound/messages/{messageId}.')
   return lines.join('\n')
+}
+
+// The agent inboxes focus (onboarding, Overview): the agent gets its own key, then reads the inbox over MCP or REST.
+// inboxId is unknown only while the inbox is still being made.
+export function agentInboxPrompt({ origin, address, inboxId, setupToken }: { origin: string; address: string; inboxId?: string | null; setupToken?: string | null }) {
+  const messages = `${origin}/v1/inboxes/${inboxId ?? '{id}'}/messages`
+  return [
+    `Give this project's agent the ${productName} inbox ${address}: it receives every email sent to that address.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index).`,
+    `- Connect over MCP if your client can: add the server ${mcpServerUrl(origin)} with the header Authorization: Bearer <the key>. Its tools list, wait for and read this inbox's mail.`,
+    `- Or use the REST API with the key as a bearer token: wait for mail with GET ${messages}?wait=30 (it answers as soon as one arrives) and read one with GET ${messages}/{messageId}.${inboxId ? '' : ` Find the inbox's id with GET ${origin}/v1/inboxes?q=${address}.`}`,
+    `- Test it: ask me to send an email to ${address}, wait for it, then tell me who sent it and its subject.`,
+  ].join('\n')
+}
+
+// The newsletter focus: a form on the project's site that adds readers to the newsletter, with consent, from the server.
+export function signupFormPrompt({ origin, newsletter, setupToken }: { origin: string; newsletter: { id: string; name: string }; setupToken?: string | null }) {
+  return [
+    `Add a signup form for my ${productName} newsletter "${newsletter.name}" to this project's website.`,
+    '',
+    `- API base URL: ${origin}`,
+    ...keyLines(origin, setupToken),
+    `- Read the docs first: ${origin}/llms.txt (agent-readable index) and ${origin}/docs.md (API reference index: Audience and Consent).`,
+    `- The form asks for an email address (and, optionally, a name) and posts to a server route of this project, never straight to ${productName}: the key stays on the server.`,
+    `- That route adds the reader: create the contact with POST ${origin}/v1/contacts {"email": …, "name": …} (reuse it if the address is already a contact), record their consent with POST ${origin}/v1/contacts/{id}/consent {"status":"subscribed","source":"signup form"}, then add them with POST ${origin}/v1/lists/${newsletter.id}/members {"contactIds":["{id}"]}.`,
+    `- Keep bots out (a hidden honeypot field and a rate limit per IP address), and say "You're subscribed" once it worked.`,
+  ].join('\n')
 }
 
 const ADDRESS = /[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+/g

@@ -1,7 +1,7 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
+import { useApiDef, useRegion, useWorkspaceAccess , useSession } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
@@ -20,7 +20,8 @@ import { DailyLimit, SetupRail, useSendingLimitPending, useSetupSteps } from './
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { setPanelHidden } from './panel'
 import { DomainSetupAlert } from '../settings/domain-setup-alert'
-import { ONBOARDING_CARD_SPACE, OnboardingCard, useOnboardingCard } from './onboarding-card'
+import { ONBOARDING_CARD_SPACE, OnboardingCard, cardActions, useOnboardingCard } from './onboarding-card'
+import { leadFocus } from '../../data/focus'
 import { useQueryClient } from '@tanstack/react-query'
 import { resourceOf } from '../../data/invalidation'
 
@@ -66,7 +67,8 @@ export function OverviewPage() {
   const sentFromCard = () => void client.invalidateQueries({ predicate: query => query.queryKey[0] === 'nightmail' && ['overview', 'logs', 'emails', 'sender-score', 'sending-limit'].includes(resourceOf(query.queryKey)) }).catch(() => {})
   // The card leads with its own actions, so the setup steps don't offer them again beside it (the key stays there: the
   // first-send card copies the agent prompt instead).
-  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : ['send']) : setup
+  const lead = leadFocus(useSession()?.identity)
+  const rail = card ? withoutActions(setup, card === 'no-domain' ? ['domain'] : cardActions[lead]) : setup
   // Latest emails and the figures above it must agree: when a new email (or a new outcome for one) shows in the list,
   // the figures are read again (unless metrics already failed, so we never hammer an over-budget query).
   const count = useLatestRowCount(card ? ONBOARDING_CARD_SPACE[card] : 0)
@@ -82,7 +84,7 @@ export function OverviewPage() {
   const failed = query.isError && !data
   return <div className="ov-page">
     <PageHeader className="ov-strip" title="Overview" actions={<>{controls}<PanelToggle /></>} />
-    {card && (card === 'no-domain' || !held) && <div className="ov-lead"><OnboardingCard kind={card} domain={setup.verifiedDomain} onSent={sentFromCard} /></div>}
+    {card && (card === 'no-domain' || !held) && <div className="ov-lead"><OnboardingCard kind={card} domain={setup.verifiedDomain} onSent={sentFromCard} progress={setup.progress} /></div>}
     {stacked && setup.stuck && <div className="ov-lead"><DomainSetupAlert domain={setup.stuck.domain} gap={setup.stuck.gap} /></div>}
     {stacked && rail.steps && <div className="ov-lead"><SetupRail steps={rail.steps} current={rail.current} open={rail.open} /></div>}
     {stacked && setup.error ? <div className="ov-lead"><ErrorState error={setup.error} onRetry={setup.retry} /></div> : null}

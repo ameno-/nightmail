@@ -9,7 +9,9 @@ import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
 import { useApiMutation, useApiQuery, usePublicOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
-import { agentStep, finishedStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
+import { afterDomainStep, agentStep, finishedStep, focusStep, readRegionalDomain, setDomainStep, setRegionalDomain, type OnboardingStage } from '../../data/onboarding'
+import { leadFocus, useSaveFocus } from '../../data/focus'
+import { AgentInboxStep, FocusStep, MarketingStep, NewsletterStep, useWarmFocus } from './focus-steps'
 import { ConnectAwsRegional, PendingDomain, createStack, domainHint, waitingForStack } from './aws'
 import { DnsWaitNote, DomainRecords, useDnsSetup, useDomain } from '../settings/domain-records'
 import { AgentSetupStatus, agentPrompt, agentPromptFile, downloadText, useAgentSetup } from '../docs/agent-setup'
@@ -86,7 +88,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
 }
 
 // Each step stands on its own heading: no step indicator. A step with somewhere to go back to has a Back link at its top.
-type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'agent' | 'error'
+type View = 'loading' | 'choose' | 'connect' | 'domain' | 'imported' | 'records' | 'focus' | 'agent' | 'error'
 const rise = (index: number) => ({ '--i': index }) as CSSProperties
 // Older APIs return no count; a list is accepted too.
 function importedCount(connection: ProviderConnection | null | undefined) {
@@ -186,14 +188,35 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const readingIdentity = useIsFetching({ queryKey: ['identity'], exact: true }) > 0
   // Overview opens next: bring the identity's daily limit and counts up to date first.
   const finish = () => { setDomainStep(workspaceId, finishedStep); refreshIdentity() }
+  // After a domain, the focus question (once), then the step its first pick leads to. Saving it runs in the background.
+  const next = (domainId: string) => setDomainStep(workspaceId, afterDomainStep(identity, domainId))
+  const saveFocus = useSaveFocus(), warmFocus = useWarmFocus()
+  // An agent inbox goes on the built-in domain while it receives, a newsletter while it sends; else on the domain
+  // onboarding verified.
+  const receives = builtin?.name && builtin.sending !== 'off' ? builtin.name : null, sends = builtin?.name && (builtin.sending === 'ready' || builtin.sending === 'pending') ? builtin.name : null
   // Reached from "Your domain is ready" or imported domains, the form goes back there.
   const domainForm = () => <AddDomain draft={draft} onDraftChange={setDraft} queued={queued} onQueuedChange={setQueued}
     ready={stage.step === 'domain'} onBack={addAnother ? () => setAddAnother(false) : undefined}
     onAdded={id => setDomainStep(workspaceId, id)} onFinish={finish} />
   let view: View, content: ReactNode
-  // Back from the first email with the built-in domain: to its step. An own domain's records move on by themselves once it verifies, so that step has no Back.
-  if (stage.step === 'agent') { view = 'agent'; content = <AgentSetup domainId={stage.domainId} onFinish={finish} onBack={stage.domainId === builtin?.id ? () => setDomainStep(workspaceId, '') : undefined} /> }
-  else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => setDomainStep(workspaceId, agentStep(stage.domainId))} onMissing={() => setDomainStep(workspaceId, '')} /> }
+  // Back from the focus question with the built-in domain: to its step. An own domain's records move on by themselves once
+  // it verifies, so the question has no Back then; the step after it goes back to it.
+  if (stage.step === 'focus') {
+    const domainId = stage.domainId
+    view = 'focus'
+    content = <FocusStep initial={identity?.focus ?? []} onBack={domainId === builtin?.id ? () => setDomainStep(workspaceId, '') : undefined}
+      onContinue={focus => { if (focus[0]) warmFocus(focus[0], receives); saveFocus(focus); setDomainStep(workspaceId, agentStep(domainId)) }} />
+  }
+  else if (stage.step === 'agent') {
+    const domainId = stage.domainId, lead = leadFocus(identity), back = () => setDomainStep(workspaceId, focusStep(domainId))
+    view = 'agent'
+    // Overview, next, is warmed while a focus's step is up, as the agent setup warms it.
+    content = lead === 'agents' ? <><FocusDomain domainId={domainId} builtin={receives}>{domain => <AgentInboxStep domain={domain} onBack={back} onFinish={finish} />}</FocusDomain><WarmOverview /></>
+      : lead === 'newsletter' ? <><FocusDomain domainId={domainId} builtin={sends}>{domain => <NewsletterStep domain={domain} onBack={back} onFinish={finish} />}</FocusDomain><WarmOverview /></>
+      : lead === 'marketing' ? <><MarketingStep domain={sends} onBack={back} onFinish={finish} /><WarmOverview /></>
+      : <AgentSetup domainId={domainId} onFinish={finish} onBack={back} />
+  }
+  else if (stage.step === 'domain' && stage.domainId) { view = 'records'; content = <DomainSetup domainId={stage.domainId} onContinue={() => next(stage.domainId)} onMissing={() => setDomainStep(workspaceId, '')} /> }
   else if (awsPhase === 'connecting' || awsPhase === 'connected') {
     view = 'connect'
     content = current?.templateVersion === 'v5'
@@ -212,11 +235,11 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   else if (choosingDomain && flow === 'shared' && builtin?.id && builtin.sending !== 'off' && !addAnother) {
     const builtinId = builtin.id
     view = 'imported'
-    content = <BuiltinReady builtin={builtin} onContinue={() => setDomainStep(workspaceId, agentStep(builtinId))} onAddOwn={() => setAddAnother(true)} />
+    content = <BuiltinReady builtin={builtin} onContinue={() => next(builtinId)} onAddOwn={() => setAddAnother(true)} />
   }
   else if (choosingDomain && flow === 'byo' && imported > 0 && !addAnother) {
     view = 'imported'
-    content = <ImportedDomains count={imported} onContinue={id => setDomainStep(workspaceId, agentStep(id))} onAddAnother={() => setAddAnother(true)} fallback={domainForm()} />
+    content = <ImportedDomains count={imported} onContinue={next} onAddAnother={() => setAddAnother(true)} fallback={domainForm()} />
   }
   else { view = 'domain'; content = domainForm() }
   // A step fades in; the first paint and the loader stay still.
@@ -226,6 +249,15 @@ function OnboardingSteps({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const motion = previous === null || view === 'loading' ? undefined : 'fade'
   useEffect(() => { if (previous !== null) document.getElementById('main-content')?.scrollTo({ top: 0 }) }, [view]) // eslint-disable-line react-hooks/exhaustive-deps
   return <div key={view} className="onboarding-step" data-motion={motion}>{content}</div>
+}
+
+/** The domain an agent inbox or a newsletter goes on: the built-in one, else the domain onboarding verified (read). */
+function FocusDomain({ domainId, builtin, children }: { domainId: string; builtin: string | null | undefined; children: (domain: string) => ReactNode }) {
+  const domain = useDomain(domainId, 0, !builtin)
+  if (builtin) return children(builtin)
+  if (domain.isPending) return <BootLoader inline />
+  if (domain.error) return <ErrorState error={domain.error} onRetry={() => void domain.refetch()} />
+  return children(domain.data.name)
 }
 
 /** A step's way back: a quiet text link above its heading. */
@@ -490,6 +522,8 @@ function useWarmOverview() {
       .then(() => prefetch('/overview')).catch(() => {})
   }
 }
+
+function WarmOverview() { useWarmOverview(); return null }
 
 // Last step: one action that sets a coding agent up (its prompt, with a one-time setup token: the agent gets its own key),
 // the docs, and a test email to yourself as the one-click proof. No code or key on screen: keys live under API keys.

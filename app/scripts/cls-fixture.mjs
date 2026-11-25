@@ -933,6 +933,19 @@ export async function seed(fx) {
   // Ulmus: the same, its built-in domain still being set up (the request that made the workspace ran out of time).
   await fx.signIn('ula', 'ula@ulmus.example', 'Ula Berg', { id: 'ws_builtin_pending', name: 'Ulmus' });
   await builtin(db, 'ws_builtin_pending', await hosted(db, 'ws_builtin_pending'), 'ulmus-r8', { pending: true });
+  // What each workspace said it is here for (onboarding's focus question): the step and Overview card each focus leads to.
+  // Alder: agent inboxes, its agent@ inbox made and two emails in it. Aspen: the same focus, nothing received yet (Overview's card).
+  const focused = async (user, email, name, workspace, label, focus) => {
+    await fx.signIn(user, email, name, { id: workspace, name: label })
+    const made = await builtin(db, workspace, await hosted(db, workspace), label.toLowerCase() + '-' + user.slice(0, 1) + '3')
+    await db.query('UPDATE workspaces SET focus = $2 WHERE id = $1', [workspace, focus])
+    return made
+  }
+  const alder = await focused('ada', 'ada@alder.example', 'Ada Moss', 'ws_focus_agents', 'Alder', ['agents', 'developer'])
+  await agentInbox(db, 'ws_focus_agents', { mdom: 'mdom_builtin_ws_focus_agents', host: alder.name }, 'Agent', 24 * 30, mix(2))
+  await focused('abe', 'abe@aspen.example', 'Abe Lowe', 'ws_focus_agents_new', 'Aspen', ['agents'])
+  await focused('mae', 'mae@maple.example', 'Mae Ford', 'ws_focus_marketing', 'Maple', ['marketing', 'newsletter'])
+  await focused('noa', 'noa@linden.example', 'Noa Hart', 'ws_focus_newsletter', 'Linden', ['newsletter'])
   // Connecting their own AWS account, one workspace per moment of the connect step (onboarding/aws.tsx).
   await connectedAccount(fx, db, 'bea', 'Juniper', 'stack');
   await connectedAccount(fx, db, 'bo', 'Kestrel', 'refused');
