@@ -62,7 +62,7 @@ try { if (localStorage.getItem('nightmail.overview-panel') === 'hidden') documen
   let account = null, workspace = null, ready = null, session = null
   try { account = sessionStorage.getItem('nightmail.account'); workspace = account && localStorage.getItem('nightmail.workspace:' + account); ready = localStorage.getItem('nightmail.dashboard-ready'); session = localStorage.getItem('nightmail.session') } catch {}
   // A visitor on a marketing page with no trace of a session here isn't asked about one (data/live.ts, sessionLikely).
-  const marketing = path === '/' || path === '/pricing' || path.startsWith('/compare/')
+  const marketing = path === '/' || /^\/pricing\/?$/.test(path) || /^\/(?:compare|legal)(?:\/|$)/.test(path)
   const visitor = marketing && session !== 'in' && (session === 'out' || (ready === null && account === null))
   const header = '%HEADER_PREFIX%' // api/src/brand.ts's headerPrefix, filled in by vite.config.ts
   const start = url => {

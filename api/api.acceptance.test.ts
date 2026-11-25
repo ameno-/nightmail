@@ -44049,6 +44049,7 @@ describe('dashboard analytics', () => {
     for (let i=0;i<2;i++) assert.equal((await post({...page,s:page.s+i},headers,ip)).status,204);
     assert.equal((await post({...page,c:'/compare/resend'},headers,ip)).status,204);
     assert.equal((await post(page,{'user-agent':'Googlebot/2.1'},ip)).status,204);
+    assert.equal((await post({ ...page, p: '/docs/api/sendEmail' },{'user-agent':'Mozilla/5.0 HeadlessChrome/131.0.0.0 Safari/537.36'},ip)).status,204);
     runtime.analyticsPeer.bot=true;
     assert.equal((await post(page,headers,ip)).status,204);
     assert.equal((await post({...page,c:'sign-in'},headers,ip)).status,204);
@@ -44063,7 +44064,7 @@ describe('dashboard analytics', () => {
     assert.ok(raw.filter(r=>r.public).every(r=>/^[a-f0-9]{32}$/.test(String(r.sid)) && !String(r.sid).startsWith('page-session')));
     assert.equal(raw.filter(r=>r.type==='page_view' && r.vid===vid).length,2);
     assert.match(String(vid),/^[a-f0-9]{32}$/);
-    assert.equal(raw.filter(r=>r.type==='bot_view').length,2);
+    assert.equal(raw.filter(r=>r.type==='bot_view').length,3);
     for(const row of raw.filter(r=>r.type==='bot_view')) assert.deepEqual(Object.keys(row).sort(),['id','received','route','type','v']);
     assert.doesNotMatch(JSON.stringify(raw),/typed@|198\.51\.100|Synthetic mobile|Googlebot/);
     const replay=[...map].find(([key])=>key.includes('/raw/'))!;
@@ -44089,7 +44090,9 @@ describe('dashboard analytics', () => {
       const exported=await get(operatorCookie);
       assert.equal(exported.status,200,await exported.clone().text());
       const report=await exported.json() as Json, by=(metric:string)=>report.rows.find((r:Json)=>r.metric===metric);
-      assert.deepEqual([by('page_view').events,by('page_view').visitors,by('visit').visitors,by('bot_view').events,by('cta').events],[3,1,1,2,1]);
+      assert.deepEqual([by('page_view').events,by('page_view').visitors,by('visit').visitors,by('cta').events],[3,1,1,1]);
+      assert.deepEqual(report.rows.filter((r:Json)=>r.dimensions.path==='/docs/api/sendEmail').map((r:Json)=>[r.metric,r.events,r.visitors]),[['bot_view',1,null]]);
+      assert.equal(report.rows.find((r:Json)=>r.metric==='bot_view' && r.dimensions.path==='/pricing').events,2);
       assert.deepEqual(by('page_view').dimensions,{path:'/pricing',referrer:'search.example',source:'newsletter',medium:'email',campaign:'launch',device:'phone',country:'CA',viewport:'phone'});
       assert.deepEqual(steps.map(s=>by(s.step).events),[1,1,1]);
       assert.doesNotMatch(JSON.stringify(report),new RegExp(String(vid)));

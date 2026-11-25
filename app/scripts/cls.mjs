@@ -250,6 +250,7 @@ const pages = ids => [
   ['Docs · keys guide', '/docs/keys', { from: '/api-keys' }],
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
+  ['Docs · signed out operation', '/docs/api/sendEmail', { user: null }],
   ['Onboarding', '/onboarding', { user: 'ona' }],
   // Onboarding's domain step with the built-in domain ready: continue with it, or add a domain of your own.
   ['Onboarding · built-in domain', '/onboarding', { user: 'uma' }],
@@ -558,7 +559,12 @@ async function measure(browser, job, fx) {
     if (job.panel) await context.addInitScript(panel => { try { localStorage.setItem('nightmail.overview-panel', panel); } catch {} }, job.panel);
     page = await context.newPage();
     net = network(page);
-    page.on('request', request => { const url = request.url(); if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`); });
+    page.on('request', request => {
+      const url = request.url();
+      if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`);
+      if (!job.user && url === origin + '/v1/me' && /^\/(?:$|docs(?:\/|$)|pricing\/?$|compare\/)/.test(new URL(page.url()).pathname))
+        problems.push('Public page asked for /v1/me without a sign-in hint');
+    });
     // A guard that makes a write fail on purpose expects its one 500 (expected500), and says so itself if it doesn't come.
     page.on('response', response => { if (response.url().startsWith(origin + '/v1/') && (response.status() >= 500 || response.status() === 429) && !(expected500 && response.status() === 500 && expected500(response))) problems.push(`${response.status()} ${response.request().method()} ${response.url().slice(origin.length)}`); });
     page.on('pageerror', error => problems.push(`page error: ${error.message}`));

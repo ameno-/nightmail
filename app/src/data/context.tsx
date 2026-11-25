@@ -110,8 +110,8 @@ async function loadIdentity(signal?: AbortSignal, override?: { account?: string 
   let workspace = override ? (override.workspace !== undefined ? override.workspace : (account ? rememberedWorkspace(account) : null)) : selectedWorkspace()
   const opts = () => override ? { signal, account, workspace } : { signal }
   const read = () => !override && reviewRoute.test(window.location.pathname) ? readReviewIdentity(signal) : request<Identity>('/v1/me', opts())
-  // A visitor on a marketing page with no trace of a session here is signed out, without asking (live.ts, sessionLikely).
-  if (!override && asksOnlyIfLikely(window.location) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
+  // An explicit refetch (e.g. after logout) also respects the public-page hint; refetch bypasses useQuery's enabled flag.
+  if (!override && asksOnlyIfLikely(window.location.pathname) && !sessionLikely()) throw new ApiError('Sign in to continue.', 'AUTH_REQUIRED', {}, undefined, 401)
   let result: Identity
   try { result = await read() }
   catch (error) {
@@ -217,7 +217,7 @@ function SignInLinkForm({ to }: { to: string | null }) {
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */
-export const isPublicPath = (path: string) => path === '/docs' || path.startsWith('/docs/') || path === '/legal' || path.startsWith('/legal/') || path === '/pricing' || path.startsWith('/compare/') || path.startsWith('/support/continue/') || (designSheetEnabled && path === DESIGN_SHEET_PATH)
+export const isPublicPath = (path: string) => (path !== '/' && asksOnlyIfLikely(path)) || path.startsWith('/support/continue/') || (designSheetEnabled && path === DESIGN_SHEET_PATH)
 export function ApiProvider({ children }: { children: ReactNode }) {
   // The docs, the legal pages and the price pages are public: they render signed out, and /v1/me only adds the workspace's context.
   const { pathname } = useLocation(), publicRoute = isPublicPath(pathname)
@@ -227,7 +227,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   useState(() => {
     const url = new URL(window.location.href), account = url.searchParams.get('account')
     if (account === null) return
-    if (takeExpectedAccount() && /^[A-Za-z0-9._:-]{1,200}$/.test(account)) selectAccount(account)
+    if (takeExpectedAccount() && /^[A-Za-z0-9._:-]{1,200}$/.test(account)) { selectAccount(account); rememberSession(true) }
     url.searchParams.delete('account')
     window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
   })
@@ -246,8 +246,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     window.history.replaceState(window.history.state, '', url.pathname + url.search + url.hash)
     setInvitation(null)
   }
+  const checkIdentity = !asksOnlyIfLikely(pathname) || sessionLikely()
   const identity = useQuery({
     queryKey: ['identity'],
+    enabled: checkIdentity,
     networkMode: 'always', refetchOnReconnect: true,
     retry: (failures, error) => failures < 1 && error instanceof ApiError && error.code !== 'AUTH_NOT_CONFIGURED' && (error.code === 'NETWORK_UNAVAILABLE' || (error.status ?? 0) >= 500),
     queryFn: async ({signal}) => {
@@ -480,7 +482,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method)); expectAccount(); analytics().flush(); window.location.assign(url) }
     catch (error) { setAuthError(error); setBusy(false) }
   }
-  const signedOut = identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED'
+  const signedOut = !checkIdentity || (identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED')
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
   // Multi-tenant installations greet everyone at "/" with the public homepage (signed in, it is App's index route);
   // /health says which this is.
@@ -507,7 +509,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: method => void startLogin(false, method), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
     : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
