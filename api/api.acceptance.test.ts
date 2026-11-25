@@ -4806,12 +4806,14 @@ test('permission refusals: every refusal helper names the permission, scope, cre
 
 test('permission refusals over HTTP: the same status and code, with error.required and the Nightmail-Required-Permission header', async t => {
   const read = await keyFixture(t, { permissions: ['read'] }), scoped = await keyFixture(t, { permissions: ['read', 'send', 'manage'], domains: ['example.com'] }), manage = await keyFixture(t);
+  // Limited to a sender domain, a key with read reads the mail addressed to it; a send-only one reads none.
+  const sendScoped = await keyFixture(t, { permissions: ['send'], domains: ['example.com'] });
   const rows: [string, string, Key, unknown, string, Json, string][] = [
     ['POST', '/v1/lists', read, { name: unique('refused-list') }, 'PERMISSION_DENIED', { permission: 'audience', level: 'write' }, 'audience=write'],
     ['GET', '/v1/api-keys', read, undefined, 'PERMISSION_DENIED', { permission: 'configuration', level: 'write' }, 'configuration=write'],
     ['GET', '/v1/metrics', scoped, undefined, 'UNRESTRICTED_KEY_REQUIRED', { permission: 'sentMail', level: 'read', scope: 'workspace' }, 'sent_mail=read; scope="workspace"'],
     ['GET', '/v1/inbound/messages', read, undefined, 'ADMIN_REQUIRED', { permission: 'receivedMail', level: 'read' }, 'received_mail=read'],
-    ['GET', '/v1/inbound/messages', scoped, undefined, 'UNRESTRICTED_KEY_REQUIRED', { permission: 'receivedMail', level: 'read', scope: 'workspace' }, 'received_mail=read; scope="workspace"'],
+    ['GET', '/v1/inbound/messages', sendScoped, undefined, 'UNRESTRICTED_KEY_REQUIRED', { permission: 'receivedMail', level: 'read', scope: 'workspace' }, 'received_mail=read; scope="workspace"'],
     ['GET', '/v1/endpoints', scoped, undefined, 'ADMIN_REQUIRED', { permission: 'receivingRules', level: 'read', scope: 'workspace' }, 'receiving_rules=read; scope="workspace"'],
     ['POST', '/v1/domains', scoped, { name: 'other-refused.example.net' }, 'DOMAIN_NOT_ALLOWED', { permission: 'configuration', scope: 'domain:other-refused.example.net' }, 'configuration; scope="domain:other-refused.example.net"'],
     // A campaign draft and its preview are Audience & content, not Send email.
@@ -5234,6 +5236,8 @@ describe('Hosted MCP OAuth and tools', () => {
         readSendKey: { kind: 'apiKey', grants: [...reads, 'sendEmail:on'], covers: ['workspace', 'domain'], bearer: await key({ permissions: ['read', 'send'] }) },
         manageKey: { kind: 'apiKey', grants: every, covers: ['workspace', 'domain', 'address'], bearer: await key({ permissions: ['manage'] }) },
         domainKey: { kind: 'apiKey', grants: every, covers: ['domain'], bearer: await key({ permissions: ['read', 'send', 'manage'], domains: ['example.com'] }) },
+        // Limited to a sender domain, read also reads the received mail addressed to it (the recipient rows).
+        domainReadKey: { kind: 'apiKey', grants: [...reads, 'sendEmail:on', 'receivedMail:read'], covers: ['domain'], bearer: await key({ permissions: ['read', 'send'], domains: ['example.com'] }) },
         addressReader: { kind: 'addressKey', grants: addressed, covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['read'] } }) },
         addressSender: { kind: 'addressKey', grants: ['sendEmail:on'], covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['send'] } }) },
         addressOrganizer: { kind: 'addressKey', grants: ['receivedMail:write'], covers: ['address'], bearer: await key({ access: { type: 'addresses', mail: ['modify'] } }) },
@@ -5260,7 +5264,8 @@ describe('Hosted MCP OAuth and tools', () => {
         if ((row.credential === 'lasting' && h.kind === 'agentToken') || (row.credential === 'notDelegated' && (h.kind === 'agentToken' || h.kind === 'signIn'))) return false;
         if (h.kind === 'person' || (h.kind === 'signIn' && !role)) return role;
         const level = ((h.kind === 'agentToken' || h.kind === 'signIn') && row.delegatedLevel) || row.level, covers = h.covers!;
-        return h.grants!.includes(`${row.permission}:${level}`) && (row.scope === 'workspace' || row.scope === 'address' ? covers.includes(row.scope) : covers.includes('workspace') || covers.includes('domain'));
+        return h.grants!.includes(`${row.permission}:${level}`) && (row.scope === 'workspace' || row.scope === 'address' ? covers.includes(row.scope)
+          : row.scope === 'recipient' ? covers.includes('address') || (h.kind === 'apiKey' && covers.includes('domain')) : covers.includes('workspace') || covers.includes('domain'));
       };
       const resolve = (value: Json | undefined): Json => { let v = value ?? {}; for (let i = 0; v.$ref && i < 20; i++) { const [, , section, name] = v.$ref.split('/'); v = spec.components[section][name]; } return v; };
       // Path values that pass validation and name nothing, so a credential REST admits gets 404, never a change.
@@ -5304,7 +5309,7 @@ describe('Hosted MCP OAuth and tools', () => {
       };
       const mismatches: string[] = [];
       // Workspace API keys that aren't full access: limited permissions, or limited to sender domains.
-      const limitedKeys = new Set(['readKey', 'sendKey', 'readSendKey', 'domainKey']), unhelpful: string[] = [];
+      const limitedKeys = new Set(['readKey', 'sendKey', 'readSendKey', 'domainKey', 'domainReadKey']), unhelpful: string[] = [];
       // Some admitted writes reach for the network (an upload to object storage); here such a fetch fails like any other.
       // The fixture's own network guard stays underneath, for the issuer, and is back once every operation was called.
       const guarded = globalThis.fetch;
@@ -5355,7 +5360,7 @@ describe('Hosted MCP OAuth and tools', () => {
         let checked = 0;
         for (const entry of entries) {
           const { id, template, params, row } = entry;
-          if (row.scope !== 'domain' && row.scope !== 'address') continue;
+          if (row.scope !== 'domain' && row.scope !== 'address' && row.scope !== 'recipient') continue;
           const family = listings[id] ?? (Object.keys(resource) as (keyof typeof resource)[]).find(name => resource[name].path.test(template))
             ?? (named[id] || id === 'previewEmail' ? (row.scope === 'domain' ? 'domain' : 'inbox') : undefined);
           // Attachments (object storage the fixture doesn't have) and mail client passwords: their parents are scoped here.
@@ -7658,6 +7663,106 @@ describe('Hosted MCP OAuth and tools', () => {
       const raw = `/v1/inbound/messages/${files.get(support.id)!.message}/raw`;
       assert.equal((await get(raw, credentials[0]![1])).status, 307);
       for (const [label, headers] of credentials.slice(1)) assert.deepEqual([(await get(raw, headers)).status, (await get(raw, headers)).body?.error?.code], [403, 'ADMIN_REQUIRED'], label);
+    });
+  });
+
+  // A key limited to a sender domain with Read is a whole agent key: it sends from the domain and reads the replies there
+  // (a production agent's Read and Send key for its domain was refused every reply). It reads only mail addressed to its
+  // domains: a message needs an SMTP envelope recipient there (sent mail: a sender there), so mail a route delivered from
+  // another domain into an address there, and mail to other domains, stay hidden in every read: lists, messages, threads,
+  // their counts and snippets, search, attachments, events and long polls, and over MCP. A send-only key reads none.
+  test('a key limited to sender domains reads the received mail addressed to them, in every read, and nothing else', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const { mailMessages, mailAttachments } = await import('./src/db/mailbox.js');
+      const { attachToMailboxes } = await import('./src/mailbox-store.js');
+      const { recordEvents } = await import('./src/mailbox-events.js');
+      const wid = runtime.config.workspaceId, scope = { workspaceId: wid };
+      runtime.mailR2 = { bucket: {} as R2Bucket, name: 'domain-reads', write: false };
+      const bucket = 'r2:domain-reads', inHost = `${unique('replies')}.example`, subHost = `reply.${inHost}`, outHost = `${unique('others')}.example`;
+      for (const host of [inHost, subHost, outHost]) await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')", [unique('mdom'), wid, host, REGION]);
+      await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'domain-reads','fixture-topic') ON CONFLICT DO NOTHING", [wid, REGION]);
+      const [a, s, b] = await Promise.all([`in@${inHost}`, `agent@${subHost}`, `out@${outHost}`].map(async address => ok(await local('POST', '/v1/inbound/addresses', { address }), 201)));
+      const threads = { mine: unique('thr'), cc: unique('thr'), other: unique('thr'), sub: unique('thr'), sent: unique('thr') };
+      for (const thread of Object.values(threads)) await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)', [thread, wid]);
+      const at = (n: number) => new Date(Date.now() - 60_000 + n * 1000).toISOString();
+      const store = async (o: { thread: string; boxes: string[]; envelope: string[]; subject: string; n: number; direction?: 'inbound' | 'outbound'; from?: string; file?: boolean }) => {
+        const message = unique('msg');
+        const [row] = await runtime.db.insert(mailMessages).values({ id: message, ...scope, direction: o.direction ?? 'inbound', threadId: o.thread, region: REGION, fromAddress: o.from ?? 'customer@example.net', subject: o.subject, text: o.subject,
+          snippet: o.subject, messageId: `${message}@example.net`, envelopeTo: o.envelope, to: o.envelope.map(address => ({ name: null, address })), verdicts: { virus: 'PASS' }, receivedAt: at(o.n), attachmentCount: o.file ? 1 : 0 }).returning();
+        await attachToMailboxes(runtime.db, scope, row!, o.boxes);
+        const file = unique('att');
+        if (o.file) await runtime.db.insert(mailAttachments).values({ id: file, ...scope, messageId: message, filename: 'quote.txt', contentType: 'text/plain', sizeBytes: 42, disposition: 'attachment', sha256: '0'.repeat(64), bucket, storageKey: `a/${wid}/${message}/${file}` });
+        return { id: message, file };
+      };
+      // A reply to the domain; mail to another domain that copies it; a route's delivery of another domain's mail into the
+      // address there, newest in the same conversation; mail to another domain only; a reply to a subdomain; and mail sent
+      // from the address, and from another domain's address through it.
+      const mine = await store({ thread: threads.mine, boxes: [a.id], envelope: [a.address], subject: 'Mine', n: 0, file: true });
+      const cc = await store({ thread: threads.cc, boxes: [a.id, b.id], envelope: [b.address, a.address], subject: 'Copied', n: 1 });
+      const routed = await store({ thread: threads.mine, boxes: [a.id], envelope: [`sales@${outHost}`], subject: 'routed-needle', n: 2, file: true });
+      const other = await store({ thread: threads.other, boxes: [b.id], envelope: [b.address], subject: 'Elsewhere', n: 3 });
+      const sub = await store({ thread: threads.sub, boxes: [s.id], envelope: [s.address], subject: 'Subdomain', n: 4 });
+      const sent = await store({ thread: threads.sent, boxes: [a.id], envelope: ['customer@example.net'], subject: 'Sent', n: 5, direction: 'outbound', from: a.address });
+      const sentElsewhere = await store({ thread: threads.sent, boxes: [a.id], envelope: ['customer@example.net'], subject: 'Sent elsewhere', n: 6, direction: 'outbound', from: `news@${outHost}` });
+      const key = async (permissions: string[]) => { const made = ok(await request('POST', '/v1/api-keys', MANAGER, { name: unique('domain-reads'), permissions, domains: [inHost] }), 201); secrets.add(made.secret); return made as Key; };
+      const [reader, sender] = [await key(['read', 'send']), await key(['send'])];
+      const get = (path: string) => request('GET', path, reader.secret);
+
+      // Messages: its own and the copy, each on its own address only; never the routed, other-domain or foreign-sent mail.
+      const listed: Json[] = ok(await get('/v1/inbound/messages?limit=100')).data;
+      assert.deepEqual(listed.map(m => m.id).sort(), [mine.id, cc.id, sub.id].sort());
+      assert.deepEqual(listed.find(m => m.id === cc.id)?.addressIds, [a.id]);
+      assert.deepEqual(ok(await get('/v1/inbound/messages?direction=outbound')).data.map((m: Json) => m.id), [sent.id]);
+      for (const hidden of [routed, other, sentElsewhere]) error(await get(`/v1/inbound/messages/${hidden.id}`), 404, 'NOT_FOUND');
+      const detail = ok(await get(`/v1/inbound/messages/${mine.id}?includeThread=true`));
+      assert.deepEqual([detail.addressIds, detail.thread.count, detail.thread.messages.map((m: Json) => m.id)], [[a.id], 1, [mine.id]]);
+      error(await get(`/v1/inbound/messages?addressId=${b.id}`), 404, 'NOT_FOUND');
+      error(await get(`/v1/inbound/messages/${mine.id}?includeDelivery=true`), 403, 'ADMIN_REQUIRED');
+      // Conversations: the routed message is newer in the same one, yet it is neither its snippet, its time nor counted.
+      const conversations: Json[] = ok(await get('/v1/inbound/threads')).data, own = conversations.find(c => c.id === threads.mine) ?? assert.fail('Its conversation is listed');
+      assert.deepEqual([own.snippet, own.messageCount, own.addressIds, Date.parse(own.lastMessageAt)], ['Mine', 1, [a.id], Date.parse(detail.receivedAt)]);
+      assert.ok(!conversations.some(c => c.id === threads.other), 'No other domain conversation');
+      const conversation = ok(await get(`/v1/inbound/threads/${threads.mine}`));
+      assert.deepEqual([conversation.messages.map((m: Json) => m.id), conversation.addressStates.map((x: Json) => [x.addressId, x.unreadCount])], [[mine.id], [[a.id, 1]]]);
+      error(await get(`/v1/inbound/threads/${threads.other}`), 404, 'NOT_FOUND');
+      for (const path of ['/v1/inbound/messages?q=routed-needle', '/v1/inbound/threads?q=routed-needle']) assert.deepEqual(ok(await get(path)).data, [], path);
+      // Attachments follow the message.
+      assert.match(ok(await get(`/v1/inbound/messages/${mine.id}/attachments/${mine.file}`)).url, /\/v1\/objects\//);
+      assert.equal(error(await get(`/v1/inbound/messages/${routed.id}/attachments/${routed.file}`), 404, 'NOT_FOUND').message, 'Attachment was not found.');
+      // Events: only those of the messages it reads, on its addresses; a long poll doesn't wake for the others.
+      const event = (box: string, thread: string, message?: string) => ({ type: message ? 'message.received' as const : 'thread.updated' as const, mailboxId: box, threadId: thread, messageId: message ?? null });
+      await recordEvents(runtime.db, wid, [event(a.id, threads.mine, mine.id), event(a.id, threads.cc, cc.id), event(b.id, threads.cc, cc.id), event(a.id, threads.mine, routed.id), event(b.id, threads.other, other.id), event(s.id, threads.sub, sub.id), event(a.id, threads.mine)]);
+      const events: Json[] = ok(await get('/v1/inbound/events?after=0&limit=100')).data;
+      assert.deepEqual(events.map(e => [e.addressId, e.messageId]), [[a.id, mine.id], [a.id, cc.id], [s.id, sub.id]]);
+      const cursor = ok(await get('/v1/inbound/events')).cursor;
+      await recordEvents(runtime.db, wid, [event(a.id, threads.mine, routed.id), event(b.id, threads.other, other.id)]);
+      assert.deepEqual(ok(await get(`/v1/inbound/events?after=${cursor}&wait=1`)).data, []);
+      // MCP events read that same log as the key: offered to the reader (not the send-only key), with only the mail
+      // addressed to its domains, whichever addresses a subscription names.
+      const rpc = async (secret: string, method: string, params: Json = {}) => ok(await request('POST', '/mcp', secret, { jsonrpc: '2.0', id: unique('events-rpc'), method, params }, rpcHeaders)) as Json;
+      assert.equal((await rpc(reader.secret, 'events/list')).result.events[0].name, 'message.received');
+      assert.equal((await rpc(sender.secret, 'events/list')).error.code, -32601);
+      const subscribe = async (args: Json, cursor: string | null) => (await rpc(reader.secret, 'events/poll', { name: 'message.received', arguments: args, cursor })).result as Json;
+      const fromNow = await subscribe({}, null);
+      await recordEvents(runtime.db, wid, [event(a.id, threads.mine, routed.id), event(b.id, threads.other, other.id), event(a.id, threads.mine, mine.id), event(s.id, threads.sub, sub.id)]);
+      assert.deepEqual((await subscribe({}, fromNow.cursor)).events.map((e: Json) => [e.data.addressId, e.data.messageId, e.data.subject]), [[a.id, mine.id, 'Mine'], [s.id, sub.id, 'Subdomain']]);
+      assert.deepEqual((await subscribe({ addressIds: [b.id] }, fromNow.cursor)).events, []);
+      assert.deepEqual((await subscribe({ addressIds: [a.id] }, fromNow.cursor)).events.map((e: Json) => e.data.messageId), [mine.id]);
+      // The workspace's own full-access reader sees all of it.
+      assert.equal(ok(await local('GET', `/v1/inbound/messages/${routed.id}`)).id, routed.id);
+      // A send-only key limited to the domain reads none of it, and is told to add Read.
+      assert.match(error(await request('GET', '/v1/inbound/messages', sender.secret), 403, 'UNRESTRICTED_KEY_REQUIRED').message, /^This key can only send from [^ ]+\. To read the replies to [^ ]+, it needs Read: add Read to it/);
+      // Over MCP the reader is offered exactly those reads, and a call reads what REST does.
+      const toolsOf = async (secret: string) => (ok(await request('POST', '/mcp?codemode=false', secret, { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, rpcHeaders)).result.tools as Json[]).map(tool => tool.name as string);
+      const [readerTools, senderTools] = [await toolsOf(reader.secret), await toolsOf(sender.secret)];
+      for (const name of ['listInboundMessages', 'getInboundMessage', 'getInboundAttachment', 'listInboundThreads', 'getInboundThread', 'listInboundEvents']) {
+        assert.ok(readerTools.includes(name), `reader: ${name}`);
+        assert.ok(!senderTools.includes(name), `sender: ${name}`);
+      }
+      for (const name of ['updateInboundThread', 'replyToInboundThread', 'listInboundAddresses', 'listInboxes', 'waitForMessage']) assert.ok(!readerTools.includes(name), `reader: ${name}`);
+      const call = async (messageId: string) => ok(await request('POST', '/mcp?codemode=false', reader.secret, { jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'getInboundMessage', arguments: { messageId } } }, rpcHeaders)).result;
+      assert.equal((await call(mine.id)).structuredContent.id, mine.id);
+      assert.equal((await call(routed.id)).structuredContent.error.code, 'NOT_FOUND');
     });
   });
 
@@ -13254,14 +13359,21 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     // A key without manage on all domains, unrestricted otherwise, on received mail: the same style, with the address-key option.
     assert.match(error(await http('GET', '/v1/inbound/addresses', reader.secret), 403, 'ADMIN_REQUIRED').message, /^This key can only read\. Inbound addresses need a full-access key: .* For mail at some addresses only, a key limited to those addresses also works\./);
     // Reading replies with a key limited to its sender domain (a production agent tried, then guessed at POST /v1/api-keys):
-    // the refusal names the key that reads them and the request that makes one. A key without the domain limit is told how
-    // to make itself Full access, on its own ID.
+    // with Read it reads the mail addressed to that domain (none here); a send-only key is told to add Read, on its own ID,
+    // or to make a Read and Send key for the domain, with the request that makes one. A key without the domain limit is
+    // told how to make itself Full access, on its own ID.
     const replyKey = await keyFixture(t, { permissions: ['read', 'send'], domains: ['allowed.example.com'] });
-    for (const [key, path] of [[sender, '/v1/inbound/messages'], [replyKey, '/v1/inbound/messages/msg_fixture'], [replyKey, '/v1/inbound/messages/msg_fixture/attachments/att_fixture'], [replyKey, '/v1/inbound/threads']] as const) {
-      const refused = error(await http('GET', path, key.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
-      assert.match(refused.message, /^This key can only send from allowed\.example\.com(?: and read what was sent from there)?\. A limit to sender domains doesn't reach received mail, so it can't read replies\. To read the replies to allowed\.example\.com, use a key limited to the receiving addresses there \(Read, and Send to answer from them\): with a full-access key, find their IDs with GET \/v1\/inbound\/addresses, then POST \/v1\/api-keys with \{"name":"Replies","access":\{"type":"addresses","addressIds":\["mbx_…"\],"mail":\["read","send"\]\}\}; or in the dashboard, API keys → Create key → Mail at chosen addresses\. A full-access key reads all received mail\. Docs: https?:\/\/[^ ]+\/docs\/operations\/createApiKey\.md Needs Received mail: read on the whole workspace\.$/, path);
+    for (const path of ['/v1/inbound/messages', '/v1/inbound/threads']) assert.deepEqual(ok(await http('GET', path, replyKey.secret)).data, [], path);
+    for (const path of ['/v1/inbound/messages/msg_fixture', '/v1/inbound/messages/msg_fixture/attachments/att_fixture']) error(await http('GET', path, replyKey.secret), 404, 'NOT_FOUND');
+    for (const path of ['/v1/inbound/messages', '/v1/inbound/threads/thr_fixture']) {
+      const refused = error(await http('GET', path, sender.secret), 403, 'UNRESTRICTED_KEY_REQUIRED');
+      assert.match(refused.message, new RegExp(`^This key can only send from allowed\\.example\\.com\\. To read the replies to allowed\\.example\\.com, it needs Read: add Read to it in the dashboard \\(API keys → Edit; it keeps its secret\\) or with a full-access key: PATCH /v1/api-keys/${sender.id} with \\{"permissions":\\["send","read"\\]\\}\\. Or create a key with Read and Send limited to allowed\\.example\\.com, in the dashboard \\(API keys → Create key\\) or with a full-access key: POST /v1/api-keys with \\{"name":"Agent","permissions":\\["read","send"\\],"domains":\\["allowed\\.example\\.com"\\]\\}\\. It reads only received mail addressed to allowed\\.example\\.com\\. Docs: https?://[^ ]+/docs/operations/createApiKey\\.md Needs Received mail: read on the whole workspace\\.$`), path);
       assert.equal(refused.required.scope, 'workspace', path);
     }
+    // What it reads stops there: no agent inboxes, addresses or changes.
+    assert.match(error(await http('GET', '/v1/inboxes/mbx_fixture/messages', replyKey.secret), 403, 'UNRESTRICTED_KEY_REQUIRED').message, /^This key can only send from allowed\.example\.com and read what was sent from there\. It reads the received mail addressed to allowed\.example\.com with GET \/v1\/inbound\/messages, \/v1\/inbound\/threads and \/v1\/inbound\/events, not agent inboxes or the rest of receiving\./);
+    for (const [method, path, body] of [['GET', '/v1/inbound/addresses'], ['PATCH', '/v1/inbound/threads/thr_fixture', { read: true }], ['GET', '/v1/inbound/messages/msg_fixture/raw']] as const)
+      error(await http(method, path, replyKey.secret, body), 403, 'UNRESTRICTED_KEY_REQUIRED');
     const unscoped = error(await http('GET', '/v1/inbound/messages', reader.secret), 403, 'ADMIN_REQUIRED');
     assert.ok(unscoped.message.startsWith(`This key can only read. Received mail needs Full access, or a key limited to receiving addresses. Make this key Full access in the dashboard (API keys → Edit; it keeps its secret) or with a full-access key: PATCH /v1/api-keys/${reader.id} with {"permissions":["read","send","manage"]}. Or, for replies at some addresses only, use a key limited to them: with a full-access key`), unscoped.message);
     // Making that key, guessed at: every problem at once, each with what was sent and the values allowed, then what keys can
