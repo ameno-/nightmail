@@ -256,6 +256,8 @@ export type SupportScope = { userId: string; contentWorkspaceId: string | null;
   workspaces: { id: string; name: string; role: 'owner' | 'admin' | 'member' }[];
   conversation: { id: string; channel: 'chat' | 'email'; verification: string; workspaceId: string | null } };
 export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody?: boolean; importLease?: import('./isolate-memory.js').MemoryLease; importLeaseTransferred?: boolean; requestId: string; serverTimings: { name: string; durationMs: number }[]; mailboxAccess?: MailboxAccess;
+  /** Elapsed time asleep between long-poll reads; queries and reauthorization are active request time. */
+  pollWaitMs?: number;
   /** The error code and field a failed request answered with, for its request log line. `unmatched`: no route did. */
   failure?: { code: string; field?: string; databaseCode?: string; unmatched?: boolean };
   /** Who a protocol handler authenticated (MCP authenticates inside its route), for the request log line. */
@@ -263,7 +265,7 @@ export type AppEnv = { Bindings: Runtime; Variables: { actor: Actor; boundedBody
 export type App = OpenAPIHono<AppEnv>;
 export type Ctx = Context<AppEnv>;
 /** Who sent a request: its ID, and the client's address and user agent as the entry point (server.ts, worker.ts) set them. */
-export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null };
+export type RequestOrigin = { requestId: string; clientIp: string | null; userAgent: string | null; onPollWait?: (ms: number) => void };
 // An in-process call (an MCP tool) is part of its outer request and keeps that request's ID, client and user agent.
 // It rides on the runtime under a private symbol, like the delegated actor, so no header can supply it.
 const outerRequest = Symbol('outerRequest');
@@ -272,7 +274,16 @@ const outerOf = (runtime: Runtime | undefined) => (runtime as (Runtime & { [oute
 /** A new request's ID: the outer request's for an in-process call. */
 export const newRequestId = (runtime: Runtime | undefined) => outerOf(runtime)?.requestId ?? `req_${crypto.randomUUID().replaceAll('-', '')}`;
 export const requestOrigin = (c: Ctx): RequestOrigin => outerOf(c.env)
-  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null };
+  ?? { requestId: c.get('requestId'), clientIp: c.req.header(clientIpHeader) ?? null, userAgent: c.req.header('user-agent') ?? null, onPollWait: ms => addPollWait(c, ms) };
+const addPollWait = (c: Ctx, ms: number) => c.set('pollWaitMs', (c.get('pollWaitMs') ?? 0) + ms);
+/** Only the timer is idle. An in-process MCP tool's timer is also idle time for the enclosing HTTP request. */
+export async function waitForPollTick(c: Ctx, ms: number) {
+  const start = Date.now();
+  await new Promise(resolve => setTimeout(resolve, ms));
+  const elapsed = Math.max(0, Date.now() - start);
+  addPollWait(c, elapsed);
+  outerOf(c.env)?.onPollWait?.(elapsed);
+}
 /** One claimed delivery and what its endpoint needs to post it. `type` is the endpoint's (absent for sent-mail webhooks); url and encrypted_secret are a webhook's. */
 export type ClaimedWebhook = { type?: 'webhook' | 'slack' | 'discord' | 'forward'; routed?:boolean;format?:string;name?:string;include?:string[];timeout_seconds?:number;retry_attempts?:number; delivery_id: string; generation: number; event_id: string; payload: unknown; synthetic: boolean; webhook_id: string; url: string; encrypted_secret: string; encrypted_headers: string | null; owned?: boolean };
 export type JobContext = { id: string; attempts: number; workspaceId: string;

@@ -106,10 +106,16 @@ const FACET_REPROBE_MS = 150;
 const parkedFacets = createFairPool({ name: 'log-facet-wait', maxActive: READ_MAX_WAITERS,
   maxPerWorkspace: READ_MAX_WAITING_PER_WORKSPACE, maxWaitingPerWorkspace: 0, maxWaitingTotal: 0 });
 
-function waitForFacetProbe(ms: number, signal: AbortSignal): Promise<boolean> {
+function waitForFacetProbe(c: Ctx, ms: number, signal: AbortSignal): Promise<boolean> {
   if (signal.aborted) return Promise.resolve(false);
   return new Promise(resolve => {
-    const done = (elapsed: boolean) => { clearTimeout(timer); signal.removeEventListener('abort', canceled); resolve(elapsed); };
+    const start = Date.now();
+    const done = (elapsed: boolean) => {
+      clearTimeout(timer); signal.removeEventListener('abort', canceled);
+      // This dashboard request is asleep only between probes, not while authorizing or reading a cut.
+      c.set('pollWaitMs', (c.get('pollWaitMs') ?? 0) + Math.max(0, Date.now() - start));
+      resolve(elapsed);
+    };
     const canceled = () => done(false);
     const timer = setTimeout(() => done(true), ms);
     signal.addEventListener('abort', canceled, { once: true });
@@ -303,7 +309,7 @@ async function readDashboardFacets(c:Ctx,q:Filters,scope:LogScope,mailAccess:(a:
       let probes = 0,nextNudge=performance.now()+1000;
       while (performance.now() < end) {
         // A small healthy cut can already be published at the first probe. Park only between probes.
-        if (probes && !await waitForFacetProbe(Math.min(probes === 1 ? 25 : FACET_REPROBE_MS, end - performance.now()), signal)) return new Response(null, { status: 499 });
+        if (probes && !await waitForFacetProbe(c, Math.min(probes === 1 ? 25 : FACET_REPROBE_MS, end - performance.now()), signal)) return new Response(null, { status: 499 });
         probes++;
         if (performance.now() >= end) break;
         const next = await withBoundedRead(c, () => budgetedRead(c.env.db, async db => {

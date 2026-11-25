@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { and, eq, gt, isNull, sql, type SQL } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
-import { ApiError, actor, agentTokenMintRefusal, denied, digest, requiredOf, errors, hasSessionCookie, id, IdParams, isoTime, json, keyAdminRefusal, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, withOuterRequest, wrapModuleLoad } from './core.js';
+import { ApiError, actor, agentTokenMintRefusal, denied, digest, requiredOf, errors, hasSessionCookie, id, IdParams, isoTime, json, keyAdminRefusal, PageQuery, page, randomSecret, response, security, senderDomainAllowed, timed, waitForPollTick, withOuterRequest, wrapModuleLoad } from './core.js';
 import type { Actor, App, AppEnv, Ctx, DbExecutor, MailboxAccess, RequestOrigin, Runtime } from './core.js';
 import { agentTokens, apiKeys } from './db/core.js';
 import { mailboxKeys } from './db/mailbox.js';
@@ -80,7 +80,7 @@ export async function longPoll<T>(c: Ctx, seconds: number, read: () => Promise<T
   for (let left = seconds; ; left--) {
     const result = await read();
     if (done(result) || !left || Date.now() >= deadline || c.req.raw.signal.aborted) return result;
-    await new Promise(resolve => setTimeout(resolve, Math.min(1000, Math.max(0, deadline - Date.now()))));
+    await waitForPollTick(c, Math.min(1000, Math.max(0, deadline - Date.now())));
     if (unchanged && !await unchanged()) return result;
   }
 }
