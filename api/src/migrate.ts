@@ -115,6 +115,8 @@ try {
     }
     await client.query('BEGIN');
     try {
+      // Bound DDL lock waits and runaway statements by default; a migration that explicitly needs a different limit can still override with SET LOCAL.
+      await client.query("SET LOCAL lock_timeout='10s'; SET LOCAL statement_timeout='5min'");
       await client.query(source);
       await client.query('INSERT INTO nightmail_migrations(name, checksum) VALUES ($1, $2)', [name, hash]);
       await client.query('COMMIT');
