@@ -111,7 +111,8 @@ export function screenedAttachment(filename: string, contentType: string, bytes:
   const shown = JSON.stringify(name);
   const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${shown}: ${why} ${PROBATION}.`);
   const mismatch = (why: string) => new ApiError(422, 'ATTACHMENT_CONTENT_MISMATCH', `Hosted sending cannot deliver ${shown}: ${why}. Its name, declared type and content must agree ${PROBATION}.`);
-  const markup = DOCUMENT_TYPES.has(type) ? `its type is ${type}` : DOCUMENT_EXTENSIONS.has(extension) ? `its name ends in .${extension}` : document(bytes) ? 'its content is markup or a mail message' : null;
+  const markup = DOCUMENT_TYPES.has(type) ? `its type is ${type}` : DOCUMENT_EXTENSIONS.has(extension) ? `its name ends in .${extension}`
+    : svgBytes(bytes) ? 'its content is SVG markup' : document(bytes) ? 'its content is markup or a mail message' : null;
   if (markup) throw unscreenable(`${markup}, and markup, SVG and mail archives are not delivered`);
   const expected = own(ATTACHMENT_TYPES, extension);
   if (!expected) throw mismatch(`${extension ? `.${extension} is not` : 'a name without an extension is not'} one of the standard types it delivers: ${Object.keys(ATTACHMENT_TYPES).map(e => `.${e}`).join(', ')}`);

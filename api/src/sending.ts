@@ -928,7 +928,8 @@ function attachmentRefusal(problems: AttachmentProblem[], batch: boolean) {
     ...(p.filename ? { filename: p.filename } : {}), code: p.code, message: line(p) }));
   return error;
 }
-const ATTACHMENT_REFUSALS = new Set(['ATTACHMENT_NOT_FOUND', 'ATTACHMENT_LIMIT_EXCEEDED', 'DUPLICATE_CONTENT_ID', 'ATTACHMENT_METADATA_INVALID', 'DUPLICATE_ATTACHMENT']);
+// DUPLICATE_ATTACHMENT is a request's shape, answered before any file is looked up, and stays as it is.
+const ATTACHMENT_REFUSALS = new Set(['ATTACHMENT_NOT_FOUND', 'ATTACHMENT_LIMIT_EXCEEDED', 'DUPLICATE_CONTENT_ID', 'ATTACHMENT_METADATA_INVALID']);
 /** Before admitted: send_admission's attachment refusal (the first problem, for one email) becomes every problem in the send. */
 async function refusedAttachments(runtime: Runtime, a: Actor, d: Admitted | Refused, out: Outgoing[], batch: boolean) {
   if (d.allowed || !ATTACHMENT_REFUSALS.has(d.code)) return;
@@ -945,7 +946,8 @@ function distinctAttachmentIds(ids: string[]) {
   return ids;
 }
 function validateAttachmentRows(ids: string[], rows: AttachmentFacts[]) {
-  const problems = attachmentProblems([ids], new Map(rows.map(row => [row.id, row])));
+  // A draft keeps files whose metadata SES would refuse (stored before that check); sending them is refused at admission.
+  const problems = attachmentProblems([ids], new Map(rows.map(row => [row.id, row]))).filter(p => p.code !== 'ATTACHMENT_METADATA_INVALID');
   if (problems.length) throw attachmentRefusal(problems, false);
 }
 export async function attachmentRows(db: DbExecutor, a: Actor, ids: string[], lock = false, conversation = false) {
