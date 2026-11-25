@@ -32181,7 +32181,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
   });
 
   test('account notices: a workspace\'s first grade emails its owners and admins what the sender score is, what moves it and what it changes, once: grading again and a retried job send nothing more', async t => {
-    await simulatedSesFixture(t, async ({ runtime, db }) => {
+    await simulatedSesFixture(t, async ({ runtime, db, fetch: publicFetch }) => {
       const { wid, name, platform, fresh } = await noticeFixture(runtime, db);
       const { refreshStanding } = await import('./src/standing.js');
       const { accountNotifyJob } = await import('./src/account-notices.js');
@@ -32232,7 +32232,26 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // The score is the one figure: no rate, threshold or provider name, and nothing of the other workspace's.
         assert.doesNotMatch(email.text, HOW_IT_WORKS);
         assert.doesNotMatch(email.text, /\b61\b|\b100 recipients|grade D/);
-        assert.ok(email.html.includes(`>${Math.round(view.score!)}</span>`) && email.html.includes('class="nm-card"'), 'The card is in the HTML part too.');
+        // The HTML part shows the card as a picture: its address names the score, its grade, the limit state and a theme,
+        // and nothing of the workspace or the recipient.
+        const pictures = [...email.html.matchAll(/<img [^>]*src="([^"]+)"/g)].map(m => m[1]!);
+        const grade = view.grade === 'A+' ? 'a-plus' : view.grade!.toLowerCase();
+        assert.deepEqual(pictures, ['light', 'dark'].map(theme => `${PUBLIC_ORIGIN}/i/score-card/v1/${Math.round(view.score!)}-${grade}-none-${theme}.png`));
+        assert.ok(email.html.includes(`alt="Sender score ${Math.round(view.score!)}, grade ${view.grade}. No daily limit."`), 'Its alt text says the same.');
+      }
+      // The pictures answer for anyone, the same bytes every time, cached a year; nothing but a real card does.
+      const get = (target: string, headers: Record<string, string> = {}) => publicFetch(new Request(target.startsWith('http') ? target : PUBLIC_ORIGIN + target, { headers }));
+      const [first] = [...emails[0]!.html.matchAll(/<img [^>]*src="([^"]+)"/g)].map(m => m[1]!), served = await get(first!);
+      const png = Buffer.from(await served.arrayBuffer());
+      assert.deepEqual([served.status, served.headers.get('content-type'), served.headers.get('cache-control'), png.subarray(1, 4).toString(), png.readUInt32BE(16), png.readUInt32BE(20)],
+        [200, 'image/png', 'public, max-age=31536000, immutable', 'PNG', 1020, 552], 'A 340 × 184 card drawn at 3×.');
+      assert.ok(Buffer.from(await (await get(first!)).arrayBuffer()).equals(png), 'Drawn again, byte for byte.');
+      assert.equal((await get(first!, { 'if-none-match': served.headers.get('etag')! })).status, 304);
+      for (const path of ['/i/score-card/v1/0-f-100-dark.png', '/i/score-card/v1/100-a-plus-none-light.png', '/i/score-card/v1/72-c-500-light.png']) assert.equal((await get(path)).status, 200, path);
+      for (const wrong of ['/i/score-card/v1/86-a-none-light.png', '/i/score-card/v1/101-a-plus-none-light.png', '/i/score-card/v1/086-b-none-light.png', '/i/score-card/v1/86-b-300-light.png',
+        '/i/score-card/v1/86-b-none-sepia.png', '/i/score-card/v2/86-b-none-light.png', '/i/score-card/v1/86-b-none-light.png/x', `/i/score-card/v1/86-b-none-light.png?w=${wid}`.replace('?', '%3F'), '/i/score-card/v1/']) {
+        const refused = await get(wrong);
+        assert.equal(refused.status, 404, wrong);
       }
       // Never again for this workspace: a later run, and the job run once more, send nothing.
       await regrade();

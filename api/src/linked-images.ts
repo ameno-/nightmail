@@ -70,6 +70,20 @@ async function sha256(bytes: Uint8Array) {
 }
 const missing = () => new ApiError(404, 'NOT_FOUND', 'This image does not exist.');
 export function registerLinkedImages(app: App) {
+  // The sender score card's pictures (src/score-card.ts), on every origin this installation answers: drawn from the
+  // address alone (a score, its grade, a limit state and a theme), so 808 can exist and nothing else answers.
+  app.get('/i/score-card/:version/:file', async c => {
+    const { drawScoreCard, parseScoreCard } = await import('./score-card.js');
+    const card = parseScoreCard(c.req.param('version'), c.req.param('file'));
+    if (!card) throw missing();
+    const etag = `"${c.req.param('version')}-${c.req.param('file')}"`, headers: Record<string, string> = {
+      'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=31536000, immutable', ETag: etag, 'Content-Security-Policy': "default-src 'none'; sandbox",
+      'X-Content-Type-Options': 'nosniff', 'Content-Disposition': 'inline', 'Cross-Origin-Resource-Policy': 'cross-origin', 'Access-Control-Allow-Origin': '*', 'X-Robots-Tag': 'noindex',
+    };
+    if (c.req.header('if-none-match')?.split(',').some(tag => tag.trim().replace(/^W\//, '') === etag)) return new Response(null, { status: 304, headers });
+    const png = await drawScoreCard(card);
+    return new Response(png as Uint8Array<ArrayBuffer>, { headers: { ...headers, 'Content-Length': String(png.length) } });
+  });
   // Public by design: the name is the only credential, and every copy of the message carries it. Cached for a year
   // everywhere (the Worker keeps a copy in its colo, src/worker.ts): a name always means the same bytes.
   app.get('/i/:name', async c => {
