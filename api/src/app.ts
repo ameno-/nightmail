@@ -1,4 +1,5 @@
 import { OpenAPIHono } from '@hono/zod-openapi';
+import { sql } from 'drizzle-orm';
 import type { MiddlewareHandler } from 'hono';
 import { allowMalformedSns, notFound, snsIngress } from './core.js';
 import { boundRequestBody } from './request-body.js';
@@ -406,6 +407,20 @@ function createShell(loadDocs: () => Promise<{ doc: Record<string, any>; createL
     return c.body(`Contact: mailto:${addresses.security}\nExpires: 2027-11-20T00:00:00.000Z\nPreferred-Languages: en\nCanonical: ${new URL('/.well-known/security.txt', c.env.config.publicUrl).href}\n`);
   });
   app.get('/health', c => c.json({status:'ok',service:healthService,multiTenant:c.env.config.multiTenant,origin:new URL(c.env.config.publicUrl).origin,analytics:c.env.config.dashboardAnalytics===true}));
+  // Deep readiness check: unlike /health (which answers in worker.ts without loading app modules or Postgres),
+  // this exercises the full Worker bundle and runs a bounded read-only query against PostgreSQL.
+  app.get('/health/ready', async c => {
+    c.header('cache-control', 'no-store');
+    try {
+      await c.env.db.transaction(async tx => {
+        await tx.execute(sql`SET LOCAL statement_timeout = '3s'`);
+        await tx.execute(sql`SELECT 1`);
+      }, { accessMode: 'read only' });
+      return c.json({ status: 'ok', service: healthService, multiTenant: c.env.config.multiTenant, database: 'ok' }, 200);
+    } catch {
+      return c.json({ status: 'unready', service: healthService, multiTenant: c.env.config.multiTenant, database: 'unavailable' }, 503);
+    }
+  });
   app.get('/health/receiving', async c => {const h=await (await import('./receiving-health.js')).cachedHealth(c.env);return c.json(h,h.status==='ok'?200:503);});
   app.get('/openapi.json', async c => { const { doc } = await loadDocs(); c.header('cache-control', 'public, max-age=300'); return c.json(doc); });
   const markdown = (c: Ctx, value: string) => { c.header('content-type', 'text/markdown; charset=utf-8'); c.header('cache-control', 'public, max-age=300'); return c.body(value); };
