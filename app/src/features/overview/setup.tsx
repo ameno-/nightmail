@@ -10,12 +10,11 @@ import { leadFocus, type WorkspaceFocus } from '../../data/focus'
 import { openConnectAgent } from '../../lib/connect-agent'
 import { newIssuePath, readersPath } from '../newsletters/shared'
 import { date, number } from '../../lib/format'
-import { TestSend } from '../docs/first-send'
+import { TestSend, TestSentLine } from '../docs/first-send'
 import { Button, Dialog } from '../../components/ui'
 import { limitNotes } from '../score'
 import { SendingLimitsGuide } from '../score/limits'
 import './setup.css'
-import { PrivateAddress } from '../../components/PrivateAddress'
 import { resourceOf } from '../../data/invalidation'
 import { setupGap, type SetupGap } from '../settings/domain-setup-alert'
 import { builtinLimitText, sendsFromBuiltin } from '../settings/builtin-domain'
@@ -150,7 +149,7 @@ export function useSetupSteps(): { loading: boolean; steps: SetupStep[] | null; 
       action: !keyed && <Link className={`ui-button ui-button--${domainDone ? 'primary' : 'secondary'} ui-button--md`} to={verified ? `/api-keys?create=send&domain=${encodeURIComponent(verified.name)}` : '/api-keys?create=send'}>Create key</Link> },
     // The test send names its from and to addresses itself; with no verified domain in this read to test from, the code examples.
     { key: 'send', done: sent, title: 'Send your first email',
-      note: testId ? <>Test email queued to {identity?.email && <PrivateAddress value={identity.email} />}. <Link to={`/logs/${encodeURIComponent(testId)}`}>View in Logs</Link></> : undefined,
+      note: testId && identity?.email ? <TestSentLine id={testId} to={identity.email} /> : undefined,
       action: !sent && (verified ? <TestSend domain={verified} onSent={sentTest} primary={keyed} /> : <Link className="ui-button ui-button--secondary ui-button--md" to="/docs#quickstart">Code examples</Link>) },
   ]
   // Sending a test needs only a verified domain (it uses this session, not a key), so its step opens beside the key step.

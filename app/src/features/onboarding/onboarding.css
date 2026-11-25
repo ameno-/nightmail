@@ -178,7 +178,6 @@
 .focus-ramp { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
 .focus-ramp a { color: var(--color-text); }
 .focus-inline-error { font-size: var(--text-sm); }
-.onboarding.onboarding--focus { max-width: 720px; }
 .onboarding--focus .onboarding-skip { margin-left: var(--space-4); }
 /* Arriving mail: room for three messages from the first frame, so mail landing moves nothing under it. */
 .focus-mail { display: flex; flex-direction: column; gap: var(--space-8); }

@@ -10,7 +10,7 @@ import type { Domain, SetupProgress } from '../../data/types'
 import { agentInboxQuery, leadFocus, type WorkspaceFocus } from '../../data/focus'
 import { newIssuePath } from '../newsletters/shared'
 import { PrivateAddress } from '../../components/PrivateAddress'
-import { useTestSend } from '../docs/first-send'
+import { TestSentLine, useTestSend } from '../docs/first-send'
 import { agentInboxPrompt, agentPrompt, signupFormPrompt, useAgentSetup } from '../docs/agent-setup'
 import { productName } from '../../../../api/src/brand'
 import { builtinSending, sendsFromBuiltin } from '../settings/builtin-domain'
@@ -99,7 +99,7 @@ function FirstSendCard({ domain, onSent }: { domain?: Domain; onSent?: () => voi
   // The prompt onboarding copies: a one-time setup token in it gets the agent its own key.
   const setup = useAgentSetup(canAdminister)
   const promptFor = (setupToken: string | null | undefined) => agentPrompt({ origin: origin!, domain: domain ?? null, email: to, multiTenant: true, setupToken })
-  const line = test.isSuccess && to ? <>Test email queued to <PrivateAddress value={to} />{test.data.simulated ? ' (simulated)' : ''}. <Link to={`/logs/${encodeURIComponent(test.data.id)}`}>View in Logs</Link></>
+  const line = test.isSuccess && to ? <TestSentLine id={test.data.id} to={to} simulated={test.data.simulated} />
     : test.error ? <ErrorText error={test.error} />
     : domain ? `${domain.name} can send now: try it on yourself, or copy the prompt for your coding agent.` : 'Your domain can send now.'
   return <section className="ov-onboarding" data-kind="first-send" aria-labelledby="ov-onboarding-title">

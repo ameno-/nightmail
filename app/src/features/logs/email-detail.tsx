@@ -3,7 +3,7 @@ import { Link, useParams } from 'react-router'
 import { ArrowUpRight, ChevronRight } from 'lucide-react'
 import { useApi, useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
-import type { Email, EmailEvent } from '../../data/types'
+import { pendingEmailStatuses as pendingStatuses, type Email, type EmailEvent } from '../../data/types'
 import { Alert, Button, CopyButton, elapsed, ErrorState, FactsRow, Icon, Identifier, PageHeader, Sheet, Tooltip, Waterfall, type Fact, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { Checks, ChecksChip, ChecksToggle, EmailViews, useSendability, type InsightSource } from '../../components/EmailInsight'
@@ -25,8 +25,6 @@ import { errorText } from '../../data/types'
 
 // A scheduled email reads queued, with scheduled true, until it goes; the page calls it scheduled.
 const statusOf = (email: Email) => email.scheduled ? 'scheduled' : email.status
-// Statuses that can still change without user action; terminal emails are not polled.
-const pendingStatuses = ['queued', 'attempting', 'accepted', 'sent', 'deferred', 'delayed']
 export function EmailDetailPage() {
   const { id = '' } = useParams()
   // Moving to another message of its thread keeps this one up until that one arrives (thread.tsx reads it ahead).
