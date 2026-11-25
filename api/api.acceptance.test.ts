@@ -31964,18 +31964,23 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const name = 'renew.example', wid = runtime.config.workspaceId;
       const { token } = (await db.query("INSERT INTO domain_claims(workspace_id,name,ever_proven,created_at) VALUES($1,$2,true,now()-interval '31 days') RETURNING token", [wid,name])).rows[0];
       let response = 'absent';
-      t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL) => {
+      // Replaced by hand and put back before the scenario ends: a second t.mock of fetch would leave the scenario's
+      // network guard in place for the tests after this one.
+      const networkGuard = globalThis.fetch;
+      globalThis.fetch = async (input: RequestInfo | URL) => {
         const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
         return Response.json({Status: response === 'unavailable' ? 2 : 0, Answer: response === 'present' ? [{name:url.searchParams.get('name'), type:16, data:token}] : []});
-      });
-      const sweep = () => expireDomainClaims(runtime, Date.now() + 5000);
-      const age = () => db.query("UPDATE domain_claims SET receiving_proof_missed_at=now()-interval '31 days' WHERE token=$1",[token]);
-      const blocks = async () => (await db.query("SELECT exclusive_domain_overlap('other',$1) AS held", ['child.'+name])).rows[0].held;
-      assert.equal(await sweep(), 0); assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
-      await age(); response = 'unavailable'; assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
-      response = 'present'; assert.equal(await sweep(), 0);
-      assert.equal((await db.query('SELECT receiving_proof_missed_at FROM domain_claims WHERE token=$1',[token])).rows[0].receiving_proof_missed_at, null);
-      response = 'absent'; await age(); assert.equal(await sweep(), 1); assert.equal(await blocks(), false);
+      };
+      try {
+        const sweep = () => expireDomainClaims(runtime, Date.now() + 5000);
+        const age = () => db.query("UPDATE domain_claims SET receiving_proof_missed_at=now()-interval '31 days' WHERE token=$1",[token]);
+        const blocks = async () => (await db.query("SELECT exclusive_domain_overlap('other',$1) AS held", ['child.'+name])).rows[0].held;
+        assert.equal(await sweep(), 0); assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
+        await age(); response = 'unavailable'; assert.equal(await sweep(), 0); assert.equal(await blocks(), true);
+        response = 'present'; assert.equal(await sweep(), 0);
+        assert.equal((await db.query('SELECT receiving_proof_missed_at FROM domain_claims WHERE token=$1',[token])).rows[0].receiving_proof_missed_at, null);
+        response = 'absent'; await age(); assert.equal(await sweep(), 1); assert.equal(await blocks(), false);
+      } finally { globalThis.fetch = networkGuard; }
     });
   });
 
