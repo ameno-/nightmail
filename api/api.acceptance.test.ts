@@ -30699,7 +30699,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(day.top.complaints.length <= 10 && day.top.complaints.every(w => Object.keys(w).join() === 'workspaceId,accepted,bounced,complained'));
 
       // Amazon's view: GetAccount every 10 minutes, VDM hourly, each elected once; DBL unconfigured without a DQS zone.
-      // Gmail Postmaster Tools through the stored OAuth grant: a token, then the domain's days (Google's answers stubbed).
+      // Gmail Postmaster Tools (v2) through the stored OAuth grant: a token, then the domain's days (Google's answers stubbed).
       const builtin = runtime.config.builtinDomain;
       runtime.config.builtinDomain = 'deliverability.example';
       // The link domain every customer's campaign links share: its zone's DBL listing is checked with the platform's own.
@@ -30712,17 +30712,17 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const google = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input instanceof Request ? input.url : input);
         if (url === 'https://oauth2.googleapis.com/token') { asked.push(`token:${new URLSearchParams(String(init?.body)).get('refresh_token')}`); return Response.json({ access_token: 'access', expires_in: 3600 }); }
-        if (url.startsWith('https://gmailpostmastertools.googleapis.com/v1/domains/deliverability.example/trafficStats?')) {
-          asked.push(`stats:${new Headers(init?.headers).get('authorization')}`);
-          return Response.json({ trafficStats: [
-            { name: `domains/deliverability.example/trafficStats/${yesterday}`, domainReputation: 'MEDIUM', userReportedSpamRatio: 0.002, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 0.98 },
-            { name: `domains/deliverability.example/trafficStats/${today}`, domainReputation: 'HIGH', userReportedSpamRatio: 0.0004, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 1 },
-          ] });
+        if (url === 'https://gmailpostmastertools.googleapis.com/v2/domains/deliverability.example/domainStats:query' && init?.method === 'POST') {
+          const query = JSON.parse(String(init.body));
+          asked.push(`stats:${new Headers(init.headers).get('authorization')}:${query.aggregationGranularity}:${query.metricDefinitions.map((m: Json) => m.name).join(',')}`);
+          const day = (at: string) => ({ year: Number(at.slice(0, 4)), month: Number(at.slice(4, 6)), day: Number(at.slice(6)) });
+          const stat = (at: string, metric: string, floatValue: number) => ({ name: `domains/deliverability.example/domainStats/x.${at}`, metric, date: day(at), value: { floatValue } });
+          return Response.json({ domainStats: [stat(yesterday, 'spam', 0.002), stat(yesterday, 'dmarc', 0.98), stat(today, 'spam', 0.0004), stat(today, 'spf', 1), stat(today, 'dkim', 1), stat(today, 'dmarc', 1), stat(today, 'errors', 0)] });
         }
         throw new Error(`Unexpected request: ${url}`);
       };
       await refreshDeliverabilitySources(runtime, { fetch: google as typeof fetch });
-      assert.deepEqual(asked, ['token:refresh', 'stats:Bearer access']);
+      assert.deepEqual(asked, ['token:refresh', 'stats:Bearer access:DAILY:spam,spf,dkim,dmarc,errors']);
       const checks = (await db.query(`SELECT kind,status,detail,checked_at FROM deliverability_checks WHERE subject=$1 ORDER BY kind`, [region])).rows;
       assert.deepEqual(checks.map((c: Json) => [c.kind, c.status, c.detail]), [
         ['ses', 'ok', { enforcement: 'HEALTHY', sendingEnabled: true, productionAccess: true, vdm: true, engagement: true }],
@@ -30740,7 +30740,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([board.blocklist.find(b => b.domain === 'linkzone.example')?.status, board.postmaster.some(p => p.domain === 'linkzone.example')], ['unconfigured', false], 'It sends no mail: no Postmaster Tools for it.');
       const postmaster = board.postmaster.find(p => p.domain === 'deliverability.example')!;
       assert.deepEqual([postmaster.status, postmaster.url, postmaster.latest, Math.round(postmaster.spamRatio.current! * 1e6) / 1e6], ['ok', 'https://postmaster.google.com/',
-        { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, reputation: 'HIGH', spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1 }, 0.0012]);
+        { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1, deliveryErrorRatio: 0 }, 0.0012]);
       runtime.config.builtinDomain = builtin;
 
       // The route: the same figures for an operator, cached; a window that isn't one is refused.
