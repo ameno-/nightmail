@@ -182,6 +182,9 @@ const pages = ids => [
   ['Domain · built-in', `/domains/${ids.builtinDomain}`, { user: 'pia', skipped: 'ws_skipped', from: '/domains' }],
   // Every record in public DNS, SES not verified yet: "Your records are correct" over the records.
   ['Domain · records correct', `/domains/${ids.correctDomain}`, { user: 'nia', from: '/domains' }],
+  // Nobody serves DNS for it (a typo): "No DNS found" over the records, with Change name and Delete domain.
+  ['Domain · no DNS', `/domains/${ids.noDnsDomain}`, { user: 'nia', from: '/domains' }],
+  ['Domain · change name dialog', `/domains/${ids.noDnsDomain}`, { user: 'nia', dialog: 'Change name' }],
   ['API keys', '/api-keys', { from: '/overview' }],
   ['Settings', '/settings', { from: '/overview' }],
   ['Settings · members', '/settings#members', { from: '/settings' }],
