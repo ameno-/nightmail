@@ -1430,8 +1430,9 @@ async function fetchSnsCert(url: URL, certificateTimeout: number, missingCertifi
 /**
  * A budget of failed SNS signatures, checked before any verification work. SNS itself never fails verification, so its
  * traffic never spends it. A peer gets SNS_PEER_FAILURES failures a minute in each isolate (and its share of the edge
- * limiter across isolates); past SNS_ISOLATE_FAILURES in an isolate, only peers that verified in the last 15 minutes are
- * verified, so SES feedback keeps flowing.
+ * limiter across isolates); past SNS_ISOLATE_FAILURES in an isolate, a peer that has failed this minute gets no more tries
+ * unless it verified in the last 15 minutes. A peer with no failure is always verified: SNS delivers from addresses this
+ * isolate may not have seen yet, and its feedback must keep flowing.
  */
 const SNS_PEER_FAILURES = 20, SNS_ISOLATE_FAILURES = 1200, SNS_PEERS = 4096;
 export class SnsFailureBudget {
@@ -1443,7 +1444,7 @@ export class SnsFailureBudget {
   admits(peer: string) {
     this.tick();
     if ((this.failures.get(peer) ?? 0) >= SNS_PEER_FAILURES) return false;
-    return this.total < SNS_ISOLATE_FAILURES || (this.verified.get(peer) ?? 0) > this.clock();
+    return this.total < SNS_ISOLATE_FAILURES || !this.failures.has(peer) || (this.verified.get(peer) ?? 0) > this.clock();
   }
   failed(peer: string, edgeExhausted = false) {
     this.tick(); this.total++;

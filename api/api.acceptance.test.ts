@@ -21311,9 +21311,12 @@ describe('Operational configuration and public event boundaries', () => {
       ok(await post(sns, true), 202);
       now += 60_000;
       ok(await post(failing, true), 202);
-      // Past an isolate's ceiling of failures in a minute, only peers that verified recently are verified.
+      // Past an isolate's ceiling of failures in a minute, a peer that failed this minute gets no more tries; a peer with
+      // no failure (SNS from an address this isolate hasn't seen) and one that verified recently still are verified.
+      error(await post(other, false), 403, 'SNS_INVALID_SIGNATURE');
       for (let i = 0; i < 1200; i++) budget.failed(`filler-${i}`);
-      error(await post(unknown, true), 429, 'SNS_RATE_LIMITED');
+      error(await post(other, true), 429, 'SNS_RATE_LIMITED');
+      ok(await post(unknown, true), 202);
       ok(await post(sns, true), 202);
     }));
   });
