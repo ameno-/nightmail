@@ -6,7 +6,9 @@ import type { Runtime, Storage } from './core.js';
 
 export const ANALYTICS_ROOT = 'analytics/v1/';
 export const analyticsStore = (runtime: Runtime): Storage => runtime.analyticsStorage ?? runtime.storage;
-const publicRoute = (x: unknown) => typeof x === 'string' && x.length <= 128 && /^\/(?:pricing|(?:compare|legal|docs)(?:\/(?:api\/)?[A-Za-z][\w-]{0,63})?)?\/?$/.test(x) ? x.replace(/\/$/, '') || '/' : null;
+/** The public pages the public hook reports (the homepage, pricing, comparisons, legal and the docs), by their own path. */
+export const PUBLIC_ROUTE = /^\/(?:pricing|(?:compare|legal|docs)(?:\/(?:api\/)?[A-Za-z][\w-]{0,63})?)?\/?$/;
+const publicRoute = (x: unknown) => typeof x === 'string' && x.length <= 128 && PUBLIC_ROUTE.test(x) ? x.replace(/\/$/, '') || '/' : null;
 const host = (x: unknown) => typeof x === 'string' && x.length <= 253 && /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,32}$/i.test(x) ? x.toLowerCase() : null;
 const tag = (x: unknown) => typeof x === 'string' && /^[\w-]{1,48}$/.test(x) ? x : null;
 export const attribution = (r: unknown, u: unknown) => {

@@ -28707,10 +28707,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Money: $25 of credit today, and $12.40 owed.
       await db.query(`INSERT INTO billing_ledger(workspace_id,kind,source_id,paid_uc,balance_after_uc,promo_after_uc,actor) VALUES ($1,'topup',$2,2500000000,2500000000,0,'stripe')`, [wid, `attempt:${unique('glass')}`]);
       await db.query(`INSERT INTO billing_accounts(workspace_id,balance_uc,unpaid_since) VALUES ($1,-1240000000,now()) ON CONFLICT (workspace_id) DO UPDATE SET balance_uc=-1240000000,unpaid_since=now()`, [wid]);
-      // Visitors: an hour rolled up today, from a referrer.
+      // Visitors: an hour rolled up today, from a referrer, and signed-in dashboard page views, which carry no visitor code
+      // and are not the site's.
       await db.query(`INSERT INTO analytics_hours(hour,snapshot) VALUES (date_trunc('day',now(),'UTC'),'glass') ON CONFLICT (hour) DO NOTHING`);
-      await db.query(`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids) VALUES (date_trunc('day',now(),'UTC'),'page_view',$1,1000000,'{glass-a,glass-b}'),(date_trunc('day',now(),'UTC'),'visit','{}',3,'{glass-a,glass-b}')
-        ON CONFLICT (hour,metric,dimensions) DO UPDATE SET events=analytics_hourly.events+excluded.events,visitor_ids=analytics_hourly.visitor_ids||excluded.visitor_ids`, [{ path: '/', referrer: 'news.glass.example' }]);
+      await db.query(`INSERT INTO analytics_hourly(hour,metric,dimensions,events,visitor_ids) VALUES (date_trunc('day',now(),'UTC'),'page_view',$1,1000000,'{glass-a,glass-b}'),
+          (date_trunc('day',now(),'UTC'),'page_view',$2,500,'{}'),(date_trunc('day',now(),'UTC'),'page_view',$3,500,'{}'),(date_trunc('day',now(),'UTC'),'visit','{}',1003,'{glass-a,glass-b}')
+        ON CONFLICT (hour,metric,dimensions) DO UPDATE SET events=analytics_hourly.events+excluded.events,visitor_ids=analytics_hourly.visitor_ids||excluded.visitor_ids`,
+        [{ path: '/', referrer: 'news.glass.example' }, { path: '/overview', referrer: 'dashboard.glass.example' }, { path: '/compare/:vendor', referrer: 'template.glass.example' }]);
 
       const after = await readGlass(runtime), hour = (g: typeof after) => g.sending.hourly.at(-1)!;
       const usd = (uc: string) => BigInt(uc);
@@ -28728,6 +28731,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([after.system.ses!.maxSendRate - (before.system.ses?.maxSendRate ?? 0), after.system.ses!.max24HourSend - (before.system.ses?.max24HourSend ?? 0), after.system.ses!.sentLast24Hours - (before.system.ses?.sentLast24Hours ?? 0)], [14, 50000, 1200]);
       assert.deepEqual(after.system.deploy, { sha: '0123456789abcdef0123456789abcdef01234567', at: '2026-11-24T12:00:00.000Z' });
       assert.deepEqual([after.visitors.views - before.visitors.views, after.visitors.visitors.n - before.visitors.visitors.n, after.visitors.visitors.atLeast, after.visitors.referrers[0]], [1000000, 2, false, { host: 'news.glass.example', views: after.visitors.referrers[0]!.views }]);
+      assert.ok(after.visitors.referrers.every(r => !r.host.endsWith('dashboard.glass.example') && !r.host.endsWith('template.glass.example')), 'Dashboard page views are not the site’s.');
       assert.ok(after.visitors.referrers[0]!.views >= 1000000);
 
       // The route: an operator reads the same figures, every series its full length, cached for the next read.

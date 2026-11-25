@@ -10,6 +10,7 @@ import { TICK } from './health-thresholds.js';
 import { GRADE_BANDS, GRADES, type Grade } from './standing-model.js';
 import { poolSends } from './states.js';
 import { MicroCentsJson } from './billing/money.js';
+import { PUBLIC_ROUTE } from './analytics-traffic.js';
 
 // Glass (/glass in the dashboard): everything going on in the installation on one page, for operators. One read that
 // returns every figure, cached GLASS_TTL_SECONDS per installation, so the page's 30-second refresh costs one statement
@@ -24,7 +25,8 @@ import { MicroCentsJson } from './billing/money.js';
 //  - sign-ups, standing, billing accounts and the health tables: small tables (one row per account, workspace or alert);
 //  - money: topups through the ledger's (kind, source_id) index, this month's cost from billing_months per account;
 //  - visitors: analytics_hourly (#680), by its hour-first key: today's hours only, and at most GLASS_VISITOR_CODES visitor
-//    codes told apart (a busier day's count is a lower bound).
+//    codes told apart (a busier day's count is a lower bound). Page views and referrers are the public pages' (the paths
+//    the public hook reports), the ones visitor codes count: a signed-in dashboard page view has no visitor code.
 // Hidden from the public OpenAPI document. Like every /v1/operator path it is behind support.ts operatorGate: anyone but a
 // signed-in operator gets the gate's one refusal, the same as for a path that doesn't exist, so nothing says it is here;
 // the dashboard's /glass answers them "Page not found".
@@ -69,7 +71,7 @@ const Glass = z.object({
     ses: z.object({ regions: int, maxSendRate: z.number(), max24HourSend: z.number(), sentLast24Hours: z.number(), checkedAt: z.string().nullable() }).nullable(),
     deploy: z.object({ sha: z.string().nullable(), at: z.string().nullable() }),
   }),
-  visitors: z.object({ views: int, visitors: Count.describe(`Told apart among at most ${GLASS_VISITOR_CODES.toLocaleString('en-US')} hourly visitor codes.`), hourly: z.array(int), referrers: z.array(z.object({ host: z.string(), views: int })).describe('Today.'),
+  visitors: z.object({ views: int.describe('Public pages only (the ones visitor codes count), today.'), visitors: Count.describe(`Told apart among at most ${GLASS_VISITOR_CODES.toLocaleString('en-US')} hourly visitor codes.`), hourly: z.array(int), referrers: z.array(z.object({ host: z.string(), views: int })).describe('Today.'),
     through: z.string().nullable().describe('The end of the last hour rolled up.') }),
 });
 export type Glass = z.infer<typeof Glass>;
@@ -143,11 +145,11 @@ export async function readGlass(runtime: Pick<Runtime, 'db' | 'config'>): Promis
       (SELECT coalesce(json_agg(a),'[]') FROM (SELECT key,kind,severity,words,${utc(sql`since`)} AS since FROM health_alerts ORDER BY severity='critical' DESC,since,key LIMIT 200) a) AS alerts,
       (SELECT json_build_object('regions',count(*),'maxSendRate',sum(l.max_send_rate),'max24HourSend',sum(l.max_24_hour_send),'sentLast24Hours',sum(l.sent_last_24_hours),'checkedAt',${utc(sql`max(l.checked_at)`)})
         FROM provider_pool_regions p JOIN provider_account_limits l ON l.aws_account_id=p.aws_account_id AND l.region=p.region WHERE ${poolSends()}) AS ses,
-      (SELECT coalesce(sum(events),0)::int FROM analytics_hourly WHERE hour>=t.today AND metric='page_view') AS views,
+      (SELECT coalesce(sum(events),0)::int FROM analytics_hourly WHERE hour>=t.today AND metric='page_view' AND dimensions->>'path' ~ ${PUBLIC_ROUTE.source}) AS views,
       json_build_object('n',(SELECT count(*) FROM (SELECT DISTINCT v FROM visitor_codes) d),'capped',(SELECT count(*) FROM visitor_codes)>${GLASS_VISITOR_CODES}) AS visitors,
-      ${series(sql`t.hour-interval '24 hours'`, 'hour', 24, sql`SELECT hour AS at,sum(events) AS n FROM analytics_hourly WHERE hour>=t.hour-interval '24 hours' AND metric='page_view' GROUP BY 1`)} AS views_hourly,
+      ${series(sql`t.hour-interval '24 hours'`, 'hour', 24, sql`SELECT hour AS at,sum(events) AS n FROM analytics_hourly WHERE hour>=t.hour-interval '24 hours' AND metric='page_view' AND dimensions->>'path' ~ ${PUBLIC_ROUTE.source} GROUP BY 1`)} AS views_hourly,
       (SELECT coalesce(json_agg(r ORDER BY r.views DESC,r.host),'[]') FROM (SELECT dimensions->>'referrer' AS host,sum(events)::int AS views FROM analytics_hourly
-        WHERE hour>=t.today AND metric='page_view' AND dimensions->>'referrer' IS NOT NULL AND dimensions->>'referrer'<>${own} GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 3) r) AS referrers,
+        WHERE hour>=t.today AND metric='page_view' AND dimensions->>'path' ~ ${PUBLIC_ROUTE.source} AND dimensions->>'referrer' IS NOT NULL AND dimensions->>'referrer'<>${own} GROUP BY 1 ORDER BY 2 DESC,1 LIMIT 3) r) AS referrers,
       (SELECT ${utc(sql`max(hour)+interval '1 hour'`)} FROM analytics_hours) AS views_through
     FROM t`);
   return shape(r!, runtime.config);
