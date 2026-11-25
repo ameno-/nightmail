@@ -29825,6 +29825,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.ok(since.events.length >= 1 && since.events.every((e: Json) => e.at >= newest));
       assert.deepEqual(ok(await local('GET', `${feed}?after=2999-01-01T00:00:00Z`)).events, []);
       error(await local('GET', `${feed}?after=yesterday`), 422, 'VALIDATION_FAILED');
+      // Reading the board, its feed or Health must not make the API tiles move, even on an error.
+      const counters = await import('./src/health-counters.js');
+      counters.resetCounters(); t.after(counters.resetCounters);
+      for (const poll of [path, feed, '/v1/operator/health']) ok(await local('GET', poll));
+      error(await local('GET', `${feed}?after=yesterday`), 422, 'VALIDATION_FAILED');
+      await counters.flushCounters(runtime.db);
+      assert.deepEqual((await readGlass(runtime)).api, sampled.api);
+      ok(await local('GET', '/v1/me'));
+      error(await request('GET', '/v1/me'), 401, 'AUTH_REQUIRED');
+      await counters.flushCounters(runtime.db);
+      const traffic = apiHour(await readGlass(runtime)), prior = apiHour(sampled);
+      assert.deepEqual([traffic.requests - prior.requests, traffic.errors4xx - prior.errors4xx, traffic.errors5xx - prior.errors5xx], [2, 1, 0]);
       // A role taken away is refused again, cache or no cache.
       await db.query('DELETE FROM platform_operators WHERE user_id=$1', [manager!.userId]);
       for (const p of [path, feed]) assert.deepEqual(refused(await local('GET', p)), refused(await local('GET', '/v1/operator/no-such-page')));
@@ -39423,6 +39435,48 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await healthTick(runtime, { queues }, { post, force: true }); await healthTick(runtime, { queues }, { post, force: true });
       clock.mock.restore(); errors.mock.restore();
       assert.deepEqual(posted.map(card => card.text).filter(text => text.startsWith('Database writes')), ['Database writes are failing: read-only (25006)', 'Database writes are working again']);
+    });
+  });
+
+  test('MX health: long-poll sleeps are not slow requests, but a slow read during or outside a poll still alerts', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
+      const counters = await import('./src/health-counters.js'), { healthTick } = await import('./src/health.js');
+      const box = ok(await local('POST', '/v1/inboxes', { type: 'sandbox', credential: { name: 'waiter', permissions: ['read'] } }), 201);
+      const version = ok(await local('GET', '/v1/rules/version')).version;
+      await db.query(`CREATE TEMP TABLE health_minutes (LIKE public.health_minutes INCLUDING ALL) ON COMMIT DROP;
+        CREATE TEMP TABLE health_alerts (LIKE public.health_alerts INCLUDING ALL) ON COMMIT DROP`);
+      counters.resetCounters(); t.after(counters.resetCounters);
+      // Run the real routes and database reads. Advance the request clock at each poll timer and, when specified,
+      // during the next database statement. The 30-second poll costs no wall-clock sleep in CI.
+      let now = Date.now(), nextQueryMs = 85, afterTickMs = 0;
+      const clock = t.mock.method(Date, 'now', () => now), timeout = globalThis.setTimeout, query = db.query.bind(db);
+      const timer = t.mock.method(globalThis, 'setTimeout', ((cb: (...args: any[]) => void, ms?: number, ...args: any[]) =>
+        ms === 1000 || ms === 2500 ? timeout(() => { now += ms; nextQueryMs = afterTickMs; afterTickMs = 0; cb(...args); }, 0) : timeout(cb, ms, ...args)) as typeof setTimeout);
+      const wire = t.mock.method(db, 'query', ((...args: unknown[]) => { now += nextQueryMs; nextQueryMs = 0; return Reflect.apply(query, db, args); }) as typeof db.query);
+      try {
+        const start = now;
+        assert.deepEqual(ok(await local('GET', `/v1/inboxes/${box.id}/messages?wait=30`)).data, []);
+        assert.equal(now - start, 30_085);
+        assert.equal(ok(await local('GET', `/v1/rules/version?after=${version}&wait=25`)).changed, false);
+        const mcp = ok(await request('POST', '/mcp?codemode=true', box.credential.secret, { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'waitForMessage', arguments: { inboxId: box.id } } }, { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' })).result;
+        assert.deepEqual(mcp.structuredContent.data, []);
+        afterTickMs = 31_000; // The event read after the first sleep takes the poll past its deadline.
+        assert.deepEqual(ok(await local('GET', '/v1/inbound/events?after=0&wait=30&types=message.received')).data, []);
+        nextQueryMs = 31_000;
+        ok(await local('GET', '/v1/me'));
+      } finally { timer.mock.restore(); wire.mock.restore(); clock.mock.restore(); }
+      await counters.flushCounters(runtime.db);
+      // Health only lists quiet routes with five or more reads; inspect their actual minute buckets.
+      const rows = (await db.query("SELECT key,n,slowest FROM health_minutes WHERE kind='route'")).rows;
+      const counter = (key: string) => rows.find(r => r.key === key)!;
+      assert.deepEqual([counter('GET /v1/inboxes/:id/messages').n, counter('GET /v1/inboxes/:id/messages').slowest], [2, 85]);
+      for (const name of ['GET /v1/rules/version', 'POST /mcp']) assert.equal(counter(name).slowest, 0, name);
+      assert.equal((await healthTick(runtime, {}, { force: true })).ran, true);
+      const page = ok(await local('GET', '/v1/operator/health'));
+      const route = (name: string) => page.routes.find((r: Json) => r.route === name);
+      for (const name of ['GET /v1/inbound/events', 'GET /v1/me']) assert.equal(route(name).slowestMs, 31_000, name);
+      assert.deepEqual(page.alerts.filter((a: Json) => a.kind === 'slow-requests').map((a: Json) => a.key).sort(),
+        ['slow-requests:GET:/v1/inbound/events', 'slow-requests:GET:/v1/me']);
     });
   });
 
