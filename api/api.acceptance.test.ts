@@ -30670,9 +30670,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       runtime.config.builtinDomain = 'deliverability.example';
       runtime.config.postmaster = { clientId: 'client', clientSecret: 'secret', refreshToken: 'refresh' };
       t.after(() => { runtime.config.builtinDomain = builtin; delete runtime.config.postmaster; });
-      const realFetch = globalThis.fetch, asked: string[] = [];
+      const asked: string[] = [];
       const today = new Date().toISOString().slice(0, 10).replaceAll('-', ''), yesterday = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10).replaceAll('-', '');
-      const google = t.mock.method(globalThis, 'fetch', async (input: RequestInfo | URL, init?: RequestInit) => {
+      // Passed in, never put on the global fetch: concurrent fixtures own that one.
+      const google = async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input instanceof Request ? input.url : input);
         if (url === 'https://oauth2.googleapis.com/token') { asked.push(`token:${new URLSearchParams(String(init?.body)).get('refresh_token')}`); return Response.json({ access_token: 'access', expires_in: 3600 }); }
         if (url.startsWith('https://gmailpostmastertools.googleapis.com/v1/domains/deliverability.example/trafficStats?')) {
@@ -30682,17 +30683,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             { name: `domains/deliverability.example/trafficStats/${today}`, domainReputation: 'HIGH', userReportedSpamRatio: 0.0004, spfSuccessRatio: 1, dkimSuccessRatio: 1, dmarcSuccessRatio: 1 },
           ] });
         }
-        return realFetch(input, init);
-      });
-      await refreshDeliverabilitySources(runtime);
-      google.mock.restore();
+        throw new Error(`Unexpected request: ${url}`);
+      };
+      await refreshDeliverabilitySources(runtime, { fetch: google as typeof fetch });
       assert.deepEqual(asked, ['token:refresh', 'stats:Bearer access']);
       const checks = (await db.query(`SELECT kind,status,detail,checked_at FROM deliverability_checks WHERE subject=$1 ORDER BY kind`, [region])).rows;
       assert.deepEqual(checks.map((c: Json) => [c.kind, c.status, c.detail]), [
         ['ses', 'ok', { enforcement: 'HEALTHY', sendingEnabled: true, productionAccess: true, vdm: true, engagement: true }],
         ['vdm', 'ok', { days: 60 }],
       ]);
-      await refreshDeliverabilitySources(runtime);
+      await refreshDeliverabilitySources(runtime, { fetch: google as typeof fetch });
       assert.deepEqual((await db.query(`SELECT checked_at FROM deliverability_checks WHERE subject=$1 ORDER BY kind`, [region])).rows.map((c: Json) => c.checked_at), checks.map((c: Json) => c.checked_at), 'Not due again yet.');
       const board = await readDeliverability(runtime, '7d'), mine = board.regions.find(r => r.region === region)!;
       assert.deepEqual([mine.ses.enforcement, mine.ses.vdm, mine.vdm.status, mine.vdm.providers.map(p => p.provider)], ['HEALTHY', true, 'ok', ['all', 'gmail', 'yahoo', 'other']]);

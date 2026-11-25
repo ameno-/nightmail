@@ -181,10 +181,11 @@ const errorName = (error: unknown) => (error as { name?: string })?.name && (err
  * GetAccount every 10 minutes, its VDM figures and each platform domain's DBL listing every hour. Each check is elected
  * once (deliverability_checks.next_at), so any number of processes run it once. Reads go out with the platform's own
  * credentials (the runtime's IAM user needs ses:GetAccount and ses:BatchGetMetricData); Gmail Postmaster Tools, every
- * 6 hours, with the OAuth grant in NIGHTMAIL_POSTMASTER_CREDENTIALS when it is set. Never throws: a failed check is
+ * 6 hours, with the OAuth grant in NIGHTMAIL_POSTMASTER_CREDENTIALS when it is set (through `fetch`, which a test passes
+ * in: the acceptance fixtures own the global one). Never throws: a failed check is
  * kept with its error's name, logged, and run again at its next time.
  */
-export async function refreshDeliverabilitySources(runtime: Runtime) {
+export async function refreshDeliverabilitySources(runtime: Runtime, { fetch: get = fetch }: { fetch?: typeof fetch } = {}) {
   if (!runtime.config.multiTenant) return;
   try {
     const { rows } = await runtime.db.execute<{ kind: 'ses' | 'vdm' | 'dbl' | 'postmaster'; subject: string; account: string | null }>(sql`WITH wanted(kind,subject,account,every) AS (
@@ -202,7 +203,7 @@ export async function refreshDeliverabilitySources(runtime: Runtime) {
       let status = 'ok', detail: Record<string, unknown> | null = null;
       try {
         if (row.kind === 'dbl') status = await blocklisted(runtime, row.subject);
-        else if (row.kind === 'postmaster') detail = await readPostmaster(runtime, row.subject, await (google ??= postmasterToken(runtime.config.postmaster!)));
+        else if (row.kind === 'postmaster') detail = await readPostmaster(runtime, row.subject, await (google ??= postmasterToken(runtime.config.postmaster!, get)), get);
         else {
           transport ??= await loadDispatchTransport(runtime);
           const { ses } = poolSes(runtime, transport, row.subject, row.account!);
@@ -254,8 +255,8 @@ async function readVdm(runtime: Runtime, ses: import('@aws-sdk/client-sesv2').SE
 const POSTMASTER_API = 'https://gmailpostmastertools.googleapis.com/v1';
 const googleError = (status: number, body: { error?: string | { status?: string } }) => Object.assign(new Error('Google refused the request'),
   { name: (typeof body.error === 'string' ? body.error : body.error?.status) ?? `HTTP_${status}` });
-async function postmasterToken(grant: NonNullable<Runtime['config']['postmaster']>) {
-  const res = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', signal: AbortSignal.timeout(10_000),
+async function postmasterToken(grant: NonNullable<Runtime['config']['postmaster']>, get: typeof fetch) {
+  const res = await get('https://oauth2.googleapis.com/token', { method: 'POST', signal: AbortSignal.timeout(10_000),
     body: new URLSearchParams({ client_id: grant.clientId, client_secret: grant.clientSecret, refresh_token: grant.refreshToken, grant_type: 'refresh_token' }) });
   const body = await res.json().catch(() => ({})) as { access_token?: string; error?: string };
   if (!res.ok || !body.access_token) throw googleError(res.status, body);
@@ -263,14 +264,14 @@ async function postmasterToken(grant: NonNullable<Runtime['config']['postmaster'
 }
 type TrafficStats = { name?: string; domainReputation?: string; userReportedSpamRatio?: number; spfSuccessRatio?: number; dkimSuccessRatio?: number; dmarcSuccessRatio?: number; deliveryErrors?: unknown[] };
 /** The last 60 days Google has for a domain, upserted by day (a day Google revises is written again). */
-async function readPostmaster(runtime: Runtime, domain: string, token: string) {
+async function readPostmaster(runtime: Runtime, domain: string, token: string, get: typeof fetch) {
   const today = new Date(), end = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() + 1)), start = new Date(end.getTime() - 60 * 86_400_000);
   const date = (prefix: string, d: Date) => [[`${prefix}.year`, String(d.getUTCFullYear())], [`${prefix}.month`, String(d.getUTCMonth() + 1)], [`${prefix}.day`, String(d.getUTCDate())]];
   const stats: TrafficStats[] = [];
   let page: string | undefined;
   for (let i = 0; i < 5; i++) {
     const query = new URLSearchParams([...date('startDate', start), ...date('endDate', end), ['pageSize', '100'], ...page ? [['pageToken', page]] : []]);
-    const res = await fetch(`${POSTMASTER_API}/domains/${encodeURIComponent(domain)}/trafficStats?${query}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
+    const res = await get(`${POSTMASTER_API}/domains/${encodeURIComponent(domain)}/trafficStats?${query}`, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000) });
     const body = await res.json().catch(() => ({})) as { trafficStats?: TrafficStats[]; nextPageToken?: string; error?: { status?: string } };
     if (!res.ok) throw googleError(res.status, body);
     stats.push(...body.trafficStats ?? []);
