@@ -36,6 +36,7 @@ import { realDestination } from './hosted-sending.js';
 import { webhookSecretBinding as mailboxSecretBinding } from './mailbox-events.js';
 import { mailboxDomains, endpoints, type MxReport } from './db/mailbox.js';
 import { checkMx,expectedMx } from './mailbox-dns.js';
+import { dohQuery } from './public-dns.js';
 import { baneRecordIssue, baneRecordUse, defaultReceivingHost, establishedHost, hostOwners, inspectReceivingHost, observeReceiving, refusedCodes, takenIssue, type DomainObservation, type ReceivingHostRow, type ReceivingIssue } from './receiving-host.js';
 import { deliveryAttempts, deliveries, domainClaims, domains, events, eventTypes, snsReceipts, unsubscribeTokens, webhooks, webhookSecretAudit, type PublishedEvent, type EventType } from './db/operations.js';
 import { clientIpHeader, productName, requestHeaderNames, webhookTestHeaders, webhookUserAgent } from './brand.js';
@@ -338,10 +339,7 @@ async function identityQuotaAlert(runtime:Runtime,region:string,account:string,e
 }
 async function txtProof(name: string, token: string) {
   try {
-    const r = await fetch(`https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(name)}&type=TXT`, { headers: { accept: 'application/dns-json' }, signal: AbortSignal.timeout(5000), redirect: 'manual' }); // Workers reject 'error'; a 3xx fails !r.ok below.
-    if (!r.ok) { await r.body?.cancel();throw dnsUnavailable(); }
-    const answer = await r.json() as { Status: number; TC?: boolean; Answer?: { name: string; type: number; data: string }[] };
-    if (answer.TC || (answer.Status!==0 && answer.Status!==3)) throw dnsUnavailable();
+    const answer = await dohQuery(name, 'TXT', AbortSignal.timeout(5000));
     return answer.Status === 0 && !!answer.Answer?.some(rr => rr.type === 16 && rr.name.toLowerCase().replace(/\.$/, '') === name && (rr.data === `"${token}"` || rr.data === token));
   } catch { throw dnsUnavailable(); }
 }

@@ -3953,7 +3953,7 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           let answer = '', lookups = 0, fault=''; const activeMx=new Set<string>(), cnames=new Map<string,string>();
           const policies=new Map<string,string[]>(); let dmarcQueries=0,dmarcFailure=false;
           dt.mock.method(globalThis,'fetch', async (input: RequestInfo | URL) => {
-            const url = new URL(String(input)); assert.equal(url.origin + url.pathname,'https://cloudflare-dns.com/dns-query');
+            const url = new URL(String(input)); assert.ok(['https://cloudflare-dns.com/dns-query','https://dns.google/resolve'].includes(url.origin + url.pathname));
             if (fault===url.searchParams.get('type')+'-servfail') return Response.json({Status:2});
             if (fault===url.searchParams.get('type')+'-503') return new Response(null,{status:503});
             if (fault===url.searchParams.get('type')+'-timeout') throw new DOMException('timed out','TimeoutError');
@@ -32056,7 +32056,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const networkGuard = globalThis.fetch;
       t.after(() => { globalThis.fetch = networkGuard; });
       globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
-        const url = new URL(String(input)); assert.equal(url.hostname, 'cloudflare-dns.com');
+        const url = new URL(String(input)); assert.ok(['cloudflare-dns.com', 'dns.google'].includes(url.hostname));
         const name = url.searchParams.get('name')!, type = url.searchParams.get('type')!, soa = (zone: string) => ({ name: `${zone}.`, type: 6, data: 'ns. hostmaster. 1 1 1 1 1' });
         if (type === 'NS') lookups.push(name);
         if (name.endsWith('broken.example')) return new Response('', { status: 500 });
@@ -32654,6 +32654,18 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(input(sealed.body.id).Content.Simple, undefined);
       assert.ok(Buffer.from(input(sealed.body.id).Content.Raw.Data).equals(signed), 'The signed message reaches SES as written.');
       for (const e of await emails('Many')) assert.ok(input(e.id), 'Both parts of the envelope are sent.');
+      // Outer fields as mail apps write them still go out as written: a quoted name with a comma, an encoded name folded
+      // before the address, a long Subject folded before a word and a colon, a field name with an underscore.
+      const written = [['From: "Relay, App" <app@relay.example>', 'Subject: Signed'], ['From: =?UTF-8?Q?Jos=C3=A9_App?=\r\n <app@relay.example>',
+        'Subject: Signed release notes for the quarterly review with the whole team and its\r\n agenda: budget\r\nmsip_labels: MSIP_Label_fixture_Enabled=true']]
+        .map(([fromLine, subjectLine]) => Buffer.from(signed.toString().replace('From: app@relay.example', fromLine!).replace('Subject: Signed', subjectLine!)));
+      const kept: string[] = [];
+      for (const raw of written) { const res = await stream(raw, ['reader@example.net']); assert.equal(res.status, 200, JSON.stringify(res.body)); kept.push(res.body.id); }
+      await run('email.dispatch');
+      written.forEach((raw, i) => assert.ok(Buffer.from(input(kept[i]!).Content.Raw.Data).equals(raw), 'The signed message reaches SES as written.'));
+      // A bare CR that hides a second From from the parser is refused.
+      const hidden = await stream(Buffer.from(signed.toString().replace('Subject: Signed', 'X-A: b\rFrom: ceo@victim.test\r\r\nSubject: Signed')), ['reader@example.net']);
+      assert.deepEqual([hidden.status, hidden.body.error?.code], [422, 'UNSUPPORTED_MESSAGE']);
       // On Hosted, a sender still on probation can't send it as written.
       runtime.config.multiTenant = true;
       try {
