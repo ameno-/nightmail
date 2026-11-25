@@ -2,7 +2,7 @@ import { createPrivateKey, hkdfSync } from 'node:crypto';
 import { z } from 'zod';
 import { ApiError, log } from './core.js';
 import type { Config } from './core.js';
-import { envNames, settingNames } from './brand.js';
+import { envNames, linkHostTarget, settingNames } from './brand.js';
 import { mailServerHosts } from './mail-servers.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { EVALUATION } from './standing-model.js';
@@ -141,6 +141,17 @@ const values = z.object({
   NIGHTMAIL_POSTMASTER_CREDENTIALS: optional(z.string().max(4000)),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Links in customer mail (unsubscribe, forwarding) go on the sending domain's own links.<domain> (src/link-domains.ts):
+  // a CNAME to NIGHTMAIL_LINK_SAAS_TARGET (Hosted default: brand.ts linkHostTarget; required self-hosted), served as a
+  // custom hostname of the Cloudflare for SaaS zone NIGHTMAIL_LINK_SAAS_ZONE_ID, which NIGHTMAIL_LINK_SAAS_TOKEN may edit.
+  // Unset: links stay on PUBLIC_URL, as before link hosts (self-hosted; Hosted dev, which has no zone of its own).
+  NIGHTMAIL_LINK_SAAS_ZONE_ID: optional(z.string().trim().regex(/^[0-9a-f]{32}$/)),
+  NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().min(20).max(500)),
+  // Hosted, while the zone's custom hostname quota is full: the shared link host (a name in the SaaS zone, served by its
+  // route) that campaign and marketing mail links on until its domain's own is active, within guardrails
+  // (src/link-domains.ts linkChoice). Never a name of PUBLIC_URL's domain. Unset: refused, saying link hosts are at capacity.
+  NIGHTMAIL_LINK_FALLBACK_HOST: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  NIGHTMAIL_LINK_SAAS_TARGET: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
   // The origin a connected account's SNS topics deliver to (https://events.nightmail.dev): its role template allows
@@ -314,6 +325,18 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
+  if (!v.NIGHTMAIL_LINK_SAAS_ZONE_ID !== !v.NIGHTMAIL_LINK_SAAS_TOKEN) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_ZONE_ID and NIGHTMAIL_LINK_SAAS_TOKEN together, or neither.');
+  // The target is a name in the SaaS zone, which is a domain of its own: Hosted's is brand.ts linkHostTarget; a self-hosted
+  // installation names its own.
+  const linkTarget = v.NIGHTMAIL_LINK_SAAS_TARGET ?? (v.MULTI_TENANT === 'true' ? linkHostTarget : undefined);
+  if (v.NIGHTMAIL_LINK_SAAS_ZONE_ID && !linkTarget) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_TARGET to the name in the Cloudflare for SaaS zone that links.<domain> CNAMEs point to.');
+  // The shared fallback link host shares no domain with this installation's own origins (nightmail.dev never carries
+  // customer links): compared by their last two labels.
+  const site = (host: string) => host.split('.').slice(-2).join('.'), fallbackHost = v.NIGHTMAIL_LINK_FALLBACK_HOST;
+  if (fallbackHost && [url.origin, ...previousOrigins].some(origin => site(new URL(origin).hostname) === site(fallbackHost)))
+    throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_LINK_FALLBACK_HOST must be a name in the link hosts\u2019 zone, not under PUBLIC_URL\u2019s domain.');
+  const linkHosts = v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN && linkTarget
+    ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: linkTarget, ...fallbackHost && v.MULTI_TENANT === 'true' ? { fallbackHost } : {} } : undefined;
   return {
     // Retained internal storage namespace, not an installation setting or browser-provided tenant ID.
     workspaceId: 'default', multiTenant: v.MULTI_TENANT === 'true', authSecret: v.NIGHTMAIL_ROOT_SECRET, previousAuthSecret: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET,mailGatewayToken:v.MAILGW_API_TOKEN,
@@ -351,7 +374,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
-    publicUrl: url.origin, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
+    publicUrl: url.origin, linkHosts, sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: v.DISPATCH_TX_RESERVE_PERCENT, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
     aws,

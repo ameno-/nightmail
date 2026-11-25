@@ -6,7 +6,11 @@
   "define": { "NIGHTMAIL_AWS_NAMES": "true" },
   "account_id": "15d29c8639fd3733b1b5486a2acfd968",
   "workers_dev": false,
-  "routes": [{ "pattern": "nightmail.dev", "custom_domain": true }, { "pattern": "bane.mx", "custom_domain": true }, { "pattern": "events.nightmail.dev", "custom_domain": true }],
+  // */* on nightmailedge.com: customers' link hosts (links.<domain>, custom hostnames of that Cloudflare for SaaS zone) reach
+  // this Worker, which answers only their links (src/link-hosts.ts). Wrangler replaces the Worker's routes on each deploy, so
+  // the route lives here, and the deploy token's zones include nightmailedge.com (anomalyco/secrets config.ts).
+  "routes": [{ "pattern": "nightmail.dev", "custom_domain": true }, { "pattern": "bane.mx", "custom_domain": true }, { "pattern": "events.nightmail.dev", "custom_domain": true },
+    { "pattern": "*/*", "zone_name": "nightmailedge.com" }],
   "main": "src/worker.ts",
   "compatibility_date": "2026-09-08",
   "compatibility_flags": ["nodejs_compat"],
@@ -24,6 +28,15 @@
     "BYO_EVENTS_ORIGIN": "https://events.nightmail.dev",
     "NIGHTMAIL_MAIL_STORE": "r2",
     "PUBLIC_URL": "https://nightmail.dev",
+    // Link hosts (src/link-domains.ts): links.<domain> CNAMEs to the target, made custom hostnames of the nightmailedge.com
+    // zone with nightmail/production/NIGHTMAIL_LINK_SAAS_TOKEN (bound by .github/scripts/deploy-worker.sh, which stops the
+    // deploy without it).
+    "NIGHTMAIL_LINK_SAAS_ZONE_ID": "7b0d7306312182f66e12368f93efbb96",
+    "NIGHTMAIL_LINK_SAAS_TARGET": "cname.nightmailedge.com",
+    // While the zone's custom hostname quota is full, campaign and marketing mail from a domain whose own link host waits
+    // links here, within guardrails (src/link-domains.ts LINK_FALLBACK). A name of the zone, served by the */* route.
+    // Remove it to refuse that mail instead, saying link hosts are at capacity.
+    "NIGHTMAIL_LINK_FALLBACK_HOST": "links.nightmailedge.com",
     // Mail apps connect to imap.nightmail.dev and smtp.nightmail.dev (the gateway certificate names both). Shown only
     // while the deploy binds MAILGW_API_TOKEN (bane:mailGatewayEnabled in infra/pulumi/Pulumi.production.yaml).
     "MAILGW_PUBLIC_DOMAIN": "nightmail.dev",
