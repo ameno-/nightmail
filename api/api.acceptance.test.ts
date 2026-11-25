@@ -38594,11 +38594,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         });
       };
       const own=new URL(PUBLIC_ORIGIN).host;
-      // Hosted, and the sending domain has no link host: campaign, test and marketing mail are refused, naming the record.
-      const refused=ok(await draft(),201);
+      // Hosted, and the sending domain has no link host: campaign tests and marketing mail are refused, naming the record, and
+      // so is a launch's link (a launch asks once the sender's own checks pass: this fixture's sender isn't verified on Hosted).
+      const refused=ok(await draft(),201),message=`Campaign and marketing mail from example.com needs the domain's link record, which carries its unsubscribe link: add a CNAME at links.example.com pointing to ${target}, then check the domain.`;
       runtime.config.multiTenant=true;
-      for(const reply of [await local('POST',`/v1/campaigns/${refused.id}/send`,{revision:refused.revision}),await local('POST',`/v1/campaigns/${refused.id}/test`,{to:'tester@example.net'}),await local('POST','/v1/emails/send',marketing)])
-        assert.equal(error(reply,409,'LINK_RECORD_REQUIRED').message,`Campaign and marketing mail from example.com needs the domain's link record, which carries its unsubscribe link: add a CNAME at links.example.com pointing to ${target}, then check the domain.`);
+      for(const reply of [await local('POST',`/v1/campaigns/${refused.id}/test`,{to:'tester@example.net'}),await local('POST','/v1/emails/send',marketing)])
+        assert.equal(error(reply,409,'LINK_RECORD_REQUIRED').message,message);
+      await assert.rejects(linkOrigin(runtime,runtime.db,wid,'news@example.com'),{code:'LINK_RECORD_REQUIRED',message});
       assert.equal(delivered.length,0);
       // Self-hosted, it links on its own origin, the operator's domain.
       runtime.config.multiTenant=false;
