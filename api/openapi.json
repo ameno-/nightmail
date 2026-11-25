@@ -543,7 +543,7 @@
                   "closed",
                   "off"
                 ],
-                "description": "ready: it sends now. pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused)."
+                "description": "ready: it sends now (in a new workspace's first seconds, a send waits for its setup to finish). pending: it is being set up. closed: a domain of the workspace's own verified, so it only receives now. off: it sends nothing: turned off by the operator, or paused with every built-in domain (paused)."
               },
               "paused": {
                 "type": "boolean",
@@ -565,6 +565,10 @@
               },
               "perMinute": {
                 "type": "integer"
+              },
+              "used": {
+                "type": "integer",
+                "description": "Recipients it sent to in the rolling 24 hours, counted as perDay counts them; 0 once it no longer sends."
               }
             },
             "required": [
@@ -573,7 +577,8 @@
               "sending",
               "scope",
               "perDay",
-              "perMinute"
+              "perMinute",
+              "used"
             ],
             "description": "Hosted only: the subdomain of the installation's own domain this workspace sends and receives on before it verifies a domain of its own (sendEmail from any address at it), with who it sends to and its recipient caps. Absent when the installation has none; null until this workspace has one."
           },

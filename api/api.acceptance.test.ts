@@ -1131,8 +1131,9 @@ test('OIDC dashboard callback verifies the token, consumes bound state once and 
   const me=await (await request('/v1/me','GET',session)).json() as {id:string;workspaceId:string;workspaces:{id:string;name:string}[]};
   await holder.query('ROLLBACK');
   assert.deepEqual((await observedBy(subject))!.map(s=>s.kind).sort(),['email','email_domain','net','provider'],'The admitted sign-in replaced what the refused ones observed.');
-  // A staff sign-up starts its own workspace, named after the person (#92's naming).
-  assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved}'s workspace`);
+  // A staff sign-up starts its own workspace, named after the person (#92's naming); a sign-in that names no one but its
+  // address names it after the address's local part, never the whole address.
+  assert.equal(me.workspaces.find(w=>w.id===me.workspaceId)?.name,`${approved.split('@')[0]}'s workspace`);
   const members=await (await request('/v1/workspaces/current/members','GET',session)).json() as {data:{userId:string;email:string}[]};
   assert.deepEqual(members.data.map(m=>[m.userId,m.email]),[[me.id,approved]]);
   assert.equal((await db.query('SELECT FROM auth_user WHERE id=$1',[me.id])).rowCount,0);
@@ -23181,7 +23182,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
   // they are counted. A pause stops its sending, a revoke stops everything, and its label is never given out again.
   test('built-in domain: given on creation and by the backfill, unique and never a reserved name, sends within its caps and scope, receives into a catch-all inbox, refused when paused or revoked',async t=>{
     await simulatedSesFixture(t,async({runtime,db,local,run})=>t.test('synthetic transports',async t=>{
-      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser},{acceptInboundNotification},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
+      const [{runDispatcher},{SESv2Client,GetAccountCommand,SendEmailCommand,GetEmailIdentityCommand,CreateTenantResourceAssociationCommand,DeleteTenantResourceAssociationCommand},builtin,{onboardNewUser,ownerName},{acceptInboundNotification},{storeIncoming},{ingestInput},{matchRouting},{sql},{render}]=await Promise.all([
         import('./src/dispatcher.js'),import('@aws-sdk/client-sesv2'),import('./src/builtin-domain.js'),import('./src/workspaces.js'),import('./src/mailbox-ingest.js'),import('./src/mailbox-ingest-store.js'),
         import('./src/mailbox-ingest-input.js'),import('./src/routing-match.js'),import('drizzle-orm'),import(new URL('../infra/aws-shared/runtime-policies.mjs',import.meta.url).href)]);
       const wid=runtime.config.workspaceId,acct='111122225555',oh='us-east-2',parent='nightmail-fixture.email',topic=`arn:aws:sns:${oh}:${acct}:bane-feedback`;
@@ -23223,8 +23224,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
 
       // 2. On creation: a new account's workspace has its label in the same transaction.
       const user=unique('user');await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,'Acme Corp',`${user}@example.net`]);
-      assert.equal(await onboardNewUser(runtime.db,{id:user,name:'Acme Corp',email:`${user}@example.net`},true,oh,null,runtime.config),true);
+      assert.match(String(await onboardNewUser(runtime.db,{id:user,name:'Acme Corp',email:`${user}@example.net`},true,oh,null,runtime.config)),/^ws_/);
       assert.match((await db.query('SELECT b.name FROM builtin_domains b JOIN workspace_members m ON m.workspace_id=b.workspace_id WHERE m.user_id=$1',[user])).rows[0].name,/^acme-corps-[a-z0-9]{2}\.nightmail-fixture\.email$/);
+      // A name that is only the address (an emailed sign-in names no one) is its local part without a +tag.
+      assert.deepEqual([['ryan+onboarding-1125','ryan+onboarding-1125@example.net'],['ryan+x@example.net','ryan+x@example.net'],['','ana+news@example.net'],['Ana Lima','ana+news@example.net'],['C++ Guild',null]].map(([name,email])=>ownerName(name!,email)),
+        ['ryan','ryan','ana','Ana Lima','C++ Guild']);
 
       // 3. The backfill: this workspace predates built-in domains. The sweep gives it a label and queues its domain.
       assert.equal((await db.query('SELECT FROM builtin_domains WHERE workspace_id=$1',[wid])).rowCount,0);
@@ -23241,7 +23245,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // A parent still verifying (a new parent's MAIL FROM, at launch) is looked at again in 5 minutes, not an hour.
       assert.deepEqual((await db.query("SELECT payload->>'parentWaits' AS waits,available_at BETWEEN clock_timestamp()+interval '4 minutes' AND clock_timestamp()+interval '6 minutes' AS soon FROM jobs WHERE id=$1",['domain.builtin:'+wid])).rows,[{waits:'1',soon:true}]);
       const me=async()=>ok(await local('GET','/v1/me')).connection.builtinDomain;
-      assert.deepEqual(await me(),{id:(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id,name:host,sending:'pending',scope:'anyone',perDay:100,perMinute:10});
+      assert.deepEqual(await me(),{id:(await db.query('SELECT id FROM operation_domains WHERE workspace_id=$1 AND name=$2',[wid,host])).rows[0].id,name:host,sending:'pending',scope:'anyone',perDay:100,perMinute:10,used:0});
       error(await local('POST','/v1/emails/send',{from,to:'friend@example.net',subject:'Too early',text:'Pending.'}),403,'SENDER_DOMAIN_NOT_VERIFIED');
       parentIdentity=verifiedParent;await db.query('UPDATE builtin_parent SET checked_at=now()-interval \'2 hours\' WHERE name=$1',[parent]);
       await builtin.builtinDomainTick(runtime);await pace();await run('domain.builtin');
@@ -23279,6 +23283,7 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       for (let round=1;round<10;round++){await age('2 minutes');ok(await local('POST','/v1/emails/batch',{emails:[0,1,2,3,4,5,6,7,8,9].map(n=>({from,to:`r${round}-${n}@example.net`,subject:`Round ${round} ${n}`,text:'Daily.'}))}),202);}
       await age('2 minutes');
       assert.match(error(await local('POST','/v1/emails/send',{from,to:'over@example.net',subject:'Over',text:'Over.'}),429,'BUILTIN_DOMAIN_LIMIT').message,/100 in 24 hours/);
+      assert.equal((await me()).used,100,'GET /v1/me counts what the daily cap counts, for the dashboard\'s daily limit.');
       await age('24 hours');ok(await local('POST','/v1/emails/send',{from,to:'next-day@example.net',subject:'Next day',text:'Again.'}),202);
       // The other scope: only the members' own verified addresses, 3 a minute and 10 a day.
       runtime.config.builtinScope='members';await age('24 hours');
@@ -23359,6 +23364,72 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal(iamAllows(statements,action,arn,{'aws:RequestedRegion':oh}),false,action+' untagged');
       }
       assert.equal(iamAllows(statements,'ses:DeleteEmailIdentity',arn,{'aws:RequestedRegion':oh,'aws:ResourceTag/bane:purpose':'builtin-domains'}),false);
+    }));
+  });
+
+  test('built-in domain: the request that creates a workspace starts its tenant and built-in domain without waiting; meanwhile the domain counts as ready and a send waits for it; the jobs are the fallback',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local})=>t.test('synthetic transports',async t=>{
+      const [{SESv2Client,CreateTenantCommand,UpdateReputationEntityPolicyCommand,CreateTenantResourceAssociationCommand},{STSClient},builtin,{onboardNewUser},{startHostedMail},{JobDeferred}]=await Promise.all([
+        import('@aws-sdk/client-sesv2'),import('@aws-sdk/client-sts'),import('./src/builtin-domain.js'),import('./src/workspaces.js'),import('./src/provider-connections.js'),import('./src/jobs.js')]);
+      const acct='111122226666',oh='us-east-2',parent='nightmail-fixture.email';
+      Object.assign(runtime.config,{multiTenant:true,regionalSending:true,liveEnabled:true,aws:{accessKeyId:'fixture-hosted-start',secretAccessKey:'fixture-only'},builtinDomain:parent,builtinScope:'anyone',platformAccount:undefined});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket,inbound_topic_arn,receiving_state) VALUES($1,$2,$3,'ready',$4,$5,'ready')`,
+        [oh,acct,`arn:aws:sns:${oh}:${acct}:bane-feedback`,'hosted-start-mail',`arn:aws:sns:${oh}:${acct}:bane-inbound`]);
+      await db.query('INSERT INTO builtin_parent(name,ok,ses,checked_at) VALUES($1,true,$2,now())',[parent,JSON.stringify({VerificationStatus:'SUCCESS',VerifiedForSendingStatus:true,DkimAttributes:{SigningAttributesOrigin:'AWS_SES',SigningEnabled:true,Status:'SUCCESS'}})]);
+      // SES: the tenant's calls and the associations, each recorded by what it touches. One mock for the whole test.
+      const calls:string[]=[];let failTenant=false;
+      t.mock.method(STSClient.prototype,'send',async()=>({Account:acct,Arn:`arn:aws:iam::${acct}:user/fixture`}));
+      t.mock.method(SESv2Client.prototype,'send',async(cmd:any)=>{
+        const name=cmd.constructor.name,i=cmd.input;
+        calls.push(cmd instanceof CreateTenantResourceAssociationCommand?`${name}:${String(i.ResourceArn).split(':').slice(5).join(':')}`:name);
+        if(cmd instanceof CreateTenantCommand){if(failTenant)throw Object.assign(new Error('Synthetic denial'),{name:'AccessDeniedException',$metadata:{httpStatusCode:403}});return {TenantName:i.TenantName,TenantArn:`arn:aws:ses:${oh}:${acct}:tenant/${i.TenantName}/fixture`};}
+        if(cmd instanceof UpdateReputationEntityPolicyCommand||cmd instanceof CreateTenantResourceAssociationCommand)return {};
+        throw new Error('Unexpected SES call '+name);
+      });
+      const signUp=async()=>{const user=unique('user'),email=`ryan+${user}@example.net`;
+        await db.query('INSERT INTO nightmail_users(id,name,email,email_verified) VALUES($1,$2,$3,true)',[user,email.split('@')[0],email]);
+        const wid=await onboardNewUser(runtime.db,{id:user,name:email.split('@')[0]!,email},true,oh,null,runtime.config) as string;
+        return {wid,context:{actor:{type:'member' as const,id:user,userId:user,via:'dashboard' as const},requestId:null,ipNetwork:null,userAgent:null}};};
+      const claim=async(wid:string)=>(await db.query('SELECT dc.sending_state FROM domain_claims dc JOIN builtin_domains b ON b.workspace_id=dc.workspace_id AND b.name=dc.name WHERE dc.workspace_id=$1',[wid])).rows[0]?.sending_state;
+      // Due: its time has come by the clock (the fixture's now() is its transaction's start).
+      const jobs=async(wid:string,conn:string)=>(await db.query("SELECT id,available_at<=clock_timestamp() AS due FROM jobs WHERE id IN ('tenant.provision:'||$2::text,'domain.builtin:'||$1::text) ORDER BY id",[wid,conn])).rows;
+
+      // 1. A sign-up: the request makes its connection and domain, starts its tenant (strict, its configuration sets) and the
+      //    parent's association with it, and answers without waiting. The +tag of the address that signed up is no part of
+      //    its name or label.
+      const a=await signUp();
+      assert.equal((await db.query('SELECT name FROM workspaces WHERE id=$1',[a.wid])).rows[0].name,"ryan's workspace");
+      assert.match((await db.query('SELECT name FROM builtin_domains WHERE workspace_id=$1',[a.wid])).rows[0].name,/^ryans-[a-z0-9]{2,4}\.nightmail-fixture\.email$/);
+      const t0=Date.now(),ra=await startHostedMail(runtime,a.wid,a.context,{kind:'shared'},true),answered=Date.now()-t0;
+      assert.equal(ra.connection.tenant_state,'pending');
+      await ra.started;
+      t.diagnostic(`A new workspace's request answered in ${answered} ms; its tenant and built-in domain were set up ${Date.now()-t0} ms after it started`);
+      assert.equal(await claim(a.wid),'verified');
+      assert.equal((await db.query('SELECT tenant_state FROM provider_connections WHERE id=$1',[ra.connection.id])).rows[0].tenant_state,'ready');
+      assert.deepEqual([calls.length,calls[0],calls[1],calls.at(-1)],[5,'CreateTenantCommand','UpdateReputationEntityPolicyCommand',`CreateTenantResourceAssociationCommand:identity/${parent}`]);
+      assert.deepEqual(await jobs(a.wid,ra.connection.id),[{id:`domain.builtin:${a.wid}`,due:false},{id:`tenant.provision:${ra.connection.id}`,due:false}],'The jobs only stand by, a minute on.');
+      await builtin.setUpBuiltinDomain(runtime,a.wid);assert.equal(calls.length,5,'The job, when it comes, finds nothing left to do.');
+
+      // 2. SES refuses: the jobs take it from now, and the domain no longer counts as ready meanwhile.
+      failTenant=true;calls.length=0;
+      const b=await signUp(),rb=await startHostedMail(runtime,b.wid,b.context,{kind:'shared'},true);await rb.started;
+      assert.deepEqual([await claim(b.wid),calls],['pending',['CreateTenantCommand']]);
+      assert.deepEqual(await jobs(b.wid,rb.connection.id),[{id:`domain.builtin:${b.wid}`,due:true},{id:`tenant.provision:${rb.connection.id}`,due:true}],'A failure brings the jobs forward.');
+      assert.equal((await db.query("SELECT payload ? 'inline' AS inline FROM jobs WHERE id=$1",['domain.builtin:'+b.wid])).rows[0].inline,false);
+      // The domain's job waits seconds, not minutes, for a new connection's tenant; an old connection's, minutes.
+      await assert.rejects(builtin.setUpBuiltinDomain(runtime,b.wid),(e:unknown)=>e instanceof JobDeferred&&Date.parse(e.availableAt)-Date.now()<=6000);
+      await db.query("UPDATE provider_connections SET created_at=now()-interval '1 hour' WHERE id=$1",[rb.connection.id]);
+      await assert.rejects(builtin.setUpBuiltinDomain(runtime,b.wid),(e:unknown)=>e instanceof JobDeferred&&Date.parse(e.availableAt)-Date.now()>200_000);
+
+      // 3. While the work runs the domain counts as ready (onboarding's first paint), and a send from it waits for it instead
+      //    of being refused (the fixture's own workspace, so its dashboard session can send).
+      failTenant=false;calls.length=0;
+      const own=runtime.config.workspaceId,host=(await builtin.allocateBuiltinDomain(runtime.db,runtime.config,own,'Acme'))!;
+      const rc=await startHostedMail(runtime,own,a.context,{kind:'shared'},true);
+      assert.equal(ok(await local('GET','/v1/me')).connection.builtinDomain.sending,'ready');
+      const t1=Date.now(),early=ok(await local('POST','/v1/emails/send',{from:`hello@${host}`,to:AUTH_EMAIL,subject:'Early',text:'Sent while its domain was set up.'}),202);
+      t.diagnostic(`A send in the domain's first seconds waited ${Date.now()-t1} ms for its setup`);
+      assert.ok(early.id);assert.equal(await claim(own),'verified');await rc.started;
     }));
   });
 

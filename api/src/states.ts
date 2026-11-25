@@ -337,9 +337,10 @@ export const startProvisioning = (id: string, account: string, roleArn: string, 
   WHERE id=${id} AND ((state IN ('awaiting_role','failed')) OR (state='provisioning' AND coalesce(lease_until,'-infinity')<=now())) AND (aws_account_id IS NULL OR aws_account_id=${account})`;
 export const finishProvisioning = (fence: SQL, to: 'ready' | 'failed' | 'awaiting_role') => sql`UPDATE provider_connections SET state=${to},lease_until=NULL WHERE state='provisioning' AND ${fence}`;
 export const notProvisioning = (pc: SQL = sql`pc`) => sql`NOT (${pc}.state='provisioning' AND coalesce(${pc}.lease_until,'-infinity')>now())`;
-/** Queues the one tenant job (retry-safe by id). The request never calls AWS: Hosted is instant and the job owns CreateTenant. */
-export const queueTenantJob = (source: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,jsonb_build_object('connectionId',id) FROM (${source}) c
-  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
+/** Queues the one tenant job (retry-safe by id). Hosted is instant: the request that creates a connection may make its
+ * tenant itself (startHostedMail), and then the job, due `afterSeconds` later, is the fallback. */
+export const queueTenantJob = (source: SQL, afterSeconds = 0) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at) SELECT 'tenant.provision:'||id,'tenant.provision',workspace_id,jsonb_build_object('connectionId',id),now()+make_interval(secs=>${afterSeconds}) FROM (${source}) c
+  ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,available_at=excluded.available_at,lease_until=NULL,last_error=NULL WHERE jobs.status<>'running'`;
 export const setTenantState = (id: string, to: TenantState, account?: string) => sql`UPDATE provider_connections SET tenant_state=${to}${account && to==='ready' ? sql`,aws_account_id=${account}` : sql``} WHERE id=${id} AND tenant_state<>'ready'
   ${account ? sql`AND (aws_account_id IS NULL OR aws_account_id=${account})` : sql``}`;
 export const setPoolState = (fence: SQL, column: 'sending_state' | 'receiving_state', extra: SQL = sql``) => sql`UPDATE provider_pool_regions SET ${sql.identifier(column)}='ready'${extra} WHERE ${fence}`;
