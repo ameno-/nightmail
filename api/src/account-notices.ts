@@ -10,7 +10,7 @@ import { LINK_MINUTES, signinLinkUrl } from './signups.js';
 // standing.notify (standing.ts: paused, marketing on hold, warning, resumed, campaign paused), billing.notify
 // (billing/notify.ts) and account.notify here, for the moments that have no standing event or billing notice of their
 // own: a domain that stopped verifying or was released, a new domain's records still missing after an hour and a new workspace with no
-// domain after an hour (src/domain-setup.ts), the daily limit reached, the evaluation finished, an invitation, the waitlist and a sign-in link. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
+// domain after an hour (src/domain-setup.ts), the daily limit reached, the evaluation finished (the first grade, which explains the sender score), an invitation, the waitlist and a sign-in link. Those are account_notices rows (migration 403), one per dedupe key, queued with their job in one statement.
 //
 // An email goes out once: the row's dedupe key makes one notice of one moment, the job leases the row so one runner
 // sends it, and the send's idempotency key (its origin) makes a retried send the same email. Nothing here runs in the
@@ -145,7 +145,7 @@ export async function limitReached(runtime: Runtime, workspaceId: string) {
       WHERE s.workspace_id=${workspaceId} AND s.phase='graded' AND s.daily_limit IS NOT NULL AND NOT w.exempt_hosted_quotas AND pc.paused_at IS NULL)` });
 }
 
-/** The evaluation's end, once in a workspace's life. */
+/** The evaluation's end, its first grade, once in a workspace's life: the email that explains the sender score. */
 export const evaluationFinished = (db: DbExecutor, workspaceId: string, limited: boolean) =>
   queueNotice(db, { workspaceId, kind: 'evaluation_finished', dedupe: `evaluation:${workspaceId}`, data: { limited } });
 

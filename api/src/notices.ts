@@ -5,8 +5,9 @@ import { wildcardMessage } from './dns-messages.js';
 // paragraphs (what happened, what it means for their mail right now, what to do next), one link and one line saying
 // why it was sent. customerNotice() is pure and returns the subject with a text part and an HTML part that carry the
 // same words; the HTML part sets a line length, the link as a button and its own colours, light and dark, and nothing
-// else (no images). A notice never says how a check works: no scores, rates, thresholds or provider names. The
-// domain setup reminder alone also lists the DNS records to publish and links the customer's own DNS provider's page.
+// else (no images). A notice never says how a check works: no score figures, rates, thresholds or provider names. The
+// domain setup reminder alone also lists the DNS records to publish and links the customer's own DNS provider's page,
+// and the first grade's email (evaluation_finished) alone adds a paragraph on what the sender score is and what moves it.
 //
 // Words a customer chose (a workspace's name, a campaign's) are shown through shownName, an address through
 // plainAddress and a domain through hostName, and nowhere but where a template puts them. The invitation goes to an
@@ -143,15 +144,19 @@ export function customerNotice(origin: string, n: NoticeInput): Notice {
       `${w} has reached its daily sending limit.`,
       'Mail over the limit is refused for now. Room frees up over the next 24 hours, and mail already accepted is still delivered.',
       'The dashboard shows the limit and what raises it.'] });
-    case 'evaluation_finished': return notice(n.limited
-      ? { subject: `The evaluation of ${w} is finished`, action: dashboard, why: members, lines: [
-        `The first emails from ${w} showed some problems, so it keeps a daily limit for now.`,
-        'Mail within the limit sends as usual. The limit rises on its own as your later mail goes well.',
-        'The dashboard shows the limit and what would raise it.'] }
-      : { subject: `${w} has passed its evaluation`, action: dashboard, why: members, lines: [
-        `The first emails from ${w} were delivered well, so its starting limit is lifted.`,
-        'You can send more now. Over the next day the amount grows on its own as your mail keeps being delivered.',
-        'The dashboard shows how much you can send right now.'] });
+    // The first grade: the one email that says what the sender score is, what moves it and what it changes.
+    case 'evaluation_finished': {
+      const score = `The sender score works like a credit score for your sending. Bounces, spam complaints and mail our content screening flags bring it down; mail people want ${n.limited ? 'brings it up' : 'keeps it up'}. Recent mail counts most.`;
+      return notice({ subject: `${w} now has a sender score`, action: dashboard, why: `${productName} sends this once, to the owners and admins of ${w}. To reach us, write to ${addresses.support}.`, lines: n.limited ? [
+        `The first emails from ${w} showed some problems, so its sender score starts low and it keeps a daily limit for now.`,
+        score,
+        'Mail within the limit sends as usual. As the score rises the limit goes up, and once the score is good there is no daily limit.',
+        'The dashboard shows the score, the limit and what moves them.'] : [
+        `The first emails from ${w} were delivered well, so it now has a sender score and its starting limit is lifted. Over the next day, how much it can send grows on its own.`,
+        score,
+        'While the score stays good and there are no warnings, there is no daily limit. If it drops, a daily limit applies until it recovers.',
+        'The dashboard shows the score and what moves it.'] });
+    }
     case 'campaign_paused': {
       const name = shownName(n.campaign.name), campaign = name ? `the campaign "${name}"` : 'a campaign';
       return notice({ subject: name ? `The campaign "${name}" is paused` : 'A campaign is paused', action: { label: 'Open the campaign', url: `${base}/campaigns/${encodeURIComponent(n.campaign.id)}/review` }, why: members, lines: [

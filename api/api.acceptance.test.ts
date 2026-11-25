@@ -32180,6 +32180,57 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('account notices: a workspace\'s first grade emails its owners and admins what the sender score is, what moves it and what it changes, once: grading again and a retried job send nothing more', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { wid, name, fresh } = await noticeFixture(runtime, db);
+      const { refreshStanding } = await import('./src/standing.js');
+      const { accountNotifyJob } = await import('./src/account-notices.js');
+      // Who account emails go to: owners and admins with a verified address. A member and an unverified admin are not told.
+      await db.query(`INSERT INTO nightmail_users(id,name,email,email_verified) VALUES ('user_grade_admin','Ada','ada@first-grade.example',true),('user_grade_member','Mo','mo@first-grade.example',true),('user_grade_unverified','Una','una@first-grade.example',false)`);
+      await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ('wm_grade_admin',$1,'user_grade_admin','admin'),('wm_grade_member',$1,'user_grade_member','member'),('wm_grade_unverified',$1,'user_grade_unverified','admin')`, [wid]);
+      // Real mail as the standing job counts it, early today (UTC).
+      const sent = (n: number, status: string, outcomes: number) => db.query(`INSERT INTO sending_emails(id,workspace_id,region,actor_key_id,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,status,provider_id,event_outcomes,created_at)
+        SELECT $1||n,$2,$3,'fixture',$4,jsonb_build_array('r'||n||'@example.net'),'[]','[]','First grade','{}',false,$5::text,'p-'||$1||n,$6,least(now(),date_trunc('day',now(),'UTC')+make_interval(secs=>n%3000)) FROM generate_series(1,$7::int) n`,
+        [unique('first-grade-'), wid, REGION, 'sender@first-grade.example', status, outcomes, n]);
+      const regrade = async () => { await db.query('UPDATE sender_standing SET evidence_at=NULL WHERE workspace_id=$1', [wid]); await refreshStanding(runtime, { only: wid }); };
+      const standing = async () => (await db.query('SELECT phase,round(score)::int AS score FROM sender_standing WHERE workspace_id=$1', [wid])).rows[0];
+      // Each pending account.notify job run twice (a retry), and how its notice ended.
+      const deliver = async () => {
+        const jobs = (await db.query(`SELECT id,payload FROM jobs WHERE type='account.notify' AND status='pending' AND workspace_id=$1`, [wid])).rows;
+        for (const j of jobs) { for (let i = 0; i < 2; i++) await accountNotifyJob(runtime, j.payload, { id: j.id, attempts: i + 1, workspaceId: wid }); await db.query(`UPDATE jobs SET status='completed' WHERE id=$1`, [j.id]); }
+        return (await db.query('SELECT kind,status FROM account_notices WHERE id=ANY($1) ORDER BY kind', [jobs.map(j => j.payload.noticeId)])).rows.map(r => `${r.kind}:${r.status}`);
+      };
+
+      // The evaluation: its first 500 real recipients are counted, their results are not in yet. Nothing is said.
+      await sent(500, 'sent', 1);
+      await regrade();
+      assert.deepEqual([(await standing()).phase, await deliver()], ['calibrating', []]);
+      // Their results land and the workspace has its first grade; the next run grades it again.
+      await db.query(`UPDATE sending_emails SET status='delivered',event_outcomes=3 WHERE workspace_id=$1 AND status='sent'`, [wid]);
+      await regrade();
+      await regrade();
+      const graded = await standing();
+      assert.equal(graded.phase, 'graded');
+      // One email to each owner and admin, sent once however often the job runs.
+      assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
+      const emails = await fresh();
+      assert.deepEqual(emails.flatMap(e => e.to_addresses).sort(), [AUTH_EMAIL, 'ada@first-grade.example'].sort());
+      for (const email of emails) {
+        assert.equal(email.subject, `${name} now has a sender score`);
+        // What happened, what the score is and what moves it, what it changes, and where to see it.
+        for (const line of ['so it now has a sender score and its starting limit is lifted.', 'The sender score works like a credit score for your sending.',
+          'Bounces, spam complaints and mail our content screening flags bring it down; mail people want keeps it up.', 'there is no daily limit. If it drops, a daily limit applies until it recovers.',
+          `Open the dashboard: ${PUBLIC_ORIGIN}/overview`, 'sends this once, to the owners and admins of']) assert.ok(email.text.includes(line), `${line}\n\n${email.text}`);
+        // The words are the dashboard's to back up: no figure, rate, threshold or provider name, and not the score itself.
+        assert.doesNotMatch(email.text, HOW_IT_WORKS);
+        assert.doesNotMatch(email.text, new RegExp(`\\b${graded.score}\\b`));
+      }
+      // Never again for this workspace: a later run, and the job run once more, send nothing.
+      await regrade();
+      assert.deepEqual([await deliver(), await fresh(), (await db.query(`SELECT count(*)::int AS n FROM account_notices WHERE workspace_id=$1 AND kind='evaluation_finished'`, [wid])).rows[0].n], [[], [], 1]);
+    });
+  });
+
   test('account notices: an invitation (only from a workspace with a verified domain or past its evaluation, in fixed words that name the inviter by address and not the workspace), the daily limit, the evaluation\'s end, a lost domain, a waitlist admission and a sign-in link are each emailed once; what no longer holds, an exempt workspace and a used-up invitation allowance send nothing; a send that fails is retried and ends failed after its last attempt', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const { wid, name, platform, pool, fresh } = await noticeFixture(runtime, db);
@@ -32370,11 +32421,11 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([await evaluationFinished(runtime.db, wid, false), await evaluationFinished(runtime.db, wid, true)], [true, false]);
       assert.deepEqual(await deliver(), ['evaluation_finished:sent']);
       const [evaluation] = await fresh();
-      assert.equal(evaluation.subject, `${name} has passed its evaluation`);
-      assert.match(evaluation.text, /so its starting limit is lifted\..*Over the next day the amount grows on its own/s);
+      assert.equal(evaluation.subject, `${name} now has a sender score`);
+      assert.match(evaluation.text, /so it now has a sender score and its starting limit is lifted\. Over the next day, how much it can send grows on its own\./);
       // One that ended with a limit says so; a first-party workspace, which has no limit, is not told at all.
       const { customerNotice } = await import('./src/notices.js');
-      assert.match(customerNotice(PUBLIC_ORIGIN, { kind: 'evaluation_finished', workspace: 'W', limited: true }).text, /^The first emails from W showed some problems, so it keeps a daily limit for now\./);
+      assert.match(customerNotice(PUBLIC_ORIGIN, { kind: 'evaluation_finished', workspace: 'W', limited: true }).text, /^The first emails from W showed some problems, so its sender score starts low and it keeps a daily limit for now\.\n\nThe sender score works like a credit score/);
       await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [wid]);
       await db.query(`UPDATE account_notices SET dedupe_key=dedupe_key||':first' WHERE workspace_id=$1 AND kind='evaluation_finished'`, [wid]);
       await evaluationFinished(runtime.db, wid, false);
