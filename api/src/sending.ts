@@ -30,7 +30,7 @@ import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
-import { AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
+import { decodedDisplayName, AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
 import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, recordLinkUse } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
@@ -973,6 +973,7 @@ export function formattedSender(from: string, fromName?: string, foldMime = fals
   // Current admission validates FromName. A queued display name is data, not a new admission:
   // one that no longer passes the policy is left out and the bare address is sent.
   if (!FromName.safeParse(fromName).success) return from;
+  fromName = decodedDisplayName(fromName);
   if (/^[\x20-\x7e]+$/.test(fromName)) return `"${fromName.replace(/["\\]/g, '\\$&')}" <${from}>`;
   // RFC 2047 encoded words, each below 75 characters and never splitting a UTF-8 code point.
   const words: string[] = []; let chunk = '';

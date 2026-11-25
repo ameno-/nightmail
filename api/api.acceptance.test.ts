@@ -16607,6 +16607,10 @@ describe('Dashboard API capabilities', () => {
     assert.equal(formattedSender('sender@example.com', 'security\u24D0paypal.com'), 'sender@example.com');
     assert.equal(formattedSender('sender@example.com', 'securitya\u20DDpaypal.com'), 'sender@example.com');
     assert.equal(formattedSender('sender@example.com', 'Support \u202Emoc.elpmaxe'), 'sender@example.com');
+    const encodedName = (text: string) => `=?utf-8?B?${Buffer.from(text).toString('base64')}?=`;
+    assert.equal(formattedSender('sender@example.com', encodedName('Acme Billing')), '"Acme Billing" <sender@example.com>');
+    assert.equal(formattedSender('sender@example.com', encodedName('billing@example.com')), 'sender@example.com');
+    error(await http('POST', '/v1/emails/send', key.secret, mail({ fromName: encodedName('billing@example.com') })), 422, 'VALIDATION_FAILED');
     assert.equal(formattedSender('sender@example.com', 'Acme Billing'), '"Acme Billing" <sender@example.com>');
     const template = await resource(t, key.secret, '/v1/templates', { name: unique('display-name') });
     error(await http('PATCH', `/v1/templates/${template.id}`, key.secret, { revision: template.revision, draft: { ...template.draft, fromName: 'billing\uFF20example.com' } }), 422, 'VALIDATION_FAILED');
@@ -32652,11 +32656,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Signed as a whole: its own bytes go to SES as raw content.
       const signed = Buffer.from([...top('Signed'), 'Content-Type: multipart/signed; protocol="application/pgp-signature"; micalg=pgp-sha256; boundary=s', '', '--s', 'Content-Type: text/plain', '', 'Signed text.',
         '--s', 'Content-Type: application/pgp-signature; name="signature.asc"', '', '-----BEGIN PGP SIGNATURE-----', 'fixture', '-----END PGP SIGNATURE-----', '--s--', ''].join('\r\n'));
-      const sealed = await stream(signed, ['reader@example.net']);
+      const withBlind = Buffer.from(signed.toString().replace('Subject: Signed', 'Bcc: hidden@example.net\r\nSubject: Signed'));
+      const sealed = await stream(withBlind, ['reader@example.net', 'hidden@example.net']);
       assert.equal(sealed.status, 200, JSON.stringify(sealed.body));
       await run('email.dispatch');
       const input = (id: string) => sent.find(s => s.EmailTags.some((tag: Json) => tag.Name === 'bane_email_id' && tag.Value === id))!;
       assert.ok(Buffer.from(input(large.body.id).Content.Simple.Attachments[0].RawContent).equals(file), 'The file reaches SES byte for byte.');
+      assert.deepEqual(input(sealed.body.id).Destination.BccAddresses, ['hidden@example.net']);
       assert.equal(input(sealed.body.id).Content.Simple, undefined);
       assert.ok(Buffer.from(input(sealed.body.id).Content.Raw.Data).equals(signed), 'The signed message reaches SES as written.');
       for (const e of await emails('Many')) assert.ok(input(e.id), 'Both parts of the envelope are sent.');
