@@ -31,7 +31,7 @@ import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { decodedDisplayName, AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, recordLinkUse } from './link-domains.js';
+import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -503,7 +503,9 @@ const CampaignReadiness = z.object({
   domain: z.object({ name: z.string(), firstSeenAt: z.string().nullable().describe('When the From domain (or the domain it is under) was added to this workspace.'), ageDays: z.number().int().nullable(),
     dmarc: z.enum(['reject', 'quarantine', 'none', 'missing', 'invalid']).nullable().describe('The DMARC policy last observed; null when not checked yet.'),
     mailFrom: z.enum(['verified', 'pending', 'failed', 'not_configured']).describe('The custom MAIL FROM domain (aligned SPF).'),
-    linkHost: z.enum(['not_configured']).describe('A link host of the domain\'s own for tracked links: not configurable yet.') }),
+    linkHost: z.enum(['active', 'pending', 'not_configured']).describe('The domain\'s own link host (links.<domain>), where its links go once active: active, its links go there; pending, it isn\u2019t set up yet, so its links go on linkOrigin meanwhile (the link domain); not_configured, it has none.'),
+    linkHostname: z.string().nullable().describe('The name of the domain\'s own link host, active or pending; null without one.'),
+    linkOrigin: z.string().nullable().describe('Where this campaign\'s links (its unsubscribe link, the text part\'s, List-Unsubscribe and linked images) go if it launches now: the domain\'s own link host when active, else the link domain (Hosted) or this installation\'s own origin. Null when the launch would be refused for want of one (the workspace\'s sending is paused, or no link host for the domain). A launch on the link domain moves to the domain\'s own host for the copies made once that is active.') }),
   history: z.object({ workspace: HistoryFigures.describe('Every kind of mail the workspace sent; largestSend counts campaigns.'), domain: HistoryFigures.describe('Campaigns from this From domain.') }),
   list: z.object({ recipients: z.number().int(), risky: z.number().int().describe('Risky contacts the send skips.'),
     neverMailed: z.number().int().nullable().describe('Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.'),
@@ -687,6 +689,7 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
       coalesce((SELECT max_send_rate FROM ${limitsTable(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${row.draft.region}),0)::float8 AS rate,
       ${runtime.config.multiTenant ? sharedConnection(a.workspaceId) : sql`false`} AS hosted`)).rows;
   const live = !!f!.hosted && !isSimulatedSes(runtime), ageDays = f!.first_seen ? Math.floor((Date.now() - Date.parse(f!.first_seen)) / DAY_MS) : null;
+  const links = await linkReview(runtime, db, a.workspaceId, row.draft.from);
   const dmarc = f!.dmarc && ['reject', 'quarantine', 'none', 'missing', 'invalid'].includes(f!.dmarc) ? f!.dmarc as 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' : null;
   const n = audience.recipients, wsAccepted = Number(f!.ws_accepted ?? 0);
   const judged = judgeReadiness({ recipients: n, matched: audience.matched, risky: audience.risky, neverMailed: audience.neverMailed, domainAgeDays: ageDays,
@@ -711,7 +714,8 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   const rate = (part: number, whole: number) => whole > 0 ? part / whole : null;
   return CampaignReadiness.parse({ verdict: judged.verdict, summary, reasons: judged.reasons.map(code => ({ code, message: messages[code]() })),
     domain: { name: domain, firstSeenAt: f!.first_seen ? new Date(f!.first_seen).toISOString() : null, ageDays, dmarc,
-      mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured', linkHost: 'not_configured' },
+      mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured',
+      linkHost: links.state, linkHostname: links.hostname, linkOrigin: links.origin },
     history: { workspace: { largestSend: f!.ws_largest, sent: wsAccepted, bounceRate: rate(Number(f!.ws_bounced ?? 0), wsAccepted), complaintRate: rate(Number(f!.ws_complained ?? 0), wsAccepted) },
       domain: { largestSend: f!.dom_largest, sent: f!.dom_accepted, bounceRate: rate(f!.dom_bounced, f!.dom_accepted), complaintRate: rate(f!.dom_complained, f!.dom_accepted) } },
     list: { recipients: n, risky: audience.risky, neverMailed: audience.neverMailed, createdAt: f!.list_created ? new Date(f!.list_created).toISOString() : null,
@@ -2163,11 +2167,11 @@ async function reviewPart<T>(c: Ctx, read: Promise<T>) {
 
 /** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder on the link host
  *  its launch would use. A draft that couldn't launch for want of one shows this installation's own: it is never sent. */
-async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
+async function previewParts(runtime: Runtime, workspaceId: string, draft: CampaignDraft, footer: Footer) {
   const rendered = await renderCampaignContent(runtime, draft, false);
   if (!rendered.html && !rendered.text) return rendered;
   let origin = runtime.config.publicUrl;
-  if (!footer.requiredNotice) try { origin = foundLinkOrigin(runtime.config, draft.from, footer.linkOrigin); } catch { /* Never sent: shown as this installation's own. */ }
+  if (!footer.requiredNotice) try { origin = foundLinkOrigin(runtime.config, workspaceId, draft.from, footer.linkOrigin); } catch { /* Never sent: shown as this installation's own. */ }
   footerParts(rendered, unsubscribePlaceholder(origin), footer);
   return rendered;
 }
@@ -2619,7 +2623,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, with the footer every email gets (the Unsubscribe link, a placeholder here, and the workspace’s postal address) and without personalization. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
     const a = actor(c), { row, footer } = await campaignWithFooter(c.env, a, c.req.valid('param').id);
-    const rendered = await previewParts(c.env, row.draft, footer);
+    const rendered = await previewParts(c.env, a.workspaceId, row.draft, footer);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/audience', operationId: 'previewCampaignAudience', description: 'Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. With readiness=true it also reviews the send (CampaignReadiness): whether it is ready to go out as it is, why, and the daily batches it recommends; send it with pacing.plan "recommended" to follow them. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.', tags: ['Campaigns'], security, request: { params: IdParams, query: z.object({ readiness: z.enum(['true', 'false']).optional().describe('Also review the send (readiness).') }) }, responses: { 200: response(AudienceCounts), ...errors } }), async c => {
@@ -2650,7 +2654,7 @@ export function registerSending(app: App) {
     await chargeRenderBudget(c, a.workspaceId);
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
     // The page is passed on, not kept here: renderPreview drops it once it is rendered.
-    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, row.draft, footer)).html ?? '', inline, async item => {
+    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, a.workspaceId, row.draft, footer)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
@@ -2716,7 +2720,7 @@ export function registerSending(app: App) {
       // The footer as recipients get it, its link the placeholder on the link host they get: a test is transactional,
       // without List-Unsubscribe, and refused as the launch would be when there is no link host.
       // Its pictures are linked from that host too, as recipients' are (src/linked-images.ts); a required notice's stay attached.
-      const origin = footer.requiredNotice ? undefined : foundLinkOrigin(c.env.config, row.draft.from, footer.linkOrigin);
+      const origin = footer.requiredNotice ? undefined : foundLinkOrigin(c.env.config, a.workspaceId, row.draft.from, footer.linkOrigin);
       const snapshot = { ...message, testCampaignId: campaignId, ...origin ? { linkOrigin: origin } : {} };
       footerParts(snapshot, unsubscribePlaceholder(origin ?? c.env.config.publicUrl), footer);
       const out: Outgoing[] = [{ snapshot, recipients: hostedCost(input.to), marketing: false }];

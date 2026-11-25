@@ -494,7 +494,10 @@ export function judgeReadiness(f: ReadinessFacts): { verdict: Verdict; reasons: 
   if (f.dmarc === false) reasons.push('NO_DMARC');
   if (f.accepted > 0 && f.bounced > rec.bounceRate * f.accepted) reasons.push('BOUNCES');
   if (f.accepted > 0 && f.complained > rec.complaintRate * f.accepted) reasons.push('COMPLAINTS');
-  const requiredBy = !f.enforced || n < r.required.recipients ? null : newDomain ? 'NEW_DOMAIN' : n > r.required.jump * f.largestSend ? 'SIZE_JUMP' : null;
+  // A new domain whose clean campaigns here already cover this send in the plan's first day has no plan to require: it
+  // stays a reason (ramp_recommended) rather than a requirement whose daily limit is the whole list.
+  const planned = (rampPlan(n, f.largestCleanSend)[0] ?? 0) < n;
+  const requiredBy = !f.enforced || n < r.required.recipients ? null : newDomain && planned ? 'NEW_DOMAIN' : n > r.required.jump * f.largestSend ? 'SIZE_JUMP' : null;
   const verdict: Verdict = requiredBy ? 'ramp_required' : n >= rec.recipients && reasons.length ? 'ramp_recommended' : 'ready';
   return { verdict, reasons, requiredBy, jump };
 }

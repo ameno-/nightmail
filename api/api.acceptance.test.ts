@@ -1000,6 +1000,11 @@ test('optional Worker secrets disable only their feature on a partial rollout; c
     NIGHTMAIL_POSTMASTER_CREDENTIALS:JSON.stringify({clientId:'id',clientSecret:token,refreshToken:'refresh'}),
     CF_OBSERVABILITY_TOKEN:token,CF_OBSERVABILITY_ACCOUNT_ID:zone,CF_OBSERVABILITY_SCRIPT:'nightmail-dev'});
   assert.deepEqual([healthy.linkHosts?.zoneId,healthy.postmaster?.clientId,healthy.observability?.script],[zone,'id','nightmail-dev']);
+  // Own link hosts on Hosted are for the workspaces NIGHTMAIL_LINK_HOST_WORKSPACES lists: none without it; a malformed list
+  // turns them off. Self-hosted ignores it (every workspace).
+  const listed=`ws_${'1'.repeat(32)}`, saasVars={NIGHTMAIL_LINK_SAAS_ZONE_ID:zone,NIGHTMAIL_LINK_SAAS_TOKEN:token};
+  assert.deepEqual([loadConfig({...base,...saasVars}).linkHosts?.workspaces,loadConfig({...base,...saasVars,NIGHTMAIL_LINK_HOST_WORKSPACES:` ${listed} , ${listed}`}).linkHosts?.workspaces,
+    loadConfig({...base,...saasVars,NIGHTMAIL_LINK_HOST_WORKSPACES:'everyone'}).linkHosts],[[],[listed],undefined]);
   for(const bad of [{BANE_ROOT_SECRET:'short'},{ACCOUNT_CLIENT_PRIVATE_KEY:''},{ACCOUNT_REQUIRED_ACR:''},{AWS_RUNTIME_CREDENTIALS:'{}'},{ENABLE_LIVE_SES:'true'}])
     assert.throws(()=>loadConfig({...base,...bad,NIGHTMAIL_POSTMASTER_CREDENTIALS:'bad'}),{code:'CONFIG_INVALID'});
 });
@@ -31802,6 +31807,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([4_000, 9_000, 49_999, 50_000, 100_000, 100_001].map(recipients => judgeReadiness({ ...facts, recipients }).verdict),
         ['ready', 'ready', 'ramp_recommended', 'ramp_recommended', 'ramp_recommended', 'ramp_required']);
       assert.deepEqual([judgeReadiness({ ...facts, recipients: 50_000, domainAgeDays: 29 }).requiredBy, judgeReadiness({ ...facts, recipients: 50_000, domainAgeDays: 29, enforced: false }).verdict], ['NEW_DOMAIN', 'ramp_recommended']);
+      // A domain added recently whose clean campaigns here already cover the send in one day: no plan, so none required.
+      const covered = judgeReadiness({ ...facts, recipients: 1_744_207, domainAgeDays: 13, largestSend: 1_810_000, largestCleanSend: 1_810_000 });
+      assert.deepEqual([covered.verdict, covered.requiredBy, covered.reasons, rampPlan(1_744_207, 1_810_000)], ['ramp_recommended', null, ['NEW_DOMAIN'], [1_744_207]]);
       const list = ok(await local('POST', '/v1/lists', { name: unique('readiness') }), 201);
       await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'fresh-'||n||'@example.net','subscribed' FROM generate_series(1,60000) n RETURNING id)
         INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`, [wid, list.id]);
@@ -41828,15 +41836,40 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query('DELETE FROM sender_standing WHERE workspace_id=$1',[wid]);
       assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),onShared);
       await gradedSender(db,wid,10000);
-      // Own link hosts on as well: the record says the link domain carries the links until it is set up, and once the
-      // domain's own host is active, its mail links there and records nothing on the link domain.
-      runtime.config.linkHosts=saas;
+      // Own link hosts on as well (the SaaS zone set), only for the workspaces NIGHTMAIL_LINK_HOST_WORKSPACES lists. One it
+      // doesn't list (none listed, or others) is shown no link record, gets no check (so no custom hostname) and links on the
+      // link domain, and its send review says so.
+      const {checkLinkHost}=await import('./src/link-domains.js'),other=`ws_${'f'.repeat(32)}`;
+      const review=async()=>{const c=ok(await local('POST','/v1/campaigns',{name:unique('link-review'),from,subject:'Links',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
+        const d=ok(await local('GET',`/v1/campaigns/${c.id}/audience?readiness=true`)).readiness.domain;return [d.linkHost,d.linkHostname,d.linkOrigin];};
+      for(const workspaces of [[],[other]]){
+        runtime.config.linkHosts={...saas,workspaces};
+        assert.deepEqual((await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]))[0].dns,[]);
+        await checkLinkHost(runtime,wid,domain);
+        assert.equal((await db.query('SELECT count(*)::int AS n FROM link_hosts WHERE workspace_id=$1',[wid])).rows[0].n,0);
+        assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),onShared);
+        assert.deepEqual(await review(),['not_configured',null,`https://${shared}`]);
+      }
+      // The workspace it lists: the record and the review say the link domain carries the links until its own host is set
+      // up; once that is active, its mail links there and records nothing on the link domain.
+      runtime.config.linkHosts={...saas,workspaces:[other,wid]};
       assert.equal((await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]))[0].dns[0].note,`Until it is set up, links in campaign and marketing mail from ${domain} use Nightmail's link domain.`);
       assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),onShared);
+      assert.deepEqual(await review(),['pending',`links.${domain}`,`https://${shared}`]);
       await db.query("INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES ($1,$2,'links.'||$2,'active')",[wid,domain]);
+      assert.deepEqual(await review(),['active',`links.${domain}`,`https://links.${domain}`]);
       await launch();await run('campaign.run');await run('email.dispatch');
-      assert.deepEqual(hostsOf(delivered.splice(0)),[`links.${domain}`,`links.${domain}`,`links.${domain}`]);
+      const onOwn=delivered.splice(0);
+      assert.deepEqual(hostsOf(onOwn),[`links.${domain}`,`links.${domain}`,`links.${domain}`]);
       assert.equal(await used(),10001);
+      // Taken off the list, it links on the link domain again at once, with no record shown; the links its mail already
+      // carries keep answering on its own host.
+      runtime.config.linkHosts={...saas,workspaces:[other]};
+      assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),onShared);
+      assert.deepEqual((await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]))[0].dns,[]);
+      const ownLink=/https:\/\/links\.[^\s"]+\/unsubscribe\/u_[0-9a-f]{64}/.exec(onOwn[0].Content.Simple.Body.Text.Data)![0];
+      assert.equal((await page(new Request(ownLink,{headers:{accept:'text/html'}}))).status,200);
+      runtime.config.linkHosts={...saas,workspaces:[wid]};
       // Neither on (dev, self-hosted): this installation's own origin, as before link hosts.
       Object.assign(runtime.config,{linkHost:undefined,linkHosts:undefined});
       assert.deepEqual(await linkChoice(runtime,runtime.db,wid,from),{origin:PUBLIC_ORIGIN.replace(/\/$/,'')});
@@ -41845,8 +41878,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const at=(publicUrl:string)=>({...runtime,config:{...runtime.config,publicUrl}});
       const missing=/link domain isn’t set up, and its links never go on nightmail\.dev/;
       await assert.rejects(linkChoice(at('https://nightmail.dev'),runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:missing});
-      assert.throws(()=>foundLinkOrigin(at('https://nightmail.dev').config,from,null),{code:'LINK_RECORD_REQUIRED',message:missing});
+      assert.throws(()=>foundLinkOrigin(at('https://nightmail.dev').config,wid,from,null),{code:'LINK_RECORD_REQUIRED',message:missing});
       assert.deepEqual(await linkChoice(at('https://dev.nightmail.dev'),runtime.db,wid,from),{origin:'https://dev.nightmail.dev'});
+      // Nor when own link hosts are on for other workspaces only.
+      runtime.config.linkHosts={...saas,workspaces:[`ws_${'f'.repeat(32)}`]};
+      await assert.rejects(linkChoice(at('https://nightmail.dev'),runtime.db,wid,from),{code:'LINK_RECORD_REQUIRED',message:missing});
+      assert.throws(()=>foundLinkOrigin(at('https://nightmail.dev').config,wid,from,null),{code:'LINK_RECORD_REQUIRED',message:missing});
+      runtime.config.linkHosts=undefined;
     });
   });
 
