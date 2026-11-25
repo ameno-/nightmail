@@ -1,4 +1,4 @@
-import { sql } from 'drizzle-orm';
+import { sql, type SQL } from 'drizzle-orm';
 import { log, logError, ModuleLoadError, wrapModuleLoad, type JobHandler, type Runtime } from './core.js';
 
 // The domain setup check. Someone adds a domain, sees its records and leaves, and nothing tells them the records never
@@ -37,6 +37,12 @@ export async function domainSetupTick(runtime: Runtime) {
     INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.linkCheck:'||token,'domain.linkCheck',workspace_id,jsonb_build_object('domainId',id,'token',token) FROM due
     ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL,payload=excluded.payload WHERE jobs.status IN ('completed','failed')
     RETURNING id`)).rows : [];
+  // Link hosts of domains that are gone (deleted, released, a connection disconnected, a workspace deleted): one cleanup
+  // job deletes their rows and custom hostnames (domainLinkCleanupJob).
+  if (runtime.config.linkHosts) links.push(...(await runtime.db.execute<{ id: string }>(sql`INSERT INTO jobs(id,type,workspace_id,payload)
+    SELECT 'domain.linkCleanup','domain.linkCleanup',${runtime.config.workspaceId},'{}'::jsonb WHERE EXISTS (${staleLinkHosts(sql`1`)})
+    ON CONFLICT (id) DO UPDATE SET status='pending',attempts=0,available_at=now(),lease_until=NULL,last_error=NULL WHERE jobs.status IN ('completed','failed')
+    RETURNING id`)).rows);
   // New workspaces with no domain at all an hour on: the one email, with NO_DOMAIN_REMINDER=on.
   const notices = runtime.config.noDomainReminder ? await (await wrapModuleLoad(() => import('./account-notices.js'))).noDomainNotices(runtime) : 0;
   // Built-in domains: the parent's check, the label backfill and the domains still to set up (builtin-domain.ts).
@@ -82,4 +88,16 @@ export const domainLinkCheckJob: JobHandler = async (runtime, payload, job) => {
     WHERE d.workspace_id=${job.workspaceId} AND d.id=${payload.domainId} AND dc.token=${payload.token}::uuid AND NOT domain_claim_expired(dc)`);
   // Removed or released since it was queued: nothing to check.
   if (row) await (await wrapModuleLoad(() => import('./link-domains.js'))).checkLinkHost(runtime, job.workspaceId, row.name);
+};
+
+/** Link hosts whose domain is gone from its workspace: no operation_domains row of that name (deleting, releasing or
+ *  detaching a claim and deleting a workspace all remove it). */
+const staleLinkHosts = (select: SQL) => sql`SELECT ${select} FROM link_hosts h WHERE NOT EXISTS (SELECT 1 FROM operation_domains d WHERE d.workspace_id=h.workspace_id AND d.name=h.domain)`;
+/** Deletes up to 200 gone domains' link hosts a run: each row, and its custom hostname unless another row still uses it. */
+export const domainLinkCleanupJob: JobHandler = async runtime => {
+  if (!runtime.config.linkHosts) return;
+  const { rows } = await runtime.db.execute<{ workspace_id: string; domain: string }>(sql`${staleLinkHosts(sql`h.workspace_id, h.domain`)} ORDER BY h.checked_at LIMIT 200`);
+  const { forgetLinkHost } = await wrapModuleLoad(() => import('./link-domains.js'));
+  for (const row of rows) await forgetLinkHost(runtime, row.workspace_id, row.domain);
+  if (rows.length) log('info', { code: 'LINK_HOSTS_CLEANED', count: rows.length });
 };

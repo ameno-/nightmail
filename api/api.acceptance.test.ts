@@ -38868,6 +38868,60 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     });
   });
 
+  test('link hosts: a campaign launched before link hosts waits for its link record and resumes once it verifies; gone domains lose their link hosts',async t=>{
+    await simulatedSesFixture(t,async({runtime,db,local,run})=>{
+      const wid=runtime.config.workspaceId,pool='111122223333',domain='legacy-links.example',from=`news@${domain}`,zone='0'.repeat(32);
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'},linkHosts:{zoneId:zone,token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'}});
+      await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
+      await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
+      await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
+      await db.query('INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,$2,$3,$4)',[unique('dom'),wid,domain,REGION]);
+      await gradedSender(db,wid,10000);
+      const list=ok(await local('POST','/v1/lists',{name:unique('legacy-links')}),201);
+      await db.query(`WITH c AS (INSERT INTO audience_contacts(id,workspace_id,email,marketing_consent) SELECT 'con_'||md5($1||n),$1,'legacy-'||n||'@example.net','subscribed' FROM generate_series(1,3)n RETURNING id)
+        INSERT INTO audience_list_members(workspace_id,list_id,contact_id) SELECT $1,$2,id FROM c`,[wid,list.id]);
+      // Launched with the link host the fixture's trigger made active, then frozen as a review from before link hosts is: no
+      // link origin, and the sending domain's link host not active.
+      const c=ok(await local('POST','/v1/campaigns',{name:'Legacy links',from,subject:'Legacy',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201),path=`/v1/campaigns/${c.id}`;
+      ok(await local('POST',`${path}/send`,{revision:c.revision}),202);
+      await db.query("UPDATE sending_campaign_reviews SET draft=draft-'linkOrigin' WHERE campaign_id=$1",[c.id]);
+      await db.query("UPDATE link_hosts SET status='pending' WHERE workspace_id=$1 AND domain=$2",[wid,domain]);
+      const view=async()=>ok(await local('GET',path)),job=async()=>(await db.query('SELECT available_at FROM jobs WHERE id=$1',[`campaign.run:${c.id}`])).rows[0];
+      await run('campaign.run');
+      const held=await view();
+      assert.deepEqual([held.state,held.delivery.expanded,held.delivery.waiting.reason],['sending',0,'link_record'],'It waits, releasing no one, instead of failing.');
+      assert.ok(Math.abs(Date.parse(held.delivery.waiting.until)-Date.now()-15*60_000)<60_000);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id=$1',[c.id])).rows[0].n,0);
+      assert.ok(Date.parse((await job()).available_at)>Date.now()+14*60_000);
+      // The link record verifies (public DNS has the CNAME, Cloudflare serves the custom hostname): the run wakes at once.
+      const prior=globalThis.fetch,deleted:string[]=[];
+      globalThis.fetch=(async(input:RequestInfo|URL,init?:RequestInit)=>{
+        const url=new URL(input instanceof Request?input.url:String(input));
+        if(url.hostname==='cloudflare-dns.com')return Response.json({Status:0,Answer:[{name:`links.${domain}.`,type:5,data:'edge.links-fixture.example.'}]});
+        if(url.hostname==='api.cloudflare.com'){if(init?.method==='DELETE')deleted.push(url.pathname.split('/').at(-1)!);return Response.json({success:true,errors:[],result:{id:'ch_legacy',status:'active',ssl:{status:'active'}}});}
+        return prior(input,init);
+      }) as typeof fetch;
+      try {
+        const {checkLinkHost}=await import('./src/link-domains.js');
+        await checkLinkHost(runtime,wid,domain);
+        assert.ok(Date.parse((await job()).available_at)<=Date.now(),'The campaign run is due now.');
+        await run('campaign.run');
+        const resumed=await view();
+        assert.deepEqual([resumed.delivery.expanded,resumed.delivery.waiting],[3,null]);
+        // Gone domains (deleted, released, detached, or their workspace deleted): no operation_domains row. Their link hosts go,
+        // with their custom hostnames, unless another row still uses the hostname; a live domain's stays.
+        await db.query(`INSERT INTO link_hosts(workspace_id,domain,hostname,custom_hostname_id,status) VALUES ($1,'gone.example','links.gone.example','ch_gone','active'),
+          ('ws_link_gone_a','shared.example','links.shared.example','ch_shared','active'),('ws_link_gone_b','shared.example','links.shared.example','ch_shared','active')`,[wid]);
+        await db.query("INSERT INTO operation_domains(id,workspace_id,name,region) VALUES($1,'ws_link_gone_b','shared.example',$2)",[unique('dom'),REGION]);
+        const {domainLinkCleanupJob}=await import('./src/domain-setup.js');
+        await domainLinkCleanupJob(runtime,{},{id:'domain.linkCleanup',attempts:1,workspaceId:wid});
+        const left=(await db.query("SELECT workspace_id,domain FROM link_hosts WHERE domain IN ($1,'gone.example','shared.example') ORDER BY workspace_id",[domain])).rows.map(r=>`${r.workspace_id}/${r.domain}`);
+        assert.deepEqual(left,['ws_link_gone_b/shared.example',`${wid}/${domain}`].sort());
+        assert.deepEqual(deleted,['ch_gone'],'A hostname another row still uses stays.');
+      } finally { globalThis.fetch=prior; }
+    });
+  });
+
   test('a frozen v1 campaign reproduces the legacy preheader at dispatch and on readback, without its web-font block',async t=>{
     await simulatedSesFixture(t,async({db,local,run})=>{
       const {SESv2Client,SendEmailCommand}=await import('@aws-sdk/client-sesv2'),send=SESv2Client.prototype.send,delivered:string[]=[];

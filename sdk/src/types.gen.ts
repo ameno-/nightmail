@@ -1872,10 +1872,10 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up.
+     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. link_record: a campaign launched before link hosts waits until its sending domain's link record (links.<domain>) verifies, then continues by itself.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'link_record';
         until: string;
     } | null;
     /**
