@@ -32,7 +32,9 @@ import { RuleLine } from './recipes'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const FULL = 'Enter a full email address.'
-const onDomains = (names: string[]) => `Use an address on one of your domains: ${names.join(', ')}.`
+const onDomains = (names: string[], typed?: string) => `${typed ? `${typed} isn’t one of your domains. ` : ''}Use an address on ${names.length === 1 ? names[0] : `one of your domains: ${names.join(', ')}`}.`
+// A name alone (support): the address it most likely means, at the workspace's first host, for the message and its button.
+const LOCAL = /^[^\s@<>,;*]+$/
 /**
  * An address on one of the workspace's domains where nothing receives yet: creating it turns receiving on there
  * (createInboundAddress), so the address step offers that, with the MX record to add and, at a domain's own name, what
@@ -262,20 +264,26 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const typed = form.address.trim().toLowerCase()
   const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && hosts.includes(typed.split('@')[1]!) ? typed : null
   const existing = errors.address ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
+  // The name typed without its domain: offered back with the first host, one press away.
+  const completed = errors.address && LOCAL.test(typed) && hosts[0] ? `${typed}@${hosts[0]}` : null
   async function next(event: FormEvent) {
     event.preventDefault()
     if (boxes.isPending || checkingAddress) return
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
-    if (!EMAIL.test(value)) found.address = 'Enter a full email address, such as support@example.com.'
+    // Said exactly: an empty field, a name without its domain (the common slip), or something else that isn't an address.
+    const example = `support@${hosts[0] ?? 'example.com'}`
+    if (!value) found.address = `Enter an address, such as ${example}.`
+    else if (LOCAL.test(value)) found.address = hosts[0] ? `Add the domain: ${value}@${hosts[0]}.` : `Add the domain, such as ${value}@example.com.`
+    else if (!EMAIL.test(value)) found.address = `${value} isn’t a full email address: use a name, @ and a domain, such as ${example}.`
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
     else if (value.split('@')[0]!.includes('*')) found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'
-    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) found.address = onDomains([...new Set([...hosts, ...roots])])
-    else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) found.address = onDomains([...new Set([...hosts, ...roots])], value.split('@')[1])
+    else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) found.address = `${value} already exists.`
     else if (boxes.hasMore) {
       setCheckingAddress(true)
       try {
         const matches = await api.inbound.addresses({ search: value })
-        if (matches.some(b => b.address === value || b.aliases.includes(value))) found.address = 'That address exists.'
+        if (matches.some(b => b.address === value || b.aliases.includes(value))) found.address = `${value} already exists.`
       } catch { /* Server validates uniqueness on submit if lookup fails. */ }
       finally { setCheckingAddress(false) }
     }
@@ -300,7 +308,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     if (!pick.startsWith('new:')) return ''
     const type = pick.slice(4) as NewType, v = value.trim().toLowerCase()
     if (!v) return type === 'forward' || type === 'inbox' ? 'Enter its address.' : 'Paste the URL.'
-    if (type === 'inbox') return !EMAIL.test(v) || v.split('@')[0]!.includes('*') ? FULL : !hosts.includes(v.split('@')[1]!) ? onDomains(hosts) : v === own || allBoxes.some(b => b.address === v) ? 'That address exists: pick it above.' : ''
+    if (type === 'inbox') return !EMAIL.test(v) || v.split('@')[0]!.includes('*') ? FULL : !hosts.includes(v.split('@')[1]!) ? onDomains(hosts, v.split('@')[1]) : v === own || allBoxes.some(b => b.address === v) ? 'That address exists: pick it above.' : ''
     return type === 'slack' && !slackUrl.test(v) ? targetProblem('slack', v) : type === 'discord' && !discordUrl.test(v) ? targetProblem('discord', v) : targetProblem(type, v)
   }
 
@@ -472,6 +480,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     </Field>
     {!errors.address && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) && domainOf(typed.split('@')[1]!) && <TurnOnReceiving host={typed.split('@')[1]!} domainId={domainOf(typed.split('@')[1]!)!.id} />}
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
+    {completed && <div className="cluster"><Button size="sm" onClick={() => { setForm({ ...form, address: completed }); setErrors({}) }}>Use {completed}</Button></div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
     <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Name" /></Field>
     <details className="inbound-advanced" open={!!form.lifetime || !!form.publicAddress || !!errors.publicAddress || undefined}>
