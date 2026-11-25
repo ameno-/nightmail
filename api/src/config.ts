@@ -121,7 +121,7 @@ const values = z.object({
   // Hosted only, optional: the signing secret of the PlanetScale webhook that reports the database disk (src/disk-alert.ts).
   // Set, a delivery must also carry a matching X-PlanetScale-Signature. Treat as a secret. Its length is checked in
   // loadConfig, not here: an optional secret that is wrong must not stop the installation.
-  PLANETSCALE_WEBHOOK_SECRET: optional(z.string()),
+  PLANETSCALE_WEBHOOK_SECRET: z.unknown().optional(),
   // Hosted only. Reserved for a later release: monitoring only observes, and nothing reads this.
   NIGHTMAIL_ABUSE_ENFORCE: z.enum(['true','false']).default('false'),
   // List hygiene (src/list-hygiene.ts): the nightly sync of the open disposable/role/provider lists (off: the vendored snapshot
@@ -149,7 +149,7 @@ const values = z.object({
   // NIGHTMAIL_LINK_SAAS_ZONE_ID, which NIGHTMAIL_LINK_SAAS_TOKEN may edit. A domain whose own host is active links there.
   // Neither set: links stay on PUBLIC_URL, as before link hosts (self-hosted; Hosted dev).
   NIGHTMAIL_LINK_SAAS_ZONE_ID: optional(z.string().trim().regex(/^[0-9a-f]{32}$/)),
-  NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().min(20).max(500)),
+  NIGHTMAIL_LINK_SAAS_TOKEN: optional(z.string().regex(/^[A-Za-z0-9._~+/=-]{20,500}$/)),
   NIGHTMAIL_LINK_SAAS_TARGET: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
   NIGHTMAIL_BYO_V2: z.enum(['true','false']).default('false'),
   BYO_V5_TEMPLATE_URL: optional(z.url({ protocol: /^https$/ })),
@@ -222,16 +222,12 @@ export function requirePlatformAccount(account: Config['platformAccount']): stri
   return account;
 }
 const list = (value: string) => [...new Set(value.split(',').map(v => v.trim()).filter(Boolean))];
-let signingSecretIgnored = false;
-/**
- * PlanetScale's signing secret, or undefined for one that cannot be it (under 32 or over 200 characters): the disk
- * alert then checks its token alone, as when the secret is unset. Said once per process, never with the value.
- */
-function planetscaleSecret(value: string | undefined) {
-  if (!value || value.length >= 32 && value.length <= 200) return value;
-  if (!signingSecretIgnored) log('warn', { code: 'PLANETSCALE_WEBHOOK_SECRET_IGNORED', message: 'PLANETSCALE_WEBHOOK_SECRET is not 32 to 200 characters, so it is not used: the database disk alert checks its Authorization header alone.' });
-  signingSecretIgnored = true;
-  return undefined;
+// No signing secret is a supported token-only installation. A configured but invalid secret must
+// close the disk webhook rather than silently accepting a delivery without its requested signature.
+function planetscaleSecret(value: unknown) {
+  if (value == null || value === '') return undefined;
+  if (typeof value === 'string' && value.length >= 32 && value.length <= 200) return value;
+  disabled('diskWebhook'); return null;
 }
 let signupsListIgnored = false;
 /** The sign-ups list, or undefined for a value that isn't a list ID: the optional sync is off, and nothing else is. Said once, never with the value. */
@@ -239,7 +235,7 @@ let signupsListIgnored = false;
 function builtinParent(name: string | undefined, origins: string[]) {
   if (!name) return undefined;
   const overlaps = (a: string, b: string) => a === b || a.endsWith(`.${b}`) || b.endsWith(`.${a}`);
-  if (origins.some(origin => overlaps(name, new URL(origin).hostname.toLowerCase()))) throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_BUILTIN_DOMAIN must be a domain of its own, not PUBLIC_URL’s domain or one of its earlier origins.');
+  if (origins.some(origin => overlaps(name, new URL(origin).hostname.toLowerCase()))) return disabled('builtinDomains');
   return name;
 }
 function signupsListId(value: unknown): string | undefined {
@@ -253,13 +249,65 @@ function signupsListId(value: unknown): string | undefined {
 export function deriveEncryptionKey(secret: string): string {
   return Buffer.from(hkdfSync('sha256', secret, 'opensend:keys:v1', 'webhook-encryption', 32)).toString('hex');
 }
+// Only these independent integrations may be disabled by bad configuration. Auth/encryption, database
+// and live sending policy keep their fail-closed checks. Report names only, once per feature per isolate.
+const featureSettings = {
+  builtinDomains: ['NIGHTMAIL_BUILTIN_DOMAIN', 'NIGHTMAIL_BUILTIN_SEND_SCOPE'],
+  listHygiene: ['NIGHTMAIL_HYGIENE_LISTS'], dnsHygiene: ['NIGHTMAIL_HYGIENE_DNS'],
+  linkHosts: ['NIGHTMAIL_LINK_SAAS_ZONE_ID', 'NIGHTMAIL_LINK_SAAS_TOKEN', 'NIGHTMAIL_LINK_SAAS_TARGET'],
+  sharedLinks: ['NIGHTMAIL_LINK_HOST'],
+  postmaster: ['NIGHTMAIL_POSTMASTER_CREDENTIALS'],
+  supportChat: ['NIGHTMAIL_SUPPORT_URL', 'NIGHTMAIL_SUPPORT_SIGNING_KEY'],
+  supportEmail: ['NIGHTMAIL_SUPPORT_ADDRESS_IDS'],
+  supportLogs: ['CF_OBSERVABILITY_TOKEN', 'CF_OBSERVABILITY_ACCOUNT_ID', 'CF_OBSERVABILITY_SCRIPT'],
+  domainConnect: ['DOMAIN_CONNECT_PRIVATE_KEY', 'DOMAIN_CONNECT_KEY_ID'],
+  analyticsPush: ['ANALYTICS_PUSH_URL', 'ANALYTICS_PUSH_SECRET'],
+  mailGateway: ['MAILGW_API_TOKEN', 'MAILGW_PUBLIC_DOMAIN'],
+  stripe: ['STRIPE_SECRET_KEY', 'STRIPE_WEBHOOK_SECRET', 'STRIPE_AUTOMATIC_TAX', 'STRIPE_CREDIT_PRODUCT_ID', 'STRIPE_TAX_CODE', 'STRIPE_API_BASE'],
+  diskWebhook: ['PLANETSCALE_WEBHOOK_SECRET'],
+  operatorAlerts: ['OPERATOR_SLACK_WEBHOOK_URL'], abuseAlerts: ['ABUSE_SLACK_WEBHOOK_URL'], reputationAlerts: ['REPUTATION_ALERT_SLACK_URL'],
+  secondaryClassifier: ['JEVF_API_KEY', 'JEVF_ENDPOINT', 'JEVF_MODEL', 'JEVF_DEADLINE_MS', 'JEVF_MAX_CONCURRENCY', 'JEVF_SCREEN_THRESHOLD'],
+  dashboardAnalytics: ['DASHBOARD_ANALYTICS'], domainSetupReminder: ['DOMAIN_SETUP_REMINDER'], noDomainReminder: ['NO_DOMAIN_REMINDER'],
+  domainNsCheck: ['DOMAIN_NS_CHECK'], placementShadow: ['NIGHTMAIL_PLACEMENT_SHADOW'], abuseMonitoring: ['NIGHTMAIL_ABUSE_MONITORING'],
+  uiNotes: ['UI_NOTES_SUBJECTS'], notices: ['NIGHTMAIL_NOTIFY_FROM'], diskCapacity: ['DATABASE_DISK_GB'], placementDns: ['NIGHTMAIL_PLACEMENT_DBL_ZONE'],
+} satisfies Record<string, (keyof typeof values.shape)[]>;
+type Feature = keyof typeof featureSettings;
+const reported = new Set<Feature>();
+function disabled(feature: Feature) {
+  if (!reported.has(feature)) {
+    reported.add(feature);
+    log('error', { code: 'OPTIONAL_FEATURE_DISABLED', feature, settings: featureSettings[feature] });
+  }
+  return undefined;
+}
 export function loadConfig(input: Record<string, unknown>): Config {
   const catalogUnused = input.MULTI_TENANT !== 'true' || !input.STRIPE_SECRET_KEY || !input.STRIPE_WEBHOOK_SECRET;
-  const parsed = values.safeParse({...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)])),
-    ...(catalogUnused ? { STRIPE_CREDIT_PRODUCT_ID: undefined, STRIPE_TAX_CODE: undefined } : {})});
-  if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
+  const raw: Record<string, unknown> = {...input, ...Object.fromEntries(settingKeys.map(key => [key, namesOf(key).map(name => input[name]).find(value => value !== undefined && value !== null)])),
+    ...(catalogUnused ? { STRIPE_CREDIT_PRODUCT_ID: undefined, STRIPE_TAX_CODE: undefined } : {})};
+  let parsed = values.safeParse(raw);
+  if (!parsed.success) {
+    const invalid = new Set(parsed.error.issues.map(issue => issue.path[0]));
+    for (const feature of Object.keys(featureSettings) as Feature[]) {
+      if (featureSettings[feature].some(key => invalid.has(key))) {
+        disabled(feature);
+        for (const key of featureSettings[feature]) delete raw[key];
+        // Keep default-on integrations off, and never widen the scope of a built-in sender.
+        if (feature === 'domainNsCheck') raw.DOMAIN_NS_CHECK = 'off';
+        if (feature === 'builtinDomains') raw.NIGHTMAIL_BUILTIN_SEND_SCOPE = 'members';
+        if (feature === 'listHygiene') raw.NIGHTMAIL_HYGIENE_LISTS = 'off';
+        if (feature === 'dnsHygiene') raw.NIGHTMAIL_HYGIENE_DNS = 'off';
+        if (feature === 'placementShadow') raw.NIGHTMAIL_PLACEMENT_SHADOW = 'false';
+      }
+    }
+    parsed = values.safeParse(raw);
+    if (!parsed.success) throw new ApiError(503, 'CONFIG_INVALID', `Missing or invalid server configuration: ${parsed.error.issues.map(i => i.path.join('.')).join(', ')}.`);
+  }
   const v = parsed.data;
-  if (Boolean(v.ANALYTICS_PUSH_URL) !== Boolean(v.ANALYTICS_PUSH_SECRET)) throw new ApiError(503, 'CONFIG_INVALID', 'Set both ANALYTICS_PUSH_URL and ANALYTICS_PUSH_SECRET.');
+  if (Boolean(v.ANALYTICS_PUSH_URL) !== Boolean(v.ANALYTICS_PUSH_SECRET)) disabled('analyticsPush');
+  if (Boolean(v.STRIPE_SECRET_KEY) !== Boolean(v.STRIPE_WEBHOOK_SECRET)) disabled('stripe');
+  if (v.MAILGW_PUBLIC_DOMAIN && !v.MAILGW_API_TOKEN) disabled('mailGateway');
+  const logSettings = [v.CF_OBSERVABILITY_TOKEN, v.CF_OBSERVABILITY_ACCOUNT_ID, v.CF_OBSERVABILITY_SCRIPT];
+  if (logSettings.some(Boolean) && !logSettings.every(Boolean)) disabled('supportLogs');
   if (Boolean(v.ACCOUNT_CLIENT_ID) !== Boolean(v.ACCOUNT_CLIENT_PRIVATE_KEY)) throw new ApiError(503,'CONFIG_INVALID','Set both ACCOUNT_CLIENT_ID and ACCOUNT_CLIENT_PRIVATE_KEY.');
   // Hosted sign-in and MCP accept only the account service's own methods (METHOD_ACR). A missing, empty or misspelled
   // value must stop the installation instead of silently accepting every authentication method.
@@ -274,14 +322,14 @@ export function loadConfig(input: Record<string, unknown>): Config {
   if (v.MULTI_TENANT==='true' && v.ENABLE_LIVE_SES==='true' && v.NIGHTMAIL_HOSTED_SCREEN==='true' && !v.TYPESAFE_API_KEY)
     throw new ApiError(503,'CONFIG_INVALID','Hosted live screening requires TYPESAFE_API_KEY.');
   if (v.MULTI_TENANT==='true' && (v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT || [v.NIGHTMAIL_REGIONAL_SENDING,v.NIGHTMAIL_TRUSTED_POOL,v.NIGHTMAIL_BYO_V2].includes('true'))) requirePlatformAccount(v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT);
-  if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) throw new ApiError(503,'CONFIG_INVALID','Set both DOMAIN_CONNECT_PRIVATE_KEY and DOMAIN_CONNECT_KEY_ID, or neither.');
+  if (Boolean(v.DOMAIN_CONNECT_PRIVATE_KEY) !== Boolean(v.DOMAIN_CONNECT_KEY_ID)) disabled('domainConnect');
   let domainConnect: Config['domainConnect'];
   if (v.DOMAIN_CONNECT_PRIVATE_KEY && v.DOMAIN_CONNECT_KEY_ID) {
     try {
       const privateKey=createPrivateKey(v.DOMAIN_CONNECT_PRIVATE_KEY.replace(/\\n/g,'\n'));
       if (privateKey.asymmetricKeyType!=='rsa' || privateKey.asymmetricKeyDetails?.modulusLength!==2048) throw new Error();
       domainConnect={privateKey,keyId:v.DOMAIN_CONNECT_KEY_ID};
-    } catch { throw new ApiError(503,'CONFIG_INVALID','DOMAIN_CONNECT_PRIVATE_KEY must be an RSA-2048 private key in PEM format.'); }
+    } catch { disabled('domainConnect'); }
   }
   if (v.PREVIOUS_NIGHTMAIL_ROOT_SECRET && v.ENCRYPTION_KEY) throw new ApiError(503, 'CONFIG_INVALID', 'Finish the legacy ENCRYPTION_KEY upgrade before configuring PREVIOUS_NIGHTMAIL_ROOT_SECRET.');
   // Email allowlists were removed: an issuer can assert a verified address its sign-in method never vouched for.
@@ -293,28 +341,37 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const staffGoogleDomains = list(v.AUTH_STAFF_GOOGLE_DOMAINS).map(d => d.toLowerCase());
   if (staffGoogleDomains.some(d => !/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/.test(d))) throw new ApiError(503, 'CONFIG_INVALID', 'Use exact Google Workspace domains in AUTH_STAFF_GOOGLE_DOMAINS, without wildcards or URLs.');
   if (staffGoogleDomains.length && !requiredAcr?.includes(GOOGLE_ACR)) throw new ApiError(503, 'CONFIG_INVALID', `AUTH_STAFF_GOOGLE_DOMAINS needs ACCOUNT_REQUIRED_ACR to include ${GOOGLE_ACR}.`);
-  const uiNotesSubjects = v.MULTI_TENANT !== 'true' ? [] : list(v.UI_NOTES_SUBJECTS).map(pair => {
+  const uiNotesSubjects: Config['uiNotesSubjects'] = [];
+  if (v.MULTI_TENANT === 'true') for (const pair of list(v.UI_NOTES_SUBJECTS)) {
     const [issuer, subject, extra] = pair.split(/\s+/);
-    if (!issuer || !subject || extra !== undefined || !/^https:\/\/[^/\s]+$/.test(issuer) || subject.length > 255) throw new ApiError(503, 'CONFIG_INVALID', 'UI_NOTES_SUBJECTS lists "https://issuer subject" pairs separated by commas.');
-    return { issuer, subject };
-  });
+    if (!issuer || !subject || extra !== undefined || !/^https:\/\/[^/\s]+$/.test(issuer) || subject.length > 255) {
+      disabled('uiNotes'); uiNotesSubjects.length = 0; break;
+    }
+    uiNotesSubjects.push({ issuer, subject });
+  }
   const regions = [v.DEFAULT_SES_REGION];
   const sharedRegions = list(v.SHARED_SENDING_REGIONS);
   if (!sharedRegions.length || sharedRegions.some(r => !/^[a-z]{2}(?:-[a-z]+)+-\d$/.test(r))) throw new ApiError(503, 'CONFIG_INVALID', 'Set SHARED_SENDING_REGIONS to comma-separated AWS regions.');
   let supportSigningKey: NonNullable<Config['support']>['signingKey'];
-  if (v.NIGHTMAIL_SUPPORT_SIGNING_KEY) {
-    const jwk = (() => { try { return JSON.parse(v.NIGHTMAIL_SUPPORT_SIGNING_KEY!) as Record<string, unknown>; } catch { return null; } })();
-    if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || typeof jwk.d !== 'string' || typeof jwk.x !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_SIGNING_KEY to an Ed25519 private JWK with d and x.');
-    supportSigningKey = { kty: 'OKP', crv: 'Ed25519', d: jwk.d, x: jwk.x };
+  if (v.NIGHTMAIL_SUPPORT_URL || v.NIGHTMAIL_SUPPORT_SIGNING_KEY) {
+    try {
+      const jwk = JSON.parse(v.NIGHTMAIL_SUPPORT_SIGNING_KEY ?? '');
+      if (!v.NIGHTMAIL_SUPPORT_URL || !jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' ||
+          typeof jwk.d !== 'string' || typeof jwk.x !== 'string' ||
+          ![jwk.d,jwk.x].every(part => /^[A-Za-z0-9_-]{43}$/.test(part) && Buffer.from(part,'base64url').length === 32)) throw new Error();
+      supportSigningKey = { kty: 'OKP', crv: 'Ed25519', d: jwk.d, x: jwk.x };
+    } catch { disabled('supportChat'); }
   }
   let postmaster: Config['postmaster'];
   if (v.NIGHTMAIL_POSTMASTER_CREDENTIALS) {
-    const grant = (() => { try { return JSON.parse(v.NIGHTMAIL_POSTMASTER_CREDENTIALS!) as Record<string, unknown>; } catch { return null; } })();
-    if (!grant || typeof grant.clientId !== 'string' || typeof grant.clientSecret !== 'string' || typeof grant.refreshToken !== 'string') throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_POSTMASTER_CREDENTIALS to the JSON scripts/postmaster-auth.ts writes: clientId, clientSecret and refreshToken.');
-    postmaster = { clientId: grant.clientId, clientSecret: grant.clientSecret, refreshToken: grant.refreshToken };
+    try {
+      const grant = JSON.parse(v.NIGHTMAIL_POSTMASTER_CREDENTIALS);
+      if (!grant || ![grant.clientId, grant.clientSecret, grant.refreshToken].every(k => typeof k === 'string' && k.trim())) throw new Error();
+      postmaster = { clientId: grant.clientId, clientSecret: grant.clientSecret, refreshToken: grant.refreshToken };
+    } catch { disabled('postmaster'); }
   }
-  const supportAddressIds = list(v.NIGHTMAIL_SUPPORT_ADDRESS_IDS ?? '');
-  if (supportAddressIds.some(id => !/^mbx_[0-9a-f]{32}$/.test(id))) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_SUPPORT_ADDRESS_IDS to inbound address IDs (mbx_…) separated by commas.');
+  let supportAddressIds = list(v.NIGHTMAIL_SUPPORT_ADDRESS_IDS ?? '');
+  if (supportAddressIds.some(id => !/^mbx_[0-9a-f]{32}$/.test(id))) { disabled('supportEmail'); supportAddressIds = []; }
   const url = new URL(v.PUBLIC_URL);
   const jevf = v.JEVF_API_KEY ? { apiKey: v.JEVF_API_KEY, endpoint: v.JEVF_ENDPOINT, model: v.JEVF_MODEL, threshold: v.JEVF_SCREEN_THRESHOLD, deadlineMs: v.JEVF_DEADLINE_MS, maxConcurrency: v.JEVF_MAX_CONCURRENCY } : undefined;
   const screen: Config['screen'] = v.TYPESAFE_API_KEY ? {
@@ -324,16 +381,15 @@ export function loadConfig(input: Record<string, unknown>): Config {
   const previousOrigins = list(v.PREVIOUS_PUBLIC_URLS).map(value => { try { const u = new URL(value); if (u.protocol === 'https:' && u.origin !== url.origin) return u.origin; } catch { /* refused below */ } throw new ApiError(503, 'CONFIG_INVALID', 'PREVIOUS_PUBLIC_URLS lists https origins other than PUBLIC_URL, separated by commas.'); });
   if (url.protocol !== 'https:' && !(url.protocol === 'http:' && ['localhost', '127.0.0.1'].includes(url.hostname))) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must use HTTPS, except for localhost development.');
   if (url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) throw new ApiError(503, 'CONFIG_INVALID', 'PUBLIC_URL must be a canonical origin without credentials, a path, query or fragment.');
-  if (!v.NIGHTMAIL_LINK_SAAS_ZONE_ID !== !v.NIGHTMAIL_LINK_SAAS_TOKEN) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_ZONE_ID and NIGHTMAIL_LINK_SAAS_TOKEN together, or neither.');
   // The target is a name in the SaaS zone, which is a domain of its own: Hosted's is brand.ts linkHostTarget; a self-hosted
   // installation names its own.
   const linkTarget = v.NIGHTMAIL_LINK_SAAS_TARGET ?? (v.MULTI_TENANT === 'true' ? linkHostTarget : undefined);
-  if (v.NIGHTMAIL_LINK_SAAS_ZONE_ID && !linkTarget) throw new ApiError(503, 'CONFIG_INVALID', 'Set NIGHTMAIL_LINK_SAAS_TARGET to the name in the Cloudflare for SaaS zone that links.<domain> CNAMEs point to.');
+  if ((v.NIGHTMAIL_LINK_SAAS_ZONE_ID || v.NIGHTMAIL_LINK_SAAS_TOKEN || v.NIGHTMAIL_LINK_SAAS_TARGET) && !(v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN && linkTarget)) disabled('linkHosts');
   // The link domain shares no domain with this installation's own origins (nightmail.dev never carries customer links):
   // compared by their last two labels.
-  const site = (host: string) => host.split('.').slice(-2).join('.'), linkHost = v.MULTI_TENANT === 'true' ? v.NIGHTMAIL_LINK_HOST : undefined;
-  if (linkHost && [url.origin, ...previousOrigins].some(origin => site(new URL(origin).hostname) === site(linkHost)))
-    throw new ApiError(503, 'CONFIG_INVALID', 'NIGHTMAIL_LINK_HOST must be a name in the link domain\u2019s own zone, not under PUBLIC_URL\u2019s domain.');
+  const site = (host: string) => host.split('.').slice(-2).join('.');
+  const configuredHost = v.MULTI_TENANT === 'true' ? v.NIGHTMAIL_LINK_HOST : undefined;
+  const linkHost = configuredHost && [url.origin, ...previousOrigins].some(origin => site(new URL(origin).hostname) === site(configuredHost)) ? disabled('sharedLinks') : configuredHost;
   const linkHosts = v.NIGHTMAIL_LINK_SAAS_ZONE_ID && v.NIGHTMAIL_LINK_SAAS_TOKEN && linkTarget
     ? { zoneId: v.NIGHTMAIL_LINK_SAAS_ZONE_ID, token: v.NIGHTMAIL_LINK_SAAS_TOKEN, target: linkTarget } : undefined;
   return {
@@ -343,7 +399,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     platformAccount: v.NIGHTMAIL_PLATFORM_AWS_ACCOUNT, platformDomainWorkspace: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_PLATFORM_DOMAIN_WORKSPACE : undefined, notifyFrom: v.MULTI_TENANT==='true' ? v.NIGHTMAIL_NOTIFY_FROM : undefined,
     builtinDomain: v.MULTI_TENANT==='true' ? builtinParent(v.NIGHTMAIL_BUILTIN_DOMAIN, [url.origin, ...previousOrigins]) : undefined, builtinScope: v.NIGHTMAIL_BUILTIN_SEND_SCOPE,
     signupsListId: v.MULTI_TENANT==='true' ? signupsListId(v.NIGHTMAIL_SIGNUPS_LIST_ID) : undefined,
-    support: v.MULTI_TENANT==='true' ? { url: v.NIGHTMAIL_SUPPORT_URL, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
+    support: v.MULTI_TENANT==='true' ? { url: supportSigningKey ? v.NIGHTMAIL_SUPPORT_URL : undefined, signingKey: supportSigningKey, addressIds: supportAddressIds } : undefined,
     observability: v.MULTI_TENANT==='true' && v.CF_OBSERVABILITY_TOKEN && v.CF_OBSERVABILITY_ACCOUNT_ID && v.CF_OBSERVABILITY_SCRIPT
       ? { token: v.CF_OBSERVABILITY_TOKEN, accountId: v.CF_OBSERVABILITY_ACCOUNT_ID, script: v.CF_OBSERVABILITY_SCRIPT } : undefined, receivingRedrive:v.NIGHTMAIL_RECEIVING_REDRIVE==='true',byoTemplateUrl: v.BYO_TEMPLATE_URL, sharedRegions, regionalSending: v.MULTI_TENANT === 'true' && v.NIGHTMAIL_REGIONAL_SENDING === 'true',
     trustedPool: v.MULTI_TENANT==='true' && v.NIGHTMAIL_REGIONAL_SENDING==='true' && v.NIGHTMAIL_TRUSTED_POOL==='true',
