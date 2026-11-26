@@ -7,6 +7,7 @@ import { supportRead, withRedactedReply } from './deliverability.js';
 import { GOOD_STANDING, limitRequest, type Step } from './standing-model.js';
 import { cached, registerSupportDeliverability } from './support-deliverability.js';
 import { registerSupportReceiving } from './support-receiving.js';
+import { registerSupportSmtp } from './smtp-refusals.js';
 import { ERROR_CODE, groupLines, LOG_RETENTION_DAYS, LOG_ROWS, LogsUnavailable, requestLines, ROUTE_TEMPLATE, type RequestLine } from './support-logs.js';
 import { CONVERSATION_ID, keyId, signSupportToken } from './support-platform.js';
 import { ceilingFor, routedOnly, sectionIds } from './support-conversations.js';
@@ -585,4 +586,5 @@ export function registerSupport(app: App) {
   });
   registerSupportDeliverability(app, meta, WorkspaceFilter);
   registerSupportReceiving(app, meta, WorkspaceFilter);
+  registerSupportSmtp(app, meta, WorkspaceFilter);
 }
