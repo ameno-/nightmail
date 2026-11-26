@@ -16,7 +16,7 @@ import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import { validEmail } from '../lib/domain'
-import { countdown, keepWait, keptWait, useSecondsLeft, waitDeadline, waitLeft, waitSeconds } from '../lib/countdown'
+import { countdown, keepWait, keptWait, useSecondsLeft, waitDeadline, waitLeft, waitSeconds, type Wait } from '../lib/countdown'
 import { queries, type QueryDef } from './queries'
 import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
@@ -43,9 +43,9 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   signInIntent: (event: { button: number; pointerType: string }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
-  /** When a refused start's wait (429 AUTH_STATE_LIMIT) ends, on performance.now()'s clock (lib/countdown.ts): every
+  /** When a refused start's wait (429 AUTH_STATE_LIMIT) ends (lib/countdown.ts): every
    *  sign-in button is held until then, counting it down (useSecondsLeft). */
-  signInWaitUntil: number | null
+  signInWaitUntil: Wait | null
   notice: string | null; dismissNotice: () => void }
 const SIGN_IN_WAIT_KEY = 'nightmail.sign-in-wait'
 const homeChunk = chunk(() => import('../features/home'))
@@ -203,7 +203,7 @@ function waitlistAddress() {
 // waits, every place taken, and ?position=N says where in the order a raise lets the waitlist in (1 is next); someone
 // told they're in who signed in with another address asks for a link to that one. ?link=expired: the sign-in link it
 // followed was used or ran out.
-function WaitlistPage({ busy, error, waitUntil, onSwitch }: { busy: boolean; error: unknown; waitUntil: number | null; onSwitch: () => void }) {
+function WaitlistPage({ busy, error, waitUntil, onSwitch }: { busy: boolean; error: unknown; waitUntil: Wait | null; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
   const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
   const position = /^[1-9]\d{0,6}$/.test(search.get('position') ?? '') ? Number(search.get('position')) : null
@@ -224,7 +224,7 @@ function WaitlistPage({ busy, error, waitUntil, onSwitch }: { busy: boolean; err
 // moves nothing. Busy or held it is unavailable but never disabled: a disabled button drops keyboard focus, and the
 // screen reader's place, to the page. Presses (Enter and Space too) are ignored instead, and its name stays the action's,
 // so the countdown isn't read out every second; the toast said why once.
-function SignInButton({ waitUntil, loading = false, children, onClick, ...props }: Omit<ComponentProps<typeof Button>, 'children' | 'disabled'> & { waitUntil: number | null; children: string }) {
+function SignInButton({ waitUntil, loading = false, children, onClick, ...props }: Omit<ComponentProps<typeof Button>, 'children' | 'disabled'> & { waitUntil: Wait | null; children: string }) {
   const left = useSecondsLeft(waitUntil), shown = left ? 'wait' : loading ? 'busy' : 'idle', unavailable = shown !== 'idle'
   return <Button {...props} aria-disabled={unavailable || undefined} aria-busy={loading || undefined} aria-label={left ? children : undefined} onClick={event => { if (!unavailable) onClick?.(event) }}><span className="signed-out__countdown">
     <span data-shown={shown === 'idle' || undefined} aria-hidden={shown !== 'idle' || undefined}>{children}</span>
@@ -241,7 +241,7 @@ function SignInButton({ waitUntil, loading = false, children, onClick, ...props 
 // one slot, so nothing moves when an answer comes.
 const RESEND_SECONDS = 60
 const linkLines = { idle: 'The link works once, for 30 minutes.', invalid: 'Check the address, like name@company.com.', failed: 'Couldn’t ask for a link. Try again in a minute.' }
-type LinkState = { view: 'ask'; line: keyof typeof linkLines } | { view: 'sent'; address: string; until: number; capped: boolean }
+type LinkState = { view: 'ask'; line: keyof typeof linkLines } | { view: 'sent'; address: string; until: Wait; capped: boolean }
 function SignInLinkForm({ to }: { to: string | null }) {
   const [typed, setTyped] = useState(''), [state, setState] = useState<LinkState>({ view: 'ask', line: 'idle' }), [sending, setSending] = useState(false)
   const inFlight = useRef(false), field = useRef<HTMLInputElement>(null), box = useRef<HTMLDivElement>(null), again = useRef<HTMLButtonElement>(null), focusAgain = useRef(false)
@@ -528,7 +528,7 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // once in a toast (why only: the buttons are the clock), which covers nothing it would move, then every sign-in button
   // stays disabled and counts down the API's wait, and no press or pointer down asks again until it ends. Kept for the tab, so a reload doesn't ask again.
   // Never longer than the API holds anyone (lib/countdown.ts): a kept wait that isn't a real time within that is dropped.
-  const [signInWait, setSignInWait] = useState<number | null>(() => keptWait(SIGN_IN_WAIT_KEY))
+  const [signInWait, setSignInWait] = useState<Wait | null>(() => keptWait(SIGN_IN_WAIT_KEY))
   const held = () => waitLeft(signInWait) > 0
   useEffect(() => {
     if (signInWait === null) return

@@ -1303,7 +1303,8 @@ async function measure(browser, job, fx) {
       // on the button would hold one of the network's pending sign-ins. One press is one start either way. Refused at the
       // cap (429 AUTH_STATE_LIMIT), the button is held for the wait the API gives: it keeps keyboard focus and its name,
       // Enter and Space do nothing, and it works the moment the wait ends. A wait kept for the tab is never longer than the
-      // API's maximum (lib/countdown.ts), whatever is stored and however the system clock moves.
+      // API's maximum (lib/countdown.ts), whatever is stored and however the system clock moves, and ends on waking from
+      // a sleep that outlasted it.
       let starts = 0, wait = 2;
       await page.route('**/api/auth/sign-in/account', route => { starts++; return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'retry-after': String(wait) }, body: JSON.stringify({ error: { code: 'AUTH_STATE_LIMIT', message: 'Too many pending sign-ins.', details: [{ retryAfterSeconds: wait }] } }) }); });
       const button = page.getByRole('button', { name: 'Continue to sign in' });
@@ -1358,20 +1359,34 @@ async function measure(browser, job, fx) {
           now = await reload(value);
           if (now.held !== held || now.seconds > (held ? 120 : 0)) problems.push(`a kept wait ${what}: ${now.held ? `held for ${now.seconds} s` : 'not held'}, expected ${held ? 'at most 120 s' : 'not held'}`);
         }
-        // Refused for 300 s, then the clock moves an hour: the wait in the page keeps its time, and after a reload the
-        // kept one is dropped, as it is no longer a time within the API's maximum.
+        // Refused for 300 s, then the system clock moves an hour. Back: the wait keeps its time (performance.now() ends it).
+        // Forward: it is over (the system clock says so; the next press asks the API). Either way a reload drops the kept
+        // wait, as it is no longer a time within the API's maximum.
         wait = 300;
-        for (const [what, hour] of [['back', -3_600_000], ['forward', 3_600_000]]) {
+        for (const [what, hour, held] of [['back', -3_600_000, true], ['forward', 3_600_000, false]]) {
           await reload(null);
           await button.click();
           await settle();
           await page.evaluate(hour => { const real = Date.now.bind(Date); Date.now = () => real() + hour; }, hour);
           await settle(1200);
           now = await state();
-          if (!now.held || now.seconds > 300 || now.seconds > MAX) problems.push(`refused for 300 s, the clock moved an hour ${what}: ${now.held ? `held for ${now.seconds} s` : 'not held'}, expected held for at most 300 s`);
+          if (now.held !== held || now.seconds > 300) problems.push(`refused for 300 s, the clock moved an hour ${what}: ${now.held ? `held for ${now.seconds} s` : 'released'}, expected ${held ? 'held for at most 300 s' : 'released'}`);
           now = await reload(undefined, hour);
           if (now.held) problems.push(`refused for 300 s, the clock moved an hour ${what}, then a reload: held for ${now.seconds} s, expected not held`);
         }
+        // Refused for 300 s, then an hour asleep (a locked phone, a closed laptop): performance.now() stood still, the system
+        // clock didn't. Released on waking, and the next press asks the API.
+        await reload(null);
+        await button.click();
+        await settle();
+        const asleep = starts;
+        await page.evaluate(() => { const real = Date.now.bind(Date); Date.now = () => real() + 3_600_000; });
+        await settle(1200);
+        now = await state();
+        if (now.held) problems.push(`refused for 300 s, then an hour asleep: still held for ${now.seconds} s on waking`);
+        await button.click();
+        await settle();
+        if (starts !== asleep + 1) problems.push(`refused for 300 s, then an hour asleep: the next press started ${starts - asleep} sign-ins, expected 1`);
         await page.evaluate(() => sessionStorage.removeItem('cls-clock-offset'));
       }
       await page.unroute('**/api/auth/sign-in/account');
