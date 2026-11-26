@@ -22,7 +22,7 @@ export const queueColumnDefs: SkeletonColumn[] = [
   { key: 'reason', label: 'Why', card: 'line' },
   { key: 'score', label: 'Score', width: 72, align: 'right', card: 'line' },
   { key: 'limit', label: 'Daily limit', width: 104, align: 'right', card: 'inline' },
-  { key: 'since', label: 'Since', width: 160, card: 'inline' },
+  { key: 'since', label: 'Since', width: 160, card: 'line' },
 ]
 export const actionColumnDefs: SkeletonColumn[] = [
   { key: 'action', label: 'Action', width: '20%' },
@@ -71,9 +71,9 @@ export const timelineColumnDefs: SkeletonColumn[] = [
 export const waitlistColumnDefs: SkeletonColumn[] = [
   { key: 'email', label: 'Email', width: '28%', card: 'title' },
   { key: 'name', label: 'Name', card: 'line' },
-  { key: 'first', label: 'First attempt', width: 176, card: 'inline' },
-  { key: 'last', label: 'Last attempt', width: 176, card: 'aside' },
   { key: 'attempts', label: 'Attempts', width: 96, align: 'right', card: 'inline' },
+  { key: 'first', label: 'First attempt', width: 176, card: 'line' },
+  { key: 'last', label: 'Last attempt', width: 176, card: 'aside' },
   { key: 'letIn', label: 'Let in', width: 216, card: 'line' },
 ]
 
@@ -111,6 +111,12 @@ export function SelfHostedHealthSkeleton() {
 }
 // The Sign-ups tab's header action, for the operator role: it opens the limit's dialog.
 export const SetLimitTrigger = (props: ButtonProps) => <Button {...props}>Set limit…</Button>
+/** Direct jump to the live Glass board, placed in Operator's header. */
+export const GlassLink = () => <Link className="ui-button ui-button--ghost ui-button--md" to="/glass">Glass <ArrowUpRight size={16} aria-hidden="true" /></Link>
+const signupSubItems = [{ value: 'signups', label: 'Workspaces' }, { value: 'waitlist', label: 'Waitlist' }]
+export function SignupSubTabs({ value, onChange, actions }: { value: 'signups' | 'waitlist'; onChange?: (next: 'signups' | 'waitlist') => void; actions?: ReactNode }) {
+  return <div className="data-toolbar"><Tabs value={value} onValueChange={next => onChange?.(next as 'signups' | 'waitlist')} disabled={!onChange} items={signupSubItems} label="Sign-ups views" />{actions}</div>
+}
 
 // UI notes (/operator/notes): staff's design and bug notes on the dashboard. The screenshot column is for the table; a
 // phone's card shows the note, its status, page, type and age, with its selection checkbox at the end for the bulk menu.
@@ -135,7 +141,7 @@ export function NotesToolbar({ search = '', status = '', kind = '', onSearch, on
 }
 export function OperatorNotesSkeleton() {
   return <>
-    <PageHeader title="Operator" actions={<Button disabled>Agent keys</Button>} />
+    <PageHeader title="Operator" actions={<div className="cluster"><Button disabled>Agent keys</Button><GlassLink /></div>} />
     <LoadingRegion label="Loading UI notes"><div className="op-page">
       <Tabs value="notes" onValueChange={() => {}} disabled items={notesTabs} label="Operator views" />
       <NotesToolbar disabled />
@@ -153,16 +159,16 @@ export const clusterColumnDefs: SkeletonColumn[] = [
   { key: 'workspaces', label: 'Workspaces', width: 112, align: 'right', card: 'inline' },
   { key: 'changed', label: 'Changed', width: 168, card: 'line' },
 ]
-// Operator → Lists (./lists.tsx): one row per launched campaign to a list.
+// Operator → Abuse → Lists (./lists.tsx): one row per launched campaign to a list.
 export const listColumnDefs: SkeletonColumn[] = [
   { key: 'campaign', label: 'Campaign', card: 'title' },
-  { key: 'band', label: 'List risk', width: 132, card: 'aside' },
-  { key: 'flagged', label: 'Flagged', width: 96, align: 'right', card: 'inline' },
-  { key: 'review', label: 'Review said', width: 168, card: 'inline' },
-  { key: 'bounced', label: 'Bounced', width: 96, align: 'right', card: 'inline' },
-  { key: 'blocklist', label: 'Blocklist', width: 96, align: 'right', card: 'inline' },
-  { key: 'probe', label: 'Probe', width: 112, card: 'inline' },
-  { key: 'launched', label: 'Launched', width: 168, card: 'line' },
+  { key: 'band', label: 'List risk', width: 120, card: 'aside' },
+  { key: 'flagged', label: 'Flagged', width: 80, align: 'right', card: 'line' },
+  { key: 'review', label: 'Review said', width: 124, card: 'inline' },
+  { key: 'bounced', label: 'Bounced', width: 80, align: 'right', card: 'line' },
+  { key: 'blocklist', label: 'Blocklist', width: 84, align: 'right', card: 'inline' },
+  { key: 'probe', label: 'Probe', width: 88, card: 'inline' },
+  { key: 'launched', label: 'Launched', width: 148, card: 'line' },
 ]
 export const alertColumnDefs: SkeletonColumn[] = [
   { key: 'alert', label: 'Alert', card: 'title' },
@@ -188,20 +194,27 @@ export const clusterAccountColumnDefs: SkeletonColumn[] = [
 export const bandLabel: Record<AbuseBand, string> = { high: 'High', review: 'Review', watch: 'Watch', low: 'Low' }
 export const bandTone: Record<AbuseBand, Tone> = { high: 'danger', review: 'warning', watch: 'info', low: 'neutral' }
 export const abuseBands: AbuseBand[] = ['high', 'review', 'watch', 'low']
-/** What the Abuse tab shows: ?band=high narrows the clusters; ?show=alerts is the alert outbox. */
-export const abuseView = (search: string) => { const params = new URLSearchParams(search), band = params.get('band'); return { alerts: params.get('show') === 'alerts', band: abuseBands.includes(band as AbuseBand) ? band as AbuseBand : null } }
-// The rail beside the list: risk levels with their counts, and the outbox. Counts arrive with the list (a dash until then).
-export function abuseFacets({ band, alerts, counts, outbox, onBand, onAlerts }: { band: AbuseBand | null; alerts: boolean; counts?: Record<AbuseBand, number>; outbox?: number; onBand?: (band: AbuseBand | null) => void; onAlerts?: () => void }): FacetGroup[] {
+/** What the Abuse tab shows: ?band=high narrows clusters; ?show=alerts is the alert outbox; ?view=lists or ?show=lists is campaign list risk. */
+export const abuseView = (search: string) => {
+  const params = new URLSearchParams(search), band = params.get('band'), lists = params.get('view') === 'lists' || params.get('show') === 'lists'
+  const alerts = !lists && params.get('show') === 'alerts'
+  return { alerts, lists, band: !alerts && !lists && abuseBands.includes(band as AbuseBand) ? band as AbuseBand : null }
+}
+// The rail beside the list: risk levels with their counts, the alert outbox, and campaign list risk.
+export function abuseFacets({ band, alerts, lists, counts, outbox, onBand, onAlerts, onLists }: { band: AbuseBand | null; alerts: boolean; lists: boolean; counts?: Record<AbuseBand, number>; outbox?: number; onBand?: (band: AbuseBand | null) => void; onAlerts?: () => void; onLists?: () => void }): FacetGroup[] {
   const pick = (value: AbuseBand | null) => onBand ? () => onBand(value) : undefined
   return [
-    { key: 'risk', title: 'Risk', items: [{ key: 'all', label: 'All', count: counts ? abuseBands.reduce((sum, key) => sum + counts[key], 0) : null, selected: !alerts && band === null, onSelect: pick(null) },
-      ...abuseBands.map(key => ({ key, label: bandLabel[key], tone: bandTone[key], count: counts ? counts[key] : null, selected: !alerts && band === key, onSelect: pick(key) }))] },
-    { key: 'outbox', title: 'Outbox', items: [{ key: 'alerts', label: 'Alerts', count: outbox ?? null, selected: alerts, onSelect: onAlerts }] },
+    { key: 'risk', title: 'Risk', items: [{ key: 'all', label: 'All', count: counts ? abuseBands.reduce((sum, key) => sum + counts[key], 0) : null, selected: !alerts && !lists && band === null, onSelect: pick(null) },
+      ...abuseBands.map(key => ({ key, label: bandLabel[key], tone: bandTone[key], count: counts ? counts[key] : null, selected: !alerts && !lists && band === key, onSelect: pick(key) }))] },
+    { key: 'more', title: 'More', items: [
+      { key: 'alerts', label: 'Alerts', count: outbox ?? null, selected: alerts, onSelect: onAlerts },
+      { key: 'lists', label: 'Lists', dot: false, count: false, selected: lists, onSelect: onLists },
+    ] },
   ]
 }
 export function AbuseSkeleton({ search }: { search: string }) {
   const view = abuseView(search)
-  return <SplitPane className="op-abuse" collapse="row" rail={<FacetRail label="Abuse views" groups={abuseFacets(view)} />}><TableSkeleton className="op-table" columns={view.alerts ? alertColumnDefs : clusterColumnDefs} rows={6} /></SplitPane>
+  return <SplitPane className="op-abuse" collapse="row" rail={<FacetRail label="Abuse views" groups={abuseFacets(view)} />}><TableSkeleton className="op-table" columns={view.lists ? listColumnDefs : view.alerts ? alertColumnDefs : clusterColumnDefs} rows={6} /></SplitPane>
 }
 export const dailyLimitError = 'A whole number from 1 to 10,000,000.'
 export const clusterFacts = ['Risk', 'Score', 'Accounts', 'Workspaces', 'First seen', 'Changed', 'Alert', 'Review'] as const
@@ -225,9 +238,11 @@ export function OperatorClusterSkeleton({ actions }: { actions: boolean }) {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'lists', label: 'Lists' }, { value: 'actions', label: 'Actions' }, { value: 'waitlist', label: 'Waitlist' }, { value: 'health', label: 'Health' }]
-/** The tab a /operator address opens: ?view=signups, ?view=abuse, ?view=lists, ?view=actions, ?view=waitlist or ?view=health, else the review queue. */
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'health', label: 'Health' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }]
+/** The view a /operator address opens (old ?view=waitlist and ?view=lists URLs stay valid and open inside Sign-ups and Abuse). */
 export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' || view === 'lists' || view === 'signups' || view === 'health' ? view : 'queue' }
+/** The top-level tab active for a given operator view. */
+export const operatorTab = (view: ReturnType<typeof operatorView>) => view === 'waitlist' ? 'signups' : view === 'lists' ? 'abuse' : view
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
@@ -247,15 +262,15 @@ export function WaitlistToolbar({ search = '', onSearch, onExport, exporting = f
     <SearchField className="search-box--list" aria-label="Search the waitlist" placeholder="Search addresses and names" value={search} disabled={disabled} onChange={event => onSearch?.(event.target.value)} />
   </div><Button className="op-export" aria-label="Export as CSV" title="Download everyone listed as a CSV file" disabled={disabled || !exportable} loading={exporting} onClick={onExport}><Download size={16} aria-hidden="true" /><span>Export CSV</span></Button></div>
 }
-export function OperatorQueueSkeleton({ view = 'queue', search = '', canAct = false }: { view?: string; search?: string; canAct?: boolean }) {
+export function OperatorQueueSkeleton({ view = 'queue', search = '', canAct = false }: { view?: ReturnType<typeof operatorView>; search?: string; canAct?: boolean }) {
+  const tab = operatorTab(view)
   return <>
-    <PageHeader title="Operator" actions={view === 'signups' && canAct ? <SetLimitTrigger disabled /> : undefined} />
+    <PageHeader title="Operator" actions={<GlassLink />} />
     <LoadingRegion label={view === 'waitlist' ? 'Loading the waitlist' : view === 'abuse' ? 'Loading related accounts' : view === 'lists' ? 'Loading lists' : view === 'signups' ? 'Loading sign-ups' : view === 'health' ? 'Loading health' : 'Loading the review queue'}><div className="op-page">
-      <Tabs value={view} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
+      <Tabs value={tab} onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       {view === 'queue' && <QueueToolbar disabled />}
-      {view === 'waitlist' && <WaitlistToolbar disabled />}
-      {view === 'signups' && <SignupFacts />}
-      {view === 'abuse' ? <AbuseSkeleton search={search} /> : view === 'health' ? <HealthSkeleton /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : view === 'signups' ? signupColumnDefs : view === 'lists' ? listColumnDefs : actionColumnDefs} rows={6} />}
+      {tab === 'signups' && <><SignupFacts /><SignupSubTabs value={view === 'waitlist' ? 'waitlist' : 'signups'} actions={canAct ? <SetLimitTrigger disabled /> : undefined} />{view === 'waitlist' && <WaitlistToolbar disabled />}</>}
+      {tab === 'abuse' ? <AbuseSkeleton search={search} /> : view === 'health' ? <HealthSkeleton /> : <TableSkeleton columns={view === 'queue' ? queueColumnDefs : view === 'waitlist' ? waitlistColumnDefs : view === 'signups' ? signupColumnDefs : actionColumnDefs} rows={6} />}
     </div></LoadingRegion>
   </>
 }
