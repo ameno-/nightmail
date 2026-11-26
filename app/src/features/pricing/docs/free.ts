@@ -116,7 +116,7 @@ export function freeEmailApi(): Doc {
   const lead = `Listed: the ${listed.length} of ${n} email services ${productName} has compared itself with whose free allowance is smaller than its own, or is a trial or a one-off (${byGroup.map(g => `${g.rows.length} ${g.unit}`).join(', ')}); this is not every email service.`
   const limits = `On a new workspace the first ${formatCount(EVALUATION.recipients)} recipients are a check: more go out once their results are in, then up to ${formatCount(GROWTH.start)} an hour for ${GROWTH.hours} hours; the built-in domain sends only to your workspace’s members, ${formatCount(BUILTIN_CAPS.members.perDay)} a day.`
   const terms = `${productName}: ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month, with no end date; past it, ${nightmail.perThousand} per 1,000 emails, sent or received.`
-  const basis = `The others: each one’s free plan, trial or one-off as its own page states it, checked ${when}; a daily allowance counts as 30 days’ worth where no monthly one is stated. Each name links to its comparison and the page it was read on.`
+  const basis = `The others: each one’s free plan, trial or one-off as its own page states it, checked ${when}; a daily allowance counts as 30 days’ worth where no monthly one is stated, and a dash under Limits means none is stated. Each name links to its comparison and the page it was read on.`
   const note: Text = [`${scope} ${terms} ${limits} ${basis}`]
   const h1: Doc['h1'] = [[`${formatCount(nightmail.freeSent)} emails free.`], ['Every month.']]
   const caption = `${productName}, beside ${spelled(apis.rows.length)} email APIs’ free plans · checked ${when.replaceAll(' ', '\u00a0')}`
