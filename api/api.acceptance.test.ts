@@ -25428,8 +25428,8 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const method = await request('PUT', '/v1/domains', key.secret, {}), methodBody = method.body.error;
       assert.deepEqual([method.status, methodBody.details, method.headers.get('allow')], [404, [{ path: '/v1/domains', allowedMethods: ['GET', 'POST'] }], 'GET, POST']);
       assert.match(methodBody.message, /^Route not found: no endpoint answers PUT on this path\. \/v1\/domains doesn’t take PUT; it takes GET, POST\. Every operation/);
-      const guess = await request('POST', '/v1/inbound/domains/dom_0123456789/hosts/mdom_0123456789/check', key.secret, {}), guessBody = guess.body.error;
-      assert.deepEqual(guessBody.details, [{ closest: { method: 'POST', path: '/v1/inbound/domains/{id}/hosts' } }]);
+      const guess = await request('GET', '/v1/domains/dom_0123456789/dns-setup/mdom_0123456789', key.secret), guessBody = guess.body.error;
+      assert.deepEqual([guess.status, guessBody.details], [404, [{ closest: { method: 'GET', path: '/v1/domains/{id}/dns-setup' } }]]);
       assert.ok(!JSON.stringify(guessBody).includes('0123456789'), 'The answer never echoes what the caller put in the path.');
       // A burst past the limit still writes its request lines, without the path.
       const paths: unknown[] = [];

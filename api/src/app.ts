@@ -160,17 +160,19 @@ export function unmatchedTemplate(path: string) {
 }
 const UNMATCHED_MAX = 200;
 type RouteRow = { method: string; template: string; segments: (string | null)[] };
-const routeTables = new WeakMap<object, RouteRow[]>();
-/** The app's own routes as public templates (/v1/domains/{id}), from its route table; never from a request. */
+const routeTables = new WeakMap<object, { size: number; rows: RouteRow[] }>();
+/** The app's own routes as public templates (/v1/domains/{id}), from its route table; never from a request. Groups of
+ *  routes register on first use, so the table is read again whenever the app has more routes than last time. */
 function routeTable(app: { routes: { method: string; path: string }[] }) {
-  let rows = routeTables.get(app);
+  const cached = routeTables.get(app);
+  let rows = cached?.size === app.routes.length ? cached.rows : undefined;
   if (!rows) {
     rows = app.routes.filter(r => r.method !== 'ALL' && !r.path.includes('*') && r.path.startsWith('/v1/')).map(r => {
       const segments = r.path.split('/').slice(1).map(s => s.startsWith(':') ? null : s);
       return { method: r.method, template: '/' + r.path.split('/').slice(1).map(s => s.startsWith(':') ? `{${s.slice(1).replace(/\{.*$/, '')}}` : s).join('/'), segments };
     });
     rows = [...new Map(rows.map(r => [r.method + ' ' + r.template, r])).values()];
-    routeTables.set(app, rows);
+    routeTables.set(app, { size: app.routes.length, rows });
   }
   return rows;
 }
