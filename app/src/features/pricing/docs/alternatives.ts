@@ -1,6 +1,6 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, listOf, money, nightmail, quote, shownSources, type Comparison, type Source } from '../prices.ts'
+import { checkedOn, dayOf, fitWords, formatCount, listOf, money, nightmail, quote, shownSources, type Comparison, type Source } from '../prices.ts'
 import { billAt, groupOf, ORDERED, perSize } from '../page/comparison.ts'
 import { factsSection, rowLines } from '../page/facts.ts'
 import { comparisonQuestions } from '../questions.ts'
@@ -24,14 +24,7 @@ export const SHOWN_OTHERS = 6
 /** A small count in words, as a caption says it: "six alternatives". */
 /** Under a table, what a dash means: no price was read for that size (a service may still sell one: Bird's deposit plan at
  *  10,000). One sentence for every page of several services, so they can't drift. */
-/** The days a page's prices were read, as its caption says them: "25 Nov 2026", or a span, "25–26 Nov 2026" (one month)
- *  or "30 Nov to 1 Dec 2026". Shared by the pages of several services. */
-export function checkedOn(days: string[]) {
-  const sorted = [...new Set(days)].sort(), first = sorted[0]!, last = sorted.at(-1)!
-  if (first === last) return dayOf(first)
-  const [a, b] = [dayOf(first).split(' '), dayOf(last).split(' ')]
-  return a[1] === b[1] && a[2] === b[2] ? `${a[0]}–${dayOf(last)}` : a[2] === b[2] ? `${a[0]} ${a[1]} to ${dayOf(last)}` : `${dayOf(first)} to ${dayOf(last)}`
-}
+export { checkedOn }
 export const DASH = ' A dash: no price read for that size.'
 
 /** What a vendor offers that Nightmail doesn't (its entry's gaps), as a section of a page's Markdown copy: each line in the
@@ -41,7 +34,7 @@ export function gapsSection(c: Comparison): Section {
   const vendor = c.offer.vendor, gaps = c.gaps ?? []
   return { id: 'gaps', title: `What ${vendor} has that ${productName} does not`, blocks: [
     { kind: 'p', text: [`Read on ${vendor}’s own pages, ${checkedOn(gaps.map(item => item.source.checked))}. ${productName} offers none of these.`] },
-    { kind: 'list', items: gaps.map(item => [`${item.text} (`, { text: pageName(item.source.url), href: item.source.url }, ')']) },
+    { kind: 'list', items: gaps.map(item => [`${item.text}${item.ours ? ` ${item.ours}` : ''} (`, { text: pageName(item.source.url), href: item.source.url }, ')']) },
   ] }
 }
 /** The same, as one line: "Not in Nightmail: dedicated IPs, …". */
@@ -104,8 +97,8 @@ export function vendorAlternatives(c: Comparison): Doc {
       `${assume}, each service’s least expensive plan that holds it. Monthly list prices before tax, no promotions, read ${when} on each service’s pricing page (its comparison names the page and quotes it). ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${claim}${dash(group)}`,
     ])] },
     ...left.length ? [{ id: 'left', title: 'Not on the page’s table', blocks: [{ kind: 'p' as const, text: [`The page lists the ${shown.length} lowest of those with a price read at ${formatCount(sizes[1]!)}${m.per === 'contact' ? ' contacts' : ' emails a month'}, besides ${vendor}, so it stays one table on a phone. The others here: ${left.map(r => r.o.offer.vendor).join(', ')}. Every comparison is on `, { text: 'the comparisons page', href: '/compare' }, '.'] }] }] : [],
-    ...lacks ? [{ id: 'lacks', title: lacks.question, blocks: [{ kind: 'p' as const, text: [lacks.answer] }] }] : [],
-    ...c.gaps?.length ? [gapsSection(c)] : [],
+    // What the vendor has that Nightmail doesn't: its sourced gaps, or else the comparison's older list.
+    ...c.gaps?.length ? [gapsSection(c)] : lacks ? [{ id: 'lacks', title: lacks.question, blocks: [{ kind: 'p' as const, text: [lacks.answer] }] }] : [],
   ]
 
   // ---------------------------------------------------------------- its title, description, links and card

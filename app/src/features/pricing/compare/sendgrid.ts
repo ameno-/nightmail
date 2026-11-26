@@ -1,4 +1,4 @@
-import { LANGUAGES, fact, formatCount, gap, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { LANGUAGES, NO_DEDICATED_IP, fact, formatCount, gap, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier} from '../prices.ts'
 
 // Nightmail vs SendGrid (/compare/sendgrid): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Twilio SendGrid's own pages on CHECKED: the Email API plans on its pricing page, and each plan's overage in the
@@ -55,7 +55,7 @@ export const sendgrid: Entry = {
   panels: ['send', 'free', 'team', 'receive', 'agent', 'campaign', 'domain'],
   // What it offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
   gaps: [
-    gap('dedicated IPs', 'SendGrid’s Pro and Premier plans include dedicated IPs, and more can be bought.', /\bdedicated IPs?\b/i, GAPS_READ(SENDGRID, 'Pro and premier plans include dedicated IPs, with option to purchase more')),
+    gap('dedicated IPs', 'SendGrid’s Pro and Premier plans include dedicated IPs, and more can be bought.', /\bdedicated IPs?\b/i, GAPS_READ(SENDGRID, 'Pro and premier plans include dedicated IPs, with option to purchase more'), NO_DEDICATED_IP),
     gap('libraries for C#, Go, Java, PHP, Python and Ruby', 'SendGrid maintains official libraries for C#, Go, Java, PHP, Python and Ruby.', LANGUAGES, GAPS_READ('https://www.twilio.com/docs/sendgrid/for-developers/sending-email/libraries', 'SendGrid maintains the following official libraries for mail sending.')),
   ],
 }

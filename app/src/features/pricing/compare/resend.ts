@@ -1,4 +1,4 @@
-import { AUTOMATION, LANGUAGES, formatCount, gap, money, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { AUTOMATION, LANGUAGES, NO_DEDICATED_IP, formatCount, gap, money, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier} from '../prices.ts'
 
 // Nightmail vs Resend (/compare/resend): a comparison's whole entry (prices.ts, Entry), and Resend's marketing plans,
 // which the calculator lists too (compare/index.ts, OFFERS). Every figure was read on Resend's own pricing page on
@@ -69,7 +69,7 @@ export const resend: Entry = {
   panels: ['send', 'free', 'domain', 'receive', 'agent', 'campaign', 'route'],
   // What it offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
   gaps: [
-    gap('dedicated IPs', 'Resend sells a dedicated IP for $30 a month on its Scale plan, to customers sending more than 3,000 emails a day.', /\bdedicated IPs?\b/i, GAPS_READ(RESEND, 'Dedicated IPs - $30 / mo Available to customers exceeding 3,000 emails sent per day on the Scale plan.')),
+    gap('dedicated IPs', 'Resend sells a dedicated IP for $30 a month on its Scale plan, to customers sending more than 3,000 emails a day.', /\bdedicated IPs?\b/i, GAPS_READ(RESEND, 'Dedicated IPs - $30 / mo Available to customers exceeding 3,000 emails sent per day on the Scale plan.'), NO_DEDICATED_IP),
     gap('automations', 'Resend’s Automations run a series of steps, such as sending an email, started by custom events from your application.', AUTOMATION, GAPS_READ('https://resend.com/docs/dashboard/automations/introduction', 'Automations allow you to create a series of executable steps based on custom trigger events from your application.')),
     gap('SDKs for PHP, Python, Ruby, Go, Java, Rust and .NET', 'Resend has official SDKs for PHP, Python, Ruby, Go, Java, Rust and .NET.', LANGUAGES, GAPS_READ('https://resend.com/docs/sdks', 'Official SDKs Node.js github.com/resend/resend-node PHP github.com/resend/resend-php Laravel github.com/resend/resend-laravel Python github.com/resend/resend-python Ruby github.com/resend/resend-ruby Go github.com/resend/resend-go Java github.com/resend/resend-java Rust github.com/resend/resend-rust .NET')),
   ],

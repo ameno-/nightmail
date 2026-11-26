@@ -1,7 +1,7 @@
 // (With extensions: the build's config imports this file, through pages.ts and readable.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import type { WorkspaceFocus } from '../../../../../api/src/workspace-focus.ts'
-import { linesOf, plain, type Block, type PageDoc, type Question, type Section, type Text } from '../page/shape.ts'
+import { answerMarkdown, linesOf, plain, type Block, type PageDoc, type Question, type Section, type Text } from '../page/shape.ts'
 import { dayOf, sourceNote, type Source } from '../prices.ts'
 import { faqPage } from '../questions.ts'
 import { START } from '../start.ts'
@@ -74,7 +74,7 @@ export function docMarkdown(doc: Doc): string {
     `Canonical page: ${url(doc.path)}`,
     START,
     ...[...doc.sections, ...doc.copy.sections].flatMap(section => [`## ${section.title}`, ...section.blocks.map(block)]),
-    ...doc.copy.questions.length ? ['## Questions', doc.copy.questions.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
+    ...doc.copy.questions.length ? ['## Questions', doc.copy.questions.map(item => `### ${item.question}\n\n${answerMarkdown(item)}`).join('\n\n')] : [],
     '## Sources',
     pagesOf(doc.copy.sources).map(source => `- [${pageName(source.url)}](${source.url})${sourceNote(source.url)}, read ${dayOf(source.checked)}`).join('\n'),
     trademarks,

@@ -250,8 +250,20 @@ export type Gap = {
   /** The words a Nightmail fact naming the same thing would use. */
   subject: RegExp
   source: Source
+  /** Nightmail's half, where the line says it: "Nightmail sells no dedicated IPs." */
+  ours?: string
 }
-export const gap = (what: string, text: string, subject: RegExp, source: Source): Gap => ({ what, text, subject, source })
+export const gap = (what: string, text: string, subject: RegExp, source: Source, ours?: string): Gap => ({ what, text, subject, source, ...ours ? { ours } : {} })
+/** Nightmail's half of a dedicated-IP line, the same for every vendor. */
+export const NO_DEDICATED_IP = 'Nightmail sells no dedicated IPs.'
+/** The days a page's prices were read, as its caption says them: "25 Nov 2026", or a span, "25–26 Nov 2026" (one month)
+ *  or "30 Nov to 1 Dec 2026". Shared by the pages of several services. */
+export function checkedOn(days: string[]) {
+  const sorted = [...new Set(days)].sort(), first = sorted[0]!, last = sorted.at(-1)!
+  if (first === last) return dayOf(first)
+  const [a, b] = [dayOf(first).split(' '), dayOf(last).split(' ')]
+  return a[1] === b[1] && a[2] === b[2] ? `${a[0]}–${dayOf(last)}` : a[2] === b[2] ? `${a[0]} ${a[1]} to ${dayOf(last)}` : `${dayOf(first)} to ${dayOf(last)}`
+}
 /** Subjects several vendors' gaps share. */
 export const LANGUAGES = /\b(?:Python|Ruby|PHP|Java|Rust|C#|Golang)\b|\.NET\b|\b(?:libraries|SDKs) for\b/
 export const AUTOMATION = /\bautomat(?:ion|ions|ed|es|e)\b|\bworkflows?\b|\bdrip\b/i
@@ -424,7 +436,7 @@ export function entryProblems(entry: Entry, today: string, panels: readonly stri
   entry.gaps?.forEach((item, i) => {
     checkSource(`gaps[${i}] (${item.what})`, item.source)
     if (!item.what.trim() || !item.text.trim()) at(`gaps[${i}]`, 'needs a few words and a line.')
-    if (JUDGEMENT.test(item.what) || JUDGEMENT.test(item.text)) at(`gaps[${i}] (${item.what})`, `judges ("${(item.what + ' ' + item.text).match(JUDGEMENT)![0]}"): say what it is, in the vendor's terms.`)
+    if (JUDGEMENT.test(item.what) || JUDGEMENT.test(item.text) || JUDGEMENT.test(item.ours ?? '')) at(`gaps[${i}] (${item.what})`, `judges ("${(item.what + ' ' + item.text).match(JUDGEMENT)![0]}"): say what it is, in the vendor's terms.`)
   })
   if (entry.sizes.length !== 3 || entry.sizes.some(size => !(size > 0))) at('sizes', 'must be three sizes above zero.')
   if (entry.steps.length < 2 || entry.steps.some((size, i) => i > 0 && size <= entry.steps[i - 1]!)) at('steps', 'must be at least two sizes, smallest first.')

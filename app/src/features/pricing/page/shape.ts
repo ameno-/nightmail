@@ -27,8 +27,24 @@ export type Block = { kind: 'p'; text: Text } | { kind: 'list'; items: Text[] } 
 /** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx); a page whose
  *  only section is a table has it so without saying. */
 export type Section = { id: string; title: string; blocks: Block[]; quiet?: boolean }
-/** A question the page answers, word for word as the page shows it and its FAQPage carries it (pricing/questions.ts). */
-export type Question = { id: string; question: string; answer: string }
+/** A question the page answers, word for word as the page shows it and its FAQPage carries it (pricing/questions.ts).
+ *  links: words of the answer that link to a page (the vendor's page a line was read on). */
+export type Question = { id: string; question: string; answer: string; links?: Link[] }
+export type Link = { text: string; href: string }
+/** An answer in runs: its text, with each link's words as a link (the page, the board and the Markdown twins). */
+export function answerRuns(item: { answer: string; links?: Link[] }): (string | Link)[] {
+  const runs: (string | Link)[] = []
+  let rest = item.answer
+  for (const link of item.links ?? []) {
+    const at = rest.indexOf(link.text)
+    if (at < 0) throw new Error(`An answer doesn't say the words it links: ${link.text}`)
+    runs.push(rest.slice(0, at), link)
+    rest = rest.slice(at + link.text.length)
+  }
+  return [...runs, rest].filter(run => run !== '')
+}
+/** The same in Markdown. */
+export const answerMarkdown = (item: { answer: string; links?: Link[] }) => answerRuns(item).map(run => typeof run === 'string' ? run : `[${run.text}](${run.href})`).join('')
 export type PageDoc = {
   path: string
   title: string

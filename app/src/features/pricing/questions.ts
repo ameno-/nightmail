@@ -1,5 +1,5 @@
 // (With extensions: the build's config imports this file, through readable.ts.)
-import { dayOf, formatCount, listOf, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices.ts'
+import { checkedOn, dayOf, formatCount, listOf, money, nightmail, nightmailBill, theirPrice, ucOf, type Comparison, type Usage } from './prices.ts'
 
 // The questions a comparison's page answers, made from its data alone: the one source for every page that shows them
 // (board.tsx's Questions, the Markdown twin and the FAQPage: readable.ts), and for any other page about the same
@@ -9,7 +9,7 @@ import { dayOf, formatCount, listOf, money, nightmail, nightmailBill, theirPrice
 
 /** One question and its answer. id says which question it is, so a page can pick or order them; question and answer are
  *  the text the page shows and its structured data carries, word for word. */
-export type Question = { id: 'price' | 'less' | 'charges' | 'has' | 'lacks'; question: string; answer: string }
+export type Question = { id: 'price' | 'less' | 'charges' | 'has' | 'lacks'; question: string; answer: string; links?: { text: string; href: string }[] }
 
 /** A comparison's questions, in reading order: what the vendor costs at the page's opening size; whether Nightmail
  *  costs less at its large size (only where the data says so); how each charges; what Nightmail has that the vendor
@@ -37,7 +37,8 @@ export function comparisonQuestions(c: Comparison): Question[] {
       answer: `${c.lead} Nightmail’s price: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month; contacts and teammates are free.` },
     { id: 'has', question: `What does Nightmail have that ${vendor} charges for or lacks?`,
       answer: c.rows.map(row => row.text).join(' ') + (cited.length ? ` (Read on ${listOf([...new Set(cited.map(source => host(source.url)))])}, ${dayOf(cited.map(source => source.checked).sort().at(-1)!)}.)` : '') },
-    ...c.without?.length ? [{ id: 'lacks' as const, question: `What does ${vendor} have that Nightmail doesn’t?`, answer: `${capital(listOf(c.without))}: Nightmail doesn’t have them.` }] : [],
+    ...c.gaps?.length ? [{ id: 'lacks' as const, question: `What does ${vendor} have that Nightmail doesn’t?`, ...gapsAnswer(c) }]
+      : c.without?.length ? [{ id: 'lacks' as const, question: `What does ${vendor} have that Nightmail doesn’t?`, answer: `${capital(listOf(c.without))}: Nightmail doesn’t have them.` }] : [],
   ]
 }
 
@@ -48,4 +49,17 @@ export const faqPage = (pageUrl: string, questions: Pick<Question, 'question' | 
 })
 
 const host = (page: string) => new URL(page).hostname.replace(/^www\./, '')
+/** The vendor's gaps as an answer (prices.ts, Gap): each line in its own words, Nightmail's half where the line says it,
+ *  then the days read and the pages, each linked. The same entries as an alternatives page's copy (gapsSection). */
+function gapsAnswer(c: Comparison): Pick<Question, 'answer' | 'links'> {
+  const gaps = c.gaps ?? [], pages = [...new Map(gaps.map(item => [item.source.url, item.source])).values()]
+  const name = (page: string) => host(page) + new URL(page).pathname.replace(/\/$/, '')
+  const lines = gaps.map(item => item.ours ? `${item.text} ${item.ours}` : item.text)
+  const others = gaps.filter(item => !item.ours).length
+  const rest = others === gaps.length ? ' Nightmail offers none of these.' : others > 1 ? ' Nightmail offers none of the others.' : others ? ' Nightmail doesn’t offer that either.' : ''
+  return {
+    answer: `${lines.join(' ')}${rest} Read ${checkedOn(gaps.map(item => item.source.checked))} on ${c.offer.vendor}’s ${pages.length > 1 ? 'pages' : 'page'}: ${listOf(pages.map(source => name(source.url)))}.`,
+    links: pages.map(source => ({ text: name(source.url), href: source.url })),
+  }
+}
 const capital = (text: string) => text.charAt(0).toUpperCase() + text.slice(1)

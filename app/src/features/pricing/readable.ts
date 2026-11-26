@@ -5,6 +5,7 @@ import { docGraph, docMarkdown } from './docs/doc.ts'
 import { ownPages } from './docs/registry.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { comparisonQuestions, faqPage } from './questions.ts'
+import { answerMarkdown } from './page/shape.ts'
 import { START } from './start.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
 import { billMath, claim, dayOf, formatCount, listOf, money, nightmail, nightmailBill, opening, shownSources, sourceNote, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
@@ -67,7 +68,7 @@ export function comparisonMarkdown(c: Comparison): string {
     ...c.without?.length ? [`Not in the box: ${listOf(c.without)}.`] : [],
     FIRST_STEP[c.focus],
     `## Questions`,
-    comparisonQuestions(c).map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n'),
+    comparisonQuestions(c).map(item => `### ${item.question}\n\n${answerMarkdown(item)}`).join('\n\n'),
     `## ${productName}’s pricing terms`,
     terms(),
     `## Sources`,
