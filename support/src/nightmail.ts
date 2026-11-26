@@ -38,7 +38,9 @@ export type ConversationEvidence = { kind: 'handoff'; token: string } | { kind: 
 export type Mode = 'member' | 'non_member' | 'pending_signin' | 'unverified';
 export type Verification = 'handoff' | 'dmarc' | 'signin' | 'none';
 /** A registration's answer (POST /v1/operator/support/conversations): Nightmail's decision about the conversation. */
-export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean };
+export type RegisteredConversation = { id: string; channel: 'chat' | 'email'; mode: Mode; verification: Verification; status: 'open' | 'ticketed' | 'closed'; workspaceId: string | null; contentShared: boolean; created: boolean;
+  /** Email: the message passed the sender checks a general answer needs (api/src/support-conversations.ts emailEvidence). */
+  generalAnswer?: boolean };
 export type ScopeWorkspace = { id: string; name: string; role: 'owner' | 'admin' | 'member' };
 /** GET /v1/support/scope: who the conversation is for and what it can read now, read at the start of every turn. */
 export type Scope = {
@@ -81,10 +83,19 @@ export interface SupportPlatform {
   mirrorState(conversationId: string, state: MirroredState): Promise<PlatformReply<InboxState>>;
   inboxState(conversationId: string): Promise<PlatformReply<InboxState>>;
   pullOutbox(conversationId?: string): Promise<PlatformReply<{ data: OutboxReply[] }>>;
+  /** Conversations whose sender asked, from the sign-in link, to be answered by email instead (one conversation's, after its wake). */
+  generalAnswers(conversationId?: string): Promise<PlatformReply<{ data: { conversationId: string; messageId: string; requestedAt: string }[] }>>;
   markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed'): Promise<PlatformReply<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>>;
   // One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, and each one sent.
   staffMail(): Promise<PlatformReply<{ data: StaffEmail[] }>>;
   staffMailSent(key: string, sent: { threadId: string; messageId: string }): Promise<PlatformReply<{ key: string; sentAt: string }>>;
+  /** A staff email failed to send this time, with its error's code: after three tries Glass shows it until it goes. */
+  staffMailFailed(key: string, failed: { code: string }): Promise<PlatformReply<{ key: string; attempts: number; failed: boolean; sent: boolean }>>;
+  /**
+   * Before an email to a support address is a customer's: whether it replies to a staff email. reply true: Nightmail made
+   * it a note on its conversation (a verified staff sender) or ignored it, and it is never a conversation here.
+   */
+  staffMailReply(messageId: string, team: string | null): Promise<PlatformReply<StaffReply>>;
   // The feedback triage agent (api/src/feedback-triage.ts, triage.ts): the reports due (claimed, each at most twice), and
   // for one report, by its conversation, a request's trace and the reports beside it (its own workspace only), and its one note.
   feedbackDue(limit: number): Promise<PlatformReply<{ data: FeedbackReport[] }>>;
@@ -92,6 +103,8 @@ export interface SupportPlatform {
   feedbackRelated(conversationId: string): Promise<PlatformReply>;
   feedbackTriage(conversationId: string, note: TriageNoteInput): Promise<PlatformReply<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>>;
 }
+/** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
+export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null };
 /** An agent feedback report to triage: Nightmail's facts, and its text as its filer wrote it (untrusted). */
 export type FeedbackReport = { conversationId: string; ticketId: string; filedAt: string; operation: string | null; requestId: string | null; text: string };
 /** The triage agent's one note: its summary and likely cause, a suggested classification, and duplicates by ticket ID. */

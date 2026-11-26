@@ -10,7 +10,7 @@ import { mutate, operatorActor, type OperatorIdentity } from './operator.js';
 import type { OperatorRole } from './operator-identity.js';
 import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID, FILE_AUDIENCE, signSupportToken, type InboxState, type OutboxReply } from './support-platform.js';
-import { EXPIRES_MS, isKind, KINDS, validToken } from './support-approvals.js';
+import { EXPIRES_MS, heldWhy, isKind, KINDS, validToken } from './support-approvals.js';
 
 // The support inbox (api/README.md "Support integration"): every support conversation, its transcript and the staff
 // replies to it. Internal, in two halves:
@@ -31,7 +31,8 @@ import { EXPIRES_MS, isKind, KINDS, validToken } from './support-approvals.js';
 // was mailed; the agent's, sent or held and why; staff replies and staff notes) and what happened besides
 // (support_events: a ticket filed, its priority, the agent paused and handed back, resolved, done), with the agent's
 // ticket brief above it. A note (kind 'note': a staff member's, or the feedback triage agent's on an agent feedback report,
-// author agent, src/feedback-triage.ts) is never delivered and changes no triage.
+// author agent, src/feedback-triage.ts) is never delivered and changes no triage; one that came by email (a staff member's
+// reply to a staff email, src/support-staff-mail.ts staffReply) keeps the address it came from.
 //
 // Needs you, the inbox's default view, is what only a person can move forward. A conversation needs staff when nobody
 // marked it done since anything new happened (a message, a failed delivery, more blocked work, a ticket, a pause) and at
@@ -86,7 +87,8 @@ const Message = z.object({
   id: z.string(), seq: z.number().int(), author: Author, kind: z.string().nullable(), text: z.string(),
   tools: z.array(z.object({ label: z.string(), ok: z.boolean() })).describe('The agent’s tool calls by label and outcome; never their content.'),
   attachments: z.array(z.string()).describe('Attachment IDs, held by the support platform.'),
-  staff: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('Who wrote a staff reply or note.'),
+  staff: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('Who wrote a staff reply or note (null for a note by the team address alone).'),
+  emailFrom: z.string().nullable().describe('A note that came by email (a reply to a staff email): the verified address it came from. Null otherwise.'),
   delivery: Delivery.nullable().describe('A staff reply: queued until the support platform delivers it, then sent (or failed). An agent answer: sent, or held (frozen before a staff reply, never sent). A note: null.'),
   heldReason: z.enum(HELD_REASONS).nullable().describe('A held agent answer: paused (staff took over after it was written), gate (the output check held it), access (the customer’s access shrank), closed (the conversation ended first), earlier (written by an earlier build).'),
   files: z.array(z.object({ id: z.string(), name: z.string().nullable(), type: z.string().nullable(), size: z.number().int().nullable() })).describe('The attachments (screenshots held by the support platform), with their names when it sent them.'),
@@ -114,7 +116,7 @@ const Item = z.object({
   blockedWork: z.number().int().describe('Work the support platform could not finish for this conversation.'),
   firstLine: z.string().nullable().describe('The first line of the customer’s first message: what a conversation without a subject is about.'),
   needsYou: z.object({
-    reasons: z.array(z.enum(TRIAGE_REASONS)).min(1).describe('ticket: its ticket is open; blocked: the support platform could not finish work for it; failed: its latest answer or staff reply failed to send; paused: the agent is paused and staff owe the next message; no_reply: the customer wrote and nothing was sent back for 10 minutes (a held draft or a failed reply reaches nobody).'),
+    reasons: z.array(z.enum(TRIAGE_REASONS)).min(1).describe('ticket: its ticket is open; blocked: the support platform could not finish work for it; failed: its latest answer or staff reply failed to send; paused: the agent is paused and staff owe the next message; no_reply: the customer wrote and nothing was sent back for 10 minutes (a held draft, a failed reply or a notice asking them to sign in first reaches nobody; an email whose sender failed the checks a general answer needs, or that the answering limits held, is owed a reply only once they claim it or ask from its sign-in link to be answered by email).'),
     urgent: z.boolean().describe('A P1 ticket, or a customer nobody else will answer.'),
     since: z.string().describe('When it started waiting on staff.'),
   }).nullable().describe('Why staff must handle it (the needs_you view), or null.'),
@@ -187,13 +189,32 @@ export const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN ni
     least(CASE WHEN why.ticket THEN coalesce(c.ticket_at, c.created_at) END, CASE WHEN why.paused THEN coalesce(waiting.at, c.paused_at) END,
       CASE WHEN why.failed THEN answer.created_at END, CASE WHEN why.blocked THEN coalesce(c.last_message_at, c.created_at) END, CASE WHEN why.no_reply THEN unanswered.at END) AS since) triage`;
 /**
- * No reply sent: since the customer's first message after the last thing that reached them (an answer or notice the
- * support platform sent, or a staff reply, queued or sent; a held draft or a failed reply reaches nobody). Over
- * NO_REPLY_AFTER, a conversation (not agent feedback, which has nobody to reply to) needs you for it, and Glass counts it.
+ * No reply sent: since the customer's first message owed a reply after the last thing that reached them. Reached: an
+ * answer the support platform sent, a notice that answers (system kind 'notice': busy, declined, a chat notice), or a
+ * staff reply, queued or sent. Never a held draft or a failed reply (they reach nobody), and never a notice that asks the
+ * person to do something before we answer (system kind 'waiting': the sign-in reply, the access-changed reply) or the
+ * support platform's record that it won't answer yet (kind 'unanswered'). Over NO_REPLY_AFTER, a conversation (not agent
+ * feedback, which has nobody to reply to) needs you for it, and Glass counts it.
  */
-const reached = sql`(o.kind IS DISTINCT FROM 'note' AND (o.author = 'system'
+export const reached = sql`(o.kind IS DISTINCT FROM 'note' AND ((o.author = 'system' AND o.kind = 'notice')
   OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed') OR (o.author = 'staff' AND o.delivery IN ('queued','sent'))))`;
-const unansweredSince = sql`(SELECT min(m.created_at) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
+/**
+ * When a customer message (`m`) starts to be owed a reply: when it arrived, except an email support answers only once its
+ * sender claims it (signs in and confirms they wrote it), or asks from the sign-in link to be answered by email instead
+ * (the release, releaseGeneralAnswer in support-conversations.ts), and doesn't answer in general meanwhile. That is one
+ * whose sender failed the checks a general answer needs (support_email_signins.general_answer: forged or failed
+ * authentication, sent through Nightmail itself, a replay), or whose general answer the support platform's answering
+ * limits held (its 'unanswered' entry for that email). Such an email is owed one from its claim or from the
+ * conversation's release (when it arrived by then), whichever came first, and never before: spam or forged mail to a
+ * support address never wakes staff. Mail the support platform never takes (automatic, looping, over its inbound limits)
+ * never becomes a customer message.
+ */
+const owedAt = sql`(SELECT CASE WHEN si.message_id IS NULL OR (si.general_answer AND NOT EXISTS (SELECT FROM support_messages u WHERE u.conversation_id = m.conversation_id
+      AND u.author = 'system' AND u.kind = 'unanswered' AND u.source_message_id = m.source_message_id)) THEN m.created_at
+    ELSE least(si.signed_in_at, (SELECT CASE WHEN min(r.general_answer_requested_at) >= m.created_at THEN min(r.general_answer_requested_at) END
+      FROM support_email_signins r WHERE r.conversation_id = m.conversation_id)) END
+  FROM (SELECT 1) one LEFT JOIN support_email_signins si ON si.conversation_id = m.conversation_id AND si.message_id = m.source_message_id)`;
+const unansweredSince = sql`(SELECT min(${owedAt}) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
   AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND ${reached}), 0))`;
 const NO_REPLY_AFTER = sql`interval '10 minutes'`;
 const noReply = (since: SQL) => sql`(c.channel <> 'agent_feedback' AND coalesce(${since} < now() - ${NO_REPLY_AFTER}, false))`;
@@ -216,7 +237,7 @@ export const TICKETS_APART = ['bug', 'billing', 'abuse_report', 'privacy', 'lega
  * - without_human: of the answerable, those that ended (closed, marked done, or quiet for 24 hours after a sent agent
  *   answer) with no staff reply, no ticket for a person (one the agent filed, other than a feature request it logged,
  *   or one Nightmail opened for staff: type staff, now or on the timeline), no held answer, no failed send and never
- *   "no reply sent" (a customer message nothing reached within NO_REPLY_AFTER).
+ *   "no reply sent" (a customer message nothing reached within NO_REPLY_AFTER of being owed a reply).
  * Nothing here says an answer was right: only that no person had to step in.
  */
 export const supportWeek = (cap: number) => sql`(SELECT json_build_object('answerable',count(*) FILTER (WHERE x.n <= ${cap} AND NOT x.apart),
@@ -228,8 +249,8 @@ export const supportWeek = (cap: number) => sql`(SELECT json_build_object('answe
         OR EXISTS (SELECT FROM support_events e WHERE e.conversation_id = c.id AND e.kind = 'ticket' AND e.details->>'type' = 'staff')
         OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND ((m.author = 'staff' AND m.kind IS DISTINCT FROM 'note')
           OR (m.author = 'agent' AND (m.kind = 'held' OR m.delivery = 'held')) OR m.delivery = 'failed'))
-        OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.created_at < now() - ${NO_REPLY_AFTER}
-          AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = c.id AND o.seq > m.seq AND o.created_at <= m.created_at + ${NO_REPLY_AFTER} AND ${reached})) AS human
+        OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' AND ${owedAt} < now() - ${NO_REPLY_AFTER}
+          AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = c.id AND o.seq > m.seq AND o.created_at <= ${owedAt} + ${NO_REPLY_AFTER} AND ${reached})) AS human
     FROM (SELECT * FROM support_conversations c WHERE c.created_at >= now() - interval '7 days' AND c.channel <> 'agent_feedback' ORDER BY c.created_at DESC LIMIT ${cap + 1}) c
     LEFT JOIN LATERAL (SELECT m.author, m.kind, m.delivery, m.created_at FROM support_messages m
       WHERE m.conversation_id = c.id AND m.author <> 'system' AND m.kind IS DISTINCT FROM 'note' ORDER BY m.seq DESC LIMIT 1) last ON true) x)`;
@@ -267,10 +288,10 @@ type EmailRow = { id: string; subject: string; from_address: string; from_name: 
   received_at: string; text: string | null; html_text: string | null; text_length: number; body_truncated: boolean; has_html: boolean;
   attachments: { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }[]; clean: boolean };
 type MessageRow = { id: string; seq: number; author: z.infer<typeof Author>; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[];
-  staff_user_id: string | null; staff_name: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
+  staff_user_id: string | null; staff_name: string | null; email_from: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
   email?: EmailRow | null; draft_outcome: 'sent' | 'edited' | 'replaced' | 'discarded' | null; draft_by: string | null; draft_by_name: string | null; draft_at: string | null; draft_reply: string | null;
   delivered_at: string | null; created_at: string };
-const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, delivery,
+const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, email_from, delivery,
   held_reason, files, draft_outcome, draft_by, (SELECT name FROM nightmail_users WHERE id = draft_by) AS draft_by_name, draft_at::text AS draft_at, draft_reply,
   delivered_at::text AS delivered_at, created_at::text AS created_at`;
 /** The stored email behind a customer message (`m`), for the conversation page: its text up to EMAIL_TEXT_LIMIT and its attachments' metadata. */
@@ -291,7 +312,7 @@ function email(row: EmailRow): z.infer<typeof EmailSource> {
 const message = (m: MessageRow): z.infer<typeof Message> => {
   const named = new Map((m.files ?? []).map(f => [f.id, f]));
   return { id: m.id, seq: m.seq, author: m.author, kind: m.kind, text: m.text, tools: m.tools, attachments: m.attachments,
-    staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name } : null, delivery: m.delivery, heldReason: m.held_reason ?? null,
+    staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name } : null, emailFrom: m.email_from ?? null, delivery: m.delivery, heldReason: m.held_reason ?? null,
     files: m.attachments.map(id => { const f = named.get(id); return { id, name: f?.name ?? null, type: f?.type ?? null, size: f?.size ?? null }; }),
     email: m.email ? email(m.email) : null, deliveredAt: isoTime(m.delivered_at), at: isoTime(m.created_at)!,
     draft: m.draft_outcome && m.draft_by ? { outcome: m.draft_outcome, by: { userId: m.draft_by, name: m.draft_by_name }, at: isoTime(m.draft_at)!, replyId: m.draft_reply } : null };
@@ -358,7 +379,7 @@ export function registerSupportInbox(app: App) {
     tools: z.array(Tool).max(50).default([]).describe('The agent’s tool calls: labels and outcomes only.'),
     attachments: z.array(z.string().regex(ATTACHMENT_ID)).max(20).default([]),
     files: z.array(File).max(20).optional().describe('The attachments’ names, types and sizes, beside their IDs.'),
-    source: z.string().max(100).optional().describe('A customer email only: the message it came from at a support address. Kept only when it is one; anything else is dropped, never refused, so the mirror never stalls on it.'),
+    source: z.string().max(100).optional().describe('A customer email: the message it came from at a support address; or the support platform\u2019s record that it won\u2019t answer that email until its sender claims it (system, kind unanswered). Kept only when it is one; anything else is dropped, never refused, so the mirror never stalls on it.'),
     delivery: z.enum(['sent', 'failed', 'held']).optional().describe('An agent answer only: sent, failed, or held (frozen before a staff reply and never sent).'),
     reason: z.enum(HELD_REASONS).optional().describe('A held agent answer only: why it was not sent.'),
     at: z.iso.datetime({ offset: true }).optional().describe('When it was written; default now, at most 5 minutes ahead.'),
@@ -372,7 +393,7 @@ export function registerSupportInbox(app: App) {
     messages.forEach((m, i) => {
       if (m.delivery && m.author !== 'agent') throw new ApiError(422, 'VALIDATION_FAILED', 'Only an agent answer has a delivery.', `messages.${i}.delivery`);
       if (m.reason && m.delivery !== 'held') throw new ApiError(422, 'VALIDATION_FAILED', 'Only a held answer has a reason.', `messages.${i}.reason`);
-      if (m.source && m.author !== 'customer') throw new ApiError(422, 'VALIDATION_FAILED', 'Only a customer message comes from an email.', `messages.${i}.source`);
+      if (m.source && m.author !== 'customer' && !(m.author === 'system' && m.kind === 'unanswered')) throw new ApiError(422, 'VALIDATION_FAILED', 'Only a customer message comes from an email, or names one the support platform won\u2019t answer yet.', `messages.${i}.source`);
       if (m.kind === 'note') throw new ApiError(422, 'VALIDATION_FAILED', 'A note comes from staff or the feedback triage agent, never from a mirror.', `messages.${i}.kind`);
       if (m.at && Date.parse(m.at) > Date.now() + 5 * 60_000) throw new ApiError(422, 'VALIDATION_FAILED', 'A message cannot be written in the future.', `messages.${i}.at`);
       if (messages.findIndex(other => other.id === m.id) !== i) throw new ApiError(422, 'VALIDATION_FAILED', 'Each message appears once.', `messages.${i}.id`);
@@ -551,7 +572,7 @@ export function registerSupportInbox(app: App) {
       reply_address: string | null; reply_verified: boolean }>(sql`WITH conv AS (SELECT * FROM support_conversations WHERE id = ${id}), logged AS (${viewed})
       SELECT (SELECT row_to_json(i) FROM (SELECT ${itemColumns} FROM ${itemFrom(operator.userId)} WHERE c.id = conv.id) i) AS item,
         conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id) AS page,
-        (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.delivery,
+        (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.email_from, m.delivery,
           m.held_reason, m.files, CASE WHEN m.source_message_id IS NOT NULL THEN ${emailOf} END AS email,
           m.draft_outcome, m.draft_by, (SELECT name FROM nightmail_users WHERE id = m.draft_by) AS draft_by_name, m.draft_at::text AS draft_at, m.draft_reply,
           m.delivered_at::text AS delivered_at, m.created_at::text AS created_at FROM support_messages m LEFT JOIN nightmail_users su ON su.id = m.staff_user_id
@@ -690,14 +711,17 @@ export function registerSupportInbox(app: App) {
     await tx.execute(sql`UPDATE support_messages SET draft_outcome = ${fresh ? 'replaced' : unchanged ? 'sent' : 'edited'}, draft_by = ${operator.userId}, draft_at = now(), draft_reply = ${queued.id} WHERE id = ${messageId}`);
     return queued;
   }
-  /** What sending a held answer as written would send, and why it can't be sent, if it can't: read only, for a confirm step. */
+  /**
+   * What sending a held answer as written would send, why it was held (support-approvals.ts HELD_WHY: our words for the
+   * stored reason, never blank), and why it can't be sent, if it can't: read only, for a confirm step.
+   */
   async function draftPreview(db: DbExecutor, id: string, messageId: string, channel: string) {
     try {
       const draft = await heldDraft(db, id, messageId, false), written = draft.text.trim(), fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
-      return { text: channel === 'email' ? plainText(written) : written, blocked: fresh ? `${fresh}, so it can’t be sent. Write a fresh reply.`
+      return { text: channel === 'email' ? plainText(written) : written, held: heldWhy(draft.reason), blocked: fresh ? `${fresh}, so it can’t be sent. Write a fresh reply.`
         : draft.answered ? 'A newer reply already reached the customer, so this held answer can’t be sent as written.' : null };
     } catch (error) {
-      if (error instanceof ApiError) return { text: null, blocked: error.code === 'SUPPORT_DRAFT_DECIDED' ? error.message : 'This held answer is gone.' };
+      if (error instanceof ApiError) return { text: null, held: null, blocked: error.code === 'SUPPORT_DRAFT_DECIDED' ? error.message : 'This held answer is gone.' };
       throw error;
     }
   }
@@ -877,7 +901,8 @@ export function registerSupportInbox(app: App) {
     state: z.enum(['proposed', 'approved', 'declined', 'failed', 'expired']), createdAt: z.string(), expiresAt: z.string(), decidedAt: z.string().nullable(),
     decidedBy: z.object({ userId: z.string(), name: z.string().nullable() }).nullable(), result: z.record(z.string(), z.unknown()).nullable(),
     change: z.object({ now: z.string(), after: z.string() }).nullable().describe('A limit or balance it changes: its value now, read when this is opened, and after approving.'),
-    preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
+    preview: z.object({ text: z.string().nullable().describe('Exactly what would be sent.'), held: z.string().nullable().describe('Why the support platform held it, in our words for its stored reason (Held by the output check, Held by a staff pause, Reason not recorded…); null once it is gone.'),
+      blocked: z.string().nullable().describe('Why it can\u2019t be, now.') }).nullable()
       .describe('Send the held answer: the answer as it would go, and why it can\u2019t go, when it can\u2019t (it needs a fresh reply, a newer reply reached them, or it was decided).'),
   }).openapi('SupportApproval');
   type ApprovalRow = { id: string; conversation_id: string; kind: string; payload: Record<string, unknown>; proposed_by: 'nightmail' | 'agent'; reason: string; state: 'proposed' | 'approved' | 'declined' | 'failed';

@@ -310,9 +310,12 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async mirrorState(conversationId: string, state: Parameters<SupportPlatformApi['mirrorState']>[1]) { return (await this.platform()).mirrorState(conversationId, state); }
   async inboxState(conversationId: string) { return (await this.platform()).inboxState(conversationId); }
   async pullOutbox(conversationId?: string) { return (await this.platform()).pullOutbox(conversationId); }
+  async generalAnswers(conversationId?: string) { return (await this.platform()).generalAnswers(conversationId); }
   async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
   async staffMail() { return (await this.platform()).staffMail(); }
   async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
+  async staffMailFailed(key: string, failed: { code: string }) { return (await this.platform()).staffMailFailed(key, failed); }
+  async staffMailReply(messageId: string, team: string | null) { return (await this.platform()).staffMailReply(messageId, team); }
   async feedbackDue(limit: number) { return (await this.platform()).feedbackDue(limit); }
   async feedbackRequest(conversationId: string, requestId: string) { return (await this.platform()).feedbackRequest(conversationId, requestId); }
   async feedbackRelated(conversationId: string) { return (await this.platform()).feedbackRelated(conversationId); }
