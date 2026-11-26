@@ -43,8 +43,8 @@ export interface McpOperation {
   readonly receivingAdmin: boolean;
   /** A change that outlives its credential (lastingRoute): never a temporary agent token's. */
   readonly lasting: boolean;
-  /** Only a signed-in dashboard session may call it; never listed to an MCP connection. */
-  readonly dashboardOnly: boolean;
+  /** Self-hosted only: Hosted always refuses with 409 CONNECTION_MANAGED_REGION. */
+  readonly selfHostedOnly: boolean;
   /** Members, invitations and Activity (memberAdminRoute): an owner's or admin's own sign-in, never a key or agent token. */
   readonly memberAdmin: boolean;
   /** What the tool returns in place of the REST response, where they differ (INVITATIONS). */
@@ -67,8 +67,12 @@ const INVITATIONS: Record<string, { output: Tool['inputSchema']; view?: (respons
 // Money moves only from a signed-in owner or admin: charging the saved card, auto-recharge and the payment method are
 // never agent calls (an agent may create a top-up link that a person opens and pays: createBillingTopUpLink).
 export const DASHBOARD_MONEY = ['createBillingTopUp', 'updateBillingAutoRecharge', 'createBillingCardSetup', 'deleteBillingPaymentMethod'] as const;
+// Only a signed-in dashboard session manages connected agents or binds an MCP connection's workspace.
+const DASHBOARD_ONLY = ['bindMcpConnection', 'listAgents', 'revokeAgent'] as const;
 // getRuleVersion is the dashboard's long poll for an agent's saves; an agent reads the version from getRules.
-const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'receiveCloudFormationSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', ...DASHBOARD_MONEY]);
+const EXCLUDED = new Set<string>(['receiveSesSnsEvent', 'receiveCloudFormationSnsEvent', 'revealWebhookSecret', 'downloadInboundAttachment', 'getRuleVersion', ...DASHBOARD_MONEY, ...DASHBOARD_ONLY]);
+// Self-hosted SES region writes: Hosted always refuses these with 409 CONNECTION_MANAGED_REGION.
+const SELF_HOSTED_ONLY = new Set(['configureRegion', 'provisionRegion', 'configureRegionAutoValidation']);
 // POST operations that change nothing: no confirm argument, read-only hint, read permission.
 const READ_ONLY_POSTS = new Set(['testRouting', 'testRules', 'checkRule', 'queryAudience', 'previewSegment', 'previewEmail', 'checkEmail']);
 // Writes whose calls need no confirm argument. Access to every operation is decided by its
@@ -91,7 +95,6 @@ export const ALWAYS_LISTED = new Set(['sendFeedback']);
 const MANAGE_LEVEL_READS = new Set(['listApiKeys', 'listApiKeyChanges', 'listAgentTokens', 'listAppPasswords', 'listBillingLedger', 'listBillingPayments', 'getBillingPayment', 'listActivity']);
 // No permission check in REST: GET /v1/me reads c.get('actor'), so a send-only grant may call it.
 const ANY_AUTHENTICATED = new Set(['getCurrentIdentity']);
-const DASHBOARD_ONLY = new Set(['bindMcpConnection', 'listAgents', 'revokeAgent']);
 const bytes = (value: unknown) => new TextEncoder().encode(JSON.stringify(value)).byteLength;
 function invalid(message: string): never { throw new Error(`Invalid MCP catalog: ${message}`); }
 function object(value: unknown): value is ObjectValue { return value !== null && typeof value === 'object' && !Array.isArray(value); }
@@ -382,7 +385,7 @@ export function buildMcpCatalog(app: App): ReadonlyMap<string, McpOperation> {
       const ownerOnly = receiving || ownerRoute(method, path);
       operations.set(name, Object.freeze({ tool, method, path, queryParameters, write, confirm, apiArgs, pollPage, toolset, receiving, inbound: receiving || toolset === 'inboxes', inbox: INBOX_PERMISSIONS[name], untrustedContent: UNTRUSTED_READS.has(name), permission, ownerOnly, mailbox,
         receivingConsent: receivingConsentRoute(path), unrestricted: unrestrictedRoute(path), keyAdmin: keyAdminRoute(method, path), agentTokenMint: agentTokenMintRoute(method, path),
-        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), dashboardOnly: DASHBOARD_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), view: invitations?.view, requires: permissionOf(name), validate: validator(input), validateOutput }));
+        receivingAdmin: receivingAdminRoute(path), lasting: lastingRoute(method, path), selfHostedOnly: SELF_HOSTED_ONLY.has(name), memberAdmin: memberAdminRoute(method, path), view: invitations?.view, requires: permissionOf(name), validate: validator(input), validateOutput }));
     }
   }
   // The sole non-REST primitive is a constrained long poll of the inbox message operation.
@@ -425,6 +428,9 @@ export const HUMAN_STEPS: Record<string, string> = {
   inviteWorkspaceMember: 'The dashboard’s older name for createWorkspaceInvitation, which agents use (settings · invite).',
   downloadInboundAttachment: 'The link webhook payloads carry: it redirects to the file. Agents read the same link with getInboundAttachment (attachments · getInbound), which answers the same credentials.',
   revealWebhookSecret: 'Human step: a signing secret is read back only in the dashboard or with an API key a person made, and every read is recorded. Agents can rotate it (webhooks · rotateSecret).',
+  bindMcpConnection: 'Human step: a signed-in person binds a connected MCP client to a default workspace in the dashboard. Agents set their own default with setDefaultWorkspace.',
+  listAgents: 'Human step: lists connected agents and MCP sign-ins for a signed-in owner or admin in the dashboard.',
+  revokeAgent: 'Human step: a signed-in owner or admin revokes a connected agent or MCP sign-in in the dashboard.',
 };
 /** Internal routes (Nightmail operators and support grants): never tools, and not listed in the customer coverage document. */
 export const INTERNAL_PATH = /^\/v1\/(?:support|operator)(?:\/|$)/;

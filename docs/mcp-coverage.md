@@ -12,9 +12,9 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 
 | Code Mode operation | Plain tool · action · toolset, or why it is a human step |
 |---|---|
-| `bindMcpConnection` | `connections` · `bind` · admin |
-| `listAgents` | `connections` · `agents` · admin |
-| `revokeAgent` | `connections` · `revokeAgent` · admin |
+| `bindMcpConnection` | Human step: a signed-in person binds a connected MCP client to a default workspace in the dashboard. Agents set their own default with setDefaultWorkspace. |
+| `listAgents` | Human step: lists connected agents and MCP sign-ins for a signed-in owner or admin in the dashboard. |
+| `revokeAgent` | Human step: a signed-in owner or admin revokes a connected agent or MCP sign-in in the dashboard. |
 | `getCurrentIdentity` | `settings` · `identity` · admin |
 | `createAgentToken` | `keys` · `createToken` · admin |
 | `listAgentTokens` | `keys` · `listTokens` · admin |
