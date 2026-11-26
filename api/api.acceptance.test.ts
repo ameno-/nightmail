@@ -20263,7 +20263,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.match(first.headers.get('cache-control') ?? '', /no-store/);
     assert.equal(first.headers.get('referrer-policy'), 'no-referrer');
     assert.match(first.headers.get('content-security-policy') ?? '', /form-action 'self'/);
-    assert.ok(/<form method="post">/.test(prompt) && /name="confirm" value="footer"/.test(prompt), 'A footer GET must show a confirmation form.');
+    // The live check's predicate (scripts/e2e.ts unsubscribe): a POST form that carries the confirmation.
+    assert.ok(/<form method="post"[^>]*>(?:(?!<\/form>)[\s\S])*name="confirm" value="footer"/.test(prompt), 'A footer GET must show a confirmation form.');
     assert.ok(!prompt.includes(email), 'Hosted confirmation must not disclose the recipient address.');
     assert.equal(ok(await http('GET', path)), prompt);
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'subscribed', 'A footer GET (or a link scanner) must not unsubscribe.');
@@ -20436,6 +20437,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const escaped = (text: string) => text.replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
     const checked = (page: string, id: string) => new RegExp(`name="topic" value="${id}" checked`).test(page);
     const offered = (page: string, id: string) => page.includes(`value="${id}"`);
+    // The live check's predicate (scripts/e2e.ts unsubscribe), kept the same here: a POST form that carries the confirmation.
+    const confirmationForm = (page: string) => /<form method="post"[^>]*>(?:(?!<\/form>)[\s\S])*name="confirm" value="footer"/.test(page);
 
     // Ana's link from mail about the news topic: the topic's own button, the topics she gets to clear, and no address. The
     // opt-in topic she never joined isn't offered. No script: every action is a plain POST form.
@@ -20476,12 +20479,16 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     const final = await recorded(ana);
     assert.match(await post(anas, save([news.id, latest.id], [news.id, latest.id])), /Nothing changed/);
     assert.deepEqual(await recorded(ana), final);
-    // Ben's link from mail without a topic: his own topics (not Ana's), no opt-in topic, and its everything button is today's
-    // confirmation.
+    // Ben's link from mail without a topic, in a workspace with topics: what the live check proves of every deployment
+    // (scripts/e2e.ts unsubscribe), with its predicate: a GET shows a POST form carrying the confirmation and changes nothing,
+    // then the mailbox's one-click (a POST with no body) records the opt-out. The page shows his own topics, not Ana's, and
+    // no opt-in topic.
     const bens = await linkOf(ben.email);
     const his = ok(await http('GET', bens));
-    assert.ok(checked(his, news.id) && !offered(his, events.id) && !his.includes('Unsubscribe from ' + escaped(news.name)) && his.includes('name="confirm" value="footer"'));
-    assert.match(await post(bens, 'confirm=footer'), /You’re unsubscribed/);
+    assert.ok(confirmationForm(his), 'GET must display a confirmation form');
+    assert.equal(ok(await http('GET', `/v1/contacts/${ben.id}`, key.secret)).marketingConsent, 'subscribed', 'A GET changes nothing.');
+    assert.ok(checked(his, news.id) && !offered(his, events.id) && !his.includes('Unsubscribe from ' + escaped(news.name)));
+    assert.match(ok(await http('POST', bens)), /unsubscribed/, 'one-click did not confirm opt-out');
     assert.deepEqual([ok(await http('GET', `/v1/contacts/${ben.id}`, key.secret)).marketingConsent, await states(ben, news.id, events.id)], ['unsubscribed', [[news.id, true], [events.id, false]]]);
     // The workspace itself still sets a topic with its own credentials: the API is unchanged.
     ok(await consent(key.secret, ben.id, 'subscribed', { topicId: events.id }));
