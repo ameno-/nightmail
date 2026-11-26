@@ -190,9 +190,11 @@ function useAgentPrompt() {
 // connects with a device code.
 function DocsAgentPrompt() {
   const { prompt, setup, copy } = useAgentPrompt()
+  // Signed out there is no workspace: the prompt has this API's address and a device sign-in, nothing of an account.
+  const signedIn = Boolean(useSession()?.identity)
   return <section id="agent-prompt" className="docs-section docs-agent-prompt" aria-labelledby="docs-agent-prompt" aria-busy={prompt === null || undefined}>
     <h2 id="docs-agent-prompt">Set up with your agent</h2>
-    <p className="muted">Paste this prompt into your coding agent. It has this workspace’s real values; the API key stays in your environment.</p>
+    <p className="muted">{signedIn ? 'Paste this prompt into your coding agent. It has this workspace’s real values; the API key stays in your environment.' : 'Paste this prompt into your coding agent. It has this API’s address, and the key your agent gets stays in your environment.'}</p>
     <AgentPromptPanel value={setup && copy ? copy : prompt ?? ''} preview={prompt ?? ''} pending={prompt === null} setup={setup} line="It connects with a device code: an owner or admin approves it." />
   </section>
 }
