@@ -4,7 +4,7 @@ import { FactoryHome } from './factory-home'
 import { afterFirstPicture, shown, UPRIGHT } from './first-picture'
 
 /** What the page's button does: signs a visitor in (Get started), or opens the dashboard for someone signed in. */
-export type HomeStart = { signedIn: true } | { signedIn: false; onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean }
+export type HomeStart = { signedIn: true } | { signedIn: false; onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean; waitUntil: number | null }
 export type HomeProps = { start: HomeStart; notice?: ReactNode }
 
 // Which homepage a window gets (first-picture.ts: by its shape), decided before the first paint and again as the window

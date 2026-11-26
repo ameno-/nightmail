@@ -4,6 +4,7 @@ import { Button, Dialog, SkeletonText } from '../../components/ui'
 import { useSession } from '../../data/context'
 import { supportApi, type SupportPendingEmail } from '../../data/support'
 import { ApiError } from '../../data/types'
+import { countdown, useSecondsLeft } from '../../lib/countdown'
 import { date } from '../../lib/format'
 import { productName } from '../../../../api/src/brand'
 import './continue.css'
@@ -123,6 +124,8 @@ export function SupportContinuePage() {
     finally { setAnswering(false) }
   }
   useEffect(() => { if (state === 'ready' && confirmOnce.current) { confirmOnce.current = false; void act() } }, [state])
+  // A sign-in start refused at the cap (data/context.tsx holdSignIn): its button waits it out, counting down.
+  const wait = useSecondsLeft(session?.signInWaitUntil), held = wait > 0 && (state === 'signin' || state === 'link')
   const copy = COPY[state], shown = email && (state === 'ready' || state === 'claimed' || state === 'failed')
   const text = typeof copy.text === 'string' ? copy.text : copy.text(address ?? 'your address')
   return <main className="support-continue">
@@ -130,7 +133,7 @@ export function SupportContinuePage() {
       description={<span className="support-continue__text">{text}</span>}
       footer={<>
         <Button className="support-continue__instead" data-hidden={copy.instead ? undefined : ''} disabled={working} loading={answering} onClick={() => void answer()}>Answer me by email instead</Button>
-        <Button variant="primary" className="support-continue__action" disabled={answering} loading={working || state === 'loading' || (state === 'link' && !!session?.signingIn)} onClick={() => void act()}>{copy.action}</Button>
+        <Button variant="primary" className="support-continue__action" disabled={answering || held} loading={working || state === 'loading' || (state === 'link' && !!session?.signingIn)} onClick={() => void act()}>{held ? `Try again in ${countdown(wait)}` : copy.action}</Button>
       </>}>
       <div className="support-continue__email" data-empty={!shown && state !== 'loading' ? '' : undefined} data-more={copy.more && !shown && state !== 'loading' ? '' : undefined}>
         {state === 'loading' ? <><SkeletonText width="80%" /><SkeletonText width="92%" /><SkeletonText width="65%" /><SkeletonText width="50%" /></>

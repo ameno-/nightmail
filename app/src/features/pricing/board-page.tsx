@@ -18,7 +18,7 @@ export { BoardEnd } from './scene'
 export function PriceScene({ comparison, frame }: { comparison?: Comparison | null; frame?: string | null }) {
   const session = useSession()
   const start: HomeStart = session?.identity ? { signedIn: true }
-    : { signedIn: false, onSignIn: () => session?.signIn(comparison?.focus), onSignInIntent: event => session?.signInIntent(event, comparison?.focus), busy: session?.signingIn ?? false }
+    : { signedIn: false, onSignIn: () => session?.signIn(comparison?.focus), onSignInIntent: event => session?.signInIntent(event, comparison?.focus), busy: session?.signingIn ?? false, waitUntil: session?.signInWaitUntil ?? null }
   const full = useSignupsFull(!start.signedIn)
   const way: Start = { signedIn: start.signedIn, full, button: className => <StartButton start={start} className={className} /> }
   return <Scene comparison={comparison} start={way} frame={frame} />

@@ -2007,7 +2007,18 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   // Asking for a link has its own allowance per browser: one that used up its pending sign-ins (production saw a retrier
   // refused with AUTH_STATE_LIMIT) still gets one.
   for (let i = 0; i < 8; i++) await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'});
-  assert.equal((await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'})).status,429);
+  // Refused, a start says when this network's oldest pending sign-in ends (Retry-After and the error's details), so the
+  // page can hold its buttons that long; the wait shrinks as that slot nears its end, and once it ends a start goes through.
+  const startAt = async () => { const r = await request('/api/auth/sign-in/account','POST','',{callbackURL:origin+'/'}); if (r.status !== 429) return r.status; const e = (await r.json() as { error: { code: string; details: { retryAfterSeconds: number }[] } }).error; assert.deepEqual([e.code,e.details],['AUTH_STATE_LIMIT',[{retryAfterSeconds:Number(r.headers.get('retry-after'))}]]); return e.details[0]!.retryAfterSeconds; };
+  const network = createHash('sha256').update(ip()).digest('hex'), oldestSlot = `(SELECT slot FROM auth_state_slots WHERE peer=$1 ORDER BY expires_at LIMIT 1)`;
+  const firstWait = await startAt();
+  assert.ok(typeof firstWait === 'number' && firstWait > 0 && firstWait <= 660, `${firstWait}`);
+  await db.query(`UPDATE auth_state_slots SET expires_at=clock_timestamp()+interval '30 seconds' WHERE peer=$1 AND slot=${oldestSlot}`,[network]);
+  const nearEnd = await startAt();
+  assert.ok(typeof nearEnd === 'number' && nearEnd > 0 && nearEnd <= 30, `${nearEnd}`);
+  await db.query(`UPDATE auth_state_slots SET expires_at=clock_timestamp()-interval '1 second' WHERE peer=$1 AND slot=${oldestSlot}`,[network]);
+  const [through, refusedAgain] = [await startAt(), await startAt()];
+  assert.deepEqual([through, typeof refusedAgain], [200, 'number'], 'One start in the freed slot, then refused again.');
   assert.equal((await places()).open,1);
   assert.deepEqual(await ask(unverified.email),[202,{requested:true}]);
   const [openLink] = await links(unverified);
@@ -2025,10 +2036,10 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   // An address the API refuses names its field (never its value), and asking past the allowance says how long to wait:
   // when this browser's oldest pending sign-in ends, as Retry-After and in the error's details.
   const invalid = await request('/api/auth/sign-in/link','POST','',{email:'name@example'});
-  assert.deepEqual([invalid.status,(await invalid.json()).error.field],[422,'email']);
+  assert.deepEqual([invalid.status,(await invalid.json() as { error: { field?: string } }).error.field],[422,'email']);
   let capped: Response | undefined;
   for (let i = 0; i < 9 && !capped; i++) { const asked = await request('/api/auth/sign-in/link','POST','',{email:full2.email}); if (asked.status === 429) capped = asked; else assert.equal(asked.status,202); }
-  const wait = Number(capped?.headers.get('retry-after')), refusal = (await capped!.json()).error;
+  const wait = Number(capped?.headers.get('retry-after')), refusal = (await capped!.json() as { error: { code: string; details: unknown; message: string } }).error;
   assert.ok(wait >= 1 && wait <= 660, `Retry-After ${wait}`);
   assert.deepEqual([refusal.code,refusal.details,refusal.message],['AUTH_STATE_LIMIT',[{retryAfterSeconds:wait}],`Too many pending sign-ins. Try again in ${Math.ceil(wait/60)} minute${Math.ceil(wait/60) === 1 ? '' : 's'}.`]);
 });

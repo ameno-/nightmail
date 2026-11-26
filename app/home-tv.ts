@@ -89,7 +89,7 @@ function homeShell(): Plugin {
       // data-member (a browser that has had a dashboard) picks the one shown.
       const { module: tv } = await runnerImport<typeof import('./src/features/home/tv/tv.tsx')>(TV, { root, configFile: false, logLevel: 'error', plugins: [renderOnly] })
       const [{ createElement }, { renderToStaticMarkup }, { MemoryRouter }] = await Promise.all([import('react'), import('react-dom/server'), import('react-router')])
-      const visitor: HomeStart = { signedIn: false, onSignIn() {}, onSignInIntent() {}, busy: false }
+      const visitor: HomeStart = { signedIn: false, onSignIn() {}, onSignInIntent() {}, busy: false, waitUntil: null }
       let shell = renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/'] }, createElement(tv.TvHome, { start: visitor })))
         .replace(/^(?:<link rel="preload"[^>]*\/>)+/, '').replace(/\/src\/features\/home\/([\w./-]+\.(?:webp|avif|png|jpg))/g, (_match, path: string) => url(path))
       const swap = (pattern: RegExp, to: string | ((...found: string[]) => string), count = 1) => {

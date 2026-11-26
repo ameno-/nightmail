@@ -1,4 +1,4 @@
-import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type FormEvent, type ReactNode } from 'react'
+import { createContext, Suspense, useContext, useRef, useState, useMemo, useEffect, type ComponentProps, type FormEvent, type ReactNode } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { ApiError, type Identity, type Api, type WorkspaceInvitationPreview, errorText, tooBroadCode } from './types'
@@ -9,12 +9,14 @@ import { forgetInboxDrafts } from './support-inbox'
 import { regionCatalogKey } from './regions'
 import { dashboardLikelyReady, identityOnboardingStage, rememberDashboardReady, useDomainStep, onboardingStage } from './onboarding'
 import { clearLandingFocus, noteLandingLocation, rememberLandingFocus } from './landing-focus'
-import { Alert, Button, Field, Input, PageHeader, ToastScope, useToast } from '../components/ui'
+import { Alert, Button, Field, Icon, Input, PageHeader, ToastScope, useToast } from '../components/ui'
+import { LoaderCircle } from 'lucide-react'
 import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import { validEmail } from '../lib/domain'
+import { countdown, useSecondsLeft, waitSeconds } from '../lib/countdown'
 import { queries, type QueryDef } from './queries'
 import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
@@ -41,7 +43,10 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
+  /** Until when (epoch ms) a refused start (429 AUTH_STATE_LIMIT) holds every sign-in button, which counts it down. */
+  signInWaitUntil: number | null
   notice: string | null; dismissNotice: () => void }
+const SIGN_IN_WAIT_KEY = 'nightmail.sign-in-wait'
 const homeChunk = chunk(() => import('../features/home'))
 export const loadHome = homeChunk.preload
 export const HomePage = homeChunk.page(m => m.HomePage)
@@ -197,7 +202,7 @@ function waitlistAddress() {
 // waits, every place taken, and ?position=N says where in the order a raise lets the waitlist in (1 is next); someone
 // told they're in who signed in with another address asks for a link to that one. ?link=expired: the sign-in link it
 // followed was used or ran out.
-function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown; onSwitch: () => void }) {
+function WaitlistPage({ busy, error, waitUntil, onSwitch }: { busy: boolean; error: unknown; waitUntil: number | null; onSwitch: () => void }) {
   const [email] = useState(waitlistAddress), [search] = useState(() => new URLSearchParams(window.location.search))
   const place = search.get('place'), ready = (place === 'held' || place === 'ready') && email !== null, expired = search.get('link') === 'expired'
   const position = /^[1-9]\d{0,6}$/.test(search.get('position') ?? '') ? Number(search.get('position')) : null
@@ -209,9 +214,20 @@ function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown
         <p className="muted">Got an email saying you’re in? Sign in with that address, or get a sign-in link sent to it.</p></>}
     <SignInLinkForm to={ready ? email : null} />
     {error ? <Alert tone="danger">{errorText(error)}</Alert> : null}
-    <Button variant={ready ? 'secondary' : 'primary'} loading={busy} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</Button>
+    <SignInButton variant={ready ? 'secondary' : 'primary'} loading={busy} waitUntil={waitUntil} onClick={onSwitch} data-analytics="sign-in/waitlist-switch">Use a different account</SignInButton>
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
   </SignedOutPage>
+}
+// A button that starts a sign-in. Held after a refused start (429 AUTH_STATE_LIMIT), it is disabled and counts the wait
+// down. Its label, the label with the spinner while a start is out, and the wait are laid out in one cell, so going from
+// one to another moves nothing.
+function SignInButton({ waitUntil, loading = false, children, disabled, ...props }: ComponentProps<typeof Button> & { waitUntil: number | null }) {
+  const left = useSecondsLeft(waitUntil), shown = left ? 'wait' : loading ? 'busy' : 'idle'
+  return <Button {...props} disabled={disabled || loading || left > 0} aria-busy={loading || undefined}><span className="signed-out__countdown">
+    <span data-shown={shown === 'idle' || undefined} aria-hidden={shown !== 'idle' || undefined}>{children}</span>
+    <span className="signed-out__busy" data-shown={shown === 'busy' || undefined} aria-hidden={shown !== 'busy' || undefined}><Icon icon={LoaderCircle} size="sm" className="ui-spinner" />{children}</span>
+    <span data-shown={shown === 'wait' || undefined} aria-hidden={shown !== 'wait' || undefined}>Try again in {countdown(left)}</span>
+  </span></Button>
 }
 // A sign-in link to an address with a place (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
 // place is held for it or open, in one click, else the address typed. The answer never says whether there is a place.
@@ -223,17 +239,10 @@ function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown
 const RESEND_SECONDS = 60
 const linkLines = { idle: 'The link works once, for 30 minutes.', invalid: 'Check the address, like name@company.com.', failed: 'Couldn’t ask for a link. Try again in a minute.' }
 type LinkState = { view: 'ask'; line: keyof typeof linkLines } | { view: 'sent'; address: string; until: number; capped: boolean }
-const waitOf = (error: ApiError) => error.retryAfter ?? (typeof error.details?.[0]?.retryAfterSeconds === 'number' ? error.details[0].retryAfterSeconds : 600)
-const countdown = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 function SignInLinkForm({ to }: { to: string | null }) {
-  const [typed, setTyped] = useState(''), [state, setState] = useState<LinkState>({ view: 'ask', line: 'idle' }), [sending, setSending] = useState(false), [now, setNow] = useState(Date.now)
+  const [typed, setTyped] = useState(''), [state, setState] = useState<LinkState>({ view: 'ask', line: 'idle' }), [sending, setSending] = useState(false)
   const inFlight = useRef(false), field = useRef<HTMLInputElement>(null)
-  const sent = state.view === 'sent', left = sent ? Math.max(0, Math.ceil((state.until - now) / 1000)) : 0
-  useEffect(() => {
-    if (!left) return
-    const timer = window.setInterval(() => setNow(Date.now()), 250)
-    return () => window.clearInterval(timer)
-  }, [left > 0])
+  const sent = state.view === 'sent', left = useSecondsLeft(sent ? state.until : null)
   async function send(address: string) {
     if (inFlight.current) return
     if (!validEmail(address)) { setState({ view: 'ask', line: 'invalid' }); field.current?.focus(); return }
@@ -243,9 +252,9 @@ function SignInLinkForm({ to }: { to: string | null }) {
       await accountApi.signInLink(address)
       setState({ view: 'sent', address, until: Date.now() + RESEND_SECONDS * 1000, capped: false })
     } catch (error) {
-      if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') setState({ view: 'sent', address, until: Date.now() + waitOf(error) * 1000, capped: true })
+      if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') setState({ view: 'sent', address, until: Date.now() + waitSeconds(error) * 1000, capped: true })
       else setState({ view: 'ask', line: error instanceof ApiError && error.code === 'AUTH_INPUT_INVALID' ? 'invalid' : 'failed' })
-    } finally { inFlight.current = false; setSending(false); setNow(Date.now()) }
+    } finally { inFlight.current = false; setSending(false) }
   }
   const ask = (event: FormEvent) => { event.preventDefault(); void send(to ?? typed.trim()) }
   const line = state.view === 'ask' ? state.line : 'idle'
@@ -507,6 +516,22 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
   // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
+  // A start refused at the cap on pending sign-ins (429 AUTH_STATE_LIMIT; the cap is per network, not per person): said
+  // once in a toast, which covers nothing it would move, then every sign-in button stays disabled and counts down the
+  // API's wait, and no press or pointer down asks again until it ends. Kept for the tab, so a reload doesn't ask again.
+  const [signInWait, setSignInWait] = useState<number | null>(() => { try { const until = Number(sessionStorage.getItem(SIGN_IN_WAIT_KEY)); return until > Date.now() ? until : null } catch { return null } })
+  const held = () => signInWait !== null && Date.now() < signInWait
+  useEffect(() => {
+    if (signInWait === null) return
+    const timer = window.setTimeout(() => setSignInWait(null), Math.max(0, signInWait - Date.now()))
+    return () => window.clearTimeout(timer)
+  }, [signInWait])
+  function holdSignIn(error: ApiError) {
+    const seconds = waitSeconds(error), until = Date.now() + seconds * 1000, minutes = Math.ceil(seconds / 60)
+    setSignInWait(until)
+    try { sessionStorage.setItem(SIGN_IN_WAIT_KEY, String(until)) } catch { /* Held for this page only. */ }
+    toast(`Too many sign-ins from this network just now. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, 'info')
+  }
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
   // method: it asks for that sign-in (staff tools need Google).
   function accountUrl(select = false, method?: 'google', focus?: WorkspaceFocus) {
@@ -529,19 +554,20 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     })
   }
   function prepareLogin(event: { button: number }, focus?: WorkspaceFocus) {
-    if (busy || event.button !== 0) return
+    if (busy || held() || event.button !== 0) return
     const url = accountUrl(false, undefined, focus)
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })
   }
   const login = () => startLogin(false)
   async function startLogin(select: boolean, method?: 'google', focus?: WorkspaceFocus) {
+    if (held()) return
     setBusy(true); setAuthError(null)
     if (focus) rememberLandingFocus(focus, window.location.pathname)
     const pending = signIn.current
     signIn.current = null
     try { const url = await (!select && !method && pending && Date.now() - pending.at < 5000 ? pending.url : accountUrl(select, method, focus)); expectAccount(); analytics().flush(); window.location.assign(url) }
-    catch (error) { setAuthError(error); setBusy(false) }
+    catch (error) { setBusy(false); if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') holdSignIn(error); else setAuthError(error) }
   }
   const signedOut = !checkIdentity || (identity.error instanceof ApiError && identity.error.status === 401 && identity.error.code === 'AUTH_REQUIRED')
   const unconfigured = identity.error instanceof ApiError && identity.error.code === 'AUTH_NOT_CONFIGURED'
@@ -567,23 +593,23 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   const invitee = signedOut && invitation !== null && review.data?.status === 'pending'
   const reviewing = !publicRoute && invitation !== null && ((identity.data && !identity.isError) || invitee || (signedOut && review.isFetching))
   const allowToast = useMemo(() => () => isCurrentScope(scope), [scope])
-  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (focus, select) => void startLogin(select === true, undefined, focus), signInIntent: prepareLogin, signingIn: busy, notice, dismissNotice: () => setNotice(null)}}>
+  return <ApiContext.Provider key={generation} value={client}><RequestScopeContext.Provider value={scope}><ToastScope allow={allowToast}><SessionContext.Provider value={{identity: identity.data ?? null, logout, switchWorkspace, switchAccount, addAccount, signOutAccount, signOutAll, signInForStaff: () => void startLogin(false, 'google'), signIn: (focus, select) => void startLogin(select === true, undefined, focus), signInIntent: prepareLogin, signingIn: busy, signInWaitUntil: signInWait, notice, dismissNotice: () => setNotice(null)}}>
     <Analytics identity={identity.data && !identity.isError ? identity.data : null} signedOut={signedOut} />
     {reviewing ? review.data?.status === 'pending' ? <InvitationReview invitation={review.data} email={identity.data?.email ?? null} firstWorkspace={invitee} joining={join.isPending} error={join.error} onJoin={() => join.mutate(review.data!)} onCancel={invitee ? () => { clearInvitation(); void logout() } : clearInvitation} /> : <BootLoader />
-    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} onSwitch={() => void startLogin(true)} />
-    : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
+    : publicRoute || (identity.data && !identity.isError) ? <>{authError && <Alert tone="danger">{String(authError)}</Alert>}{children}</> : checkIdentity && identity.isPending ? <BootLoader /> : authResult === 'waitlist' && window.location.pathname === '/' ? <WaitlistPage busy={busy} error={authError} waitUntil={signInWait} onSwitch={() => void startLogin(true)} />
+    : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy, waitUntil: signInWait }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
     // /connect, from the link an agent showed: say what is waiting, so a person who has never signed in knows why.
     : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={pathname === '/connect' ? 'Sign in to approve your agent' : `Sign in to ${productName}`}>
         {authNotice}
         {pathname === '/connect' && <p className="muted">{connectLead(new URLSearchParams(window.location.search).get('code'))}</p>}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
+        <SignInButton variant="primary" loading={busy} waitUntil={signInWait} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</SignInButton>
         <SignInConsent className="muted" />
       </SignedOutPage>
       : <SignedOutPage title="Page not found">
         {authNotice}
-        <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/not-found">Sign in</Button>
+        <SignInButton variant="primary" loading={busy} waitUntil={signInWait} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/not-found">Sign in</SignInButton>
         <SignInConsent className="muted" />
         <Link className="signed-out__link" to="/">Go to {productName}</Link>
       </SignedOutPage>

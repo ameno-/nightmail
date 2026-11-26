@@ -15,5 +15,5 @@ export function DashboardLink({ className, style, ref, children }: { className?:
 export function StartButton({ start, className, style, ref }: { start: HomeStart; className: string; style?: CSSProperties; ref?: Ref<HTMLElement> }) {
   const full = useSignupsFull(!start.signedIn)
   if (start.signedIn) return <DashboardLink className={className} style={style} ref={ref as Ref<HTMLAnchorElement>}><span className="srt-cta-label">Open dashboard<ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" /></span></DashboardLink>
-  return <GetStartedButton className={className} style={style} ref={ref as Ref<HTMLButtonElement>} busy={start.busy} full={full} onSignIn={start.onSignIn} onSignInIntent={start.onSignInIntent} />
+  return <GetStartedButton className={className} style={style} ref={ref as Ref<HTMLButtonElement>} busy={start.busy} waitUntil={start.waitUntil} full={full} onSignIn={start.onSignIn} onSignInIntent={start.onSignInIntent} />
 }
