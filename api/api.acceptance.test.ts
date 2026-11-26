@@ -22867,7 +22867,7 @@ describe('List hygiene', () => {
   });
   test('list risk: a marketing campaign\'s launch records the measure of its list on its review (flagged contacts, contacts at domains this workspace\'s mail failed at, never mailed) and what the review said, banded only with the private lines, and the send review\'s verdict is unchanged; staff operators read it in Operator → Lists', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
-      const { bandListRisk, listRiskJob } = await import('./src/list-risk.js');
+      const { bandListRisk, bandListRiskBefore, listRiskJob } = await import('./src/list-risk.js');
       // The job the launch queued (the dispatcher's map names it: scripts/check-premerge.ts checks that).
       const runListRisk = async () => { for (const job of (await jobs('audience.listRisk')).filter(j => j.status === 'pending')) { await listRiskJob(runtime, job.payload, { id: job.id, attempts: 1, workspaceId: job.workspace_id } as never); await db.query("UPDATE jobs SET status = 'done' WHERE id = $1", [job.id]); } };
       const wid = runtime.config.workspaceId, tag = unique('lr').toLowerCase().replace(/[^a-z0-9]/g, ''), dead = tag + '-dead.example';
@@ -22893,11 +22893,30 @@ describe('List hygiene', () => {
         // FLAGGED_SOURCE over its high line; NEVER_MAILED over its high line counts only as elevated.
         assert.equal(risk.band, 'high');
         assert.deepEqual(risk.factors, [{ code: 'FLAGGED_SOURCE', level: 'high' }, { code: 'DEAD_DOMAINS', level: 'elevated' }, { code: 'NEVER_MAILED', level: 'elevated' }]);
+        // Before its first send every contact is unproven and new to it, so the first rule (kept beside it) agrees.
+        assert.deepEqual([risk.version, risk.counts.flaggedUnproven, risk.previous], [2, 3, { flaggedSource: 0.15, band: 'high', factors: risk.factors }]);
         // Recorded once: the review keeps the measure as the list stood at launch.
         const reviewId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].review_id;
         await db.query("INSERT INTO jobs (id, workspace_id, type, payload) VALUES ($1, $2, 'audience.listRisk', $3)", [unique('job'), wid, JSON.stringify({ workspaceId: wid, campaignId: campaign.id, reviewId, listId: list.id })]);
         await runListRisk();
         assert.deepEqual((await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [campaign.id])).rows[0].list_risk.at, risk.at);
+        // After a send: the flagged contacts it skipped are never proven, but they no longer count; a flagged contact
+        // that joined since does. The rest were mailed and delivered to.
+        await db.query("UPDATE sending_campaigns SET simulated = false, state = 'sending', prepared = total, expanded = total WHERE id = $1", [campaign.id]);
+        // The fixture is one transaction, so now() doesn't move: the first members go back two minutes and the launch one, for
+        // the import below to come after both.
+        await db.query("UPDATE audience_list_members SET created_at = created_at - interval '2 minutes' WHERE workspace_id = $1 AND list_id = $2", [wid, list.id]);
+        await db.query("UPDATE sending_campaign_reviews SET created_at = created_at - interval '1 minute' WHERE id = $1", [reviewId]);
+        await db.query("UPDATE audience_contacts SET mailed_count = 1, delivered_count = 1 WHERE workspace_id = $1 AND email LIKE 'fine%-' || $2 || '@example.net'", [wid, tag]);
+        const more = ok(await local('POST', '/v1/contact-imports', { csv: ['Email', 'temp8-' + tag + '@fexpost.com'].join('\n'), listId: list.id, mapping: { email: 'Email' } }), 201);
+        ok(await local('POST', '/v1/contact-imports/' + more.id + '/commit', { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
+        const again = ok(await local('POST', '/v1/campaigns', { name: 'Risk again', from: 'sender@example.com', subject: 'News', html: '<p>Hello again.</p>', audience: { listId: list.id } }), 201);
+        ok(await local('POST', '/v1/campaigns/' + again.id + '/send', { revision: again.revision }), 202);
+        await runListRisk();
+        const second = (await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [again.id])).rows[0].list_risk;
+        assert.deepEqual([second.sampled, second.counts.flagged, second.counts.flaggedUnproven, second.values.FLAGGED_SOURCE, second.previous.flaggedSource], [21, 4, 1, 1 / 21, 4 / 21]);
+        // The two rules disagree here: by the first, four flagged contacts were high; now the list is elevated by its dead domain alone.
+        assert.deepEqual([second.band, second.factors, second.previous.band], ['elevated', [{ code: 'DEAD_DOMAINS', level: 'elevated' }], 'high']);
         // Operator → Lists: staff operators read the measure beside what the review said and what happened; nobody else.
         const hosted = runtime.config.multiTenant;
         runtime.config.multiTenant = true;
@@ -22913,6 +22932,10 @@ describe('List hygiene', () => {
             ['high', 0.15, 5, launched.readiness.verdict, 'none', 0]);
           assert.deepEqual(row.review.reasons, (launched.readiness.findings ?? launched.readiness.reasons).map((r: Json) => r.code));
           assert.ok(!JSON.stringify(row).includes('@'), 'No address in a row.');
+          // The second launch's row carries both rules' bands, where they disagree.
+          await db.query('UPDATE sending_campaigns SET simulated=false WHERE id=$1', [again.id]);
+          const next = ok(await local('GET', '/v1/operator/lists?limit=50')).data.find((r: Json) => r.campaignId === again.id);
+          assert.deepEqual([next.measure.band, next.measure.previous], ['elevated', { flaggedSource: 4 / 21, band: 'high', factors: [{ code: 'FLAGGED_SOURCE', level: 'high' }, { code: 'DEAD_DOMAINS', level: 'elevated' }] }]);
           await setOperator(db, [AUTH_SUBJECT, 'off', '--reason', 'Synthetic list reviewer done']);
           await db.query('UPDATE nightmail_sessions SET staff=false WHERE user_id IN (SELECT user_id FROM workspace_members WHERE workspace_id=$1)', [wid]);
         } finally { runtime.config.multiTenant = hosted; }
@@ -22921,6 +22944,16 @@ describe('List hygiene', () => {
       assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.5 }, null), { band: null, factors: [] });
       assert.deepEqual(bandListRisk({ NEVER_MAILED: 1 }, { NEVER_MAILED: { elevated: 0.7, high: 0.9 } }), { band: 'elevated', factors: [{ code: 'NEVER_MAILED', level: 'elevated' }] });
       assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.001 }, { FLAGGED_SOURCE: { elevated: 0.05 } }), { band: 'low', factors: [] });
+      const lines = { FLAGGED_SOURCE: { elevated: 0.05, high: 0.12 }, DEAD_DOMAINS: { elevated: 0.2, high: 0.4 }, NEVER_MAILED: { elevated: 0.7 } };
+      // A never-mailed list is listed, but never the second of two elevated factors (the first rule made that high).
+      assert.deepEqual(bandListRisk({ DEAD_DOMAINS: 0.3, NEVER_MAILED: 1 }, lines), { band: 'elevated', factors: [{ code: 'DEAD_DOMAINS', level: 'elevated' }, { code: 'NEVER_MAILED', level: 'elevated' }] });
+      assert.equal(bandListRiskBefore({ DEAD_DOMAINS: 0.3, NEVER_MAILED: 1 }, lines).band, 'high');
+      // On a sample, a factor counts toward high only past its line by more than the sample's error.
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.13 }, lines, { FLAGGED_SOURCE: 0.018 }), { band: 'elevated', factors: [{ code: 'FLAGGED_SOURCE', level: 'elevated' }] });
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.15 }, lines, { FLAGGED_SOURCE: 0.018 }), { band: 'high', factors: [{ code: 'FLAGGED_SOURCE', level: 'high' }] });
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.06, DEAD_DOMAINS: 0.25 }, lines, { FLAGGED_SOURCE: 0.018 }).band, 'elevated');
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.08, DEAD_DOMAINS: 0.25 }, lines, { FLAGGED_SOURCE: 0.018 }).band, 'high');
+      assert.equal(bandListRiskBefore({ FLAGGED_SOURCE: 0.13 }, lines).band, 'high');
     });
   });
 });

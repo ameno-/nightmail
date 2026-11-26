@@ -14,7 +14,9 @@ const Level = z.enum(['elevated', 'high']);
 const Measure = z.object({ sampled: z.number().int(), exact: z.boolean(), band: z.enum(['low', 'elevated', 'high']).nullable(),
   factors: z.array(z.object({ code: z.enum(LIST_RISK_FACTORS), level: Level })), values: z.record(z.string(), z.number()),
   counts: z.object({ flagged: z.number().int(), deadDomains: z.number().int(), unengaged: z.number().int(), unengagedBase: z.number().int(), neverMailed: z.number().int(),
-    softFailing: z.number().int(), proven: z.number().int().optional() }) });
+    softFailing: z.number().int(), proven: z.number().int().optional() }),
+  previous: z.object({ flaggedSource: z.number().nullable(), band: z.enum(['low', 'elevated', 'high']).nullable(), factors: z.array(z.object({ code: z.enum(LIST_RISK_FACTORS), level: Level })) }).optional()
+    .describe('The band by the first rule (every flagged contact, no sampling margin, never-mailed as a second factor), kept beside it for comparison; absent on measures from before.') });
 const ListRow = z.object({
   campaignId: z.string(), campaignName: z.string(), workspaceId: z.string(), workspaceName: z.string(), launchedAt: z.string(), recipients: z.number().int(), state: z.string(),
   measure: Measure.nullable().describe('Recorded at launch; null for a launch from before the measure, or while its job is pending.'),

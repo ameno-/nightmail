@@ -20,9 +20,12 @@ const verdictText: Record<string, string> = { ready: 'Ready', ramp_recommended: 
 const probeText: Record<OperatorListRow['outcome']['probe'], string> = { passed: 'Passed', quarantined: 'Quarantined', none: '—' }
 const classText: Record<string, string> = { user_unknown: 'Unknown user', dead_domain: 'Dead domain', mailbox_full: 'Mailbox full', blocklist: 'Blocklist', policy: 'Policy or content',
   reputation: 'Rate or reputation', auth: 'Authentication', validation: 'SES validation', other: 'Other' }
+// Where the first rule (kept beside it while the two are compared) banded the list differently, its band.
+const before = (row: OperatorListRow) => row.measure?.previous && row.measure.previous.band !== row.measure.band ? row.measure.previous.band : null
 const Band = ({ row }: { row: OperatorListRow }) => !row.measure ? <span className="muted">Not measured</span>
-  : row.measure.band ? <StatusBadge status={bandText[row.measure.band]} tone={bandTone[row.measure.band]} /> : <span className="muted">No band</span>
-const bandCard = (row: OperatorListRow) => !row.measure ? 'Not measured' : row.measure.band ? `${bandText[row.measure.band]} risk` : 'No band'
+  : row.measure.band ? <span className="op-ws"><StatusBadge status={bandText[row.measure.band]} tone={bandTone[row.measure.band]} />{before(row) && <span className="op-muted-id">first rule: {bandText[before(row)!].toLowerCase()}</span>}</span>
+  : <span className="muted">No band</span>
+const bandCard = (row: OperatorListRow) => !row.measure ? 'Not measured' : row.measure.band ? `${bandText[row.measure.band]} risk${before(row) ? ` (first rule: ${bandText[before(row)!].toLowerCase()})` : ''}` : 'No band'
 const columns: Column<OperatorListRow>[] = [
   { ...def('campaign'), render: row => <span className="op-ws" title={`${row.campaignName} · ${row.workspaceName}`}><span className="op-cell">{row.campaignName}</span><span className="op-muted-id">{row.workspaceName}</span></span>,
     cardRender: row => `${row.campaignName} · ${row.workspaceName}` },
@@ -64,6 +67,7 @@ function ListDetail({ row }: { row: OperatorListRow }) {
     <div><dt>Recipients</dt><dd>{number(row.recipients)}</dd></div>
     <div><dt>List risk</dt><dd>{bandCard(row)}{m && `, ${m.exact ? 'all' : 'a sample of'} ${number(m.sampled)} contacts`}</dd></div>
     <div><dt>Over the lines</dt><dd>{m?.factors.length ? m.factors.map(x => `${factorText[x.code] ?? x.code} (${x.level})`).join(', ') : '—'}</dd></div>
+    {m?.previous && <div><dt>By the first rule</dt><dd>{[m.previous.band ? `${bandText[m.previous.band]} risk` : 'No band', m.previous.factors.map(x => `${factorText[x.code] ?? x.code} (${x.level})`).join(', '), m.previous.flaggedSource !== null && `${share(m.previous.flaggedSource)} flagged in all`].filter(Boolean).join('; ')}</dd></div>}
     {m && Object.entries(factorText).map(([code, text]) => <div key={code}><dt>{text}</dt><dd>{code.startsWith('RECENT') ? number(m.values[code] ?? 0) : share(m.values[code])}</dd></div>)}
     {m && <div><dt>Proven contacts</dt><dd>{m.counts.proven === undefined ? '—' : share(m.counts.proven / Math.max(1, m.sampled))}</dd></div>}
     <div><dt>Review said</dt><dd>{row.review ? [verdictText[row.review.verdict] ?? label(row.review.verdict), row.review.required && `required by ${label(row.review.required.toLowerCase())}`, row.review.reasons.map(r => label(r.toLowerCase())).join(', ')].filter(Boolean).join(' · ') : 'Not kept'}</dd></div>
