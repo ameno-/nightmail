@@ -5,7 +5,8 @@ import { useEffect, useRef, useState } from 'react'
 // drawn to a small canvas and printed on its face. It is lit by the television: the light's colour and strength are
 // the picture's, its direction is from wherever the remote is toward the screen, the keys throw shadows across the
 // face, and on the table it throws a shadow of its own. It lies beside the set; picked up, it follows the pointer and
-// keeps its nose on the screen, and a press sends the next channel.
+// keeps its nose on the screen, and a press sends the next channel; a digit typed on the keyboard is a key of its
+// number pad.
 
 /** What the television gives the room: the picture's colour (0..1 each) and how bright it is. */
 export type RoomLight = { glow: [number, number, number]; level: number }
@@ -167,12 +168,12 @@ const rad = (degrees: number) => degrees * Math.PI / 180
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 const ease = (v: number) => { const k = clamp(v); return k * k * (3 - 2 * k) }
 
-export function Remote({ light, onZap }: { light: RoomLight; onZap: () => void }) {
+export function Remote({ light, onZap, onDigit }: { light: RoomLight; onZap: () => void; onDigit: (digit: string) => void }) {
   const canvas = useRef<HTMLCanvasElement>(null), spot = useRef<HTMLButtonElement>(null)
   const [held, setHeld] = useState(false), [ready, setReady] = useState(true)
   const state = useRef({ held: false, over: false, flashAt: -1e9, zap: null as { at: number; sent: boolean } | null }).current
-  const zap = useRef(onZap)
-  zap.current = onZap
+  const zap = useRef(onZap), digit = useRef(onDigit)
+  zap.current = onZap; digit.current = onDigit
   useEffect(() => {
     const el = canvas.current, button = spot.current, room = el?.closest<HTMLElement>('.chy-set')
     if (!el || !button || !room) return
@@ -265,7 +266,13 @@ export function Remote({ light, onZap }: { light: RoomLight; onZap: () => void }
     }
     // in the hand, a press anywhere that is not a control of its own sends the next channel
     const press = (event: MouseEvent) => { if (!state.held || (event.target as Element).closest('button, a, input, [role="slider"]')) return; state.flashAt = performance.now(); zap.current() }
-    const escape = (event: KeyboardEvent) => { if (event.key === 'Escape' && state.held) set(false) }
+    // in the hand, Escape puts it down, and the keyboard's digits are its number pad
+    const escape = (event: KeyboardEvent) => {
+      if (!state.held) return
+      if (event.key === 'Escape') return set(false)
+      if (event.metaKey || event.ctrlKey || event.altKey || !/^[0-9]$/.test(event.key) || (event.target as Element | null)?.closest?.('input, textarea, select, [contenteditable]')) return
+      event.preventDefault(); state.flashAt = performance.now(); digit.current(event.key)
+    }
     const over = () => { state.over = true }, out = () => { state.over = false }
     const sized = new ResizeObserver(layout)
     sized.observe(room)
