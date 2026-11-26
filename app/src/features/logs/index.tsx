@@ -14,7 +14,7 @@ import { EmailDetailPage } from './email-detail'
 import { ReceivedEmailDetailPage } from './received-detail'
 import { useScheduledActions } from './scheduled'
 import { useMediaQuery } from '../../lib/media'
-import { LogsBody, logStatuses, receivedStatuses, withStream, type LogFilters } from './facets'
+import { LogsBody, logStatuses, pickerStatuses, receivedStatuses, withStream, type LogFilters } from './facets'
 import { keptRangeStart, logRange, logRanges, touchRangeStart } from './range'
 import { useLogFacets } from './facet-query'
 
@@ -123,7 +123,7 @@ function Logs({ regionId, campaignId }: { regionId: string; campaignId?: string 
   const exportable = !authorizationLost && Boolean(query.data?.items.length) && !query.isPlaceholderData && draft.trim() === searched
   return <div className="logs-page"><div className="logs-bar"><LogsHeader regionId={campaign.data?.regionId ?? regionId} direction={direction} onDirection={setDirection} locked={Boolean(campaignId)} range={range} onRange={value => update({ range: value === '30d' ? null : value })} />
     <div className="logs-bar__tools">{campaignId && <Button variant="secondary" size="sm" aria-label={`Remove campaign filter: ${campaign.data?.name ?? campaignId}`} onClick={clearCampaign} title={campaign.data?.name}><span className="logs-campaign-chip">Campaign: {campaign.data?.name ?? campaignId}</span><Icon icon={X} size="sm" /></Button>}<div className="search-box logs-search"><Icon icon={Search} size="sm" /><Input type="search" aria-label="Search logs" placeholder="Search logs" maxLength={200} value={draft} onChange={event => type(event.target.value)} /><kbd className="ui-kbd" aria-hidden="true">/</kbd></div>
-      <Select className="logs-filter" aria-label="Email status" value={visibleStatus} onValueChange={setStatus} options={['all', ...visibleStatuses].map(value => ({ ...option(value), disabled: !withStream(value, stream) }))} />
+      <Select className="logs-filter" aria-label="Email status" value={visibleStatus} onValueChange={setStatus} options={['all', ...pickerStatuses(visibleStatuses, visibleStatus)].map(value => ({ ...option(value), disabled: !withStream(value, stream) }))} />
       <Select className="logs-filter" aria-label="Email stream filter" value={stream} disabled={receivedOnly} onValueChange={value => update({ stream: value })} options={streams} />
       <Button className="logs-export" aria-label="Export this page as CSV" title="Download the rows on this page as a CSV file" disabled={!exportable} onClick={() => downloadCsv(campaignId ? `nightmail-${campaignId}-logs-page.csv` : 'nightmail-logs-page.csv', logCsvRows(query.data?.items ?? [], !multiTenant))}><Icon icon={Download} /><span>Export</span></Button></div>
     </div>
