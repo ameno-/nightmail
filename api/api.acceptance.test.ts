@@ -34347,17 +34347,21 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       ok(await local('POST', `${unevenPath}/send`, { revision: uneven.revision, pacing: { plan: 'recommended', rateShare: 1 } }), 202);
       assert.deepEqual(ok(await local('GET', unevenPath)).delivery.pacing.plan, sized.plan.batches);
       ok(await local('POST', `${unevenPath}/cancel`));
-      // If sizing the plan by the setting fails, the review is the one without the setting, says so and is never "ready":
-      // the preview answers, and a launch goes on with it.
+      // If sizing the plan by the setting fails, a preview gets the review without the setting, saying so and never
+      // "ready"; a launch is refused, retryable, and nothing is sent or kept: the campaign stays a draft.
       runtime.config.rampLines = { get established(): never { throw new Error('Sizing failed.'); } } as never;
       const unsized = await create('Unsized'), soft = ok(await local('GET', `/v1/campaigns/${unsized.id}/audience?readiness=true`)).readiness;
       assert.deepEqual([soft.verdict, soft.required?.reason, soft.plan.batches, typeof soft.unavailable, sized.unavailable], ['ramp_required', 'NEW_DOMAIN', review.plan.batches, 'string', undefined]);
       const tiny = ok(await local('POST', '/v1/campaigns', { name: 'Small, unsized', from, subject: 'Small', html: '<p>Fixture.</p>', audience: { listId: small.id } }), 201);
       const tinyReview = ok(await local('GET', `/v1/campaigns/${tiny.id}/audience?readiness=true`)).readiness;
       assert.deepEqual([tinyReview.verdict, tinyReview.plan, tinyReview.summary, typeof tinyReview.unavailable], ['ramp_recommended', null, tinyReview.unavailable, 'string']);
-      const softLaunch = ok(await local('POST', `/v1/campaigns/${unsized.id}/send`, { revision: unsized.revision, pacing: { plan: 'recommended', rateShare: 1 } }), 202);
-      assert.deepEqual([typeof softLaunch.readiness.unavailable, softLaunch.readiness.plan.batches], ['string', review.plan.batches]);
-      ok(await local('POST', `/v1/campaigns/${unsized.id}/cancel`));
+      for (const [refusedId, revision] of [[unsized.id, unsized.revision], [tiny.id, tiny.revision]] as const) {
+        const reply = await local('POST', `/v1/campaigns/${refusedId}/send`, { revision, pacing: { plan: 'recommended', rateShare: 1 } });
+        assert.equal(error(reply, 503, 'SEND_PLAN_UNAVAILABLE').retryable, true);
+        const kept = (await db.query(`SELECT c.state, c.review_id, c.expanded, (SELECT count(*)::int FROM sending_emails e WHERE e.campaign_id = c.id) AS emails,
+          (SELECT count(*)::int FROM sending_campaign_reviews r WHERE r.campaign_id = c.id) AS reviews FROM sending_campaigns c WHERE c.id = $1`, [refusedId])).rows[0];
+        assert.deepEqual(kept, { state: 'draft', review_id: null, expanded: 0, emails: 0, reviews: 0 });
+      }
       runtime.config.rampLines = {};
     });
   });
