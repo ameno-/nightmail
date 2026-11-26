@@ -1,17 +1,18 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { ImageOff } from 'lucide-react';
 import { errorText, type AttachmentApi } from '../data/types';
 import { useApi } from '../data/context';
 import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
 import { mentionsRemoteImage, withoutFontStyles } from '../lib/html-scan';
 import DOMPurify from 'dompurify';
-import { Alert, Button } from './ui';
+import { heldImageSource, px } from '../lib/held-image';
+import { Alert, Button, Tooltip } from './ui';
 
 // Known open-tracking endpoints (ESP pixels, SES open tracking) and generic pixel paths.
 const TRACKING_URL = /(?:awstrack\.me|list-manage\.com\/track|\/wf\/open|sendgrid\.net\/wf|mandrillapp\.com\/track|pstmrk\.it|pmtrk|track\.customer\.io\/e\/o|mailgun\.[a-z]+\/o\/|emltrk\.com|sidekickopen|hubspotlinks|mixmax\.com\/api\/track|mailtrack\.io|getnotify\.com|bananatag|yesware)/i;
 // Generic pixel paths only count when the URL is not an ordinary image file (e.g. /tracking-logo.png).
 const TRACKING_PATH = /\/(?:track|tracking|open|opens|pixel|beacon)(?:[\/.?_-]|$)/i;
 const IMAGE_FILE = /\.(?:png|jpe?g|svg|webp|avif)(?:[?#]|$)/i;
-const px = (value: string | null | undefined) => { const match = value?.trim().match(/^(\d+(?:\.\d+)?)(?:px)?$/i); return match ? Number(match[1]) : null; };
 /** Tracking pixels: known tracker URLs, or remote images sized ≤2px (or zero in either dimension) or hidden by inline style. */
 export function isTrackingPixel(image: Element): boolean {
   const source = image.getAttribute('src') ?? '';
@@ -21,6 +22,24 @@ export function isTrackingPixel(image: Element): boolean {
   const width = px(image.getAttribute('width')) ?? styleSize('width'), height = px(image.getAttribute('height')) ?? styleSize('height');
   if (width === 0 || height === 0 || (width !== null && height !== null && width <= 2 && height <= 2)) return true;
   return /(?:^|;)(?:display:none|visibility:hidden|opacity:0(?:;|$)|max-height:0)/.test(style);
+}
+
+/** Whether Load images would show anything: an https image that isn't a tracking pixel, or an https CSS background (the
+ *  frame's CSP allows only https; an http image never loads, and a remote font isn't an image). */
+export function holdsRemoteImages(html: string): boolean {
+  if (!mentionsRemoteImage(html)) return false;
+  const page = new DOMParser().parseFromString(html, 'text/html');
+  return [...page.querySelectorAll('img[src]')].some(image => /^https:\/\//i.test(image.getAttribute('src')!.trim()) && !isTrackingPixel(image))
+    || /background(?:-image)?\s*:[^;}"]*url\(\s*['"]?https:\/\//i.test(html);
+}
+
+/** The line over a preview whose remote images are held back: what is going on, and Load images. `why` is the reason,
+ *  on Load images' tooltip. */
+export function HeldImages({ onLoad, why, style }: { onLoad: () => void; why: string; style?: CSSProperties }) {
+  return <div className="email-held" style={style}>
+    <ImageOff size={14} aria-hidden="true" /><span className="email-held__text">Images in this email aren’t loaded.</span>
+    <Tooltip content={why}><Button size="sm" onClick={onLoad}>Load images</Button></Tooltip>
+  </div>;
 }
 
 /**
@@ -35,8 +54,8 @@ export function ReceivedEmailPreview({ tooComplex, ...props }: Omit<EmailPreview
 function ReceivedHtml(props: Omit<EmailPreviewProps, 'remoteImages'>) {
   const [loadedFor, setLoadedFor] = useState<string | null>(null);
   const load = loadedFor === props.html;
-  const remote = useMemo(() => mentionsRemoteImage(props.html), [props.html]);
-  return <>{remote && !load && <Alert tone="info">Remote images are hidden so the sender can’t tell when you open this message. <Button variant="ghost" size="sm" onClick={() => setLoadedFor(props.html)}>Load images</Button></Alert>}<EmailPreview {...props} remoteImages={load} /></>;
+  const held = useMemo(() => holdsRemoteImages(props.html), [props.html]);
+  return <>{held && !load && <HeldImages why="Remote images are hidden so the sender can’t tell when you open this message." onLoad={() => setLoadedFor(props.html)} />}<EmailPreview {...props} remoteImages={load} /></>;
 }
 
 // The sandboxed frame can't fetch, so it gets Inter as data: URLs, read once per file per session: the Latin files
@@ -97,8 +116,10 @@ function emailDocument(html: string, { respectStyles, remoteImages, inline, asSe
     const source = element.getAttribute('src') ?? '';
     const owned = element.tagName === 'IMG' ? sources?.get(source) ?? inline.get(source)?.href : undefined;
     if (owned) element.setAttribute('src', owned);
-    else if (remoteImages && element.tagName === 'IMG' && /^https?:\/\//i.test(source) && isTrackingPixel(element)) element.remove();
-    else if (element.tagName !== 'IMG' || !(isRasterDataUrl(source) || (remoteImages && /^https:\/\//i.test(source)))) element.removeAttribute('src');
+    // A tracking pixel is never drawn, loaded or held: it has nothing to show.
+    else if (element.tagName === 'IMG' && /^https?:\/\//i.test(source) && isTrackingPixel(element)) element.remove();
+    else if (element.tagName !== 'IMG') element.removeAttribute('src');
+    else if (!(isRasterDataUrl(source) || (remoteImages && /^https:\/\//i.test(source)))) element.setAttribute('src', heldImageSource(element));
   });
   // A frame's `prefers-color-scheme` follows the system, not the frame's color-scheme, in Chrome: the email's light and
   // dark media queries are settled here for the document's scheme, so its dark styles never land on the light canvas.
@@ -122,7 +143,8 @@ function emailDocument(html: string, { respectStyles, remoteImages, inline, asSe
 }
 
 /** An email's sandboxed document (`doc`, null until the frame's fonts are read, once per session), whether its inline
- *  images are in it yet (`complete`), and why some of them can't be shown. With `dark`, also `darkDoc`: the document
+ *  images are in it yet (`complete`), why some of them can't be shown, and whether remote images are held back that
+ *  Load images would show (`held`). With `dark`, also `darkDoc`: the document
  *  on a dark canvas when the email opts in to dark mode (declaresDark), otherwise undefined. */
 export function useEmailDocument({ html, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false, inlineImages, asSent = false, dark = false }: Omit<EmailPreviewProps, 'title' | 'className'> & { dark?: boolean }) {
   const api = useApi();
@@ -160,7 +182,8 @@ export function useEmailDocument({ html, attachmentIds = [], attachmentApi: prov
   const doc = useMemo(() => fontFaces === null ? null : emailDocument(html, { ...options, scheme: 'light' }, sources, fontFaces), [html, options, sources, fontFaces]);
   const hasDark = useMemo(() => dark && declaresDark(html), [dark, html]);
   const darkDoc = useMemo(() => !hasDark ? undefined : fontFaces === null ? null : emailDocument(html, { ...options, scheme: 'dark' }, sources, fontFaces), [hasDark, html, options, sources, fontFaces]);
-  return { doc, darkDoc, complete: Boolean(sources) || error !== '', error };
+  const held = useMemo(() => !remoteImages && holdsRemoteImages(html), [html, remoteImages]);
+  return { doc, darkDoc, complete: Boolean(sources) || error !== '', error, held };
 }
 
 export function EmailPreview({ title = 'Email preview', className, ...props }: EmailPreviewProps) {

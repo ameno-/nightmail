@@ -329,6 +329,12 @@ a.ui-tab { text-decoration: none; }
 .ui-toast__body { display: flex; align-items: center; justify-content: space-between; gap: var(--space-12); }
 .ui-toast__action { flex: none; margin-block: calc(-1 * var(--space-4)); }
 .ui-email-preview { display: block; width: 100%; height: 400px; border: 0; background: var(--color-email-surface); color-scheme: light; }
+/* Over a preview whose remote images are held back (EmailPreview.tsx HeldImages): one line and Load images, one solid
+   step off what it sits on. Its images show as quiet tiles meanwhile, at their own size, never the broken-image icon. */
+.email-held { display: flex; align-items: center; gap: var(--space-8); min-width: 0; max-width: 100%; min-height: var(--control-height); padding: var(--space-2) var(--space-2) var(--space-2) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); color: var(--color-text); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.email-held > svg { flex: none; color: var(--color-muted); }
+.email-held__text { flex: 1; min-width: 0; }
+.email-held .ui-button { flex: none; }
 /* Tooltip (components/ui/tooltip.tsx): a quiet popover-coloured note above its trigger. */
 .ui-tooltip { position: fixed; z-index: 120; max-width: min(300px, calc(100vw - 16px)); padding: var(--space-6) var(--space-8); border: 0; border-radius: var(--radius-sm); background: var(--color-overlay-surface); box-shadow: var(--shadow-popover); color: var(--color-text); font-size: var(--text-xs); line-height: var(--leading-xs); overflow-wrap: anywhere; pointer-events: none; animation: tooltip-in 150ms ease-out; }
 .ui-tooltip[data-instant] { animation: none; }
