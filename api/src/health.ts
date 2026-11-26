@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, databaseCodeOf, errors, log, logError, response, security, transientDatabaseError, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, SUPPORT_AI, TICK, WAKE_QUEUES } from './health-thresholds.js';
+import { ABUSE, CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, SUPPORT_AI, TICK, WAKE_QUEUES } from './health-thresholds.js';
 import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
 import { slackCard, supportCostAlert } from './operator-alerts.js';
 import { aiCostToday } from './support-ai-cost.js';
@@ -57,6 +57,10 @@ const KINDS = {
   'database-refusing': { emoji: ':rotating_light:', label: 'Database refusing', severity: 'critical', unit: 'seconds', section: 'database' },
   // Read in the database probe. A warning, so the tick posts no card of its own: operator-alerts.ts posts one a UTC day.
   'support-ai-cost': { emoji: ':money_with_wings:', label: 'Support AI cost', severity: 'warning', unit: 'usd', section: 'database' },
+  // Read in the database probe: abuse alerts that should have gone out and have not, and the hourly abuse job running out of time.
+  // abuse-alerts-undelivered is critical while a high alert is unposted (evaluate).
+  'abuse-alerts-undelivered': { emoji: ':mag:', label: 'Abuse alerts not delivered', severity: 'warning', unit: 'alerts', section: 'database' },
+  'abuse-monitor-behind': { emoji: ':mag:', label: 'Abuse monitoring behind', severity: 'warning', unit: 'seconds', section: 'database' },
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
 const isKind = (kind: string): kind is Kind => Object.hasOwn(KINDS, kind);
@@ -87,7 +91,11 @@ type CampaignRow = { id: string; workspaceId: string; state: string; total: numb
   /** The provider account's send rate. */ account: number | null; /** The rate the release planner reads, shown beside the others and never compared with. */ planned: number | null;
   accepted: number | null; delivered: number | null; bounced: number | null; complained: number | null };
 type CounterRow = { kind: string; key: string; n: number; errors: number; ms: number; slowest: number; n5: number; errors5: number; slowest5: number; verySlow5: number; stormMinutes: number; stormRate: number; hist: number[] | null };
-type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
+type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number;
+  /** Abuse alerts that should have gone out and have not (late: unposted past ABUSE.lateMinutes; failed; expired unposted), of them the high ones, and those posted but unconfirmed. */
+  abuseUndelivered?: { late: number; failed: number; expired: number; high: number; unconfirmed?: number };
+  /** How many hourly abuse runs in a row ran out of time and the stages the last one stopped; the sign-ins waiting to be read, and how long the oldest has waited. */
+  abuseBehind?: { runs: number; cuts: string[]; signInsWaiting?: number; signInsBehindSeconds?: number | null } | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
 /**
@@ -290,10 +298,22 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   let database: Rollup['database'] = null;
   if (sample.database) {
-    const { heldDomains, supportAiToday, ...d } = sample.database;
+    const { heldDomains, supportAiToday, abuseUndelivered, abuseBehind, ...d } = sample.database;
     for (const domain of heldDomains ?? []) find('link-domain-held', domain, 1, `Marketing releases using ${id(domain)} are paused after a confirmed DBL listing.`, DATABASE.remindMinutes);
     if (supportAiToday !== undefined && supportAiToday >= SUPPORT_AI.dailyLineUsd)
       find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
+    if (abuseUndelivered) {
+      // Critical while a high alert is unposted over an hour (late, failed or expired): someone must hear of that one.
+      const { late, failed, expired, high, unconfirmed = 0 } = abuseUndelivered, n = late + failed + expired + unconfirmed;
+      if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} failed`,
+        expired && `${count(expired)} expired unposted`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
+    }
+    if (abuseBehind) {
+      const lag = abuseBehind.signInsBehindSeconds ?? 0, waiting = abuseBehind.signInsWaiting ?? 0;
+      const lagging = waiting > 0 && lag > ABUSE.signInsBehindMinutes * 60, outOfTime = abuseBehind.runs >= ABUSE.cutRuns;
+      if (lagging || outOfTime) find('abuse-monitor-behind', null, lag, `${[lagging && `sign-ins are ${span(lag)} behind: ${count(waiting)} waiting to be read, the oldest for ${span(lag)}`,
+        outOfTime && `the hourly job ran out of time ${count(abuseBehind.runs)} runs in a row${abuseBehind.cuts.length ? ` (last stopped: ${abuseBehind.cuts.map(id).join(', ')})` : ''}`].filter(Boolean).join('; ')}.`, ABUSE.remindMinutes);
+    }
     if (held('database-connections', d.maxConnections > 0 && d.connections >= d.maxConnections * DATABASE.connectionShare, DATABASE.sustain))
       find('database-connections', null, d.connections, `${count(d.connections)} of ${count(d.maxConnections)}.`, DATABASE.remindMinutes);
     if (d.oldestTransactionSeconds >= DATABASE.transactionSeconds)
@@ -362,7 +382,15 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
       (SELECT hist FROM h WHERE h.kind=m.kind AND h.key=m.key) AS hist
     FROM m GROUP BY m.kind,m.key`)).rows);
   const activity = sql`pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`;
-  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",
+      (SELECT json_build_object('late',count(*) FILTER (WHERE status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})),
+        'failed',count(*) FILTER (WHERE status='failed' AND created_at>now()-interval '1 day'),'expired',count(*) FILTER (WHERE status='stale' AND stale_reason='expired'),
+        'high',count(*) FILTER (WHERE band='high' AND ((status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})) OR (status='failed' AND created_at>now()-interval '1 day') OR (status='stale' AND stale_reason='expired'))),
+        'unconfirmed',count(*) FILTER (WHERE status='unconfirmed' AND sent_at>now()-interval '1 day'))
+        FROM abuse_alerts WHERE created_at>now()-interval '2 days') AS "abuseUndelivered",
+      (SELECT json_build_object('runs',s.cut_runs,'cuts',coalesce(s.last_run->'cuts','[]'::jsonb),'signInsWaiting',w.n,'signInsBehindSeconds',extract(epoch FROM now()-w.oldest))
+        FROM abuse_state s CROSS JOIN LATERAL (SELECT count(*) AS n,min(a.last_at) AS oldest FROM nightmail_signin_attempts a
+          WHERE a.observed IS NOT NULL AND a.last_at>greatest(coalesce((s.cursors->'signIns'->>'at')::timestamptz,s.active_since),s.active_since)) w WHERE s.id='monitor') AS "abuseBehind",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",

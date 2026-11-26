@@ -36,19 +36,25 @@ const clusterColumns: Column<AbuseCluster>[] = [
   { ...def(clusterColumnDefs, 'changed'), render: row => <At value={row.changedAt} />, cardRender: row => `changed ${when(row.changedAt)}` },
 ]
 const kindText: Record<AbuseAlert['kind'], string> = { new: 'New', raised: 'Risk raised', grew: 'New member' }
-// Stored: waiting for a post to Slack for a day, else kept here only (no webhook is set, or its day has passed).
-const statusText: Record<AbuseAlert['status'], string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
-const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger' }
-const deliveryText = (row: AbuseAlert, posting: boolean) => row.status !== 'stored' ? statusText[row.status] : posting && row.band === 'review' && Date.now() - Date.parse(row.createdAt) < 86_400_000 ? 'Queued' : 'Not posted'
+// Stored: its post to Slack is queued, the one thing here still waiting on us (amber), or no webhook is set. Stale: it
+// no longer needed a look before it was posted, so it never was; why stays shown. Not confirmed: Slack didn't answer
+// either of its two posts, so it may be in the channel (amber, never Sent's green). Failed: Slack refused it (red).
+const statusText: Record<Exclude<AbuseAlert['status'], 'stale'>, string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed', unconfirmed: 'Not confirmed' }
+const staleText: Record<NonNullable<AbuseAlert['staleReason']>, string> = { cluster_gone: 'Stale: cluster gone', band_dropped: 'Stale: risk dropped', reviewed: 'Stale: reviewed', expired: 'Stale: expired' }
+const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'warning', sent: 'success', failed: 'danger', stale: 'neutral', unconfirmed: 'warning' }
+const deliveryText = (row: AbuseAlert, posting: boolean) => row.status === 'stale' ? staleText[row.staleReason ?? 'expired'] : row.status !== 'stored' ? statusText[row.status] : posting ? 'Queued' : 'Not posted'
 const reviewText: Record<AbuseReview['action'], string> = { watch: 'Watched', dismiss: 'Dismissed' }
 // When, in a tooltip; who, as a masked address where it shows (never in a tooltip, which can't mask it).
 const reviewTitle = (review: AbuseReview) => `${reviewText[review.action]} ${when(review.at)}`
 const alertTitle = (row: AbuseAlert) => `${bandLabel[row.band]} risk · ${kindText[row.kind]} · ${row.score}`
+// On a phone the card's title is the level and score, and the kind moves to the line below, so the status beside the
+// title ("Stale: risk dropped") never cuts the score off.
+const alertCardTitle = (row: AbuseAlert) => `${bandLabel[row.band]} risk · ${row.score}`
 // The alert's name opens its card; on a phone the whole card does.
 const alertColumns = (open: (row: AbuseAlert) => void, posting: boolean): Column<AbuseAlert>[] => [
-  { ...def(alertColumnDefs, 'alert'), render: row => <button type="button" className="op-reason" onClick={event => { event.stopPropagation(); open(row) }}>{alertTitle(row)}</button>, cardRender: alertTitle },
+  { ...def(alertColumnDefs, 'alert'), render: row => <button type="button" className="op-reason" onClick={event => { event.stopPropagation(); open(row) }}>{alertTitle(row)}</button>, cardRender: alertCardTitle },
   { ...def(alertColumnDefs, 'status'), render: row => row.review ? <span title={reviewTitle(row.review)}><StatusBadge status={reviewText[row.review.action]} tone="neutral" /></span> : <StatusBadge status={deliveryText(row, posting)} tone={statusTones[row.status]} /> },
-  { ...def(alertColumnDefs, 'workspaces'), render: row => number(row.workspaces), cardRender: row => `${number(row.workspaces)} ${row.workspaces === 1 ? 'workspace' : 'workspaces'}` },
+  { ...def(alertColumnDefs, 'workspaces'), render: row => number(row.workspaces), cardRender: row => `${kindText[row.kind]} · ${number(row.workspaces)} ${row.workspaces === 1 ? 'workspace' : 'workspaces'}` },
   { ...def(alertColumnDefs, 'created'), render: row => <At value={row.createdAt} /> },
 ]
 
@@ -90,13 +96,15 @@ function Alerts() {
     {alerts.hasNextPage && <Button className="op-more" loading={alerts.isFetchingNextPage} onClick={() => void alerts.fetchNextPage()}>Load more</Button>}
     {alerts.isError && alerts.data && <Alert tone="danger"><ErrorText error={alerts.error} /></Alert>}
     {shown && <Dialog open onOpenChange={next => { if (!next) setShown(null) }} title="Slack card" footer={<><Button onClick={() => setShown(null)}>Close</Button><Link className="ui-button ui-button--primary ui-button--md" to={`/operator/abuse/${shown.clusterId}`}>Open cluster</Link></>}>
+      {shown.status === 'unconfirmed' && <Alert tone="warning">Slack didn’t answer either post in time, so this card may be in the channel once or twice, or not at all. Check the channel.</Alert>}
       <SlackPreview card={shown.payload} />
     </Dialog>}
   </>
 }
-// Slack's mrkdwn as the cards use it: *bold*, `code` and line breaks.
+// Slack's mrkdwn as the cards use it: *bold*, `code`, line breaks and the level's mark (:mag: review, :rotating_light: high).
+const slackEmoji: Record<string, string> = { mag: '🔍', rotating_light: '🚨' }
 function mrkdwn(text: string): ReactNode[] {
-  return text.split('\n').flatMap((line, i) => [i > 0 ? <br key={`br${i}`} /> : null, ...line.split(/(\*[^*]+\*|`[^`]+`)/).filter(Boolean).map((part, j) =>
+  return text.replace(/:([a-z_]+):/g, (code, name: string) => slackEmoji[name] ?? code).split('\n').flatMap((line, i) => [i > 0 ? <br key={`br${i}`} /> : null, ...line.split(/(\*[^*]+\*|`[^`]+`)/).filter(Boolean).map((part, j) =>
     part.startsWith('*') ? <strong key={`${i}:${j}`}>{part.slice(1, -1)}</strong> : part.startsWith('`') ? <code key={`${i}:${j}`}>{part.slice(1, -1)}</code> : part)])
 }
 /** The card as Slack lays it out: a heading, fields two to a row, sections, its buttons (as their labels) and a footnote. */

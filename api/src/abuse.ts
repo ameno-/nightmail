@@ -311,8 +311,13 @@ export async function linkDomains(html?: string | null, text?: string | null): P
 // Work limits of one run. Each stage stops at its limit or its share of the time and continues from its cursor.
 const SIGN_INS_A_RUN = 200, PAYMENTS_A_RUN = 200, WORKSPACE_PAGE = 200, WORKSPACE_PAGES = 10, SAMPLED_A_RUN = 100, MESSAGES_A_WORKSPACE = 6, NEW_ROWS_A_RUN = 5000, LEASE = sql`interval '5 minutes'`;
 type Cursors = { signIns?: { at: string; key: string }; payments?: { at: string; id: string }; workspaces?: string };
-type Run = { since: string; cursors: Cursors; added: number; deadline: number };
+type Run = { since: string; cursors: Cursors; added: number; deadline: number; cuts: Record<string, Cut> };
+/** Why a stage stopped with work left: its share of the time ran out, or it reached a per-run limit. */
+export type Cut = 'time' | 'limit';
 const spent = (run: Run) => Date.now() >= run.deadline || run.added >= NEW_ROWS_A_RUN;
+/** A stage stopped with work left: recorded, so the run's log line, its state and Health say so (never silently). */
+// Out of time outranks a limit: a stage that hit both counts towards Health.
+const cut = (run: Run, stage: string, why?: Cut) => { if (run.cuts[stage] !== 'time') run.cuts[stage] = why ?? (Date.now() >= run.deadline ? 'time' : 'limit'); };
 export const utc = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
 /**
@@ -327,8 +332,9 @@ async function foldSignIns(runtime: Hosted, run: Run) {
     FROM nightmail_signin_attempts a LEFT JOIN nightmail_oidc_identities i ON i.issuer=a.issuer AND i.subject=a.subject
     WHERE a.observed IS NOT NULL AND (a.last_at,${key})>(${after.at}::timestamptz,${after.key}) AND a.last_at>${run.since}::timestamptz
     ORDER BY a.last_at,${key} LIMIT ${SIGN_INS_A_RUN}`));
+  if (rows.length === SIGN_INS_A_RUN) cut(run, 'signIns', 'limit');
   for (const row of rows) {
-    if (spent(run)) break;
+    if (spent(run)) { cut(run, 'signIns'); break; }
     const signals = Observed.safeParse(row.observed).data, attempt: Entity = { type: 'attempt', id: attemptEntity(runtime.config, row.issuer, row.subject) }, subject = subjectGuard(row.issuer, row.subject);
     // A row that is malformed, or whose write fails or times out, is passed over: the cursor never waits on one row.
     try {
@@ -364,8 +370,9 @@ async function foldPayments(runtime: Hosted, run: Run) {
   const { rows } = await bounded(runtime, tx => tx.execute<{ id: string; workspace_id: string; fingerprint: string | null; at: string }>(sql`SELECT p.id,p.workspace_id,
       CASE WHEN NOT ${workspaceExcluded(sql`p.workspace_id`)} THEN p.card_fingerprint END AS fingerprint,${utc(sql`p.updated_at`)} AS at FROM billing_payment_attempts p
     WHERE (p.updated_at,p.id)>(${after.at}::timestamptz,${after.id}) AND p.created_at>=${run.since}::timestamptz ORDER BY p.updated_at,p.id LIMIT ${PAYMENTS_A_RUN}`));
+  if (rows.length === PAYMENTS_A_RUN) cut(run, 'payments', 'limit');
   for (const row of rows) {
-    if (spent(run)) break;
+    if (spent(run)) { cut(run, 'payments'); break; }
     const workspace: Entity = { type: 'workspace', id: row.workspace_id };
     // A payment whose write fails or times out is passed over: the cursor never waits on one row.
     if (row.fingerprint) try { run.added += await bounded(runtime, async tx => {
@@ -403,6 +410,8 @@ const ownMail = (mail: SQL) => sql`(${mail}.snapshot @> '{"screenVerdict":{"stat
  */
 async function sampleSends(runtime: Hosted, run: Run) {
   let sampled = 0;
+  // No time left for it at all: said so, as any stop with work left.
+  if (spent(run)) { cut(run, 'sample'); return 0; }
   const floor = (workspaceId: SQL) => sql`greatest(coalesce((SELECT s.sampled_through FROM abuse_sampling s WHERE s.workspace_id=${workspaceId}),'-infinity'::timestamptz),
     coalesce((SELECT f.ignore_through FROM abuse_floors f WHERE f.entity_type='workspace' AND f.entity_id=${workspaceId}),'-infinity'::timestamptz),${run.since}::timestamptz,now()-interval '1 day')`;
   for (let page = 0; page < WORKSPACE_PAGES && sampled < SAMPLED_A_RUN && !spent(run); page++) {
@@ -415,12 +424,14 @@ async function sampleSends(runtime: Hosted, run: Run) {
       ORDER BY w.id`));
     for (const workspace of due) {
       // Out of time or work: the next run starts at this workspace.
-      if (sampled >= SAMPLED_A_RUN || spent(run)) { const at = ids.findIndex(row => row.id === workspace.id); run.cursors.workspaces = at > 0 ? ids[at - 1]!.id : start; return sampled; }
+      if (sampled >= SAMPLED_A_RUN || spent(run)) { cut(run, 'sample', sampled >= SAMPLED_A_RUN ? 'limit' : undefined); const at = ids.findIndex(row => row.id === workspace.id); run.cursors.workspaces = at > 0 ? ids[at - 1]!.id : start; return sampled; }
       // A workspace whose sample fails or times out is skipped until the cursor comes round again.
       try { if (await bounded(runtime, tx => sampleWorkspace(runtime, tx, run, workspace.id, floor(sql`${workspace.id}`)))) sampled++; } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'workspace' }); }
     }
     run.cursors.workspaces = ids.length < WORKSPACE_PAGE ? '' : ids.at(-1)!.id;
     if (ids.length < WORKSPACE_PAGE) break;
+    // The next page waits for the next run: out of time, work or pages.
+    if (page + 1 >= WORKSPACE_PAGES || sampled >= SAMPLED_A_RUN || spent(run)) cut(run, 'sample', sampled >= SAMPLED_A_RUN || page + 1 >= WORKSPACE_PAGES ? 'limit' : undefined);
   }
   return sampled;
 }
@@ -459,10 +470,13 @@ async function sampleWorkspace(runtime: Hosted, tx: DbExecutor, run: Run, worksp
 /**
  * The hourly job (maintenance.ts hourlyUpkeep, last of its steps), the only writer of signals. Off, it forgets when
  * monitoring started, so turning it on again starts from that moment. On, it takes the lease (a run in progress makes
- * this one return), then reads the sign-in log and the payment records, samples accepted mail, and groups what
- * changed, each within its share of the time. A failing stage is logged and skipped. Returns what it did, or null when it did not run.
+ * this one return), sweeps the alert outbox (abuse-alerts.ts sweepAlerts: a few statements, never cut), then reads
+ * the sign-in log and the payment records, samples accepted mail, and groups what changed, each within its share of
+ * the time and its per-run limits. A failing stage is logged and skipped. A stage that stops with work left is a cut:
+ * each is logged (ABUSE_STEP_CUT), the run's line names them with each stage's time, and the state keeps the run and
+ * how many runs in a row ran out of time, which Health reads (abuse-monitor-behind). Returns what it did, or null when it did not run.
  */
-export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number; post?: import('./abuse-alerts.js').SlackPost } = {}) {
+export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number } = {}) {
   if (!runtime.config.multiTenant) return null;
   if (!monitoring(runtime.config)) {
     try { await bounded(runtime, tx => tx.execute(sql`DELETE FROM abuse_state WHERE lease_until IS NULL OR lease_until<=now()`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'state' }); }
@@ -481,28 +495,40 @@ export async function abuseHourly(runtime: Hosted, options: { budgetMs?: number;
       WHERE s.lease_until IS NULL OR s.lease_until<=now()
       RETURNING ${utc(sql`active_since`)} AS since,cursors`));
     if (!state) { log('info', { code: 'ABUSE_HOURLY_BUSY' }); return null; }
-    run = { since: state.since, cursors: state.cursors ?? {}, added: 0, deadline: started };
+    run = { since: state.since, cursors: state.cursors ?? {}, added: 0, deadline: started, cuts: {} };
   } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'lease' }); return null; }
+  const ms: Record<string, number> = {};
   const stage = async (name: string, deadline: number, work: () => Promise<void>) => {
     run.deadline = deadline;
+    const begun = Date.now();
     try { await work(); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: name }); }
+    ms[name] = Date.now() - begun;
     try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET cursors=${JSON.stringify(run.cursors)}::jsonb WHERE id='monitor'`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'cursor' }); }
   };
+  // The alert outbox first: stale alerts marked, unqueued ones queued (their jobs post them, outside this run's time).
+  const alerts = { stale: 0, queued: 0, requeued: 0, failed: 0 };
+  await stage('alerts', started + budget, async () => { Object.assign(alerts, await (await import('./abuse-alerts.js')).sweepAlerts(runtime)); });
   await stage('signIns', started + budget * .2, async () => { result.signIns = await foldSignIns(runtime, run); });
   await stage('payments', started + budget * .4, async () => { result.payments = await foldPayments(runtime, run); });
   await stage('sample', started + budget * .75, async () => { result.sampled = await sampleSends(runtime, run); });
   // Groups the entities whose links changed and rescores the clusters longest unscored (src/abuse-clusters.ts).
-  // A change worth a person's look leaves an alert in the outbox; review alerts are posted to Slack, a few an hour,
-  // when the abuse or the operator alerts' webhook is configured (src/abuse-alerts.ts).
-  const clusters = { grouped: 0, rescored: 0, alerts: 0, posted: 0 };
+  // A change worth a person's look leaves an alert in the outbox, with the job that posts it (src/abuse-alerts.ts).
+  const clusters = { grouped: 0, rescored: 0, alerts: 0 };
   await stage('clusters', started + budget, async () => {
-    const [{ refreshClusters }, { noteAlert, deliverAlerts }] = await Promise.all([import('./abuse-clusters.js'), import('./abuse-alerts.js')]);
-    Object.assign(clusters, await refreshClusters(runtime, started + budget, async change => { if (await noteAlert(runtime, change)) clusters.alerts++; }));
-    clusters.posted = await deliverAlerts(runtime, started + budget, options.post);
+    const [{ refreshClusters }, { noteAlert }] = await Promise.all([import('./abuse-clusters.js'), import('./abuse-alerts.js')]);
+    const { cut: stopped, ...done } = await refreshClusters(runtime, started + budget, async change => { if (await noteAlert(runtime, change)) clusters.alerts++; });
+    Object.assign(clusters, done);
+    if (stopped) cut(run, 'clusters', stopped);
   });
-  try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET lease_until=NULL WHERE id='monitor'`)); } catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'release' }); }
   result.added = run.added;
-  log('info', { code: 'ABUSE_HOURLY', ...result, ...clusters, ms: Date.now() - started });
+  const cuts = Object.entries(run.cuts).map(([step, why]) => `${step}:${why}`), outOfTime = Object.values(run.cuts).includes('time');
+  // Out of time is a warning (Health counts runs of it); a per-run limit reached is the design working, logged for the record.
+  for (const [step, why] of Object.entries(run.cuts)) log(why === 'time' ? 'warn' : 'info', { code: 'ABUSE_STEP_CUT', step, reason: why });
+  // The run as it went, and how many runs in a row ran out of time (Health: abuse-monitor-behind), with the release.
+  const lastRun = { at: new Date().toISOString(), ms: Date.now() - started, stages: ms, cuts };
+  try { await bounded(runtime, tx => tx.execute(sql`UPDATE abuse_state SET lease_until=NULL,last_run=${JSON.stringify(lastRun)}::jsonb,cut_runs=CASE WHEN ${outOfTime} THEN cut_runs+1 ELSE 0 END WHERE id='monitor'`)); }
+  catch { log('warn', { code: 'ABUSE_STEP_FAILED', step: 'release' }); }
+  log('info', { code: 'ABUSE_HOURLY', ...result, ...clusters, ...alerts, ms: lastRun.ms, stages: ms, cuts });
   return result;
 }
 
