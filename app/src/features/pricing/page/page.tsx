@@ -25,10 +25,11 @@ function Run({ text }: { text: Text }) {
 }
 
 /** A caption in parts ("Per 100,000 emails a month · checked 25 Nov 2026"): on one line the parts are set apart by a
- *  dot; where they wrap, each wrapped part starts its own line, with no dot (page.css, .pp-parts). */
+ *  dot; where they wrap, each wrapped part starts its own line, with no dot (page.css, .pp-parts). The dot and its spaces
+ *  are the text's own, so the words read the same to anything that reads them. */
 function Caption({ text }: { text: Text }) {
   const parts = text.length === 1 && typeof text[0] === 'string' ? text[0].split(' · ') : []
-  return parts.length < 2 ? <Run text={text} /> : <span className="pp-parts">{parts.map((part, i) => <span key={i}>{part}</span>)}</span>
+  return parts.length < 2 ? <Run text={text} /> : <span className="pp-parts">{parts.map((part, i) => <span key={i}>{i > 0 && <span className="pp-dot">{' · '}</span>}{part}</span>)}</span>
 }
 
 /** The way in, the price pages' own (board.tsx, Start): the homepage's button in the television's airmail label
