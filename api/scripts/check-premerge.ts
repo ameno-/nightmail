@@ -269,12 +269,14 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   ]
   const script = [
     "import { createElement as h, Fragment } from 'react'", "import { renderToStaticMarkup } from 'react-dom/server'", "import { MemoryRouter } from 'react-router'",
-    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts'), compare = await import('./src/features/pricing/compare/index.ts')",
+    "const scene = await import('./src/features/pricing/scene.tsx'), prices = await import('./src/features/pricing/prices.ts'), compare = await import('./src/features/pricing/compare/index.ts'), view = await import('./src/features/pricing/page/page.tsx'), page = await import('./src/features/pricing/page/comparison.ts')",
     'const at = (path, element) => renderToStaticMarkup(h(MemoryRouter, { initialEntries: [path] }, element))',
     `const calculator = ${JSON.stringify(inputs)}.map(input => { const path = '/pricing?' + new URLSearchParams(input); return { input, path, html: at(path, h(scene.Scene, {})) } })`,
-    // Each comparison's page (scene.tsx: the board in its hall, and the page's end, whose Sources has its small print), and every
-    // size its fader can reach, with the competitor's price there.
-        "const boards = Object.entries(compare.comparisons).map(([id, c]) => ({ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }))",
+    // Each comparison's page, both ways it is drawn: as a board (scene.tsx: the board in its hall, and the page's end, whose
+    // Sources has its small print) and from its data (page/page.tsx, from page/comparison.ts: its verdict, its table of
+    // every size, its small print; the dev stage's, VITE_PRICE_PAGES=verdict). And every size its fader can reach, with the
+    // competitor's price there.
+    "const boards = Object.entries(compare.comparisons).flatMap(([id, c]) => [{ id, html: at('/compare/' + id, h(Fragment, null, h(scene.Scene, { comparison: c }), h(scene.BoardEnd, { comparison: c }))) }, { id: id + ' (verdict)', html: at('/compare/' + id, h(view.PricePageView, { doc: page.comparisonDoc(c) })) }])",
     "const reach = Object.entries(compare.comparisons).map(([id, c]) => ({ id, sizes: prices.reachable(c).map(size => { const u = c.use(size), t = prices.theirPrice(c.offer, u); return { size, sent: u.sent, received: u.received, theirs: t ? t.cents : null } }) }))",
     'const { OFFERS, comparisons, resendOverage, resendReceived } = compare',
     "process.stdout.write(JSON.stringify({ calculator, boards, reach, data: { OFFERS, comparisons, resendOverage, resendReceived } }, (_k, v) => typeof v === 'bigint' ? String(v) : v))",
@@ -349,13 +351,13 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     for (const { id, html } of out.boards) {
       const page = text(html), where = `Nightmail vs ${id}`
       checkFigures(where, html, 1)
-      // The emails a month beside each figure: sent, or (a comparison of inboxes) received and sent.
-      for (const f of figures(html)) if (!page.includes(f.received ? `${n(f.received)} received and ${n(f.sent)} sent a month` : `${n(f.sent)} emails a month`)) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
+      // The emails a month beside each figure: sent, received (a comparison of receiving), or (a comparison of inboxes) both.
+      for (const f of figures(html)) if (!page.includes(f.received ? f.sent ? `${n(f.received)} received and ${n(f.sent)} sent a month` : `${n(f.received)} emails received a month` : `${n(f.sent)} emails a month`)) fail('Price pages', `${where} prices ${n(f.sent)} sent and ${n(f.received)} received without saying so beside the figure.`, file)
       for (const term of terms.slice(2)) if (!page.includes(term)) fail('Price pages', `${where} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       if (!dated.test(html)) fail('Price pages', `${where} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${where} shows NaN, undefined or Infinity.`, file)
     }
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.boards.length} comparison pages match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs and ${out.boards.length} comparison pages (each as a board and from its data) match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

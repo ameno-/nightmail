@@ -2,6 +2,7 @@
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import { dayOf, formatCount, type Comparison } from '../prices.ts'
 import { billAt, GROUPS, ORDERED } from './comparison.ts'
+import type { CardWords } from '../../../../link-card.ts'
 import { plain, type PageDoc, type Table, type Text } from './shape.ts'
 
 // /compare, every comparison on one page (shape.ts, drawn by page.tsx like a comparison): a line, then each group's
@@ -64,4 +65,10 @@ export function hubMarkdown(doc = hubDoc()): string {
     ].join('\n')])]),
     'Each comparison names the pages its prices were read on. Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.',
   ].join('\n\n') + '\n'
+}
+
+/** /compare's link-preview card (link-card.ts draws it): how many services it prices, and the day the newest was read. */
+export function hubCard(): CardWords {
+  const modified = ORDERED.map(c => c.offer.checked).sort().at(-1)!
+  return { name: 'compare', lines: [`${ORDERED.length} email services,`, 'priced side by side.'], caption: `Each price from its own pricing page, checked ${dayOf(modified)}.` }
 }

@@ -2,13 +2,16 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin, type Rollup } from 'vite'
-import { publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
+import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
 import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
 import { linkCard, withCard } from './link-card.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
-import { PRICE_PAGES } from './src/features/pricing/pages.ts'
+import { PRICE_PAGES, type PricePage } from './src/features/pricing/pages.ts'
+import { comparisonDoc } from './src/features/pricing/page/comparison.ts'
+import { hubCard, hubDoc, hubMarkdown } from './src/features/pricing/page/hub.ts'
+import type { PageDoc } from './src/features/pricing/page/shape.ts'
 import { PANEL_IDS } from './src/features/pricing/panels.ts'
 import { entryProblems } from './src/features/pricing/prices.ts'
 import * as readable from './src/features/pricing/readable.ts'
@@ -24,6 +27,13 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 //   app's page then takes the painted one's place (index.tsx), with the inlined CSS. The Worker answers /pricing
 //   with pricing.html from the assets, compressed (api/src/worker.ts), and api/src/server.ts does the same on Node; an
 //   address under /compare/ with no page is not found.
+// - With the comparisons' new look (verdict: VITE_PRICE_PAGES=verdict, page/switch.ts; the dev stage's), each
+//   compare/<slug>.html is instead the page drawn from its data (page/comparison.ts, drawn by page/page.tsx) with its CSS
+//   inlined and none of the app's code, which it doesn't need (its links are plain links, and Get started opens
+//   Overview); and there is compare.html, every comparison on one page (page/hub.ts), with its Markdown twin
+//   compare.md and its place in the sitemap. compare/with-set.html is /compare with the homepage's television over it,
+//   while Ryan chooses (noindex, its canonical /compare). The Worker answers /compare with compare.html as it does the
+//   comparisons (api/src/worker.ts). Without it, the build writes exactly what it did before.
 // - Each page's Markdown twin, and the homepage's (readable.ts): pricing.md, compare/<slug>.md, index.md;
 //   llms-site.txt, the lines the API's llms.txt puts under its title (api/src/site-index.ts); llms-full.txt.
 // - robots.txt (every crawler welcome to the pages, not to the API: api/src/site-index.ts, CRAWL_DISALLOW; and where the
@@ -35,6 +45,8 @@ import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/read
 // homepage and the product comes from `words`: readable.ts, or with the television homepage features/home/tv/readable.ts.
 const attr = (value: string) => value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;')
 const prerenderModule = fileURLToPath(new URL('./src/features/pricing/prerender.tsx', import.meta.url))
+const pagesModule = fileURLToPath(new URL('./src/features/pricing/page/prerender.tsx', import.meta.url))
+const pricingAt = fileURLToPath(new URL('./src/features/pricing/', import.meta.url))
 const bootScript = fileURLToPath(new URL('./src/features/home/shell/boot.js', import.meta.url))
 /** Over the app's own page until it takes over (index.tsx), and not at all at an address it doesn't show (theme.js,
  *  data-plain). Unseen until all of it has arrived (#root follows it): drawn while its HTML streams in, its rows grow as
@@ -52,7 +64,7 @@ const THEME_ATTRIBUTES = ['data-theme', 'data-shell', 'data-member', 'data-overv
 const WHOLE_FACES = /@font-face\{font-family:(?:Inter|OpenTUI Mono|"Inter"|"OpenTUI Mono");[^}]*\}/g
 const FIRST_FONTS = [{ family: 'Inter', file: 'inter-basic.woff2', weight: '100 900' }, { family: 'OpenTUI Mono', file: 'opentui-regular-basic.woff2', weight: '400' }, { family: 'OpenTUI Mono', file: 'opentui-bold-basic.woff2', weight: '700' }]
 
-export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFiles' | 'structuredData'> = readable): Plugin {
+export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFiles' | 'structuredData'> = readable, verdict = false): Plugin {
   let publicDir = '', root = ''
   return {
     name: 'nightmail:price-pages', apply: 'build', enforce: 'post',
@@ -98,13 +110,29 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const faces = fonts.map(font => `@font-face{font-family:'${font.family}';src:url(${font.url}) format('woff2');font-style:normal;font-weight:${font.weight};font-display:swap;unicode-range:${BASIC}}`).join('')
       const moondust = { x1: fileOf('pricing/board/moondust-384.avif'), x2: fileOf('pricing/board/moondust-768.avif') }
       const { module: prerender } = await runnerImport<typeof import('./src/features/pricing/prerender.tsx')>(prerenderModule, { root, configFile: false, logLevel: 'error' })
+      // With the new look: the pages drawn from their data, the CSS they load in the app (page/view.tsx: page.css and the
+      // television's tv.css), and the set's photograph for /compare drawn with it.
+      const drawn = verdict ? {
+        render: (await runnerImport<typeof import('./src/features/pricing/page/prerender.tsx')>(pagesModule, { root, configFile: false, logLevel: 'error' })).module.renderPage,
+        css: [...new Set([styles[0]!.slice(1), ...pageCss(bundle, ['/features/pricing/page/view.tsx'])])].map(file => {
+          const asset = bundle[file]
+          if (asset?.type !== 'asset') this.error(`The price pages' stylesheet ${file} isn't in the bundle.`)
+          return String((asset as { source: string | Uint8Array }).source)
+        }).join(''),
+        scene: fileOf('home/tv/crt/scene.webp'),
+      } : null
+      const hub = hubDoc(), hubPage: PricePage = { path: hub.path, file: 'compare.html', title: hub.title, searchTitle: hub.searchTitle, description: hub.description, card: hubCard(), comparison: null, modified: hub.modified }
+      const written: { page: PricePage; file: string; doc?: PageDoc; set?: boolean; robots?: boolean }[] = [
+        ...PRICE_PAGES.map(page => ({ page, file: page.file, doc: drawn && page.comparison ? comparisonDoc(page.comparison) : undefined })),
+        ...drawn ? [{ page: hubPage, file: hubPage.file, doc: hub }, { page: hubPage, file: 'compare/with-set.html', doc: hub, set: true, robots: true }] : [],
+      ]
 
-      for (const page of PRICE_PAGES) {
+      for (const { page, file, doc, set: withSet, robots } of written) {
         const title = page.searchTitle, canonical = canonicalOrigin + page.path, card = linkCard(page.card)
         if (!bundle[card.file]) this.emitFile({ type: 'asset', fileName: card.file, source: card.source })
         let html = withCard(template, card, origin)
         const set = (pattern: RegExp, value: string) => {
-          if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${page.file}.`)
+          if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${file}.`)
           html = html.replace(pattern, (_match, start: string) => start + value)
         }
         set(/(<title>)[^<]*/, attr(title))
@@ -118,6 +146,23 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         set(/(<link rel="alternate" type="text\/markdown" href=")[^"]*(?=" title=")/, attr(canonicalOrigin + markdownPath(page.path)))
         set(/(<link rel="alternate" type="text\/markdown" href="[^"]*" title=")[^"]*/, attr(`${page.title}, in Markdown`))
         if (!PRICE_PAGES_LIVE) set(/(<meta charset="UTF-8" \/>)/, '\n    <meta name="robots" content="noindex" />')
+        if (doc && drawn) {
+          // A page drawn from its data: the page itself, its CSS and fonts (and the set's photograph, drawn with it), and its
+          // structured data with where it sits.
+          if (robots && !html.includes('<meta name="robots"')) set(/(<meta charset="UTF-8" \/>)/, '\n    <meta name="robots" content="noindex" />')
+          const body = drawn.render(doc, withSet).replace(/\/src\/features\/home\/tv\/crt\/scene\.webp/g, drawn.scene)
+          set(/(<link rel="manifest" href="\/site.webmanifest" \/>)/, `\n    <script type="application/ld+json">${jsonLd(page === hubPage ? hubData(page, doc) : withCrumbs(words.structuredData(page), page, doc))}</script>`)
+          html = html.replace(/\s*<link rel="preload" href="\/fonts\/[^"]+" as="font" type="font\/woff2" crossorigin \/>/g, '')
+          set(/(<script src="\/theme.js"><\/script>)/, [
+            ...fonts.map(font => `<link rel="preload" href="${font.url}" as="font" type="font/woff2" crossorigin />`),
+            ...withSet ? [`<link rel="preload" href="${drawn.scene}" as="image" fetchpriority="high" />`] : [],
+          ].map(line => `\n    ${line}`).join(''))
+          set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
+          set(/(<\/title>)/, `\n    <style>${pruneCss(drawn.css, usedNames(html + body, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
+          html = html.replace('<div id="root"></div>', `${body}\n    <div id="root"></div>`)
+          this.emitFile({ type: 'asset', fileName: file, source: html })
+          continue
+        }
         // The page, painted, with what it needs to show: its CSS, its first picture, and its structured data.
         const shell = prerender.renderShell(page)
         set(/(<link rel="manifest" href="\/site.webmanifest" \/>)/, `\n    <script type="application/ld+json">${jsonLd(words.structuredData(page))}</script>`)
@@ -134,13 +179,14 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
         set(/(<\/title>)/, `\n    <style data-shell-css>${SHELL_CSS}${pruneCss(css, usedNames(html + shell, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
         html = html.replace('<div id="root"></div>', `<div id="price-shell">${shell}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-shell="price-shell" data-press="button" data-wait="none" data-keep=".boot-loader, .price-page" data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
-        this.emitFile({ type: 'asset', fileName: page.file, source: html })
+        this.emitFile({ type: 'asset', fileName: file, source: html })
       }
       for (const { file, source } of words.markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })
+      if (drawn) this.emitFile({ type: 'asset', fileName: 'compare.md', source: hubMarkdown(hub) })
       this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex() })
       this.emitFile({ type: 'asset', fileName: 'llms-full.txt', source: words.llmsFull() })
       // The homepage's lastmod: the newest figure it quotes or links (every comparison's, which the price pages carry).
-      const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? PRICE_PAGES.map(page => ({ path: page.path, modified: page.modified })) : []]
+      const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? [...PRICE_PAGES, ...drawn ? [hubPage] : []].map(page => ({ path: page.path, modified: page.modified })) : []]
       this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n${CRAWL_DISALLOW.map(path => `Disallow: ${path}\n`).join('')}\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
       this.emitFile({ type: 'asset', fileName: 'sitemap.xml', source: `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${listed.map(({ path, modified }) => `  <url><loc>${canonicalOrigin}${path}</loc>${modified ? `<lastmod>${modified}</lastmod>` : ''}</url>\n`).join('')}</urlset>\n` })
     } },
@@ -166,4 +212,34 @@ function pageCss(bundle: Rollup.OutputBundle, modules: string[]) {
     if (chunk) visit(chunk)
   }
   return [...css]
+}
+
+/** With the comparisons' new look (page/switch.ts), the app's price pages: App.tsx's import of features/pricing is
+ *  page/pricing.tsx (a comparison and /compare drawn from their data, the calculator as before), as the television homepage
+ *  swaps its own in (home-tv.ts). Without it, the app is what it was. */
+export const verdictApp = (): Plugin => ({
+  name: 'nightmail:verdict-app', enforce: 'pre',
+  async resolveId(source, importer, options) {
+    if (!importer || importer.startsWith(pricingAt) || !/(?:^|\/)pricing(?:\/index)?(?:\.tsx?)?$/.test(source)) return null
+    const found = await this.resolve(source, importer, { ...options, skipSelf: true })
+    return found?.id === `${pricingAt}index.tsx` ? `${pricingAt}page/pricing.tsx` : found
+  },
+})
+
+const home = { '@type': 'ListItem', position: 1, name: productName, item: `${canonicalOrigin}/` }
+/** A page's structured data with where it sits (its crumbs: Home › Compare › the vendor), as its breadcrumb shows. */
+function withCrumbs(data: object, page: PricePage, doc: PageDoc) {
+  const graph = (data as { '@graph'?: object[] })['@graph']
+  graph?.push({ '@type': 'BreadcrumbList', '@id': `${canonicalOrigin}${page.path}#breadcrumb`, itemListElement: doc.crumbs.map((crumb, i) => ({ '@type': 'ListItem', position: i + 1, name: crumb.name, item: canonicalOrigin + crumb.path })) })
+  return data
+}
+/** /compare's structured data (the SEO audit's spec): the page as a collection, the comparisons it lists in its order,
+ *  and where it sits (Home › Compare). */
+function hubData(page: PricePage, doc: PageDoc) {
+  const url = canonicalOrigin + page.path, rows = doc.sections.flatMap(section => section.blocks.flatMap(block => block.kind === 'table' ? block.rows.flatMap(row => row.cells[0]!.flatMap(part => typeof part === 'object' && 'href' in part ? [part] : [])) : []))
+  return { '@context': 'https://schema.org', '@graph': [
+    { '@type': 'CollectionPage', '@id': url, url, name: page.searchTitle, description: page.description, inLanguage: 'en', dateModified: page.modified, mainEntity: { '@id': `${url}#list` }, breadcrumb: { '@id': `${url}#breadcrumb` } },
+    { '@type': 'ItemList', '@id': `${url}#list`, numberOfItems: rows.length, itemListElement: rows.map((row, i) => ({ '@type': 'ListItem', position: i + 1, name: `${productName} vs ${row.text}`, url: canonicalOrigin + row.href })) },
+    { '@type': 'BreadcrumbList', '@id': `${url}#breadcrumb`, itemListElement: [home, { '@type': 'ListItem', position: 2, name: 'Compare', item: url }] },
+  ] }
 }
