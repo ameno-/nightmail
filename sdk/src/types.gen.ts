@@ -615,6 +615,10 @@ export type AgentDeviceAuthorization = {
      * Seconds to wait between polls.
      */
     interval: number;
+    /**
+     * What to do now, in words: the link to show the person on its own line, then the polling.
+     */
+    nextStep: string;
 };
 
 export type AgentDeviceRequest = {
@@ -630,6 +634,30 @@ export type AgentDeviceRequest = {
      * What its key gets once approved.
      */
     permissions: Array<'read' | 'send' | 'manage'>;
+    /**
+     * The workspace of your own setup token that the agent held, which the page chooses first; null otherwise. Approving may still choose any workspace you own or administer.
+     */
+    suggestedWorkspaceId: string | null;
+    /**
+     * When you copied the prompt whose setup token the agent held; null for an agent that asked without one of yours. A request long after your last copy, or when you started no agent, isn't yours.
+     */
+    promptCopiedAt: string | null;
+};
+
+export type WaitingAgentDevices = {
+    data: Array<{
+        userCode: string;
+        /**
+         * What the agent says it is: its claim, not verified.
+         */
+        clientName: string | null;
+        createdAt: string;
+        expiresAt: string;
+        /**
+         * When you copied the prompt whose setup token it held.
+         */
+        promptCopiedAt: string;
+    }>;
 };
 
 export type AgentDeviceApproval = {
@@ -8247,6 +8275,10 @@ export type StartAgentDeviceAuthorizationData = {
          * What the agent is, shown to the person as its claim and naming its key ("OpenCode, set up <date>").
          */
         client_name?: string;
+        /**
+         * The setup token from the person's prompt, even if it expired or was replaced: their dashboard then shows you waiting for their approval. One that was used already addresses nobody.
+         */
+        setup_token?: string;
     };
     path?: never;
     query?: never;
@@ -8439,6 +8471,67 @@ export type LookUpAgentDeviceResponses = {
 };
 
 export type LookUpAgentDeviceResponse = LookUpAgentDeviceResponses[keyof LookUpAgentDeviceResponses];
+
+export type ListWaitingAgentDevicesData = {
+    body?: never;
+    path?: never;
+    query?: never;
+    url: '/v1/agent/device/waiting';
+};
+
+export type ListWaitingAgentDevicesErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListWaitingAgentDevicesError = ListWaitingAgentDevicesErrors[keyof ListWaitingAgentDevicesErrors];
+
+export type ListWaitingAgentDevicesResponses = {
+    /**
+     * Success
+     */
+    200: WaitingAgentDevices;
+};
+
+export type ListWaitingAgentDevicesResponse = ListWaitingAgentDevicesResponses[keyof ListWaitingAgentDevicesResponses];
 
 export type ApproveAgentDeviceData = {
     body: {

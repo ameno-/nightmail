@@ -17,6 +17,7 @@ import { RouteSkeleton } from './RouteSkeleton'
 import { ThemeToggle } from './ThemeToggle'
 import { AccountSwitcher } from './AccountSwitcher'
 import { Notices } from './Notices'
+import { AgentWaiting } from './AgentWaiting'
 import { LegalFooterLinks } from './LegalLinks'
 import { PrivacyToggle } from './PrivacyToggle'
 import { NightmailWordmark } from './NightmailLogo'
@@ -301,7 +302,7 @@ export function AppShell() {
   const grouped = groups.map(([name]) => ({ name, links: links.filter(([path]) => groupOf(path) === name) })).filter(group => group.links.length)
   const section = [...links, ...unlisted].find(([path]) => on(path) ?? (location.pathname === path || location.pathname.startsWith(`${path}/`)))?.[1] ?? 'Overview'
   const workspaceName = access.multiTenant ? session?.identity?.workspaces?.find(item => item.id === session?.identity?.workspaceId)?.name ?? 'Workspace' : regionId || productName
-  const overlays = <>{connectHost}{support.mode && <SupportHost chat={support} />}{contacting && <ContactSupportDialog onClose={() => setContacting(false)} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} pages={commands} help={help} signOut={signOut} /></>
+  const overlays = <><AgentWaiting />{connectHost}{support.mode && <SupportHost chat={support} />}{contacting && <ContactSupportDialog onClose={() => setContacting(false)} />}{notesOn && <UiNotesLayer />}<CommandMenu open={commandOpen} onOpenChange={setCommandOpen} pages={commands} help={help} signOut={signOut} /></>
   const main = <main ref={content} id="main-content" className="page-surface" tabIndex={-1}>{session?.notice && <div className="page-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
     <Notices />
     <ChunkFallback.Provider value={<RouteSkeleton />}><Suspense fallback={<RouteSkeleton />}>

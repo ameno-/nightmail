@@ -30,6 +30,7 @@ The remaining rows are human steps: OAuth consent, a forward recipient's confirm
 | `startAgentDeviceAuthorization` | An agent without credentials starts the device flow over HTTP; a person approves at /connect. |
 | `pollAgentDeviceToken` | The device flow’s poll, over HTTP, until the person approves; it returns the agent’s API key. |
 | `lookUpAgentDevice` | Human step: the /connect page shows a signed-in person the agent behind a code. |
+| `listWaitingAgentDevices` | Dashboard step: shows a signed-in owner or admin the agents waiting for their approval. |
 | `approveAgentDevice` | Human step: a signed-in owner or admin approves an agent’s code at /connect. |
 | `denyAgentDevice` | Human step: a signed-in person denies an agent’s code at /connect. |
 | `listContacts` | `contacts` · `list` · sending |

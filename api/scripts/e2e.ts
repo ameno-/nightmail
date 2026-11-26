@@ -345,6 +345,7 @@ async function devBoundaries() {
   });
   await denied('createAgentSetupToken',{});
   await denied('getAgentSetupToken',{path:fake});
+  await denied('listWaitingAgentDevices',{});
   for (const op of ['lookUpAgentDevice','approveAgentDevice','denyAgentDevice'] as const) await denied(op,{body:{userCode:'BCDF-GHJK'}});
   for (const op of ['getConnection','listConnectionRegions','refreshConnectionScan','getConnectionRegionStatus'] as const) await denied(op,{},403,'PERMISSION_DENIED');
   await denied('verifyConnection',{body:{awsAccountId:'000000000000'}},403,'PERMISSION_DENIED');

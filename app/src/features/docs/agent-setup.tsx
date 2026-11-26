@@ -26,12 +26,12 @@ export const setupTokenPlaceholder = `${secretPrefixes.agentSetup}… (added whe
 // The agent's own API key (api/src/agent-setup.ts): from the setup token a copy carries, else the device flow, which an
 // owner or admin approves at /connect.
 function keyLines(origin: string, token: string | null | undefined) {
-  const device = `POST ${origin}/v1/agent/device (JSON body {"client_name":"<your name>"}), show me its verification_uri_complete and user_code, then poll POST ${origin}/v1/agent/device/token with {"device_code":"<device_code>"} every interval seconds until it returns the key (AUTHORIZATION_PENDING means keep waiting).`
+  const device = (body: string) => `POST ${origin}/v1/agent/device (JSON body ${body}), then show me its verification_uri_complete link on its own line and tell me to open it and approve you, with its user_code; poll POST ${origin}/v1/agent/device/token with {"device_code":"<device_code>"} every interval seconds until it returns the key (AUTHORIZATION_PENDING means keep waiting, and show me the link again if I haven't approved).`
   const keep = `Save the key it returns as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit; it's shown once. It sends email and manages domains, inboxes and receiving; it can't create API keys, inbox connection keys, inbox keys or mail-client (IMAP/SMTP) passwords, and can't manage members or billing.`
-  if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device} ${keep}`]
+  if (token === undefined) return [`- No ${apiKeyEnv} yet? Get your own key with a device code: ${device('{"client_name":"<your name>"}')} ${keep}`]
   return [
     `- Get your own API key first: exchange this one-time setup token (it works once, for 15 minutes) with POST ${origin}/v1/agent/setup and the JSON body {"token":"${token ?? setupTokenPlaceholder}","client_name":"<your name>"}. ${keep}`,
-    `- If the setup token was already used or has expired, use a device code instead: ${device}`,
+    `- If the setup token has expired or was replaced, ask me for a fresh copy of this prompt: that's quickest. Its refusal also carries a device code (error.details[0]): show me its link on its own line and poll it. If it was already used and you don't have the key, get a device code: ${device(`{"client_name":"<your name>","setup_token":"${token ?? setupTokenPlaceholder}"}`)}`,
   ]
 }
 

@@ -7,6 +7,7 @@ import { LiveStatus } from '../../components/motion'
 import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
+import { AgentWaiting } from '../../components/AgentWaiting'
 import { useApiMutation, useApiQuery, useSession } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { finishedStep, readDomainStep, readRegionalDomain, setDomainStep, setRegionalDomain, startStep, storedStage, useDomainStep, type OnboardingStage } from '../../data/onboarding'
@@ -86,6 +87,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
       {session?.notice && <div className="page-notice onboarding-notice"><Alert tone="danger" title="Invitation not accepted" onDismiss={session.dismissNotice}>{session.notice}</Alert></div>}
       <OnboardingSteps stage={stage} />
     </main>
+    <AgentWaiting />
   </div>
 }
 
