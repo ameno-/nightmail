@@ -6,7 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { flushCounters } from './health-counters.js';
-import { nodeLogFacetLane, nodeRuntime } from './adapters/node.js';
+import { closeAfterRefusal, nodeLogFacetLane, nodeRuntime } from './adapters/node.js';
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
@@ -115,8 +115,11 @@ try {
     let answer = await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), path === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: { ip: connection.incoming.socket.remoteAddress ?? '' } } : runtime));
     if (path === '/llms.txt' && request.method === 'GET' && answer.ok && siteIndex) { const head = new Headers(answer.headers); head.delete('content-length'); answer = new Response(withSiteIndex(await answer.text(), siteIndex), { status: answer.status, headers: head }); }
     const response = await dashboardFile(request, path, answer);
-    // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
-    if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
+    // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse, and close it in stages.
+    if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) {
+      connection.outgoing.shouldKeepAlive = false;
+      closeAfterRefusal(connection.incoming.socket);
+    }
     return response;
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });

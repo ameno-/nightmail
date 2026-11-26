@@ -9,6 +9,7 @@ import { isoTime, operatorApi, type AbuseAccount, type AbuseAlert, type AbuseBan
 import { errorText } from '../../data/types'
 import { label, number, shortDateTime } from '../../lib/format'
 import { abuseFacets, abuseView, alertColumnDefs, bandLabel, bandTone, ClusterBodySkeleton, clusterAccountColumnDefs, clusterColumnDefs, clusterFacts, ClusterRailSkeleton, clusterWorkspaceColumnDefs, dailyLimitError, reviewActions, StaffOnly } from './skeletons'
+import { ListsView } from './lists'
 
 // Operator → Abuse: accounts and workspaces that abuse monitoring found related, by risk, for a person to review.
 // A cluster opens beside the list of the others: why it scored, what links its members (kinds and counts, never a
@@ -62,9 +63,11 @@ export function AbuseView() {
   })
   const first = clusters.data?.pages[0], rows = (clusters.data?.pages ?? []).flatMap(page => page.items)
   const groups = abuseFacets({ ...view, counts: first?.counts, outbox: first?.alerts,
-    onBand: band => set(next => { next.delete('show'); if (band) next.set('band', band); else next.delete('band') }), onAlerts: () => set(next => { next.delete('band'); next.set('show', 'alerts') }) })
+    onBand: band => set(next => { next.set('view', 'abuse'); next.delete('show'); if (band) next.set('band', band); else next.delete('band') }),
+    onAlerts: () => set(next => { next.set('view', 'abuse'); next.delete('band'); next.set('show', 'alerts') }),
+    onLists: () => set(next => { next.set('view', 'lists'); next.delete('band'); next.delete('show') }) })
   return <SplitPane className="op-abuse" collapse="row" rail={<FacetRail label="Abuse views" groups={groups} />}>
-    {view.alerts ? <Alerts /> : clusters.isError && !clusters.data ? <ErrorState error={clusters.error} onRetry={() => void clusters.refetch()} /> : <>
+    {view.lists ? <ListsView /> : view.alerts ? <Alerts /> : clusters.isError && !clusters.data ? <ErrorState error={clusters.error} onRetry={() => void clusters.refetch()} /> : <>
       <DataTable className="op-table" loading={clusters.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} rowHref={row => `/operator/abuse/${row.id}`} columns={clusterColumns}
         empty={<EmptyState title={first && !first.monitoring ? 'Abuse monitoring is off' : view.band ? `No ${bandLabel[view.band].toLowerCase()}-risk clusters` : 'No related accounts found'} action={view.band ? <Button onClick={() => set(next => next.delete('band'))}>Show all</Button> : undefined} />} />
       {clusters.hasNextPage && <Button className="op-more" loading={clusters.isFetchingNextPage} onClick={() => void clusters.fetchNextPage()}>Load more</Button>}

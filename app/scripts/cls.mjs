@@ -244,7 +244,7 @@ const pages = ids => [
   ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
-  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator', click: 'Waitlist' }],
+  ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator?view=signups', click: 'Waitlist' }],
   // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.
   ['Operator · sign-ups', '/operator?view=signups', { from: '/operator', click: 'Sign-ups' }],
   ['Operator · sign-up limit dialog', '/operator?view=signups', { dialog: 'Set limit' }],
@@ -254,7 +254,7 @@ const pages = ids => [
   ['Operator · abuse · cluster', `/operator/abuse/${ids.abuseCluster}`, { from: '/operator?view=abuse', row: 'Several accounts · Shared card' }],
   ['Operator · abuse · alerts', '/operator?view=abuse&show=alerts', { from: '/operator?view=abuse', click: 'Alerts' }],
   ['Operator · abuse · Slack card', '/operator?view=abuse&show=alerts', { dialog: 'High risk' }],
-  ['Operator · lists', '/operator?view=lists', { from: '/operator', click: 'Lists' }],
+  ['Operator · lists', '/operator?view=lists', { from: '/operator?view=abuse', click: 'Lists' }],
   // Health: six facts and one table of what the minute tick last wrote, the open alerts first.
   ['Operator · health', '/operator?view=health', { from: '/operator', click: 'Health' }],
   // Glass: the board's tiles, funnel, region rows (two at least), metric rows and feed column have fixed sizes, and feed
@@ -264,13 +264,16 @@ const pages = ids => [
   ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The Deliverability board: tiles, the providers' table, groups and VDM's table of fixed rows, filtered in place.
   ['Glass · deliverability', '/glass?view=deliverability', { from: '/glass', click: 'Deliverability' }],
-  // The support inbox (staff): Needs you and All, a conversation's timeline beside
-  // its customer panel, an email conversation (the email as it arrived), and on a phone the panel's sheet.
+  // The support inbox (staff): Needs you and All; a conversation as a chat (its thread scrolls by itself under a header
+  // of one height, loaded or not, with the reply box docked below), an email conversation (the email as it arrived), an
+  // agent's report, and Details: a panel from the right, a sheet on a phone (where the name opens it).
   ['Support', '/support', { from: '/overview' }],
   ['Support · all', '/support?view=all', { from: '/support', click: 'All' }],
   ['Support · conversation', `/support/${ids.supportConversation}`, { from: '/support', row: 'DKIM will not verify' }],
   ['Support · email conversation', `/support/${ids.supportEmail}`, { from: '/support?view=all', row: 'Why did my test email bounce?' }],
-  ['Support · customer sheet', `/support/${ids.supportConversation}`, { dialog: 'Customer', phoneOnly: true }],
+  ['Support · agent report', `/support/${ids.supportFeedback}`, {}],
+  ['Support · details', `/support/${ids.supportConversation}`, { dialog: 'Details' }],
+  ['Support · details sheet', `/support/${ids.supportConversation}`, { dialog: 'Sam Okafor', phoneOnly: true }],
   // A change support proposed, from its emailed link: the dialog over Overview opens once Nightmail's record has loaded.
   ['Support · confirm a change', `/support/actions/${ids.supportAction}`, {}],
   // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
@@ -396,9 +399,9 @@ const pages = ids => [
   // ⌘K, from the command bar's field: the command menu over Logs, its whole list (pages, then actions) at a fixed height.
   ['Logs · command menu', '/logs', { dialog: 'Search or jump' }],
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
-  ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { dialog: 'Add custom MAIL FROM' }],
-  ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
-  ['Domain · remove custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Remove custom MAIL FROM', 'Remove custom MAIL FROM?'] }],
+  ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { disclose: 'DNS records', dialog: 'Add custom MAIL FROM' }],
+  ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { disclose: 'DNS records', menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
+  ['Domain · remove custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { disclose: 'DNS records', menu: ['Actions for MAIL FROM MX record', 'Remove custom MAIL FROM', 'Remove custom MAIL FROM?'] }],
   ['API keys · create key dialog', '/api-keys', { dialog: 'Create key' }],
   // /api-keys?create=smtp opens Create key on an SMTP login: its domains load after it opens.
   ['API keys · SMTP login dialog', '/api-keys?create=smtp', {}],
@@ -560,7 +563,8 @@ const phonePages = new Set([
   'Support · all',
   'Support · conversation',
   'Support · email conversation',
-  'Support · customer sheet',
+  'Support · agent report',
+  'Support · details sheet',
   'Support · confirm a change',
   'Overview · UI notes mode',
   'Operator · without UI notes',
@@ -916,6 +920,13 @@ async function measure(browser, job, fx) {
       if (!opened) problems.push('no Help button');
       else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
       await settle(page, net);
+    }
+    if (job.disclose) {
+      const toggle = page.locator('button[aria-expanded], details > summary', { hasText: job.disclose }).first();
+      if (await toggle.isVisible()) {
+        await toggle.click();
+        await settle(page, net);
+      } else if (job.device === 'phone') problems.push(`no disclosure “${job.disclose}”`);
     }
     if (job.dialog) {
       const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.dialog);
@@ -1282,12 +1293,12 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide }] of television ? televisionPages : pages(ids)) {
+  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, disclose, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide }] of television ? televisionPages : pages(ids)) {
     if (only && !only.test(name) || pass === 'phone' && !television && !phonePages.has(name) || phoneOnly && pass !== 'phone') continue;
     // `wide` pages take the desktop passes at 3440 × 1440.
     const device = wide && pass === 'desktop' ? 'wide' : pass;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, disclose, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
     if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, start, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
