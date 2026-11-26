@@ -20635,11 +20635,14 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // The workspace itself still sets a topic with its own credentials: the API is unchanged.
     ok(await consent(key.secret, ben.id, 'subscribed', { topicId: events.id }));
     assert.deepEqual(await states(ben, events.id), [[events.id, true]]);
-    // One link acts at most 10 times a minute: past that the page says so, with Retry-After, and nothing more is done.
+    // One link saves preferences at most 10 times a minute: past that the page says so, with Retry-After, and nothing more is
+    // done. Its opt-outs still go through: the mailbox's one-click and the confirmation are never refused.
     const replies = [];
-    for (let i = 0; i < 25; i++) replies.push(await http('POST', bens, undefined, 'confirm=footer', form));
+    for (let i = 0; i < 25; i++) replies.push(await http('POST', bens, undefined, `preferences=save&shown=${news.id}&topic=${news.id}`, form));
     const limited = replies.find(reply => reply.status === 429);
     assert.ok(limited && limited.headers.get('retry-after') === '60' && /Too many requests/.test(String(limited.body)) && replies.filter(reply => reply.status === 200).length >= 9, replies.map(reply => reply.status).join());
+    assert.match(ok(await http('POST', bens)), /unsubscribed/, 'A one-click POST is never refused by the link’s limit.');
+    assert.match(ok(await http('POST', bens, undefined, 'confirm=footer', form)), /unsubscribed/, 'Nor is the confirmation.');
   });
 
   test('a campaign’s own unsubscribe page changes only the footer link: List-Unsubscribe keeps its one HTTPS one-click address', async () => {

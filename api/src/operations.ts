@@ -1793,14 +1793,15 @@ function registerPublicEvents(app: App) {
       if (!linked && !prefs.topics.length) return c.html(unsubscribePage('Unsubscribe from marketing emails?', `<p>You will no longer receive marketing emails from this workspace.${destination}</p><form method="post"><input type="hidden" name="confirm" value="footer">${button('Unsubscribe')}</form>`), 200);
       return c.html(unsubscribePage('Email preferences', preferencesBody(prefs, destination)), 200);
     }
-    // One link acts at most UNSUBSCRIBE_POSTS_PER_MINUTE times a minute (a mailbox's one-click is one POST; a person a few).
-    // The page only removes and every opt-out is idempotent, so a link can't pile up consent records or events anyway: this
-    // bounds the work a flood of requests on one link makes.
-    if (!await chargeBudget(c.env, token.workspaceId, `unsubscribe:${token.tokenHash.slice(0, 32)}`, UNSUBSCRIBE_POSTS_PER_MINUTE)) {
+    const form = await c.req.parseBody({ all: true }).catch(() => ({} as Record<string, unknown>));
+    // One link saves preferences at most PREFERENCE_SAVES_PER_MINUTE times a minute (a person saves a few): this bounds the
+    // work a flood of Saves on one link makes. An opt-out (the mailbox's one-click, the confirmation, everything) is never
+    // refused: each is one idempotent write, and refusing one would keep someone on a list because another copy of their
+    // link was busy.
+    if (form.preferences === 'save' && !await chargeBudget(c.env, token.workspaceId, `unsubscribe:${token.tokenHash.slice(0, 32)}`, PREFERENCE_SAVES_PER_MINUTE)) {
       c.header('Retry-After', '60');
       return c.html(unsubscribePage('Too many requests', '<p>This link was used many times in the last minute. Try again in a minute.</p>'), 429);
     }
-    const form = await c.req.parseBody({ all: true }).catch(() => ({} as Record<string, unknown>));
     const list = (value: unknown) => (Array.isArray(value) ? value : value === undefined ? [] : [value]).filter((item): item is string => typeof item === 'string');
     const again = prefs.topics.length ? '<p><a href="">Back to your email preferences</a></p>' : '';
     // The preference page's own forms: Save, and everything from a link about one topic. One-click and the confirmation
@@ -1828,7 +1829,7 @@ function registerPublicEvents(app: App) {
   });
 }
 
-const UNSUBSCRIBE_POSTS_PER_MINUTE = 10;
+const PREFERENCE_SAVES_PER_MINUTE = 10;
 const escapeText = (text: string) => text.replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
 const button = (label: string, secondary = false) => `<button type="submit"${secondary ? ' class="secondary"' : ''}>${label}</button>`;
 /**
