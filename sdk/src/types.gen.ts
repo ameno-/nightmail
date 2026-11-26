@@ -690,9 +690,32 @@ export type Contact = {
     updatedAt: string;
 };
 
-export type ContactDetail = ContactRead & {
+export type ContactDetail = {
+    id: string;
+    workspaceId: string;
+    email: string;
+    name: string | null;
+    properties: {
+        [key: string]: string | number | boolean | null;
+    };
+    marketingConsent: 'unknown' | 'subscribed' | 'unsubscribed';
+    suppressed: boolean;
+    suppressionReason: string | null;
+    risk: ContactRisk;
+    lastOpenAt: string | null;
+    lastClickAt: string | null;
+    observedSince: string | null;
+    openObservedSince: string | null;
+    clickObservedSince: string | null;
+    deletedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
     /**
-     * Every topic of the workspace, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.
+     * Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.
+     */
+    listIds: Array<string>;
+    /**
+     * Every topic of the workspace that isn’t archived, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.
      */
     topics: Array<ContactTopic>;
 };

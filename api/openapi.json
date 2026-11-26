@@ -1868,25 +1868,140 @@
         ]
       },
       "ContactDetail": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/ContactRead"
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
           },
-          {
-            "type": "object",
-            "properties": {
-              "topics": {
-                "type": "array",
-                "items": {
-                  "$ref": "#/components/schemas/ContactTopic"
-                },
-                "description": "Every topic of the workspace, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId."
-              }
-            },
-            "required": [
-              "topics"
+          "workspaceId": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
             ]
+          },
+          "properties": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "marketingConsent": {
+            "type": "string",
+            "enum": [
+              "unknown",
+              "subscribed",
+              "unsubscribed"
+            ]
+          },
+          "suppressed": {
+            "type": "boolean"
+          },
+          "suppressionReason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "risk": {
+            "$ref": "#/components/schemas/ContactRisk"
+          },
+          "lastOpenAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastClickAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "observedSince": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "openObservedSince": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "clickObservedSince": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "deletedAt": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          },
+          "listIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID."
+          },
+          "topics": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContactTopic"
+            },
+            "description": "Every topic of the workspace that isn’t archived, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId."
           }
+        },
+        "required": [
+          "id",
+          "workspaceId",
+          "email",
+          "name",
+          "properties",
+          "marketingConsent",
+          "suppressed",
+          "suppressionReason",
+          "risk",
+          "lastOpenAt",
+          "lastClickAt",
+          "observedSince",
+          "openObservedSince",
+          "clickObservedSince",
+          "deletedAt",
+          "createdAt",
+          "updatedAt",
+          "listIds",
+          "topics"
         ]
       },
       "ContactTopic": {

@@ -61,7 +61,8 @@ export function contactBody<T extends { email: string; risk: string | null; risk
 const ListInput = z.object({ name: z.string().trim().min(1).max(200), description: z.string().max(2000).default('') }).strict();
 const List = ListInput.extend({ id: z.string(), ...Scope, ...Dates }).openapi('ContactList');
 const ContactRead = Contact.extend({ listIds: z.array(z.string()).describe('Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.') }).openapi('ContactRead');
-const ContactDetail = ContactRead.extend({ topics: z.array(ContactTopic).describe('Every topic of the workspace, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.') }).openapi('ContactDetail');
+// Spread, not extend: an extension of a named schema is published as allOf, which reads as a different response to clients.
+const ContactDetail = z.object({ ...ContactRead.shape, topics: z.array(ContactTopic).describe('Every topic of the workspace that isn\u2019t archived, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.') }).openapi('ContactDetail');
 const ListCounts = z.object({ total: z.number().int(), subscribed: z.number().int(), unsubscribed: z.number().int(), unknown: z.number().int(), suppressed: z.number().int() }).describe('Active members only. Suppressed takes precedence over consent; subscribed, unsubscribed, unknown and suppressed are mutually exclusive and sum to total.');
 const ListRead = z.object({ ...List.shape, counts: ListCounts.nullable() }).strict().openapi('ContactListRead');
 const SearchQuery = PageQuery.extend({ search: z.string().trim().min(1).max(200).optional() });
