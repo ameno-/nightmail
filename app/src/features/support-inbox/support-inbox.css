@@ -79,6 +79,14 @@
 .sinbox-timeline > .sinbox-message[data-note]:first-child { padding-top: var(--space-12); }
 .sinbox-message[data-held] :is(.sinbox-text, .sinbox-message__body) { color: var(--color-muted); }
 .sinbox-held { margin: var(--space-8) 0 0; color: var(--color-warning); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.sinbox-held[data-decided] { color: var(--color-muted); }
+/* A held answer's choices, under it; a confirmation says what it means beside them. */
+.sinbox-draft { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-8) var(--space-12); margin-top: var(--space-8); }
+.sinbox-draft__actions { gap: var(--space-8); }
+.sinbox-draft__warn { color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.sinbox-composer__editing { margin: 0; color: var(--color-muted); font-size: var(--text-xs); line-height: var(--leading-xs); }
+.sinbox-composer__editing button { position: relative; padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }
+.sinbox-composer__editing button::before { content: ''; position: absolute; inset: -12px -4px; }
 /* What happened besides the messages: one quiet mono line each. */
 .sinbox-event { display: flex; align-items: center; gap: var(--space-8); min-width: 0; padding-block: var(--space-6); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 20px; }
 .sinbox-event svg { flex: none; width: 14px; height: 14px; }

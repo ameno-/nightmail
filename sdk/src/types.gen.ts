@@ -690,6 +690,53 @@ export type Contact = {
     updatedAt: string;
 };
 
+export type ContactDetail = {
+    id: string;
+    workspaceId: string;
+    email: string;
+    name: string | null;
+    properties: {
+        [key: string]: string | number | boolean | null;
+    };
+    marketingConsent: 'unknown' | 'subscribed' | 'unsubscribed';
+    suppressed: boolean;
+    suppressionReason: string | null;
+    risk: ContactRisk;
+    lastOpenAt: string | null;
+    lastClickAt: string | null;
+    observedSince: string | null;
+    openObservedSince: string | null;
+    clickObservedSince: string | null;
+    deletedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
+    /**
+     * Up to 50 list IDs on paginated contact reads (200 on getContact), sorted by ID.
+     */
+    listIds: Array<string>;
+    /**
+     * Every topic of the workspace that isn’t archived, oldest first, with whether its sends reach this contact. Set one with updateContactConsent and topicId.
+     */
+    topics: Array<ContactTopic>;
+};
+
+export type ContactTopic = {
+    topicId: string;
+    name: string;
+    /**
+     * Whether sends with this topic reach the contact, as far as the topic goes: the contact’s own choice, or the topic’s default without one. Mail is still sent only while the contact is subscribed to marketing and not suppressed.
+     */
+    subscribed: boolean;
+    /**
+     * true when a choice about this topic was recorded for the contact; false when subscribed is the topic’s default.
+     */
+    chosen: boolean;
+    /**
+     * When the choice was last recorded; null without one.
+     */
+    updatedAt: string | null;
+};
+
 export type ContactListRead = {
     name: string;
     description?: string;
@@ -1028,6 +1075,17 @@ export type CommitContactImportInput = {
         evidence: string;
         policyVersion?: string;
     };
+};
+
+export type Topic = {
+    id: string;
+    workspaceId: string;
+    name: string;
+    description: string;
+    subscribedByDefault: boolean;
+    archivedAt: string | null;
+    createdAt: string;
+    updatedAt: string;
 };
 
 export type AudienceQueryResult = {
@@ -1425,6 +1483,10 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
+     * kind marketing only (422 TOPIC_REQUIRES_MARKETING otherwise): the topic it is about (listTopics). A recipient who opted out of the topic is refused (reason topic_unsubscribed), and its one-click unsubscribe opts out of this topic only.
+     */
+    topicId?: string;
+    /**
      * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
@@ -1511,6 +1573,10 @@ export type BatchSendEmailItem = {
         name: string;
         value: string;
     }>;
+    /**
+     * kind marketing only (422 TOPIC_REQUIRES_MARKETING otherwise): the topic it is about (listTopics). A recipient who opted out of the topic is refused (reason topic_unsubscribed), and its one-click unsubscribe opts out of this topic only.
+     */
+    topicId?: string;
     /**
      * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
@@ -1840,6 +1906,10 @@ export type CampaignDraft = {
      */
     unsubscribePageUrl?: string;
     /**
+     * The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.
+     */
+    topicId?: string;
+    /**
      * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).
      */
     requiredNotice?: boolean;
@@ -2031,6 +2101,10 @@ export type CreateCampaignInput = {
      * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
+    /**
+     * The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.
+     */
+    topicId?: string;
     /**
      * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).
      */
@@ -2489,6 +2563,10 @@ export type CampaignUpdateInput = {
          * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
          */
         unsubscribePageUrl?: string;
+        /**
+         * The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.
+         */
+        topicId?: string;
         /**
          * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).
          */
@@ -8578,7 +8656,7 @@ export type GetContactResponses = {
     /**
      * Success
      */
-    200: ContactRead;
+    200: ContactDetail;
 };
 
 export type GetContactResponse = GetContactResponses[keyof GetContactResponses];
@@ -8734,6 +8812,10 @@ export type ListContactConsentEventsResponses = {
              * Committed import ID when source is import; null otherwise.
              */
             importId: string | null;
+            /**
+             * The topic this decision is about (updateContactConsent with topicId, or an unsubscribe from mail with a topic); null for marketing as a whole.
+             */
+            topicId: string | null;
             occurredAt: string;
             createdAt: string;
         }>;
@@ -8746,6 +8828,10 @@ export type ListContactConsentEventsResponse = ListContactConsentEventsResponses
 export type UpdateContactConsentData = {
     body: {
         status: 'subscribed' | 'unsubscribed';
+        /**
+         * A topic (listTopics): the decision is about that kind of mail only, and marketing consent stays as it is. Without it, the decision is about all marketing.
+         */
+        topicId?: string;
         source?: string;
         policyVersion?: string;
         evidence?: string;
@@ -10039,6 +10125,224 @@ export type CommitContactImportResponses = {
 };
 
 export type CommitContactImportResponse = CommitContactImportResponses[keyof CommitContactImportResponses];
+
+export type ListTopicsData = {
+    body?: never;
+    path?: never;
+    query?: {
+        cursor?: string;
+        limit?: number;
+        /**
+         * true lists the archived topics instead.
+         */
+        archived?: 'true' | 'false';
+    };
+    url: '/v1/topics';
+};
+
+export type ListTopicsErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type ListTopicsError = ListTopicsErrors[keyof ListTopicsErrors];
+
+export type ListTopicsResponses = {
+    /**
+     * Success
+     */
+    200: {
+        data: Array<Topic>;
+        nextCursor: string | null;
+    };
+};
+
+export type ListTopicsResponse = ListTopicsResponses[keyof ListTopicsResponses];
+
+export type CreateTopicData = {
+    body: {
+        /**
+         * Shown to recipients on the preference page, e.g. "Product updates". Unique among the workspace’s topics that aren’t archived, ignoring case.
+         */
+        name: string;
+        /**
+         * One line under the name on the preference page.
+         */
+        description?: string;
+        /**
+         * What a contact who never chose gets: true sends the topic to everyone subscribed to marketing until they opt out of it; false only to those who opted in. Fixed when the topic is made.
+         */
+        subscribedByDefault?: boolean;
+    };
+    path?: never;
+    query?: never;
+    url: '/v1/topics';
+};
+
+export type CreateTopicErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type CreateTopicError = CreateTopicErrors[keyof CreateTopicErrors];
+
+export type CreateTopicResponses = {
+    /**
+     * Success
+     */
+    201: Topic;
+};
+
+export type CreateTopicResponse = CreateTopicResponses[keyof CreateTopicResponses];
+
+export type UpdateTopicData = {
+    /**
+     * subscribedByDefault is fixed when the topic is made: it can’t change who gets the topic without their choice.
+     */
+    body: {
+        name?: string;
+        description?: string;
+        /**
+         * true archives the topic: it leaves the topic list and the preference page, and new sends can’t name it, while sends already launched with it keep skipping the people who opted out of it. false brings it back, with every choice made about it.
+         */
+        archived?: boolean;
+    };
+    path: {
+        id: string;
+    };
+    query?: never;
+    url: '/v1/topics/{id}';
+};
+
+export type UpdateTopicErrors = {
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    400: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    401: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    403: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    404: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    409: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    413: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    422: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    429: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    500: ApiError;
+    /**
+     * Request failed; use error.code and requestId to diagnose.
+     */
+    503: ApiError;
+};
+
+export type UpdateTopicError = UpdateTopicErrors[keyof UpdateTopicErrors];
+
+export type UpdateTopicResponses = {
+    /**
+     * Success
+     */
+    200: Topic;
+};
+
+export type UpdateTopicResponse = UpdateTopicResponses[keyof UpdateTopicResponses];
 
 export type QueryAudienceData = {
     body: {
@@ -15654,7 +15958,7 @@ export type UnsubscribeOneClickError = UnsubscribeOneClickErrors[keyof Unsubscri
 
 export type UnsubscribeOneClickResponses = {
     /**
-     * Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).
+     * Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form); for a link from mail with a topic, the contact is unsubscribed from that topic only.
      */
     200: UnsubscribeConfirmationHtml;
 };

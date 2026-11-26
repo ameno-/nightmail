@@ -43,7 +43,7 @@ function routeGroupFor(pathname: string): RouteGroup | null {
   if (/^\/v1\/(?:settings|webhooks|metrics|sender-score|usage)(?:\/|$)/.test(pathname) || pathname === '/unsubscribe' || pathname.startsWith('/unsubscribe/')) return 'ops-other';
   if (pathname === '/v1/emails' || pathname.startsWith('/v1/emails/')) return 'sending-emails';
   if (/^\/v1\/(?:attachments|campaigns|campaign-content-guide|preview-images)(?:\/|$)/.test(pathname)) return 'sending-other';
-  if (/^\/v1\/(?:contacts|lists|segments|contact-imports)(?:\/|$)/.test(pathname)) return 'audience';
+  if (/^\/v1\/(?:contacts|lists|segments|contact-imports|topics)(?:\/|$)/.test(pathname)) return 'audience';
   if (pathname === '/v1/audience-query' || pathname.startsWith('/v1/audience-query/')) return 'audience-query';
   if (pathname === '/v1/newsletters' || pathname.startsWith('/v1/newsletters/')) return 'newsletters';
   if (/^\/v1\/(?:templates|template-assets)(?:\/|$)/.test(pathname)) return 'templates';
@@ -83,7 +83,10 @@ function loadGroupRegistrar(group: Exclude<RouteGroup, 'mcp'>): Promise<(app: Ap
         const [{ registerMcpAuth }, { registerDashboardAuth }] = await Promise.all([import('./mcp-auth.js'), import('./dashboard-auth.js')]);
         return (target: App) => { registerMcpAuth(target); registerDashboardAuth(target); };
       }
-      case 'audience': return (await import('./audience.js')).registerAudience;
+      case 'audience': {
+        const [{ registerAudience }, { registerTopics }] = await Promise.all([import('./audience.js'), import('./topics.js')]);
+        return (target: App) => { registerAudience(target); registerTopics(target); };
+      }
       case 'audience-query': return (await import('./audience-query.js')).registerAudienceQuery;
       case 'newsletters': return (await import('./newsletters.js')).registerNewsletters;
       case 'templates': return (await import('./templates.js')).registerTemplates;
@@ -451,8 +454,8 @@ export async function createOpenApiApp(): Promise<App> {
     import('./mailbox.js'), import('./workspaces.js'), import('./provider-connections.js'), import('./mcp.js'), import('./public-stats.js'), import('./overview-setup.js'), import('./operator.js'),
     import('./audit.js'), import('./support.js'), import('./support-conversations.js'), import('./support-inbox.js'), import('./ui-notes.js'),
   ]));
-  const [{ registerBilling }, { registerStripeWebhook }, { registerNewsletters }, { registerAgentSetup }, { registerFeedback }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js'), import('./newsletters.js'), import('./agent-setup.js'), import('./feedback.js')]));
-  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAgentSetup(full); registerAudience(full); registerAudienceQuery(full); registerNewsletters(full);
+  const [{ registerBilling }, { registerStripeWebhook }, { registerNewsletters }, { registerAgentSetup }, { registerFeedback }, { registerTopics }] = await wrapModuleLoad(() => Promise.all([import('./billing/routes.js'), import('./billing/stripe-webhook.js'), import('./newsletters.js'), import('./agent-setup.js'), import('./feedback.js'), import('./topics.js')]));
+  registerMcpAuth(full); registerDashboardAuth(full); registerAuth(full); registerAgentSetup(full); registerAudience(full); registerTopics(full); registerAudienceQuery(full); registerNewsletters(full);
   registerTemplates(full); registerSending(full); registerOperations(full); registerSesRegions(full); registerMailbox(full);
   registerWorkspaces(full); registerProviderConnections(full); registerMcp(full); registerPublicStats(full); registerOverviewSetup(full); registerOperator(full);
   registerAudit(full); registerSupport(full); registerSupportOperator(full); registerSupportConversations(full); registerSupportInbox(full); registerUiNotes(full);
