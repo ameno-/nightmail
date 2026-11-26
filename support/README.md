@@ -172,14 +172,15 @@ Nightmail records a `message.received` event for every message an address receiv
 ## Limits and retention
 
 - **Daily caps** (`src/limits.ts`; override each with a `LIMIT_*` var). The budgets are separate, so one can't starve another:
-  - model turns: 1,500 a day, 100 per chat person, and 5 per email sender address (`LIMIT_TURNS_PER_EMAIL_SENDER`); a verified email's turn counts against its person's 100 as well;
+  - model turns: 1,500 a day, 40 per chat person, 80 per workspace (all its people together, `LIMIT_TURNS_PER_WORKSPACE`), and 5 per email sender address (`LIMIT_TURNS_PER_EMAIL_SENDER`); a verified email's turn counts against its person's 40 and its workspace's 80 as well;
   - tickets: a 60-a-day reserve for verified customers, 40 a day per intake address for everyone else, and 3 per customer or DMARC-passing sender;
   - mail: 20 a day per DMARC-passing sender, 30 per address for all unauthenticated mail together (a spoofed From can't spread across keys), of which at most 3 per From address at support@ (`LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS`, so a forged address can't use up the sign-in replies of every sender without DMARC), and 2,000 in total.
 
   Mail over a cap is never dropped. It's kept, bounded, in D1 `overflow`, and the daily cron (00:10 UTC) emails the team one "N messages over cap" digest. The first time a global cap is hit each day, the team gets an alert at once. Both emails are frozen when first queued (D1 `support_notices`) and resent by the five-minute sweep, under the same idempotency key, until Nightmail accepts them. The daily cron also runs the retention sweep.
 - **Per sender at the edge:** 10 messages a minute (the `EMAIL_IN` limiter), counted apart for a sender's DMARC-verified mail and for mail that only claims its address. Mail over it is never read or answered, but it's recorded in the work ledger and listed in the digest.
 - **Per conversation:** 60 turns, and 500K tokens weighted by cost (cache reads count a tenth). Past either, the conversation files a ticket.
+- **A chat message the agent can't answer** (a daily turn cap, the conversation's own limits, or the model failing) goes to the team, with no model call: the message is kept, the conversation becomes a ticket with the reason in its title (one per conversation: later messages are added to it), and the person gets one plain reply saying so, never an address to write to. The conversation stays open, so staff reply as to any ticket (in the chat, or by email when it isn't open). Past the ticket caps the reply says only that the team has it, and No reply sent holds it for staff.
 - **Per person:** 10 chats a day.
 - **Per email thread:** 5 messages in 10 minutes.
 - **Tool steps:** 25 per turn.
-- **Retention:** chats close after 24 hours idle, email threads after 7 days. The DO deletes its storage 7 days after closing. D1 keeps the conversation index and tickets, finished ledger rows for 35 days, and notices for 30. Intake mail blocked for 30 days is given up (it stays in Nightmail's inbox).
+- **Retention:** chats close after 30 days idle, email threads after 7 days. The DO deletes its storage 7 days after closing. D1 keeps the conversation index and tickets, finished ledger rows for 35 days, and notices for 30. Intake mail blocked for 30 days is given up (it stays in Nightmail's inbox).
