@@ -94,7 +94,7 @@ export function paint(template: string, page: Paint): string {
   // while its HTML streams in grows as each row's rest arrives (Chrome; other browsers ignore it).
   set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
   const pruned = pruneCss(page.css, usedNames(html + page.body, THEME_ATTRIBUTES))
-  set(/(<\/title>)/, `\n    <style data-shell-css>${shellCss(page.shell)}${page.extraCss ?? ''}${page.wholeFaces ? pruned : pruned.replace(WHOLE_FACES, '')}</style>\n    <style>${firstFaces}</style>`)
+  set(/(<\/title>)/, `\n    <style data-shell-css>${shellCss(page.shell)}${page.extraCss ?? ''}${page.wholeFaces ? pruned : pruned.replace(WHOLE_FACES, '')}</style>\n    <style data-shell-fonts>${firstFaces}</style>`)
   if (!html.includes('<div id="root"></div>')) throw new Error('index.html has no <div id="root"></div>.')
   const { files } = page
   return html.replace('<div id="root"></div>', `<div id="${page.shell}">${page.body}</div>\n    <div id="root"></div>\n    <script src="${page.boot}" defer data-shell="${page.shell}" data-press="button" data-wait="none" data-keep="${page.keep}" data-css="${files.css}" data-preload="${files.preload.join(' ')}" data-entry="${files.entry}"></script>`)

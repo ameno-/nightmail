@@ -107,10 +107,11 @@ function LegalDocumentView({ document: item, onFollow }: { document: typeof term
   </div>
 }
 
-// The section being read: the last heading above a line a quarter of the way down the window.
+// The section being read: the last heading above a line a quarter of the way down the window, from the first frame (the
+// first section, as the page drawn before this code shows it: prerender.tsx).
 function useActiveSection(ids: readonly string[]) {
-  const [active, setActive] = useState<string | null>(null)
-  useEffect(() => {
+  const [active, setActive] = useState<string | null>(ids[0] ?? null)
+  useLayoutEffect(() => {
     let frame = 0
     const update = () => {
       frame = 0
