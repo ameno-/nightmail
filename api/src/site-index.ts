@@ -15,11 +15,12 @@ export const CRAWL_DISALLOW = ['/v1/', '/api/', '/mcp', '/internal/', '/unsubscr
 /** The pages search engines may index: the homepage, the price pages, the docs and the legal pages. Every other address
  *  the dashboard's shell answers is a signed-in screen (Overview, Domains, Connect …), which a crawler sees only as the
  *  sign-in, so the Worker and the Node server send it with X-Robots-Tag: noindex. */
-export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pricing|compare|docs|legal)(?:\/|$)/.test(pathname);
+export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pricing|compare|docs|legal)(?:\/|$)|^\/alternatives\//.test(pathname);
 
 /** An address under the directories the build writes the site's own pages into (app/price-pages.ts): a comparison
- *  (/compare/<vendor>) or a vendor's pricing page (/pricing/<vendor>). The Worker serves them from the build's files. */
-export const isSitePage = (pathname: string) => /^\/(?:compare|pricing)\//.test(pathname);
+ *  (/compare/<vendor>), a vendor's pricing page (/pricing/<vendor>) or its alternatives page (/alternatives/<vendor>). The
+ *  Worker serves them from the build's files. */
+export const isSitePage = (pathname: string) => /^\/(?:compare|pricing|alternatives)\//.test(pathname);
 /** Where one of those the build didn't make is (and /compare, without its page): nowhere (404), never the dashboard. */
 export const isMissingComparePage = (pathname: string) => pathname === '/compare' || isSitePage(pathname);
 /** Where a reference page the build didn't make is (app/site-pages.ts writes one per operation): not found, rather than

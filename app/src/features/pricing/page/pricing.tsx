@@ -32,8 +32,8 @@ export function PricePage() {
   const vendor = at.startsWith('/compare/') ? at.slice('/compare/'.length) : null
   const comparison = vendor !== null && Object.hasOwn(comparisons, vendor) ? comparisons[vendor]! : null
   if (comparison) return <Frame title={PRICE_PAGES.find(page => page.comparison === comparison)!.searchTitle}><ComparisonView comparison={comparison} /></Frame>
-  // A vendor's pricing page (docs/), or (another address under /pricing/) not found, as ../index.tsx says it.
-  const doc = at.startsWith('/pricing/') ? PRICE_PAGES.find(page => page.path === at)?.doc : undefined
+  // A vendor's pricing or alternatives page (docs/), or (another address under them) not found, as ../index.tsx says it.
+  const doc = /^\/(?:pricing|alternatives)\//.test(at) ? PRICE_PAGES.find(page => page.path === at)?.doc : undefined
   if (doc) return <Frame title={doc.searchTitle}><DocView doc={doc} /></Frame>
   return <Calculator />
 }

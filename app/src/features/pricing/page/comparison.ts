@@ -75,8 +75,11 @@ export function comparisonDoc(c: Comparison): PageDoc {
     factsSection(rowLines(c.rows))],
     questions: comparisonQuestions(c),
     sources: shownSources(sourcesOf(c), c.offer),
-    // The vendor's own pages first (docs/registry.ts: its pricing page), then the other comparisons of its kind.
-    related: [...ownPages(c.slug).map(path => ({ title: `${vendor} pricing`, path, line: `Every ${vendor} plan, and what a month costs at each size.` })), ...ORDERED.filter(other => other.focus === c.focus && other.slug !== c.slug).map(other => {
+    // The vendor's own pages first (docs/registry.ts: its pricing and alternatives pages), then the other comparisons of
+    // its kind.
+    related: [...ownPages(c.slug).map(path => path.startsWith('/alternatives/')
+      ? { title: `${vendor} alternatives`, path, line: `${productName} and the services nearest ${vendor} in price, at three sizes.` }
+      : { title: `${vendor} pricing`, path, line: `Every ${vendor} plan, and what a month costs at each size.` }), ...ORDERED.filter(other => other.focus === c.focus && other.slug !== c.slug).map(other => {
       const o = verdictOf(other)
       return { title: `vs ${other.offer.vendor}`, path: other.path, line: `${o.at.replaceAll('\u00a0', ' ').replace(/^Per/, 'At')}: ${productName} ${o.ours}, ${other.offer.vendor} ${o.theirs}.` }
     })],

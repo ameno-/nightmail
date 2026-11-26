@@ -1,7 +1,8 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { comparisons } from '../compare/index.ts'
 import type { Doc } from './doc.ts'
-import { PRICING_VENDORS } from './registry.ts'
+import { vendorAlternatives } from './alternatives.ts'
+import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './registry.ts'
 import { vendorPricing } from './vendor-pricing.ts'
 
 // The pages that answer a question about email prices (docs/doc.ts), every one the registry names (registry.ts). pages.ts
@@ -9,7 +10,10 @@ import { vendorPricing } from './vendor-pricing.ts'
 // in it, its Markdown twin, its structured data, its sitemap entry and its line in llms.txt.
 
 const pricingVendors = PRICING_VENDORS.map(slug => ({ slug, vendor: comparisons[slug]!.vendor }))
-export const DOCS: Doc[] = PRICING_VENDORS.map(slug => vendorPricing(comparisons[slug]!, pricingVendors))
+export const DOCS: Doc[] = [
+  ...PRICING_VENDORS.map(slug => vendorPricing(comparisons[slug]!, pricingVendors)),
+  ...ALTERNATIVES_VENDORS.map(slug => vendorAlternatives(comparisons[slug]!)),
+]
 
 /** A vendor's pricing page needs this much of its own to be worth an address: a page with less is a template with a name
  *  in it, and the build refuses it (docProblems). */

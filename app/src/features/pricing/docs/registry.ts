@@ -9,9 +9,10 @@
 /** The vendors with a pricing page, by their comparison's slug (compare/index.ts), in the order the pages list them. */
 export const PRICING_VENDORS: readonly string[] = ['sendgrid', 'resend', 'mailchimp', 'mailgun', 'postmark', 'mailjet', 'brevo', 'mandrill']
 
-/** The vendors with an alternatives page (/alternatives/<slug>): none is built yet. A comparison's title follows which of
- *  the two pages its vendor has (prices.ts, searchWords), so adding a slug here retitles its comparison in the same build. */
-export const ALTERNATIVES_VENDORS: readonly string[] = []
+/** The vendors with an alternatives page (/alternatives/<slug>: alternatives.ts), the ones searched most for one. A
+ *  comparison's title follows which of the two pages its vendor has (prices.ts, searchWords), so adding a slug here makes
+ *  the page and retitles its comparison in the same build. */
+export const ALTERNATIVES_VENDORS: readonly string[] = ['sendgrid', 'resend', 'mailgun', 'postmark', 'mailchimp', 'mandrill']
 
 /** The pages a vendor has besides its comparison, by its slug. */
-export const ownPages = (slug: string) => PRICING_VENDORS.includes(slug) ? [`/pricing/${slug}`] : []
+export const ownPages = (slug: string) => [...PRICING_VENDORS.includes(slug) ? [`/pricing/${slug}`] : [], ...ALTERNATIVES_VENDORS.includes(slug) ? [`/alternatives/${slug}`] : []]

@@ -3,6 +3,7 @@ import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import { dayOf, formatCount, type Comparison } from '../prices.ts'
 import { billAt, GROUPS, ORDERED } from './comparison.ts'
 import { START } from '../start.ts'
+import { ALTERNATIVES_VENDORS } from '../docs/registry.ts'
 import { factsSection } from './facts.ts'
 import type { CardWords } from '../../../../link-card.ts'
 import { plain, type PageDoc, type Table, type Text } from './shape.ts'
@@ -48,7 +49,8 @@ export function hubDoc(): PageDoc {
     h1: [[`${productName} costs less`], [`than each of these ${ORDERED.length}.`]],
     answer: [[`At every size shown · checked ${dayOf(modified).replaceAll(' ', '\u00a0')}`]],
     sections,
-    questions: [], sources: [], related: [],
+    // The vendors' alternatives pages (docs/registry.ts), which link back here.
+    questions: [], sources: [], related: ALTERNATIVES_VENDORS.flatMap(slug => { const c = ORDERED.find(o => o.slug === slug); return c ? [{ title: `${c.offer.vendor} alternatives`, path: `/alternatives/${slug}`, line: `${productName} and the services nearest ${c.offer.vendor} in price.` }] : [] }),
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }],
     modified,
     llms: `What a month costs on ${productName} and on ${counts.join(', ')}, at three sizes each, read ${dayOf(modified)}.`,
@@ -64,6 +66,7 @@ export function hubMarkdown(doc = hubDoc()): string {
     ...doc.sections.flatMap(section => [`## ${section.title}`, ...section.blocks.flatMap(block => block.kind === 'list' ? [block.items.map(item => `- ${plain(item)}`).join('\n')] : block.kind !== 'table' ? [] : [plain(block.caption), [
       `| Service | ${block.head.slice(1).join(' | ')} |`, `| --- | ${block.head.slice(1).map(() => '---:').join(' | ')} |`, ...block.rows.map(row => `| ${row.cells.map(cell).join(' | ')} |`),
     ].join('\n')])]),
+    ...doc.related.length ? ['## More', doc.related.map(page => `- [${page.title}](${publicOrigin}${page.path}.md): ${page.line}`).join('\n')] : [],
     'Each comparison names the pages its prices were read on. Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.',
   ].join('\n\n') + '\n'
 }
