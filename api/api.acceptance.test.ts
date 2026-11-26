@@ -11657,6 +11657,48 @@ describe('Hosted MCP OAuth and tools', () => {
             { answerable: 9, withoutHuman: 3, apart: 2, noReply: 2, atLeast: false }, 'Answered without a human: 3 of 9; 2 counted apart; no reply sent to the customer still waiting, nor to the one whose answer was held.');
         });
 
+        await t.test('15d the support AI\u2019s cost: each model call that reaches Nightmail is counted once (the answering agent\u2019s as its mirrored counters grow, the triage agent\u2019s after each reading, binding only); Glass adds it up by UTC day; past the daily line one Slack card a UTC day', async () => {
+          const { readGlass } = await import('./src/glass.js'), { SUPPORT_AI } = await import('./src/health-thresholds.js'), { supportCostAlert, operatorCard } = await import('./src/operator-alerts.js');
+          const spent = async (id: string) => (await db.query('SELECT agent, turns, cost_usd::float8 AS cost FROM support_ai_usage WHERE conversation_id = $1 ORDER BY id', [id])).rows.map(r => [r.agent, r.turns, r.cost]);
+          const before = (await readGlass(runtime)).supportAi, near = (a: number, b: number) => Math.abs(a - b) < 1e-6;
+          // The answering agent: what its mirrored counters grew by, once; a mirror that repeats or is behind adds nothing.
+          const id = await stranger();
+          for (const [turns, costUsd] of [[2, 0.25], [2, 0.25], [3, 5], [1, 0.1]]) ok(reply(await platform.mirrorState(id, { turns, costUsd })));
+          assert.deepEqual(await spent(id), [['support', 2, 0.25], ['support', 1, 4.75]]);
+          // The triage agent: what one reading cost, added to its report. Only the binding, only for an agent feedback report, only its two fields.
+          const { ticketId } = ok(await send('POST', '/v1/feedback', session(owner, acme), { message: 'Listing inboxes is slow.', operation: 'listInboxes' }), 201);
+          const report = (await db.query('SELECT id FROM support_conversations WHERE ticket_id = $1', [ticketId])).rows[0].id as string;
+          error(await send('POST', `/v1/operator/support/feedback/${report}/usage`, keyed(operator), { turns: 1, costUsd: 0.05 }), 403, 'SUPPORT_PLATFORM_REQUIRED');
+          error(reply(await platform.feedbackUsage(id, { turns: 1, costUsd: 0.05 })), 404);
+          error(reply(await platform.feedbackUsage(report, { turns: 1, costUsd: 0.05, workspaceId: acme } as never)), 422);
+          assert.deepEqual(ok(reply(await platform.feedbackUsage(report, { turns: 1, costUsd: 0.05 }))), { conversationId: report, turns: 1, costUsd: 0.05 });
+          assert.deepEqual(await spent(report), [['triage', 1, 0.05]]);
+          // Glass: today, 7 and 30 days with the turns and conversations behind them, each UTC day, and the conversations that cost most.
+          const after = (await readGlass(runtime)).supportAi;
+          assert.ok(near(after.today.costUsd - before.today.costUsd, 5.05) && after.today.turns - before.today.turns === 4 && after.today.conversations - before.today.conversations === 2, JSON.stringify([before.today, after.today]));
+          for (const span of ['week', 'month'] as const) assert.ok(near(after[span].costUsd - before[span].costUsd, 5.05), span);
+          assert.ok(after.daily.length === 30 && near(after.daily.at(-1)! - before.daily.at(-1)!, 5.05), JSON.stringify(after.daily.slice(-2)));
+          assert.equal(after.line, SUPPORT_AI.dailyLineUsd);
+          assert.ok(after.top.length <= 3 && after.top.every((c, i, all) => i === 0 || all[i - 1]!.costUsd >= c.costUsd), JSON.stringify(after.top));
+          assert.deepEqual(after.top.find(c => c.id === id), { id, channel: 'email', workspace: null, costUsd: 5, turns: 3 });
+          // The average per conversation: what the conversations the AI answered cost, over how many. The stranger's counts once an
+          // answer of the AI reached it, and the triage agent's reading never does.
+          assert.ok(after.answered === before.answered && near(after.answeredCostUsd, before.answeredCostUsd), 'Not answered yet, so not in the average.');
+          ok(reply(await platform.mirrorMessages(id, [{ id: 'msg_aianswerreachedz', author: 'agent', kind: 'reply', text: 'Here is the answer.', delivery: 'sent' }])));
+          const answered = (await readGlass(runtime)).supportAi;
+          assert.ok(answered.answered === before.answered + 1 && near(answered.answeredCostUsd - before.answeredCostUsd, 5), JSON.stringify([before, answered].map(g => [g.answered, g.answeredCostUsd])));
+          // The alarm: one card to the operators' Slack a UTC day, however many ticks find the day past its line.
+          const cardsOf = async () => (await db.query("SELECT id, payload FROM jobs WHERE type = 'operator.alert' AND id LIKE 'operator-alert:support\\_ai\\_cost:%'")).rows;
+          await db.query("DELETE FROM jobs WHERE type = 'operator.alert' AND id LIKE 'operator-alert:support\\_ai\\_cost:%'");
+          for (let i = 0; i < 3; i++) await supportCostAlert(runtime.db, SUPPORT_AI.dailyLineUsd + 1.5, SUPPORT_AI.dailyLineUsd);
+          const cards = await cardsOf();
+          assert.deepEqual(cards.map(c => c.id), [`operator-alert:support_ai_cost:platform:${new Date().toISOString().slice(0, 10)}`]);
+          const card = operatorCard('https://nightmail.example', cards[0]!.payload, { id: 'platform', name: null })!;
+          assert.equal(card.text, `Support AI cost: $${(SUPPORT_AI.dailyLineUsd + 1.5).toFixed(2)} since midnight UTC, past the $${SUPPORT_AI.dailyLineUsd.toFixed(2)} daily line. Nothing stops: the turn caps still apply.`);
+          assert.equal((card.blocks[0]!.accessory as Json).url, 'https://nightmail.example/glass');
+          await db.query("DELETE FROM jobs WHERE type = 'operator.alert' AND id LIKE 'operator-alert:support\\_ai\\_cost:%'");
+        });
+
         await t.test('16 a reply to a staff email: from a verified staff address (the team address or an operator\u2019s), in the staff thread ingest filed it in, it is an internal note on that conversation, by email, with only its new words; anything else replying there is ignored, and nothing in a subject or body moves it', async () => {
           ok(reply(await platform.pullOutbox()));
           const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
@@ -17806,6 +17848,27 @@ describe('Private attachment assets and campaign revisions', () => {
     cleanup(t, async () => { for (const file of [big, small]) ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404, 409]); });
     assert.equal(big.size, max);
     assert.match(error(await upload('over.txt', max + 1), 413, 'ATTACHMENT_LIMIT_EXCEEDED').message, /^Attachment "over\.txt" is 25\.0 MiB \(26,214,401 bytes\) decoded\. No file may be larger than 25 MiB: link to it from the email instead\./);
+    // The refused file is never stored.
+    assert.equal((await (await fixtureDatabase(t)).query("SELECT count(*)::int AS n FROM sending_attachments WHERE filename = 'over.txt'")).rows[0].n, 0);
+    // Exercise both halves of the closing connection in memory. The client can still write after reading the refusal.
+    const { duplexPair } = await import('node:stream'), { once } = await import('node:events');
+    const { closeAfterRefusal } = await import('./src/adapters/node.js');
+    const [client, server] = duplexPair({ allowHalfOpen: true });
+    const socket = Object.assign(server, { destroySoon() { server.destroy(); } });
+    const handled: string[] = [];
+    socket.on('data', input => {
+      handled.push(input.toString());
+      if (handled.length === 1) {
+        closeAfterRefusal(socket);
+        socket.write('413', () => socket.destroySoon());
+      }
+    });
+    const closed = once(socket, 'close'), reply = once(client, 'data');
+    client.write('upload');
+    assert.equal(String((await reply)[0]), '413');
+    client.end('second request');
+    await closed;
+    assert.deepEqual(handled, ['upload'], 'A request sent after the refusal must not reach the handler.');
     const content = ok(await http('GET', `/v1/attachments/${big.id}/content`, key.secret, undefined, {}, 30_000)).content as string;
     assert.ok(content.length === Math.ceil(max / 3) * 4 && Buffer.from(content, 'base64').equals(Buffer.alloc(max, 0x61)), 'The download is the whole file as canonical base64.');
     // One message may carry 25 MiB of files; one byte more is refused before anything is queued.
@@ -33413,7 +33476,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // The route: an operator reads the same figures, every series its full length, cached for the next read.
       const first = await local('GET', path), page = ok(first);
       assert.deepEqual([first.headers.get('x-nightmail-glass-cache'), first.headers.get('cache-control')], ['miss', 'private, no-store']);
-      assert.deepEqual(Object.keys(page), ['generatedAt', 'signups', 'sending', 'delivery', 'receiving', 'builtin', 'support', 'screening', 'api', 'money', 'system', 'visitors']);
+      assert.deepEqual(Object.keys(page), ['generatedAt', 'signups', 'sending', 'delivery', 'receiving', 'builtin', 'support', 'supportAi', 'screening', 'api', 'money', 'system', 'visitors']);
       const steady = (g: typeof after) => ({ ...g, generatedAt: null, api: { ...g.api, hourly: g.api.hourly.at(-1) } });
       assert.deepEqual(steady(page), steady(sampled));
       const day = new Date().getUTCDate();
@@ -43636,6 +43699,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const always = ['database-transaction warning 660: open 11 min, 2 over a minute.', 'database-disk warning 0.8: 80% of 150 GB.'];
     assert.deepEqual([lines(crowded), lines(crowded)], [always, ['database-connections warning 85: 85 of 100.', always[0], 'database-slow-queries warning 4: 4 running over 30 s.', 'database-lock-waits warning 12: 12 sessions waiting on a lock.', always[1]]]);
     assert.ok(lines({ ...crowded, database: { ...crowded.database, sizeBytes: 135 * GB } }).includes('database-disk critical 0.9: 90% of 150 GB.'));
+    // The support AI past its daily line (health-thresholds.ts SUPPORT_AI): a warning on Health, in dollars; under it, nothing.
+    const { SUPPORT_AI } = await import('./src/health-thresholds.js'), over = SUPPORT_AI.dailyLineUsd + 11.234;
+    assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: SUPPORT_AI.dailyLineUsd - 0.01 } }), []);
+    assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: over } }), [`support-ai-cost warning ${over}: $${over.toFixed(2)} since midnight UTC, past the $${SUPPORT_AI.dailyLineUsd.toFixed(2)} daily line.`]);
   });
 
   test('MX health: warnings stay on Health; critical opens, reminders and long recoveries are single plain Slack lines; short flaps stay quiet across ticks; operator and self-hosted access', async t => {

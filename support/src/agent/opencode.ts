@@ -2,7 +2,7 @@ import { Plugin } from '@opencode/plugin';
 import type { OpenCodeWorkerd } from '@opencode/sdk/workerd';
 import type { Env } from '../env.js';
 import { MissingSecret } from '../tokens.js';
-import type { Harness, HarnessEvent, HarnessTool, TurnInput, TurnResult, Usage } from './harness.js';
+import { withSpent, type Harness, type HarnessEvent, type HarnessTool, type TurnInput, type TurnResult, type Usage } from './harness.js';
 import { TOOLS, ToolFailure, type Param, type ToolHost } from './tools.js';
 import { unfenced } from './projection.js';
 import SYSTEM from './system.md';
@@ -291,6 +291,9 @@ export async function createHarness<H = ToolHost>(env: Env, storage: DurableObje
         await done;
         // The run ended (succeeded, failed or interrupted): nothing is left for a boot to resume.
         await storage.delete(TURN_OPEN);
+      } catch (error) {
+        // Whatever its steps had spent goes with the error, so the caller counts it (harness.ts spentBy).
+        throw withSpent(error, usage);
       } finally {
         signal.removeEventListener('abort', stop);
         listen.abort();

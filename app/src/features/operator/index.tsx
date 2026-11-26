@@ -11,10 +11,9 @@ import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsvChunks, formatCsvRow } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, memberColumnDefs, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, GlassLink, memberColumnDefs, operatorTab, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, SignupSubTabs, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 import { AbuseView } from './abuse'
-import { ListsView } from './lists'
 import { HealthView } from './health'
 
 // The operator console (lazy, /operator): Nightmail staff with a platform role review flagged Hosted workspaces and act on
@@ -37,16 +36,17 @@ const StepBadge = ({ step }: { step: StandingStep }) => <StatusBadge status={ste
 export function OperatorPage() {
   const role = useOperatorRole()
   const [params, setParams] = useSearchParams()
-  const view = operatorView(params.toString())
+  const view = operatorView(params.toString()), tab = operatorTab(view)
   const navigate = useNavigate(), tabs = useOperatorTabs(), identity = useSession()?.identity
   // A self-hosted installation has no operator area: this address is its Health page, for anyone signed in.
   if (!role && identity && identity.multiTenant !== true) return <><PageHeader title="Health" /><div className="op-page"><HealthView /></div></>
   if (!role) return <NotFound />
+  const setView = (value: string) => setParams(previous => { const next = new URLSearchParams(previous); next.delete('band'); next.delete('show'); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })
   return <>
-    <PageHeader title="Operator" actions={view === 'signups' && role === 'operator' ? <SetLimit /> : undefined} />
+    <PageHeader title="Operator" actions={<GlassLink />} />
     <div className="op-page">
-      <Tabs value={view} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setParams(previous => { const next = new URLSearchParams(previous); next.delete('band'); next.delete('show'); if (value === 'queue') next.delete('view'); else next.set('view', value); return next }, { replace: true })} />
-      {view === 'queue' ? <Queue /> : view === 'signups' ? <Signups /> : view === 'abuse' ? <AbuseView /> : view === 'lists' ? <ListsView /> : view === 'waitlist' ? <Waitlist /> : view === 'health' ? <HealthView /> : <Actions />}
+      <Tabs value={tab} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setView(value)} />
+      {tab === 'queue' ? <Queue /> : tab === 'health' ? <HealthView /> : tab === 'signups' ? <Signups sub={view === 'waitlist' ? 'waitlist' : 'signups'} onSub={setView} canAct={role === 'operator'} /> : tab === 'abuse' ? <AbuseView /> : <Actions />}
     </div>
   </>
 }
@@ -64,17 +64,18 @@ const signupColumns: Column<WorkspaceSummary>[] = [
   { ...def(signupColumnDefs, 'sent'), render: row => number(row.sent), cardRender: row => `${number(row.sent)} sent` },
   { ...def(signupColumnDefs, 'standing'), render: row => !row.standing ? <span className="muted">—</span> : <span className={row.standing === 'ok' ? 'muted' : undefined}>{standingText[row.standing]}</span> },
 ]
-function Signups() {
+function Signups({ sub, onSub, canAct }: { sub: 'signups' | 'waitlist'; onSub: (next: 'signups' | 'waitlist') => void; canAct: boolean }) {
   const query = useSignupPlaces(), places = query.data, unknown = query.isError && !places
   const list = useInfiniteQuery({
-    queryKey: ['operator', 'signups', 'workspaces'], initialPageParam: undefined as string | undefined,
+    queryKey: ['operator', 'signups', 'workspaces'], initialPageParam: undefined as string | undefined, enabled: sub === 'signups',
     queryFn: ({ pageParam, signal }) => operatorApi.allWorkspaces({ cursor: pageParam }, signal), getNextPageParam: page => page.nextCursor ?? undefined,
   })
   const rows = (list.data?.pages ?? []).flatMap(page => page.items)
   return <>
     <SignupFacts values={places ? { 'Signed up': `${number(places.signedUp)} of ${number(places.limit)}`, 'Held for the waitlist': number(places.held), Open: number(places.open), Waiting: number(places.waiting) }
       : unknown ? { 'Signed up': '—', 'Held for the waitlist': '—', Open: '—', Waiting: '—' } : undefined} />
-    {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
+    <SignupSubTabs value={sub} onChange={onSub} actions={canAct ? <SetLimit /> : undefined} />
+    {sub === 'waitlist' ? <Waitlist /> : list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
       <DataTable className="op-table" loading={list.isPending} skeletonRows={6} rows={rows} rowKey={row => row.id} columns={signupColumns}
         rowHref={row => row.standing ? `/operator/workspaces/${encodeURIComponent(row.id)}` : undefined} empty={<EmptyState title="No workspaces yet" />} />
       {list.hasNextPage && <Button className="op-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
@@ -202,9 +203,9 @@ const letInText = (row: WaitlistEntry) => `${when(row.letInAt)} · ${row.emailed
 const waitlistColumns: Column<WaitlistEntry>[] = [
   { ...def(waitlistColumnDefs, 'email'), render: row => <span className="op-email"><PrivateAddress value={row.email} /></span> },
   { ...def(waitlistColumnDefs, 'name'), render: row => <span className="op-cell" title={row.name ?? undefined}>{row.name || '—'}</span>, cardRender: row => row.name || 'No name' },
+  { ...def(waitlistColumnDefs, 'attempts'), render: row => number(row.attempts), cardRender: row => `${number(row.attempts)} ${row.attempts === 1 ? 'attempt' : 'attempts'}` },
   { ...def(waitlistColumnDefs, 'first'), render: row => <At value={row.firstAt} />, cardRender: row => `first ${when(row.firstAt)}` },
   { ...def(waitlistColumnDefs, 'last'), render: row => <At value={row.lastAt} /> },
-  { ...def(waitlistColumnDefs, 'attempts'), render: row => number(row.attempts), cardRender: row => `${number(row.attempts)} ${row.attempts === 1 ? 'attempt' : 'attempts'}` },
   { ...def(waitlistColumnDefs, 'letIn'), render: row => row.letInAt ? <span className="op-cell" title={letInText(row)}>{letInText(row)}</span> : <span className="muted">—</span>, cardRender: row => row.letInAt ? `Let in ${letInText(row)}` : 'Waiting' },
 ]
 function Waitlist() {

@@ -561,7 +561,7 @@ button.ui-facet:focus-visible:not([aria-pressed='true']) { background: var(--col
   .ui-split[data-collapse='row'] .ui-facets__group ul { flex-direction: row; flex-wrap: nowrap; gap: var(--space-4); overflow-x: auto; }
   /* Each value keeps its whole label: the row scrolls sideways instead of squeezing them to a letter. */
   .ui-split[data-collapse='row'] .ui-facets__group li { flex: none; }
-  .ui-split[data-collapse='row'] button.ui-facet { width: auto; margin: 0; padding-inline: var(--space-8); grid-template-columns: auto auto auto; height: var(--control-height); }
+  .ui-split[data-collapse='row'] button.ui-facet { display: inline-flex; width: auto; margin: 0; padding-inline: var(--space-12); height: var(--control-height); }
   .ui-split[data-collapse='row'] .ui-facet__dot--none { display: none; }
 }
 /* Waterfall: 28px rows, a dot, the name and the time since the first event; no rules, a solid fill under the pointer

@@ -4,6 +4,7 @@ import { ApiError, errors, json, log, notFound, response, type App, type DbExecu
 import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID } from './support-platform.js';
 import { requestTrace } from './support.js';
+import { recordAiUsage } from './support-ai-cost.js';
 
 // The feedback triage agent's side of Nightmail. Every agent feedback report (src/feedback.ts) is read once, before
 // staff read it, by a separate agent the support platform runs on its sweep (support/src/agent/triage.ts): it writes one
@@ -186,5 +187,21 @@ export function registerFeedbackTriage(app: App) {
     });
     log('info', { code: 'FEEDBACK_TRIAGED', classification: written.classification, duplicates: body.duplicates.length });
     return c.json(written, 201);
+  });
+
+  app.openapi(createRoute({ hide: true, tags, security, method: 'post', path: '/v1/operator/support/feedback/{id}/usage', operationId: 'operatorFeedbackTriageUsage',
+    description: 'What one reading of a report cost (the binding only): the triage agent\u2019s model turns and their cost in US dollars, added to the report\u2019s counters and to the support AI\u2019s spend (src/support-ai-cost.ts). Sent once per reading, after it ends, with or without a note. Anything but an agent feedback report is 404.',
+    request: { params: Id, body: json(z.object({ turns: z.number().int().min(0).max(10), costUsd: z.number().min(0).max(100).describe('US dollars.') }).strict()) },
+    responses: { 200: response(z.object({ conversationId: z.string(), turns: z.number().int(), costUsd: z.number() })), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const id = c.req.valid('param').id, body = c.req.valid('json');
+    const totals = await c.env.db.transaction(async tx => {
+      await reportOf(tx, id, true);
+      const { rows: [row] } = await tx.execute<{ turns: number; cost_usd: string }>(sql`UPDATE support_conversations SET turns = turns + ${body.turns}, cost_usd = cost_usd + ${body.costUsd}::numeric
+        WHERE id = ${id} RETURNING turns, cost_usd`);
+      await recordAiUsage(tx, { conversationId: id, agent: 'triage', turns: body.turns, costUsd: body.costUsd });
+      return { conversationId: id, turns: row!.turns, costUsd: Number(row!.cost_usd) };
+    });
+    return c.json(totals, 200);
   });
 }

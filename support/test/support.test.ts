@@ -2439,6 +2439,37 @@ describe('support Worker', () => {
       c.ws.close();
     }, 180_000);
 
+    test('failed turns: what they spent counts in the conversation’s cost, never in its turns or token budget', async () => {
+      // A person of its own: their daily conversations and turns are nobody else's.
+      const c = await chat(handoff('usr_outage'));
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('ft0', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)));
+      const budget = (m: any) => m.inputTokens + m.outputTokens + (m.cacheReadTokens ?? 0) / 10;
+      const before = (await drive(c.id) as any).meta, N = 3;
+      assert.equal(before.turns, 1);
+      // Each: a docs search that spends, then the model's API fails the next step, so the customer gets no answer from the AI.
+      for (let n = 1; n <= N; n++) {
+        c.say(`ft${n}`, `Outage probe ${n}`);
+        // Each goes to the team (#958 passToTeam): the conversation's ticket, then added to it.
+        assert.ok(await eventually(async () => c.frames.filter(f => f.type === 'message.end' && /our team/i.test(f.text ?? '')).length === n || undefined), `failed turn ${n}`);
+      }
+      const after = (await drive(c.id) as any).meta;
+      assert.deepEqual([after.turns, budget(after), after.costUsd], [before.turns, budget(before), before.costUsd], 'The turns and token budget its limits read are exactly where they were.');
+      assert.ok(after.failed?.turns === N && after.failed.inputTokens > 0 && after.failed.costUsd > 0, JSON.stringify(after.failed));
+      // The cost goes up: in D1 and in what the inbox (and so Glass) gets, the turns stay the answered ones.
+      const spent = before.costUsd + after.failed.costUsd;
+      const row = await (await db()).prepare('SELECT turns, cost_usd FROM conversations WHERE id = ?').bind(c.id).first<{ turns: number; cost_usd: number }>();
+      assert.ok(row!.turns === before.turns && Math.abs(row!.cost_usd - spent) < 1e-9, JSON.stringify(row));
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.state.costUsd === Math.round(spent * 10_000) / 10_000 ? box : undefined; });
+      assert.ok(box && box.state.turns === before.turns && box.state.costUsd > Math.round(before.costUsd * 10_000) / 10_000, JSON.stringify([before.costUsd, spent, (await inboxOf(c.id))?.state]));
+      // And the conversation still answers.
+      c.say('ft9', 'And Gmail bounces today?');
+      assert.ok(await eventually(async () => c.frames.filter(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)).length === 2 || undefined));
+      assert.equal((await drive(c.id) as any).meta.turns, before.turns + 1);
+      c.ws.close();
+    }, 180_000);
+
     test('the staff inbox: a chat answer the output gate held is mirrored as a held draft with what the agent wrote, the panel gets only the held text, and the ticket’s brief is listed', async () => {
       const c = await chat();
       await setInbox({ id: c.id, channel: 'chat' });
@@ -3337,6 +3368,11 @@ describe('support Worker', () => {
       assert.ok(noted.x.duplicates.length && noted.x.duplicates.every((t: string) => ['e', 'r', 's', 'w'].map(tkt).includes(t)), JSON.stringify(noted.x.duplicates));
       // Quoted fence text is stored as plain data: the escapes undone once, never markup the harness reads.
       assert.equal(noted.f.cause, `The report quotes: ${FENCE}`);
+
+      // What each reading cost reaches Nightmail once, after it ends: one turn (its nudge isn't another), at a cost above zero.
+      const usage = calls.filter(c => c[0] === 'feedbackUsage');
+      assert.deepEqual(usage.map(c => c[1]).sort(), read.map(conv).sort(), JSON.stringify(usage));
+      for (const [, , spent] of usage) assert.ok(spent.turns === 1 && spent.costUsd > 0 && Object.keys(spent).sort().join() === 'costUsd,turns', JSON.stringify(spent));
 
       // The daily cap: once it is reached, nothing more is claimed today.
       const d1 = await db(), day = new Date().toISOString().slice(0, 10);
