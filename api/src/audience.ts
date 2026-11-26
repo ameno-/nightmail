@@ -823,19 +823,20 @@ export async function linkPreferences(db: DbExecutor, workspaceId: string, email
   return { consent: current?.consent ?? null, topics: topics.filter(topic => !topic.archived), linked: topics.find(topic => topic.id === topicId) ?? null };
 }
 /**
- * The preference page's Save: of the topics it showed (`shown`), those checked (`on`) reach the person and the rest don't.
- * Only choices that change are recorded (source preferences), each with its consent record and event; a topic archived or
- * made since the page was shown is left alone. A person unsubscribed from everything, or with no contact, changes nothing
- * here: the page never lifts an opt-out from all marketing, and a topic turned back on needs that.
+ * The preference page's Save, which only ever removes: of the topics it showed (`shown`) that still reach the person, those
+ * left unchecked (not in `on`) are recorded as opt-outs (source preferences), each with its consent record and event. A
+ * public link never turns a topic on: not one the person left, not an opt-in topic they never joined. Asking for that is
+ * ignored and records nothing; getting a topic again is the sender's to record (updateContactConsent). A topic archived or
+ * made since the page was shown is left alone, and a person unsubscribed from everything, or with no contact, changes
+ * nothing here. Returns the topics it turned off, or null for such a person.
  */
 export async function recordPreferences(runtime: Runtime, workspaceId: string, email: string, shown: string[], on: Set<string>) {
   return runtime.db.transaction(async tx => {
     const [contact] = await tx.select().from(contacts).where(and(eq(contacts.workspaceId, workspaceId), eq(contacts.email, email.trim().toLowerCase()), isNull(contacts.deletedAt))).limit(1).for('update');
     if (contact?.marketingConsent !== 'subscribed') return null;
-    const states = (await topicStates(tx, workspaceId, contact.id, null)).filter(topic => !topic.archived && shown.includes(topic.id));
-    const choices = states.filter(topic => topic.subscribed !== on.has(topic.id)).map(topic => ({ topicId: topic.id, subscribed: on.has(topic.id) }));
-    if (choices.length) await recordTopicChoices(tx, workspaceId, contact, choices, { source: 'preferences', evidence: RECIPIENT_EVIDENCE.preferences, occurredAt: new Date().toISOString(), actorKeyId: null }, true);
-    return choices.map(choice => ({ ...choice, name: states.find(topic => topic.id === choice.topicId)!.name }));
+    const off = (await topicStates(tx, workspaceId, contact.id, null)).filter(topic => !topic.archived && topic.subscribed && shown.includes(topic.id) && !on.has(topic.id));
+    if (off.length) await recordTopicChoices(tx, workspaceId, contact, off.map(topic => ({ topicId: topic.id, subscribed: false })), { source: 'preferences', evidence: RECIPIENT_EVIDENCE.preferences, occurredAt: new Date().toISOString(), actorKeyId: null }, false);
+    return off.map(topic => ({ topicId: topic.id, name: topic.name }));
   });
 }
 /**
