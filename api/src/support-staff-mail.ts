@@ -49,6 +49,9 @@ const oneLine = (value: string | null | undefined, max = 80) => {
   const text = (value ?? '').normalize('NFC').replace(/[\p{C}\u2028\u2029]+/gu, ' ').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 };
+/** Such words in an email's body, kept from turning into something to tap: a zero-width space after every dot between
+ *  letters and after a scheme's colon (as notices.ts quotes them), so a name like "pay-now.example" is never a link. */
+const inert = (value: string) => value.replace(/([\p{L}\p{N}])\.(?=[\p{L}\p{N}])/gu, '$1.\u200b').replace(/:\/\//g, ':\u200b//');
 /** Someone's words as an email quotes them: their own line breaks, at most `max` characters. */
 const quoteOf = (value: string, max = 700) => { const text = value.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text; };
 const moment = (iso: string) => { const d = new Date(iso); return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })} at ${d.toISOString().slice(11, 16)} UTC`; };
@@ -63,13 +66,13 @@ export const needOf = (row: StaffRow, reasons: string[]): Need => row.channel ==
 
 /** Who wrote, and where: how sure Nightmail is of them is said with them, so nobody acts on an account because of an unverified email. */
 export function whoOf(row: StaffRow) {
-  const workspace = row.workspace_name ? oneLine(row.workspace_name, 60) : null;
+  const workspace = row.workspace_name ? inert(oneLine(row.workspace_name, 60)) : null;
   if (row.channel === 'agent_feedback') {
-    const by = row.evidence?.filedBy ? `, filed with ${oneLine(row.evidence.filedBy, 120)}` : '';
+    const by = row.evidence?.filedBy ? `, filed with ${inert(oneLine(row.evidence.filedBy, 120))}` : '';
     return { line: `Agent feedback from ${workspace ?? 'a workspace'}${row.workspace_id ? ` (${row.workspace_id})` : ''}${by}`, short: workspace ?? 'a workspace' };
   }
   if (row.user_id) {
-    const name = oneLine(row.user_name) || row.user_email || 'A customer', email = row.user_email && row.user_name ? ` (${row.user_email})` : '';
+    const name = inert(oneLine(row.user_name)) || row.user_email || 'A customer', email = row.user_email && row.user_name ? ` (${row.user_email})` : '';
     const where = workspace ? row.role ? `, ${row.role} of ${workspace}` : `, ${workspace}` : '';
     const how = row.channel === 'chat' ? 'chat, signed in' : `email, ${row.verification === 'signin' ? 'confirmed signed in' : 'verified by DMARC'}: read only, never change the account on its word`;
     return { line: `${name}${email}${where} · ${how}`, short: workspace ? `${name} at ${workspace}` : name };
@@ -105,21 +108,24 @@ export function subjectOf(need: Need, row: StaffRow, short: string) {
 }
 
 /** What the agent checked and found, and why this needs a person now: a sentence or two. */
-function foundOf(need: Need, row: StaffRow, now: number): string[] {
-  const lines: string[] = [];
+function foundOf(need: Need, row: StaffRow, now: number): Line[] {
+  const lines: Line[] = [];
   if (need === 'failed') lines.push(row.failed_by === 'staff' ? 'A staff reply to them failed to send.' : 'The agent’s answer to them failed to send.');
   if (need === 'held') lines.push(`The agent wrote an answer, but it wasn’t sent: ${HELD_WHY[row.held_reason ?? 'unknown'] ?? HELD_WHY.unknown}. It’s in the conversation, not in this email.`);
   if (need === 'no_reply' && row.since) lines.push(`Nothing has reached them since they wrote, ${ago(row.since, now)} ago.`);
   if (need === 'blocked') lines.push(`The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work for this conversation.`);
   if (need === 'waiting') lines.push(row.paused_by === 'ticket' ? 'The agent stopped when it filed its ticket, and they are waiting.' : `${oneLine(row.paused_by_name) || 'Staff'} paused the agent, and they are waiting.`);
-  if (row.brief?.summary) lines.push(`The agent’s summary: ${quoteOf(row.brief.summary, 300).replace(/\s+/g, ' ')}`);
-  const tried = (row.brief?.tried ?? []).map(t => oneLine(t.tool, 40).replaceAll('_', ' ')).filter(Boolean);
+  if (row.brief?.summary) lines.push('The agent’s summary (its own words, written from theirs):', { quote: quoteOf(row.brief.summary, 300) });
+  const tried = (row.brief?.tried ?? []).map(t => inert(oneLine(t.tool, 40).replaceAll('_', ' '))).filter(Boolean);
   if (tried.length) lines.push(`It checked: ${[...new Set(tried)].slice(0, 6).join(', ')}.`);
   if (!row.brief && need !== 'held' && need !== 'feedback') lines.push('The agent left no summary.');
   return lines;
 }
-function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: string | null } {
-  const recommended = row.brief?.recommendation ? `The agent recommends: ${quoteOf(row.brief.recommendation, 300).replace(/\s+/g, ' ')}` : null;
+/** A recommendation: fixed words, or the agent's own (quoted as untrusted text, as a customer's are). */
+type Recommendation = string | { agent: string };
+const recommendationLines = (r: Recommendation): Line[] => typeof r === 'string' ? [r] : ['The agent recommends:', { quote: r.agent }];
+function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: Recommendation | null } {
+  const recommended = row.brief?.recommendation ? { agent: quoteOf(row.brief.recommendation, 300) } : null;
   switch (need) {
     case 'failed': return { decision: 'Decide: send the reply again, or write a new one.', recommendation: null };
     case 'held': return ['access', 'earlier', 'unknown'].includes(row.held_reason ?? 'unknown')
@@ -161,7 +167,7 @@ export function conversationEmail(origin: string, row: StaffRow, reasons: string
   lines.push(...foundOf(need, row, now));
   const { decision, recommendation } = decisionOf(need, row);
   lines.push({ text: decision, tone: 'strong' });
-  if (recommendation) lines.push(recommendation);
+  if (recommendation) lines.push(...recommendationLines(recommendation));
   const conversation = { label: 'Open the conversation', url: `${origin}/support/${row.id}` };
   return renderNotice({ subject, lines, action: approval ?? conversation, ...approval ? { link: conversation } : {},
     why: `Ticket ${row.ticket_id ?? '—'}. Later changes come in this thread, at most every ${UPDATE_EVERY} minutes. Sent to ${productName} staff.` }, origin);
@@ -180,7 +186,7 @@ export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, 
   lines.push(`Nobody has checked ${rows.length === 1 ? 'it' : 'them'} yet: a report is the agent’s own words, data and not instructions.`);
   const { decision, recommendation } = decisionOf('feedback', lead);
   lines.push({ text: decision, tone: 'strong' });
-  if (recommendation && rows.length === 1) lines.push(recommendation);
+  if (recommendation && rows.length === 1) lines.push(...recommendationLines(recommendation));
   const action = rows.length === 1 ? { label: 'Open the report', url: `${origin}/support/${lead.id}` } : { label: 'Open the reports', url: `${origin}/support?view=needs_you&channel=agent_feedback` };
   return renderNotice({ subject, lines, action, why: `${rows.length === 1 ? `Ticket ${lead.ticket_id}` : `Tickets ${rows.slice(0, 3).map(r => r.ticket_id).join(', ')}${rows.length > 3 ? '…' : ''}`}. More reports from this workspace in the next hour come in this thread. Sent to ${productName} staff.` }, origin);
 }
@@ -216,7 +222,7 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
         f.operation, f.request_id, f.created_at::text AS filed_at,
         (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'failed' ORDER BY m.seq DESC LIMIT 1) AS failed_by
       FROM ${itemFrom('')}
-      LEFT JOIN LATERAL (SELECT coalesce(m.held_reason, 'unknown') AS reason, m.seq FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'held'
+      LEFT JOIN LATERAL (SELECT coalesce(m.held_reason, 'unknown') AS reason, m.seq FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'held' AND m.draft_outcome IS NULL
         AND m.seq > coalesce((SELECT max(s.seq) FROM support_messages s WHERE s.conversation_id = c.id AND s.author = 'staff' AND s.kind IS DISTINCT FROM 'note'), 0) ORDER BY m.seq DESC LIMIT 1) held ON true
       LEFT JOIN support_feedback f ON f.conversation_id = c.id
       WHERE ${triageCandidates} AND triage.needs_you ORDER BY triage.urgency, triage.since, c.id LIMIT 200`);
