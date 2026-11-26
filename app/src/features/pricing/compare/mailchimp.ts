@@ -85,8 +85,8 @@ export const mailchimp: Entry = {
   gaps: [
     gap('automation flows', 'Mailchimp has marketing automation flows that automate campaigns.', AUTOMATION, GAPS_READ(FEATURES, 'Marketing Automation Flows Automate your campaigns')),
     gap('A/B testing', 'Mailchimp tests versions of an email against each other (A/B testing).', /\bA\/B\b|\bsplit[- ]test|\bmultivariate\b/i, GAPS_READ(FEATURES, 'A/B Testing Test and optimize your emails')),
-    gap('landing pages', 'Mailchimp builds landing pages.', /\blanding pages?\b/i, GAPS_READ(FEATURES, 'Landing Pages Design a website easily')),
-    gap('sign-up forms', 'Mailchimp has forms that collect contacts’ details.', /\bforms?\b/i, GAPS_READ(FEATURES, 'Forms Collect the data you need')),
+    gap('landing pages', 'Mailchimp has a landing page and website builder.', /\blanding pages?\b|\bwebsite builder\b/i, GAPS_READ(FEATURES, 'Landing pages and website builder: Build pages for campaigns or your business without a separate hosting service.')),
+    gap('sign-up forms', 'Mailchimp has sign-up forms that collect email addresses from your website or social profiles.', /\bforms?\b/i, GAPS_READ(FEATURES, 'Signup forms: Collect email addresses from your website or social profiles.')),
     gap('SMS marketing', 'Mailchimp sells SMS marketing as an add-on to paid plans, in select countries.', /\bSMS\b|\btext messages?\b/i, GAPS_READ(MAILCHIMP, 'SMS Marketing : SMS is available as an add-on to paid plans in select countries.')),
   ],
 }

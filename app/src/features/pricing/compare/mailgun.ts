@@ -59,7 +59,7 @@ export const mailgun: Entry = {
   panels: ['send', 'free', 'route', 'receive', 'agent', 'domain', 'campaign'],
   // What it offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
   gaps: [
-    gap('dedicated IPs', 'Mailgun includes one dedicated IP with its Foundation 100k, Growth and Scale plans.', /\bdedicated IPs?\b/i, GAPS_READ(MAILGUN, 'One dedicated IP is included with Foundation 100k, Growth and Scale plans.'), NO_DEDICATED_IP),
+    gap('dedicated IPs', 'Mailgun includes one dedicated IP with its Foundation 100k and Scale plans.', /\bdedicated IPs?\b/i, GAPS_READ(MAILGUN, 'Dedicated IPs Access at 50k, included at 100K+ volumes One Dedicated IP Included'), NO_DEDICATED_IP),
     gap('send time optimization', 'Mailgun’s Scale plan includes send time optimization.', /\bsend[- ]time\b/i, GAPS_READ(MAILGUN, 'Everything on Foundation plus... SAML SSO 5,000 email validations Dedicated IP pools Send time optimization')),
     gap('inbox placement tests', 'Mailgun’s Optimize product tests inbox placement: which folder an email will land in.', /\binbox placement\b|\bseed (?:list|test)/i, GAPS_READ('https://www.mailgun.com/features/email-inbox-placement/', 'Inbox placement tools give you proactive insight into which folder your email will land in')),
     gap('SDKs for Go, PHP, Java, Ruby and Python', 'Mailgun has SDKs for Go, PHP, Java, Ruby and Python.', LANGUAGES, GAPS_READ('https://documentation.mailgun.com/docs/mailgun/sdk/introduction', 'Our SDKs support multiple programming languages, allowing you to seamlessly send, receive, and track emails within your applications. Go Node.js PHP Java Ruby Python'), TYPESCRIPT_SDK),

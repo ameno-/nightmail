@@ -52,7 +52,7 @@ export const mandrill: Entry = {
   // What Mandrill offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
   gaps: [
     gap('a dedicated IP', 'Mandrill sells a dedicated IP for $29.95 a month.', /\bdedicated IPs?\b/i, GAPS_READ(MANDRILL, 'Add dedicated IP for $29.95 / month (Optional)'), NO_DEDICATED_IP),
-    gap('transactional SMS', 'Mailchimp Transactional sends SMS messages from the same API as its email.', /\bSMS\b|\btext messages?\b/i, GAPS_READ('https://mailchimp.com/features/transactional-email/', 'Transactional SMS Trigger both transactional email and SMS messages from a single, reliable API')),
+    gap('transactional SMS', 'Mandrill sends SMS messages from the same API as its email.', /\bSMS\b|\btext messages?\b/i, GAPS_READ('https://mailchimp.com/features/transactional-email/', 'With Mailchimp’s updated transactional API, businesses can send critical 1:1 text messages via SMS as well as email')),
     gap('client libraries for PHP, Ruby and Python', 'Mandrill has client libraries for PHP, Ruby and Python.', LANGUAGES, GAPS_READ('https://mailchimp.com/developer/transactional/guides/quick-start/', 'To install the client library for your preferred language: cURL Node PHP Ruby Python'), TYPESCRIPT_SDK),
   ],
 }
