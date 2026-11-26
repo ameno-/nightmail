@@ -546,8 +546,8 @@ function CopyForAgent() {
     <span className="chy-sr" role="status">{copied ? 'Copied to clipboard' : failed ? 'Couldn’t copy to clipboard' : ''}</span>
   </>
 }
-// After the terms (or alone, for someone signed in): the API's docs and the agent's way in.
-const More = ({ lead }: { lead?: boolean }) => <>{lead && <span aria-hidden="true"> · </span>}<a href="/docs">API docs</a><span aria-hidden="true"> · </span><CopyForAgent /></>
+// After the terms (or alone, for someone signed in): the full price list, the API's docs and the agent's way in.
+const More = ({ lead }: { lead?: boolean }) => <>{lead && <span aria-hidden="true"> · </span>}<a href="/pricing">Pricing</a><span aria-hidden="true"> · </span><a href="/docs">API docs</a><span aria-hidden="true"> · </span><CopyForAgent /></>
 
 /** home.html's first screen (app/home-shell.ts: this page as first rendered, with a still of the tape behind the glass),
  *  over this one until now: it goes, handing on the label's focus. */

@@ -72,7 +72,7 @@ export function homeShell(): Plugin {
 
       // The page as the app first renders it for a visitor. For someone signed in it differs only in the way in (Open
       // dashboard: home/start.tsx's DashboardLink, which needs the app's data to render, so it is written out here) and
-      // the line under the table (tv.tsx: the visitor's, from its API docs link on). Both are in the page, and theme.js's
+      // the line under the table (tv.tsx: the visitor's, from its Pricing link on). Both are in the page, and theme.js's
       // data-member (a browser that has had a dashboard) picks the one shown.
       const { module: tv } = await runnerImport<typeof import('./src/features/home/tv/tv.tsx')>(TV, { root, configFile: false, logLevel: 'error', plugins: [renderOnly] })
       const [{ createElement }, { renderToStaticMarkup }, { MemoryRouter }] = await Promise.all([import('react'), import('react-dom/server'), import('react-router')])
@@ -86,7 +86,7 @@ export function homeShell(): Plugin {
       const mark = (element: string, name: string) => element.replace(/^(<\w+\b[^>]*?\sclass=")([^"]*)"/, `$1$2 ${name}"`)
       const arrow = /<svg\b[^>]*\bsrt-cta-arrow\b[\s\S]*?<\/svg>/.exec(shell)?.[0] ?? ''
       swap(/(<div class="chyp(?: chyp-under)?">)(<button\b[^>]*\sclass="chyp-go"[\s\S]*?<\/button>)(<\/div>)/g, (_match, open, way, close) => `${open}${mark(way!, 'hs-visitor')}<a class="chyp-go hs-member" href="/overview"><span class="srt-cta-label">Open dashboard${arrow}</span></a>${close}`, 2)
-      swap(/<p class="sign-in-consent chy-consent">[\s\S]*?<span aria-hidden="true"> · <\/span>(<a href="\/docs">[\s\S]*?<\/p>)(?=<\/div><\/div><\/main>$)/, (line, more) => `${mark(line!, 'hs-visitor')}<p class="chy-consent hs-member">${more}`)
+      swap(/<p class="sign-in-consent chy-consent">[\s\S]*?<span aria-hidden="true"> · <\/span>(<a href="\/pricing">[\s\S]*?<\/p>)(?=<\/div><\/div><\/main>$)/, (line, more) => `${mark(line!, 'hs-visitor')}<p class="chy-consent hs-member">${more}`)
       // Behind the glass, the still, where the live picture's canvas goes; the table's reflections as the page draws
       // them for it; the room at the page's light; no remote and no knobs (they are drawn by the app).
       swap(/(<button[^>]*class="chy-screen"[^>]*>)<canvas aria-hidden="true"><\/canvas>/, `$1<img class="hs-still" src="${picture}" alt="" width="964" height="720" fetchpriority="high">`)
