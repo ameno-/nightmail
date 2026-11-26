@@ -31,6 +31,8 @@ export type Doc = PageDoc & {
   about: { name: string; url: string }
   /** The services a page's table lists, in its order: its structured data's ItemList (an alternatives page). */
   items?: { name: string; url: string }[]
+  /** A sentence the Markdown copy says first, under the heading (/cheapest-email-api: what its list is and isn't). */
+  lead?: string
   llms: string
 }
 
@@ -68,6 +70,7 @@ export function docMarkdown(doc: Doc): string {
   return [
     `# ${doc.title}`,
     `> ${inline(verdict).replaceAll('\u00a0', ' ')}`,
+    ...doc.lead ? [doc.lead] : [],
     `Canonical page: ${url(doc.path)}`,
     START,
     ...[...doc.sections, ...doc.copy.sections].flatMap(section => [`## ${section.title}`, ...section.blocks.map(block)]),

@@ -45,7 +45,7 @@ for (const path of ['/', '/overview', '/logs', '/settings']) {
 // Each price page is its own HTML file (app/price-pages.ts): assets answer its address with it (its own og:url and title,
 // and noindex until it is published). A comparison that doesn't exist is the Worker's: the dashboard's HTML, as 404
 // (src/site-index.ts, isMissingComparePage), so it isn't indexed. /compare is every comparison on one page (compare.html).
-for (const [path, own] of [['/pricing', true], ['/compare', true], ['/compare/mailchimp', true], ['/compare/resend', true], ['/compare/does-not-exist', false], ['/pricing/does-not-exist', false], ['/alternatives/does-not-exist', false], ['/email-for-ai-agents', true]] as const) {
+for (const [path, own] of [['/pricing', true], ['/compare', true], ['/compare/mailchimp', true], ['/compare/resend', true], ['/compare/does-not-exist', false], ['/pricing/does-not-exist', false], ['/alternatives/does-not-exist', false], ['/email-for-ai-agents', true], ['/cheapest-email-api', true], ['/cheapest-email-api/nothing', false]] as const) {
   const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
   const html = await response.text();
   const page = new RegExp(`<meta property="og:url" content="[^"]*${path}" />`).test(html);
