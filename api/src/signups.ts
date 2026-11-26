@@ -412,7 +412,7 @@ export async function customersList(db: Database, workspaceId: string): Promise<
  */
 export const CUSTOMERS_NOTICE = 'Privacy Policy and Terms of 26 November 2026';
 const customerConsent = (occurredAt: string) => ({ source: `${productName} account`, occurredAt, policyVersion: CUSTOMERS_NOTICE,
-  evidence: `Account holder: owns a ${productName} workspace with this verified address. Product news and service status emails, on legitimate interests; not an opt-in. Dated when the account signed up, which can be before the notice.` });
+  evidence: `Account holder: owns a ${productName} workspace with this verified address. Product news and service status emails, on legitimate interests; not an opt-in. Dated when the account was created, which can be before the notice.` });
 type Written = { workspace_id: string; list_id: string; email: string };
 // One account at a time, so a run never writes an account twice or takes back what another just wrote.
 const lockAccount = (tx: DbExecutor, userId: string) => tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${userId},57901))`);
