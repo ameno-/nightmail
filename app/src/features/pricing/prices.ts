@@ -196,7 +196,7 @@ export const PANEL_SLOTS = 7
 
 /** One competitor, as its comparison page (/compare/<slug>) and everything made from it say: the page, its Markdown
  *  twin, its line in llms.txt, its sitemap entry and its structured data (app/price-pages.ts). A new comparison is one
- *  of these in compare/<slug>.ts, listed in compare/index.ts, and its link-preview card (scripts/price-cards.mjs). */
+ *  of these in compare/<slug>.ts, listed in compare/index.ts; its link-preview card is drawn from its data (pages.ts). */
 export type Entry = {
   /** The page's address: /compare/<slug>. */
   slug: string
