@@ -2,6 +2,7 @@
 import { productName, publicOrigin } from '../../../../api/src/brand.ts'
 import { COMPARISONS, OFFERS } from './compare/index.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
+import { comparisonQuestions, faqPage } from './questions.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
 import { billMath, claim, dayOf, formatCount, listOf, money, nightmail, nightmailBill, opening, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
 
@@ -61,7 +62,8 @@ export function comparisonMarkdown(c: Comparison): string {
     c.panels.map(id => `- **${PANELS[id].title}** ${PANELS[id].line}`).join('\n'),
     ...c.without?.length ? [`Not in the box: ${listOf(c.without)}.`] : [],
     FIRST_STEP[c.focus],
-    ...c.faq?.length ? [`## Questions`, c.faq.map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n')] : [],
+    `## Questions`,
+    comparisonQuestions(c).map(item => `### ${item.question}\n\n${item.answer}`).join('\n\n'),
     `## ${productName}’s pricing terms`,
     terms(),
     `## Sources`,
@@ -169,7 +171,7 @@ export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'd
         isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') }, dateModified: page.modified,
         ...c ? { mentions: { '@type': 'SoftwareApplication', name: c.vendor, url: c.offer.pricing }, citation: pagesRead(c).map(source => source.url) } : {} },
       site(), app(),
-      ...c?.faq?.length ? [{ '@type': 'FAQPage', '@id': url(`${page.path}#questions`), mainEntity: c.faq.map(item => ({ '@type': 'Question', name: item.question, acceptedAnswer: { '@type': 'Answer', text: item.answer } })) }] : [],
+      ...c ? [faqPage(url(page.path), comparisonQuestions(c))] : [],
     ],
   }
 }
