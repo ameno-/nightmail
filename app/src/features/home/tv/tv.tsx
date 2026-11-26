@@ -8,6 +8,7 @@ import type { HomeProps, HomeStart } from '..'
 import { useSignupsFull } from '../signups-open'
 import { StartButton } from '../start'
 import { MONTHS, OPENING, PER_THOUSAND, VOLUMES, count, usd, type Volume } from './data'
+import { Heading, Words } from './words'
 import { Remote, type RoomLight } from './crt/remote'
 import type { Broadcast } from './crt/commercial/play'
 import scene from './crt/scene.webp'
@@ -616,11 +617,8 @@ export function TvHome({ start, notice }: HomeProps) {
   </>
   return <main className="chy">
     <div className="chy-col">
-      {/* In words, for whoever can't see the picture: the price, what is free, and the tape's opening page (channel 1). */}
-      <h1 className="chy-sr">{PER_THOUSAND} per {count(1000)} emails</h1>
-      <p className="chy-sr">The first {count(nightmail.freeSent)} emails sent each month are free.</p>
-      <h2 className="chy-sr">What sending {count(OPENING)} emails a month costs</h2>
-      <ul className="chy-sr">{MONTHS[OPENING].map(line => <li key={line.slug}>{line.name}: {usd(line.dollars)}</li>)}</ul>
+      {/* In words, for whoever can't watch the picture (words.tsx): what it is here, the rest after the way in. */}
+      <Heading />
       <div className="chy-set" ref={box} onClickCapture={event => { if ((event.target as Element).closest('[data-cta]')) return; fresh.current = !sound.current?.started; sound.current?.start() }}>
         <button type="button" className="chy-screen" aria-label="Television screen" onClick={() => { deck.thumpAt = performance.now(); deck.wake() }}>
           {flat ? <ul className="chy-flat" aria-hidden="true">{list}</ul> : <Tube deck={deck} onLight={light} onFlat={fall} />}
@@ -648,6 +646,7 @@ export function TvHome({ start, notice }: HomeProps) {
         <div className="chy-way"><Label start={start} under /><div className="chy-notice">{said}</div></div>
         {visitor ? <SignInConsent className="chy-consent" after={<More lead />} /> : <p className="chy-consent"><More /></p>}
       </div>
+      <Words />
     </div>
   </main>
 }

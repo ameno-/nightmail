@@ -68,9 +68,18 @@ const buildSha = (() => {
 })()
 
 // Link-preview images need an absolute URL: the deploy sets VITE_PUBLIC_URL per stage; other builds name the hosted origin.
+// A stage on another host than the hosted site's (the dev stage) also asks search engines to leave its pages out: they
+// are the hosted site's pages over again, and a search result should open the real one. home.html and the price pages
+// are made from index.html, so they ask too.
+const stageOrigin = (process.env.VITE_PUBLIC_URL || hostedOrigin).replace(/\/$/, '')
 const publicOrigin: Plugin = {
   name: 'nightmail:public-origin',
-  transformIndexHtml: html => html.replaceAll('%PUBLIC_ORIGIN%', (process.env.VITE_PUBLIC_URL || hostedOrigin).replace(/\/$/, '')),
+  transformIndexHtml(html) {
+    html = html.replaceAll('%PUBLIC_ORIGIN%', stageOrigin)
+    if (stageOrigin === hostedOrigin || html.includes('<meta name="robots"')) return html
+    if (!html.includes('<meta charset="UTF-8" />')) throw new Error('index.html has no <meta charset="UTF-8" /> to put the stage\'s robots line after.')
+    return html.replace('<meta charset="UTF-8" />', '<meta charset="UTF-8" />\n    <meta name="robots" content="noindex" />')
+  },
 }
 
 // public/theme.js runs before the app's modules and is served as written, so the request header names it shares with the
