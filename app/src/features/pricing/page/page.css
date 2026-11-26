@@ -157,6 +157,8 @@
   .pp-section { margin-top: 48px; }
   .pp-hero + .pp-section { margin-top: 32px; }
   .pp-table th, .pp-table td { padding: 0 8px; font-size: 14px; }
+  .pp-table th:first-child { padding-left: 0; }
+  .pp-table th:last-child, .pp-table td:last-child { padding-right: 0; }
   .pp-table tbody th { font-size: 13px; line-height: 1.25; }
   /* A table with a plan's name in its last column: each row a grid, the plan's name under the two prices. */
   .pp-table[data-fold] { display: flex; flex-direction: column; }
@@ -182,5 +184,7 @@
 @media (max-width: 400px) {
   /* The narrowest phones: a table of several sizes in a step smaller type. */
   .pp-table:not([data-fold]) th, .pp-table:not([data-fold]) td { padding: 0 5px; font-size: 12px; }
+  .pp-table:not([data-fold]) th:first-child { padding-left: 0; }
+  .pp-table:not([data-fold]) th:last-child, .pp-table:not([data-fold]) td:last-child { padding-right: 0; }
   .pp-table:not([data-fold]) thead th { font-size: 10px; }
 }
