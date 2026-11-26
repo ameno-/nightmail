@@ -35,12 +35,15 @@ export function mailboxEventCtes(source:SQL) {
 }
 
 const fanout:JobHandler=retryDatabaseFailures(async(runtime,payload,job)=>{
-  // Snapshot endpoint IDs at commit, not at expansion: a new subscription never receives historical mail.
+  // Snapshot endpoint IDs at commit, not at expansion: a new subscription never receives historical mail. A forward still
+  // waiting for its recipient gets nothing (a route or rule may name it meanwhile): mail received before they allow it is
+  // never forwarded, and sendForward refuses any that reaches it after (a delivery recorded between the two).
   // A routed ref carries its recipient's junk decision (159); the event's type is only a fallback for older refs.
   const records=sql`deliveries AS (INSERT INTO mailbox_webhook_deliveries(id,workspace_id,webhook_id,event_seq,routed,format,payload)
     SELECT CASE WHEN ref?'ritualAction' THEN 'mwd_'||md5(e.workspace_id||':'||(ref->>'ritualAction')||':'||h.id) ELSE public.row_id('mwd') END,e.workspace_id,h.id,CASE WHEN NOT ref?'ritualAction' THEN e.seq END,jsonb_typeof(ref)='object' AND NOT ref?'subscription',h.format,jsonb_build_object('id','mev_'||e.seq,'cursor',e.seq::text,'type',CASE WHEN ref?'junk' THEN CASE WHEN (ref->>'junk')::boolean THEN 'message.junk' ELSE 'message.received' END ELSE e.type END,'createdAt',to_char(e.created_at AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),'addressId',e.mailbox_id,'threadId',e.thread_id,'messageId',e.message_id,'data',CASE WHEN jsonb_typeof(ref)='object' THEN e.data||jsonb_build_object('recipients',jsonb_build_array(ref->>'recipient'),'route',ref->'route','junk',CASE WHEN ref?'junk' THEN (ref->>'junk')::boolean ELSE e.type='message.junk' END,'subaddress',substring(split_part(ref->>'recipient','@',1) from '[+](.*)')) ELSE e.data END)||CASE WHEN ref?'body' THEN jsonb_build_object('ritualBody',ref->'body') ELSE '{}'::jsonb END||CASE WHEN ref?'ritualAction' THEN jsonb_build_object('ritualAction',ref->'ritualAction') ELSE '{}'::jsonb END||CASE WHEN ref?'grants' THEN jsonb_build_object('grants',ref->'grants') ELSE '{}'::jsonb END
     FROM settled CROSS JOIN jsonb_each(${JSON.stringify(payload)}::jsonb) s(seq,hooks) JOIN mailbox_events e ON e.workspace_id=${job.workspaceId} AND e.seq=s.seq::bigint
     CROSS JOIN jsonb_array_elements(s.hooks) ref JOIN mailbox_webhooks h ON h.workspace_id=e.workspace_id AND h.id=coalesce(ref->>'id',ref#>>'{}')
+      AND NOT (h.type='forward' AND NOT h.verified AND h.declined_at IS NULL)
     ON CONFLICT DO NOTHING RETURNING id,workspace_id),
     queued AS (INSERT INTO jobs(id,type,workspace_id,payload) SELECT public.row_id('job'),'mailbox.webhook',workspace_id,jsonb_build_object('deliveryId',id) FROM deliveries)`;
   if(job.recordWithSettlement)job.recordWithSettlement(records);else await runtime.db.execute(sql`WITH settled AS (SELECT 1),${records} SELECT 1`);

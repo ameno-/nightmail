@@ -97,7 +97,7 @@ async function analyze(tx: DbExecutor, w: string, c: Config, unchanged: Readonly
   const refs = [...new Set(Object.values(p.rituals).flatMap(ir => ir.refs))];
   const found = refs.length ? (await tx.execute<Resolved>(sql`WITH refs AS (SELECT ref,split_part(ref,':',2) AS key FROM jsonb_array_elements_text(${JSON.stringify(refs)}::jsonb) ref)
     SELECT ref,b.id,'inbox' AS type,true AS ready FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
-    UNION ALL SELECT ref,h.id,h.type,h.verified AND h.declined_at IS NULL FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key WHERE starts_with(ref,'endpoint:')`)).rows : [];
+    UNION ALL SELECT ref,h.id,h.type,h.declined_at IS NULL FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key WHERE starts_with(ref,'endpoint:')`)).rows : [];
   const byRef = new Map(found.map(r => [r.ref, r])), diagnostics: Diagnostic[] = [];
   let names: { endpoints: string[]; inboxes: string[] } | null = null;
   const known = async () => names ??= {
@@ -117,9 +117,10 @@ async function analyze(tx: DbExecutor, w: string, c: Config, unchanged: Readonly
         else report(`No endpoint named ${name}.`, guess ? `Did you mean ${endpointCall(guess)}?` : 'Create it first with createEndpoint (type slack, discord, webhook or forward).');
         continue;
       }
-      // A rule saved while its forward was confirmed keeps it when the recipient later stops forwards: the delivery
-      // refuses unconfirmed forwards, and a decline must not block every other save in the workspace.
-      if (!r.ready) { if (!unchanged.has(ritual)) report(`${endpointCall(name)} is a forward waiting for its recipient to confirm.`, 'Rules can call it once they choose Allow in the emailed link; getEndpoint shows its status.'); continue; }
+      // A rule may call a forward still waiting for its recipient: it reaches them with mail received from the moment they
+      // allow it (mailbox-events.ts fanout, sendForward). One they declined is refused in a new or changed rule; a rule saved
+      // before they stopped forwards keeps it (its deliveries are refused), so a decline never blocks every other save.
+      if (!r.ready) { if (!unchanged.has(ritual)) report(`${endpointCall(name)} is a forward its recipient declined or stopped.`, 'A new request is possible 30 days after; getEndpoint shows its status.'); continue; }
       if (r.type === 'inbox' || r.type === 'webhook') continue;
       const shape = endpointPayloads[r.type], k = shape.fields?.[0];
       if (site.args < shape.args[0] || site.args > shape.args[1] || (k && site.fields && (site.fields.length !== 1 || site.fields[0] !== k)))

@@ -12,7 +12,7 @@ import { RitualConfig, type Config } from './ritual-pipeline.js';
 import { ritualRecipes, type RecipeParams } from './ritual-schema.js';
 import { checkVersion, currentVersion, listRoutes, makeRoute, MailRoute, routeFor, RouteFields, save as saveRoutes, type Route } from './routing.js';
 import { apply as applyRecipe, current as currentRules, freeKey, holdReceiving, RecipeInputParams, save as saveRules, targetRows } from './rituals.js';
-import { createEndpointRecord } from './endpoints.js';
+import { canAsk, createEndpointRecord, Endpoint, endpointRowOf, endpointView } from './endpoints.js';
 import { legacyWebhookFormat } from './brand.js';
 import { rolledBack } from './idempotency.js';
 
@@ -32,14 +32,22 @@ const NewEndpoints = z.array(z.object({
   name: RuleKey.describe('Endpoint name, unique in the workspace across every type.'),
   url: z.string().max(2048).describe('As createEndpoint takes it: a Slack or Discord webhook URL, or a public HTTPS URL for a webhook (its signing secret is not returned here).'),
 }).strict()).max(4).describe('New endpoints this change uses, made with it: a refusal or failure makes none of them.');
+/** A forward made with a new address, asked from it: createEndpoint's forward, with the address made first. */
+const NewForward = z.object({
+  name: RuleKey.describe('Endpoint name, unique in the workspace across every type.'),
+  address: z.email().max(254).toLowerCase().describe('Recipient. They confirm with an emailed link, sent from the new address when it can send it (else as createEndpoint picks one), unless preverify applies.'),
+  preverify: z.union([z.boolean(), z.literal('auto')]).default(false).describe('As createEndpoint takes it: auto skips the confirmation only for an address on a domain this workspace has verified.'),
+}).strict();
 /** createInboundAddress's flow: the same change for the address it creates. */
 export const CreateFlow = z.object({
   endpoints: NewEndpoints.optional(),
+  forward: NewForward.optional().describe('A new forward, made after the address: its recipient is asked by the new address. deliver and split may name it at once (forward:<name>; <name> in split params): mail received from the moment they allow it is forwarded, never mail received before. The answer’s forward says whether they were emailed.'),
   deliver: Deliver.optional(),
   split: Split.optional().describe('Adds a two-way rule on the new address. Its params may name the new address as inbox:<key>.'),
 }).strict().openapi('CreateInboundAddressFlow');
 const SetFlow = z.object({
   endpoints: NewEndpoints.optional(),
+  forward: NewForward.optional().describe('A new forward: its recipient is asked by this address when it can send the request (else as createEndpoint picks one). deliver and split may name it at once: mail received from the moment they allow it is forwarded, never mail received before. The answer’s forward says whether they were emailed.'),
   deliver: Deliver.optional(),
   rule: RuleKey.optional().describe('The key of the two-way rule (split or split-by-meaning) on this address that split changes.'),
   split: Split.nullable().optional().describe('With rule: rewrites that rule. A rule other addresses also run is left as it is for them, and this address gets its own copy under a new key. Without rule: adds a new two-way rule on this address. null, with rule: takes the rule off this address, and deletes it once no address runs it.'),
@@ -49,11 +57,13 @@ const SetFlow = z.object({
 }).openapi('SetInboundAddressFlow');
 const FlowResult = z.object({
   version: z.number().int().describe('The routing and rules version after the change, also the ETag; unchanged when nothing changed.'),
+  forward: Endpoint.extend({ confirmation: z.enum(['emailed', 'skipped']).describe('emailed: its recipient was asked to confirm (requestFrom names who asked); skipped: preverified, ready at once.') })
+    .optional().describe('The forward flow.forward made, as getEndpoint returns it.'),
   route: z.union([MailRoute, z.null()]).describe("The route for the address's own address, as getRoute returns it; null when there is none."),
   rule: z.string().nullable().describe('The two-way rule this change left on the address: the rule it named, its own copy when the rule was shared, or the new rule. null when it was taken off, or no rule was named or added.'),
 }).openapi('InboundAddressFlow');
 
-type Flow = { endpoints?: z.infer<typeof NewEndpoints>; deliver?: z.infer<typeof Deliver>; rule?: string; split?: { recipe: string; params: RecipeParams } | null };
+type Flow = { endpoints?: z.infer<typeof NewEndpoints>; forward?: z.infer<typeof NewForward>; deliver?: z.infer<typeof Deliver>; rule?: string; split?: { recipe: string; params: RecipeParams } | null };
 type Address = { id: string; address: string };
 // Stored configs come back from jsonb with their keys reordered, so compare them key-order-free.
 const canonical = (value: unknown) => JSON.stringify(value, (_, v) => v && typeof v === 'object' && !Array.isArray(v) ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) : v);
@@ -118,6 +128,13 @@ export async function applyFlow(tx: DbExecutor, c: Ctx, w: string, box: Address,
     await recordAudit(tx, c, { action: 'endpoint.create', workspaceId: w, target: { type: 'endpoint', id: row.id }, after: { name: e.name, type: e.type } });
     if (e.type === 'webhook') made.set('webhook:' + e.name, row.id);
   }
+  // A new address's forward, asked by the address itself when it can send the request (a built-in domain may not).
+  let forward: Awaited<ReturnType<typeof createEndpointRecord>>['row'] | undefined;
+  if (flow.forward) {
+    const f = flow.forward, from = await canAsk(c.env, tx, w, box.address, f.address) ? box.id : undefined;
+    ({ row: forward } = await createEndpointRecord(tx, c, w, { type: 'forward', key: f.name, address: f.address, from, preverify: f.preverify }, 'forward.name'));
+    await recordAudit(tx, c, { action: 'endpoint.create', workspaceId: w, target: { type: 'endpoint', id: forward.id }, after: { name: f.name, type: 'forward', address: f.address, preverified: forward.verified } });
+  }
   if (Array.isArray(flow.deliver)) flow = { ...flow, deliver: flow.deliver.map(ref => made.get(ref) ?? ref) };
   const before = await currentRules(tx, w), rules = await nextRules(tx, w, before.config, box, flow);
   let saved = version;
@@ -138,7 +155,7 @@ export async function applyFlow(tx: DbExecutor, c: Ctx, w: string, box: Address,
     await recordAudit(tx, c, { action: rules.action, workspaceId: w, target: { type: 'ritual', id: key }, before: { version }, after: { version: result.version, key, ...(flow.split ? { recipe: flow.split.recipe } : {}) } });
     saved = result.version;
   }
-  return { version: saved, route: await routeFor(tx, w, box.address), rule: rules.rule };
+  return { version: saved, route: await routeFor(tx, w, box.address), rule: rules.rule, forward };
 }
 
 /**
@@ -183,6 +200,8 @@ export function registerAddressFlow(app: App) {
       return await applyFlow(tx, c, w, box, c.req.valid('json'), version);
     } catch (e) { rolledBack(c); throw e; } });
     c.header('ETag', `"${result.version}"`);
-    return c.json(result, 200);
+    const { forward, ...flow } = result;
+    if (forward && !forward.verified) c.get('actor').wakeJobs = 1;
+    return c.json({ ...flow, ...(forward ? { forward: { ...await endpointView(c.env, w, endpointRowOf(forward)), confirmation: forward.verified ? 'skipped' as const : 'emailed' as const } } : {}) }, 200);
   });
 }

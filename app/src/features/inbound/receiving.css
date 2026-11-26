@@ -338,6 +338,8 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 .builder-condition { display: grid; gap: var(--space-8); padding-block: var(--space-8); }
 .builder-condition .ui-field__label:has(.sr-only) { display: none; }
 .builder-slot { gap: var(--space-8); padding-block: var(--space-4); }
+/* The address step's one-press fixes name a whole address: a long one wraps inside its button on a phone. */
+.builder-fixes .ui-button { height: auto; min-height: var(--control-height-sm); white-space: normal; overflow-wrap: anywhere; text-align: left; padding-block: var(--space-4); }
 .builder-option { display: inline-flex; align-items: center; gap: var(--space-6); }
 @media (max-width: 640px) {
   .flow-fork__ways { grid-template-columns: minmax(0, 1fr); }

@@ -59,7 +59,7 @@ An address that has no rule yet says so in its row (**No rule · add**), so what
 | Dropped | Not stored. | `drop` |
 | New address per recipient | The domain's catch-all creates an address for each new recipient. | `create_address` |
 
-A route can deliver to inboxes, webhooks and confirmed forwards (`forward:<name>` or the endpoint's `con_…` ID), and a forward from a route sends each message whole, as a rule's call does ([rules.md](rules.md#forward-confirmation)). Slack and Discord posts are sent by a rule, which writes the message they post. A route refuses a forward its recipient hasn't confirmed; one they stop later stays on the route and gets nothing.
+A route can deliver to inboxes, webhooks and forwards (`forward:<name>` or the endpoint's `con_…` ID), a forward still waiting for its recipient included: it forwards mail received from the moment they choose Allow, never mail received before, and a forward from a route sends each message whole, as a rule's call does ([rules.md](rules.md#forward-confirmation)). Slack and Discord posts are sent by a rule, which writes the message they post. A route refuses a forward its recipient hasn't confirmed; one they stop later stays on the route and gets nothing.
 
 The list is complete: routing targets and rule targets always show, and webhooks subscribed to an address's received mail show active ones first, then paused ones. An address with more than 50 subscribers shows the first 50 and says how many more there are, with a link to every one (the Destinations tab, filtered to that address).
 

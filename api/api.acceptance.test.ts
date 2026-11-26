@@ -28563,6 +28563,33 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
     });
   });
 
+  test('address builder: an address is read the way it was typed (a name alone, name@, Name <address>, spaces, capitals), says what it changed, and asks for the name a domain alone lacks', async () => {
+    // The dashboard's reading of the address field (app/src/features/inbound/address-input.ts); whether the address is
+    // allowed stays the builder's checks and the API's. Loaded by a path the API's type check doesn't follow.
+    const { understandAddress } = await import(`../app/src/features/inbound/${'address-input'}.ts`) as { understandAddress: (raw: string, hosts: string[], domains?: string[]) => Json };
+    const hosts = ['rowan.example', 'mail.rowan.example'], read = (raw: string) => understandAddress(raw, hosts, [...hosts, 'rowan.example']);
+    const cases: [string, Json][] = [
+      ['support', { address: 'support@rowan.example', note: 'Added @rowan.example.', fixes: ['support@mail.rowan.example'] }],
+      ['Support', { address: 'support@rowan.example', note: 'Added @rowan.example.', fixes: ['support@mail.rowan.example'] }],
+      ['support@', { address: 'support@rowan.example', note: 'Added @rowan.example.', fixes: ['support@mail.rowan.example'] }],
+      ['Ren Okafor', { address: 'ren.okafor@rowan.example', note: 'Spaces became dots. Added @rowan.example.', fixes: ['ren.okafor@mail.rowan.example'] }],
+      ['ren okafor@rowan.example', { address: 'ren.okafor@rowan.example', note: 'Spaces became dots.' }],
+      ['Support <support@rowan.example>', { address: 'support@rowan.example', displayName: 'Support', note: 'Took the address; Support is its name.' }],
+      ['"Rowan Bakery" <Orders@Rowan.Example>', { address: 'orders@rowan.example', displayName: 'Rowan Bakery', note: 'Took the address; Rowan Bakery is its name.' }],
+      ['<support@rowan.example>', { address: 'support@rowan.example', note: 'Took the address.' }],
+      ['rowan.example', { address: 'rowan.example', error: 'Add a name before the @, such as support@rowan.example.', code: 'missing_local', fixes: ['support@rowan.example'] }],
+      ['@mail.rowan.example', { address: '@mail.rowan.example', error: 'Add a name before the @, such as support@mail.rowan.example.', code: 'missing_local', fixes: ['support@mail.rowan.example'] }],
+      ['first.last', { address: 'first.last@rowan.example', note: 'Added @rowan.example.', fixes: ['first.last@mail.rowan.example'] }],
+      [' Support@ROWAN.EXAMPLE ', { address: 'support@rowan.example' }],
+      ['first.last@rowan.example', { address: 'first.last@rowan.example' }],
+      ['ren+billing@rowan.example', { address: 'ren+billing@rowan.example' }],
+      ['me@gmail.com', { address: 'me@gmail.com' }],
+    ];
+    for (const [raw, expected] of cases) assert.deepEqual(read(raw), expected, raw);
+    // With nowhere to receive yet, a name alone is left as typed, for the builder to ask for the domain.
+    assert.deepEqual(understandAddress('support', []), { address: 'support' });
+  });
+
   test('forwards: with no permanent address to send the confirmation from, the 422 names an address to create at a host that receives now, never one that would turn receiving on; created, the forward goes out from it', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId;
@@ -28684,6 +28711,79 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       const fresh = ok(await local('POST', '/v1/inbound/addresses', { address: `orders@${reply}` }), 201);
       assert.equal(ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'orders-team', address: 'orders@outside.example' }), 201).status, 'pending');
       assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'orders-team'])).rows[0].request_from, fresh.address);
+
+      // auto: ready at once on a domain this workspace verified, emailed anywhere else; the answer says which, and who asked.
+      // (A subdomain of its own verified domain: the domain itself receives here now, and a forward there would loop.)
+      const own = ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'own-auto', address: `ops@team.${name}`, preverify: 'auto' }), 201);
+      assert.deepEqual([own.status, own.confirmation, own.requestFrom], ['ready', 'skipped', null]);
+      const outside = ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'outside-auto', address: 'auto@outside.example', preverify: 'auto' }), 201);
+      assert.deepEqual([outside.status, outside.confirmation, outside.requestFrom], ['pending', 'emailed', fresh.address]);
+      assert.equal(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'outside-true', address: 'true@outside.example', preverify: true }), 422, 'PREVERIFY_NOT_ALLOWED').field, 'preverify');
+
+      // An address made with its forward: the address first, and its recipient is asked by it, in one request; the route
+      // names the forward at once.
+      const desk = ok(await local('POST', '/v1/inbound/addresses', { address: `desk@${reply}`, flow: { forward: { name: 'desk-fwd', address: 'desk@outside.example', preverify: 'auto' }, deliver: ['forward:desk-fwd'] } }), 201);
+      assert.deepEqual([desk.forward.name, desk.forward.status, desk.forward.confirmation, desk.forward.requestFrom], ['desk-fwd', 'pending', 'emailed', desk.address]);
+      assert.deepEqual((ok(await local('GET', '/v1/routing/routes'), 200).data as Json[]).find(r => r.match === desk.address)?.to, [desk.forward.id]);
+      // Refused as a whole when the forward can't be made: nothing is created.
+      error(await local('POST', '/v1/inbound/addresses', { address: `desk2@${reply}`, flow: { forward: { name: 'desk-fwd', address: 'other@outside.example' } } }), 409);
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM mailboxes WHERE workspace_id=$1 AND address=$2', [wid, `desk2@${reply}`])).rows[0].n, 0);
+
+      // An address where creating it turns receiving on, with its forward and the route to it: receiving is written in the
+      // transaction that makes the rest, so a refusal at any step after it leaves everything as it was (the host, the
+      // domain's receiving state and choice, no address, forward, email, job or audit entry), whatever step refused.
+      const fresh2 = `mail2.${name}`, at2 = `hello@${fresh2}`;
+      const sha = (value: string) => createHash('sha256').update(value).digest('hex');
+      const state = async () => ({
+        hosts: (await db.query('SELECT id, receiving_host, status, updated_at::text FROM mailbox_domains WHERE workspace_id=$1 ORDER BY id', [wid])).rows,
+        claim: (await db.query("SELECT receiving_state, receiving_host, identity->>'receivingChoice' AS choice FROM domain_claims WHERE workspace_id=$1 AND name=$2", [wid, name])).rows[0],
+        address: (await db.query('SELECT count(*)::int AS n FROM mailbox_addresses WHERE workspace_id=$1 AND address=$2', [wid, at2])).rows[0].n,
+        forwards: (await db.query("SELECT key FROM mailbox_webhooks WHERE workspace_id=$1 AND type='forward' ORDER BY key", [wid])).rows.map((r: Json) => r.key),
+        emails: (await db.query('SELECT count(*)::int AS n FROM sending_emails WHERE workspace_id=$1', [wid])).rows[0].n,
+        jobs: (await db.query('SELECT count(*)::int AS n FROM jobs WHERE workspace_id=$1', [wid])).rows[0].n,
+        audit: (await db.query('SELECT count(*)::int AS n FROM audit_events WHERE workspace_id=$1', [wid])).rows[0].n,
+      });
+      const untouched = await state();
+      const make = (flow: Json) => local('POST', '/v1/inbound/addresses', { address: at2, flow });
+      const fwd = (name: string, address: string) => ({ name, address, preverify: 'auto' });
+      // The address itself, refused after receiving was written (an address retired here earlier).
+      await db.query("INSERT INTO mail_retired_addresses(workspace_id,address,until) VALUES ($1,$2,now()+interval '1 hour')", [wid, at2]);
+      error(await make({ forward: fwd('fresh-fwd', 'fresh@outside.example'), deliver: ['forward:fresh-fwd'] }), 409, 'ADDRESS_RETIRED');
+      assert.deepEqual(await state(), untouched, 'Refused at the address: nothing left.');
+      await db.query('DELETE FROM mail_retired_addresses WHERE workspace_id=$1 AND address=$2', [wid, at2]);
+      // The forward's record: its name is taken.
+      error(await make({ forward: fwd('desk-fwd', 'fresh@outside.example'), deliver: ['forward:desk-fwd'] }), 409, 'ENDPOINT_NAME_TAKEN');
+      assert.deepEqual(await state(), untouched, 'Refused at the forward: nothing left.');
+      // The forward to the host this very request turns on: a loop, seen only because that host is written first.
+      error(await make({ forward: fwd('loop-fwd', `boss@${fresh2}`), deliver: ['forward:loop-fwd'] }), 422, 'FORWARD_LOOP');
+      assert.deepEqual(await state(), untouched, 'Refused as a loop: nothing left.');
+      // The request to its recipient: they declined this workspace.
+      await db.query('INSERT INTO mail_forward_declines(workspace_id,address_hash) VALUES ($1,$2)', [wid, sha('declined@outside.example')]);
+      error(await make({ forward: fwd('declined-fwd', 'declined@outside.example'), deliver: ['forward:declined-fwd'] }), 409, 'FORWARD_DECLINED');
+      assert.deepEqual(await state(), untouched, 'Refused at the confirmation: nothing left.');
+      // The route, after the forward and its email: it names something that doesn't exist.
+      error(await make({ forward: fwd('fresh-fwd', 'fresh@outside.example'), deliver: ['forward:fresh-fwd', 'forward:ghost'] }), 422, 'UNKNOWN_DESTINATION');
+      assert.deepEqual(await state(), untouched, 'Refused at the route: nothing left, the email included.');
+      // Then the same request, valid: receiving on at the host, the address, its forward asked by it, the route.
+      const made2 = ok(await make({ forward: fwd('fresh-fwd', 'fresh@outside.example'), deliver: ['forward:fresh-fwd'] }), 201);
+      assert.deepEqual([made2.receiving?.turnedOn, made2.receiving?.status, made2.forward.status, made2.forward.requestFrom], [true, 'waiting_for_mx', 'pending', at2]);
+      assert.deepEqual((await db.query('SELECT status FROM mailbox_domains WHERE workspace_id=$1 AND receiving_host=$2', [wid, fresh2])).rows, [{ status: 'waiting_for_mx' }]);
+      assert.equal((await state()).emails, untouched.emails + 1);
+
+      // createSender: with no address that can ask, the suggested one is made in the same request and asks; with none to
+      // offer, refused as before and nothing is made.
+      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1 AND kind<>'inbox'", [wid]);
+      const hostsNow = await hosts();
+      const created = ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'made-sender', address: 'made@outside.example', createSender: true }), 201);
+      assert.deepEqual([created.status, created.confirmation, created.createdSender?.address, created.requestFrom], ['pending', 'emailed', `forward-2@${reply}`, `forward-2@${reply}`]);
+      assert.deepEqual(await hosts(), hostsNow, 'Nothing turned on.');
+      await db.query("UPDATE mailboxes SET kind='inbox' WHERE workspace_id=$1 AND kind<>'inbox'", [wid]);
+      const hostsBefore = await hosts();
+      await db.query("UPDATE mailbox_domains SET status='waiting_for_mx' WHERE workspace_id=$1 AND name=$2", [wid, reply]);
+      assert.deepEqual(error(await local('POST', '/v1/endpoints', { type: 'forward', name: 'no-sender', address: 'none@outside.example', createSender: true }), 422, 'FORWARD_SENDER_REQUIRED').details, [notReceiving]);
+      assert.equal((await db.query("SELECT count(*)::int AS n FROM mailbox_webhooks WHERE workspace_id=$1 AND key='no-sender'", [wid])).rows[0].n, 0);
+      await db.query("UPDATE mailbox_domains SET status='active' WHERE workspace_id=$1 AND name=$2", [wid, reply]);
+      assert.deepEqual(await hosts(), hostsBefore);
 
       // With no domain of its own that sends, the built-in domain sends again, to members only while that is its scope: an
       // address there is offered for a member's sign-in address, and for anyone else the answer says why none can be.
@@ -41549,12 +41649,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         // A rule with no attachments still lists in the overview.
         await call('PUT', path + '/scripts/loose', { key: 'loose', source: 'export default function route(email){ label("loose") }' });
         assert.deepEqual((await overview()).find((r: Json) => r.key === 'loose').attachedTo, []);
-        // A forward that stops being confirmed after a rule was saved with it no longer blocks other saves.
+        // A rule may name a forward still waiting for its recipient (it forwards mail received once they agree); one that
+        // stops being confirmed after a rule was saved with it no longer blocks other saves.
         // From the other address, so its confirmation email isn't the one the forward tests below read for box.
         await call('POST', '/v1/endpoints', { type: 'forward', name: 'recipe-fwd', address: 'recipes@example.net', from: other.id }, 201);
-        error(await local('POST', recipes, { recipe: 'forward', params: { to: 'recipe-fwd' }, addresses: [box.id] }), 422, 'UNKNOWN_ENDPOINT');
-        await db.query("UPDATE mailbox_webhooks SET verified=true WHERE workspace_id=$1 AND key='recipe-fwd'", [wid]);
         const forward = await call('POST', recipes, { recipe: 'forward', params: { to: 'recipe-fwd' }, addresses: [box.id] }, 201);
+        await db.query("UPDATE mailbox_webhooks SET verified=true WHERE workspace_id=$1 AND key='recipe-fwd'", [wid]);
         await db.query("UPDATE mailbox_webhooks SET verified=false,declined_at=now() WHERE workspace_id=$1 AND key='recipe-fwd'", [wid]);
         assert.equal(ritual((await call('PATCH', path + '/scripts/loose', { enabled: false })).config, 'loose').enabled, false);
         assert.ok(ritual((await call('GET', path)).config, forward.key));
@@ -41905,12 +42005,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
           await assert.rejects(attempt(routed,2),(await import('./src/jobs.js')).JobDeferred);
         }finally{runtime.webhookFetch=prev;await call('PUT',path,{})}
       });
-      await t.test('rituals: forwards require recipient verification, rewrite From via the inbox and suppress loops and repeats',async()=>{
+      await t.test('rituals: forwards wait for recipient verification, rewrite From via the inbox and suppress loops and repeats',async()=>{
         const {mailboxEventJobs}=await import('./src/mailbox-events.js');const root='/v1/rules',dest='/v1/endpoints',address='teammate@example.net';
         const d=await call('POST',dest,{type:'forward',name:'team',address,from:box.id},201);assert.equal(d.status,'pending');assert.match(d.nextStep,/Only the recipient can confirm/);
         error(await local('POST',dest,{type:'forward',name:'outside',address:'x@example.net',preverify:true}),422,'PREVERIFY_NOT_ALLOWED');
         runtime.config.multiTenant=true;try{error(await local('POST',dest,{type:'forward',name:'outside-hosted',address:'x@example.net',preverify:true}),422,'PREVERIFY_NOT_ALLOWED');}finally{runtime.config.multiTenant=false;}
-        const config={rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]};assert.match(error(await local('PUT',root,config),422,'UNKNOWN_ENDPOINT').message,/waiting for its recipient to confirm/);
+        const config={rituals:[{key:'forward',source:'export default function route(email,ctx){endpoints.team() }'}],attachments:[{ritual:'forward',target:box.id}]};
+        // A rule may call it while it waits: nothing reaches the recipient until they allow it (the forward tests below).
+        await call('PUT',root,config);await call('PUT',root,{});
         // The link alone confirms, so the workspace never sees it: the sent copy and the email content API withhold it.
         const sent=(await db.query("SELECT m.text AS stored,e.id,e.snapshot->>'text' AS sent FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id WHERE m.workspace_id=$1 AND m.subject=$2 AND m.direction='outbound'",[wid,'Confirm forwarding from '+box.address])).rows[0];
         assert.doesNotMatch(sent.stored,/fwd_[0-9a-f]{64}/);assert.match(sent.stored,/link withheld/);assert.doesNotMatch(JSON.stringify(await call('GET',`/v1/emails/${sent.id}/content`)),/fwd_[0-9a-f]{64}/);
@@ -42073,25 +42175,111 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([Buffer.from(files['logo.png']!.content as ArrayBuffer),files['logo.png']!.contentId,files['logo.png']!.mimeType],[png,'<logo@example.org>','image/png']);
         assert.equal((await db.query("SELECT attachment_count FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Quarterly report'",[wid])).rows[0].attachment_count,2);
       });
-      await t.test('forwards: an unconfirmed recipient never receives: routes refuse a pending forward, and one stopped after it was added gets nothing',async()=>{
-        const {forwardStopUrl}=await import('./src/endpoints.js');
-        assert.equal((await call('POST','/v1/endpoints',{type:'forward',name:'unconfirmed',address:'unconfirmed@example.net',from:box.id},201)).status,'pending');
-        const pendingId=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='unconfirmed'",[wid])).rows[0].id as string;
-        for(const ref of ['forward:unconfirmed',pendingId]){
-          assert.equal(error(await local('POST','/v1/routing/routes',{match:'unconfirmed@receive.example',to:[ref]}),422,'FORWARD_NOT_CONFIRMED').field,'to');
-          error(await local('POST','/v1/routing/test',{envelope:{to:['unconfirmed@receive.example']},config:{routes:[{match:'unconfirmed@receive.example',to:[ref]}]}}),422,'FORWARD_NOT_CONFIRMED');
-        }
-        // Confirmed and routed, then stopped by its recipient: the route keeps it, so other changes still save, and nothing reaches them.
-        const hookId=await confirmedForward('stopped','stopped@example.net');
-        await route('stopped@receive.example',['forward:stopped'],'stopped');
+      await t.test('forwards: mail flows once the recipient allows it: a route names a pending forward, nothing reaches them before Allow or from before it, the link is single-use and its own, and a decline or the stop link ends it at once',async()=>{
+        const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{forwardStopUrl}=await import('./src/endpoints.js');
+        const tokenFor=async(address:string)=>{
+          const request=(await db.query(`SELECT e.snapshot->>'text' AS text FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id
+            WHERE m.workspace_id=$1 AND m.direction='outbound' AND m.subject=$2 AND m."to" @> $3::jsonb ORDER BY m.created_at DESC LIMIT 1`,[wid,'Confirm forwarding from '+box.address,JSON.stringify([{address}])])).rows[0];
+          return /forwarding\/confirm\/(fwd_[0-9a-f]{64})/.exec(request.text)![1]!;
+        };
+        const choose=(token:string,choice:'allow'|'decline')=>rawFetch(new Request(`${PUBLIC_ORIGIN}/v1/forwarding/confirm/${token}`,{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice='+choice}));
+        const mail=(mid:string,to:string)=>receive(mid,[to],`From: Ana <ana@example.org>\r\nSubject: ${mid}\r\nMessage-ID: <${mid}@example.org>\r\n\r\nHello`);
+        const deliveries=async(hookId:string,messageId:string)=>(await db.query("SELECT status,last_error FROM mailbox_webhook_deliveries WHERE webhook_id=$1 AND payload->>'messageId'=$2",[hookId,messageId])).rows;
+        const forwardedTo=async(address:string)=>(await db.query(`SELECT subject FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject LIKE 'Fwd:%' AND "to" @> $2::jsonb ORDER BY created_at`,[wid,JSON.stringify([{address}])])).rows.map((r:Json)=>r.subject);
+        const status=async(name:string)=>(await call('GET',`/v1/endpoints/${name}`)).status;
+
+        // 1. Before Allow: a route names the forward while it waits. Mail to the address is received and kept as any other
+        // (stored at once, no refusal, bounce or hold), no delivery is recorded for the forward and nothing reaches them.
+        const made=await call('POST','/v1/endpoints',{type:'forward',name:'later',address:'later@example.net',from:box.id,preverify:'auto'},201);
+        assert.deepEqual([made.status,made.confirmation,made.requestFrom],['pending','emailed',box.address]);
+        const hookId=made.id as string;
+        assert.deepEqual((await route('later@receive.example',['forward:later'],'later')).to,[hookId]);
+        const early=await mail('fwd-before-allow','later@receive.example');
+        assert.deepEqual([early.direction,early.verdicts.forwardEligible],['inbound',true],'Received and kept, and forwardable once allowed.');
+        // Its receipt ends as a message to an address with no forward does: not held, refused or failed.
+        await mail('fwd-control',box.address);
+        const receipt=async(mid:string)=>(await db.query('SELECT status,error FROM mail_receipts WHERE workspace_id=$1 AND ses_message_id=$2',[wid,mid])).rows[0];
+        assert.deepEqual(await receipt('fwd-before-allow'),await receipt('fwd-control'));
+        assert.deepEqual(await deliveries(hookId,early.id),[]);
+        assert.deepEqual(await forwardedTo('later@example.net'),[]);
+
+        // 2. At Allow: mail received from then on is forwarded. A delivery for the earlier message recorded now (as one
+        // queued between its ingest and the Allow would be) is refused: received before they allowed it, never forwarded.
+        const token=await tokenFor('later@example.net');
+        assert.equal((await choose(token,'allow')).status,200);
+        assert.equal(await status('later'),'ready');
+        const late=await mail('fwd-after-allow','later@receive.example');
+        assert.deepEqual(await forwardDelivery(hookId,late.id),{status:'delivered',last_error:null,routed:true});
+        const seq=(await db.query("SELECT seq FROM mailbox_events WHERE workspace_id=$1 AND message_id=$2 AND type='message.received' ORDER BY seq LIMIT 1",[wid,early.id])).rows[0].seq;
+        await mailboxEventJobs['mailbox.fanout']!(runtime,{[String(seq)]:[{id:hookId,recipient:'later@receive.example',junk:false}]},{id:unique('job'),workspaceId:wid,attempts:1});
+        assert.deepEqual(await forwardDelivery(hookId,early.id),{status:'failed',last_error:'FORWARD_BEFORE_ALLOW',routed:true});
+        // Taken by SES before the Allow and stored after it (a slow ingest): never forwarded either.
+        const slow=await mail('fwd-slow-ingest','later@receive.example');
+        await db.query("UPDATE mail_messages SET received_at=(SELECT confirmed_at FROM mailbox_webhooks WHERE id=$2)-interval '1 second' WHERE id=$1",[slow.id,hookId]);
+        assert.equal((await forwardDelivery(hookId,slow.id)).last_error,'FORWARD_BEFORE_ALLOW');
+        assert.deepEqual(await forwardedTo('later@example.net'),['Fwd: fwd-after-allow']);
+
+        // 3. The link works once, for its own forward only, and not after it lapsed or once its forward is gone.
+        assert.equal((await choose(token,'allow')).status,410,'Used once.');
+        await call('POST','/v1/endpoints',{type:'forward',name:'other',address:'other@example.net',from:box.id},201);
+        assert.equal(await status('other'),'pending','Allowing one forward left the other waiting.');
+        await call('POST','/v1/endpoints',{type:'forward',name:'lapsed',address:'lapsed@example.net',from:box.id},201);
+        const lapsed=await tokenFor('lapsed@example.net');
+        await db.query("UPDATE mailbox_webhooks SET expires_at=now()-interval '1 minute' WHERE workspace_id=$1 AND key='lapsed'",[wid]);
+        assert.equal((await choose(lapsed,'allow')).status,410);
+        assert.equal(await status('lapsed'),'expired');
+        await call('POST','/v1/endpoints',{type:'forward',name:'gone',address:'gone@example.net',from:box.id},201);
+        const gone=await tokenFor('gone@example.net');
+        await call('DELETE','/v1/endpoints/gone');
+        // Made again under the same name and address: the old link is not its link.
+        await call('POST','/v1/endpoints',{type:'forward',name:'gone',address:'gone@example.net',from:box.id},201);
+        assert.equal((await choose(gone,'allow')).status,410);
+        assert.equal(await status('gone'),'pending');
+        // A new link replaces the old one.
+        const first=await tokenFor('other@example.net');
+        await call('POST','/v1/endpoints/other/verification',{},202);
+        assert.equal((await choose(first,'allow')).status,410);
+        const tokens=(await db.query(`SELECT e.snapshot->>'text' AS text FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id WHERE m.workspace_id=$1 AND m.direction='outbound' AND m."to" @> $2::jsonb`,[wid,JSON.stringify([{address:'other@example.net'}])])).rows.map((r:Json)=>/forwarding\/confirm\/(fwd_[0-9a-f]{64})/.exec(r.text)![1]);
+        assert.equal(tokens.length,2);
+        assert.equal((await choose(tokens.find((k:string)=>k!==first)!,'allow')).status,200);
+
+        // 4. Never answered: the address keeps receiving, the forward shows as waiting with how to send again, and it can
+        // be taken off the route and removed.
+        await route('waiting@receive.example',['forward:lapsed'],'waiting');
+        const kept=await mail('fwd-never-answered','waiting@receive.example');
+        assert.equal(kept.direction,'inbound');
+        const lapsedHook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='lapsed'",[wid])).rows[0].id;
+        assert.deepEqual(await deliveries(lapsedHook,kept.id),[]);
+        assert.match((await call('GET','/v1/endpoints/lapsed')).nextStep,/sendEndpointVerification/);
+        assert.equal(error(await local('DELETE','/v1/endpoints/lapsed'),409,'ENDPOINT_IN_USE').message.includes('A route delivers to lapsed'),true);
+        await call('PATCH','/v1/routing/routes/waiting',{to:[]});
+        await call('DELETE','/v1/endpoints/lapsed');
+
+        // 5. A decline, or the stop link once allowed, ends it at once: nothing more is forwarded, a delivery already
+        // recorded included.
+        await call('POST','/v1/endpoints',{type:'forward',name:'nope',address:'nope@example.net',from:box.id},201);
+        await route('nope@receive.example',['forward:nope'],'nope');
+        assert.equal((await choose(await tokenFor('nope@example.net'),'decline')).status,200);
+        assert.equal(await status('nope'),'declined');
+        const nopeHook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='nope'",[wid])).rows[0].id;
+        const declined=await mail('fwd-declined','nope@receive.example');
+        assert.deepEqual(await forwardDelivery(nopeHook,declined.id),{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
+        error(await local('POST','/v1/routing/routes',{match:'nope-again@receive.example',to:['forward:nope']}),422,'FORWARD_NOT_CONFIRMED');
+        const queued=await mail('fwd-stopped-queued','later@receive.example');
+        assert.deepEqual(await deliveries(hookId,queued.id),[{status:'pending',last_error:null}],'Recorded while allowed.');
         assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,hookId,PUBLIC_ORIGIN),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
-        assert.equal((await call('GET','/v1/endpoints/stopped')).status,'declined');
-        assert.equal((await call('PATCH','/v1/routing/routes/stopped',{note:'kept'})).note,'kept');
-        error(await local('POST','/v1/routing/routes',{match:'stopped-again@receive.example',to:['forward:stopped']}),422,'FORWARD_NOT_CONFIRMED');
-        const m=await receive('fwd-stopped',['stopped@receive.example'],'From: Agent <a@example.org>\r\nSubject: After the stop\r\nMessage-ID: <fwd-stopped@example.org>\r\n\r\nHello');
-        assert.deepEqual(await forwardDelivery(hookId,m.id),{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
-        assert.equal((await db.query('SELECT FROM mail_forward_once WHERE endpoint=$1',[hookId])).rowCount,0);
-        assert.equal((await db.query("SELECT FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject LIKE 'Fwd:%' AND (\"to\" @> $2::jsonb OR \"to\" @> $3::jsonb)",[wid,JSON.stringify([{address:'stopped@example.net'}]),JSON.stringify([{address:'unconfirmed@example.net'}])])).rowCount,0);
+        assert.equal(await status('later'),'declined');
+        assert.deepEqual(await forwardDelivery(hookId,queued.id),{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
+        const afterStop=await mail('fwd-after-stop','later@receive.example');
+        assert.deepEqual(await forwardDelivery(hookId,afterStop.id),{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
+        assert.deepEqual(await forwardedTo('later@example.net'),['Fwd: fwd-after-allow']);
+        assert.deepEqual([...await forwardedTo('nope@example.net'),...await forwardedTo('gone@example.net'),...await forwardedTo('lapsed@example.net')],[]);
+        // Rules may name a waiting forward too, never a declined one.
+        await call('POST','/v1/endpoints',{type:'forward',name:'ruled',address:'ruled@example.net',from:box.id},201);
+        try{
+          await call('PUT','/v1/rules',{rituals:[{key:'forward-ruled',source:'export default function route(email,ctx){endpoints.ruled() }'}],attachments:[{ritual:'forward-ruled',target:box.id}]});
+          assert.match(error(await local('PUT','/v1/rules',{rituals:[{key:'forward-nope',source:'export default function route(email,ctx){endpoints.nope() }'}],attachments:[{ritual:'forward-nope',target:box.id}]}),422).message,/declined or stopped/);
+        }finally{await call('PUT','/v1/rules',{});}
       });
       await t.test('forwards: a forward that comes back (A forwards to B, B forwards to A) is never forwarded again',async()=>{
         assert.ok(forwarded.mime,'The whole-message forward ran first.');

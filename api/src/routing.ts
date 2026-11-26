@@ -19,7 +19,7 @@ const Address = z.string().trim().toLowerCase().max(254);
 const Destination = z.union([
   z.string().max(128).regex(/^(?:(?:mbx|mwh)_[a-zA-Z0-9_-]+|(?:inbox|webhook):[a-z0-9][a-z0-9-]{0,62})$/).describe('An inbox (mbx_… or inbox:<key>) or a webhook (mwh_… or webhook:<key>).'),
   z.string().max(128).regex(/^(?:con_[a-zA-Z0-9_-]+|forward:[a-z0-9][a-z0-9-]{0,62})$/).describe('A forward endpoint (con_… or forward:<name>) its recipient confirmed: it gets the whole message, as a rule\'s endpoints.<name>() call sends it.'),
-]).describe('An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a confirmed forward (con_… or forward:<name>).');
+]).describe('An inbox (mbx_… or inbox:<key>), a webhook (mwh_… or webhook:<key>) or a forward (con_… or forward:<name>; one still waiting for its recipient forwards mail received from the moment they allow it).');
 export const RouteFields = z
   .object({
     key: RoutingKey.nullable().optional(),
@@ -29,7 +29,7 @@ export const RouteFields = z
     to: z
       .union([z.literal('drop'), z.array(Destination).max(10)])
       .describe(
-        "Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.",
+        "Up to 10 destinations (inboxes, webhooks and forwards, a forward waiting for its recipient included), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.",
       ),
     subaddresses: z.boolean().optional().describe('Also route user+tag@host here when nothing more specific matches. Default true.'),
     enabled: z.boolean().optional().describe('A disabled route is skipped; its mail falls through to the next tier. Default true.'),
@@ -247,8 +247,9 @@ const realWebhook = sql`h.type='webhook'`,
   forward = sql`h.type='forward'`;
 /**
  * Replaces keys with IDs in place. Leniently (restores), drops destinations that no longer exist instead of failing.
- * A forward a route did not already name must be confirmed, as a rule that calls one must be when it is saved; one its
- * recipient later declined stays, and its deliveries are refused (sendToEndpoint), so a decline never blocks a save.
+ * A route may name a forward still waiting for its recipient: nothing reaches them until they allow it, and then only mail
+ * received from that moment (mailbox-events.ts fanout, sendForward). A forward a route did not already name must not be
+ * declined; one its recipient declined later stays, and its deliveries are refused, so a decline never blocks a save.
  */
 async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], lenient: boolean, previous: Map<string, Route> = new Map()) {
   const refs = [...referenceSet(routes)],
@@ -261,8 +262,8 @@ async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], l
         UNION ALL SELECT ref,b.id,false FROM refs JOIN mailboxes b ON b.workspace_id=${w} AND b.key=refs.key WHERE starts_with(ref,'inbox:')
         UNION ALL SELECT ref,h.id,false FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${realWebhook} WHERE starts_with(ref,'mwh_')
         UNION ALL SELECT ref,h.id,false FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${realWebhook} WHERE starts_with(ref,'webhook:')
-        UNION ALL SELECT ref,h.id,NOT (h.verified AND h.declined_at IS NULL) FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${forward} WHERE starts_with(ref,'con_')
-        UNION ALL SELECT ref,h.id,NOT (h.verified AND h.declined_at IS NULL) FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${forward} WHERE starts_with(ref,'forward:')`,
+        UNION ALL SELECT ref,h.id,h.declined_at IS NOT NULL FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.id=ref AND ${forward} WHERE starts_with(ref,'con_')
+        UNION ALL SELECT ref,h.id,h.declined_at IS NOT NULL FROM refs JOIN mailbox_webhooks h ON h.workspace_id=${w} AND h.key=refs.key AND ${forward} WHERE starts_with(ref,'forward:')`,
     )
   ).rows;
   const found = new Map(rows.map((d) => [d.ref, d.id])),
@@ -283,7 +284,7 @@ async function resolveDestinations(tx: DbExecutor, w: string, routes: Route[], l
       throw fail(
         422,
         'FORWARD_NOT_CONFIRMED',
-        `${unconfirmed} is a forward its recipient has not confirmed. A route can deliver to it once they choose Allow in the emailed link; getEndpoint shows its status.`,
+        `${unconfirmed} is a forward its recipient declined or stopped. A new request is possible 30 days after; getEndpoint shows its status.`,
         'to',
       );
     for (const ref of missing) warnings.push(`Removed ${ref} from ${r.match}: it no longer exists.`);
@@ -562,7 +563,7 @@ export function registerRouting(app: App) {
       operationId: 'createRoute',
       summary: 'Route a recipient',
       description:
-        'Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk", "forward:team"] } keeps the Support inbox, adds a webhook and forwards each message whole to a confirmed forward endpoint. Mail is routed by the new version as soon as this returns. Test first with testRouting.',
+        'Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk", "forward:team"] } keeps the Support inbox, adds a webhook and forwards each message whole to a forward endpoint once its recipient allows it. Mail is routed by the new version as soon as this returns. Test first with testRouting.',
       request: { headers: ifMatch, body: json(RouteFields.openapi('CreateMailRoute')) },
       responses: { 201: response(MailRoute), ...errors },
     }),

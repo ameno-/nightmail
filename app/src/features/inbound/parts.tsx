@@ -35,12 +35,14 @@ function MaskedMatch({ local, domain }: { local: string; domain: string }) {
 }
 
 export const targetName = (t: Target, ownId?: string | null) => t.type === 'inbox' ? (t.id === ownId ? 'Inbox' : `${t.name} inbox`) : t.type in outcomes ? outcomes[t.type as keyof typeof outcomes] : t.name
+/** A forward a route or rule names while its recipient hasn't agreed yet: it starts with mail received once they do. */
+const waits = (t: Target) => t.type === 'forward' && (t.status === 'pending' || t.status === 'expired')
 /** Where a route's mail goes, the first few by name; total is the complete list's size when to is only part of it. */
 export function Targets({ to, ownId, max = 3, total = to.length }: { to: Target[]; ownId?: string | null; max?: number; total?: number }) {
   if (!to.length) return <span className="muted">—</span>
-  return <span className="rcv-targets">{to.slice(0, max).map(t => <span key={`${t.type}:${t.id}`} className="rcv-target" data-muted={t.type === 'store' || t.type === 'drop' || t.status === 'paused' || undefined}
-    title={`${typeLabel[t.type]}${t.via ? ` · sent by the ${t.via} rule, for the mail it chooses` : ''}`}>
-    <TargetIcon type={t.type} size={13} /><span>{t.type === 'inbox' && t.id !== ownId ? <><PrivateAddress value={t.name} /> inbox</> : <PrivateAddress value={targetName(t, ownId)} />}</span>{t.via && <span className="rcv-via">via a rule</span>}
+  return <span className="rcv-targets">{to.slice(0, max).map(t => <span key={`${t.type}:${t.id}`} className="rcv-target" data-muted={t.type === 'store' || t.type === 'drop' || t.status === 'paused' || waits(t) || undefined}
+    title={`${typeLabel[t.type]}${waits(t) ? ' · forwarding starts once its recipient agrees' : ''}${t.via ? ` · sent by the ${t.via} rule, for the mail it chooses` : ''}`}>
+    <TargetIcon type={t.type} size={13} /><span>{t.type === 'inbox' && t.id !== ownId ? <><PrivateAddress value={t.name} /> inbox</> : <PrivateAddress value={targetName(t, ownId)} />}</span>{waits(t) && <span className="rcv-via">awaiting</span>}{t.via && <span className="rcv-via">via a rule</span>}
   </span>)}{total > Math.min(max, to.length) && <span className="muted">+{total - Math.min(max, to.length)}</span>}</span>
 }
 

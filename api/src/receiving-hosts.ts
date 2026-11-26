@@ -89,10 +89,19 @@ const wake = (c: Ctx) => { const actor = c.get('actor'); if (actor) actor.wakeJo
  * suggestion with no addresses gives way to the added host instead of staying beside it.
  */
 async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput): Promise<{ view: HostView; created: boolean }> {
+  const plan = await planHost(c, wid, row, input);
+  if ('existing' in plan) return { view: (await listHosts(c, { id: row.id, workspaceId: wid }, plan.existing))[0]!, created: false };
+  const saved = await c.env.db.transaction(db => writeHost(db, c, wid, row, input, plan));
+  if (saved.created) wake(c);
+  return { view: (await views(c.env.db, [saved.row], await hostedDomain(c.env.db, wid, row.id)))[0]!, created: saved.created };
+}
+type HostPlan = { host: string; existing: string } | ({ host: string } & Pick<Awaited<ReturnType<typeof inspectReceivingHost>>, 'mx' | 'issue'>);
+/** addHosted's checks and its DNS read, before anything is written: the host already there, or what its write records. */
+async function planHost(c: Ctx, wid: string, row: HostedDomain, input: AddInput): Promise<HostPlan> {
   const host = hostName(input.name, row.name);
   if (reservedPlatformName(host, c.env.config)) throw new ApiError(409, 'RECEIVING_HOST_RESERVED', `${host} is one of ${productName}’s own hosts, so it can’t receive mail for ${row.name}.`, 'name');
   const existing = row.hosts.find(h => h.host === host && !removed(h.status));
-  if (existing) return { view: (await listHosts(c, { id: row.id, workspaceId: wid }, existing.id))[0]!, created: false };
+  if (existing) return { host, existing: existing.id };
   receivable(row);
   if (row.hosts.filter(h => !removed(h.status)).length >= MAX_HOSTS) throw new ApiError(409, 'RECEIVING_HOST_LIMIT', `A domain receives on at most ${MAX_HOSTS} hosts. Remove one first.`, 'name');
   const { mx, issue } = await inspectReceivingHost(c.env.db, row, wid, host, dnsUnavailable);
@@ -103,7 +112,14 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
   if (issue?.code === 'delegated') throw new ApiError(409, 'RECEIVING_HOST_DELEGATED', issue.message, 'name');
   if (issue && ['foreign_mx', 'split', 'wrong_region', 'null_mx'].includes(issue.code) && !input.confirm)
     throw new ApiError(409, 'RECEIVING_HOST_IN_USE', `Move mail for ${host}? ${issue.message} Send confirm: true to choose it anyway.`, 'name');
-  const saved = await c.env.db.transaction(async db => {
+  return { host, mx, issue };
+}
+/**
+ * addHosted's write, in the caller's transaction: its own (addHosted), or the transaction that creates an address there
+ * (createInboundAddress), which a later refusal rolls back with the host.
+ */
+async function writeHost(db: DbExecutor, c: Ctx, wid: string, row: HostedDomain, input: AddInput, { host, mx, issue }: Exclude<HostPlan, { existing: string }>): Promise<{ row: Row; created: boolean }> {
+  try {
     // The claim first, then its hosts: the order every receiving write takes. DNS was read before; the write is fenced on the token.
     const current = await hostedDomain(db, wid, row.id, true);
     if (!current || current.token !== row.token) throw new ApiError(409, 'DOMAIN_CHANGED', 'The domain changed while its DNS was checked. Try again.', undefined, true);
@@ -145,13 +161,11 @@ async function addHosted(c: Ctx, wid: string, row: HostedDomain, input: AddInput
     await db.execute(followMxJob(wid, sql`SELECT ${row.id}::text AS id,${current.token}::uuid AS token`));
     await recordAudit(db, c, { action: 'inbound_host.create', workspaceId: wid, target: { type: 'inbound_host', id: saved.id }, after: { domainId: row.id, name: host, catchAll: saved.catchAll, confirm: !!input.confirm, restored: !!same } });
     return { row: saved, created: true };
-  }).catch((e: unknown) => {
+  } catch (e: unknown) {
     const cause = ((e as { cause?: unknown })?.cause ?? e) as { code?: string; constraint?: string };
     if (cause?.code === '23505' && cause.constraint === 'mailbox_domains_routing_host') throw taken(host, row.name);
     throw e;
-  });
-  if (saved.created) wake(c);
-  return { view: (await views(c.env.db, [saved.row], await hostedDomain(c.env.db, wid, row.id)))[0]!, created: saved.created };
+  }
 }
 /**
  * Hosted: receiving follows verified DNS, so enabling it asks for the domain's check now. The request is stamped on the
@@ -229,9 +243,10 @@ export async function addHost(c: Ctx, domain: Domain, input: AddInput) {
  * in the same minute): the claim already holds the name for this workspace, and mail routes only once ownership is proven
  * and the MX record is live (mailbox-receipts.ts), so the address waits for both. Nothing is moved without consent: a host
  * whose mail another provider receives today is refused with the call that moves it and the MX record to publish.
- * `mayAddHosts`: the caller may make lasting host changes (not a temporary agent token). Returns the domain's ID.
+ * `mayAddHosts`: the caller may make lasting host changes (not a temporary agent token). Here every check and the DNS
+ * read, before anything is written; receiveInTransaction writes it, in the transaction that creates the address.
  */
-export async function receiveForAddress(c: Ctx, wid: string, host: string, address: string, mayAddHosts: boolean) {
+export async function planReceiving(c: Ctx, wid: string, host: string, address: string, mayAddHosts: boolean) {
   const { rows: [own] } = await c.env.db.execute<{ id: string; name: string; expired: boolean }>(sql`SELECT d.id,d.name,domain_claim_expired(dc) AS expired FROM operation_domains d
     JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
     WHERE d.workspace_id=${wid} AND (d.name=${host} OR right(${host},length(d.name)+1)='.'||d.name) ORDER BY length(d.name) DESC LIMIT 1`);
@@ -242,13 +257,22 @@ export async function receiveForAddress(c: Ctx, wid: string, host: string, addre
   const mx = `${host} MX 10 ${derivedReadiness(row).dns.find(r => r.purpose === 'receiving')?.value ?? expectedMx(host, row.region).value}`;
   const call = (confirm: boolean) => `POST /v1/inbound/domains/${own.id}/hosts with {"name":"${host}"${confirm ? ',"confirm":true' : ''}}`;
   if (!mayAddHosts) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `${host} doesn’t receive mail yet. An owner or admin can turn it on with ${call(false)} and publish ${mx}; then create ${address}.`, 'address');
-  try { await addHosted(c, wid, row, { name: host }); }
+  try { return { row, plan: await planHost(c, wid, row, { name: host }) }; }
   catch (error) {
     if (!(error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE')) throw error;
     const why = error.message.replace(/^Move mail for \S+\? /, '').replace(/ Send confirm: true to choose it anyway\.$/, '');
     throw new ApiError(409, 'RECEIVING_HOST_IN_USE', `${address} wasn’t created: receiving at ${host} would take its mail from another provider. ${why} To move it here anyway, call ${call(true)}, publish ${mx}, then create ${address} again.`, 'address');
   }
-  return own.id;
+}
+/**
+ * Turns receiving on as planReceiving planned it, in the caller's transaction (the one creating the address and its
+ * flow): when anything later in it is refused, receiving at the host is left as it was. Whether a host was written.
+ */
+export async function receiveInTransaction(tx: DbExecutor, c: Ctx, wid: string, { row, plan }: Awaited<ReturnType<typeof planReceiving>>) {
+  if ('existing' in plan) return false;
+  const { created } = await writeHost(tx, c, wid, row, { name: plan.host }, plan);
+  if (created) wake(c);
+  return created;
 }
 /** chooseReceivingHost once the domain receives somewhere: the chosen host is added beside the others. */
 export const addChosenHost = (c: Ctx, wid: string, row: HostedDomain, host: string, confirm: boolean) => addHosted(c, wid, row, { name: host, confirm });
