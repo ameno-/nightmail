@@ -8,19 +8,11 @@
 .docs-header nav { display: flex; gap: var(--space-20); font-size: var(--text-sm); }
 .docs-header nav a { color: inherit; }
 
-/* The docs frame: the table of contents beside the page, or a page picker above it where a second column doesn't fit
-   (a phone, a narrow window). A container query, so the dashboard's sidebar counts. */
-.docs-frame { container: docs / inline-size; }
-.docs-layout { display: grid; grid-template-columns: 232px minmax(0, 1fr); column-gap: clamp(var(--space-28), 4cqi, calc(2 * var(--space-28))); align-items: start; }
-/* The contents sit straight on the page's surface: only the search field and the hovered or current link are filled. */
-.docs-toc { position: sticky; top: 0; display: flex; flex-direction: column; gap: var(--space-16); height: calc(100dvh - 2 * var(--page-inset) - 2 * var(--space-24)); min-height: 0; padding: var(--space-12) var(--space-12) 0; }
-.docs-toc > .ui-input, .docs-toc > .ui-control-skeleton { flex-shrink: 0; }
-/* The list scrolls under a short fade at its bottom edge instead of stopping hard. */
-.docs-toc-scroll { --fade-pad-x: var(--focus-reach); flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; margin-inline: calc(-1 * var(--focus-reach)); padding: 0 var(--focus-reach) var(--space-24); }
-.docs-toc nav { display: flex; flex-direction: column; gap: var(--space-24); }
-.docs-picker { display: none; }
-.docs-main { min-width: 0; }
-.docs-main [id] { scroll-margin-top: var(--space-16); }
+/* The docs frame is a SubNav (components/ui/patterns.tsx): the contents beside the page, or a page picker above it where
+   two columns don't fit. Its container also answers the tables' queries (docs.css). */
+.ui-subnav-frame.docs-frame { container-name: subnav docs; }
+.docs-nav-loading { padding: var(--space-4) var(--sidebar-inset) 0; }
+.docs-frame .ui-subnav-main [id] { scroll-margin-top: var(--space-16); }
 /* In the dashboard the page fills the panel beside the contents. */
 .page-surface .docs-operation { width: 100%; margin-inline: 0; }
 
@@ -37,19 +29,17 @@
 .docs-section > h2 { margin: 0; font-size: var(--text-lg); }
 @media (max-width: 760px) { .docs-operation-header h1 { font-size: var(--text-xl); } }
 
-.docs-page .docs-layout { grid-template-columns: 292px minmax(0, 1fr); column-gap: 0; }
-.docs-page .docs-toc { top: var(--docs-top); height: calc(100dvh - var(--docs-top)); padding: var(--space-20) var(--space-16) 0 var(--space-24); }
-.docs-page .docs-main { padding: var(--space-40) clamp(var(--space-28), 7vw, calc(4 * var(--space-24))) calc(2 * var(--space-40)); }
-.docs-page .docs-main [id] { scroll-margin-top: calc(var(--docs-top) + var(--space-16)); }
-
-@container docs (width < 800px) {
-  .docs-layout, .docs-page .docs-layout { display: block; }
-  .docs-toc { display: none; }
-  .docs-picker { display: block; margin-bottom: var(--space-20); }
-  .docs-page .docs-picker { margin: 0; padding: var(--space-16) var(--space-16) 0; }
-  .docs-page .docs-main { padding: var(--space-28) var(--space-16) var(--space-40); }
+/* Standalone: the header says Docs, so the column has no title of its own, and the column and page keep their padding. */
+.docs-page .ui-subnav-layout { --subnav-width: 292px; column-gap: 0; }
+.docs-page .ui-subnav__title { display: none; }
+.docs-page .ui-subnav { top: var(--docs-top); height: calc(100dvh - var(--docs-top)); max-height: none; padding: var(--space-20) var(--space-16) 0 var(--space-24); }
+.docs-page .ui-subnav-main { padding: var(--space-40) clamp(var(--space-28), 7vw, calc(4 * var(--space-24))) calc(2 * var(--space-40)); }
+.docs-page .ui-subnav-main [id] { scroll-margin-top: calc(var(--docs-top) + var(--space-16)); }
+@container subnav (width < 880px) {
+  .docs-page .ui-subnav-layout { row-gap: 0; }
+  .docs-page .ui-subnav__picker { padding: var(--space-16) var(--space-16) 0; }
+  .docs-page .ui-subnav-main { padding: var(--space-28) var(--space-16) var(--space-40); }
 }
-.docs-picker > select { width: 100%; }
 @media (max-width: 760px) {
   .docs-header { padding-inline: var(--space-16); }
   .docs-header nav a:not(:last-child) { display: none; }

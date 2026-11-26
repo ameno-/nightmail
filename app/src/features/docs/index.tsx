@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { useIsFetching, useQuery } from '@tanstack/react-query'
-import { Link, Navigate, useLocation, useNavigate, useNavigationType, useParams } from 'react-router'
-import { Alert, EmptyState, ErrorState, Input, SkeletonText, Tabs } from '../../components/ui'
+import { Link, Navigate, useLocation, useNavigationType, useParams } from 'react-router'
+import { Alert, EmptyState, ErrorState, Input, SkeletonText, SubNav, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { useApiQuery, useCanonicalOrigin, useSession, useWorkspaceAccess } from '../../data/context'
 import { AgentPrompt, agentPrompt, useAgentSetup } from './agent-setup'
@@ -245,18 +245,6 @@ function useAnchorScroll(ready: boolean) {
   }, [location.key, ready])
 }
 
-function DocsPicker({ page, title, all }: { page: Page; title: string; all: Operation[] }) {
-  const navigate = useNavigate()
-  const value = pathOf(page)
-  const groups = [...new Set(all.map(operation => operation.tag))]
-  const known = page.kind === 'overview' || page.kind === 'guide' || all.some(operation => operationPath(operation.id) === value)
-  return <select className="ui-input ui-select-trigger ui-native-select" aria-label="Documentation page" value={value} onChange={event => navigate(event.target.value)}>
-    {!known && <option value={value} disabled>{title}</option>}
-    <optgroup label="Guides"><option value="/docs">Overview and quickstart</option>{guides.map(guide => <option key={guide.id} value={`/docs/${guide.id}`}>{guide.title}</option>)}</optgroup>
-    {groups.map(group => <optgroup key={group} label={tagTitle(group)}>{all.filter(operation => operation.tag === group).map(operation => <option key={operation.id} value={operationPath(operation.id)}>{operation.summary}</option>)}</optgroup>)}
-  </select>
-}
-
 export function DocsPage() {
   const site = useCanonicalOrigin()
   const query = useQuery(openApiQuery)
@@ -289,14 +277,15 @@ export function DocsPage() {
   if (legacy) return <Navigate replace to={legacy} />
   const renamed = renamedGuides[splat.replace(/\/$/, '')]
   if (renamed) return <Navigate replace to={`/docs/${renamed}${location.hash}`} />
-  const Main = inShell ? 'div' : 'main'
-  return <div className="docs-frame"><div className="docs-layout">
-    <aside className="docs-toc" aria-label="Documentation contents"><Input type="search" aria-label="Search the documentation" placeholder="Search guides and API" value={search} onChange={event => setSearch(event.target.value)} />
-      <div className="docs-toc-scroll" ref={contents}><nav aria-label="Guides and API operations">
-        {shownGuides.length > 0 && <div className="docs-nav-group docs-nav-group--guides"><h2>Guides</h2>{!q && <Link to="/docs" data-active={active === '/docs' || undefined} aria-current={active === '/docs' ? 'page' : undefined}><span>Overview and quickstart</span></Link>}{shownGuides.map(item => <Link key={item.id} to={`/docs/${item.id}`} data-active={active === `/docs/${item.id}` || undefined} aria-current={active === `/docs/${item.id}` ? 'page' : undefined}><span>{item.title}</span></Link>)}</div>}
-        {query.isPending ? <div className="stack"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && q ? !shownGuides.length && <p className="muted docs-nav-empty">Nothing matches.</p> : groups.map(group => <div className="docs-nav-group" key={group}><h2>{tagTitle(group)}</h2>{filtered.filter(operation => operation.tag === group).map(operation => { const to = operationPath(operation.id); return <Link key={operation.id} to={to} data-active={active === to || undefined} aria-current={active === to ? 'page' : undefined}><span data-method={operation.method}>{operation.method}</span><span>{operation.summary}</span></Link> })}</div>)}</nav></div>
-    </aside>
-    <div className="docs-picker"><DocsPicker page={page} title={title} all={all} /></div>
-    <Main className="docs-main">{site.foreign && site.origin ? <ForeignHost origin={site.origin} /> : !site.origin ? (site.error ? <ErrorState error={site.error} onRetry={site.retry} /> : <DocsArticleSkeleton />) : <DocsOrigin.Provider value={site.origin}>{missing ? <MissingPage /> : page.kind === 'guide' ? <GuidePage guide={page.guide} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : !spec ? <DocsArticleSkeleton /> : current ? <OperationPage document={spec} operation={current} /> : <DocsOverview document={spec} all={all} />}</DocsOrigin.Provider>}</Main>
-  </div></div>
+  // The contents list what the search matches; the phone's picker always lists every page.
+  const item = (to: string, label: string, method?: string) => ({ to, label, current: active === to, ...method && { lead: <span data-method={method}>{method}</span>, text: `${method.toUpperCase()} ${label}` } })
+  const guideItems = (list: Guide[], overview: boolean) => [...overview ? [item('/docs', 'Overview and quickstart')] : [], ...list.map(guide => item(`/docs/${guide.id}`, guide.title))]
+  const operationGroups = (list: Operation[]) => [...new Set(list.map(operation => operation.tag))].map(group => ({ title: tagTitle(group), items: list.filter(operation => operation.tag === group).map(operation => item(operationPath(operation.id), operation.summary, operation.method)) }))
+  const shownGroups = [...shownGuides.length ? [{ title: 'Guides', items: guideItems(shownGuides, !q) }] : [], ...query.isPending ? [] : operationGroups(filtered)]
+  return <SubNav className="docs-frame" title="Docs" titleAs="div" label="Guides and API operations" main={inShell ? 'div' : 'main'} scrollRef={contents} fallback={title}
+    top={<Input type="search" aria-label="Search the documentation" placeholder="Search guides and API" value={search} onChange={event => setSearch(event.target.value)} />}
+    groups={shownGroups} pickerGroups={[{ title: 'Guides', items: guideItems(guides, true) }, ...operationGroups(all)]}
+    after={query.isPending ? <div className="stack docs-nav-loading"><SkeletonText /><SkeletonText /><SkeletonText /></div> : !groups.length && q && !shownGuides.length ? <p className="muted docs-nav-empty">Nothing matches.</p> : null}>
+    {site.foreign && site.origin ? <ForeignHost origin={site.origin} /> : !site.origin ? (site.error ? <ErrorState error={site.error} onRetry={site.retry} /> : <DocsArticleSkeleton />) : <DocsOrigin.Provider value={site.origin}>{missing ? <MissingPage /> : page.kind === 'guide' ? <GuidePage guide={page.guide} /> : query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : !spec ? <DocsArticleSkeleton /> : current ? <OperationPage document={spec} operation={current} /> : <DocsOverview document={spec} all={all} />}</DocsOrigin.Provider>}
+  </SubNav>
 }

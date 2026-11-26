@@ -623,6 +623,35 @@ button.ui-facet:focus-visible:not([aria-pressed='true']) { background: var(--col
   .ui-list-toolbar__filters > * { flex: 1 1 0; min-width: 0; }
   .ui-list-toolbar__filters .ui-select-trigger { width: 100%; min-width: 0; max-width: none; }
 }
+/* A page's own contents (SubNav: Settings, Docs). The title sits where every page's heading does; under it a column of
+   groups, each a mono label over 28px rows, in the main sidebar's type, rhythm and selected state. Their words, the
+   title's and the search field's share one left edge, the rows' fills hanging the sidebar's inset outside it as the main
+   sidebar's do. The column stays put while the page scrolls, its list scrolling inside it when it is long. Where two
+   columns don't fit (the frame is a container, so the main sidebar counts) it is a picker under the title. */
+.ui-subnav-frame { container: subnav / inline-size; }
+.ui-subnav-layout { --subnav-width: 224px; --subnav-head: calc(var(--control-height) + var(--space-16)); display: grid; grid-template-columns: var(--subnav-width) minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); grid-template-areas: 'title main' 'nav main'; column-gap: var(--space-40); align-items: start; }
+.ui-subnav__title { grid-area: title; display: flex; align-items: center; min-height: var(--control-height); margin: 0; font-size: var(--text-title); line-height: var(--leading-title); font-weight: var(--font-weight-semibold); letter-spacing: var(--tracking-title); }
+.ui-subnav { grid-area: nav; position: sticky; top: 0; display: flex; flex-direction: column; gap: var(--space-16); max-height: calc(100dvh - var(--topbar-height) - 2 * var(--space-16)); min-height: 0; padding-top: var(--space-16); }
+.ui-subnav__top { flex: none; margin-inline-start: calc(-1 * var(--sidebar-inset)); }
+.ui-subnav__top .ui-input { --input-pad-x: var(--sidebar-inset); }
+.ui-subnav__scroll { flex: 1 1 auto; min-height: 0; margin-inline-start: calc(-1 * var(--sidebar-inset)); padding-bottom: var(--space-16); overflow-y: auto; overscroll-behavior: contain; }
+.ui-subnav nav { display: flex; flex-direction: column; gap: var(--space-8); }
+.ui-subnav__group { display: flex; flex-direction: column; gap: var(--space-2); }
+.ui-subnav__label { display: flex; align-items: center; height: 20px; margin: 0; padding: 0 var(--sidebar-inset); color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-weight: var(--font-weight-regular); line-height: var(--leading-label); letter-spacing: var(--tracking-label); text-transform: uppercase; user-select: none; }
+.ui-subnav a { display: flex; align-items: center; gap: var(--space-8); min-height: var(--control-height); padding: calc((var(--control-height) - var(--leading-md)) / 2) var(--sidebar-inset); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-md); line-height: var(--leading-md); text-decoration: none; transition: color var(--motion-duration) var(--ease-standard), background var(--motion-duration) var(--ease-standard); }
+@media (hover: hover) and (pointer: fine) { .ui-subnav a:hover { color: var(--color-text); background: var(--color-hover); } }
+.ui-subnav a:focus-visible { color: var(--color-text); background: var(--color-hover); text-decoration: none; }
+.ui-subnav a[aria-current='page'] { color: var(--color-text); background: var(--color-active-bg); font-weight: var(--font-weight-medium); }
+.ui-subnav__text { flex: 1; min-width: 0; text-wrap: pretty; }
+.ui-subnav a > svg { flex: none; color: var(--color-faint); }
+.ui-subnav__picker { display: none; grid-area: picker; min-width: 0; }
+.ui-subnav__picker > select { width: 100%; }
+.ui-subnav-main { grid-area: main; min-width: 0; }
+@container subnav (width < 880px) {
+  .ui-subnav-layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; grid-template-areas: 'title' 'picker' 'main'; row-gap: var(--space-16); }
+  .ui-subnav { display: none; }
+  .ui-subnav__picker { display: block; }
+}
 /* Detail: one row of facts under the header, each a muted label over its value, set off by the space below. Every value
    holds one line (cut with an ellipsis), so the row is as tall loaded as loading. */
 .ui-facts-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--space-16) var(--space-24); margin: 0; padding-bottom: var(--space-16); }
