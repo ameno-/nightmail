@@ -7757,13 +7757,16 @@ describe('Hosted MCP OAuth and tools', () => {
       const query = pg.Client.prototype.query as (...args: unknown[]) => Promise<unknown>; let removed = false;
       const wire = t.mock.method(pg.Client.prototype, 'query', function (this: pg.Client, ...args: unknown[]) {
         const text = typeof args[0] === 'string' ? args[0] : (args[0] as { text?: string })?.text ?? '';
-        // The endpoint's first read, by name, before its approval is held and its row locked.
-        if (this !== db || removed || !/^select "id" from "mailbox_webhooks" where/.test(text)) return query.apply(this, args);
+        // The endpoint's first read, by name, before its approval is held and its row locked (lockEndpoint).
+        if (this !== db || removed || !/^select "id", "type" from "mailbox_webhooks" where/.test(text)) return query.apply(this, args);
         removed = true;
         return query.apply(this, args).then(async rows => { await query.call(this, 'DELETE FROM nightmail_resource_grants WHERE grant_key=$1', [second.consentId]); return rows; });
       } as typeof pg.Client.prototype.query);
-      try { error(await local('PATCH', '/v1/endpoints/untouched', { paused: false }), 409, 'ENDPOINT_URL_REQUIRED'); } finally { wire.mock.restore(); }
-      assert.equal(removed, true);
+      let raced: Reply;
+      try { raced = await local('PATCH', '/v1/endpoints/untouched', { paused: false }); } finally { wire.mock.restore(); }
+      // A hook that never fired tests nothing: when that read changes, this fails here, not as the wrong path passing.
+      assert.equal(removed, true, 'The endpoint’s first read was not seen: match the query lockEndpoint sends now.');
+      error(raced, 409, 'ENDPOINT_URL_REQUIRED');
       const marked = async () => (await db.query("SELECT paused,reconfirm FROM mailbox_webhooks WHERE key='untouched' AND workspace_id=(SELECT workspace_id FROM mailbox_webhooks WHERE id=$1)", [hook.id])).rows[0];
       // The refused request rolled back with everything on its connection, the removal included: the endpoint is still paused.
       assert.equal((await marked()).paused, true);
