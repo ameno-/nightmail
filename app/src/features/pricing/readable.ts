@@ -1,6 +1,5 @@
 // (With extensions: the build's config imports this file, price-pages.ts.)
-import { apiKeyEnv, productName, publicOrigin, sdkPackage } from '../../../../api/src/brand.ts'
-import { ASSUME, MONTHS, OPENING, RIVALS, usd, VOLUMES } from '../home/tv/data.ts'
+import { productName, publicOrigin } from '../../../../api/src/brand.ts'
 import { COMPARISONS, OFFERS } from './compare/index.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
@@ -16,7 +15,7 @@ const url = (path: string) => publicOrigin + path
 export const markdownPath = (path: string) => path === '/' ? '/index.md' : `${path}.md`
 const host = (page: string) => new URL(page).hostname.replace(/^www\./, '')
 const cell = (text: string) => text.replaceAll('|', '\\|')
-const table = (head: string[], rows: string[][], right: number[] = []) => [
+export const table = (head: string[], rows: string[][], right: number[] = []) => [
   `| ${head.join(' | ')} |`, `| ${head.map((_, i) => right.includes(i) ? '---:' : '---').join(' | ')} |`, ...rows.map(row => `| ${row.map(cell).join(' | ')} |`),
 ].join('\n')
 const free = `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received`
@@ -28,7 +27,7 @@ const terms = () => [
 ].join('\n')
 /** Every page a comparison's figures were read on, once each, with the day. */
 const pagesRead = (c: Comparison) => [...new Map(sourcesOf(c).map(source => [source.url, source])).values()]
-const trademarks = `Product names belong to their owners and only identify their products. ${productName} isn’t affiliated with them.`
+export const trademarks = `Product names belong to their owners and only identify their products. ${productName} isn’t affiliated with them.`
 const comparisonLinks = (except?: string) => COMPARISONS.filter(c => c.slug !== except).map(c => `- [${c.title}](${url(markdownPath(c.path))}): ${c.description}`).join('\n')
 
 /** A comparison's page in Markdown: its headline, the board at every size its fader reaches, the rows with their
@@ -96,47 +95,14 @@ export function pricingMarkdown(): string {
   ].join('\n\n') + '\n'
 }
 
-/** What the homepage's pitch says: sending, at the billing code's price, with its free allowance. */
-const sendingPitch = () => `${nightmail.perThousand} per 1,000 emails sent, after the first ${formatCount(nightmail.freeSent)} free every month`
-
-/** The homepage's steps for an agent asked to set up sending (its "Copy for your agent" points here): the device flow for
- *  its own key (api/src/agent-setup.ts, the same one the dashboard's agent prompt falls back to), the docs, a first send
- *  from the workspace's built-in domain (api/src/builtin-domain.ts) and the person's own domain after it. */
-function agentSteps() {
-  return [
-    `## For agents: set up sending`,
-    `If a person asked you to send email from their project with ${productName}:`,
-    [
-      `1. Get your own API key with a device code: POST ${url('/v1/agent/device')} with the JSON body {"client_name":"<your name>"}. Show the person its verification_uri_complete and user_code; they sign in there (a new account signs up the same way) and approve. Poll POST ${url('/v1/agent/device/token')} with {"device_code":"<device_code>"} every interval seconds until it returns the key (AUTHORIZATION_PENDING means keep waiting).`,
-      `2. Save the key as ${apiKeyEnv} in the project's environment (a gitignored .env), never in code or a commit: it's shown once.`,
-      `3. Read ${url('/llms.txt')} and ${url('/docs.md')} before writing code. Use the TypeScript SDK (npm i ${sdkPackage}) or the REST API with the key as a bearer token, from server code only.`,
-      `4. Send from the workspace's domain (GET /v1/domains lists it). A new workspace starts with a built-in nightmail.email domain that for now sends only to its members' own sign-in addresses, so send the first email to the person's own address with POST /v1/emails/send. 202 means queued, not delivered.`,
-      `5. To email anyone else, ask the person which domain to send from, add it with POST /v1/domains and give them its DNS records; it verifies by itself once they resolve.`,
-    ].join('\n'),
-  ].join('\n\n')
-}
-
-/** The homepage's comparison, as its television plays it (home/tv/data.ts): a month of sending at each volume, on
- *  Nightmail and on each vendor, columns in the opening page's order. */
-function homeComparison() {
-  const order = MONTHS[OPENING].map(line => line.slug)
-  const rows = VOLUMES.map(volume => [formatCount(volume), ...order.map(slug => usd(MONTHS[volume].find(line => line.slug === slug)!.dollars))])
-  return [
-    `## A month of sending, compared`,
-    ASSUME,
-    table(['Emails a month', ...MONTHS[OPENING].map(line => line.name)], rows, order.map((_, i) => i + 1).concat(0)),
-    `Prices read on each vendor’s own pricing page: ${listOf([...new Set(RIVALS.map(rival => rival.checked))].map(day => `${listOf(RIVALS.filter(rival => rival.checked === day).map(rival => `[${rival.name}](${rival.pricing})`))} on ${day}`))}.`,
-    trademarks,
-  ].join('\n\n')
-}
-
-export function homeMarkdown(): string {
+/** The homepage's twin, /index.md: the factory homepage's lead, or another's with more sections after its address (the
+ *  television's: home/tv/readable.ts). */
+export function homeMarkdown(lead = `${productName} is an email API on Amazon SES: send, receive and reply on your own domains. ${nightmail.perThousand} per 1,000 emails, sent or received via API. Free every month: ${free}.`, more: string[] = []): string {
   return [
     `# ${productName}`,
-    `> ${productName} is an email API on Amazon SES: ${sendingPitch()}. Below, what a month of sending costs on it and on ${listOf(RIVALS.map(rival => rival.name))}.`,
+    `> ${lead}`,
     `Canonical page: ${url('/')}`,
-    agentSteps(),
-    homeComparison(),
+    ...more,
     `## What it costs`,
     terms(),
     `That’s the whole bill. [Price calculator](${url('/pricing.md')})`,
@@ -167,8 +133,8 @@ export function llmsSiteIndex(): string {
   ].join('\n\n') + '\n\n'
 }
 /** llms-full.txt: every page's Markdown twin, one after another. */
-export function llmsFull(): string {
-  return [`# ${productName}: the website in full`, `> The homepage, the price calculator and every comparison, as Markdown. API documentation: ${url('/docs.md')}.`, ...markdownFiles().map(({ source }) => source.trim().replace(/^# /, '## ').replace(/\n(#{2,5}) /g, '\n#$1 '))].join('\n\n') + '\n'
+export function llmsFull(files = markdownFiles()): string {
+  return [`# ${productName}: the website in full`, `> The homepage, the price calculator and every comparison, as Markdown. API documentation: ${url('/docs.md')}.`, ...files.map(({ source }) => source.trim().replace(/^# /, '## ').replace(/\n(#{2,5}) /g, '\n#$1 '))].join('\n\n') + '\n'
 }
 
 // ---------------------------------------------------------------- structured data (JSON-LD)
@@ -176,10 +142,10 @@ export function llmsFull(): string {
 const app = () => ({
   '@type': 'SoftwareApplication', '@id': url('/#app'), name: productName, url: url('/'),
   applicationCategory: 'BusinessApplication', applicationSubCategory: 'Email API', operatingSystem: 'Web',
-  description: `An email API on Amazon SES: ${sendingPitch()}.`,
+  description: `An email API on Amazon SES: send, receive and reply on your own domains. ${nightmail.perThousand} per 1,000 emails, sent or received, after ${free} free every month.`,
   offers: {
     '@type': 'Offer', price: nightmail.perThousand.slice(1), priceCurrency: 'USD', url: url('/pricing'),
-    description: `${sendingPitch()}. Contacts and teammates: no charge.`,
+    description: `${nightmail.perThousand} per 1,000 emails, sent or received, after ${free} free every month. Contacts and teammates: no charge.`,
     priceSpecification: { '@type': 'UnitPriceSpecification', price: nightmail.perThousand.slice(1), priceCurrency: 'USD', referenceQuantity: { '@type': 'QuantitativeValue', value: 1000, unitText: 'emails' } },
   },
 })

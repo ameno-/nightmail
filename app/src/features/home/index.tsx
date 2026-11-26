@@ -1,24 +1,37 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useSyncExternalStore, type ReactNode } from 'react'
 import { productName } from '../../../../api/src/brand'
-import { TvHome } from './tv/tv'
+import { FactoryHome } from './factory-home'
+import { afterFirstPicture, shown, UPRIGHT } from './first-picture'
 
 /** What the page's button does: signs a visitor in (Get started), or opens the dashboard for someone signed in. */
 export type HomeStart = { signedIn: true } | { signedIn: false; onSignIn: () => void; onSignInIntent: (event: { button: number }) => void; busy: boolean }
 export type HomeProps = { start: HomeStart; notice?: ReactNode }
 
-// The homepage, signed in or out: one screen, a television playing what email costs (tv/tv.tsx).
+// Which homepage a window gets (first-picture.ts: by its shape), decided before the first paint and again as the window
+// changes.
+const watch = (changed: () => void) => {
+  const query = matchMedia(UPRIGHT)
+  query.addEventListener('change', changed)
+  return () => query.removeEventListener('change', changed)
+}
+
+// The homepage, signed in or out.
 export function HomePage(props: HomeProps) {
   const signedIn = props.start.signedIn
-  useEffect(() => { document.title = `${productName.toLowerCase()} · Email for $0.20 per 1,000` }, [])
+  const home = useSyncExternalStore(watch, shown)
+  useEffect(() => { document.title = `${productName.toLowerCase()} · Email infrastructure` }, [])
   // A visitor's first screen after signing in: fetch its code while they read, so it is already cached on return.
-  // (Signed in, Overview's code and data load only when the button is about to be pressed.) When the browser is idle,
-  // so it does not take the picture's bandwidth.
+  // (Signed in, Overview's code and data load only when the button is about to be pressed.) Not before the hero's
+  // picture is in: on a slow connection it would take the picture's bandwidth.
   useEffect(() => {
     if (signedIn) return
     const load = () => void import('../onboarding').catch(() => {})
-    if (typeof requestIdleCallback === 'function') { const idle = requestIdleCallback(load, { timeout: 4000 }); return () => cancelIdleCallback(idle) }
-    const timer = setTimeout(load, 2500)
-    return () => clearTimeout(timer)
+    let cancel = () => {}
+    const wait = afterFirstPicture(() => {
+      if (typeof requestIdleCallback === 'function') { const idle = requestIdleCallback(load, { timeout: 3000 }); cancel = () => cancelIdleCallback(idle) }
+      else { const timer = setTimeout(load, 1500); cancel = () => clearTimeout(timer) }
+    })
+    return () => { wait(); cancel() }
   }, [signedIn])
-  return <TvHome {...props} />
+  return <FactoryHome key={home} format={home} {...props} />
 }

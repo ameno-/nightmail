@@ -13,12 +13,10 @@ import phoneBoard1 from './factory/phone/board1.webp'
 import phoneBoard2 from './factory/phone/board2.webp'
 import type { Format } from './factory/manifest'
 import { UPRIGHT } from './frame'
-import scene from './tv/crt/scene.webp'
 
 // The homepage's first picture, apart from the page's code so the app can start loading it before that code arrives
-// (App.tsx, beside the session check): the television's photograph (tv/tv.tsx). home.html paints it before any of the
-// app's code (home-shell.ts), so there the page takes it from the cache. The factory's frames and posters below are
-// for factory-home.tsx, which is no longer shown.
+// (App.tsx, beside the session check): which frame a window gets, and its poster. home.html paints the same pictures
+// before any of the app's code (home-shell.ts), so the page's own takes them from the cache.
 
 // Which homepage a window gets (frame.ts: by its shape). `?home=` shows one anywhere: `phone` or `desktop`.
 export { UPRIGHT }
@@ -36,11 +34,14 @@ export const POSTER_SIZES = '100vw'
 /** A phone's boards, hung in turn (factory-home.tsx): the first is in the poster too. */
 export const STILL_SPRITES = [phoneBoard0, phoneBoard1, phoneBoard2], STILL_BOARDS = [1, 2, 0]
 
-/** Starts loading the homepage's photograph ahead of the page that shows it. */
+/** Starts loading the first picture this window is shown, ahead of the page that shows it (in AVIF: a browser without
+ *  it finds its JPEG when the page renders). */
 export function preloadFirstPicture() {
+  const format = shown()
   if (document.getElementById('home-shell')) return
   const link = document.createElement('link')
-  link.rel = 'preload'; link.as = 'image'; link.href = scene; link.fetchPriority = 'high'
+  link.rel = 'preload'; link.as = 'image'; link.type = 'image/avif'; link.href = POSTERS[format].src; link.fetchPriority = 'high'
+  link.setAttribute('imagesrcset', POSTERS[format].avif); link.setAttribute('imagesizes', POSTER_SIZES)
   document.head.append(link)
 }
 
