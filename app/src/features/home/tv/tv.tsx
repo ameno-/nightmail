@@ -13,6 +13,7 @@ import { Remote, type RoomLight } from './crt/remote'
 import type { Broadcast } from './crt/commercial/play'
 import scene from './crt/scene.webp'
 import knob from './crt/knob.webp'
+import someone from './crt/someone.mp4'
 import newAge from './crt/sound/newage.mp3'
 import channelClunk from './crt/sound/channel.mp3'
 import knobClick from './crt/sound/knob.mp3'
@@ -37,7 +38,7 @@ const HIT = { w: .040, h: .039 }, CAP = { w: .0262, h: .0295 }, DIAL = .05
 // What is on: channel 1 is the tape (the page's own comparison); each of the next six says one more thing about what
 // Nightmail costs, every figure from the billing code (pricing/prices.ts: nightmail) or the comparison (data.ts). Channel 8 is on the air: Nightmail's old television commercial (crt/commercial), fetched and shown when its key is pressed.
 type Row = { name: string; value: string; ours: boolean }
-type Channel = { kind: 'list'; head?: string; title: string; rows: Row[]; tape?: boolean; cycle?: boolean } | { kind: 'air' }
+type Channel = { kind: 'list'; head?: string; title: string; rows: Row[]; tape?: boolean; cycle?: boolean } | { kind: 'air' } | { kind: 'bars' } | { kind: 'dead' }
 const cents = (dollars: number) => usd(Math.round(dollars * 100) / 100)
 const month = (volume: Volume, value: (dollars: number, ours: boolean) => string = d => usd(d)): Row[] => MONTHS[volume].map(line => ({ name: line.name.toUpperCase(), value: value(line.dollars, line.ours), ours: line.ours }))
 const fact = (name: string, value: string): Row => ({ name, value, ours: false })
@@ -56,6 +57,25 @@ const CHANNELS: Channel[] = [
   { kind: 'air' },
 ]
 const TAPE = CHANNELS[0] as Extract<Channel, { kind: 'list' }>, AIR = CHANNELS.findIndex(channel => channel.kind === 'air')
+
+// Off the keys: what the remote's number pad reaches and the set's eight keys don't (the remote in the hand, a number
+// typed on the keyboard: TvHome). 0 is the test card: colour bars and a tone. 202, 404 and 550 are what those numbers
+// mean to anyone who sends email: the API's own answer to a send (202: queued, not delivered, and a signed webhook for
+// each event after it), a channel that isn't there, and a mailbox that isn't (dead addresses are flagged and campaigns
+// skip them: pricing/panels.ts). 888, the page teletext kept subtitles on, turns the commercial's on. Any other number
+// is a dead channel: static.
+const OFF_KEYS: Record<number, Channel> = {
+  0: { kind: 'bars' },
+  202: { kind: 'list', head: '202 ACCEPTED', title: 'QUEUED, NOT DELIVERED', rows: [fact('POST /V1/EMAILS/SEND', '202'), fact('WEBHOOK EMAIL.SENT', '200'), fact('EMAIL.DELIVERED', '200')] },
+  404: { kind: 'list', head: '404', title: 'CHANNEL NOT FOUND', rows: [fact('CHANNELS', '1 TO 8')] },
+  550: { kind: 'list', head: '550', title: 'MAILBOX UNAVAILABLE', rows: [fact('DEAD ADDRESSES', 'FLAGGED'), fact('CAMPAIGNS', 'SKIP THEM')] },
+}
+const NUMBERS = Object.keys(OFF_KEYS).map(Number), SUBTITLES = 888
+/** Everything the set can be tuned to: its eight keys' channels, then the numbers off the keys, then the dead channel. */
+const STATIONS: Channel[] = [...CHANNELS, ...NUMBERS.map(number => OFF_KEYS[number]!), { kind: 'dead' }]
+const DEAD = STATIONS.length - 1, BARS = CHANNELS.length + NUMBERS.indexOf(0)
+/** Where a typed number tunes the set: channel 1 to 8, a number off the keys, or nowhere. */
+const stationOf = (number: number) => number >= 1 && number <= CHANNELS.length ? number - 1 : NUMBERS.includes(number) ? CHANNELS.length + NUMBERS.indexOf(number) : DEAD
 
 // The tape goes round the volumes, a page each, starting from the opening one. A page turns as a character generator
 // redraws a screen: the tape hiccups (a flick of static, the picture jumps a line or two and settles), then a
@@ -100,7 +120,7 @@ function type(ctx: CanvasRenderingContext2D, text: string, x: number, y: number,
   ctx.setTransform(1, 0, 0, 1, 0, 0)
 }
 /** bare: only the set's own type, on nothing (it is laid over the broadcast). */
-function drawPicture(ctx: CanvasRenderingContext2D, channel: Channel, rows: number, play: boolean, osd: string | null, page: Page | null, bare = false) {
+function drawPicture(ctx: CanvasRenderingContext2D, channel: Channel, rows: number, play: boolean, osd: string | null, page: Page | null, bare = false, caption: string | null = null) {
   if (bare) ctx.clearRect(0, 0, TW, TH)
   else { ctx.fillStyle = '#04050D'; ctx.fillRect(0, 0, TW, TH) }
   ctx.font = FONT
@@ -119,6 +139,24 @@ function drawPicture(ctx: CanvasRenderingContext2D, channel: Channel, rows: numb
       type(ctx, row.name, 32, y); type(ctx, row.value, TW - 32, y, true)
     })
   }
+  if (channel.kind === 'bars') {
+    // the test card: seven bars at three-quarter strength, the strip of every other one under them, and the dark row
+    // a set's brightness was set by, with the station's name on it
+    const w = TW / 7, bar = (colour: string, x: number, y: number, width: number, height: number) => { ctx.fillStyle = colour; ctx.fillRect(Math.round(x), y, Math.ceil(width), height) }
+    ;['#BFBFBF', '#BFBF00', '#00BFBF', '#00BF00', '#BF00BF', '#BF0000', '#0000BF'].forEach((colour, i) => bar(colour, i * w, 0, w, 160))
+    ;['#0000BF', '#131313', '#BF00BF', '#131313', '#00BFBF', '#131313', '#BFBFBF'].forEach((colour, i) => bar(colour, i * w, 160, w, 20))
+    ;['#00214C', '#FFFFFF', '#32006A', '#131313'].forEach((colour, i) => bar(colour, i * w * 1.25, 180, w * 1.25, 60))
+    bar('#131313', w * 5, 180, w * 2, 60)
+    ;['#090909', '#131313', '#1D1D1D'].forEach((colour, i) => bar(colour, w * 5 + i * w / 3, 180, w / 3, 60))
+    bar('#04050D', TW / 2 - 56, 68, 112, 26)
+    ctx.fillStyle = INK; type(ctx, 'NIGHTMAIL', TW / 2 - 4.5 * CELL, 87)
+  }
+  // subtitles: what is being said, as teletext set it, white on a black box, under the set's own line of type
+  if (caption) {
+    const width = caption.length * CELL
+    ctx.fillStyle = '#000'; ctx.fillRect((TW - width) / 2 - 6, 42, width + 12, 20)
+    ctx.fillStyle = '#FFF'; type(ctx, caption.toUpperCase(), (TW - width) / 2, 57)
+  }
   if (play) {
     ctx.fillStyle = '#F4F4EE'; type(ctx, 'PLAY', 32, 34)
     ctx.beginPath(); ctx.moveTo(77, 22.5); ctx.lineTo(88, 28.5); ctx.lineTo(77, 34.5); ctx.closePath(); ctx.fill()
@@ -131,9 +169,9 @@ void main() { vec2 p = vec2(gl_VertexID == 1 ? 3. : -1., gl_VertexID == 2 ? 3. :
 
 const FRAG = `#version 300 es
 precision highp float;
-uniform sampler2D uTape;
+uniform sampler2D uTape, uSomeone;
 uniform vec2 uRes;
-uniform float uTime, uPower, uStatic, uRoll, uTrack, uBad, uJump, uStill, uAir, uOsd, uTilt;
+uniform float uTime, uPower, uStatic, uRoll, uTrack, uBad, uJump, uStill, uAir, uOsd, uTilt, uGone;
 out vec4 o;
 
 // ---------------------------------------------------------------- tuning: the tube
@@ -145,6 +183,7 @@ const float BLOOM = .50;        // glow around bright text
 const float BLACK = .040;       // how far "black" is from black (a tube glows)
 const float VIGNETTE = .26;     // darkening toward the corners
 const float GLASS = 1.;         // the room reflected in the glass
+const float SOMEONE = .17;      // how plainly someone stands in it once the set has been off a while (0: nobody)
 // ---------------------------------------------------------------- tuning: the tape
 const float BLEED = .016;       // colour smeared to the right, in screen widths
 const float SOFT = .0019;       // softness of the picture
@@ -240,15 +279,28 @@ void main() {
   // the room in the glass: a soft window of light high on the left, a faint sheen beside it
   col += GLASS * vec3(.030, .032, .038) * smoothstep(.62, .05, length((uv - vec2(.2, .13)) * vec2(1., 2.4)));
   col += GLASS * vec3(.010, .011, .014) * smoothstep(.16, 0., abs(uv.x - .13 - uv.y * .05)) * smoothstep(1., .2, uv.y);
+
+  // someone in the glass. With the set off (uGone: for how many seconds), the dark screen is a mirror of the room, and
+  // after a while there is a man in it, behind whoever is looking (uSomeone: crt/someone.mp4, filmed on black and kept
+  // brighter in the file than it is shown, so only its light is added and the glass shows through him). He comes out
+  // of the dark over half a minute, standing still; then he moves (the tube plays the film). He is gone the moment
+  // the set comes on.
+  if (uGone > 0. && uPower < .05) {
+    // (his darks lifted a little, so the clothes are there to be made out, not only the face and hands)
+    vec3 he = pow(texture(uSomeone, uv).rgb, vec3(.82));
+    he *= .86 + .28 * hash(gl_FragCoord.xy * .37 + frame * 3.);
+    col += GLASS * SOMEONE * he * smoothstep(5., 32., uGone);
+  }
   o = vec4(pow(max(col, 0.), vec3(.92)), 1.);
 }`
 
 const clamp = (v: number) => Math.min(1, Math.max(0, v))
 const easeOut = (v: number) => 1 - (1 - clamp(v)) ** 3
 
-/** The set's controls, as the tube reads them every frame. wake: draw again (the tube sets it). air: the commercial,
- *  once it is ready to be shown on channel 8. */
-type Deck = RoomLight & { channel: number; power: boolean; bad: number; thumpAt: number; switchAt: number; note: string; noteAt: number; air: Broadcast | null; wake: () => void; hear: (snow: number, bad: number, on: boolean) => void }
+/** The set's controls, as the tube reads them every frame. channel: which of STATIONS is on, and number: what the set
+ *  calls it on screen. wake: draw again (the tube sets it). air: the commercial, once it is ready to be shown on
+ *  channel 8; subtitles: whether what it says is also written on the screen. */
+type Deck = RoomLight & { channel: number; number: number; subtitles: boolean; power: boolean; bad: number; thumpAt: number; switchAt: number; note: string; noteAt: number; air: Broadcast | null; wake: () => void; hear: (snow: number, bad: number, on: boolean) => void }
 
 function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) => void; onFlat: () => void }) {
   const canvas = useRef<HTMLCanvasElement>(null)
@@ -264,10 +316,33 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     gl.attachShader(program, shader(gl.VERTEX_SHADER, VERT)); gl.attachShader(program, shader(gl.FRAGMENT_SHADER, FRAG)); gl.linkProgram(program)
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(program)); onFlat(); return }
     gl.useProgram(program)
-    const u = Object.fromEntries(['uTape', 'uRes', 'uTime', 'uPower', 'uStatic', 'uRoll', 'uTrack', 'uBad', 'uJump', 'uStill', 'uAir', 'uOsd', 'uTilt'].map(name => [name, gl.getUniformLocation(program, name)]))
+    const u = Object.fromEntries(['uTape', 'uRes', 'uTime', 'uPower', 'uStatic', 'uRoll', 'uTrack', 'uBad', 'uJump', 'uStill', 'uAir', 'uOsd', 'uTilt', 'uGone', 'uSomeone'].map(name => [name, gl.getUniformLocation(program, name)]))
     const texture = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, texture)
     for (const [key, value] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_2D, key, value)
+    // Who is in the glass once the set is off (the shader's uSomeone, on the second texture unit): nobody, a black
+    // pixel, until the set is first switched off. His film is fetched then, and not before: its first frame is him
+    // standing still, which is what the glass shows until MOVES seconds have gone; then it plays, once, and its last
+    // frame stays. Switching on rewinds it.
+    const glass = gl.createTexture(), MOVES = 38
+    let alive = true, clip: HTMLVideoElement | null = null, stands = false, moving = false
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glass)
+    for (const [key, value] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_2D, key, value)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]))
+    gl.activeTexture(gl.TEXTURE0); gl.uniform1i(u.uSomeone!, 1)
+    const look = () => {
+      if (!alive || !clip || clip.readyState < 2) return
+      gl.activeTexture(gl.TEXTURE1); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, clip); gl.activeTexture(gl.TEXTURE0)
+      stands = true
+    }
+    const summon = () => {
+      if (clip) return
+      clip = document.createElement('video')
+      clip.muted = true; clip.playsInline = true; clip.preload = 'auto'
+      for (const name of ['loadeddata', 'seeked', 'ended']) clip.addEventListener(name, look)
+      clip.src = someone; clip.load()
+    }
+    const leave = () => { if (!clip) return; clip.pause(); moving = false; if (clip.currentTime > 0) clip.currentTime = 0 }
 
     // The picture's light in the room. On the table: the picture, upside down and very small (the tabletop's two
     // canvases stretch and blur it), so what is at the foot of the screen lies nearest the set and each colour falls
@@ -326,7 +401,7 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     // Taking over from home.html's still of this picture (takeOver, below): on and settled from the first frame, without
     // switching on or the tape's first run-up.
     const handoff = !!document.getElementById('home-shell')
-    let shown = '', raf = 0, last = 0, seen = true, track = 0, trackTo = 0, level = handoff ? 1 : 0, bootAt = performance.now() - (handoff ? 2100 : 0), wasOn = true, bad = 0
+    let shown = '', raf = 0, last = 0, seen = true, track = 0, trackTo = 0, level = handoff ? 1 : 0, bootAt = performance.now() - (handoff ? 2100 : 0), wasOn = true, bad = 0, offAt = 0
     const began = performance.now()
     const size = () => {
       const scale = Math.min(devicePixelRatio || 1, 2), w = Math.round(el.clientWidth * scale), h = Math.round(el.clientHeight * scale)
@@ -336,32 +411,40 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     const draw = (now: number) => {
       const still = calm.matches, dt = Math.min(100, now - (last || now))
       if (deck.power && !wasOn) bootAt = now
+      if (!deck.power && wasOn) { offAt = now; summon() }
+      if (deck.power && !wasOn) leave()
       wasOn = deck.power
       level = still ? Number(deck.power) : clamp(level + (deck.power ? dt / 450 : -dt / 300) * Number(now - began > 150))
       const boot = now - bootAt, thump = now - deck.thumpAt, flick = now - deck.switchAt
-      const channel = CHANNELS[deck.channel]!, first = deck.channel === 0 && boot < 2100 && flick > boot
+      const channel = STATIONS[deck.channel]!, first = deck.channel === 0 && boot < 2100 && flick > boot
       const power = easeOut(level)
       // channel 8: static until the broadcast is ready; then it is drawn for this frame (960 px wide on a sharp tube, 640 on
       // a small one), and its own tuning-in static, roll and knocked camera come through this tube
       const air = channel.kind === 'air' ? deck.air : null, aired = air?.frame(el.width > 820 ? 960 : 640)
-      const snow = channel.kind === 'air' && !air ? 1 : still ? 0 : Math.max(first && boot >= 350 ? clamp(1 - (boot - 350) / 550) : 0, clamp(.9 - thump / 380), clamp(1 - flick / 260), aired?.static ?? 0)
+      // nothing on (channel 8 before its broadcast is ready, or a number no channel has): static
+      const nothing = (channel.kind === 'air' && !air) || channel.kind === 'dead'
+      const snow = nothing ? 1 : still ? 0 : Math.max(first && boot >= 350 ? clamp(1 - (boot - 350) / 550) : 0, clamp(.9 - thump / 380), clamp(1 - flick / 260), aired?.static ?? 0)
       const roll = still ? 0 : Math.max(first && boot >= 900 ? 1 - easeOut((boot - 900) / 550) : 0, .5 * (1 - easeOut(thump / 450)), deck.bad > 1.75 ? (now / 2600) % 1 : 0, aired?.roll ?? 0)
       const rows = still || !first ? 9 : boot < 1150 ? 0 : Math.min(9, 1 + Math.floor((boot - 1150) / 100))
       const play = channel.kind === 'list' && !!channel.tape && (still || !first || boot >= 900)
       const said = now - deck.noteAt
-      const osd = said < 2200 && said < flick ? deck.note : flick < 2200 ? `CH ${String(deck.channel + 1).padStart(2, '0')}` : null
+      const osd = said < 2200 && said <= flick ? deck.note : flick < 2200 ? `CH ${String(deck.number).padStart(2, '0')}` : null
       const page = channel.kind === 'list' && channel.cycle ? pageAt(still ? 0 : boot - 2100) : null
       // a page turning: the tape's hiccup (seen, not heard)
       const since = page?.since ?? null, hiccup = since === null ? 0 : .07 * clamp(1 - since / 200), jump = since === null ? 0 : .009 * Math.exp(-since / 110) * Math.cos(since / 30)
-      const key = [deck.channel, rows, play, osd, page?.key, !!air].join()
-      if (key !== shown) { shown = key; drawPicture(ctx, channel, rows, play, osd, page, !!air); if (!air) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, picture); sample(picture) } }
+      const caption = air && deck.subtitles ? air.caption() : null
+      const key = [deck.channel, rows, play, osd, page?.key, !!air, caption].join()
+      if (key !== shown) { shown = key; drawPicture(ctx, channel, rows, play, osd, page, !!air, caption); if (!air) { gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, picture); sample(picture) } }
       if (air) broadcast(air)
       track += (trackTo - track) * .12
       bad += (deck.bad / 2 - bad) * .2
       size()
       gl.uniform1i(u.uTape!, 0); gl.uniform2f(u.uRes!, el.width, el.height); gl.uniform1f(u.uTime!, (now - began) / 1000)
       gl.uniform1f(u.uPower!, power); gl.uniform1f(u.uStatic!, Math.max(snow, hiccup)); gl.uniform1f(u.uRoll!, roll >= 1 ? 0 : roll); gl.uniform1f(u.uJump!, jump)
-      gl.uniform1f(u.uTrack!, track); gl.uniform1f(u.uBad!, bad); gl.uniform1f(u.uStill!, still ? 1 : 0); gl.uniform1f(u.uAir!, air ? 1 : 0); gl.uniform1f(u.uOsd!, channel.kind === 'air' && !air ? 1 : 0); gl.uniform1f(u.uTilt!, aired?.tilt ?? 0)
+      gl.uniform1f(u.uTrack!, track); gl.uniform1f(u.uBad!, bad); gl.uniform1f(u.uStill!, still ? 1 : 0); gl.uniform1f(u.uAir!, air ? 1 : 0); gl.uniform1f(u.uOsd!, nothing ? 1 : 0); gl.uniform1f(u.uTilt!, aired?.tilt ?? 0); const gone = deck.power || still || !stands ? 0 : (now - offAt) / 1000
+      if (clip && gone > MOVES && !moving) { moving = true; void clip.play().catch(() => {}) }
+      if (moving && !clip!.ended) look()
+      gl.uniform1f(u.uGone!, gone)
       gl.drawArrays(gl.TRIANGLES, 0, 3)
       reflect(power, Math.max(snow, hiccup))
       deck.hear(snow, bad, deck.power)
@@ -391,7 +474,9 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
       cancelAnimationFrame(raf); watch.disconnect(); resized.disconnect()
       el.removeEventListener('pointermove', move); calm.removeEventListener('change', start)
       deck.wake = () => {}
-      gl.deleteTexture(texture); gl.deleteProgram(program)
+      alive = false
+      if (clip) { clip.pause(); clip.removeAttribute('src'); clip.load() }
+      gl.deleteTexture(texture); gl.deleteTexture(glass); gl.deleteProgram(program)
     }
   }, [deck, onLight, onFlat])
   return <canvas ref={canvas} aria-hidden="true" />
@@ -412,11 +497,11 @@ const BROADCAST = .7
 type Noise = keyof typeof NOISES
 type Speaker = { context: AudioContext; input: AudioNode }
 /** air(true): a broadcast is on, and its sound goes in at the returned input (null before the set's sound has started);
- *  the music is let down while it is. */
-type Sound = { readonly started: boolean; start: () => void; set: (snow: number, bad: number, on: boolean) => void; mute: (muted: boolean) => void; play: (noise: Noise, gain?: number, after?: number) => void; air: (on: boolean) => Speaker | null; stop: () => void }
+ *  the music is let down while it is. tone(true): the test card's tone in the music's place. */
+type Sound = { readonly started: boolean; start: () => void; set: (snow: number, bad: number, on: boolean) => void; mute: (muted: boolean) => void; play: (noise: Noise, gain?: number, after?: number) => void; air: (on: boolean) => Speaker | null; tone: (on: boolean) => void; stop: () => void }
 function createSound(): Sound {
   let ctx: AudioContext | null = null, apply: ((snow: number, bad: number, on: boolean) => void) | null = null, inlet: Speaker | null = null
-  let muted = false, airing = false, last = [0, 0, true] as [number, number, boolean]
+  let muted = false, airing = false, toning = false, last = [0, 0, true] as [number, number, boolean]
   let play: Sound['play'] = () => {}
   const seen = () => { if (ctx) void (document.hidden ? ctx.suspend() : ctx.resume()) }
   const start = () => {
@@ -444,6 +529,9 @@ function createSound(): Sound {
     const bed = gain(1), air = gain(0)
     bed.connect(mono); air.connect(mono)
     inlet = { context: c, input: air }
+    // the test card's tone: 1 kHz, through the same speaker
+    const pip = c.createOscillator(), pipBy = gain(0)
+    pip.frequency.value = 1000; pip.connect(pipBy).connect(mono); pip.start()
     // tape hiss (made here), and the set's static (recorded) for bursts and the dead channel
     const grain = c.createBuffer(1, c.sampleRate * 2, c.sampleRate), data = grain.getChannelData(0)
     for (let i = 0; i < data.length; i++) data[i] = Math.random() * 2 - 1
@@ -466,7 +554,7 @@ function createSound(): Sound {
       const t = now()
       burst.gain.setTargetAtTime(on ? snow * .2 : 0, t, .03)
       music.gain.setTargetAtTime(on ? .9 * (1 - .78 * snow) : 0, t, .05)
-      bed.gain.setTargetAtTime(airing ? 0 : 1, t, .06); air.gain.setTargetAtTime(airing ? BROADCAST : 0, t, .015)
+      bed.gain.setTargetAtTime(airing || toning ? 0 : 1, t, .06); air.gain.setTargetAtTime(airing ? BROADCAST : 0, t, .015); pipBy.gain.setTargetAtTime(toning ? .1 : 0, t, .02)
       wowBy.gain.setTargetAtTime(.0016 * (1 + 3 * bad), t, .15); flutterBy.gain.setTargetAtTime(.00012 * (1 + 9 * bad), t, .15)
       low.frequency.setTargetAtTime(3600 - 1500 * bad, t, .15)
       tape?.playbackRate.setTargetAtTime(on ? 1 : .5, t, .14)
@@ -483,6 +571,7 @@ function createSound(): Sound {
     mute: to => { muted = to; apply?.(...last) },
     play: (noise, level, after) => play(noise, level, after),
     air: to => { airing = to; apply?.(...last); return inlet },
+    tone: to => { toning = to; apply?.(...last) },
     stop: () => { document.removeEventListener('visibilitychange', seen); void ctx?.close(); ctx = null; apply = null; inlet = null; play = () => {} },
   }
 }
@@ -574,7 +663,7 @@ export function TvHome({ start, notice }: HomeProps) {
   const full = useSignupsFull(visitor), said = notice || <p role="status">{full ? 'Full for now. Join the waitlist and we’ll email you when a place opens.' : ''}</p>
   const [flat, setFlat] = useState(false), [on, setOn] = useState(true), [channel, setChannel] = useState(0), [bad, setBad] = useState(0), [muted, setMuted] = useState(false)
   const box = useRef<HTMLDivElement>(null)
-  const deck = useRef<Deck>({ channel: 0, power: true, bad: 0, thumpAt: -1e9, switchAt: -1e9, note: '', noteAt: -1e9, air: null, wake: () => {}, hear: () => {}, glow: [.38, .49, .75], level: 0 }).current
+  const deck = useRef<Deck>({ channel: 0, number: 1, subtitles: false, power: true, bad: 0, thumpAt: -1e9, switchAt: -1e9, note: '', noteAt: -1e9, air: null, wake: () => {}, hear: () => {}, glow: [.38, .49, .75], level: 0 }).current
   // The sound starts with the visitor's first use of the set (a browser plays nothing before that); the speaker's
   // grille turns it off and on.
   const sound = useRef<Sound | null>(null), fresh = useRef(false)
@@ -591,7 +680,37 @@ export function TvHome({ start, notice }: HomeProps) {
     const late = setTimeout(() => takeOver(box.current), 3000)
     return () => clearTimeout(late)
   }, [])
-  const tune = (to: number) => { setChannel(to); deck.channel = to; deck.switchAt = performance.now(); deck.wake() }
+  const tune = (to: number, number = to + 1) => { setChannel(to); deck.channel = to; deck.number = number; deck.switchAt = performance.now(); deck.wake() }
+  // The remote's number pad (remote.tsx: in the hand, the keyboard's digits are its keys). A number is typed as on a
+  // set of the time: each digit shows in the corner with dashes for the ones to come, and the set tunes when three
+  // are in or the typing stops. 1 to 8 are the keys' channels; the rest is OFF_KEYS, above.
+  const pad = useRef({ digits: '', timer: undefined as ReturnType<typeof setTimeout> | undefined }).current
+  useEffect(() => () => clearTimeout(pad.timer), [pad])
+  const go = (number: number) => {
+    if (number === SUBTITLES) {
+      deck.subtitles = !deck.subtitles
+      if (deck.subtitles && deck.channel !== AIR) { noise('channel'); tune(AIR) }
+      say(deck.subtitles ? 'SUBTITLES ON' : 'SUBTITLES OFF')
+      return
+    }
+    const to = stationOf(number)
+    noise('channel'); tune(to, number)
+    if (to === DEAD) say('NO SIGNAL')
+  }
+  const digit = (key: string) => {
+    if (!on || flat) return
+    noise('remote')
+    pad.digits = pad.digits.length >= 3 ? key : pad.digits + key
+    say(`CH ${pad.digits.padEnd(3, '-')}`)
+    clearTimeout(pad.timer)
+    pad.timer = setTimeout(() => { const number = Number(pad.digits); pad.digits = ''; go(number) }, pad.digits.length === 3 ? 350 : 1400)
+  }
+  // The test card has its tone, in the music's place.
+  useEffect(() => {
+    if (!on || channel !== BARS) return
+    sound.current?.start(); sound.current?.tone(true)
+    return () => sound.current?.tone(false)
+  }, [on, channel])
   // Channel 8 has something on only where the commercial can be drawn (WebGPU). Once the set has warmed up a GPU is asked
   // for (nothing is fetched for it), and the key's lamp lights only when there is one; null: not known yet.
   const [gpu, setGpu] = useState<boolean | null>(() => 'gpu' in navigator ? null : false)
@@ -646,7 +765,7 @@ export function TvHome({ start, notice }: HomeProps) {
         <button type="button" className="chy-grille" style={at(.882, .713, .1, .3)} aria-label="Sound" aria-pressed={!muted} onClick={() => { const to = fresh.current ? false : !muted; setMuted(to); sound.current?.mute(to); say(to ? 'MUTE' : 'SOUND ON') }} />
         <Dial y={KNOB_Y[0]!} label="Tracking" stops={[-55, 0, 55]} index={bad} onIndex={i => { noise('knob'); setBad(i); deck.bad = i; deck.wake() }} onAngle={angle => { deck.bad = (angle + 55) / 55; deck.wake() }} />
         <Dial y={KNOB_Y[1]!} label="Power" stops={[-50, 40]} index={Number(on)} onIndex={i => { noise('knob', .7); noise(i === 1 ? 'on' : 'off', .6, .05); if (i === 1) noise('tape', .3, .9); setOn(i === 1); deck.power = i === 1; deck.wake() }} />
-        <Remote light={deck} onZap={() => { noise('remote'); tune((deck.channel + 1) % CHANNELS.length) }} />
+        <Remote light={deck} onZap={() => { noise('remote'); tune(deck.channel >= CHANNELS.length ? 0 : (deck.channel + 1) % CHANNELS.length) }} onDigit={digit} />
         <Label start={start} />
       </div>
       <div className="chy-under">

@@ -601,6 +601,9 @@ async function supportInbox(db, webhookId) {
       NULL,NULL,'active',NULL,NULL,now()-interval '6 minutes',2,1,0.0410,0,now()-interval '8 minutes',NULL)`,
     [chat, email, stranger, closed, supportId('tkt', 'samdkim', 16), supportId('tkt', 'samlimit', 16), keys]);
   await db.query(`UPDATE support_conversations SET ticket_at = created_at + interval '2 minutes' WHERE ticket_id IS NOT NULL AND id = ANY($1)`, [[chat, closed]]);
+  // What those turns cost (api/src/support-ai-cost.ts): today's rows, and the closed chat's three days ago, for Glass's Support AI cost.
+  await db.query(`INSERT INTO support_ai_usage(at,conversation_id,agent,turns,cost_usd) VALUES (now()-interval '12 minutes',$1,'support',4,0.1840),
+    (now()-interval '25 minutes',$2,'support',1,0.0610),(now()-interval '3 days',$3,'support',2,0.0920),(now()-interval '6 minutes',$4,'support',1,0.0410)`, [chat, email, closed, keys]);
   const line = (id, conversation, seq, author, text, minutes, extra = {}) => db.query(`INSERT INTO support_messages(id,conversation_id,seq,author,kind,text,tools,staff_user_id,delivery,delivered_at,held_reason,source_message_id,created_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,CASE WHEN $9 = 'sent' AND $4 = 'staff' THEN now()-make_interval(mins=>$10) END,$11,$12,now()-make_interval(mins=>$10))`,
     [id, conversation, seq, author, extra.kind ?? null, text, JSON.stringify(extra.tools ?? []), extra.staff ?? null, extra.delivery ?? null, minutes, extra.held ?? null, extra.source ?? null]);
@@ -977,7 +980,7 @@ export async function seed(fx) {
     sampled: 3200, exact: true, counts: { flagged: 21, deadDomains: 4, unengaged: 0, unengagedBase: 0, neverMailed: 140, softFailing: 2, proven: 3010, byReason: { invalid: 0, disposable: 12, typo_domain: 5, role: 4, dead: 0, no_mail_domain: 0 } },
     lastSend: null, recentBlocklist: 0, values: { FLAGGED_SOURCE: 21 / 3200, DEAD_DOMAINS: 4 / 3200, NEVER_MAILED: 140 / 3200, RECENT_BLOCKLIST: 0 }, band: 'low', factors: [], previous: { flaggedSource: 64 / 3200, band: 'elevated', factors: [{ code: 'FLAGGED_SOURCE', level: 'elevated' }] },
     review: { verdict: 'ready', required: null, reasons: [] } })]);
-  const { conversation: supportConversation, email: supportEmail, action: supportAction } = await supportInbox(db, hook.webhook?.id ?? hook.id);
+  const { conversation: supportConversation, email: supportEmail, action: supportAction, feedback: supportFeedback } = await supportInbox(db, hook.webhook?.id ?? hook.id);
 
   // Lumen Labs: verified domain, no key, no mail. Field Notes: no sending connection yet.
   const nia = await fx.signIn('nia', 'nia@lumenlabs.example', 'Nia Moreau', { id: 'ws_fresh', name: 'Lumen Labs' });
@@ -1130,6 +1133,6 @@ export async function seed(fx) {
   fx.liveKey = agent.secret;
   return {
     ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, imageEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
-    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage, linkConversation, linkMessage, answerConversation, answerMessage, outConversation, outMessage,
+    webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, supportFeedback, continueConversation, continueMessage, linkConversation, linkMessage, answerConversation, answerMessage, outConversation, outMessage,
   };
 }

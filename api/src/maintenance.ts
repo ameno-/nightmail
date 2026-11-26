@@ -349,6 +349,8 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expired('support_action_slots', 'support_action_slots', at('at'), sql`at < now() - interval '1 day'`),
     // SMTP refusals (src/smtp-refusals.ts) are kept 7 days for support.
     expired('smtp_refusals', 'smtp_refusals', at('at'), sql`at < now() - interval '7 days'`),
+    // The support AI's spend (src/support-ai-cost.ts): Glass reads 30 days; a year and a bit is kept to compare.
+    expired('support_ai_usage', 'support_ai_usage', at('at'), sql`at < now() - interval '400 days'`),
     // Support transcripts (src/support-inbox.ts), their events and their subjects go 90 days after the conversation closed
     // (agent feedback's, after its ticket was resolved).
     expiredTogether('support_messages', [{ table: 'support_messages', by: at('created_at'), where: sql`conversation_id IN (${closedLongAgo})` },

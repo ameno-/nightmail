@@ -169,8 +169,11 @@ export class SupportConversation extends Conversation {
     if (unavailable.delete(input.messageId)) throw new Error('fixture: unavailable');
     return super.enqueueInbound(input);
   }
-  async fixture({ expire, tick, age, unavailable: id, route, fail, ageActions, actionsDue, spend, claimWait }) {
+  async fixture({ expire, tick, age, unavailable: id, route, fail, ageActions, actionsDue, spend, claimWait, adopt }) {
     const sql = this.ctx.storage.sql, has = name => sql.exec('SELECT 1 FROM sqlite_master WHERE name=?', name).toArray().length > 0;
+    // A filed chat half adopted: this object set up from Nightmail's record, and the D1 row never written (a failure
+    // between adoptFiledChat's two steps).
+    if (adopt) await this.adoptFiled((await this.env.BANE.filedConversation(adopt)).body);
     // The claim wait of an answer parked for a sign-in has passed (when it has one): its check is due now.
     if (claimWait) sql.exec("UPDATE _support_work SET due_at = 1, result = CASE WHEN json_extract(result, '$.challengedAt') IS NULL THEN result ELSE json_set(result, '$.challengedAt', 1) END WHERE id = ?", claimWait);
     if (ageActions) sql.exec('UPDATE _support_actions SET created_at = created_at - ?', ageActions);
@@ -226,7 +229,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   TRIAGE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportTriage' },
   INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
   // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
-  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_TURNS_PER_EMAIL_DOMAIN: text('1000'), LIMIT_TURNS_GENERAL_PER_DAY: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS: text('200'),
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_WORKSPACE: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_TURNS_PER_EMAIL_DOMAIN: text('1000'), LIMIT_TURNS_GENERAL_PER_DAY: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS: text('200'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -400,7 +403,8 @@ describe('support Worker', () => {
       assert.deepEqual([landing.status, landing.headers.get('content-type')], [200, 'text/html; charset=utf-8']);
       assert.ok(landing.headers.get('content-security-policy')?.includes("default-src 'none'"));
       const html = await landing.text();
-      assert.ok(html.includes(ORIGIN) && html.includes(`mailto:${addresses.support}`), html);
+      // Help in the dashboard is the way in: no support address to write to instead.
+      assert.ok(html.includes(ORIGIN) && html.includes('open Help') && !html.includes(addresses.support), html);
     }
     assert.equal((await mf.dispatchFetch(`${SUPPORT}/staff/callback`)).status, 404, 'Staff ticket pages are retired.');
     // The tab icon of this Worker's own pages: the moon on its tile (the tile ink on a pale theme, paper on a dark one).
@@ -785,6 +789,79 @@ describe('support Worker', () => {
       assert.equal((await chat.until(f => f.type === 'message.end' && f.text === 'OK.', 60_000)).text, 'OK.');
       chat.ws.close();
     } finally { await isolated.dispose(); }
+  }, 180_000);
+
+  test('turn caps: 40 a day per person and 80 per workspace by default, 1,500 in all; past its workspace\u2019s cap a chat message goes to the team as the conversation\u2019s one ticket, with no model call and no address, and another workspace is still answered', async () => {
+    const { DEFAULT_LIMITS } = await import('../src/limits.js');
+    assert.deepEqual([DEFAULT_LIMITS.turnsPerDay, DEFAULT_LIMITS.turnsPerPerson, DEFAULT_LIMITS.turnsPerWorkspace], [1500, 40, 80]);
+    const capped = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_WORKSPACE: text('2') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(capped);
+      const done = (f: any) => f.type === 'message.end' && (f.text === 'OK.' || /our team/i.test(f.text ?? ''));
+      const ask = async (user: string, workspace: string, id: string) => {
+        const chat = await chatIn(capped, handoff(user, false, workspace));
+        chat.send({ type: 'user.message', clientMessageId: id, text: 'How do I add a domain?' });
+        const frame = await chat.until(done, 60_000);
+        chat.ws.close();
+        return frame;
+      };
+      // Two people of one workspace share its cap; a third answer that day is refused for the workspace, not the person.
+      assert.equal((await ask('usr_wcap_a', 'ws_acme', 'wcap_1')).text, 'OK.');
+      assert.equal((await ask('usr_wcap_b', 'ws_acme', 'wcap_2')).text, 'OK.');
+      // Past it: the message is kept and the conversation becomes a ticket for the team, with why in its title; the person
+      // gets one plain reply, never an error or an address, and nothing reaches the model.
+      const models = recorded.length, chat = await chatIn(capped, handoff('usr_wcap_c', false, 'ws_acme'));
+      chat.send({ type: 'user.message', clientMessageId: 'wcap_3', text: 'How do I add a domain?' });
+      const passed = await chat.until(done, 60_000);
+      assert.equal(passed.text, 'I can\u2019t answer this one right now, so I\u2019ve passed it to our team as a ticket. They\u2019ll reply here, or by email when this chat isn\u2019t open.');
+      assert.ok(chat.frames.some(f => f.type === 'ticket.filed') && !chat.frames.some(f => f.type === 'error'), JSON.stringify(chat.frames.map(f => f.type)));
+      // A second message in that conversation is added to the same ticket.
+      chat.send({ type: 'user.message', clientMessageId: 'wcap_3b', text: 'And SPF?' });
+      assert.match((await chat.until(f => done(f) && /added it to your ticket/.test(f.text)))!.text, /^I can\u2019t answer this one right now either, so I\u2019ve added it to your ticket\./);
+      assert.equal(recorded.length, models, 'No model call for a refused message.');
+      const conversation = chat.id;
+      const tickets = (await (await capped.getD1Database('DB', 'support')).prepare('SELECT title, ask, notes FROM tickets WHERE conversation_id = ?').bind(conversation).all<{ title: string; ask: string; notes: string }>()).results;
+      assert.equal(tickets.length, 1, 'One ticket per conversation.');
+      assert.deepEqual([tickets[0]!.title, tickets[0]!.ask, JSON.parse(tickets[0]!.notes).length], ['Workspace\u2019s daily answer limit reached', 'How do I add a domain?', 1]);
+      assert.ok(chat.frames.every(f => !JSON.stringify(f).includes(addresses.support)), 'No support address anywhere in the chat.');
+      chat.ws.close();
+      // Another workspace's people are still answered.
+      assert.equal((await ask('usr_wcap_d', 'ws_other', 'wcap_4')).text, 'OK.');
+      const db = await capped.getD1Database('DB', 'support');
+      assert.deepEqual((await db.prepare("SELECT key, n FROM daily_counters WHERE key LIKE 'workspace:%' ORDER BY key").all()).results, [{ key: 'workspace:ws_acme:turns', n: 4 }, { key: 'workspace:ws_other:turns', n: 1 }], 'Every message checked against the cap counts, the two refused ones too.');
+    } finally { await capped.dispose(); }
+  }, 180_000);
+
+  test('ticket pools: messages the agent couldn\u2019t answer never use the ticket caps, so with the model failing for many people an escalation of the agent later that day still gets its ticket', async () => {
+    // Two tickets a day for everyone and one per person here (60 and 3 by default).
+    const pools = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TICKETS_VERIFIED_PER_DAY: text('2'), LIMIT_TICKETS_PER_PERSON: text('1') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(pools);
+      const db = await pools.getD1Database('DB', 'support');
+      // The model is down: four people's messages each become their conversation's ticket ("The AI failed to answer"),
+      // twice everyone's ticket cap, and the first person's twice over (a second conversation).
+      control.failStatus = 400;
+      try {
+        for (const [user, id] of [['usr_pool_a', 'p1'], ['usr_pool_b', 'p2'], ['usr_pool_c', 'p3'], ['usr_pool_a', 'p4']] as const) {
+          const chat = await chatIn(pools, handoff(user));
+          chat.send({ type: 'user.message', clientMessageId: id, text: 'Why are Gmail bounces up?' });
+          assert.match((await chat.until(f => f.type === 'message.end' && /our team/.test(f.text ?? ''), 60_000)).text, /as a ticket/, user);
+          chat.ws.close();
+        }
+      } finally { control.failStatus = 0; }
+      assert.equal((await db.prepare("SELECT count(*) AS n FROM tickets WHERE title = 'The AI failed to answer'").first<{ n: number }>())!.n, 4);
+      // The model is back: the first person asks for a refund in a new chat, and the agent's escalation is filed.
+      const chat = await chatIn(pools, handoff('usr_pool_a'));
+      chat.send({ type: 'user.message', clientMessageId: 'p5', text: 'refund please' });
+      assert.ok(await chat.until(f => f.type === 'ticket.filed', 60_000), 'The agent\u2019s own ticket is filed.');
+      const refused = chat.frames.find(f => f.type === 'tool.end' && f.label === 'Passed this to the Nightmail team');
+      assert.ok(!refused || refused.ok, 'Not refused by a cap the outage used up.');
+      chat.ws.close();
+      const counters = Object.fromEntries((await db.prepare("SELECT key, n FROM daily_counters WHERE key LIKE '%tickets%'").all<{ key: string; n: number }>()).results.map(r => [r.key, r.n]));
+      assert.deepEqual(counters, { 'global:tickets:verified': 1, 'user:usr_pool_a:tickets': 1 }, 'Only the escalation counts against the caps.');
+    } finally { await pools.dispose(); }
   }, 180_000);
 
   test('chat ingress limits queued messages before persisting them', async () => {
@@ -1967,14 +2044,24 @@ describe('support Worker', () => {
       await one.until(f => f.type === 'message.end' && f.kind !== 'first' && f.text?.length);
       const two = await open();
       await two.until(f => f.type === 'history');
+      const twoId = two.frames.find(f => f.type === 'hello')!.conversationId as string, PASSED_TEAM = 'I can\u2019t answer this one right now, so I\u2019ve passed it to our team. They\u2019ll reply here, or by email when this chat isn\u2019t open.';
+      await fakeHook('/__inbox', { id: twoId, channel: 'chat' }, caps);
+      const passed = () => two.frames.filter(f => f.type === 'message.end' && f.text === PASSED_TEAM).length;
       two.send({ type: 'user.message', clientMessageId: 'r2', text: 'refund please' });                   // turn 2
       const refused = await two.until(f => f.type === 'tool.end' && f.label === 'Passed this to the Nightmail team');
       assert.equal(refused.ok, false, 'A second ticket today for the same person is refused.');
-      await two.until(f => f.type === 'message.end' && f.text?.includes('passed this'));
-      assert.ok(!two.frames.some(f => f.type === 'ticket.filed'));
+      // Past the ticket caps the turn gives no answer (whatever the AI wrote, never "email us" or "we couldn't pass this
+      // on"): its reply ends empty, then the plain notice, recorded as unanswered so No reply sent holds it for staff.
+      assert.ok(await eventually(async () => passed() === 1 || undefined));
+      assert.ok(!two.frames.some(f => f.type === 'ticket.filed' || (f.type === 'message.end' && /passed this|couldn\u2019t pass|@|email (us|support)/i.test(f.text ?? ''))), JSON.stringify(two.frames.filter(f => f.type === 'message.end')));
+      const kinds = async () => ((await (await (await caps.getWorker('fake-bane')).fetch(`http://fake-bane/__inbox?id=${twoId}`)).json()) as any)?.messages.map((m: any) => [m.author, m.kind]) ?? [];
+      assert.deepEqual((await eventually(async () => { const k = await kinds(); return k.length >= 2 ? k : undefined; }))!.slice(-2), [['customer', null], ['system', 'unanswered']]);
       two.send({ type: 'user.message', clientMessageId: 'r3', text: 'hello?' });                         // turn 3 > 2
-      const busy = await two.until(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED');
-      assert.match(busy.message, /a lot of questions today/);
+      // Past everyone's daily total: a message the agent can't answer goes to the team as this conversation's ticket, even
+      // with this person's tickets used up today (it counts against no ticket cap), and they're told so plainly.
+      assert.equal((await two.until(f => f.type === 'message.end' && /as a ticket/.test(f.text ?? '')))?.text, 'I can\u2019t answer this one right now, so I\u2019ve passed it to our team as a ticket. They\u2019ll reply here, or by email when this chat isn\u2019t open.');
+      assert.ok(two.frames.some(f => f.type === 'ticket.filed'));
+      assert.ok(!two.frames.some(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED'));
       two.send({ type: 'user.message', clientMessageId: 'r4', text: 'hello again?' });
       await new Promise(r => setTimeout(r, 1500));
       const alerts = (await fakeCalls(caps)).filter(c => c[0] === 'api' && c[2] === '/v1/inbound/threads' && /Daily model-turn budget reached \(2\)/.test(c[3].subject ?? ''));
@@ -2164,7 +2251,7 @@ describe('support Worker', () => {
     afterAll(() => instance?.dispose());
     type Row = { id: string; kind: string; state: string; attempts: number; due_at: number; last_error: string | null };
     type Run = { rows: Row[]; legacy: { message_id: string; state: string }[]; grant: boolean; alarm: number | null; before: number; meta: { closedAt: number | null } | null; actions: { id: string; state: string; attempts: number; next_check_at: number }[] };
-    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean; spend?: number; claimWait?: string } = {}) {
+    async function drive(id: string, options: { tick?: boolean; expire?: string; age?: number; unavailable?: string; route?: string; fail?: 'throw' | 'reply'; ageActions?: number; actionsDue?: boolean; spend?: number; claimWait?: string; adopt?: string } = {}) {
       const res = await instance.dispatchFetch(`${SUPPORT}/__conversation`, { method: 'POST', body: JSON.stringify({ id, ...options }) });
       assert.equal(res.status, 200);
       return await res.json() as Run;
@@ -2279,7 +2366,7 @@ describe('support Worker', () => {
       return { id: started.conversationId as string, ws, frames, until, say: (clientMessageId: string, text: string) => ws.send(JSON.stringify({ type: 'user.message', clientMessageId, text })) };
     }
 
-    test('continuous chat: a conversation that spent its turn budget ends after its ticket, so the next resume starts a fresh one', async () => {
+    test('continuous chat: a conversation that spent its turn budget becomes a ticket: each later message is kept and added to it, the conversation stays open for staff to reply, and resuming finds it', async () => {
       const start = async () => await (await instance.dispatchFetch(`${SUPPORT}/chat/start`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ handoff: handoff('usr_spent', false, 'ws_acme'), resume: true }) })).json() as any;
       const first = await start();
       const socket = await instance.dispatchFetch(first.socketUrl.replace('wss:', 'https:'), { headers: { upgrade: 'websocket', origin: ORIGIN } });
@@ -2288,14 +2375,49 @@ describe('support Worker', () => {
       const until = async (match: (f: any) => boolean) => { for (let i = 0; i < 600 && !frames.some(match); i++) await new Promise(r => setTimeout(r, 100)); return frames.find(match); };
       await until(f => f.type === 'history');
       assert.equal((await start()).conversationId, first.conversationId, 'Resumed while it has budget.');
+      await setInbox({ id: first.conversationId, channel: 'chat' });
       await drive(first.conversationId, { spend: 60 });
+      const models = recorded.length;
       ws.send(JSON.stringify({ type: 'user.message', clientMessageId: 'spent1', text: 'One more question' }));
-      assert.ok(await until(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED'));
-      assert.equal((await until(f => f.type === 'closed'))?.reason, 'limit');
+      assert.match((await until(f => f.type === 'message.end' && /our team as a ticket/.test(f.text ?? '')))!.text, /^I can’t answer this one right now/);
+      assert.ok(await until(f => f.type === 'ticket.filed'));
+      ws.send(JSON.stringify({ type: 'user.message', clientMessageId: 'spent2', text: 'Still there?' }));
+      assert.ok(await until(f => f.type === 'message.end' && /added it to your ticket/.test(f.text ?? '')));
+      assert.ok(!frames.some(f => f.type === 'closed' || f.type === 'error'), JSON.stringify(frames.map(f => [f.type, f.code])));
+      assert.equal(recorded.length, models, 'No model call for a message past the conversation\u2019s limits.');
+      // The inbox has both messages and the ticket (Needs you), and the replies are 'unanswered' lines: nothing reached them yet.
+      const box = await eventually(async () => { const box = await inboxOf(first.conversationId); return box?.state.ticket && box.messages.length >= 4 ? box : undefined; });
+      assert.deepEqual(box.messages.slice(-4).map((m: any) => [m.author, m.kind, m.text.slice(0, 12)]), [['customer', null, 'One more que'], ['system', 'unanswered', 'I can’t answ'], ['customer', null, 'Still there?'], ['system', 'unanswered', 'I can’t answ']]);
+      assert.equal(box.state.ticket.brief.title, 'Conversation limit reached');
       ws.close();
-      const next = await start();
-      assert.ok(next.conversationId && next.conversationId !== first.conversationId, 'A fresh conversation, never the spent one.');
+      assert.equal((await start()).conversationId, first.conversationId, 'Still open: resuming finds the ticketed conversation.');
     });
+
+    test('a chat turn the model fails goes to the team: the message is kept, the conversation becomes a ticket ("The AI failed to answer"), the person gets one plain reply with no address, and a second failure is added to the same ticket', async () => {
+      const c = await chat(handoff('usr_modelfail'));
+      await setInbox({ id: c.id, channel: 'chat' });
+      control.failStatus = 400;
+      try {
+        c.say('mf1', 'Why are Gmail bounces up?');
+        const passed = await c.until(f => f.type === 'message.end' && /our team/.test(f.text ?? ''));
+        assert.equal(passed?.text, 'I can’t answer this one right now, so I’ve passed it to our team as a ticket. They’ll reply here, or by email when this chat isn’t open.');
+        assert.ok(c.frames.some(f => f.type === 'ticket.filed'), 'Filed for the team.');
+        c.say('mf2', 'Hello?');
+        assert.ok(await eventually(async () => c.frames.some(f => f.type === 'message.end' && /added it to your ticket/.test(f.text ?? '')) || undefined));
+      } finally { control.failStatus = 0; }
+      // Never an error to retry, and no support address anywhere.
+      assert.ok(!c.frames.some(f => f.type === 'error') && c.frames.every(f => !JSON.stringify(f).includes('support@')), JSON.stringify(c.frames.map(f => [f.type, f.code])));
+      const tickets = (await (await db()).prepare('SELECT title, ask, notes FROM tickets WHERE conversation_id = ?').bind(c.id).all<{ title: string; ask: string; notes: string }>()).results;
+      assert.deepEqual(tickets.map(r => [r.title, r.ask, JSON.parse(r.notes).length]), [['The AI failed to answer', 'Why are Gmail bounces up?', 1]], 'One ticket for the conversation; the second failure is a note on it.');
+      // The inbox: both messages kept, each followed by its 'unanswered' line, and the ticket listed (Needs you).
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.state.ticket && box.messages.length === 4 ? box : undefined; });
+      assert.deepEqual(box.messages.map((m: any) => [m.author, m.kind]), [['customer', null], ['system', 'unanswered'], ['customer', null], ['system', 'unanswered']]);
+      assert.equal(box.state.ticket.brief.title, 'The AI failed to answer');
+      // Once the model is back, the conversation is answered again.
+      c.say('mf3', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text ?? '')));
+      c.ws.close();
+    }, 180_000);
 
     test('the staff inbox: a chat’s transcript and state are mirrored in order; with Nightmail down they wait and catch up in order', async () => {
       const c = await chat();
@@ -2317,6 +2439,37 @@ describe('support Worker', () => {
       const caught = await eventually(async () => { const box = await inboxOf(c.id); return box?.messages.length === 4 ? box : undefined; });
       assert.deepEqual(caught.messages.map((m: any) => [m.author, m.text.slice(0, 13)]), [['customer', 'Why are Gmail'], ['agent', 'Gmail hard-bo'], ['customer', 'And Gmail bou'], ['agent', 'Gmail hard-bo']]);
       assert.equal((await drive(c.id) as any).meta.mirrorAttempts, 0);
+      c.ws.close();
+    }, 180_000);
+
+    test('failed turns: what they spent counts in the conversation’s cost, never in its turns or token budget', async () => {
+      // A person of its own: their daily conversations and turns are nobody else's.
+      const c = await chat(handoff('usr_outage'));
+      await setInbox({ id: c.id, channel: 'chat' });
+      c.say('ft0', 'Why are Gmail bounces up?');
+      assert.ok(await c.until(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)));
+      const budget = (m: any) => m.inputTokens + m.outputTokens + (m.cacheReadTokens ?? 0) / 10;
+      const before = (await drive(c.id) as any).meta, N = 3;
+      assert.equal(before.turns, 1);
+      // Each: a docs search that spends, then the model's API fails the next step, so the customer gets no answer from the AI.
+      for (let n = 1; n <= N; n++) {
+        c.say(`ft${n}`, `Outage probe ${n}`);
+        // Each goes to the team (#958 passToTeam): the conversation's ticket, then added to it.
+        assert.ok(await eventually(async () => c.frames.filter(f => f.type === 'message.end' && /our team/i.test(f.text ?? '')).length === n || undefined), `failed turn ${n}`);
+      }
+      const after = (await drive(c.id) as any).meta;
+      assert.deepEqual([after.turns, budget(after), after.costUsd], [before.turns, budget(before), before.costUsd], 'The turns and token budget its limits read are exactly where they were.');
+      assert.ok(after.failed?.turns === N && after.failed.inputTokens > 0 && after.failed.costUsd > 0, JSON.stringify(after.failed));
+      // The cost goes up: in D1 and in what the inbox (and so Glass) gets, the turns stay the answered ones.
+      const spent = before.costUsd + after.failed.costUsd;
+      const row = await (await db()).prepare('SELECT turns, cost_usd FROM conversations WHERE id = ?').bind(c.id).first<{ turns: number; cost_usd: number }>();
+      assert.ok(row!.turns === before.turns && Math.abs(row!.cost_usd - spent) < 1e-9, JSON.stringify(row));
+      const box = await eventually(async () => { const box = await inboxOf(c.id); return box?.state.costUsd === Math.round(spent * 10_000) / 10_000 ? box : undefined; });
+      assert.ok(box && box.state.turns === before.turns && box.state.costUsd > Math.round(before.costUsd * 10_000) / 10_000, JSON.stringify([before.costUsd, spent, (await inboxOf(c.id))?.state]));
+      // And the conversation still answers.
+      c.say('ft9', 'And Gmail bounces today?');
+      assert.ok(await eventually(async () => c.frames.filter(f => f.type === 'message.end' && /Gmail hard-bounced/.test(f.text)).length === 2 || undefined));
+      assert.equal((await drive(c.id) as any).meta.turns, before.turns + 1);
       c.ws.close();
     }, 180_000);
 
@@ -2437,6 +2590,31 @@ describe('support Worker', () => {
       await fakeHook('/__filed', { id: theirs, userId: 'usr_filedother', messages: [{ id: 'msg_filedotheraaaaaa', text: 'Is anyone there?', at: new Date().toISOString() }] }, instance);
       assert.equal((await resume(theirs, handoff(user))).status, 404);
       assert.equal(await (await db()).prepare('SELECT id FROM conversations WHERE id = ?').bind(theirs).first(), null);
+    }, 180_000);
+
+    test('a filed chat half adopted (its object set up, its D1 row not yet written, as when adoption fails between its two steps): the next wake finishes the adoption and its queued staff reply is delivered once; so does the sweep', async () => {
+      const resume = (conversationId: string, token: string) => instance.dispatchFetch(`${SUPPORT}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify({ conversationId, handoff: token }) });
+      for (const [id, user, path] of [['conv_' + 'h'.repeat(26), 'usr_halfwake', 'wake'], ['conv_' + 'j'.repeat(26), 'usr_halfsweep', 'sweep']] as const) {
+        const reply = `msg_half${path}replyaaaa`.slice(0, 20);
+        await fakeHook('/__filed', { id, userId: user, messages: [{ id: `msg_half${path}filedaaaa`.slice(0, 20), text: 'Is my domain verified yet?', at: new Date(Date.now() - 60_000).toISOString() }] }, instance);
+        await drive(id, { adopt: id });
+        assert.equal(await (await db()).prepare('SELECT id FROM conversations WHERE id = ?').bind(id).first(), null, 'The half state: the object, no row.');
+        await setInbox({ id, reply: { id: reply, text: 'Hi, it is verified now.', staffName: 'Dana Rivera' } });
+        if (path === 'wake') assert.equal((await wake(id)).status, 202);
+        else await (await instance.getWorker('support')).scheduled({ cron: '*/5 * * * *', scheduledTime: new Date() });
+        await queued(id, reply);
+        await drive(id, { tick: true });
+        const emailed = await eventually(async () => { const e = await sends(`staff-${reply}`); return e.length ? e : undefined; });
+        assert.deepEqual([emailed!.length, emailed![0][3].to], [1, [`${user.slice(4)}@other.test`]], path);
+        assert.deepEqual(await marked(reply), ['sent'], path);
+        assert.deepEqual(await (await db()).prepare('SELECT channel, user_id FROM conversations WHERE id = ?').bind(id).first(), { channel: 'chat', user_id: user }, `${path}: the row written now`);
+        // Again: nothing more is sent, and the person can resume it.
+        if (path === 'wake') assert.equal((await wake(id)).status, 202);
+        await drive(id, { tick: true });
+        await new Promise(r => setTimeout(r, 300));
+        assert.equal((await sends(`staff-${reply}`)).length, 1, `${path}: once`);
+        assert.equal((await resume(id, handoff(user))).status, 200, path);
+      }
     }, 180_000);
 
     test('a message filed into a chat the Worker already holds: taken into its history once, under its own ID, with no turn; one with the words the person sent here in the last hour is the same message', async () => {
@@ -3278,6 +3456,11 @@ describe('support Worker', () => {
       // Quoted fence text is stored as plain data: the escapes undone once, never markup the harness reads.
       assert.equal(noted.f.cause, `The report quotes: ${FENCE}`);
 
+      // What each reading cost reaches Nightmail once, after it ends: one turn (its nudge isn't another), at a cost above zero.
+      const usage = calls.filter(c => c[0] === 'feedbackUsage');
+      assert.deepEqual(usage.map(c => c[1]).sort(), read.map(conv).sort(), JSON.stringify(usage));
+      for (const [, , spent] of usage) assert.ok(spent.turns === 1 && spent.costUsd > 0 && Object.keys(spent).sort().join() === 'costUsd,turns', JSON.stringify(spent));
+
       // The daily cap: once it is reached, nothing more is claimed today.
       const d1 = await db(), day = new Date().toISOString().slice(0, 10);
       await d1.prepare("UPDATE daily_counters SET n = 100 WHERE day = ? AND key = 'global:triage'").bind(day).run();
@@ -3846,10 +4029,12 @@ describe('support Worker', () => {
       ws.addEventListener('message', (e: MessageEvent) => frames.push(JSON.parse(String(e.data))));
       for (let i = 0; i < 50 && !frames.some(f => f.type === 'history'); i++) await new Promise(r => setTimeout(r, 100));
       ws.send(JSON.stringify({ type: 'user.message', clientMessageId: 'n1', text: 'Why are Gmail bounces up?' }));
-      for (let i = 0; i < 100 && !frames.some(f => f.type === 'error'); i++) await new Promise(r => setTimeout(r, 100));
-      const failure = frames.find(f => f.type === 'error');
-      assert.deepEqual([failure?.code, failure?.retryable], ['TURN_FAILED', false], JSON.stringify(frames));
-      assert.match(failure.message, /isn’t fully set up/);
+      // The message goes to the team as a ticket ("The AI isn't set up"), and the person is told so, with no address.
+      for (let i = 0; i < 100 && !frames.some(f => f.type === 'message.end' && /our team/.test(f.text ?? '')); i++) await new Promise(r => setTimeout(r, 100));
+      const passed = frames.find(f => f.type === 'message.end' && /our team/.test(f.text ?? ''));
+      assert.match(passed?.text ?? '', /passed it to our team as a ticket/, JSON.stringify(frames));
+      assert.ok(frames.some(f => f.type === 'ticket.filed') && !frames.some(f => f.type === 'error'), JSON.stringify(frames.map(f => f.type)));
+      assert.equal((await (await nokey.getD1Database('DB', 'support')).prepare('SELECT title FROM tickets WHERE conversation_id = ?').bind(opened.conversationId).first<{ title: string }>())?.title, 'The AI isn\u2019t set up');
       assert.equal(recorded.length, before, 'No model request without the key.');
       ws.close();
     } finally { await nokey.dispose(); }

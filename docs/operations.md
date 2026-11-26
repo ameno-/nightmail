@@ -308,6 +308,16 @@ With `DATABASE_DISK_GB` set: 75% of disk is a warning; 90% is critical. PlanetSc
 2. Workers Logs, `RETENTION_*`: is retention running and deleting?
 3. Growth: `GET /v1/operator/health` `database.sizeBytes` now against an hour ago (the Health tab shows it each minute).
 
+### support-ai-cost
+The support AI's model calls cost more than `SUPPORT_AI.dailyLineUsd` (`api/src/health-thresholds.ts`) since midnight UTC.
+A warning: nothing stops answering (the support platform's daily turn caps, `support/src/limits.ts`, do that). The
+operators' Slack gets one card that UTC day; the alert clears when the day ends.
+
+**An agent checks first**
+1. Glass → Support AI: today against the 7 and 30 days, and the conversations that cost the most.
+2. `SELECT conversation_id,agent,sum(turns),sum(cost_usd) FROM support_ai_usage WHERE at>=date_trunc('day',now(),'UTC') GROUP BY 1,2 ORDER BY 4 DESC LIMIT 10;`
+3. One conversation or many: one is a long chat or a loop (its transcript in Support); many is traffic.
+
 ## What the tick costs, and what it can never cost
 
 Nothing waits for health. The counters are written after a response, a queue batch or a dispatcher run has

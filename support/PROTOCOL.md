@@ -173,11 +173,11 @@ The agent ends its answer with the proposal and carries on once it is decided: o
 | --- | --- |
 | `GRANT_EXPIRED` | No longer sent (access doesn't expire mid-conversation). An older Worker sent it: get a fresh handoff, call `/chat/resume`, reconnect. |
 | `RATE_LIMITED` | Show the message; the input stays disabled until `retryAfter` (seconds) passes. |
-| `TURN_FAILED` | Show the message with a **Try again** button that resends the last `user.message` with the same `clientMessageId`. |
+| `TURN_FAILED` | No longer sent for a turn: a message the agent can't answer (a daily cap, the conversation's limits, the model failing) goes to the team instead, as a `ticket.filed` (when a ticket opens) and a `notice` saying so; the input stays enabled. An older Worker sent it: show the message with a **Try again** button that resends the last `user.message` with the same `clientMessageId`. |
 | `BAD_MESSAGE` | A bug in the panel: log it. |
-| `BUDGET_EXHAUSTED` | The conversation reached its limit; a ticket follows. Disable the input. |
+| `BUDGET_EXHAUSTED` | The conversation holds its maximum of messages: that one went to the team with its ticket, not into the transcript. Disable the input. (A conversation past its turn or token limit stays open and passes each message to the team, as above.) |
 
-`closed` means the conversation ended (24 hours idle, the turn limit, or the person ended it). Disable the input and offer "Start a new conversation".
+`closed` means the conversation ended (30 days idle, its access changed, or the person ended it). Disable the input and offer "Start a new conversation".
 
 ## 5. Panel → server
 

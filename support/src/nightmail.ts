@@ -111,6 +111,8 @@ export interface SupportPlatform {
   feedbackRequest(conversationId: string, requestId: string): Promise<PlatformReply>;
   feedbackRelated(conversationId: string): Promise<PlatformReply>;
   feedbackTriage(conversationId: string, note: TriageNoteInput): Promise<PlatformReply<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>>;
+  /** What one reading of a report cost (its model turns and US dollars): sent once, after it ends. */
+  feedbackUsage(conversationId: string, usage: { turns: number; costUsd: number }): Promise<PlatformReply<{ conversationId: string; turns: number; costUsd: number }>>;
 }
 /** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
 export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null };
