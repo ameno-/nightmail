@@ -39,6 +39,10 @@ export function smtpReply(status: number, code: string, message: string): { code
   return null;
 }
 
+/** Refusals recorded per workspace an hour, at most: a client retrying into a send limit can't grow the table without
+ *  bound (the read says truncated, and support sees the pattern long before). */
+export const SMTP_REFUSALS_PER_HOUR = 1000;
+const PER_HOUR = SMTP_REFUSALS_PER_HOUR;
 /** Records the API's refusal of a gateway submission by credential `kid` to `to`, after the answer. A credential that no longer resolves to a workspace records nothing. */
 export function recordSmtpRefusal(runtime: Runtime, kid: string, to: readonly string[], error: ApiError) {
   const reply = smtpReply(error.status, error.code, error.message);
@@ -50,7 +54,8 @@ export function recordSmtpRefusal(runtime: Runtime, kid: string, to: readonly st
         SELECT k.w, ${reply.code}, ${reply.text}, ${error.code}, ${sql.param(domains)}::text[] FROM (
           SELECT b.workspace_id AS w FROM inbox_app_passwords p JOIN mailboxes b ON b.id = p.inbox_id WHERE p.id = ${kid}
           UNION ALL SELECT workspace_id FROM api_keys WHERE id = ${kid}
-          UNION ALL SELECT workspace_id FROM mailbox_keys WHERE id = ${kid} LIMIT 1) k`);
+          UNION ALL SELECT workspace_id FROM mailbox_keys WHERE id = ${kid} LIMIT 1) k
+        WHERE (SELECT count(*) FROM (SELECT 1 FROM smtp_refusals s WHERE s.workspace_id = k.w AND s.at > now() - interval '1 hour' LIMIT ${PER_HOUR}) n) < ${PER_HOUR}`);
     } catch {
       log('warn', { code: 'SMTP_REFUSAL_NOT_RECORDED', message: 'An SMTP refusal was answered but not recorded.' });
     }

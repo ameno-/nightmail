@@ -2734,6 +2734,13 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
   assert.deepEqual(recorded.map(r=>[r.code,r.reply_code,r.reason,r.recipient_domains]),[['SEALED_MESSAGE_SIZE','552 5.3.4','Signed or encrypted messages can be at most 8 MiB',['example.invalid']],
     ['RECIPIENT_INELIGIBLE','550 5.7.1','Rejected',['example.invalid']],['CREDENTIAL_REVOKED','550 5.7.1','Rejected',['example.invalid']]]);
   assert.ok(!JSON.stringify(recorded).includes('@'),'No address is kept.');
+  // At most SMTP_REFUSALS_PER_HOUR a workspace an hour: a client retrying into a send limit can't grow the table without bound.
+  {const {recordSmtpRefusal,SMTP_REFUSALS_PER_HOUR}=await import('./src/smtp-refusals.js'),{ApiError}=await import('./src/core.js');
+    await db.query(`INSERT INTO smtp_refusals(workspace_id,reply_code,reason,code) SELECT $1,'451 4.7.1','Send limit reached','REQUEST_RATE_LIMITED' FROM generate_series(1,$2::int)`,[wid,SMTP_REFUSALS_PER_HOUR-recorded.length]);
+    const later:((runtime:typeof rt)=>Promise<void>)[]=[];rt.deferNudge=work=>{later.push(work);};
+    for(let i=0;i<3;i++)recordSmtpRefusal(rt,kid,['x@example.invalid'],new ApiError(429,'REQUEST_RATE_LIMITED','x'));
+    for(const work of later.splice(0))await work(rt);rt.deferNudge=undefined;
+    assert.equal((await db.query("SELECT count(*)::int n FROM smtp_refusals WHERE workspace_id=$1 AND at>now()-interval '1 hour'",[wid])).rows[0].n,SMTP_REFUSALS_PER_HOUR,'Past the hour\'s cap, nothing more is written.');}
   // The reply as the gateway words it (remote.rs submit_error, whose test uses these same refusals): a refused attachment
   // in the API's words on one printable line of at most 400 characters; a refusal it can't name, "Rejected"; a deploy's
   // signature mismatch or the API's own failure is no refusal (the app retries).
