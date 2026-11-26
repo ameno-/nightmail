@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction } from './nightmail.js';
+import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction, type FiledConversation } from './nightmail.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, namedIn, plainText } from './gate.js';
 import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext, type TicketMessage } from './tickets.js';
@@ -701,6 +701,58 @@ export class SupportConversation extends DurableObject<Env> {
     return 'ok';
   }
   /** /chat/resume asks before it mints a token: an email conversation continues by email; anything else must be joinable. */
+  /**
+   * A chat Nightmail opened from a message the dashboard filed while the chat couldn't take it (api/src/support-
+   * conversations.ts fileChatTicket): this object never registered it, and adopts it as openChat would have opened it,
+   * for its person and workspace as Nightmail holds them, without registering again (Nightmail already has it). Its filed
+   * messages come in with it (takeFiled). An object that already holds it only takes them in.
+   */
+  async adoptFiled(f: FiledConversation): Promise<{ ok: boolean }> {
+    if (!this.meta()) {
+      if (!f.filed || !f.workspace || f.status === 'closed') return { ok: false };
+      const meta = this.fresh(f.id, 'chat'), workspace = { id: f.workspace.id, name: f.workspace.name };
+      Object.assign(meta, { userId: f.user.id, email: f.user.email, name: f.user.name, role: f.workspace.role, workspace, workspaces: [{ ...workspace, role: f.workspace.role }],
+        verified: 'handoff' as const, page: f.page, requestIds: f.requestIds, bound: f.workspace.id, registered: true, mode: 'member' as const, greeted: true,
+        status: f.status === 'ticketed' ? 'ticketed' as const : 'open' as const });
+      this.save(meta);
+      log('info', { event: 'chat', code: 'FILED_CHAT_ADOPTED', conversation: f.id });
+    }
+    this.takeIn(f.messages);
+    await this.arm();
+    return { ok: true };
+  }
+  /**
+   * The messages the dashboard filed into this chat while it couldn't take them, read from Nightmail and each taken into
+   * the transcript once, under its own ID (so the mirror leaves it as it is). No turn for any of them: they are a ticket
+   * for a person, and the agent is paused for it. On a resume, a wake and every panel connection.
+   */
+  async takeFiled(): Promise<{ taken: number }> {
+    const meta = this.meta();
+    if (!meta || meta.channel !== 'chat' || !meta.registered || meta.status === 'closed') return { taken: 0 };
+    try {
+      const reply = await this.env.BANE.filedConversation(meta.conversationId);
+      if (reply.status !== 200 || !reply.body.messages.length) return { taken: 0 };
+      return { taken: this.takeIn(reply.body.messages) };
+    } catch (error) { logError(error, { event: 'chat', code: 'FILED_READ_FAILED' }, 'warn'); return { taken: 0 }; }
+  }
+  /**
+   * Records each filed message the transcript lacks, oldest first. One whose words the person already sent here within the
+   * hour is that same message (the chat dropped after it arrived, and the dashboard filed it too), as Nightmail counts it:
+   * not taken twice.
+   */
+  private takeIn(messages: FiledConversation['messages']) {
+    let taken = 0;
+    for (const m of [...messages].sort((a, b) => a.at.localeCompare(b.at))) {
+      if (this.sql.exec('SELECT 1 FROM _support_transcript WHERE id = ?', m.id).toArray().length) continue;
+      const since = new Date(Date.parse(m.at) - 3_600_000).toISOString();
+      if (this.sql.exec("SELECT 1 FROM _support_transcript WHERE role = 'user' AND text = ? AND at >= ?", m.text, since).toArray().length) continue;
+      this.record({ id: m.id, role: 'user', kind: null, text: m.text, at: m.at, tools: [] }, false);
+      taken++;
+    }
+    if (taken) { this.update(m => { m.lastActivity = Date.now(); }); log('info', { event: 'chat', code: 'FILED_MESSAGES_TAKEN', taken }); }
+    return taken;
+  }
+
   async admits({ userId }: { userId: string }): Promise<{ ok: true } | { ok: false; code: 'EMAIL' | 'GONE' | 'UNAVAILABLE' }> {
     if (this.meta()?.channel === 'email') return { ok: false, code: 'EMAIL' };
     const joinable = await this.joinable(userId);
@@ -715,6 +767,8 @@ export class SupportConversation extends DurableObject<Env> {
     // Open proposals' cards only as Nightmail returns them now, read through the stamp (a refusal ends the chat).
     const cards = await this.openCards();
     if (cards === 'refused') { await this.endForAccess(); return new Response(null, { status: 404 }); }
+    // What the dashboard filed here while the chat couldn't take it, so the history shows it.
+    await this.takeFiled();
     const meta = this.meta()!;
     // There is no greeting turn: the panel opens with its own fixed line. A question typed into the handoff (an API
     // client's; the panel sends none) becomes the first message, once.
@@ -941,6 +995,7 @@ export class SupportConversation extends DurableObject<Env> {
     // Closed: its parked answers were held at close; the ledger hears so again.
     if (meta.status === 'closed') { await this.work.mirror(); return { ok: false, queued: 0 }; }
     const released = await this.signIns() + await this.releases();
+    if (meta.channel === 'chat') await this.takeFiled();
     const pulled = platformBody(await this.env.BANE.pullOutbox(meta.conversationId));
     return { ok: true, queued: await this.deliver({ replies: pulled.data }), released };
   }
@@ -2602,6 +2657,27 @@ function ticketPerson(meta: Meta) {
 /** Whether the scope's person still has this address as their verified email now: an answer from their account may go there. */
 function recipientOf(scope: Scope, address: string | null) {
   return scope.user.mailboxProven === true && !!address && !!scope.user.email && scope.user.email.trim().toLowerCase() === address.trim().toLowerCase();
+}
+
+/**
+ * A conversation Nightmail named that this Worker doesn't hold (D1 has no row): adopted if Nightmail opened it from a
+ * filed message, as a chat for its person and workspace (and only for `userId` when a resume names it): the object as
+ * openChat would have opened it, then a D1 row as startChat writes. False otherwise, or when Nightmail can't say now.
+ */
+export async function adoptFiledChat(env: Env, id: string, userId?: string): Promise<boolean> {
+  let reply: PlatformReply<FiledConversation>;
+  try { reply = await env.BANE.filedConversation(id); } catch (error) { logError(error, { event: 'chat', code: 'FILED_READ_FAILED' }, 'warn'); return false; }
+  if (reply.status !== 200) return false;
+  const f = reply.body;
+  if (!f.filed || !f.workspace || f.status === 'closed' || (userId !== undefined && f.user.id !== userId)) return false;
+  // The object first, the D1 row after: every path adopts only while the row is missing, so a failure between the two
+  // (a deploy, an overload) is finished by the next resume, wake or sweep. Both steps repeat safely: an object that holds
+  // the chat only takes messages in, and the row is written once.
+  if (!(await env.CONVERSATION.get(env.CONVERSATION.idFromName(id)).adoptFiled(f)).ok) return false;
+  const now = Date.now();
+  await env.DB.prepare(`INSERT INTO conversations (id, channel, user_id, email, workspace_id, workspace_name, status, created_at, updated_at) VALUES (?, 'chat', ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT (id) DO NOTHING`).bind(f.id, f.user.id, f.user.email, f.workspace.id, f.workspace.name, f.status === 'ticketed' ? 'ticketed' : 'open', now, now).run();
+  return true;
 }
 
 /** countToday for one work item: each key is charged once, and a retry reads the stored outcome. */
