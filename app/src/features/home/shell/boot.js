@@ -26,6 +26,8 @@
   if (!shell || !root || document.documentElement.dataset.shell === 'off') { if (shell) shell.remove(); start(); return }
 
   shell.addEventListener('click', event => {
+    // Only a press a person made is held for the app: a click a script dispatched is not.
+    if (!event.isTrusted) return
     const button = event.target instanceof Element && event.target.closest(set.press || 'button.fac-cta')
     if (!button) return
     window.__nightmailShellPress = button
