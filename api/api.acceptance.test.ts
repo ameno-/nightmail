@@ -5049,7 +5049,7 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       const { rows: [revocation] } = await db.query("SELECT via FROM audit_events WHERE workspace_id=$1 AND action='api_key.revoke' AND target_id=$2", [w, agent.keyId]);
       assert.match(error(await request('GET', '/v1/me', agent.key), 401, 'KEY_REVOKED').message,
         new RegExp(`^This key was revoked on \\d{4}-\\d{2}-\\d{2} at \\d{2}:\\d{2}:\\d{2} UTC ${({ dashboard: 'from the dashboard', api: 'with an API key' } as Json)[revocation.via]}; get a new one by running setup again`));
-      assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again\.$/);
+      assert.match(error(await exchange(request, minted.token), 409, 'SETUP_TOKEN_USED').message, /has since been revoked\. Ask them to copy the prompt again, or start a device code with POST \/v1\/agent\/device and \{"setup_token":"<this token>"\}: their dashboard shows you waiting\.$/);
       assert.equal(await agentStep(), false, 'A revoked agent key no longer counts as a connected agent.');
     });
   });
@@ -5080,6 +5080,70 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       await mint(request, as(other));
       secrets.add(ok(await exchange(request, mine.token), 201).key);
       assert.equal(await keys(), 1);
+    });
+  });
+
+  test('an agent with a spent setup token asks its person with a device code: their dashboard lists it, and approving is unchanged', async t => {
+    await hosted(t, async ({ db, request, w, owner, person, join, as, workspace }) => {
+      const waiting = async (who: Person, ws = w) => ok(await request('GET', '/v1/agent/device/waiting', undefined, undefined, as(who, ws))).data;
+      const poll = (code: string) => request('POST', '/v1/agent/device/token', undefined, { device_code: code });
+      // Replaced by a newer copy (a production agent came back hours later to its first prompt): the 410 carries a device
+      // code addressed to the person who copied it, with the link alone on its line.
+      const first = await mint(request, as(owner));
+      await mint(request, as(owner));
+      const replaced = error(await exchange(request, first.token, 'Devin'), 410, 'SETUP_TOKEN_REPLACED'), asked = replaced.details[0];
+      secrets.add(asked.device_code);
+      assert.match(asked.device_code, /^nm_device_/);
+      assert.ok(replaced.message.includes(`\n${asked.verification_uri_complete}\n`) && asked.nextStep.includes('their dashboard shows you waiting'), replaced.message);
+      // First it asks for a fresh copy of the prompt, the quicker path for the same person: that person connected in seconds.
+      assert.ok(replaced.message.indexOf(`${PUBLIC_ORIGIN}/docs#agent-prompt`) > 0 && replaced.message.indexOf(`${PUBLIC_ORIGIN}/docs#agent-prompt`) < replaced.message.indexOf(asked.verification_uri_complete), replaced.message);
+      const listed = await waiting(owner);
+      assert.deepEqual(listed.map((item: Json) => [item.userCode, item.clientName]), [[asked.user_code, 'Devin']]);
+      // Only that person, in that workspace: not another admin here, not them in another workspace, not a member.
+      const admin = await person('admin'), member = await person('member'), elsewhere = await workspace();
+      await join(owner, elsewhere, 'owner');
+      assert.deepEqual([await waiting(admin), await waiting(owner, elsewhere)], [[], []]);
+      error(await request('GET', '/v1/agent/device/waiting', undefined, undefined, as(member)), 403, 'PERMISSION_DENIED');
+      error(await request('GET', '/v1/agent/device/waiting'), 401, 'AUTH_REQUIRED');
+      // The page chooses that workspace first for its person only; anyone else approving chooses as before.
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: asked.user_code }, as(owner))).suggestedWorkspaceId, w);
+      assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: asked.user_code }, as(admin))).suggestedWorkspaceId, null);
+      // Nothing without an approval: still pending, no key, until a signed-in owner or admin approves at /connect.
+      error(await poll(asked.device_code), 400, 'AUTHORIZATION_PENDING');
+      assert.equal((await db.query('SELECT count(*)::int AS n FROM api_keys WHERE workspace_id=$1 AND agent_setup_id IS NOT NULL', [w])).rows[0].n, 0);
+      ok(await request('POST', '/v1/agent/device/approve', undefined, { userCode: asked.user_code }, as(owner, w)));
+      assert.deepEqual(await waiting(owner), [], 'Approved, it is no longer waiting');
+      await db.query("UPDATE agent_setups SET last_polled_at=NULL WHERE kind='device' AND user_code=$1", [asked.user_code.replace('-', '')]);
+      const agent = ok(await poll(asked.device_code), 201);
+      secrets.add(agent.key);
+      assert.deepEqual([agent.workspaceId, agent.name.startsWith('Devin, set up')], [w, true]);
+
+      // Expired: the same, and the code it carries, renewed when nobody approved it, still asks the same person.
+      const lapsed = await mint(request, as(admin));
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE id=$1", [lapsed.id]);
+      const expired = error(await exchange(request, lapsed.token), 410, 'SETUP_TOKEN_EXPIRED').details[0];
+      secrets.add(expired.device_code);
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE kind='device' AND user_code=$1", [expired.user_code.replace('-', '')]);
+      const renewed = error(await poll(expired.device_code), 400, 'EXPIRED_TOKEN').details[0];
+      secrets.add(renewed.device_code);
+      assert.deepEqual((await waiting(admin)).map((item: Json) => item.userCode), [renewed.user_code]);
+      assert.deepEqual(await waiting(owner), []);
+
+      // Used, and the agent lost its key: it asks with that token on POST /v1/agent/device, and its person sees it.
+      const spent = await mint(request, as(owner));
+      secrets.add(ok(await exchange(request, spent.token), 201).key);
+      error(await exchange(request, spent.token), 409, 'SETUP_TOKEN_USED');
+      const again = ok(await request('POST', '/v1/agent/device', undefined, { client_name: 'Codex', setup_token: spent.token }));
+      secrets.add(again.device_code);
+      assert.deepEqual((await waiting(owner)).map((item: Json) => item.userCode), [again.user_code]);
+      // A token that isn't one of ours, or a forged verifier, addresses nobody: refused, no code made.
+      const forged = spent.token.slice(0, -1) + (spent.token.endsWith('0') ? '1' : '0');
+      for (const token of [forged, 'nm_setup_x']) error(await request('POST', '/v1/agent/device', undefined, { setup_token: token }), 400, 'SETUP_TOKEN_INVALID');
+      // Without one, a device code asks nobody in particular: only its link reaches a person.
+      const cold = ok(await request('POST', '/v1/agent/device', undefined, {}));
+      secrets.add(cold.device_code);
+      assert.ok(!cold.nextStep.includes('dashboard'));
+      assert.deepEqual((await waiting(owner)).map((item: Json) => item.userCode), [again.user_code]);
     });
   });
 
@@ -5114,11 +5178,15 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       assert.match(started.user_code, /^[BCDFGHJKLMNPQRSTVWXZ]{4}-[BCDFGHJKLMNPQRSTVWXZ]{4}$/);
       assert.deepEqual([started.verification_uri, started.verification_uri_complete, started.expires_in, started.interval],
         [`${PUBLIC_ORIGIN}/connect`, `${PUBLIC_ORIGIN}/connect?code=${started.user_code}`, 900, 5]);
+      // In words too, with the link alone on its line: an agent relays it as the person's one thing to open.
+      assert.ok(started.nextStep.includes(`\n${started.verification_uri_complete}\n`) && started.nextStep.includes(started.user_code), started.nextStep);
       const poll = (code = started.device_code) => request('POST', '/v1/agent/device/token', undefined, { device_code: code, grant_type: 'urn:ietf:params:oauth:grant-type:device_code' });
       const waited = () => db.query("UPDATE agent_setups SET last_polled_at=now()-interval '1 minute' WHERE kind='device' AND user_code=$1", [started.user_code.replace('-', '')]);
       // Pending, then polled too soon: five seconds more from now on.
-      const pending = await poll();
-      assert.equal(error(pending, 400, 'AUTHORIZATION_PENDING').retryable, true);
+      const pending = await poll(), waiting = error(pending, 400, 'AUTHORIZATION_PENDING');
+      assert.equal(waiting.retryable, true);
+      // Every pending answer repeats the link, so an agent that polls in a loop keeps showing it.
+      assert.ok(waiting.message.startsWith('Waiting for the person to approve (15 min left). ') && waiting.message.endsWith(`:\n${started.verification_uri_complete}\nPoll again in 5 seconds.`), waiting.message);
       assert.equal(pending.headers.get('retry-after'), '5');
       const slow = await poll();
       error(slow, 400, 'SLOW_DOWN');
@@ -5196,9 +5264,22 @@ describe('Agent setup: a setup token in the copied prompt, and the device flow',
       // Expired: the agent starts again, and the page says so.
       const expired = await start();
       await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second' WHERE kind='device' AND user_code=$1", [expired.user_code.replace('-', '')]);
-      error(await poll(expired.device_code), 400, 'EXPIRED_TOKEN');
+      // Nobody approved it in time: the poll that finds it expired carries one new code, with the link to show.
+      const lapsed = error(await poll(expired.device_code), 400, 'EXPIRED_TOKEN'), renewed = lapsed.details[0];
+      secrets.add(renewed.device_code);
+      assert.notEqual(renewed.user_code, expired.user_code);
+      assert.ok(lapsed.message.startsWith('Nobody approved this code within 15 minutes') && lapsed.message.includes(`\n${renewed.verification_uri_complete}\n`), lapsed.message);
+      assert.deepEqual([renewed.expires_in, renewed.interval, renewed.verification_uri_complete], [900, 5, `${PUBLIC_ORIGIN}/connect?code=${renewed.user_code}`]);
+      error(await poll(renewed.device_code), 400, 'AUTHORIZATION_PENDING');
+      // The old code is done: polled again it points to the new one and makes no other; the page says it expired.
+      const again = error(await poll(expired.device_code), 400, 'EXPIRED_TOKEN');
+      assert.deepEqual([again.details, /was renewed/.test(again.message)], [undefined, true]);
       assert.equal(ok(await request('POST', '/v1/agent/device/lookup', undefined, { userCode: expired.user_code }, as(owner))).status, 'expired');
       error(await request('POST', '/v1/agent/device/approve', undefined, { userCode: expired.user_code }, as(owner)), 410, 'DEVICE_CODE_EXPIRED');
+      // Once: the renewed code, expired too, says to start again.
+      await db.query("UPDATE agent_setups SET expires_at=now()-interval '1 second', last_polled_at=NULL WHERE kind='device' AND user_code=$1", [renewed.user_code.replace('-', '')]);
+      const ended = error(await poll(renewed.device_code), 400, 'EXPIRED_TOKEN');
+      assert.deepEqual([ended.details, /^This device code expired \(15 minutes\)\. Start again/.test(ended.message)], [undefined, true]);
       // Wrong device codes, and a setup token where a device code goes.
       const live = await start();
       for (const code of [live.device_code.slice(0, -1) + (live.device_code.endsWith('0') ? '1' : '0'), `nm_device_${'3'.repeat(32)}.${'4'.repeat(64)}`, 'device', live.device_code.replace('nm_device_', 'nm_setup_')])

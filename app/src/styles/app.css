@@ -164,6 +164,23 @@ html[data-privacy='on']:not([data-peek]) .private-field:not(:focus)::placeholder
 .standing-banner__what { display: flex; align-items: center; font-weight: var(--font-weight-bold); font-variant-numeric: tabular-nums; }
 .standing-banner__what:not(:has(.ui-skeleton-block)) { display: block; }
 .standing-banner__did { color: var(--color-muted); }
+/* An agent waiting for this person's approval (components/AgentWaiting.tsx): over the page, bottom right where toasts
+   stack above it (a phone: above the tab bar), so nothing in the page moves when it appears or goes. */
+.agent-waiting { position: fixed; right: var(--space-24); bottom: var(--space-24); z-index: 90; display: flex; align-items: center; gap: var(--space-12); width: min(420px, calc(100vw - 48px)); padding: var(--space-8) var(--space-8) var(--space-8) var(--space-12); border: 0; border-radius: var(--radius-sm); background: var(--color-overlay-surface); box-shadow: var(--shadow-popover); color: var(--color-text); font-size: var(--text-md); line-height: var(--leading-sm); animation: toast-in 220ms var(--ease-out-strong); }
+.agent-waiting__pulse { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--color-accent); animation: agent-waiting-pulse 1.6s ease-in-out infinite; }
+@keyframes agent-waiting-pulse { 50% { opacity: .25; } }
+.agent-waiting__text { flex: 1; min-width: 0; }
+.agent-waiting__text > p { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-waiting__what { font-weight: var(--font-weight-bold); }
+.agent-waiting__when { color: var(--color-muted); font-size: var(--text-sm); font-variant-numeric: tabular-nums; }
+.agent-waiting__review { flex: none; }
+.app-shell--compact .agent-waiting { right: var(--space-8); bottom: calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--space-8)); width: calc(100vw - 2 * var(--space-8)); }
+.app-shell--compact .agent-waiting__review { height: var(--control-height); }
+/* A phone's page ends clear of it (the document scrolls, so only its end grows); in onboarding, whose page doesn't
+   scroll to clear it, it sits over the header instead of over the page's last button. */
+.app-shell--compact:has(.agent-waiting) { padding-bottom: calc(calc(var(--tab-bar-height) + env(safe-area-inset-bottom)) + var(--space-40) + var(--space-32)); }
+@media (max-width: 640px) { .onboarding-shell .agent-waiting { top: calc(env(safe-area-inset-top) + var(--space-8)); right: var(--space-8); bottom: auto; width: calc(100vw - 2 * var(--space-8)); animation-name: toast-in-top; } }
+@media (prefers-reduced-motion: reduce) { .agent-waiting, .agent-waiting__pulse { animation: none; } }
 .standing-banner__fix { flex: none; }
 /* Below 1100 px the text wraps instead of being cut (the reserved lines are two, three on a phone); below 900 px the button drops below it. */
 @media (max-width: 1100px) {

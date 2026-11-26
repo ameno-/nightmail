@@ -1057,6 +1057,8 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
   // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
   await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
+  // Uma's agent came back to a spent setup token and asked her with a device code: her pages show it waiting for her.
+  await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at,for_workspace_id,for_user_id) VALUES ($1,'device',repeat('0',64),'DFGHJKLM','Devin',now()+interval '14 minutes','ws_builtin','user_uma')", ['ags_' + 'd'.repeat(32)]);
   // API keys' agent tokens: that agent with two short-lived tokens it made in Northwind, and Sam's agent with one (an
   // owner sees another member's agent once it has made tokens here).
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at) VALUES('mcp_at_cls_sam','https://account.anoma.ly','user_sam','user_sam','claude-code',NULL,'{read}',now()+interval '1 day',0)");

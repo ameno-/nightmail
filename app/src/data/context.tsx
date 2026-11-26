@@ -163,6 +163,12 @@ function InvitationReview({ invitation, email, firstWorkspace, joining, error, o
     <div className="cluster"><Button variant="primary" loading={joining} onClick={onJoin}>Join workspace</Button><Button disabled={joining} onClick={onCancel}>{firstWorkspace ? 'Cancel and sign out' : 'Cancel'}</Button></div>
   </div></main>
 }
+/** Signed out at /connect: the agent's code, when the link had one that can be one, and what happens next. */
+function connectLead(code: string | null) {
+  const typed = (code ?? '').toUpperCase().replace(/[\s-]/g, '')
+  const shown = /^[BCDFGHJKLMNPQRSTVWXZ]{8}$/.test(typed) ? ` with the code ${typed.slice(0, 4)}-${typed.slice(4)}` : ''
+  return `A coding agent is waiting${shown} for you to approve it. Sign in, or sign up, and you’ll see what it asks for before it gets anything.`
+}
 // Signed out, or the session couldn't be checked, on a page that needs one: the wordmark (to the homepage) over one
 // centred column, as the account page it leads to is laid out.
 function SignedOutPage({ title, children }: { title: string; children: ReactNode }) {
@@ -522,8 +528,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     : home.isLoading ? <BootLoader /> : signedOut && home.data ? <Suspense fallback={null}><HomePage start={{ signedIn: false, onSignIn: login, onSignInIntent: prepareLogin, busy }} notice={authNotice} /></Suspense>
     // A dashboard page (a deep link from an email, or a bookmark) asks to sign in and opens once signed in; any other
     // address says there is no page there.
-    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={`Sign in to ${productName}`}>
+    // /connect, from the link an agent showed: say what is waiting, so a person who has never signed in knows why.
+    : signedOut ? isKnownPath(pathname) ? <SignedOutPage title={pathname === '/connect' ? 'Sign in to approve your agent' : `Sign in to ${productName}`}>
         {authNotice}
+        {pathname === '/connect' && <p className="muted">{connectLead(new URLSearchParams(window.location.search).get('code'))}</p>}
         <Button variant="primary" loading={busy} onClick={login} onPointerDown={prepareLogin} data-analytics="sign-in/continue">Continue to sign in</Button>
         <SignInConsent className="muted" />
       </SignedOutPage>

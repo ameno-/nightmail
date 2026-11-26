@@ -4,6 +4,10 @@
 .connect-facts dt { color: var(--color-muted); }
 .connect-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
 .connect-facts code { font-size: var(--text-md); font-weight: var(--font-weight-bold); letter-spacing: .08em; }
+/* Who is signed in, so a person in the wrong account sees it before approving, and the way to the right one. */
+/* Centred, not on the baseline: a masked address and a revealed one sit on different baselines (PrivateAddress). */
+.connect-facts dd.connect-account { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-12); }
+.connect-facts .connect-account__switch { min-height: 0; padding-block: 0; font-size: var(--text-sm); line-height: inherit; }
 .connect-grants { display: flex; flex-direction: column; gap: var(--space-8); font-size: var(--text-sm); line-height: var(--leading-sm); }
 .connect-grants h2 { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .connect-grants ul { display: flex; flex-direction: column; gap: var(--space-6); margin: 0; padding: 0; list-style: none; }

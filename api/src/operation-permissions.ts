@@ -74,7 +74,7 @@ export const OPERATION_PERMISSIONS: Record<string, OperationPermission> = {
   // agent exchanges its secret, which is its only credential there.
   createAgentSetupToken: people('admin', 'dashboard'), getAgentSetupToken: people('admin', 'dashboard'),
   exchangeAgentSetupToken: PUBLIC, startAgentDeviceAuthorization: PUBLIC, pollAgentDeviceToken: PUBLIC,
-  lookUpAgentDevice: people('any', 'dashboard'), approveAgentDevice: people('admin', 'dashboard'), denyAgentDevice: people('any', 'dashboard'),
+  listWaitingAgentDevices: people('admin', 'dashboard'), lookUpAgentDevice: people('any', 'dashboard'), approveAgentDevice: people('admin', 'dashboard'), denyAgentDevice: people('any', 'dashboard'),
   createApiKey: keyAdmin, listApiKeys: keyAdmin, revokeApiKey: keyAdmin, updateApiKey: keyAdmin, listApiKeyChanges: keyAdmin,
   // Audience. Contacts, imports and templates are content a member edits; lists and segments are not.
   listContacts: needs('audience', 'read', 'workspace'), createContact: needs('audience', 'write', 'workspace'), getContact: needs('audience', 'read', 'workspace'),
