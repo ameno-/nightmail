@@ -15366,7 +15366,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
     assert.deepEqual([misplaced.field, misplaced.message.startsWith('A key with access type addresses takes its permissions in access.mail (read, send (reply and start conversations from those addresses), modify (mark read, archive, label) and create (create agent inboxes)) and has no sender domains: move ["read","send"] from permissions to access.mail.')], ['permissions', true]);
     assert.match(error(await http('POST', '/v1/api-keys', sender.secret, { name: 'Replies', permissions: ['receive'] }), 403, 'PERMISSION_DENIED').message, /so it can't create, list or revoke API keys\. Create keys in the dashboard under API keys → Create key, or with a full-access key via POST \/v1\/api-keys\./);
     // A guessed route says where the endpoint is.
-    assert.match(error(await http('DELETE', `/v1/api-keys/${replyKey.id}`, full), 404, 'NOT_FOUND').message, /^Route not found\. Revoke a key with POST \/v1\/api-keys\/\{id\}\/revoke\. Every endpoint is listed in \/llms\.txt and \/docs\.md\.$/);
+    assert.match(error(await http('DELETE', `/v1/api-keys/${replyKey.id}`, full), 404, 'NOT_FOUND').message, /^Route not found: no endpoint answers DELETE on this path\. Revoke a key with POST \/v1\/api-keys\/\{id\}\/revoke\.(?: .*)? Every operation is listed in \/openapi\.json, \/llms\.txt and \/docs\.md\.$/);
     const visible = await allPages('/v1/emails', domainReader.secret);
     assert.ok(visible.some(row => row.id === allowed.id));
     assert.ok(visible.every(row => /@(?:[^@]+\.)?allowed\.example\.com$/i.test(row.from)), JSON.stringify(visible.map(row => row.from)));
@@ -25400,6 +25400,13 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       assert.equal(unmatchedTemplate('/v1/jobs/0f8fad5b-d9cb-469f-a165-70867728950e'), '/v1/jobs/{uuid}');
       assert.equal(unmatchedTemplate('/v1/Mailboxes/List'), '/v1/mailboxes/list');
       assert.equal(unmatchedTemplate('/v1/x/%E0%A4%A'), '/v1/x/{value}');
+      // What the template keeps: each literal segment that is a short plain word (lower-cased), and the slashes as sent, so a
+      // trailing or doubled slash shows. Everything else is a placeholder; the query and fragment are dropped; at most 12
+      // segments and 200 characters.
+      assert.equal(unmatchedTemplate('/v1/domains/'), '/v1/domains/');
+      assert.equal(unmatchedTemplate('/v1//domains?name=secret.example#x'), '/v1//domains');
+      assert.equal(unmatchedTemplate('/v1/a/b/c/d/e/f/g/h/i/j/k/l/m'), '/v1/a/b/c/d/e/f/g/h/i/j/k/…');
+      assert.equal(unmatchedTemplate('/v1/' + 'abcdefghijklmnopqrstuvwxyzabcd/'.repeat(10) + 'x').length, 201, 'Capped at 200 characters and an ellipsis.');
       const lines: Json[] = [];
       for (const level of ['error', 'info', 'warn'] as const) t.mock.method(console, level, (line: string) => { try { lines.push(JSON.parse(String(line))); } catch { /* not a log line */ } });
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Guessing agent', permissions: ['read'] }), 201); secrets.add(key.secret);
@@ -25412,10 +25419,22 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // An agent guessing: method plus template, never the address or ID it put in the path.
       assert.equal(await logged('/v1/mailboxes/mbx_9c67eea843964aefac3d404ad409eaab/reply-all/someone%40private.example?to=someone@private.example'), '/v1/mailboxes/{mbx_id}/reply-all/{email}');
       assert.ok(!JSON.stringify(lines).includes('private.example') && !JSON.stringify(lines).includes('9c67eea843964aefac3d404ad409eaab'));
+      // The answer an agent can act on: not retryable; the same route without the extra slash, the methods a real path takes
+      // (and an Allow header), or the closest route for the method, as templates from the route table, never the path sent.
+      const slash = await request('POST', '/v1/domains/', key.secret, { name: 'x.example' }), slashBody = slash.body.error;
+      assert.deepEqual([slash.status, slashBody.code, slashBody.retryable, slashBody.details], [404, 'NOT_FOUND', false, [{ closest: { method: 'POST', path: '/v1/domains' } }]]);
+      assert.equal(slashBody.message, 'Route not found: no endpoint answers POST on this path. POST /v1/domains exists: send it without the extra slash. Every operation is listed in /openapi.json, /llms.txt and /docs.md.');
+      assert.equal(lines.find(l => l.event === 'request' && l.requestId === slash.headers.get('x-request-id'))!.path, '/v1/domains/');
+      const method = await request('PUT', '/v1/domains', key.secret, {}), methodBody = method.body.error;
+      assert.deepEqual([method.status, methodBody.details, method.headers.get('allow')], [404, [{ path: '/v1/domains', allowedMethods: ['GET', 'POST'] }], 'GET, POST']);
+      assert.match(methodBody.message, /^Route not found: no endpoint answers PUT on this path\. \/v1\/domains doesn’t take PUT; it takes GET, POST\. Every operation/);
+      const guess = await request('GET', '/v1/domains/dom_0123456789/dns-setup/mdom_0123456789', key.secret), guessBody = guess.body.error;
+      assert.deepEqual([guess.status, guessBody.details], [404, [{ closest: { method: 'GET', path: '/v1/domains/{id}/dns-setup' } }]]);
+      assert.ok(!JSON.stringify(guessBody).includes('0123456789'), 'The answer never echoes what the caller put in the path.');
       // A burst past the limit still writes its request lines, without the path.
       const paths: unknown[] = [];
       for (let i = 0; i < 22; i++) paths.push(await logged(`/v1/guess${i % 3}`));
-      assert.equal(paths.filter(Boolean).length, 19, 'Twenty per window, the first already used.');
+      assert.equal(paths.filter(Boolean).length, 16, 'Twenty per window, four already used.');
       // A path outside the API (a crawler) isn't recorded at all; a matched route never carries one.
       const crawler = await local('GET', '/wp-admin/setup.php'); assert.equal(crawler.status, 404);
       assert.equal(lines.find(l => l.event === 'request' && l.requestId === crawler.headers.get('x-request-id'))?.path, undefined);
