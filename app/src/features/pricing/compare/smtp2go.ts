@@ -3,15 +3,17 @@ import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer
 // Nightmail vs SMTP2GO (/compare/smtp2go): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // SMTP2GO's own pages on CHECKED: the plans on its pricing page as it renders with monthly billing ($15 for 10,000; the
 // page's no-script fallback shows older figures, which aren't used).
-const CHECKED = '2026-11-25'
+const CHECKED = '2026-11-26'
 const read = readOn(CHECKED)
 
 const SMTP2GO = 'https://www.smtp2go.com/pricing/'
 const tier = (size: number, cents: number, overage: number, quote: string): Tier => ({ size, cents, overage, source: read(SMTP2GO, quote) })
 const free = read(SMTP2GO, 'Free Plan … $ 0/mo For testing & sending low volumes. Limited to 200 emails/day. 1,000 emails/mo … Extra emails not permitted')
-// Every size SMTP2GO's pricing page sells its plans at. Past a paid plan's emails SMTP2GO bills each extra 1,000 at the
-// tier's rate, so a smaller plan plus that can cost less than the next one up. Its page lists no plan between 1,000,000
-// and Premier, over 3,000,000.
+// Every size SMTP2GO's pricing page sells its plans at, monthly, as its slider's own data lists them (DATA: the page's
+// embedded plans, by emails a month, with the monthly price and the price per extra email; on 26 Nov 2026 it also lists
+// 5,000 for $5, and 3,000,000 and 5,000,000 above the 1,000,000 its visible text tops out at). Past a paid plan's emails
+// SMTP2GO bills each extra 1,000 at the tier's rate, so a smaller plan plus that can cost less than the next one up.
+const DATA = (quote: string) => read(SMTP2GO, quote)
 const offer: Offer = {
   id: 'smtp2go', vendor: 'SMTP2GO', name: 'SMTP2GO', pricing: SMTP2GO, checked: CHECKED, unit: 'emails', ladder: 'complete',
   counts: 'emails sent', payg: ' plus overage',
@@ -19,6 +21,7 @@ const offer: Offer = {
   plans: [
     { name: 'Free', note: '200 a day', tiers: [{ size: 1_000, cents: 0, source: free }] },
     { name: 'Starter', tiers: [
+      { size: 5_000, cents: 500, overage: 100, source: DATA('"5000":{"1":{"record_id":200,"price":5,"has_private_ip":false,"price_per_extra_email":0.001}') },
       tier(10_000, 1_500, 120, 'Starter … $ 15/mo … 10,000 emails/mo … Extra emails: $1.20 / thousand'),
       tier(50_000, 3_000, 100, 'Starter … $ 30/mo … 50,000 emails/mo … Extra emails: $1 / thousand'),
     ] },
@@ -27,6 +30,8 @@ const offer: Offer = {
       tier(250_000, 17_000, 70, 'Professional … $ 170/mo … 250,000 emails/mo … Extra emails: $0.70 / thousand'),
       tier(500_000, 28_000, 60, 'Professional … $ 280/mo … 500,000 emails/mo … Extra emails: $0.60 / thousand'),
       tier(1_000_000, 52_000, 50, 'Professional … $ 520/mo … 1,000,000 emails/mo … Extra emails: $0.50 / thousand'),
+      { size: 3_000_000, cents: 90_000, overage: 40, source: DATA('"3000000":{"1":{"record_id":245,"price":900,"has_private_ip":true,"price_per_extra_email":0.0004}') },
+      { size: 5_000_000, cents: 130_000, overage: 35, source: DATA('"5000000":{"1":{"record_id":250,"price":1300,"has_private_ip":true,"price_per_extra_email":0.00035}') },
     ] },
   ],
 }
@@ -39,7 +44,7 @@ export const smtp2go: Entry = {
   offer,
   model: { per: 'email' },
   sizes,
-  // Every paid plan size SMTP2GO's page lists, from 10,000 to its last (1,000,000).
+  // Every paid plan size SMTP2GO's page lists, from 10,000 to its last (5,000,000).
   steps: tierSizes(offer, 10_000, Infinity),
   lead: 'SMTP2GO sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, SMTP2GO’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
