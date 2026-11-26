@@ -204,6 +204,18 @@ jobs:
         run: cargo fmt --all --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked
 
   acceptance-shard:
+    # Matrix outputs are merged by key, not collected in an array. Key by job position so even
+    # two runners reporting the same logical shard survive for the required check to diagnose.
+    outputs: &shard-outputs
+      slot0: ${{ steps.report.outputs.slot0 }}
+      slot1: ${{ steps.report.outputs.slot1 }}
+      slot2: ${{ steps.report.outputs.slot2 }}
+      slot3: ${{ steps.report.outputs.slot3 }}
+      slot4: ${{ steps.report.outputs.slot4 }}
+      slot5: ${{ steps.report.outputs.slot5 }}
+      slot6: ${{ steps.report.outputs.slot6 }}
+      slot7: ${{ steps.report.outputs.slot7 }}
+      slot8: ${{ steps.report.outputs.slot8 }}
     needs: changes
     if: needs.changes.outputs.acceptance == 'true'
     strategy:
@@ -239,6 +251,16 @@ jobs:
         env:
           PG_CONTAINER: ${{ job.services.postgres.id }}
           ACCEPTANCE_SHARD: ${{ matrix.fixture }}
+          SHARD_REPORT: &shard-report ${{ runner.temp }}/shard-report.jsonl
+      - &publish-shard
+        id: report
+        name: Report completed shard and full inventory
+        env:
+          SLOT: ${{ strategy.job-index }}
+        run: |
+          (( SLOT < 9 )) || { echo "::error::Unexpected matrix slot $SLOT"; exit 1; }
+          rows=$(jq -ces 'select(length > 0)' "$RUNNER_TEMP/shard-report.jsonl")
+          echo "slot$SLOT=$rows" | tee -a "$GITHUB_OUTPUT"
 
   # The real Worker before merge (docs/ci.md): dev's migrations then this change's, and this change's alone, must
   # apply and end with the same schema; then wrangler dev (workerd) serves wrangler.dev.jsonc's assets and routing on
@@ -283,6 +305,7 @@ jobs:
   # slow out-of-order API responses) against the production build and a throwaway API with synthetic data.
   # Fails above CLS 0.001 on any page; the longest task per in-app navigation is reported. Locally: cd app && bun run cls.
   cls-shard:
+    outputs: *shard-outputs
     needs: changes
     if: needs.changes.outputs.cls == 'true'
     strategy:
@@ -318,6 +341,7 @@ jobs:
       - name: Measure layout shift on every page
         working-directory: app
         env:
+          SHARD_REPORT: *shard-report
           CLS_SHARD_INDEX: ${{ matrix.shard }}
           CLS_SHARD_COUNT: ${{ strategy.job-total }}
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
@@ -329,9 +353,11 @@ jobs:
         working-directory: app
         env:
           VITE_HOME: tv
+          SHARD_REPORT: *shard-report
           CLS_HOME: tv
           CLS_PG_URL: postgresql://postgres:fixture-admin@127.0.0.1:5432/postgres
         run: ./node_modules/.bin/vite build --outDir dist-tv && node scripts/cls.mjs
+      - *publish-shard
       - name: Upload the shift sources
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -344,6 +370,7 @@ jobs:
   # The support Worker (support/, the AI support agent's backend): types, the deployable bundle, and its tests, which
   # drive that bundle in Miniflare with a fake Nightmail and a scripted model (no network, no model calls).
   support-work:
+    outputs: *shard-outputs
     needs: changes
     if: needs.changes.outputs.support == 'true'
     strategy:
@@ -379,7 +406,11 @@ jobs:
           queues='support Worker (intake work queue|conversation work queue|work ledger and sweep|replay and readiness) '
           pattern=$queues
           if [[ $FIXTURE == chat ]]; then pattern="^(?!.*$queues)"; fi
-          bun run test --testNamePattern "$pattern"
+          ./node_modules/.bin/vitest list --json > "$RUNNER_TEMP/support-list.json"
+          bun run test --testNamePattern "$pattern" --reporter=default --reporter=json --outputFile.json="$RUNNER_TEMP/support-run.json"
+          jq -cn --arg id "$FIXTURE" --slurpfile list "$RUNNER_TEMP/support-list.json" --slurpfile run "$RUNNER_TEMP/support-run.json" \
+            '{id:$id,ran:$run[0].numPassedTests,total:($list[0] | length)}' > "$RUNNER_TEMP/shard-report.jsonl"
+      - *publish-shard
 
   # Don't publish all six protected checks at once after the slowest shard. The dev queue saw
   # them go green together while branch protection still saw build in progress on the batch tip.
@@ -406,6 +437,48 @@ jobs:
           echo "Scope: $SCOPE; selected: $SELECTED; suite: $RESULT"
           [[ $SCOPE == success ]]
           [[ $SELECTED:$RESULT == true:success || $SELECTED:$RESULT == false:skipped ]]
+      - name: Verify shard coverage
+        if: always() && needs.changes.outputs[matrix.flag] == 'true' && contains(fromJSON('["acceptance","cls","support"]'), matrix.check)
+        env:
+          SUITE: ${{ matrix.check }}
+          REPORTS: ${{ toJSON(needs[matrix.job].outputs) }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, sys
+          suite = os.environ['SUITE']
+          # Independent of the workflow matrix: deleting an entry must not shrink the expected set.
+          inventories = {
+              'acceptance': [['integration-contract', 'integration-rest', 'simulated-a-h', 'simulated-rest']],
+              'support': [['chat', 'queues']],
+              'cls': [[*map(str, range(8)), 'alone'], ['tv']],
+          }[suite]
+          expected = {shard for group in inventories for shard in group}
+          seen, errors = {}, []
+          for value in json.loads(os.environ['REPORTS']).values():
+              for row in json.loads(value):
+                  shard, ran, total = row['id'], row['ran'], row['total']
+                  print(f'{suite} [{shard}]: {ran}/{total}')
+                  if shard not in expected or shard in seen:
+                      errors.append(f'{"duplicate" if shard in seen else "unexpected"} shard: {shard}')
+                  if not (type(ran) is int and type(total) is int and 0 <= ran <= total and total > 0):
+                      errors.append(f'invalid counts for {shard}: {ran}/{total}')
+                  seen[shard] = row
+          if missing := expected - seen.keys():
+              errors.append('missing shard(s): ' + ', '.join(sorted(missing)))
+          if not errors:
+              grand = 0
+              for group in inventories:
+                  totals = {seen[s]['total'] for s in group}
+                  ran = sum(seen[s]['ran'] for s in group)
+                  if len(totals) != 1:
+                      errors.append(f'inventory sizes disagree for {group}: {sorted(totals)}')
+                  elif ran != (total := totals.pop()):
+                      errors.append(f'{group}: ran {ran}/{total}; {abs(total - ran)} {"missing" if ran < total else "extra"}')
+                  grand += ran
+          if errors:
+              sys.exit(f'{suite}: ' + '; '.join(errors))
+          print(f'::notice title=Shard coverage::{suite}: {grand}/{grand} {"measurements" if suite == "cls" else "cases"}')
+          PYTHON
 
   required-cls:
     name: *protected-name
