@@ -6,7 +6,7 @@ import { dayOf, formatCount, nightmail, shownSources, type Comparison, type Sour
 import { ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
-import { month as monthOf, spelled } from './alternatives.ts'
+import { checkedOn, month as monthOf, spelled } from './alternatives.ts'
 
 // /free-email-api: the search for a free tier (many arrive after SendGrid's became a trial), answered with what the data
 // shows. Nightmail's line is its allowance in full, from the billing code; the rows are the compared services whose standing
@@ -96,7 +96,7 @@ export function freeEmailApi(): Doc {
   for (const { c, f } of read) if (f && f.kind === 'larger' && !((monthly(f) ?? Infinity) >= nightmail.freeSent || f.terms))
     throw new Error(`/free-email-api leaves out ${c.offer.vendor} as larger, and its allowance isn't (docs/free.ts).`)
   const checked = [...new Set(listed.map(r => r.source!.checked))].sort()
-  const when = checked.length === 1 ? dayOf(checked[0]!) : `${dayOf(checked[0]!)} to ${dayOf(checked.at(-1)!)}`
+  const when = checkedOn(checked)
   const byGroup = GROUPS.map(g => ({ ...g, all: ORDERED.filter(c => c.focus === g.focus), rows: listed.filter(r => r.c.focus === g.focus) }))
   const apis = byGroup[0]!
 
