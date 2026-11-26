@@ -23,7 +23,10 @@ export type GateScope = {
    * them in this conversation that their access still covers. An answer may repeat these; never anyone else's.
    */
   theirs?: readonly string[];
-  /** The sender's own name (a staff member signing their reply): theirs to use, never an internal name. */
+  /**
+   * The sender's own name (a staff member signing their reply): a mention that is that whole name, and nothing longer,
+   * is theirs to use. A name exempts nothing unless it is a person's (ownNameOf).
+   */
   ownName?: string | null;
 };
 export type GateResult = { ok: true } | { ok: false; reasons: string[] };
@@ -36,7 +39,8 @@ const LONG_B64 = /(?<![A-Za-z0-9+/])[A-Za-z0-9+/]{60,}={0,2}(?![A-Za-z0-9+/])/;
 const INTERNAL_HOST = /\b(?:(?:[a-z0-9-]+\.)+(?:internal|invalid|local)|(?:[a-z0-9-]+\.)*(?:svc\.cluster\.local|workers\.dev|psdb\.cloud|amazonaws\.com|hyperdrive\.local))\b/i;
 const INTERNAL_ID = /\b(?:ws|sgr|sho|dom|wh|key|mbk|usr|conv|tkt)_[0-9a-z]{16,}\b/g;
 /** People and systems the agent never names: Nightmail staff, internal tools. */
-const STAFF = /\b(?:Ryan Vogel|thdxr|R44VC0RP|Dax Raad|PlanetScale|Hyperdrive|platform_operators|support_grants|supportGate|operatorGate|SupportPlatform)\b/i;
+const STAFF_PEOPLE = ['Ryan Vogel', 'thdxr', 'R44VC0RP', 'Dax Raad'], INTERNAL_SYSTEMS = ['PlanetScale', 'Hyperdrive', 'platform_operators', 'support_grants', 'supportGate', 'operatorGate', 'SupportPlatform'];
+const STAFF = new RegExp(`\\b(?:${[...STAFF_PEOPLE, ...INTERNAL_SYSTEMS].join('|')})\\b`, 'i');
 const FENCE = /<\/?untrusted>|<customer>|<\/customer>|<context>|<\/context>|<notes\b|<\/notes>|<proposals\b|<\/proposals>/i;
 
 export function gate(text: string, scope: GateScope): GateResult {
@@ -49,8 +53,7 @@ export function gate(text: string, scope: GateScope): GateResult {
   if (INTERNAL_HOST.test(text)) reasons.push('internal hostname');
   const allowedIds = new Set([...scope.allowedIds, ...scope.theirs ?? []]);
   for (const id of text.match(INTERNAL_ID) ?? []) if (!allowedIds.has(id)) reasons.push('ID outside the grant');
-  const own = scope.ownName?.trim();
-  if (STAFF.test(own ? text.replace(new RegExp(own.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), ' ') : text)) reasons.push('internal name');
+  if (namesStaff(text, ownNameOf(scope.ownName))) reasons.push('internal name');
   if (FENCE.test(text)) reasons.push('harness markup');
   if (confirmLink(text)) reasons.push('confirmation link');
   if (scope.linkOrigins) {
@@ -62,6 +65,31 @@ export function gate(text: string, scope: GateScope): GateResult {
   const lower = text.toLowerCase();
   for (const fragment of scope.promptFragments) if (fragment.length >= 24 && lower.includes(fragment.toLowerCase())) { reasons.push('system prompt text'); break; }
   return reasons.length ? { ok: false, reasons: [...new Set(reasons)] } : { ok: true };
+}
+
+/**
+ * A sender's own name as the internal-name rule may exempt it, or null: a person's name, at least 3 characters of
+ * letters (any script), spaces, apostrophes, hyphens and periods, starting with a letter, and never one of the internal
+ * systems. A shorter name, or one with a digit, an underscore or another sign (an identifier, a handle), exempts nothing.
+ */
+function ownNameOf(name: string | null | undefined) {
+  const own = name?.trim();
+  if (!own || own.length < 3 || !/^\p{L}[\p{L}\p{M} .'’-]*[\p{L}\p{M}.]$/u.test(own)) return null;
+  return INTERNAL_SYSTEMS.some(system => system.toLowerCase() === own.toLowerCase()) ? null : own.toLowerCase();
+}
+/**
+ * Whether a text names staff or an internal system. Without an own name, the rule as it always was. With one, a mention
+ * the rule finds is exempt only when it is that whole name (ignoring case) and stands alone: not inside a longer word,
+ * identifier, address, path or host (no letter, digit, _, @, ., / or - right before it; none of those right after it,
+ * except a period that ends a sentence).
+ */
+function namesStaff(text: string, own: string | null) {
+  if (!own) return STAFF.test(text);
+  for (const match of text.matchAll(new RegExp(STAFF.source, 'gi'))) {
+    const before = text[match.index - 1] ?? '', after = text.slice(match.index + match[0].length, match.index + match[0].length + 2);
+    if (match[0].toLowerCase() !== own || /[\p{L}\p{N}_@./-]/u.test(before) || /^(?:[\p{L}\p{N}_@/-]|\.[\p{L}\p{N}_])/u.test(after)) return true;
+  }
+  return false;
 }
 
 /** The addresses and internal IDs in a text, as the gate finds them: what `theirs` is collected from. */

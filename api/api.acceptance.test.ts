@@ -11977,12 +11977,19 @@ describe('Hosted MCP OAuth and tools', () => {
             assert.deepEqual(staffView.messages.filter((m: Json) => m.author === 'staff').map((m: Json) => [m.staff.userId, m.staff.viaAgent]), [[operator.userId, true]]);
             assert.deepEqual(staffView.events.filter((e: Json) => e.kind === 'paused').map((e: Json) => e.details), [{ by: 'staff', reply: true, viaAgent: true }]);
             assert.deepEqual((await db.query("SELECT via, actor_label, summary->>'agent' AS agent FROM audit_events WHERE action = 'support.reply' AND target_id = $1", [chatAgent])).rows, [{ via: 'mcp', actor_label: 'via agent', agent: approval.id }]);
-            // A staff member's own name is theirs to sign with (the check refuses staff names); anyone else's is still refused.
+            // A staff member's own name is theirs to sign with (the check refuses staff names), as that whole name only. Anyone
+            // else's is still refused; so is an own name inside a longer word or identifier, and a name too short to be a
+            // person's or that is an internal system exempts nothing.
             const named = (await db.query('SELECT name FROM nightmail_users WHERE id = $1', [operator.userId])).rows[0].name;
-            await db.query("UPDATE nightmail_users SET name = 'Ryan Vogel' WHERE id = $1", [operator.userId]);
+            const signedAs = async (name: string, text: string) => {
+              await db.query('UPDATE nightmail_users SET name = $2 WHERE id = $1', [operator.userId, name]);
+              return act(mine.token, { conversationId: chatAgent, action: 'reply', text });
+            };
             try {
-              fine(await act(mine.token, { conversationId: chatAgent, action: 'reply', text: 'It is live now.\n\nRyan Vogel, Nightmail' }));
-              assert.deepEqual(refused(await act(mine.token, { conversationId: chatAgent, action: 'reply', text: 'Dax Raad will follow up.' }), 'SUPPORT_AGENT_REPLY_REFUSED').details, [{ reasons: ['internal name'] }]);
+              fine(await signedAs('Ryan Vogel', 'It is live now.\n\nRyan Vogel, Nightmail'));
+              for (const [name, text] of [['Ryan Vogel', 'Dax Raad will follow up.'], ['Ryan Vogel', 'Write to the Ryan Vogel-bot.'], ['Grant', 'Your access is in support_grants.'],
+                ['R', 'Dax Raad will follow up.'], ['Hyperdrive', 'Hyperdrive was slow today.']] as const)
+                assert.deepEqual(refused(await signedAs(name, text), 'SUPPORT_AGENT_REPLY_REFUSED').details, [{ reasons: ['internal name'] }], `${name}: ${text}`);
             } finally { await db.query('UPDATE nightmail_users SET name = $2 WHERE id = $1', [operator.userId, named]); }
             // A note, hand back and done, each on the record as via agent.
             assert.equal(fine(await act(mine.token, { conversationId: chatAgent, action: 'note', text: 'Told them it is live.' })).message.viaAgent, true);
