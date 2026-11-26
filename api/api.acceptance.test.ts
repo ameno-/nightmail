@@ -32178,6 +32178,42 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const postmaster = board.postmaster.find(p => p.domain === 'deliverability.example')!;
       assert.deepEqual([postmaster.status, postmaster.url, postmaster.latest, Math.round(postmaster.spamRatio.current! * 1e6) / 1e6], ['ok', 'https://postmaster.google.com/',
         { day: `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6)}`, spamRatio: 0.0004, spf: 1, dkim: 1, dmarc: 1, deliveryErrorRatio: 0 }, 0.0012]);
+      const root = 'example.co.uk', resume = `/v1/operator/glass/link-domains/${root}/resume`;
+      await db.query("INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES ($1,'news.example.co.uk','links.news.example.co.uk','active')",[wid]);
+      runtime.config.placementDblZone = 'fixture.dbl.example';
+      let answer: 'listed' | 'unknown' | 'clear' = 'unknown';
+      const prior = globalThis.fetch;
+      globalThis.fetch = async (input,init) => {
+        const url = new URL(input instanceof Request ? input.url : String(input));
+        if (['dns.google','cloudflare-dns.com'].includes(url.hostname)) {
+          assert.equal(url.searchParams.get('name'),root+'.fixture.dbl.example');
+          if (answer === 'unknown') throw Error('fixture resolver unavailable');
+          return Response.json(answer === 'clear' ? {Status:3,Authority:[{name:'fixture.dbl.example.',type:6,data:'fixture'}]} :
+            {Status:0,Answer:[{name:url.searchParams.get('name')+'.',type:1,data:'127.0.1.2'}]});
+        }
+        return prior(input,init);
+      };
+      try {
+        const observe = async (result: typeof answer) => {
+          answer = result;
+          await db.query("UPDATE deliverability_checks SET next_at=now() WHERE kind='dbl' AND subject=$1",[root]);
+          await refreshDeliverabilitySources(runtime);
+          return (await db.query("SELECT status,held_at IS NOT NULL AS held,checked_at IS NOT NULL AS checked FROM deliverability_checks WHERE kind='dbl' AND subject=$1",[root])).rows[0];
+        };
+        assert.deepEqual(await observe('unknown'),{status:'unknown',held:false,checked:true});
+        assert.deepEqual(await observe('listed'),{status:'listed',held:true,checked:true});
+        const { healthTick } = await import('./src/health.js');
+        await healthTick(runtime,{}, {force:true});
+        assert.ok(ok(await local('GET','/v1/operator/health')).alerts.some((a:Json)=>a.key==='link-domain-held:'+root && a.severity==='critical'));
+        assert.deepEqual(await observe('unknown'),{status:'unknown',held:true,checked:true});
+        const reason = {reason:'Synthetic operator reviewed domain'};
+        error(await local('POST',resume,reason),403,'OPERATOR_REQUIRED');
+        await setOperator(db,[AUTH_SUBJECT,'operator','--reason','Synthetic domain review']);
+        error(await local('POST',resume,reason),409,'LINK_DOMAIN_NOT_CLEARED');
+        assert.deepEqual(await observe('clear'),{status:'clear',held:true,checked:true});
+        ok(await local('POST',resume,reason));
+        assert.equal((await db.query("SELECT held_at FROM deliverability_checks WHERE kind='dbl' AND subject=$1",[root])).rows[0].held_at,null);
+      } finally { globalThis.fetch = prior; }
       runtime.config.builtinDomain = builtin;
 
       // The route: the same figures for an operator, cached; a window that isn't one is refused.
@@ -42848,7 +42884,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const wid=runtime.config.workspaceId,pool='111122223333',domain='link-domain.example',from=`news@${domain}`,shared='links.link-fixture.example';
       const saas={zoneId:'0'.repeat(32),token:'acceptance-fixture-cloudflare-token',target:'edge.links-fixture.example'};
       // As production: the link domain on, own link hosts off.
-      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'},linkHost:shared,linkHosts:undefined});
+      Object.assign(runtime.config,{multiTenant:true,liveEnabled:true,aws:{accessKeyId:'fixture-platform',secretAccessKey:'fixture-only'},linkHost:shared,linkWarmup:{initial:12,full:48,days:3,workspacePercent:50},linkHosts:undefined});
       await db.query(`INSERT INTO provider_pool_regions(region,aws_account_id,feedback_topic_arn,sending_state,inbound_bucket) VALUES ($1,$2,$3,'ready','fixture')`,[REGION,pool,`arn:aws:sns:${REGION}:${pool}:bane-feedback`]);
       await db.query(`INSERT INTO provider_connections(id,workspace_id,region,state,kind,aws_account_id,tenant_state) VALUES ($1,$1,$2,'ready','shared',$3,'ready')`,[wid,REGION,pool]);
       await db.query(`INSERT INTO domain_claims(name,workspace_id,connection_id,sending_state) VALUES ($1,$2,$2,'verified')`,[domain,wid]);
@@ -42868,7 +42904,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       });
       const launch=async()=>{const c=ok(await local('POST','/v1/campaigns',{name:unique('link-domain'),from,subject:'Links',html:'<p>Fixture.</p>',audience:{listId:list.id}}),201);
         ok(await local('POST',`/v1/campaigns/${c.id}/send`,{revision:c.revision}),202);return c;};
-      const marketingTo=(to:string)=>local('POST','/v1/emails/send',{from,to,subject:'Links',html:'<p>Hello</p>',text:'Hello',kind:'marketing'});
+      const marketingTo=(to:string,key?:string)=>local('POST','/v1/emails/send',{from,to,subject:'Links',html:'<p>Hello</p>',text:'Hello',kind:'marketing'},'live',key ? {'Idempotency-Key':key} : {});
       // Own link hosts off: no link record to add.
       assert.deepEqual((await withLinkRecords(runtime,wid,[{name:domain,dns:[]}] as any[]))[0].dns,[]);
       // A campaign: its review freezes no link host, its release records its recipients, and every copy links on the link domain.
@@ -42878,7 +42914,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(hostsOf(delivered.splice(0)),[shared,shared,shared]);
       assert.equal(await used(),3);
       // Marketing mail too, recorded the same way.
-      ok(await marketingTo('link-domain-1@example.net'),202);
+      const once = unique('idem'), accepted = ok(await marketingTo('link-domain-1@example.net',once),202);
+      assert.equal(ok(await marketingTo('link-domain-1@example.net',once),202).id,accepted.id);
       await run('email.dispatch');
       const [marketing]=delivered.splice(0);assert.deepEqual(hostsOf([marketing]),[shared]);assert.equal(await used(),4);
       // The link domain serves the links of the workspaces that linked there, and only theirs.
@@ -42889,10 +42926,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal((await page(new Request(`https://${shared}/unsubscribe/${foreign}`,{headers:{accept:'text/html'}}))).status,404);
       // Glass's activity feed shows the workspace's use of it today.
       assert.ok((await readActivity(runtime)).events.some(e=>e.kind==='link_fallback'&&e.workspace?.id===wid&&e.subject===shared&&e.detail==='4'&&e.tone==='neutral'));
-      // No cap of its own: past 10,000 today, marketing mail still goes, as the workspace's own limits allow.
-      await db.query('UPDATE link_fallback_days SET recipients=10000 WHERE workspace_id=$1 AND host=$2',[wid,shared]);
-      ok(await marketingTo('link-domain-2@example.net'),202);assert.equal(await used(),10001);
-      await run('email.dispatch');assert.deepEqual(hostsOf(delivered.splice(0)),[shared]);
+      // Two slots of this workspace's share remain. Its campaign releases those two, then waits at its cursor.
+      const paced = await launch(), view = async () => ok(await local('GET', `/v1/campaigns/${paced.id}`)).delivery;
+      await run('campaign.run'); await run('email.dispatch'); await run('campaign.run');
+      const heldBudget = await view();
+      assert.deepEqual([heldBudget.expanded,heldBudget.waiting.reason,heldBudget.waiting.linkHold,await used()], [2,'pacing_window','daily_budget',6]);
+      assert.deepEqual(hostsOf(delivered.splice(0)), [shared,shared]);
+      error(await marketingTo('link-domain-2@example.net'),429,'LINK_BUDGET_REACHED');
+      assert.equal(await used(),6,'A refused admission consumes nothing.');
+      // A UTC day later: the already-released prefix is never repeated.
+      await db.query('UPDATE link_fallback_days SET day=day-1 WHERE workspace_id=$1 AND host=$2',[wid,shared]);
+      await run('campaign.run'); await run('email.dispatch');
+      assert.deepEqual(hostsOf(delivered.splice(0)),[shared]); assert.equal((await view()).expanded,3);
+      const { linkBudget } = await import('./src/link-domains.js');
+      assert.deepEqual((await linkBudget(runtime.db,runtime.config,wid))?.limit,24);
+      // Other workspaces can exhaust the global allowance even while our workspace has room.
+      await db.query("INSERT INTO link_fallback_days(workspace_id,host,day,recipients) VALUES ('other_a',$1,(now() AT TIME ZONE 'UTC')::date,12),('other_b',$1,(now() AT TIME ZONE 'UTC')::date,11)",[shared]);
+      error(await marketingTo('link-domain-2@example.net'),429,'LINK_BUDGET_REACHED');
+      assert.equal(await used(),7);
       // A pause takes the workspace off at once (a paused connection: an operator's pause or the abuse path; or the standing
       // ladder's pause step), with every use asking again; a warning, or a new workspace with no standing yet, doesn't.
       const paused=/isn’t sent while this workspace’s sending is paused/;
@@ -42930,10 +42981,24 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await review(),['not_configured',{hostname:`links.${domain}`,active:false},`https://${shared}`]);
       await db.query("INSERT INTO link_hosts(workspace_id,domain,hostname,status) VALUES ($1,$2,'links.'||$2,'active')",[wid,domain]);
       assert.deepEqual(await review(),['not_configured',{hostname:`links.${domain}`,active:true},`https://links.${domain}`]);
-      await launch();await run('campaign.run');await run('email.dispatch');
+      const ownCampaign = await launch(), registered = 'link-domain.example';
+      await db.query("INSERT INTO deliverability_checks(kind,subject,status,checked_at,held_at) VALUES ('dbl',$1,'listed',now(),now())",[registered]);
+      await run('campaign.run');
+      const heldOwn = ok(await local('GET',`/v1/campaigns/${ownCampaign.id}`)).delivery;
+      assert.deepEqual([heldOwn.expanded,heldOwn.waiting.reason,heldOwn.waiting.linkHold], [0,'link_record','blocklist']);
+      error(await marketingTo('link-domain-1@example.net'),429,'LINK_DOMAIN_HELD');
+      // A scheduled message is judged on release, not on its scheduling day.
+      const later = ok(await local('POST','/v1/emails/send',{from,to:'link-domain-2@example.net',subject:'Scheduled',text:'Later',kind:'marketing',scheduledAt:new Date(Date.now()+3600000).toISOString()}),202);
+      await db.query("UPDATE sending_emails SET scheduled_at=now()-interval '1 second' WHERE id=$1",[later.id]);
+      await run('sending.release');
+      assert.equal((await db.query('SELECT status FROM sending_emails WHERE id=$1',[later.id])).rows[0].status,'scheduled');
+      ok(await local('POST','/v1/emails/send',{from,to:'link-domain-1@example.net',subject:'Receipt',text:'Transactional'}),202);
+      await run('email.dispatch'); assert.equal(delivered.splice(0).length,1);
+      await db.query("UPDATE deliverability_checks SET status='clear',held_at=NULL WHERE kind='dbl' AND subject=$1",[registered]);
+      await run('campaign.run');await run('email.dispatch');
       const onOwn=delivered.splice(0);
       assert.deepEqual(hostsOf(onOwn),[`links.${domain}`,`links.${domain}`,`links.${domain}`]);
-      assert.equal(await used(),10001);
+      assert.equal(await used(),7);
       // Taken off the list, it links on the link domain again at once, with no record shown; the links its mail already
       // carries keep answering on its own host.
       runtime.config.linkHosts={...saas,workspaces:[other]};
@@ -43062,6 +43127,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // this installation's own origin as before.
       const linkDomain = 'links.image-fixture.example', onLinkDomain = `https://${linkDomain}${path}`;
       runtime.config.linkHost = linkDomain;
+      runtime.config.linkWarmup = { initial: 8, full: 16, days: 2, workspacePercent: 50 };
       try {
         const hosted = await campaign('On the link domain', true), body = hosted.sent.Content.Simple.Body.Html.Data as string;
         assert.ok(body.includes(`<img src="${onLinkDomain}" alt="logo" width="100"`) && body.includes(`https://${linkDomain}/unsubscribe/`) && !body.includes(`${PUBLIC_ORIGIN}/i/`), body);
@@ -46079,6 +46145,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
             DISPATCHER: { idFromName(n) { return n; }, get() { return { async fetch() { return Response.json({ ok: true }); } }; } },
           };
 
+          const sharedEnv = { ...env, NIGHTMAIL_LINK_HOST: 'links.example.net' };
+          for (const host of ['links.example.net','example.net']) {
+            const info = await worker.fetch(new Request('https://'+host+'/'),sharedEnv);
+            assert.equal(info.status,200); assert.match(await info.text(),/mailto:abuse@nightmail.dev/);
+          }
+          assert.equal((await worker.fetch(new Request('https://links.other.net/'),sharedEnv)).status,404);
+          assert.equal((await worker.fetch(new Request('https://links.example.net/v1/emails'),sharedEnv)).status,404);
           // 1) Encoded /health fast path must answer before loading src/app.ts and must not hit ASSETS.
           const healthRes = await worker.fetch(new Request('https://dev.bane.mx/%68ealth'), {...env,ENABLE_LIVE_SES:'true',get HYPERDRIVE(){throw Error('liveness opened DB')}});
           assert.equal(healthRes.status, 200);
