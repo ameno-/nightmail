@@ -16,7 +16,7 @@ import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
 import { validEmail } from '../lib/domain'
-import { countdown, useSecondsLeft, waitSeconds } from '../lib/countdown'
+import { countdown, keepWait, keptWait, useSecondsLeft, waitDeadline, waitLeft, waitSeconds } from '../lib/countdown'
 import { queries, type QueryDef } from './queries'
 import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
@@ -43,7 +43,8 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
   signInIntent: (event: { button: number; pointerType: string }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
-  /** Until when (epoch ms) a refused start (429 AUTH_STATE_LIMIT) holds every sign-in button, which counts it down. */
+  /** When a refused start's wait (429 AUTH_STATE_LIMIT) ends, on performance.now()'s clock (lib/countdown.ts): every
+   *  sign-in button is held until then, counting it down (useSecondsLeft). */
   signInWaitUntil: number | null
   notice: string | null; dismissNotice: () => void }
 const SIGN_IN_WAIT_KEY = 'nightmail.sign-in-wait'
@@ -218,15 +219,17 @@ function WaitlistPage({ busy, error, waitUntil, onSwitch }: { busy: boolean; err
     <nav className="signed-out__links" aria-label={productName}><Link to="/">Homepage</Link><Link to="/docs">Docs</Link></nav>
   </SignedOutPage>
 }
-// A button that starts a sign-in. Held after a refused start (429 AUTH_STATE_LIMIT), it is disabled and counts the wait
-// down. Its label, the label with the spinner while a start is out, and the wait are laid out in one cell, so going from
-// one to another moves nothing.
-function SignInButton({ waitUntil, loading = false, children, disabled, ...props }: ComponentProps<typeof Button> & { waitUntil: number | null }) {
-  const left = useSecondsLeft(waitUntil), shown = left ? 'wait' : loading ? 'busy' : 'idle'
-  return <Button {...props} disabled={disabled || loading || left > 0} aria-busy={loading || undefined}><span className="signed-out__countdown">
+// A button that starts a sign-in. Held after a refused start (429 AUTH_STATE_LIMIT), it counts the wait down. Its label,
+// the label with the spinner while a start is out, and the wait are laid out in one cell, so going from one to another
+// moves nothing. Busy or held it is unavailable but never disabled: a disabled button drops keyboard focus, and the
+// screen reader's place, to the page. Presses (Enter and Space too) are ignored instead, and its name stays the action's,
+// so the countdown isn't read out every second; the toast said why once.
+function SignInButton({ waitUntil, loading = false, children, onClick, ...props }: Omit<ComponentProps<typeof Button>, 'children' | 'disabled'> & { waitUntil: number | null; children: string }) {
+  const left = useSecondsLeft(waitUntil), shown = left ? 'wait' : loading ? 'busy' : 'idle', unavailable = shown !== 'idle'
+  return <Button {...props} aria-disabled={unavailable || undefined} aria-busy={loading || undefined} aria-label={left ? children : undefined} onClick={event => { if (!unavailable) onClick?.(event) }}><span className="signed-out__countdown">
     <span data-shown={shown === 'idle' || undefined} aria-hidden={shown !== 'idle' || undefined}>{children}</span>
     <span className="signed-out__busy" data-shown={shown === 'busy' || undefined} aria-hidden={shown !== 'busy' || undefined}><Icon icon={LoaderCircle} size="sm" className="ui-spinner" />{children}</span>
-    <span data-shown={shown === 'wait' || undefined} aria-hidden={shown !== 'wait' || undefined}>Try again in {countdown(left)}</span>
+    <span data-shown={shown === 'wait' || undefined} aria-hidden>Try again in {countdown(left)}</span>
   </span></Button>
 }
 // A sign-in link to an address with a place (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
@@ -241,8 +244,10 @@ const linkLines = { idle: 'The link works once, for 30 minutes.', invalid: 'Chec
 type LinkState = { view: 'ask'; line: keyof typeof linkLines } | { view: 'sent'; address: string; until: number; capped: boolean }
 function SignInLinkForm({ to }: { to: string | null }) {
   const [typed, setTyped] = useState(''), [state, setState] = useState<LinkState>({ view: 'ask', line: 'idle' }), [sending, setSending] = useState(false)
-  const inFlight = useRef(false), field = useRef<HTMLInputElement>(null)
+  const inFlight = useRef(false), field = useRef<HTMLInputElement>(null), box = useRef<HTMLDivElement>(null), again = useRef<HTMLButtonElement>(null), focusAgain = useRef(false)
   const sent = state.view === 'sent', left = useSecondsLeft(sent ? state.until : null)
+  // Asked from the form, focus moves to Send again as the form goes inert, rather than dropping to the page.
+  useEffect(() => { if (sent && focusAgain.current) { focusAgain.current = false; again.current?.focus() } }, [sent])
   async function send(address: string) {
     if (inFlight.current) return
     if (!validEmail(address)) { setState({ view: 'ask', line: 'invalid' }); field.current?.focus(); return }
@@ -250,19 +255,20 @@ function SignInLinkForm({ to }: { to: string | null }) {
     setSending(true)
     try {
       await accountApi.signInLink(address)
-      setState({ view: 'sent', address, until: Date.now() + RESEND_SECONDS * 1000, capped: false })
+      focusAgain.current = !!box.current?.contains(document.activeElement)
+      setState({ view: 'sent', address, until: waitDeadline(RESEND_SECONDS), capped: false })
     } catch (error) {
-      if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') setState({ view: 'sent', address, until: Date.now() + waitSeconds(error) * 1000, capped: true })
+      if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') { focusAgain.current = !!box.current?.contains(document.activeElement); setState({ view: 'sent', address, until: waitDeadline(waitSeconds(error)), capped: true }) }
       else setState({ view: 'ask', line: error instanceof ApiError && error.code === 'AUTH_INPUT_INVALID' ? 'invalid' : 'failed' })
     } finally { inFlight.current = false; setSending(false) }
   }
   const ask = (event: FormEvent) => { event.preventDefault(); void send(to ?? typed.trim()) }
   const line = state.view === 'ask' ? state.line : 'idle'
   const capped = sent && state.capped
-  return <div className="signed-out__link-box" data-sent={sent || undefined}>
+  return <div ref={box} className="signed-out__link-box" data-sent={sent || undefined}>
     <form className="signed-out__link-form" noValidate onSubmit={ask} inert={sent} aria-hidden={sent || undefined}>
       {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input ref={field} id="waitlist-link-address" type="email" autoComplete="email" required value={typed} aria-invalid={line === 'invalid' || undefined} aria-describedby="waitlist-link-line" onChange={event => { setTyped(event.target.value); if (line !== 'idle') setState({ view: 'ask', line: 'idle' }) }} /></Field>}
-      <Button type="submit" variant={to ? 'primary' : 'secondary'} loading={sending && !sent} data-analytics="sign-in/waitlist-link">Email me a sign-in link</Button>
+      <Button type="submit" variant={to ? 'primary' : 'secondary'} aria-disabled={sending || undefined} aria-busy={sending || undefined} data-analytics="sign-in/waitlist-link">{sending && !sent ? <Icon icon={LoaderCircle} size="sm" className="ui-spinner" /> : null}Email me a sign-in link</Button>
       <p id="waitlist-link-line" className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === line || undefined} data-tone={key === 'idle' ? undefined : 'danger'}>{linkLines[key]}</span>)}</p>
     </form>
     <div className="signed-out__link-sent" inert={!sent} aria-hidden={!sent || undefined}>
@@ -273,7 +279,7 @@ function SignInLinkForm({ to }: { to: string | null }) {
         <span data-shown={capped || undefined} aria-hidden={!capped || undefined}>You’ve asked a few times. If there’s a place for this address, a link is already on its way.</span>
       </p>
       <div className="signed-out__link-actions">
-        <Button disabled={left > 0 || sending} aria-busy={(sending && sent) || undefined} onClick={() => { if (sent) void send(state.address) }} data-analytics="sign-in/waitlist-link-again"><span className="signed-out__countdown">{([['sending', 'Sending…'], ['wait', `Send again in ${countdown(left)}`], ['ready', 'Send again']] as const).map(([key, label]) => { const shown = key === (sending ? 'sending' : left > 0 ? 'wait' : 'ready'); return <span key={key} data-shown={shown || undefined} aria-hidden={!shown || undefined}>{label}</span> })}</span></Button>
+        <Button ref={again} aria-disabled={left > 0 || sending || undefined} aria-busy={(sending && sent) || undefined} aria-label={left > 0 ? 'Send again' : undefined} onClick={() => { if (sent && !left && !sending) void send(state.address) }} data-analytics="sign-in/waitlist-link-again"><span className="signed-out__countdown">{([['sending', 'Sending…'], ['wait', `Send again in ${countdown(left)}`], ['ready', 'Send again']] as const).map(([key, label]) => { const shown = key === (sending ? 'sending' : left > 0 ? 'wait' : 'ready'); return <span key={key} data-shown={shown || undefined} aria-hidden={!shown || key === 'wait' || undefined}>{label}</span> })}</span></Button>
         {to ? null : <Button variant="ghost" disabled={sending} onClick={() => { setState({ view: 'ask', line: 'idle' }); requestAnimationFrame(() => field.current?.focus()) }}>Change address</Button>}
       </div>
     </div>
@@ -521,17 +527,18 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   // A start refused at the cap on pending sign-ins (429 AUTH_STATE_LIMIT; the cap is per network, not per person): said
   // once in a toast (why only: the buttons are the clock), which covers nothing it would move, then every sign-in button
   // stays disabled and counts down the API's wait, and no press or pointer down asks again until it ends. Kept for the tab, so a reload doesn't ask again.
-  const [signInWait, setSignInWait] = useState<number | null>(() => { try { const until = Number(sessionStorage.getItem(SIGN_IN_WAIT_KEY)); return until > Date.now() ? until : null } catch { return null } })
-  const held = () => signInWait !== null && Date.now() < signInWait
+  // Never longer than the API holds anyone (lib/countdown.ts): a kept wait that isn't a real time within that is dropped.
+  const [signInWait, setSignInWait] = useState<number | null>(() => keptWait(SIGN_IN_WAIT_KEY))
+  const held = () => waitLeft(signInWait) > 0
   useEffect(() => {
     if (signInWait === null) return
-    const timer = window.setTimeout(() => setSignInWait(null), Math.max(0, signInWait - Date.now()))
+    const timer = window.setTimeout(() => { setSignInWait(null); keepWait(SIGN_IN_WAIT_KEY, null) }, waitLeft(signInWait))
     return () => window.clearTimeout(timer)
   }, [signInWait])
   function holdSignIn(error: ApiError) {
-    const until = Date.now() + waitSeconds(error) * 1000
-    setSignInWait(until)
-    try { sessionStorage.setItem(SIGN_IN_WAIT_KEY, String(until)) } catch { /* Held for this page only. */ }
+    const deadline = waitDeadline(waitSeconds(error))
+    setSignInWait(deadline)
+    keepWait(SIGN_IN_WAIT_KEY, deadline)
     toast('Too many sign-ins from this network just now.', 'info')
   }
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").

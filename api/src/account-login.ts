@@ -5,6 +5,7 @@ import { ApiError, digest, log, logError, wrapModuleLoad, type Actor, type Ctx, 
 import { setCookie } from 'hono/cookie';
 import { onboardNewUser, pendingInvitation } from './workspaces.js';
 import { acceptedMethods, githubVerifiedAddress, isStaffSignIn, provenMailbox, PROVIDER_IDENTITY_CLAIM, providerIdentity, type ProviderIdentity } from './account-policy.js';
+import { AUTH_STATE_SECONDS } from './auth-state.js';
 import { clientIpHeader, productName, requestHeader } from './brand.js';
 import { METHOD_ACR } from './config.js';
 import { ANALYTICS_SESSION_PARAM } from './analytics-events.js';
@@ -16,8 +17,6 @@ const verifiedEmail = z.email().max(320);
  * address (far above the time a link takes to make). */
 export const LINK_ANSWER_MS = 500;
 const loginFailed = () => new ApiError(403, 'SIGN_IN_DENIED', 'This account cannot sign in.');
-/** How long a pending sign-in holds one of its peer's slots (reserve_auth_state, migrations/105_auth_state_slots.sql). */
-const AUTH_STATE_SECONDS = 660;
 /**
  * Reserves one of a peer's pending sign-ins (reserve_auth_state: 8 at once, each for 11 minutes), or refuses with 429
  * AUTH_STATE_LIMIT and when the peer's oldest one ends, as Retry-After and in the error's details, so the page can say how

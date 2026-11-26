@@ -252,7 +252,7 @@ html[data-privacy='on']:not([data-peek]) .private-field:not(:focus)::placeholder
    its ink), a field a solid control fill, and focus shows the hover fill. */
 .signed-out__body > .ui-alert { border-color: transparent; background: var(--color-surface); }
 .signed-out__body .ui-button--secondary { background: var(--color-deep-control, var(--color-surface)); }
-@media (hover: hover) and (pointer: fine) { .signed-out__body .ui-button--secondary:hover:not(:disabled) { background: var(--color-deep-control-hover, var(--color-layer-1)); } }
+@media (hover: hover) and (pointer: fine) { .signed-out__body .ui-button--secondary:hover:not(:disabled, [aria-disabled='true']) { background: var(--color-deep-control-hover, var(--color-layer-1)); } }
 .signed-out__body .ui-button--secondary:focus-visible { background: var(--color-deep-control-focus, var(--color-layer-2)); }
 .signed-out__body .ui-button--primary:focus-visible { background: var(--color-accent-hover); }
 .signed-out__link-form .ui-input { background: var(--color-deep-control, var(--color-surface)); }

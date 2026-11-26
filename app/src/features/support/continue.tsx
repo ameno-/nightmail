@@ -100,6 +100,7 @@ export function SupportContinuePage() {
   // Back to the dashboard, or the homepage for someone without one.
   const leave = () => navigate(session?.identity ? '/overview' : '/', { replace: true })
   async function act() {
+    if (held) return
     if (state === 'signin') { session?.signIn(); return }
     if (state === 'link') { follow(); return }
     if (state === 'failed' && !email) { await load(); return }
@@ -133,7 +134,7 @@ export function SupportContinuePage() {
       description={<span className="support-continue__text">{text}</span>}
       footer={<>
         <Button className="support-continue__instead" data-hidden={copy.instead ? undefined : ''} disabled={working} loading={answering} onClick={() => void answer()}>Answer me by email instead</Button>
-        <Button variant="primary" className="support-continue__action" disabled={answering || held} loading={working || state === 'loading' || (state === 'link' && !!session?.signingIn)} onClick={() => void act()}>{held ? `Try again in ${countdown(wait)}` : copy.action}</Button>
+        <Button variant="primary" className="support-continue__action" disabled={answering} aria-disabled={held || undefined} aria-label={held ? copy.action : undefined} loading={working || state === 'loading' || (state === 'link' && !!session?.signingIn)} onClick={() => void act()}>{held ? `Try again in ${countdown(wait)}` : copy.action}</Button>
       </>}>
       <div className="support-continue__email" data-empty={!shown && state !== 'loading' ? '' : undefined} data-more={copy.more && !shown && state !== 'loading' ? '' : undefined}>
         {state === 'loading' ? <><SkeletonText width="80%" /><SkeletonText width="92%" /><SkeletonText width="65%" /><SkeletonText width="50%" /></>

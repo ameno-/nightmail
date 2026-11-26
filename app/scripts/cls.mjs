@@ -355,7 +355,8 @@ const pages = ids => [
   ['Two accounts · switch', '/overview', { user: ['dana', 'nia'], from: '/overview', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null, alone: true }],
   // Signed out on a dashboard page (a link from an email) and on an address the dashboard doesn't have.
-  // guard: a touch's pointer down on Continue to sign in starts no sign-in; a tap, or a mouse press, starts exactly one.
+  // guard: a touch's pointer down on Continue to sign in starts no sign-in, and a tap or a mouse press starts exactly one;
+  // at the cap it is held for the API's wait, keyboard focus and all, and a wait kept for the tab never outlasts the API's.
   ['Signed out · deep link', '/overview', { user: null, guard: 'sign-in-press' }],
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
   // The link an agent shows, opened signed out: it says an agent is waiting, with its code, before the sign-in.
@@ -1299,20 +1300,80 @@ async function measure(browser, job, fx) {
     }
     if (job.guard === 'sign-in-press' && job.mode === 'load') {
       // A sign-in starts on a mouse's pointer down (data/context.tsx prepareLogin), never on a touch's: a scroll that begins
-      // on the button would hold one of the network's pending sign-ins. One press is one start either way.
-      let starts = 0;
-      await page.route('**/api/auth/sign-in/account', route => { starts++; return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'retry-after': '600' }, body: JSON.stringify({ error: { code: 'AUTH_STATE_LIMIT', message: 'Too many pending sign-ins.', details: [{ retryAfterSeconds: 600 }] } }) }); });
+      // on the button would hold one of the network's pending sign-ins. One press is one start either way. Refused at the
+      // cap (429 AUTH_STATE_LIMIT), the button is held for the wait the API gives: it keeps keyboard focus and its name,
+      // Enter and Space do nothing, and it works the moment the wait ends. A wait kept for the tab is never longer than the
+      // API's maximum (lib/countdown.ts), whatever is stored and however the system clock moves.
+      let starts = 0, wait = 2;
+      await page.route('**/api/auth/sign-in/account', route => { starts++; return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'retry-after': String(wait) }, body: JSON.stringify({ error: { code: 'AUTH_STATE_LIMIT', message: 'Too many pending sign-ins.', details: [{ retryAfterSeconds: wait }] } }) }); });
       const button = page.getByRole('button', { name: 'Continue to sign in' });
-      const settle = () => page.waitForTimeout(500);
+      const settle = (ms = 500) => page.waitForTimeout(ms);
+      const state = () => button.evaluate(el => {
+        const shown = [...el.querySelectorAll('[data-shown]')].map(node => node.textContent).join(''), clock = /(\d+):(\d\d)/.exec(shown);
+        return { held: el.getAttribute('aria-disabled') === 'true', focused: document.activeElement === el, name: el.getAttribute('aria-label') ?? el.textContent.trim(), seconds: clock ? Number(clock[1]) * 60 + Number(clock[2]) : 0 };
+      });
+      const expectStarts = (n, what) => { if (starts !== n) problems.push(`${what} on Continue to sign in: ${starts} sign-in starts in all, expected ${n}`); };
       if (job.device === 'phone') {
         await button.dispatchEvent('pointerdown', { pointerType: 'touch', button: 0, isPrimary: true });
         await button.dispatchEvent('pointercancel', { pointerType: 'touch', button: 0, isPrimary: true });
         await settle();
-        if (starts) problems.push(`a touch pointer down on Continue to sign in started ${starts} sign-in(s)`);
+        expectStarts(0, 'a touch pointer down');
         await button.tap();
       } else await button.click();
       await settle();
-      if (starts !== 1) problems.push(`one ${job.device === 'phone' ? 'tap' : 'mouse press'} on Continue to sign in started ${starts} sign-ins`);
+      expectStarts(1, job.device === 'phone' ? 'one tap' : 'one mouse press');
+      await settle(wait * 1000);
+      // From the keyboard: Enter is refused, and focus stays on the held button.
+      await button.focus();
+      await page.keyboard.press('Enter');
+      await settle();
+      expectStarts(2, 'Enter');
+      let now = await state();
+      if (!now.held || !now.focused) problems.push(`refused, Continue to sign in was ${now.held ? 'held' : 'not held'} and ${now.focused ? 'kept' : 'lost'} keyboard focus`);
+      if (now.name !== 'Continue to sign in') problems.push(`held, Continue to sign in was named "${now.name}"`);
+      await page.keyboard.press('Enter');
+      await page.keyboard.press('Space');
+      await settle(200);
+      expectStarts(2, 'Enter and Space while held');
+      await settle(wait * 1000);
+      now = await state();
+      if (now.held || !now.focused) problems.push(`when the wait ended, Continue to sign in was ${now.held ? 'still held' : 'pressable'} and ${now.focused ? 'focused' : 'not focused'}`);
+      await page.keyboard.press('Enter');
+      await settle();
+      expectStarts(3, 'Enter when the wait ended');
+      if (job.device === 'desktop') {
+        await settle(wait * 1000);
+        const KEY = 'nightmail.sign-in-wait', MAX = 660;
+        const reload = async (value, offset = 0) => {
+          await page.evaluate(([key, value, offset]) => { if (value === null) sessionStorage.removeItem(key); else if (value !== undefined) sessionStorage.setItem(key, String(value)); sessionStorage.setItem('cls-clock-offset', String(offset)); }, [KEY, value, offset]);
+          await page.reload();
+          await button.waitFor();
+          await settle(300);
+          return state();
+        };
+        // The system clock moved: an init script offsets Date.now() by what the test puts in sessionStorage.
+        await page.addInitScript(() => { const offset = Number(sessionStorage.getItem('cls-clock-offset')) || 0; if (offset) { const real = Date.now.bind(Date); Date.now = () => real() + offset; } });
+        const at = await page.evaluate(() => Date.now());
+        for (const [what, value, held] of [['20 days ahead', at + 20 * 86_400_000, false], ['in the past', at - 1000, false], ['garbage', 'garbage', false], ['2 minutes ahead', at + 120_000, true]]) {
+          now = await reload(value);
+          if (now.held !== held || now.seconds > (held ? 120 : 0)) problems.push(`a kept wait ${what}: ${now.held ? `held for ${now.seconds} s` : 'not held'}, expected ${held ? 'at most 120 s' : 'not held'}`);
+        }
+        // Refused for 300 s, then the clock moves an hour: the wait in the page keeps its time, and after a reload the
+        // kept one is dropped, as it is no longer a time within the API's maximum.
+        wait = 300;
+        for (const [what, hour] of [['back', -3_600_000], ['forward', 3_600_000]]) {
+          await reload(null);
+          await button.click();
+          await settle();
+          await page.evaluate(hour => { const real = Date.now.bind(Date); Date.now = () => real() + hour; }, hour);
+          await settle(1200);
+          now = await state();
+          if (!now.held || now.seconds > 300 || now.seconds > MAX) problems.push(`refused for 300 s, the clock moved an hour ${what}: ${now.held ? `held for ${now.seconds} s` : 'not held'}, expected held for at most 300 s`);
+          now = await reload(undefined, hour);
+          if (now.held) problems.push(`refused for 300 s, the clock moved an hour ${what}, then a reload: held for ${now.seconds} s, expected not held`);
+        }
+        await page.evaluate(() => sessionStorage.removeItem('cls-clock-offset'));
+      }
       await page.unroute('**/api/auth/sign-in/account');
     }
     if (job.guard === 'receiving-edit') {
