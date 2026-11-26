@@ -167,13 +167,9 @@
 .onb-panel[data-enter='right'] { animation: onb-from-right 300ms var(--ease-out-strong) both; }
 @keyframes onb-from-left { from { opacity: 0; transform: translateX(-24px); } }
 @keyframes onb-from-right { from { opacity: 0; transform: translateX(24px); } }
-.onb-panel__actions { display: flex; }
 .onb-panel__line { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-/* The prompt fills what the panel has left (at least eight lines) and scrolls; its text fades where it runs on. */
-.onb-prompt { flex: 1 1 0; height: 0; min-height: 168px; margin-top: var(--space-4); }
-.onb-prompt.developer-code { padding: 0; overflow: hidden; display: flex; }
-.onb-prompt > code { flex: 1; min-width: 0; padding: var(--space-12) var(--space-16); overflow-y: auto; --fade-top: 0px; --fade-bottom: 0px;
-  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
+/* The agent prompt (AgentPromptPanel, docs/developer.css) fills what the panel has left, at least eight lines. */
+.onb-panel .agent-prompt__box { flex: 1 1 0; height: 0; min-height: 168px; margin-top: var(--space-4); }
 .onb-key { display: flex; flex-direction: column; gap: var(--space-8); }
 .onb-key__slot { justify-items: start; align-items: center; min-height: var(--onb-control-height); }
 .onb-key__secret { align-self: stretch; width: 100%; min-height: var(--onb-control-height); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); font-size: var(--text-sm); line-height: var(--leading-sm); }
@@ -229,9 +225,9 @@
   .onboarding-connect-actions { flex-direction: column; align-items: stretch; }
   .onboarding-actions .ui-button { flex: 1; }
   /* Get started: full-width actions, and two lines kept for the test email's line, which names the domain once it exists. */
-  .onb-panel__actions > .ui-button, .onb-key__slot > span:first-child, .onb-key__slot .ui-button, .onb-start-test .first-send-test > .ui-button { width: 100%; }
+  .onb-key__slot > span:first-child, .onb-key__slot .ui-button, .onb-start-test .first-send-test > .ui-button { width: 100%; }
   .onb-key__slot { justify-items: stretch; }
   .onb-start-test .first-send-test { align-items: stretch; }
   .onb-start-test .first-send-test > .muted { min-height: calc(2 * var(--leading-sm)); }
-  .onb-prompt { min-height: 200px; }
+  .onb-panel .agent-prompt__box { min-height: 200px; }
 }

@@ -4,7 +4,7 @@ import { Link, Navigate, useLocation, useNavigationType, useParams } from 'react
 import { Alert, EmptyState, ErrorState, Input, SkeletonText, SubNav, Tabs } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { useApiQuery, useCanonicalOrigin, useSession, useWorkspaceAccess } from '../../data/context'
-import { AgentPrompt, agentPrompt, useAgentSetup } from './agent-setup'
+import { AgentPromptPanel, agentPrompt, useAgentSetup } from './agent-setup'
 import { guides, type Guide } from './guides'
 import { SendingLimitsGuide } from '../score/limits'
 import { DocsArticleSkeleton, useDocsAudience } from './frame'
@@ -192,20 +192,31 @@ function useAgentPrompt() {
   const items = domains.data?.items ?? []
   const domain = withDomain ? items.find(row => row.status === 'verified') ?? items[0] ?? null : undefined
   const promptFor = (setupToken: string | null | undefined) => agentPrompt({ origin, domain, email: identity?.email ?? null, multiTenant, setupToken })
-  return { prompt: promptFor(setup ? null : undefined), setup, copy: setup?.copy(promptFor), download: promptFor(undefined) }
+  return { prompt: promptFor(setup ? null : undefined), setup, copy: setup?.copy(promptFor) }
+}
+
+// The first thing on the docs' first page: the prompt that hands the whole setup to a coding agent, with one Copy, as
+// Get started shows it (AgentPromptPanel). An owner's or admin's copy carries a fresh setup token; everyone else's prompt
+// connects with a device code.
+function DocsAgentPrompt() {
+  const { prompt, setup, copy } = useAgentPrompt()
+  return <section id="agent-prompt" className="docs-section docs-agent-prompt" aria-labelledby="docs-agent-prompt" aria-busy={prompt === null || undefined}>
+    <h2 id="docs-agent-prompt">Set up with your agent</h2>
+    <p className="muted">Paste this prompt into your coding agent. It has this workspace’s real values; the API key stays in your environment.</p>
+    <AgentPromptPanel value={setup && copy ? copy : prompt ?? ''} preview={prompt ?? ''} pending={prompt === null} setup={setup} line="It connects with a device code: an owner or admin approves it." />
+  </section>
 }
 
 function DocsOverview({ document, all }: {document: Document; all: Operation[]}) {
-  const { prompt, setup, copy, download } = useAgentPrompt()
   const groups = [...new Set(all.map(operation => operation.tag))]
   const install = `npm install ${sdkPackage}`
   return <article className="docs-operation docs-overview">
     <header className="docs-operation-header"><h1>{productName} API</h1><p>{document.info.description}</p></header>
+    <DocsAgentPrompt />
     {document.info['x-quickstart']?.length ? <Quickstart steps={document.info['x-quickstart']} /> : null}
     <section id="guides" className="docs-section" aria-labelledby="docs-guides"><h2 id="docs-guides">Guides</h2><div className="docs-resource-list">
       {guides.map(guide => <Link key={guide.id} to={`/docs/${guide.id}`}><strong>{guide.title}</strong><span>{guide.summary}</span></Link>)}
     </div></section>
-    <AgentPrompt prompt={prompt} setup={setup} copy={copy} download={download} />
     <section id="sdk" className="docs-section"><h2>TypeScript SDK</h2><p className="muted">Generated client and types, <a href={`https://www.npmjs.com/package/${sdkPackage}`}>published on npm</a>. Call it from a trusted server with an API key.</p><div className="docs-install"><code>{install}</code><CopyAction value={install} label="Copy install command" variant="ghost" size="sm" compact className="developer-copy-icon" /></div></section>
     <section id="formats" className="docs-section"><h2>Documentation formats</h2><div className="docs-resource-list">
       <a href="/docs.md"><strong>Markdown reference</strong><span>API index for agents and text tools, with a complete reference per tag.</span></a>

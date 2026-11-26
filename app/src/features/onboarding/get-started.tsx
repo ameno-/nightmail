@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type UIEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, Send } from 'lucide-react'
 import { Button, CopyButton, ErrorText, SecretCode, Tabs } from '../../components/ui'
@@ -8,7 +8,7 @@ import { invalidate, resourceOf } from '../../data/invalidation'
 import { usePrefetchRoute } from '../../data/prefetch'
 import type { ApiKeyInput, Domain } from '../../data/types'
 import { analytics } from '../../lib/analytics'
-import { AgentSetupStatus, MaskedText, agentPrompt, useAgentSetup } from '../docs/agent-setup'
+import { AgentPromptPanel, MaskedText, agentPrompt, useAgentSetup } from '../docs/agent-setup'
 import { TestSentLine, sendLanguages, sendSnippets, useTestSend } from '../docs/first-send'
 import { useDomain } from '../settings/domain-records'
 import { BUILTIN_CAPS, BUILTIN_UNSUPPORTED, builtinLimitsText } from '../../../../api/src/builtin-limits'
@@ -101,11 +101,7 @@ export function GetStarted({ domainId, onFinish }: { domainId: string | null; on
       {/* Both panels share one cell: the taller sets its height, so switching moves nothing below them. */}
       <div className="onb-panels">
         <section className="onb-panel onb-panel--agent" {...panel('agent')}>
-          <div className="onb-panel__actions">
-            <CopyAction value={copyPrompt} label="Copy agent prompt" text="Copy agent prompt" variant="primary" />
-          </div>
-          {setup ? <AgentSetupStatus setup={setup} idle="Paste it into your coding agent." /> : <p className="muted onb-panel__line">Paste it into your coding agent: it connects with a device code.</p>}
-          <Prompt text={preview} />
+          <AgentPromptPanel value={copyPrompt} preview={preview} setup={setup} idle="Paste it into your coding agent." line="Paste it into your coding agent: it connects with a device code." />
         </section>
         <section className="onb-panel" {...panel('hand')}>
           <ByHand from={name} onCreated={() => setActed(true)} />
@@ -165,17 +161,6 @@ function TestEmail({ domain, sends, recheck, onLeave, onSent, onSettled }: { dom
     </div>
     <p className="muted onb-start-time" data-shown={sent || undefined} aria-hidden={!sent || undefined}>Sent through the API in <strong className="onb-num">{`${Math.max(0, Math.round(state.phase === 'sent' ? state.ms : 0)).toLocaleString('en-US')} ms`}</strong></p>
   </section>
-}
-
-// The prompt as the agent will read it, in a box that fills the panel and scrolls; its edges fade where it runs on.
-function Prompt({ text }: { text: string }) {
-  const ref = useRef<HTMLElement>(null)
-  const fade = (node: HTMLElement) => {
-    node.style.setProperty('--fade-top', `${Math.min(24, node.scrollTop)}px`)
-    node.style.setProperty('--fade-bottom', `${Math.min(24, node.scrollHeight - node.clientHeight - node.scrollTop)}px`)
-  }
-  useEffect(() => { if (ref.current) fade(ref.current) }, [text])
-  return <pre className="developer-code developer-code--prompt onb-prompt"><code ref={ref} tabIndex={0} aria-label="Agent prompt" onScroll={(event: UIEvent<HTMLElement>) => fade(event.currentTarget)}><MaskedText text={text} /></code></pre>
 }
 
 // By hand: a key that sends (shown once, here), then the first send with it from the domain, and the docs.

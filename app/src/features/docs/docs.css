@@ -60,12 +60,11 @@
   .docs-overview-groups section a { grid-template-columns: 40px minmax(0, 1fr); row-gap: var(--space-4); }
   .docs-overview-groups section a code { grid-column: 2; }
 }
-.docs-overview .developer-section { max-width: none; margin: 0; padding-block: var(--space-24); gap: var(--space-12); }
-.docs-overview .developer-section > .ui-section-header { margin: 0; min-height: 24px; }
-.docs-overview .developer-copy { font-size: var(--text-sm); line-height: var(--leading-sm); }
-.docs-overview .developer-section > .ui-section-header h2 { font-size: var(--text-lg); line-height: var(--leading-lg); }
-/* A fixed height, so the workspace's prompt arriving after the page never moves what follows. */
-.docs-overview #agent-prompt .developer-code { box-sizing: content-box; height: 16lh; overflow: auto; }
+/* The agent prompt, first on the page: its box has a fixed height (twelve lines), so the workspace's prompt arriving after
+   the page never moves what follows; the prompt scrolls inside it. */
+.docs-agent-prompt { padding-top: 0; }
+.docs-agent-prompt .agent-prompt__box { max-width: 60em; height: calc(12 * var(--leading-sm) + 2 * var(--space-12)); }
+@media (max-width: 560px) { .docs-agent-prompt .agent-prompt__box { height: calc(14 * var(--leading-xs) + 2 * var(--space-12)); } }
 
 .docs-quickstart ol { margin: 0; padding-inline-start: var(--space-24); display: flex; flex-direction: column; gap: var(--space-12); max-width: 45em; }
 .docs-quickstart li { text-wrap: pretty; }
