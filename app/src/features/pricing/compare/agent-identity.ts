@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs Agent Identity (/compare/agent-identity): a comparison's whole entry (prices.ts, Entry). Every figure was
 // read on Agent Identity's own pages on CHECKED. Its pages disagree on how many identities a plan holds (pricing: 15 on
@@ -39,5 +39,4 @@ export const agentIdentity: Entry = {
   ],
   // Its readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'send', 'route', 'team'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

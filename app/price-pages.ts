@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin, type Rollup } from 'vite'
-import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
+import { publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
 import { pruneCss, usedNames } from './critical-css.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
@@ -59,6 +59,10 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const problems = ENTRIES.flatMap(entry => entryProblems(entry, today, PANEL_IDS))
       if (new Set(ENTRIES.map(entry => entry.slug)).size !== ENTRIES.length) problems.push('Two comparisons have the same slug.')
       for (const [path] of PRICE_LINKS) if (!PRICE_PAGES.some(page => page.path === path)) problems.push(`live.ts links ${path}, which is no price page.`)
+      for (const page of PRICE_PAGES) {
+        if (!(page.searchTitle?.length <= 60)) problems.push(`${page.path}'s title is over 60 characters: ${page.searchTitle}`)
+        if (!(page.description?.length <= 160)) problems.push(`${page.path}'s description is over 160 characters: ${page.description}`)
+      }
       if (problems.length) return this.error(`The price pages can't be built (features/pricing/compare):\n  ${problems.join('\n  ')}`)
 
       const index = bundle['index.html']
@@ -94,7 +98,7 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
 
       for (const page of PRICE_PAGES) {
         if (!existsSync(resolve(publicDir, page.card.file))) return this.error(`${page.path}'s card, public/${page.card.file}, is missing: what it shows has changed (features/pricing/pages.ts). Make it with node scripts/price-cards.mjs and delete the old one.`)
-        const title = `${page.title} · ${productName.toLowerCase()}`, canonical = canonicalOrigin + page.path, image = `${origin}/${page.card.file}`
+        const title = page.searchTitle, canonical = canonicalOrigin + page.path, image = `${origin}/${page.card.file}`
         let html = template
         const set = (pattern: RegExp, value: string) => {
           if (!pattern.test(html)) this.error(`index.html has no ${pattern.source} for ${page.file}.`)

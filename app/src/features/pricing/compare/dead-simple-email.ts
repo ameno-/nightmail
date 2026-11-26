@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Dead Simple Email (/compare/dead-simple-email): a comparison's whole entry (prices.ts, Entry). Every
 // figure was read on Dead Simple Email's own pages on CHECKED (its prices are on its homepage, which /pricing opens).
@@ -41,5 +41,4 @@ export const deadSimpleEmail: Entry = {
   ],
   // Its readers first see the agents' inboxes, receiving and the allowances.
   panels: ['agent', 'receive', 'free', 'domain', 'send', 'route', 'team'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

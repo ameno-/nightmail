@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs AWeber (/compare/aweber): a comparison's whole entry (prices.ts, Entry). Every figure was read on AWeber's
 // own pages on CHECKED.
@@ -73,5 +73,4 @@ export const aweber: Entry = {
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'free', 'domain'],
   without: ['signup forms', 'landing pages', 'a web archive', 'automations', 'paid subscriptions'],
-  description: `AWeber prices by subscribers, Nightmail by email. Monthly prices at ${listOf(sizes.map(formatCount))} subscribers, checked ${dayOf(CHECKED)}.`,
 }

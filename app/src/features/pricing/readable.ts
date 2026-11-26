@@ -151,13 +151,13 @@ const app = () => ({
 })
 const site = () => ({ '@type': 'WebSite', '@id': url('/#website'), name: productName, url: url('/') })
 /** A page's JSON-LD: the page, the product it's about with its price, and the questions it answers. */
-export function structuredData(page: Pick<PricePage, 'path' | 'title' | 'description' | 'comparison'> | 'home'): object {
+export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'description' | 'comparison'> | 'home'): object {
   if (page === 'home') return { '@context': 'https://schema.org', '@graph': [site(), app()] }
   const c = page.comparison
   return {
     '@context': 'https://schema.org',
     '@graph': [
-      { '@type': 'WebPage', '@id': url(page.path), url: url(page.path), name: page.title, description: page.description, inLanguage: 'en',
+      { '@type': 'WebPage', '@id': url(page.path), url: url(page.path), name: page.searchTitle, description: page.description, inLanguage: 'en',
         isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') },
         ...c ? { dateModified: lastChecked(c), mentions: { '@type': 'SoftwareApplication', name: c.vendor, url: c.offer.pricing }, citation: pagesRead(c).map(source => source.url) } : {} },
       site(), app(),

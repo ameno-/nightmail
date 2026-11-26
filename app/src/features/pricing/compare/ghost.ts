@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Ghost(Pro) (/compare/ghost): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Ghost's own pages on CHECKED: the monthly prices in the script its pricing page loads (pricing.min.js).
@@ -63,5 +63,4 @@ export const ghost: Entry = {
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'domain', 'team', 'free'],
   without: ['signup forms', 'a web archive', 'a website', 'automations', 'paid subscriptions'],
-  description: `Ghost(Pro) prices by subscribers, Nightmail by email. Monthly prices at ${listOf(sizes.map(formatCount))} subscribers, checked ${dayOf(CHECKED)}.`,
 }
