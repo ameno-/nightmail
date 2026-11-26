@@ -165,7 +165,8 @@ export async function purgeExpiredAudit(runtime: Pick<Runtime, 'db'>, limit = 50
 
 // ---------- operator identity ----------
 
-export type OperatorIdentity = { id: string; role: OperatorRole; via: 'console' | 'support'; userId: string | null };
+/** via mcp: a staff member's own agent (support-agents.ts), labelled so on the trail. */
+export type OperatorIdentity = { id: string; role: OperatorRole; via: 'console' | 'support' | 'mcp'; userId: string | null; label?: string };
 /**
  * Who the operator is, for the audit and support routes and the /v1/operator/* gate (support.ts operatorGate). There is
  * one operator check: a signed-in dashboard session goes through #115's operatorActor (src/operator.ts, which reads the
@@ -186,7 +187,7 @@ export async function requireOperator(c: Ctx, level: OperatorRole): Promise<Oper
   return { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId };
 }
 export const operatorRequired = () => new ApiError(403, 'OPERATOR_REQUIRED', `This area is for ${productName} operators.`);
-export const operatorContext = (c: Ctx, operator: OperatorIdentity): AuditContext => ({ ...auditContext(c), actor: { type: 'operator', id: operator.id, userId: operator.userId, via: operator.via } });
+export const operatorContext = (c: Ctx, operator: OperatorIdentity): AuditContext => ({ ...auditContext(c), actor: { type: 'operator', id: operator.id, userId: operator.userId, via: operator.via, label: operator.label } });
 
 // ---------- reading the trail ----------
 

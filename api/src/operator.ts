@@ -20,7 +20,8 @@ import { registerOperatorLists } from './operator-lists.js';
 // link to the user lives only in src/operator-identity.ts.
 // Hidden from the public OpenAPI document, SDK and llms docs (hide: true).
 
-export type OperatorIdentity = { userId: string; email: string; role: OperatorRole };
+/** agent: a staff member's own agent acting for them on the support inbox, through the connection they approved (support-agents.ts). */
+export type OperatorIdentity = { userId: string; email: string; role: OperatorRole; agent?: { approvalId: string; grantId: string } };
 /** The signed-in operator, or 403. `operator` may change things; `operator:read` only reads. */
 export async function operatorActor(c: Ctx, level: OperatorRole): Promise<OperatorIdentity> {
   if (!c.env.config.multiTenant) notFound('Endpoint');

@@ -71,8 +71,15 @@ export const operatorGate: MiddlewareHandler<AppEnv> = async (c, next) => {
     c.set('actor', { workspaceId: '', permissions: [], domains: [], keyId: 'service:bane-support', credential: 'operatorService' });
     return next();
   }
+  const { authenticate, delegatedIdentity } = await import('./auth.js');
+  // A staff member's agent (src/support-agents.ts): an MCP sign-in dispatched in process, which no request from outside
+  // can be, on the support inbox routes an agent may call and no other. Each of them checks the role and the approval.
+  if (delegatedIdentity(c.env)) {
+    const { supportAgentRoute } = await import('./support-agents.js');
+    if (!supportAgentRoute(c.req.method, c.req.path) || hasSessionCookie(c.req.raw.headers)) throw operatorRequired();
+    return authenticate(c, next);
+  }
   if (!hasSessionCookie(c.req.raw.headers)) throw operatorRequired();
-  const { authenticate } = await import('./auth.js');
   try { await authenticate(c, async () => {}); await requireOperator(c, 'operator:read'); }
   catch (error) { if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 404)) throw operatorRequired(); throw error; }
   // Staff UI notes are for UI_NOTES_SUBJECTS only: any other operator gets 404 before a body is even read.

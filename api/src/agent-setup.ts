@@ -7,6 +7,7 @@ import { auditContext, auditInsert, ipNetwork, type AuditContext } from './audit
 import { apiKeyEnv, productName, secretPrefixes, shownPrefix } from './brand.js';
 import { agentKeyName } from './agent-key-name.js';
 import { mcpClientConfig, mcpServerUrl } from './mcp-clients.js';
+import { newUserCode, shownCode, typedCode } from './user-code.js';
 
 /**
  * Agent setup: how a coding agent gets its own lasting API key without a person making one by hand (migration 469).
@@ -43,8 +44,6 @@ const LIMITS = { exchange: 30, device: 30, poll: 120, userCode: 10 } as const;
 const DEVICES_PER_MINUTE = 600;
 // api_request_budgets rows for callers that have no workspace yet (core.ts chargeBudget), purged after a day like any.
 const BUDGET = 'agent-setup';
-// RFC 8628 §6.1: twenty consonants, no vowels (no words) and none easily confused.
-const USER_CODE_LETTERS = 'BCDFGHJKLMNPQRSTVWXZ';
 const dashboardSecurity = [{ dashboardSession: [] }, { secureDashboardSession: [] }] as Record<string, string[]>[];
 const tags = ['Auth'];
 // An expired or replaced setup token or device code: 410 Gone, in the error shape every refusal has.
@@ -76,19 +75,6 @@ async function readSecret(prefix: string, value: string) {
 // Compared in constant time, against a stand-in when there is no row, so a miss costs what a mismatch does.
 const MISSING = '0'.repeat(64);
 const matches = (row: Row | undefined, hash: string): row is Row => timingSafeEqual(Buffer.from(row?.secret_hash ?? MISSING, 'hex'), Buffer.from(hash, 'hex')) && !!row;
-
-function newUserCode() {
-  let code = '';
-  while (code.length < 8) for (const byte of crypto.getRandomValues(new Uint8Array(16))) if (byte < 240 && code.length < 8) code += USER_CODE_LETTERS[byte % 20];
-  return code;
-}
-/** The user code as people see and type it: BCDF-GHJK. */
-const shownCode = (code: string) => `${code.slice(0, 4)}-${code.slice(4)}`;
-/** A typed user code, any case, with or without its hyphen or spaces; null if it can't be one. */
-function typedCode(value: string) {
-  const code = value.toUpperCase().replace(/[\s-]/g, '');
-  return new RegExp(`^[${USER_CODE_LETTERS}]{8}$`).test(code) ? code : null;
-}
 
 /** The /connect link with the user code filled in: the one link the person needs. */
 const approvalLink = (c: Ctx, code: string) => `${new URL('/connect', c.env.config.publicUrl).href}?code=${shownCode(code.replace('-', ''))}`;

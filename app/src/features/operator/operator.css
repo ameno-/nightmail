@@ -324,6 +324,22 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
   .glass-feed__list { flex: none; height: calc(12 * 52px); overflow: hidden; }
 }
 
+/* Agents (./agents): one line above the list, and the approval dialog's facts and what approving allows. */
+.op-agents-lead { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.op-agent-review { display: flex; flex-direction: column; gap: var(--space-16); }
+.op-agent-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-8) var(--space-16); margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.op-agent-facts dt { color: var(--color-muted); }
+.op-agent-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.op-agent-facts code { font-size: var(--text-md); font-weight: var(--font-weight-bold); letter-spacing: .08em; }
+.op-agent-grants { display: flex; flex-direction: column; gap: var(--space-8); font-size: var(--text-sm); line-height: var(--leading-sm); }
+.op-agent-grants h3 { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
+.op-agent-grants ul { display: flex; flex-direction: column; gap: var(--space-6); margin: 0; padding: 0; list-style: none; }
+.op-agent-grants li { display: flex; align-items: flex-start; gap: var(--space-8); color: var(--color-muted); }
+.op-agent-grants li[data-can] { color: var(--color-text); }
+.op-agent-grants li > svg { flex-shrink: 0; height: 1lh; }
+.op-agent-grants li[data-can] > svg { color: var(--color-success); }
+.op-agent-grants p { margin: 0; }
+
 @media (max-width: 1200px) { .op-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .op-grid { grid-template-columns: minmax(0, 1fr); gap: var(--page-gap); } }
 @media (max-width: 640px) {

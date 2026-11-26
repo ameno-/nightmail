@@ -142,7 +142,7 @@ export async function start(repo, { dist = 'app/dist', log = () => {}, servers =
       // Built-in domains (api/src/builtin-domain.ts): the workspaces seeded with one below show it in onboarding, Domains and Overview.
       NIGHTMAIL_BUILTIN_DOMAIN: 'nightmail.email',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
-      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', SUPPORT_AGENT_ACCESS: 'on', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
@@ -1070,6 +1070,10 @@ export async function seed(fx) {
   // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
+  // The same connection approved for the support inbox (api/src/support-agents.ts), and a second sign-in of it asking with a
+  // code: Operator → Agents lists the one and opens the other's approval from its link.
+  await db.query("INSERT INTO support_agent_approvals(id,grant_id,consent,user_id,expires_at,last_used_at) VALUES('sag_' || repeat('a',26),$1,'cls-consent-1','user_dana',now()+interval '30 days',now()-interval '5 minutes')", [mcp]);
+  await db.query("INSERT INTO support_agent_requests(id,user_code,grant_id,consent,user_id,expires_at) VALUES('cls-agent-request','GHJKLMNP',$1,'cls-consent-2','user_dana',now()+interval '1 day')", [mcp]);
   // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
   await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
   // Uma's agent came back to a spent setup token and asked her with a device code: her pages show it waiting for her.

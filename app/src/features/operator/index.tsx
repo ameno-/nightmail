@@ -11,7 +11,7 @@ import { label, number, shortDateTime } from '../../lib/format'
 import { downloadCsvChunks, formatCsvRow } from '../../lib/download'
 import { errorText } from '../../data/types'
 import { factorFormats } from '../score'
-import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, GlassLink, memberColumnDefs, operatorTab, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, SignupSubTabs, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
+import { actionColumnDefs, ActionsTrigger, dailyLimitError, campaignColumnDefs, domainColumnDefs, factorColumnDefs, facts, GlassLink, memberColumnDefs, operatorTab, operatorTabPath, operatorView, useOperatorTabs, OperatorWorkspaceSkeleton, StaffOnly, QueueToolbar, queueColumnDefs, SetLimitTrigger, SignupFacts, SignupSubTabs, signupColumnDefs, timelineColumnDefs, waitlistColumnDefs, WaitlistToolbar } from './skeletons'
 import { useDebounced } from '../../lib/pagination'
 import { AbuseView } from './abuse'
 import { HealthView } from './health'
@@ -21,6 +21,7 @@ import { HealthView } from './health'
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
+export { OperatorAgentsPage } from './agents'
 export { OperatorClusterPage } from './abuse'
 export { GlassPage } from './glass'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null
@@ -45,7 +46,7 @@ export function OperatorPage() {
   return <>
     <PageHeader title="Operator" actions={<GlassLink />} />
     <div className="op-page">
-      <Tabs value={tab} label="Operator views" items={tabs} onValueChange={value => value === 'notes' ? navigate('/operator/notes') : setView(value)} />
+      <Tabs value={tab} label="Operator views" items={tabs} onValueChange={value => value === 'notes' || value === 'agents' ? navigate(operatorTabPath(value)) : setView(value)} />
       {tab === 'queue' ? <Queue /> : tab === 'health' ? <HealthView /> : tab === 'signups' ? <Signups sub={view === 'waitlist' ? 'waitlist' : 'signups'} onSub={setView} canAct={role === 'operator'} /> : tab === 'abuse' ? <AbuseView /> : <Actions />}
     </div>
   </>

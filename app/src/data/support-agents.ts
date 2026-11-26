@@ -1,0 +1,18 @@
+import { request } from './live'
+
+// A staff member's agents in the support inbox (/v1/operator/support-agents, api/src/support-agents.ts): an agent signed
+// in over MCP as an operator asks with a code and a link; its person approves it here, from a staff session, and sees and
+// revokes what they approved.
+export interface SupportAgentConnection { connectionId: string; /** The connection's own claim, never verified. */ client: string | null; profile: string | null; connectedAt: string }
+export interface SupportAgentRequest { userCode: string; agent: SupportAgentConnection; status: 'pending' | 'approved' | 'denied' | 'expired'; createdAt: string; expiresAt: string; can: string[]; days: number }
+export interface SupportAgentApproval { id: string; agent: SupportAgentConnection; approvedAt: string; expiresAt: string; lastUsedAt: string | null }
+
+const base = '/v1/operator/support-agents'
+export const supportAgentsKey = ['operator', 'support-agents'] as const
+export const supportAgentsApi = {
+  list: (signal?: AbortSignal) => request<{ data: SupportAgentApproval[] }>(base, { signal }),
+  lookUp: (userCode: string, signal?: AbortSignal) => request<SupportAgentRequest>(`${base}/lookup`, { method: 'POST', body: { userCode }, signal }),
+  approve: (userCode: string) => request<SupportAgentApproval>(`${base}/approve`, { method: 'POST', body: { userCode } }),
+  deny: (userCode: string) => request<{ userCode: string; status: 'denied' }>(`${base}/deny`, { method: 'POST', body: { userCode } }),
+  revoke: (id: string) => request<{ id: string; revoked: true }>(`${base}/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+}

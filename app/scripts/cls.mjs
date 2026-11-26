@@ -244,6 +244,9 @@ const pages = ids => [
   ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
+  // Your agents in the support inbox, and an agent's link: its approval dialog opens over the list once the request loads.
+  ['Operator · agents', '/operator/agents', { from: '/operator', click: 'Agents' }],
+  ['Operator · agents · approve', '/operator/agents?code=GHJK-LMNP', {}],
   ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator?view=signups', click: 'Waitlist' }],
   // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.
   ['Operator · sign-ups', '/operator?view=signups', { from: '/operator', click: 'Sign-ups' }],
@@ -548,6 +551,8 @@ const phonePages = new Set([
   'Operator',
   'Operator · workspace',
   'Operator · UI notes',
+  'Operator · agents',
+  'Operator · agents · approve',
   'Operator · waitlist',
   'Operator · health',
   'Operator · sign-ups',

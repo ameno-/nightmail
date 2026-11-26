@@ -238,7 +238,7 @@ export function OperatorClusterSkeleton({ actions }: { actions: boolean }) {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'health', label: 'Health' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }]
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'health', label: 'Health' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'agents', label: 'Agents' }]
 /** The view a /operator address opens (old ?view=waitlist and ?view=lists URLs stay valid and open inside Sign-ups and Abuse). */
 export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' || view === 'lists' || view === 'signups' || view === 'health' ? view : 'queue' }
 /** The top-level tab active for a given operator view. */
@@ -246,6 +246,29 @@ export const operatorTab = (view: ReturnType<typeof operatorView>) => view === '
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
+/** Where an operator tab leads: Agents and UI notes are pages of their own, the rest views of /operator. */
+export const operatorTabPath = (value: string) => value === 'agents' ? '/operator/agents' : value === 'notes' ? '/operator/notes' : value === 'queue' ? '/operator' : `/operator?view=${encodeURIComponent(value)}`
+
+// Agents (/operator/agents, ./agents): your own agents approved for the support inbox (api/src/support-agents.ts). A
+// phone's card shows the agent, when it was approved and when it expires, its last use, and its menu at the end.
+export const agentColumnDefs: SkeletonColumn[] = [
+  { key: 'agent', label: 'Agent', card: 'title' },
+  { key: 'approved', label: 'Approved', width: 168, card: 'line' },
+  { key: 'expires', label: 'Expires', width: 168, card: 'inline' },
+  { key: 'used', label: 'Last used', width: 144, card: 'line' },
+  { key: 'actions', label: '', width: 56, card: 'end' },
+]
+export const AgentsLead = () => <p className="op-agents-lead muted">Your own agents that may work the support inbox as you. An agent asks first and shows you a link to approve it here; an approval lasts 30 days.</p>
+export function OperatorAgentsSkeleton() {
+  return <>
+    <PageHeader title="Operator" actions={<GlassLink />} />
+    <LoadingRegion label="Loading agents"><div className="op-page">
+      <Tabs value="agents" onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
+      <AgentsLead />
+      <TableSkeleton columns={agentColumnDefs} rows={3} />
+    </div></LoadingRegion>
+  </>
+}
 export const facts = ['Step', 'Score', 'Daily limit', 'Since', 'Strikes', 'Connection'] as const
 
 export const stepOptions = [{ value: '', label: 'Needs review' }, { value: 'pause', label: 'Paused' }, { value: 'restrict', label: 'Restricted' }, { value: 'warn', label: 'Warned' }, { value: 'notice', label: 'Notice' }]
@@ -505,6 +528,7 @@ export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'op
   const { pathname, search } = useLocation(), identity = useSession()?.identity, uiNotes = identity?.uiNotes === true
   if (!operator) return identity && identity.multiTenant !== true && pathname === '/operator' ? <SelfHostedHealthSkeleton /> : null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
+  if (pathname === '/operator/agents') return <OperatorAgentsSkeleton />
   if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton actions={operator === 'operator'} />
   return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} canAct={operator === 'operator'} />
 }
