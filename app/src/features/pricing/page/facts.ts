@@ -1,0 +1,41 @@
+// (With extensions: the build's config imports this file, through comparison.ts and hub.ts.)
+import { formatCount, nightmail, type Line, type Row, type SharedFact } from '../prices.ts'
+import { PANELS } from '../panels.ts'
+import type { Section } from './shape.ts'
+
+// "Nightmail does this, this and this": the short list of facts under a price page's table (page.tsx draws it as a
+// list), each one line in plain words. The facts true on every page are written here once, from the billing code
+// (prices.ts, nightmail) and the product's own list (panels.ts), and every page that lists facts reuses them: the
+// comparisons (comparison.ts, after their own), /compare (hub.ts), and any page made in the same shape (shape.ts).
+// A comparison's own facts are its rows (compare/<slug>.ts): each row's line, or its first sentence; a row whose point
+// is one of the shared facts names it, so the page says it once. The free allowance is on every list; eight lines at most.
+
+/** The facts every page can say, each with the subject that makes it a repeat of a page's own line. */
+export const SHARED_FACTS: Record<SharedFact, { text: string; covers?: RegExp }> = {
+  free: { text: `${formatCount(nightmail.freeSent)} emails sent and ${formatCount(nightmail.freeReceived)} received free every month` },
+  domains: { text: 'Sends and receives on your own domains', covers: /\bown (?:sending )?domains?\b/i },
+  contacts: { text: 'No charge for contacts, however many you have', covers: /\bcontacts?\b/i },
+  teammates: { text: 'No charge for teammates', covers: /\bteammates?\b/i },
+  agents: { text: PANELS.agent.line.replace(/\.$/, ''), covers: /\bMCP\b|\bagents?\b/i },
+  campaigns: { text: 'Newsletters cost the same as any other email', covers: /\bnewsletters?\b/i },
+}
+export const MAX_FACTS = 8
+
+/** A comparison's rows as its own lines: each row's line, or its first sentence. */
+export const rowLines = (rows: Row[]): Line[] => rows.flatMap(row => row.line ?? row.text.split(/(?<=\.) /)[0]!)
+
+/** A page's list of facts: its own lines (shared ones in their place), then the shared ones it doesn't already say. */
+export function factsFor(own: Line[]): string[] {
+  const said = new Set<SharedFact>(), mine: string[] = []
+  for (const line of own) {
+    if (typeof line !== 'string') said.add(line.shared)
+    const text = typeof line === 'string' ? line.trim().replace(/\.$/, '') : SHARED_FACTS[line.shared].text
+    if (!mine.includes(text)) mine.push(text)
+  }
+  const rest = (Object.keys(SHARED_FACTS) as SharedFact[]).filter(id => !said.has(id) && !mine.some(text => SHARED_FACTS[id].covers?.test(text)))
+  const list = [...mine, ...rest.map(id => SHARED_FACTS[id].text)].slice(0, MAX_FACTS)
+  if (!list.includes(SHARED_FACTS.free.text)) throw new Error(`A facts list leaves out the free allowance: ${JSON.stringify(own)}`)
+  return list
+}
+/** The facts as a page's section: a list under a small label. */
+export const factsSection = (own: Line[] = []): Section => ({ id: 'facts', title: 'With Nightmail', blocks: [{ kind: 'list', items: factsFor(own).map(text => [text]) }] })

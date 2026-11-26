@@ -47,8 +47,8 @@ export const sendgrid: Entry = {
   lead: 'SendGrid sells a monthly allowance of email and charges for each one past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, SendGrid’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SendGrid’s free trial is 100 emails a day for 60 days.', read(SENDGRID, 'Free trial lets you send 100 emails/day for 60 days')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'SendGrid Essentials includes 1 additional teammate.', seats(1).source),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SendGrid’s free trial is 100 emails a day for 60 days.', read(SENDGRID, 'Free trial lets you send 100 emails/day for 60 days'), { shared: 'free' }),
+    fact('Teammates at no charge', 'No charge for teammates.', 'SendGrid Essentials includes 1 additional teammate.', seats(1).source, { shared: 'teammates' }),
   ],
   // SendGrid's readers first see the API, the allowances and the team.
   panels: ['send', 'free', 'team', 'receive', 'agent', 'campaign', 'domain'],

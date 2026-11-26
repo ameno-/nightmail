@@ -33,9 +33,9 @@ export const robotomail: Entry = {
   lead: 'Robotomail sells mailboxes in plans, each with a cap on received mail. Nightmail charges for each email, not each inbox.',
   assume: 'Each inbox receives 100 emails and sends 50 a month. Robotomail’s cheapest plan that holds the mailboxes and the received mail. List prices before tax.',
   rows: [
-    fact('Receiving without a monthly cap', `Receiving with no monthly cap: ${formatCount(nightmail.freeReceived)} free, then ${nightmail.perThousand} per 1,000.`, 'Robotomail’s Starter receives 2,000 a month across all mailboxes and Growth 20,000.', read(LIMITS, 'Paid accounts have a monthly inbound cap that applies across all mailboxes: Solo **500**, Starter **2,000**, Growth **20,000**, Scale **unlimited**.')),
-    fact('Campaigns and newsletters too', 'Campaigns and newsletters on the same account.', 'Robotomail isn’t for bulk marketing, by its own description.', read('https://robotomail.com/llms.txt', 'Do NOT use Robotomail for one-way bulk marketing blasts — it is built for two-way conversations.')),
-    fact('Domains at no charge', 'Your own domains, at no charge.', 'Robotomail’s Starter includes 1 custom domain and Growth 5.', read(LIMITS, 'Starter: $19/month … 1 custom domain … Growth: $79/month … 5 custom domains')),
+    fact('Receiving without a monthly cap', `Receiving with no monthly cap: ${formatCount(nightmail.freeReceived)} free, then ${nightmail.perThousand} per 1,000.`, 'Robotomail’s Starter receives 2,000 a month across all mailboxes and Growth 20,000.', read(LIMITS, 'Paid accounts have a monthly inbound cap that applies across all mailboxes: Solo **500**, Starter **2,000**, Growth **20,000**, Scale **unlimited**.'), 'No monthly limit on email you receive'),
+    fact('Campaigns and newsletters too', 'Campaigns and newsletters on the same account.', 'Robotomail isn’t for bulk marketing, by its own description.', read('https://robotomail.com/llms.txt', 'Do NOT use Robotomail for one-way bulk marketing blasts — it is built for two-way conversations.'), { shared: 'campaigns' }),
+    fact('Domains at no charge', 'Your own domains, at no charge.', 'Robotomail’s Starter includes 1 custom domain and Growth 5.', read(LIMITS, 'Starter: $19/month … 1 custom domain … Growth: $79/month … 5 custom domains'), 'No charge for your own domains'),
   ],
   // Robotomail's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'free', 'domain', 'campaign', 'send', 'route'],

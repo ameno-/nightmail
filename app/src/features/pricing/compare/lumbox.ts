@@ -35,7 +35,7 @@ export const lumbox: Entry = {
   lead: 'Lumbox sells inboxes in plans, each with a monthly quota of received and sent mail. Nightmail charges for each email, not each inbox.',
   assume: 'Each inbox receives 100 emails and sends 50 a month. Lumbox’s cheapest plan that holds the inboxes and both quotas. List prices before tax.',
   rows: [
-    fact('No monthly quota', `No monthly quota: past the free allowance, each email is ${nightmail.perThousand} per 1,000.`, 'Once a Lumbox quota runs out, its API refuses sends and new inboxes until the 1st.', read(DOCS, 'When a monthly quota is exceeded the API returns 402 Payment Required on writes (send, create inbox, etc.). Reads keep working. Quotas reset on the first of each month UTC.')),
+    fact('No monthly quota', `No monthly quota: past the free allowance, each email is ${nightmail.perThousand} per 1,000.`, 'Once a Lumbox quota runs out, its API refuses sends and new inboxes until the 1st.', read(DOCS, 'When a monthly quota is exceeded the API returns 402 Payment Required on writes (send, create inbox, etc.). Reads keep working. Quotas reset on the first of each month UTC.'), 'No monthly quota on sending'),
     fact('Inboxes at no charge', 'No charge per inbox.', 'For more inboxes than its plans hold, Lumbox asks you to email sales.', offer.beyond!.source),
   ],
   // Lumbox's readers first see the agents' inboxes, receiving and the allowances.

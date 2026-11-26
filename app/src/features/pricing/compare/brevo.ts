@@ -70,8 +70,8 @@ export const brevo: Entry = {
   lead: 'Brevo prices by emails a month, with a cap on contacts. Nightmail prices by email.',
   assume: 'Four emails a month to each subscriber, 1 teammate, Brevo’s cheapest plan that holds them. List prices before tax.',
   rows: [
-    fact('Contacts at no charge', 'No charge for contacts.', 'Brevo’s 5,000-email tier stores 500 contacts, and its 10,000-email tier 1,500.', read(MD, '| Starter | 5,000 emails | 500 | | Starter | 10,000 emails | 1,500 | | Starter | 15,000 emails | 2,500 | | Starter | 20,000 to 100,000 emails | 500,000 |')),
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Brevo’s free plan sends at most 300 emails a day.', read(BREVO, 'Daily email volume (campaigns & transactional) Upgrade to remove daily sending limit. 300 emails/day')),
+    fact('Contacts at no charge', 'No charge for contacts.', 'Brevo’s 5,000-email tier stores 500 contacts, and its 10,000-email tier 1,500.', read(MD, '| Starter | 5,000 emails | 500 | | Starter | 10,000 emails | 1,500 | | Starter | 15,000 emails | 2,500 | | Starter | 20,000 to 100,000 emails | 500,000 |'), { shared: 'contacts' }),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Brevo’s free plan sends at most 300 emails a day.', read(BREVO, 'Daily email volume (campaigns & transactional) Upgrade to remove daily sending limit. 300 emails/day'), { shared: 'free' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'free', 'send'],

@@ -45,7 +45,7 @@ export const uniOne: Entry = {
   lead: 'UniOne sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, UniOne’s cheapest Standard plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
-    fact('Charged per email', 'Each email is charged as it’s sent, with no plan size to pick.', 'UniOne’s Standard plan starts at $6 a month for 10,000 emails.', read(UNIONE, 'Standard For 10,000 emails/month $6 / month 10 000 emails/month')),
+    fact('Charged per email', 'Each email is charged as it’s sent, with no plan size to pick.', 'UniOne’s Standard plan starts at $6 a month for 10,000 emails.', read(UNIONE, 'Standard For 10,000 emails/month $6 / month 10 000 emails/month'), 'Pay for the emails you send, with no plan size to pick'),
   ],
   // UniOne's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'agent', 'campaign', 'domain', 'route'],

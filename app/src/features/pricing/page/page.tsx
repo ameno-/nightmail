@@ -24,6 +24,14 @@ function Run({ text }: { text: Text }) {
       : <span key={i} data-nightmail-sent={part.sent} data-nightmail-received={part.received}>{part.ours}</span>)}</>
 }
 
+/** A caption in parts ("Per 100,000 emails a month · checked 25 Nov 2026"): on one line the parts are set apart by a
+ *  dot; where they wrap, each wrapped part starts its own line, with no dot (page.css, .pp-parts). The dot and its spaces
+ *  are the text's own, so the words read the same to anything that reads them. */
+function Caption({ text }: { text: Text }) {
+  const parts = text.length === 1 && typeof text[0] === 'string' ? text[0].split(' · ') : []
+  return parts.length < 2 ? <Run text={text} /> : <span className="pp-parts">{parts.map((part, i) => <span key={i}>{i > 0 && <span className="pp-dot">{' · '}</span>}{part}</span>)}</span>
+}
+
 /** The way in, the price pages' own (board.tsx, Start): the homepage's button in the television's airmail label
  *  (home/tv/tv.css, .chyp) at an ordinary button's size. Painted (page/prerender.tsx) it is a visitor's Get started; the
  *  app's (view.tsx) signs in with the page's focus, says Join the waitlist when no place is open (home/signups-open.ts),
@@ -89,16 +97,19 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
     <main className="pp-col">
       <section className="pp-hero" aria-labelledby="pp-h1">
         <Heading doc={doc} id="pp-h1" />
-        {doc.answer.map((text, i) => <p key={i} className="pp-caption"><Run text={text} /></p>)}
+        {doc.answer.map((text, i) => <p key={i} className="pp-caption"><Caption text={text} /></p>)}
         <Way start={start} />
       </section>
       {doc.sections.map((section, i) => <section key={section.id} id={section.id} className="pp-section" aria-labelledby={`${section.id}-title`}>
-        <h2 id={`${section.id}-title`} className={doc.sections.length === 1 && section.blocks[0]?.kind === 'table' ? 'sr-only' : 'pp-h2'}>{section.title}</h2>
+        {/* Quiet, or a page's only section and a table (a vendor's price page): its title for screen readers only. */}
+        <h2 id={`${section.id}-title`} className={section.quiet || (doc.sections.length === 1 && section.blocks[0]?.kind === 'table') ? 'sr-only' : 'pp-h2'}>{section.title}</h2>
         {section.blocks.map((block, j) => <BlockView key={j} block={block} />)}
       </section>)}
       {doc.questions.length > 0 && <section id="questions" className="pp-section" aria-labelledby="questions-title">
         <h2 id="questions-title" className="pp-h2">Questions</h2>
-        {doc.questions.map(item => <div key={item.id} className="pp-qa"><h3>{item.question}</h3><p>{item.answer}</p></div>)}
+        {/* Each a closed row that opens on a tap or a key: the answers stay in the HTML (the FAQPage carries them word for
+            word), out of a visitor's way. */}
+        {doc.questions.map(item => <details key={item.id} className="pp-qa"><summary><h3>{item.question}</h3></summary><p>{item.answer}</p></details>)}
       </section>}
       {doc.related.length > 0 && <nav className="pp-section" aria-labelledby="related-title">
         <h2 id="related-title" className="pp-h2">{comparisons ? 'More comparisons' : 'More'}</h2>

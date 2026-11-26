@@ -95,8 +95,8 @@ export const mailerLite: Entry = {
   lead: 'MailerLite prices by subscribers. Nightmail prices by email.',
   assume: 'Four emails a month to each subscriber, 1 teammate, MailerLite’s cheapest plan that holds them. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'MailerLite Free is 2,500 emails a month, for up to 250 subscribers.', freePlan),
-    fact('Teammates at no charge', 'No charge for teammates.', 'MailerLite Free includes 2 seats and Comfort 3.', read(MD, '| Seats | 2 | 3 | Unlimited |')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'MailerLite Free is 2,500 emails a month, for up to 250 subscribers.', freePlan, { shared: 'free' }),
+    fact('Teammates at no charge', 'No charge for teammates.', 'MailerLite Free includes 2 seats and Comfort 3.', read(MD, '| Seats | 2 | 3 | Unlimited |'), { shared: 'teammates' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'free', 'domain'],

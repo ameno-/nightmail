@@ -66,9 +66,9 @@ export const aweber: Entry = {
   lead: 'AWeber prices by subscribers. Nightmail prices by email.',
   assume: 'Four emails a month to each subscriber, 1 teammate, AWeber’s cheapest plan that holds them. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'AWeber’s free plan is 3,000 emails a month, for up to 500 subscribers.', freePlan),
-    fact('Teammates at no charge', 'No charge for teammates.', 'AWeber Lite includes 3 users.', read(AWEBER, 'Users Ultd Unlimited Ultd Unlimited 3')),
-    fact('No send allowance', `Every email is ${nightmail.perThousand} per 1,000, with no tiers.`, 'AWeber’s tiers include sends of 10 times their subscribers a month on Lite and 12 times on Plus.', read('https://docs.aweber.com/getting-started-with-aweber/aweber-information/how-many-messages-can-i-send-per-day', 'AWeber Plus: Each subscriber tier includes monthly sends equal to 12 times the number of subscribers in that tier. … AWeber Lite: … 10 times')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'AWeber’s free plan is 3,000 emails a month, for up to 500 subscribers.', freePlan, { shared: 'free' }),
+    fact('Teammates at no charge', 'No charge for teammates.', 'AWeber Lite includes 3 users.', read(AWEBER, 'Users Ultd Unlimited Ultd Unlimited 3'), { shared: 'teammates' }),
+    fact('No send allowance', `Every email is ${nightmail.perThousand} per 1,000, with no tiers.`, 'AWeber’s tiers include sends of 10 times their subscribers a month on Lite and 12 times on Plus.', read('https://docs.aweber.com/getting-started-with-aweber/aweber-information/how-many-messages-can-i-send-per-day', 'AWeber Plus: Each subscriber tier includes monthly sends equal to 12 times the number of subscribers in that tier. … AWeber Lite: … 10 times'), `Every email is ${nightmail.perThousand} per 1,000, with no plan to outgrow`),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'free', 'domain'],

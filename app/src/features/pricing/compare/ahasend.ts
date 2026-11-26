@@ -36,8 +36,8 @@ export const ahasend: Entry = {
   lead: 'AhaSend charges a monthly base with 25,000 emails, then for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, AhaSend’s Pro: $10 a month with 25,000 emails, then $0.50 per 1,000. List prices before tax.',
   rows: [
-    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'AhaSend counts each received email against the same allowance as sent.', read(PRICES, 'We count both outbound and inbound emails. … **Inbound emails:** Each email received by your domain counts as one email.')),
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'AhaSend’s free plan is 1,000 emails a month.', read(PRICES, 'We offer a forever **free plan** that includes 1000 emails per month … you can start with a free account and send up to 1000 emails per month without providing your credit card information.')),
+    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'AhaSend counts each received email against the same allowance as sent.', read(PRICES, 'We count both outbound and inbound emails. … **Inbound emails:** Each email received by your domain counts as one email.'), { shared: 'free' }),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'AhaSend’s free plan is 1,000 emails a month.', read(PRICES, 'We offer a forever **free plan** that includes 1000 emails per month … you can start with a free account and send up to 1000 emails per month without providing your credit card information.'), { shared: 'free' }),
   ],
   // AhaSend's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'route', 'agent', 'campaign', 'domain'],

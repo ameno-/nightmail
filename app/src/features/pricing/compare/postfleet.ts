@@ -33,7 +33,7 @@ export const postfleet: Entry = {
   lead: 'Postfleet sells mailboxes in plans, metered by the messages its model reads. Nightmail charges for each email, not each inbox.',
   assume: 'Each inbox receives 100 emails and sends 50 a month. Postfleet’s cheapest plan that holds the mailboxes and the sends. List prices before tax.',
   rows: [
-    fact('Your own domain from the start', 'Your own domains on every workspace.', 'Postfleet’s custom sending domains start on Pro.', read(POSTFLEET, 'Pro $20 /mo … Custom sending domains … Scale $200 /mo … Multiple custom domains')),
+    fact('Your own domain from the start', 'Your own domains on every workspace.', 'Postfleet’s custom sending domains start on Pro.', read(POSTFLEET, 'Pro $20 /mo … Custom sending domains … Scale $200 /mo … Multiple custom domains'), 'Your own domains on every account, even a free one'),
     fact('Inboxes at no charge', 'No charge per inbox.', 'Postfleet’s Scale holds 150 mailboxes for $200 a month.', offer.plans[3]!.tiers[0]!.source),
   ],
   // Postfleet's readers first see the agents' inboxes, receiving and the domain.

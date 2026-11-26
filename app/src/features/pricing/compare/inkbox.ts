@@ -36,7 +36,7 @@ export const inkbox: Entry = {
   assume: 'Each inbox receives 100 emails and sends 50 a month. Inkbox’s cheapest plan, with a pack of 100 more identities where that costs less. Up to 50 inboxes: Inkbox sends to 100 recipients a day by default. List prices before tax.',
   rows: [
     fact('Inboxes at no charge', 'No charge per inbox.', 'Inkbox sells more identities in packs of 100 for $100 a month.', pack.source),
-    fact('No branding in your mail', 'No Nightmail branding in your mail, free allowance included.', 'Inkbox’s free plan adds a “Sent via Inkbox” footer.', read(`${DOCS}/capabilities/email.md`, 'Outgoing emails include a short "Sent via Inkbox" footer by default. Organizations on a paid plan can remove it')),
+    fact('No branding in your mail', 'No Nightmail branding in your mail, free allowance included.', 'Inkbox’s free plan adds a “Sent via Inkbox” footer.', read(`${DOCS}/capabilities/email.md`, 'Outgoing emails include a short "Sent via Inkbox" footer by default. Organizations on a paid plan can remove it'), 'No Nightmail branding in your mail, free or paid'),
   ],
   // Its readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'send', 'route', 'team'],

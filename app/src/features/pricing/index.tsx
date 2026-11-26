@@ -42,12 +42,14 @@ export function useShellTakeover() {
   useLayoutEffect(() => {
     const shell = document.getElementById('price-shell')
     if (!shell) return
-    const focused = placeOf(shell, document.activeElement)
+    const focused = placeOf(shell, document.activeElement), opened = [...shell.querySelectorAll('details')].map(row => row.open)
     const held = window as Window & { __nightmailShellPress?: Element }
     carried.current = { typed: [...shell.querySelectorAll('input')].map(input => input.value !== input.defaultValue ? input.value : null), pressed: placeOf(shell, held.__nightmailShellPress) }
     delete held.__nightmailShellPress
     shell.remove()
     document.querySelector('style[data-shell-css]')?.remove()
+    // The rows the reader opened (a price page's questions) stay open, before the app's page is first painted.
+    document.querySelector(APP_PAGE)?.querySelectorAll('details').forEach((row, i) => { if (opened[i]) row.open = true })
     atPlace(document.querySelector(APP_PAGE), focused)?.focus({ preventScroll: true })
   }, [])
   useEffect(() => {

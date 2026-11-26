@@ -60,9 +60,9 @@ export const resend: Entry = {
   lead: 'Resend sells a monthly allowance of email. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, Resend’s cheapest plan or pay-as-you-go. List prices before tax.',
   rows: [
-    { short: 'A free allowance for received email', text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived },
+    { short: 'A free allowance for received email', text: `Received email has its own ${formatCount(nightmail.freeReceived)} free a month. Resend counts it against the sending allowance.`, source: resendReceived, line: { shared: 'free' } },
     { short: 'Inboxes at no charge', text: 'No charge per inbox. Resend includes 3 and charges $1 a month for each one after that.', source: read(RESEND, 'Every plan includes 3 inboxes. Paid plans can enable pay-as-you-go to add more at $1 per inbox per month') },
-    { short: 'Marketing without a contact plan', text: `No contact plan for marketing. Resend’s Pro marketing is ${money(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source },
+    { short: 'Marketing without a contact plan', text: `No contact plan for marketing. Resend’s Pro marketing is ${money(resendMarketing.plans[1]!.tiers[0]!.cents)} a month at ${formatCount(resendMarketing.plans[1]!.tiers[0]!.size)} contacts.`, source: resendMarketing.plans[1]!.tiers[0]!.source, line: { shared: 'contacts' } },
   ],
   // Resend's readers first see the API, the allowances and the domain.
   panels: ['send', 'free', 'domain', 'receive', 'agent', 'campaign', 'route'],

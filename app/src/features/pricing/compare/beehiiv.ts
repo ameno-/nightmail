@@ -61,7 +61,7 @@ export const beehiiv: Entry = {
   assume: 'Four emails a month to each subscriber, 1 teammate, beehiiv’s cheapest plan that holds them. List prices before tax.',
   rows: [
     fact('Your own domain at no charge', 'No charge for your own domains.', 'beehiiv’s custom domains start on Lite.', read(MD, '| Custom domains | — | Yes | Yes | Yes |')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'beehiiv Free includes 1 seat, Lite 2 and Pro 10.', read(MD, '| Team seats | 1 | 2 | 10 | Unlimited |')),
+    fact('Teammates at no charge', 'No charge for teammates.', 'beehiiv Free includes 1 seat, Lite 2 and Pro 10.', read(MD, '| Team seats | 1 | 2 | 10 | Unlimited |'), { shared: 'teammates' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'domain', 'team', 'free'],

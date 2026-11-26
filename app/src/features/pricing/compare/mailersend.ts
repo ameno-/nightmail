@@ -51,8 +51,8 @@ export const mailerSend: Entry = {
   lead: 'MailerSend sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, MailerSend’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'MailerSend’s free plan is 500 emails a month.', offer.plans[0]!.tiers[0]!.source),
-    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'MailerSend counts each received email it forwards or posts to your endpoint as a sent email.', read('https://www.mailersend.com/help/inbound-route', 'Inbound emails are free to receive but are counted towards your monthly usage when forwarded or posted to your endpoint URL. One forward is equivalent to one sent email.')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'MailerSend’s free plan is 500 emails a month.', offer.plans[0]!.tiers[0]!.source, { shared: 'free' }),
+    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'MailerSend counts each received email it forwards or posts to your endpoint as a sent email.', read('https://www.mailersend.com/help/inbound-route', 'Inbound emails are free to receive but are counted towards your monthly usage when forwarded or posted to your endpoint URL. One forward is equivalent to one sent email.'), { shared: 'free' }),
     fact('Domains at no charge', 'No charge per domain.', 'MailerSend charges $4 a month for each extra domain on Starter and above.', read('https://www.mailersend.com/help/plan-add-ons', 'Starter plans and above can purchase up to 50 additional domains through the Domain spaces add-on. Each additional domain costs $4/month.')),
   ],
   // MailerSend's readers first see the API, the allowances and receiving.

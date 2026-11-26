@@ -49,8 +49,8 @@ export const mailtrap: Entry = {
   lead: 'Mailtrap sells a monthly allowance of email, sent and received together. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, Mailtrap’s cheapest plan. List prices before tax.',
   rows: [
-    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'Mailtrap counts sent and received email against one quota.', read('https://docs.mailtrap.io/account-and-organization/billing/plans.md', 'Emails/mo is a shared quota for sending and receiving combined.')),
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'Mailtrap’s free plan is 4,000 emails a month, 150 a day.', free),
+    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'Mailtrap counts sent and received email against one quota.', read('https://docs.mailtrap.io/account-and-organization/billing/plans.md', 'Emails/mo is a shared quota for sending and receiving combined.'), { shared: 'free' }),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'Mailtrap’s free plan is 4,000 emails a month, 150 a day.', free, { shared: 'free' }),
     fact('Teammates and domains at no charge', 'No charge for teammates or domains.', 'Mailtrap’s Basic includes 3 users and 5 sending domains.', read(PRICES, '| Sending domains | 1 | 5 | 100 | Unlimited | … | Users | 1 | 3 | 100 | Unlimited |')),
   ],
   // Mailtrap's readers first see the API, the allowances and receiving.

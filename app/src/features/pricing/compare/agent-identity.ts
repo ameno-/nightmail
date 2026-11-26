@@ -34,8 +34,8 @@ export const agentIdentity: Entry = {
   lead: 'Agent Identity sells agent identities, an inbox each, in plans. Nightmail charges for each email, not each inbox.',
   assume: 'Each inbox receives 100 emails and sends 50 a month. Agent Identity’s cheapest plan that holds the identities. List prices before tax.',
   rows: [
-    fact('IMAP and SMTP', 'IMAP and SMTP for mail apps.', 'Agent Identity’s IMAP and SMTP access isn’t available yet.', read(AI, 'SMS, iMessage and IMAP/SMTP access are not available yet.')),
-    fact('No branding in your mail', 'No Nightmail branding in your mail, free allowance included.', 'Agent Identity’s free plan adds a footer watermark.', read(AI, 'Email footer watermark Yes Removed Removed Removed')),
+    fact('IMAP and SMTP', 'IMAP and SMTP for mail apps.', 'Agent Identity’s IMAP and SMTP access isn’t available yet.', read(AI, 'SMS, iMessage and IMAP/SMTP access are not available yet.'), 'Inboxes you keep work in mail apps, over IMAP and SMTP'),
+    fact('No branding in your mail', 'No Nightmail branding in your mail, free allowance included.', 'Agent Identity’s free plan adds a footer watermark.', read(AI, 'Email footer watermark Yes Removed Removed Removed'), 'No Nightmail branding in your mail, free or paid'),
   ],
   // Its readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'send', 'route', 'team'],
