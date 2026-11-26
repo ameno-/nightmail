@@ -43,7 +43,12 @@
 .sinbox-chat__facts { margin: 0; color: var(--color-faint); font-size: var(--text-xs); line-height: var(--leading-xs); }
 .sinbox-chat__day { display: flex; justify-content: center; margin: 0; padding: var(--space-16) 0 var(--space-8); color: var(--color-faint); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); }
 .sinbox-chat__event { display: flex; justify-content: center; margin: 0; padding: var(--space-8) var(--space-24); color: var(--color-faint); font-size: var(--text-xs); line-height: var(--leading-xs); text-align: center; }
-.sinbox-chat__event > span { min-width: 0; overflow-wrap: anywhere; text-wrap: pretty; }
+/* A centred line that wraps is balanced, so no line is left with a word or two. */
+.sinbox-chat__event > span { min-width: 0; overflow-wrap: anywhere; text-wrap: balance; }
+/* The support platform's own notice (an agent report's provenance) is a paragraph about the message above it: left, at
+   the thread's edge, in the same quiet colour. */
+.sinbox-chat__event[data-kind='system'] { justify-content: flex-start; padding: var(--space-6) 0 var(--space-8); text-align: left; }
+.sinbox-chat__event[data-kind='system'] > span { text-wrap: pretty; }
 .sinbox-chat__event:is([data-kind='proposed'], [data-kind='paused'], [data-kind='ticket']) { color: var(--color-muted); }
 .sinbox-chat__empty { margin: auto; padding: var(--space-40) 0; color: var(--color-faint); font-size: var(--text-md); text-align: center; }
 .sinbox-chat__time { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); line-height: var(--leading-label); font-variant-numeric: tabular-nums; white-space: nowrap; }
