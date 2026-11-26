@@ -66,6 +66,9 @@ try {
     await bootstrap;
     await facetLane.close();
   })();
+  // Only this independent lane claims the hourly sampler, even with JOB_CONCURRENCY=1.
+  let sampler: Promise<void> | undefined;
+  const drainSamples = async () => { while (!stopped && await drainJobs(runtime,1,1,1000,'abuseSample')) { /* next durable slice */ } };
   const hooks=(async()=>{while(!stopped){try{if(await drainJobs(runtime,20,2,5000,'webhooks'))continue;}catch{log('warn',{code:'WEBHOOK_DRAIN_FAILED'});}await setTimeout(1000);}})();
   try {
     await queueStartupDiscovery(runtime);
@@ -117,6 +120,7 @@ try {
           try { await syncOutboundMessages(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_OUTBOUND_SYNC_FAILED' }); }
         }
         const recover = Date.now() - lastRecovery >= 60_000;
+        if (recover && runtime.config.abuseMonitoring && !sampler) sampler = drainSamples().catch(() => log('warn',{code:'ABUSE_SAMPLE_DRAIN_FAILED'})).finally(() => { sampler=undefined; });
         if (recover) try { await (await import('./sending.js')).screenHeldMail(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'HELD_SCREEN_SWEEP_FAILED' }); }
         if (recover) try { await scheduleHoldRelease(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'MAILBOX_HOLD_RELEASE_FAILED' }); }
         if (recover && runtime.config.multiTenant) try { await (await import('./billing/stripe-jobs.js')).billingMinute(runtime); } catch (error) { log('warn', { code: error instanceof ApiError ? error.code : 'BILLING_MINUTE_FAILED' }); }
@@ -129,7 +133,7 @@ try {
         await setTimeout(5000);
       }
     }
-  } finally { stopped=true;await facets;await hooks;await sharedSetup;await publicStats;await display;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
+  } finally { stopped=true;await facets;await hooks;await sampler;await sharedSetup;await publicStats;await display;await health;await hourly;await sentRetention; await listener?.end(); await close(); }
 } catch (error) {
   logError(error, { code: error instanceof ApiError ? error.code : 'STARTUP_FAILED' });
   process.exitCode = 1;

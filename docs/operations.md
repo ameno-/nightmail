@@ -323,14 +323,11 @@ all, so look). A warning; **critical while a high alert is unposted**. The alert
    or a burst waiting for its level's hourly limit (3 review, 10 high).
 
 ### abuse-monitor-behind
-Abuse monitoring is behind: a sign-in has waited more than two hours to be read (the finding says how long, and how
-many wait), or the hourly abuse job ran out of time three runs in a row (`abuse_state.cut_runs`). Either way some of
-what it reads waits for later runs, so scores lag. The finding names the stages the last run stopped; each run's
-`ABUSE_HOURLY` log line has every stage's time, and each stop an `ABUSE_STEP_CUT` line.
+A sign-in, payment, pending link or cluster due for scoring has waited over two hours. Each finding names the stage and the age of its oldest outstanding work. It clears at 90 minutes or when none remains. An idle stage with no new observations is healthy.
 
 **An agent checks first**
-1. `SELECT last_run,cut_runs,cursors FROM abuse_state;`: which stage, and how far behind its cursor is.
-2. Workers Logs: `ABUSE_HOURLY` (`stages`, `cuts`) over the last few hours.
+1. Check the named stage’s job: `SELECT type,status,available_at,last_error FROM jobs WHERE starts_with(type,'abuse.stage.');`.
+2. Compare its `ABUSE_STAGE` duration, `ABUSE_STEP_CUT` reason and (for sign-ins) `ABUSE_SIGNIN_BATCH` time per item. A time cut makes another job due immediately.
 
 ### support-ai-cost
 The support AI's model calls cost more than `SUPPORT_AI.dailyLineUsd` (`api/src/health-thresholds.ts`) since midnight UTC.

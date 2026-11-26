@@ -57,7 +57,7 @@ const KINDS = {
   'database-refusing': { emoji: ':rotating_light:', label: 'Database refusing', severity: 'critical', unit: 'seconds', section: 'database' },
   // Read in the database probe. A warning, so the tick posts no card of its own: operator-alerts.ts posts one a UTC day.
   'support-ai-cost': { emoji: ':money_with_wings:', label: 'Support AI cost', severity: 'warning', unit: 'usd', section: 'database' },
-  // Read in the database probe: abuse alerts that should have gone out and have not, and the hourly abuse job running out of time.
+  // Read in the database probe: abuse alerts that should have gone out and have not, and the oldest outstanding work in each abuse stage.
   // abuse-alerts-undelivered is critical while a high alert is unposted (evaluate).
   'abuse-alerts-undelivered': { emoji: ':mag:', label: 'Abuse alerts not delivered', severity: 'warning', unit: 'alerts', section: 'database' },
   'abuse-monitor-behind': { emoji: ':mag:', label: 'Abuse monitoring behind', severity: 'warning', unit: 'seconds', section: 'database' },
@@ -94,8 +94,7 @@ type CounterRow = { kind: string; key: string; n: number; errors: number; ms: nu
 type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number;
   /** Abuse alerts that should have gone out and have not (late: unposted past ABUSE.lateMinutes; failed; expired unposted), of them the high ones, and those posted but unconfirmed. */
   abuseUndelivered?: { late: number; failed: number; expired: number; high: number; unconfirmed?: number };
-  /** How many hourly abuse runs in a row ran out of time and the stages the last one stopped; the sign-ins waiting to be read, and how long the oldest has waited. */
-  abuseBehind?: { runs: number; cuts: string[]; signInsWaiting?: number; signInsBehindSeconds?: number | null } | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
+  /** Seconds since the oldest outstanding observation or due time, by stage. */ abuseBehind?: Record<string, number | null> | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
 /**
@@ -308,11 +307,12 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
       if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high, unposted)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} failed`,
         expired && `${count(expired)} expired unposted`, unconfirmed && `${count(unconfirmed)} posted but unconfirmed (Slack didn't answer; check the channel)`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes, high > 0 ? 'critical' : 'warning');
     }
-    if (abuseBehind) {
-      const lag = abuseBehind.signInsBehindSeconds ?? 0, waiting = abuseBehind.signInsWaiting ?? 0;
-      const lagging = waiting > 0 && lag > ABUSE.signInsBehindMinutes * 60, outOfTime = abuseBehind.runs >= ABUSE.cutRuns;
-      if (lagging || outOfTime) find('abuse-monitor-behind', null, lag, `${[lagging && `sign-ins are ${span(lag)} behind: ${count(waiting)} waiting to be read, the oldest for ${span(lag)}`,
-        outOfTime && `the hourly job ran out of time ${count(abuseBehind.runs)} runs in a row${abuseBehind.cuts.length ? ` (last stopped: ${abuseBehind.cuts.map(id).join(', ')})` : ''}`].filter(Boolean).join('; ')}.`, ABUSE.remindMinutes);
+    for (const [stage, seconds] of Object.entries(abuseBehind ?? {})) {
+      const key = 'abuse-monitor-behind:'+stage;
+      if (seconds !== null && (seconds > ABUSE.lagSeconds || (memory.streaks[key] && seconds > ABUSE.clearSeconds))) {
+        streaks[key] = 1;
+        find('abuse-monitor-behind', stage, seconds, `${stage}: oldest outstanding work has waited ${span(seconds)}.`, ABUSE.remindMinutes);
+      }
     }
     if (held('database-connections', d.maxConnections > 0 && d.connections >= d.maxConnections * DATABASE.connectionShare, DATABASE.sustain))
       find('database-connections', null, d.connections, `${count(d.connections)} of ${count(d.maxConnections)}.`, DATABASE.remindMinutes);
@@ -381,6 +381,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
       count(*) FILTER (WHERE whole AND m.n>=${REQUESTS.stormPerMinute})::int AS "stormMinutes",coalesce(round(avg(m.n) FILTER (WHERE whole AND m.n>=${REQUESTS.stormPerMinute})),0)::int AS "stormRate",
       (SELECT hist FROM h WHERE h.kind=m.kind AND h.key=m.key) AS hist
     FROM m GROUP BY m.kind,m.key`)).rows);
+  const lag = config.multiTenant && config.abuseMonitoring ? (await import('./abuse.js')).abuseLag : sql`NULL`;
   const activity = sql`pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`;
   const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",
       (SELECT json_build_object('late',count(*) FILTER (WHERE status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})),
@@ -388,9 +389,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
         'high',count(*) FILTER (WHERE band='high' AND ((status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})) OR (status='failed' AND created_at>now()-interval '1 day') OR (status='stale' AND stale_reason='expired'))),
         'unconfirmed',count(*) FILTER (WHERE status='unconfirmed' AND sent_at>now()-interval '1 day'))
         FROM abuse_alerts WHERE created_at>now()-interval '2 days') AS "abuseUndelivered",
-      (SELECT json_build_object('runs',s.cut_runs,'cuts',coalesce(s.last_run->'cuts','[]'::jsonb),'signInsWaiting',w.n,'signInsBehindSeconds',extract(epoch FROM now()-w.oldest))
-        FROM abuse_state s CROSS JOIN LATERAL (SELECT count(*) AS n,min(a.last_at) AS oldest FROM nightmail_signin_attempts a
-          WHERE a.observed IS NOT NULL AND a.last_at>greatest(coalesce((s.cursors->'signIns'->>'at')::timestamptz,s.active_since),s.active_since)) w WHERE s.id='monitor') AS "abuseBehind",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+      ${lag} AS "abuseBehind",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",

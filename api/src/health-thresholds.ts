@@ -73,6 +73,7 @@ export const JOBS_LATE: Record<string, AgeRule> = {
   publish: { warning: 300 },
   hook: { warning: 900 },                     // Customers' endpoints and each owner's turn.
   other: { warning: 600 },
+  abuse: {}, abuse_sample: {}, // Measured by outstanding source work, not queue age.
 };
 export const JOBS = {
   sustain: 2, remindMinutes: 30,
@@ -218,8 +219,6 @@ export const SUPPORT_AI = { dailyLineUsd: 50, remindMinutes: 24 * 60 } as const;
 /**
  * Abuse monitoring (src/abuse.ts, src/abuse-alerts.ts). An alert is late when it is still unposted an hour after it was
  * stored: its job posts it within minutes, or waits for its level's hourly limit (a burst), so an hour means the channel
- * is behind or refusing; a high one late is critical. The monitor is behind when a sign-in has waited more than
- * signInsBehindMinutes to be read (the hourly job reads each within the hour when it keeps up), or when the job ran out
- * of time three runs in a row: one slow run is a busy hour, three is scoring that no longer keeps up.
+ * is behind or refusing; a late high alert is critical. Stage lag opens at two hours, and clears below 90 minutes or when no work remains.
  */
-export const ABUSE = { lateMinutes: 60, signInsBehindMinutes: 120, cutRuns: 3, remindMinutes: 24 * 60 } as const;
+export const ABUSE = { lateMinutes: 60, lagSeconds: 2*3600, clearSeconds: 90*60, remindMinutes: 24 * 60 } as const;
