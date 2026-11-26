@@ -35,7 +35,7 @@ type Words = { text: string; at: string };
 type Brief = { title: string; summary: string; ask: string; recommendation: string; tried?: { tool: string; finding: string }[] };
 export type StaffRow = ItemRow & {
   brief: Brief | null; evidence: { filedBy?: string } | null; staff_thread: string | null; staff_seq: number; staff_reasons: string[]; role: string | null;
-  max_seq: number; held_reason: string | null; held_seq: number | null; first_words: Words | null; fresh_words: Words[] | null;
+  max_seq: number; held_reason: string | null; held_seq: number | null; held_id: string | null; first_words: Words | null; fresh_words: Words[] | null;
   operation: string | null; request_id: string | null; filed_at: string | null; failed_by: 'agent' | 'staff' | null;
 };
 type Need = 'failed' | 'held' | 'no_reply' | 'blocked' | 'waiting' | 'ticket' | 'feedback';
@@ -209,14 +209,14 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
     if (budget <= 0) return 0;
     const { rows } = await tx.execute<StaffRow>(sql`SELECT ${itemColumns}, c.ticket_brief AS brief, c.evidence, c.staff_thread, c.staff_seq, c.staff_reasons,
         (SELECT wm.role FROM workspace_members wm WHERE wm.workspace_id = c.workspace_id AND wm.user_id = c.user_id LIMIT 1) AS role,
-        coalesce((SELECT max(m.seq) FROM support_messages m WHERE m.conversation_id = c.id), 0) AS max_seq, held.reason AS held_reason, held.seq AS held_seq,
+        coalesce((SELECT max(m.seq) FROM support_messages m WHERE m.conversation_id = c.id), 0) AS max_seq, held.reason AS held_reason, held.seq AS held_seq, held.id AS held_id,
         (SELECT json_build_object('text', left(m.text, 4000), 'at', m.created_at) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' ORDER BY m.seq LIMIT 1) AS first_words,
         (SELECT json_agg(json_build_object('text', left(x.text, 4000), 'at', x.created_at) ORDER BY x.seq) FROM (SELECT m.seq, m.text, m.created_at FROM support_messages m
           WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.seq > c.staff_seq ORDER BY m.seq DESC LIMIT 3) x) AS fresh_words,
         f.operation, f.request_id, f.created_at::text AS filed_at,
         (SELECT m.author FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'failed' ORDER BY m.seq DESC LIMIT 1) AS failed_by
       FROM ${itemFrom('')}
-      LEFT JOIN LATERAL (SELECT coalesce(m.held_reason, 'unknown') AS reason, m.seq FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'held'
+      LEFT JOIN LATERAL (SELECT m.id, coalesce(m.held_reason, 'unknown') AS reason, m.seq FROM support_messages m WHERE m.conversation_id = c.id AND m.delivery = 'held' AND m.draft_outcome IS NULL
         AND m.seq > coalesce((SELECT max(s.seq) FROM support_messages s WHERE s.conversation_id = c.id AND s.author = 'staff' AND s.kind IS DISTINCT FROM 'note'), 0) ORDER BY m.seq DESC LIMIT 1) held ON true
       LEFT JOIN support_feedback f ON f.conversation_id = c.id
       WHERE ${triageCandidates} AND triage.needs_you ORDER BY triage.urgency, triage.since, c.id LIMIT 200`);
@@ -265,9 +265,12 @@ export async function planStaffMail(db: Database, config: Pick<Config, 'publicUr
         mail = feedbackEmail(origin, due, first, subject);
       } else {
         const row = due[0]!, reasons = reasonsOf(row), need = needOf(row, reasons);
-        // A yes or no on something proposed: the button opens the conversation with it ready to confirm.
-        const approval = need === 'blocked' ? await propose(tx, { conversationId: row.id, kind: 'retry_work', proposedBy: 'nightmail', reason: `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.` }) : null;
-        mail = conversationEmail(origin, row, reasons, first, now, approval ? { label: KINDS.retry_work.label, url: approvalLink(config, approval) } : null, first ? subjectOf(need, row, whoOf(row).short) : thread.subject);
+        // A yes or no on something proposed: the button opens the conversation with it ready to confirm. A held answer
+        // is proposed only when it may go as written (held by the check or a pause); one that needs a fresh reply isn't.
+        const kind = need === 'blocked' ? 'retry_work' : need === 'held' && row.held_id && (row.held_reason === 'gate' || row.held_reason === 'paused') ? 'send_held_answer' : null;
+        const approval = kind === 'retry_work' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', reason: `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.` })
+          : kind === 'send_held_answer' ? await propose(tx, { conversationId: row.id, kind, proposedBy: 'nightmail', payload: { messageId: row.held_id }, reason: `The agent’s answer was held: ${HELD_WHY[row.held_reason ?? 'unknown']}.` }) : null;
+        mail = conversationEmail(origin, row, reasons, first, now, approval && kind ? { label: KINDS[kind].label, url: approvalLink(config, approval) } : null, first ? subjectOf(need, row, whoOf(row).short) : thread.subject);
       }
       const seq = thread.emails + 1;
       await tx.execute(sql`INSERT INTO support_staff_emails(key, thread_key, seq, subject, text, html) VALUES (${emailKey(key, seq)}, ${key}, ${seq}, ${mail.subject}, ${mail.text}, ${mail.html})`);

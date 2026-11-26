@@ -10430,6 +10430,50 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.equal(next?.subject, `${(await db.query('SELECT pending_address FROM support_conversations WHERE id = $1', [waiting])).rows[0].pending_address} got no reply`);
           await sent(next);
         });
+
+        await t.test('14 send the held answer from the email: its link opens a confirm step showing exactly what would go, and only an operator\u2019s Approve sends it, as Send does; one a newer reply overtook is refused; one that needs a fresh reply is never proposed', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const due = async () => ok(reply(await platform.staffMail())).data as Json[];
+          let n = 0;
+          const sent = async (mail: Json) => { n++; return ok(reply(await platform.staffMailSent(mail.key, { threadId: mail.threadId ?? `thr_held_${n}`, messageId: `msg_held_${n}` }))); };
+          await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'");
+          for (let i = 0; i < 30; i++) { const batch = await due(); if (!batch.length) break; for (const mail of batch) await sent(mail); await db.query("UPDATE support_staff_emails SET created_at = created_at - interval '2 hours'"); }
+          const held = async (reason: 'gate' | 'paused' | 'access', text: string) => {
+            const id = await chat(member), draft = msg();
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Why are my bounces up?', at: at(20) }, { id: draft, author: 'agent', kind: 'held', text, delivery: 'held', reason, at: at(19) }])));
+            return { id, draft };
+          };
+          const fresh = await held('gate', 'Gmail hard-bounced **61** sends from one import.'), overtaken = await held('paused', 'Your domain is verified.'), shrunk = await held('access', 'Your Beta workspace has 3 domains.');
+          const mails = await due(), mailOf = (id: string) => mails.find((m: Json) => m.text.includes(`/support/${id}`))!;
+          const linkOf = (mail: Json) => { const found = /Send the held answer: (\S+)/.exec(mail.text); return found ? new URL(found[1]!) : null; };
+          assert.equal(linkOf(mailOf(shrunk.id)), null, 'One that needs a fresh reply is never proposed.');
+          assert.ok(mailOf(shrunk.id).text.includes('Decide: write them a fresh reply.'));
+          for (const mail of mails) await sent(mail);
+          const staffReplies = async (id: string) => (await db.query("SELECT text FROM support_messages WHERE conversation_id = $1 AND author = 'staff'", [id])).rows.map(r => r.text);
+
+          // The link only opens the confirm step, with exactly what would go (a chat keeps the agent's Markdown).
+          const link = linkOf(mailOf(fresh.id))!, path = `${inbox}/${fresh.id}/approvals/${link.searchParams.get('approval')}`, token = link.searchParams.get('token')!;
+          const shown = ok(await send('GET', `${path}?token=${token}`, session(reader)));
+          assert.deepEqual([shown.kind, shown.label, shown.preview], ['send_held_answer', 'Send the held answer', { text: 'Gmail hard-bounced **61** sends from one import.', blocked: null }]);
+          assert.deepEqual(await staffReplies(fresh.id), [], 'Opening it sent nothing.');
+          error(await send('POST', path, keyed(reader), { token, decision: 'approve' }), 403, 'OPERATOR_REQUIRED');
+          const wakesBefore = wakes.length, approved = ok(await send('POST', path, keyed(operator), { token, decision: 'approve' }));
+          assert.equal(approved.state, 'approved');
+          assert.deepEqual(await staffReplies(fresh.id), ['Gmail hard-bounced **61** sends from one import.'], 'Sent as the operator\u2019s reply, as written.');
+          assert.deepEqual((await db.query('SELECT draft_outcome, draft_by, draft_reply FROM support_messages WHERE id = $1', [fresh.draft])).rows[0], { draft_outcome: 'sent', draft_by: operator.userId, draft_reply: approved.result.replyId });
+          assert.equal(wakes.length - wakesBefore, 1, 'The support platform is woken to deliver it.');
+          error(await send('POST', path, keyed(operator), { token, decision: 'approve' }), 409, 'SUPPORT_APPROVAL_DECIDED');
+
+          // A newer reply reached them first: the confirm step says so, and approving sends nothing.
+          ok(await send('POST', `${inbox}/${overtaken.id}/replies`, keyed(operator), { text: 'Checking now.' }), 201);
+          const late = linkOf(mailOf(overtaken.id))!, latePath = `${inbox}/${overtaken.id}/approvals/${late.searchParams.get('approval')}`, lateToken = late.searchParams.get('token')!;
+          assert.equal(ok(await send('GET', `${latePath}?token=${lateToken}`, session(reader))).preview.blocked, 'A newer reply already reached the customer, so this held answer can\u2019t be sent as written.');
+          const refused = ok(await send('POST', latePath, keyed(operator), { token: lateToken, decision: 'approve' }));
+          assert.deepEqual([refused.state, refused.result.error], ['failed', 'SUPPORT_DRAFT_STALE']);
+          assert.deepEqual(await staffReplies(overtaken.id), ['Checking now.']);
+          assert.equal((await db.query('SELECT draft_outcome FROM support_messages WHERE id = $1', [overtaken.draft])).rows[0].draft_outcome, null, 'Still held: staff edit or discard it.');
+        });
       } finally { globalThis.fetch = previous; }
     });
   });
