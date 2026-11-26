@@ -21524,8 +21524,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "List connected agents and their agent tokens",
-        "description": "Agent tokens are how agents use Nightmail: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.",
+        "summary": "List agents",
+        "description": "List connected agents and their agent tokens. Agent tokens are how agents use Nightmail: an agent signs in over MCP as you, and can make short-lived tokens for scripts (createAgentToken). Each connected agent is listed once with its access, last use and the tokens it made in this workspace. Owners and admins also see other members' agents that made tokens here. Dashboard session only.",
         "parameters": [
           {
             "schema": {
@@ -21691,7 +21691,7 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Revoke a connected agent and its agent tokens",
+        "summary": "Revoke an agent",
         "description": "Your own agent: its sign-in, every agent token it made and everything it created stop working at once (it can sign in again as a new connection). Another member's agent (owners and admins): the agent tokens it made in this workspace are revoked; the sign-in belongs to that person. Dashboard session only.",
         "parameters": [
           {
@@ -24096,7 +24096,7 @@
           "Auth"
         ],
         "security": [],
-        "summary": "Exchange a setup token for the agent's API key",
+        "summary": "Exchange a setup token for an API key",
         "description": "For a coding agent: the setup token in the prompt a person copied from the dashboard (nm_setup_…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within 15 minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED with a device code in error.details[0] (startAgentDeviceAuthorization's answer) for the person who copied it to approve: show them its link and poll it. The key is shown once.",
         "requestBody": {
           "required": true,
@@ -24274,7 +24274,7 @@
           "Auth"
         ],
         "security": [],
-        "summary": "Start the device flow for a coding agent",
+        "summary": "Start the device flow for an agent",
         "description": "For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Show the person verification_uri_complete as a link on its own line and ask them to open it, sign in, check the code and approve; nextStep says so in words. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for 15 minutes. With setup_token (one from the person's prompt that expired or was replaced before it was used), their dashboard shows you waiting.",
         "requestBody": {
           "required": false,
@@ -24613,7 +24613,7 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Look up an agent waiting with a user code",
+        "summary": "Look up an agent by user code",
         "description": "The /connect page: the agent behind a user code, before you approve or deny it. Each attempt counts against 10 a minute per person. Dashboard session only.",
         "requestBody": {
           "required": true,
@@ -24930,7 +24930,7 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Approve an agent waiting with a user code",
+        "summary": "Approve an agent by user code",
         "description": "Gives the agent behind the user code its own API key in the workspace this request acts in (X-Nightmail-Workspace), which you must own or administer. It receives the key on its next poll. Dashboard session only.",
         "requestBody": {
           "required": true,
@@ -49691,7 +49691,8 @@
           "Rules"
         ],
         "operationId": "restoreRuleVersion",
-        "summary": "Recompile a retained version and restore it as a new version",
+        "summary": "Restore a rules version",
+        "description": "Recompile a retained version and restore it as a new version.",
         "parameters": [
           {
             "schema": {
@@ -49984,7 +49985,8 @@
           "Rules"
         ],
         "operationId": "setDecisionOptIns",
-        "summary": "Set the domains and routes whose mail the AI may read for decisions",
+        "summary": "Set the AI decision opt-ins",
+        "description": "Set the domains and routes whose mail the AI may read for decisions.",
         "parameters": [
           {
             "schema": {
@@ -50478,8 +50480,8 @@
           "Endpoints"
         ],
         "operationId": "createEndpoint",
-        "summary": "Create a named Slack, Discord, webhook or forward endpoint",
-        "description": "Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.",
+        "summary": "Create an endpoint",
+        "description": "Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.",
         "requestBody": {
           "required": true,
           "content": {
@@ -50641,7 +50643,8 @@
           "Endpoints"
         ],
         "operationId": "getEndpoint",
-        "summary": "Read one endpoint, its status and the next step",
+        "summary": "Read an endpoint",
+        "description": "Read one endpoint, its status and the next step.",
         "parameters": [
           {
             "schema": {
@@ -50803,8 +50806,8 @@
           "Endpoints"
         ],
         "operationId": "updateEndpoint",
-        "summary": "Edit an endpoint: its name, type, URL, pause state, rate or retry policy",
-        "description": "Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.",
+        "summary": "Edit an endpoint",
+        "description": "Edit an endpoint: its name, type, URL, pause state, rate or retry policy. Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.",
         "parameters": [
           {
             "schema": {
@@ -50977,7 +50980,8 @@
           "Endpoints"
         ],
         "operationId": "deleteEndpoint",
-        "summary": "Delete an endpoint no rule or route uses",
+        "summary": "Delete an endpoint",
+        "description": "Delete an endpoint no rule or route uses.",
         "parameters": [
           {
             "schema": {
@@ -51142,8 +51146,8 @@
           "Endpoints"
         ],
         "operationId": "sendEndpointVerification",
-        "summary": "Email a forward recipient a new confirmation link",
-        "description": "For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.",
+        "summary": "Resend a forward confirmation link",
+        "description": "Email a forward recipient a new confirmation link. For a pending, expired or (after 30 days) declined forward. The recipient must open the link and choose Allow; no API call can confirm on their behalf.",
         "parameters": [
           {
             "schema": {
@@ -51325,8 +51329,8 @@
           "Endpoints"
         ],
         "operationId": "testEndpoint",
-        "summary": "Post a fixed test message to a Slack, Discord or webhook endpoint now",
-        "description": "Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.",
+        "summary": "Test an endpoint",
+        "description": "Post a fixed test message to a Slack, Discord or webhook endpoint now. Bypasses rules and queues: one synchronous post, counted against the endpoint rate. Forwards send real mail, so they are not tested this way; use testRules for a dry run.",
         "parameters": [
           {
             "schema": {
@@ -51491,7 +51495,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Generate client config with a key limited to selected inboxes. Key shown once.",
+        "summary": "Create an inbox connection",
+        "description": "Key shown once. Generate client config with a key limited to selected inboxes.",
         "requestBody": {
           "required": true,
           "content": {
@@ -51720,8 +51725,8 @@
         "tags": [
           "Rules"
         ],
-        "summary": "Read the rules and routes version, or wait for it to change",
-        "description": "Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.",
+        "summary": "Read or wait for the rules version",
+        "description": "Read the rules and routes version, or wait for it to change. Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.",
         "parameters": [
           {
             "schema": {
@@ -51916,8 +51921,8 @@
           "Rules"
         ],
         "operationId": "checkRule",
-        "summary": "Compile one rule source against this workspace without saving",
-        "description": "Returns every problem with its line, column and a hint, and what the rule calls. Use it while editing; nothing is saved, delivered or sent to the AI.",
+        "summary": "Check a rule without saving it",
+        "description": "Compile one rule source against this workspace without saving. Returns every problem with its line, column and a hint, and what the rule calls. Use it while editing; nothing is saved, delivered or sent to the AI.",
         "requestBody": {
           "required": true,
           "content": {
@@ -52107,8 +52112,8 @@
           "Rules"
         ],
         "operationId": "getRuleTypings",
-        "summary": "TypeScript declarations and editor completions for this workspace",
-        "description": "Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a rule can call.",
+        "summary": "Read the rules’ TypeScript declarations",
+        "description": "TypeScript declarations and editor completions for this workspace. Generated from the workspace’s endpoints, inbox keys and sender lists. Load typescript into an editor as a .d.ts, or read it to learn exactly what a rule can call.",
         "responses": {
           "200": {
             "description": "Success",
@@ -52259,8 +52264,8 @@
           "Rules"
         ],
         "operationId": "listRuleTemplates",
-        "summary": "Starting points for common rules, filled in with this workspace’s endpoints",
-        "description": "Each template compiles. An endpoint template uses the first endpoint of the type it needs; endpoint is null when there is none yet, and source then uses a placeholder name to replace.",
+        "summary": "List rule templates",
+        "description": "Starting points for common rules, filled in with this workspace’s endpoints. Each template compiles. An endpoint template uses the first endpoint of the type it needs; endpoint is null when there is none yet, and source then uses a placeholder name to replace.",
         "responses": {
           "200": {
             "description": "Success",
@@ -52411,8 +52416,8 @@
           "Rules"
         ],
         "operationId": "listRuleRecipes",
-        "summary": "Ready-made rules and the fields each one takes",
-        "description": "Each recipe writes an ordinary rule from one or two fields. Create one with createRuleFromRecipe; endpoint fields name an endpoint of the right type, created first with createEndpoint.",
+        "summary": "List rule recipes",
+        "description": "Ready-made rules and the fields each one takes. Each recipe writes an ordinary rule from one or two fields. Create one with createRuleFromRecipe; endpoint fields name an endpoint of the right type, created first with createEndpoint.",
         "responses": {
           "200": {
             "description": "Success",
@@ -52561,7 +52566,7 @@
           "Rules"
         ],
         "operationId": "createRuleFromRecipe",
-        "summary": "Create a rule from a recipe and attach it to addresses",
+        "summary": "Create a rule from a recipe",
         "description": "Writes the recipe’s script, saves it as a new rule (key from the recipe and address unless given) and attaches it to each address, after their other recipes and before their own scripts. An AI recipe lets the AI read mail at those addresses’ domains. Returns the new version and key. Besides listRuleRecipes, it takes the two-way rules the dashboard builds: split ({ test: always, from, subject, text or attachment; value: words, or senders for from; then; otherwise }) and split-by-meaning ({ meaning, then, otherwise }), where then and otherwise are inbox:<key>, an endpoint name, store or drop. Give the address the route [] (createRoute) so each side gets exactly its destination.",
         "parameters": [
           {
@@ -52901,7 +52906,7 @@
           "Rules"
         ],
         "operationId": "updateRuleFromRecipe",
-        "summary": "Change a rule’s recipe fields and addresses",
+        "summary": "Update a rule from its recipe",
         "description": "Rewrites the rule from its recipe with these fields. addresses, when given, replaces where it runs (kept addresses keep their place). Passing recipe turns a script into that recipe.",
         "parameters": [
           {
@@ -54316,7 +54321,8 @@
           "Rules"
         ],
         "operationId": "attachRules",
-        "summary": "Attach, reorder and detach rules by replacing the ordered attachment list",
+        "summary": "Attach rules",
+        "description": "Attach, reorder and detach rules by replacing the ordered attachment list.",
         "parameters": [
           {
             "schema": {
@@ -54640,7 +54646,8 @@
           "Rules"
         ],
         "operationId": "getRules",
-        "summary": "Read rules, ordered attachments, and sender lists",
+        "summary": "Read rules",
+        "description": "Read rules, ordered attachments, and sender lists.",
         "parameters": [
           {
             "schema": {
@@ -54911,7 +54918,8 @@
           "Rules"
         ],
         "operationId": "applyRules",
-        "summary": "Create, replace or remove rules and ordered attachments in one version",
+        "summary": "Apply rules",
+        "description": "Create, replace or remove rules and ordered attachments in one version.",
         "parameters": [
           {
             "schema": {
@@ -55331,7 +55339,8 @@
           "Rules"
         ],
         "operationId": "testRules",
-        "summary": "Trace saved or proposed rules on a stored message or pasted MIME; never asks the AI or delivers mail",
+        "summary": "Test rules on a message",
+        "description": "Trace saved or proposed rules on a stored message or pasted MIME; never asks the AI or delivers mail.",
         "requestBody": {
           "required": true,
           "content": {
@@ -55686,7 +55695,8 @@
           }
         ],
         "operationId": "listInboxFolders",
-        "summary": "List folders, stable UID namespaces and counts",
+        "summary": "List inbox folders",
+        "description": "List folders, stable UID namespaces and counts.",
         "parameters": [
           {
             "schema": {
@@ -56219,7 +56229,8 @@
           }
         ],
         "operationId": "updateInboxFolder",
-        "summary": "Rename a folder tree or change its subscription",
+        "summary": "Update an inbox folder",
+        "description": "Rename a folder tree or change its subscription.",
         "parameters": [
           {
             "schema": {
@@ -56472,7 +56483,8 @@
           }
         ],
         "operationId": "deleteInboxFolder",
-        "summary": "Remove a custom folder; preserve otherwise orphaned mail in Trash",
+        "summary": "Delete an inbox folder",
+        "description": "Remove a custom folder; preserve otherwise orphaned mail in Trash.",
         "parameters": [
           {
             "schema": {
@@ -56690,7 +56702,8 @@
           }
         ],
         "operationId": "updateInboxMessage",
-        "summary": "Set read state or flags; deleted applies to one folder entry",
+        "summary": "Update an inbox message",
+        "description": "Set read state or flags; deleted applies to one folder entry.",
         "parameters": [
           {
             "schema": {
@@ -56981,7 +56994,8 @@
           }
         ],
         "operationId": "deleteInboxMessage",
-        "summary": "Move one entry to Trash, or expunge it permanently",
+        "summary": "Delete an inbox message",
+        "description": "Move one entry to Trash, or expunge it permanently.",
         "parameters": [
           {
             "schema": {
@@ -57443,7 +57457,8 @@
           }
         ],
         "operationId": "moveInboxMessage",
-        "summary": "Move one entry and allocate a new destination UID",
+        "summary": "Move an inbox message",
+        "description": "Move one entry and allocate a new destination UID.",
         "parameters": [
           {
             "schema": {
@@ -57712,7 +57727,8 @@
           }
         ],
         "operationId": "copyInboxMessage",
-        "summary": "Copy one entry with a fresh destination UID",
+        "summary": "Copy an inbox message",
+        "description": "Copy one entry with a fresh destination UID.",
         "parameters": [
           {
             "schema": {
@@ -57981,7 +57997,8 @@
           }
         ],
         "operationId": "expungeInboxFolder",
-        "summary": "Remove entries marked deleted; repeat while hasMore is true",
+        "summary": "Expunge an inbox folder",
+        "description": "Remove entries marked deleted; repeat while hasMore is true.",
         "parameters": [
           {
             "schema": {
@@ -58205,7 +58222,8 @@
           }
         ],
         "operationId": "getInboxChanges",
-        "summary": "Sync changed and removed message IDs since an inbox MODSEQ",
+        "summary": "Read an inbox’s changes",
+        "description": "Sync changed and removed message IDs since an inbox MODSEQ.",
         "parameters": [
           {
             "schema": {
@@ -58407,7 +58425,8 @@
           }
         ],
         "operationId": "createInboxAppPassword",
-        "summary": "Grant mail client access to a persistent inbox. Password shown once; a billable day starts immediately.",
+        "summary": "Create an inbox app password",
+        "description": "Password shown once; a billable day starts immediately. Grant mail client access to a persistent inbox.",
         "parameters": [
           {
             "schema": {
@@ -58648,7 +58667,8 @@
           }
         ],
         "operationId": "listInboxAppPasswords",
-        "summary": "List active app passwords without their secrets",
+        "summary": "List an inbox’s app passwords",
+        "description": "List active app passwords without their secrets.",
         "parameters": [
           {
             "schema": {
@@ -58849,7 +58869,8 @@
           }
         ],
         "operationId": "listAppPasswords",
-        "summary": "List the active app passwords of every inbox, without their secrets",
+        "summary": "List every inbox’s app passwords",
+        "description": "List the active app passwords of every inbox, without their secrets.",
         "responses": {
           "200": {
             "description": "Success",
@@ -59000,7 +59021,8 @@
           }
         ],
         "operationId": "revokeInboxAppPassword",
-        "summary": "Revoke a mail client password and invalidate sessions",
+        "summary": "Revoke an inbox app password",
+        "description": "Revoke a mail client password and invalidate sessions.",
         "parameters": [
           {
             "schema": {
@@ -60936,7 +60958,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Release a retired address for reuse (workspace admin)",
+        "summary": "Release a retired address",
+        "description": "Release a retired address for reuse (workspace admin).",
         "parameters": [
           {
             "schema": {
@@ -64893,8 +64916,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Change where one address’s mail goes, in one version",
-        "description": "Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.",
+        "summary": "Set where an address’s mail goes",
+        "description": "Change where one address’s mail goes, in one version. Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.",
         "parameters": [
           {
             "schema": {
@@ -65294,7 +65317,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Start a conversation from an inbound address",
+        "summary": "Start a conversation",
+        "description": "Start a conversation from an inbound address.",
         "parameters": [
           {
             "schema": {
@@ -65666,7 +65690,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Mark a conversation read, star, archive or label it for one address",
+        "summary": "Update a conversation",
+        "description": "Mark a conversation read, star, archive or label it for one address.",
         "parameters": [
           {
             "schema": {
@@ -66315,7 +66340,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Download an attachment from a visible message",
+        "summary": "Download an inbound attachment",
+        "description": "Download an attachment from a visible message.",
         "parameters": [
           {
             "schema": {
@@ -66499,7 +66525,7 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Follow an attachment link from a webhook",
+        "summary": "Follow a webhook attachment link",
         "description": "The downloadUrl (inbound format) or url (message attachments) in webhook payloads. Answers 307 to a download link that works for five minutes, also returned as url in the body. Any credential that can read the message can follow it, exactly as with getInboundAttachment: an inbound key for the address it reached, a member, an agent token.",
         "parameters": [
           {
@@ -66991,8 +67017,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Every route mail can take, with its rules and endpoints, in one read",
-        "description": "One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.",
+        "summary": "Read the receiving overview",
+        "description": "Every route mail can take, with its rules and endpoints, in one read. One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.",
         "parameters": [
           {
             "schema": {
@@ -67212,8 +67238,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "List every endpoint a page at a time, with the routes and rules that use it",
-        "description": "Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address's received mail (subscribed to it or to every address), the full list a route's toMore points to.",
+        "summary": "List every endpoint",
+        "description": "List every endpoint a page at a time, with the routes and rules that use it. Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address's received mail (subscribed to it or to every address), the full list a route's toMore points to.",
         "parameters": [
           {
             "schema": {
@@ -67587,8 +67613,8 @@
         "tags": [
           "Inbound events"
         ],
-        "summary": "Poll events for the receiving addresses this key can read",
-        "description": "Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.",
+        "summary": "List inbound events",
+        "description": "Poll events for the receiving addresses this key can read. Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.",
         "parameters": [
           {
             "schema": {
@@ -67973,8 +67999,8 @@
         "tags": [
           "Inbound webhooks"
         ],
-        "summary": "List inbound webhooks a page at a time, in a stable ID order",
-        "description": "Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
+        "summary": "List inbound webhooks",
+        "description": "List inbound webhooks a page at a time, in a stable ID order. Every webhook endpoint, named or not. Pass nextCursor back as cursor until it is null to read every webhook. addressId and eventType narrow the list to the webhooks that get that address's events (subscribed to it or to every address); getInboundOverview links a route's full list of subscribers this way.",
         "parameters": [
           {
             "schema": {
@@ -68875,7 +68901,7 @@
         "tags": [
           "Inbound webhooks"
         ],
-        "summary": "Redeliver a message to its route webhooks",
+        "summary": "Redeliver an inbound message",
         "description": "Queues this message again for every route webhook that already finished with it (delivered or failed), or only destination. Returns how many deliveries were queued; 0 means none are eligible. Previously redelivered successes have a 10-minute cooldown. The workspace gets 1,000 manual posts per hour. Receivers deduplicate by Webhook-Id.",
         "parameters": [
           {
@@ -73330,8 +73356,8 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "What this workspace has set up, in one read",
-        "description": "The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus's first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.",
+        "summary": "Read the workspace setup",
+        "description": "What this workspace has set up, in one read. The newest domains, the number of active API keys, outbound webhooks and pending invitations, whether any email exists, each focus's first steps and whether an agent is connected. Each part follows the permission rules of its own list operation and is null where that operation would refuse the caller. Counts only: no webhook URL, key, address or subject.",
         "responses": {
           "200": {
             "description": "Success",
@@ -73951,7 +73977,7 @@
             "secureDashboardSession": []
           }
         ],
-        "summary": "Balance, free allowance and billing state",
+        "summary": "Read the balance and billing state",
         "description": "Hosted only. The prepaid balance, this month’s free allowances (sent and received, counted separately) and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.",
         "responses": {
           "200": {

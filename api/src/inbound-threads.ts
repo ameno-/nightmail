@@ -538,10 +538,10 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
     if (!file?.region) throw new ApiError(404,'NOT_FOUND','Attachment was not found.');
     return signedUrl(c.env,v.workspaceId,'att',file.region,file.bucket,file.key,file.filename,file.sourceId?p.messageId:undefined);
   }
-  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an attachment from a visible message',
+  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/attachments/{attachmentId}',operationId:'getInboundAttachment',tags,security,summary:'Download an inbound attachment',description:'Download an attachment from a visible message.',
     request:{params:AttachmentParams,query:AddressFilter},responses:{200:response(AttachmentDownload),...errors}}),async c=>c.json(await attachmentLink(c,c.req.valid('param'),c.req.valid('query')),200));
   // The persistent link in webhook payloads (downloadUrl, or url in a message's attachments).
-  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/parts/{attachmentId}',operationId:'downloadInboundAttachment',tags,security,summary:'Follow an attachment link from a webhook',
+  app.openapi(createRoute({method:'get',path:'/v1/inbound/messages/{messageId}/parts/{attachmentId}',operationId:'downloadInboundAttachment',tags,security,summary:'Follow a webhook attachment link',
     description:'The downloadUrl (inbound format) or url (message attachments) in webhook payloads. Answers 307 to a download link that works for five minutes, also returned as url in the body. Any credential that can read the message can follow it, exactly as with getInboundAttachment: an inbound key for the address it reached, a member, an agent token.',
     request:{params:AttachmentParams,query:AddressFilter},responses:{307:{description:'Follow Location within five minutes.',headers:z.object({Location:z.string()}),content:{'application/json':{schema:AttachmentDownload}}},...errors}}),async c=>{
     const link=await attachmentLink(c,c.req.valid('param'),c.req.valid('query'));
@@ -551,7 +551,7 @@ export function registerInboundThreadReads(app: App, access: (c: Ctx, permission
 }
 
 export function createInboundThreadRoute<T extends z.ZodType>(input: T) {
-  return createRoute({ method: 'post', path: base, operationId: 'createInboundThread', tags, security, summary: 'Start a conversation from an inbound address',
+  return createRoute({ method: 'post', path: base, operationId: 'createInboundThread', tags, security, summary: 'Start a conversation', description: 'Start a conversation from an inbound address.',
     request: { headers: SendIdempotencyHeaders, body: json(input) }, responses: { 202: response(Message, 'Queued, not yet delivered.'), ...errors } });
 }
 export function replyToInboundThreadRoute<T extends z.ZodType>(input: T) {

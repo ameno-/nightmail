@@ -146,7 +146,7 @@ async function ledgerPage(db: DbExecutor, workspaceId: string, cursor: string | 
 }
 
 export function registerBilling(app: App) {
-  app.openapi(createRoute({ method: 'get', path: '/v1/billing', operationId: 'getBilling', tags: ['Billing'], security, summary: 'Balance, free allowance and billing state',
+  app.openapi(createRoute({ method: 'get', path: '/v1/billing', operationId: 'getBilling', tags: ['Billing'], security, summary: 'Read the balance and billing state',
     description: 'Hosted only. The prepaid balance, this month’s free allowances (sent and received, counted separately) and cost, whether sending or receiving is paused for an empty balance, auto-recharge and the saved card, and the prices. Amounts are null unless the caller is an owner or admin session, or a manage key or grant. Keys restricted to domains get 403.',
     responses: { 200: response(BillingSummarySchema), ...errors } }), async c => {
     const a = billingActor(c, 'read');

@@ -632,7 +632,7 @@ export function registerMailbox(app: App) {
   registerInboxes(app, access);
   registerMailObjects(app);
   registerMailGateway(app);
-  app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address for reuse (workspace admin)',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
+  app.openapi(createRoute({method:'delete',path:'/v1/inbound/retired/{address}',operationId:'releaseRetiredAddress',tags:['Inbound addresses'],security,summary:'Release a retired address',description:'Release a retired address for reuse (workspace admin).',request:{params:z.object({address:z.email().max(254)})},responses:{200:response(Ok),...errors}}),async c=>{
     const v=admin(c);await c.env.db.execute(sql`WITH released AS (DELETE FROM mail_retired_addresses WHERE workspace_id=${v.workspaceId} AND address=${c.req.valid('param').address.toLowerCase()} RETURNING address),
       audit AS (${auditInsert(auditContext(c),{action:'address.release',workspaceId:v.workspaceId,target:{type:'address',id:sql`released.address`},before:sql`jsonb_build_object('address',released.address)`},{from:sql`released`})}) SELECT 1`);return c.json({ok:true as const},200);
   });
@@ -733,7 +733,7 @@ export function registerMailbox(app: App) {
   registerInboundThreadReads(app, access);
   registerLogs(app, actorMailAccess);
   registerInboundOverview(app, { access, mailboxView, InboundAddressSchema, InboundDomainStatus, InboundCatchAll, security });
-  app.openapi(createRoute({method:'patch',path:'/v1/inbound/threads/{threadId}',operationId:'updateInboundThread',tags:['Inbound threads'],security,summary:'Mark a conversation read, star, archive or label it for one address',request:{params:z.object({threadId:z.string().min(1).max(120)}),body:json(UpdateInboundThread)},responses:{200:response(AddressState),...errors}}),async c=>{
+  app.openapi(createRoute({method:'patch',path:'/v1/inbound/threads/{threadId}',operationId:'updateInboundThread',tags:['Inbound threads'],security,summary:'Update a conversation',description:'Mark a conversation read, star, archive or label it for one address.',request:{params:z.object({threadId:z.string().min(1).max(120)}),body:json(UpdateInboundThread)},responses:{200:response(AddressState),...errors}}),async c=>{
     const v=access(c,'modify'),{threadId}=c.req.valid('param'),{addressId,...changes}=c.req.valid('json');
     const options=await c.env.db.select({id:mailboxThreads.mailboxId}).from(mailboxThreads).where(visibleThreadAddresses(v,threadId,addressId)).limit(2);
     if (!options.length) throw new ApiError(404,'NOT_FOUND','Thread was not found.');
@@ -775,7 +775,7 @@ export function registerMailbox(app: App) {
     return rows.length ? { data: rows.map(eventView), cursor: String(rows.at(-1)!.seq) } : { data: [], cursor: String(after) };
   }
   const InboundEventQuery = EventQuery.extend({ addressId: z.string().min(1).max(120).optional().describe('Include only this receiving address.'), addressIds: z.string().max(4000).optional().describe('Comma-separated receiving address IDs. Use instead of addressId.') }).strict().refine(q => q.addressId === undefined || q.addressIds === undefined, { path: ['addressIds'], message: 'Supply addressId or addressIds, not both.' });
-  app.openapi(createRoute({ method: 'get', path: '/v1/inbound/events', operationId: 'listInboundEvents', security, tags: ['Inbound events'], summary: 'Poll events for the receiving addresses this key can read', description: 'Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.', request: { query: InboundEventQuery }, responses: { 200: response(z.object({ data: z.array(InboundEventSchema), cursor: z.string().describe('Pass as after on the next call.') }).openapi('InboundEventPage')), ...errors } }), async c => {
+  app.openapi(createRoute({ method: 'get', path: '/v1/inbound/events', operationId: 'listInboundEvents', security, tags: ['Inbound events'], summary: 'List inbound events', description: 'Poll events for the receiving addresses this key can read. Use the returned cursor as after to continue polling. Workspace-wide message.stored events require admin access, no address filter, and an explicit message.stored type filter.', request: { query: InboundEventQuery }, responses: { 200: response(z.object({ data: z.array(InboundEventSchema), cursor: z.string().describe('Pass as after on the next call.') }).openapi('InboundEventPage')), ...errors } }), async c => {
     const q = c.req.valid('query');
     return c.json(await poll(c, q.addressId ? [q.addressId] : parseEventIds(q.addressIds), q), 200);
   });

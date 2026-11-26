@@ -33,8 +33,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       method: 'post',
       path: base,
       operationId: 'createInboxAppPassword',
-      summary:
-        'Grant mail client access to a persistent inbox. Password shown once; a billable day starts immediately.',
+      summary: 'Create an inbox app password',
+      description: 'Password shown once; a billable day starts immediately. Grant mail client access to a persistent inbox.',
       request: {
         params,
         body: json(
@@ -82,7 +82,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       method: 'get',
       path: base,
       operationId: 'listInboxAppPasswords',
-      summary: 'List active app passwords without their secrets',
+      summary: 'List an inbox’s app passwords',
+      description: 'List active app passwords without their secrets.',
       request: { params },
       responses: { 200: response(z.object({ data: z.array(item) })), ...errors },
     }),
@@ -103,7 +104,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       method: 'get',
       path: '/v1/app-passwords',
       operationId: 'listAppPasswords',
-      summary: 'List the active app passwords of every inbox, without their secrets',
+      summary: 'List every inbox’s app passwords',
+      description: 'List the active app passwords of every inbox, without their secrets.',
       responses: { 200: response(z.object({ data: z.array(item.extend({ inboxId: z.string(), inboxAddress: z.string() })) }).openapi('AppPasswordList')), ...errors },
     }),
     async (c) => {
@@ -122,7 +124,8 @@ export function registerInboxPasswords(app: App, access: (c: Ctx) => MailboxAcce
       method: 'delete',
       path: base + '/{passwordId}',
       operationId: 'revokeInboxAppPassword',
-      summary: 'Revoke a mail client password and invalidate sessions',
+      summary: 'Revoke an inbox app password',
+      description: 'Revoke a mail client password and invalidate sessions.',
       request: { params: params.extend({ passwordId: z.string().min(1).max(120) }) },
       responses: { 200: response(z.object({ revoked: z.boolean() })), ...errors },
     }),

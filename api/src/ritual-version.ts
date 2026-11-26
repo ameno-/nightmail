@@ -60,8 +60,8 @@ export async function credentialName(db: DbExecutor, a: Actor) {
 }
 
 export function registerRitualVersion(app: App) {
-  const summary = 'Read the rules and routes version, or wait for it to change';
-  const description = 'Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.';
+  const summary = 'Read or wait for the rules version';
+  const description = 'Read the rules and routes version, or wait for it to change. Without after, returns the current version at once. With after (and endpoints, to include endpoint changes), waits up to wait seconds for a rule, route or endpoint save and returns as soon as one commits, with who saved it. The dashboard keeps one of these open while you edit rules so an agent’s saves appear live. Each waited 2.5 seconds counts as one request against the credential’s per-minute budget.';
   app.openapi(createRoute({
     method: 'get', path: '/v1/rules/version', operationId: 'getRuleVersion', security, tags: ['Rules'], summary, description,
     request: { query: Query },

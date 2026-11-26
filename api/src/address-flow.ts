@@ -164,8 +164,8 @@ export async function releaseAddress(tx: DbExecutor, c: Ctx, w: string, box: { i
 export function registerAddressFlow(app: App) {
   app.openapi(createRoute({
     method: 'patch', path: '/v1/inbound/addresses/{addressId}/flow', operationId: 'setInboundAddressFlow', tags: ['Inbound addresses'], security,
-    summary: 'Change where one address’s mail goes, in one version',
-    description: 'Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.',
+    summary: 'Set where an address’s mail goes',
+    description: 'Change where one address’s mail goes, in one version. Changes the route for the address’s own address and its two-way rule together: one transaction and one routing version, so all of it is saved or none of it. Omitted fields stay as they are, a field equal to what is saved writes nothing, and when nothing changes the version stays. deliver replaces only the route’s destinations (a paused route stays paused). Send the version from getInboundOverview or getRouting as If-Match; a stale one is refused with 409 and nothing changes.',
     request: {
       params: z.object({ addressId: InboundAddressId }),
       headers: z.object({ 'if-match': z.string().max(32).optional().describe('Apply only if routes and rules are still at this version, from getInboundOverview, GET /v1/routing or a previous ETag.') }),

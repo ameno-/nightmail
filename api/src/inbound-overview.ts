@@ -151,8 +151,8 @@ export function registerInboundOverview(app: App, deps: Deps) {
 
   app.openapi(createRoute({
     method: 'get', path: '/v1/inbound/overview', operationId: 'getInboundOverview', tags: ['Inbound addresses'], security: deps.security,
-    summary: 'Every route mail can take, with its rules and endpoints, in one read',
-    description: 'One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.',
+    summary: 'Read the receiving overview',
+    description: 'Every route mail can take, with its rules and endpoints, in one read. One page of routes (addresses, agent inboxes, address patterns, explicit routes and catch-alls) merged and ordered by host, kind and address, each resolved to the rules that run on it and where its mail goes. Also returns counts per kind, the rules, up to 100 endpoints and 100 inbound webhooks, and the domains. Members and scoped keys see only their addresses. With an MCP sign-in (approval), it requires an owner or admin, like the other receiving reads.',
     request: { query: z.object({
       kind: Kinds.optional(), origin: z.enum(['api', 'auto']).optional().describe('Filters address rows only: api (created on purpose) or auto (created by a catch-all). Other kinds are unaffected.'),
       domain: z.string().max(253).optional().describe('Receiving host, e.g. reply.acme.com.'), q: z.string().max(200).optional().describe('Matches the address, an alias or the display name.'),
@@ -363,8 +363,8 @@ export function registerInboundOverview(app: App, deps: Deps) {
   // Every endpoint, a page at a time: what the Receiving screen's Endpoints list reads (the overview lists the first 100 of each kind).
   app.openapi(createRoute({
     method: 'get', path: '/v1/inbound/endpoints', operationId: 'listInboundEndpoints', tags: ['Endpoints'], security: deps.security,
-    summary: 'List every endpoint a page at a time, with the routes and rules that use it',
-    description: 'Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address\'s received mail (subscribed to it or to every address), the full list a route\'s toMore points to.',
+    summary: 'List every endpoint',
+    description: 'List every endpoint a page at a time, with the routes and rules that use it. Named endpoints of every type (Slack, Discord, webhook, forward) by name, then webhooks without a name. Pass nextCursor back as cursor until it is null. addressId lists only the webhooks that get that address\'s received mail (subscribed to it or to every address), the full list a route\'s toMore points to.',
     request: { query: z.object({
       cursor: z.string().max(400).optional().describe('nextCursor from the previous page.'),
       limit: z.coerce.number().int().min(1).max(100).default(50),

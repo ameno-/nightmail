@@ -217,7 +217,7 @@ export function registerAgentSetup(app: App) {
     return c.json({ id: setupId, status, expiresAt: isoTime(row.expires_at)!, connectedAt: isoTime(row.used_at), keyId: row.key_id, keyName: row.key_name }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/setup', operationId: 'exchangeAgentSetupToken', tags, security: [],
-    summary: 'Exchange a setup token for the agent\'s API key',
+    summary: 'Exchange a setup token for an API key',
     description: `For a coding agent: the setup token in the prompt a person copied from the dashboard (${secretPrefixes.agentSetup}…) becomes a lasting API key for the agent, in that person's workspace, named after client_name. It works once, within ${SETUP_MINUTES} minutes of copying. A wrong token gets 400 SETUP_TOKEN_INVALID, a used one 409 SETUP_TOKEN_USED (naming the key it gave, in error.details, never the key again), and an expired or replaced one 410 SETUP_TOKEN_EXPIRED or SETUP_TOKEN_REPLACED with a device code in error.details[0] (startAgentDeviceAuthorization's answer) for the person who copied it to approve: show them its link and poll it. The key is shown once.`,
     request: { body: json(z.object({ token: Token.openapi({ example: `${secretPrefixes.agentSetup}${'0'.repeat(32)}.${'0'.repeat(64)}` }).describe('The setup token from the prompt.'),
       client_name: ClientName }).strict()) },
@@ -254,7 +254,7 @@ export function registerAgentSetup(app: App) {
 
   // ---------- device: RFC 8628 for an agent started without the prompt ----------
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device', operationId: 'startAgentDeviceAuthorization', tags, security: [],
-    summary: 'Start the device flow for a coding agent',
+    summary: 'Start the device flow for an agent',
     description: `For a coding agent without a setup token (RFC 8628): returns a device code to keep and a user code to show. Show the person verification_uri_complete as a link on its own line and ask them to open it, sign in, check the code and approve; nextStep says so in words. Then poll pollAgentDeviceToken every interval seconds until it returns the key. Codes work once, for ${DEVICE_MINUTES} minutes. With setup_token (one from the person's prompt that expired or was replaced before it was used), their dashboard shows you waiting.`,
     request: { body: { ...json(z.object({ client_name: ClientName,
       setup_token: Token.optional().describe('The setup token from the person\'s prompt, even if it expired or was replaced: their dashboard then shows you waiting for their approval. One that was used already addresses nobody.') }).strict()), required: false } },
@@ -357,7 +357,7 @@ export function registerAgentSetup(app: App) {
     throw new ApiError(409, 'DEVICE_CODE_DECIDED', `This code was already ${row.status === 'denied' ? 'denied' : 'approved'}.`);
   }
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device/lookup', operationId: 'lookUpAgentDevice', tags, security: dashboardSecurity,
-    summary: 'Look up an agent waiting with a user code',
+    summary: 'Look up an agent by user code',
     description: `The /connect page: the agent behind a user code, before you approve or deny it. Each attempt counts against ${LIMITS.userCode} a minute per person. Dashboard session only.`,
     request: { body: json(z.object({ userCode: UserCode }).strict()) }, responses: { 200: response(DeviceRequest), ...errors } }), async c => {
     const { userId } = person(c, false), code = await codeOf(c, userId, c.req.valid('json').userCode);
@@ -383,7 +383,7 @@ export function registerAgentSetup(app: App) {
     return c.json({ data: rows.map(row => ({ userCode: shownCode(row.user_code), clientName: row.client_name, createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, promptCopiedAt: isoTime(row.copied)! })) }, 200);
   });
   app.openapi(createRoute({ method: 'post', path: '/v1/agent/device/approve', operationId: 'approveAgentDevice', tags, security: dashboardSecurity,
-    summary: 'Approve an agent waiting with a user code',
+    summary: 'Approve an agent by user code',
     description: 'Gives the agent behind the user code its own API key in the workspace this request acts in (X-Nightmail-Workspace), which you must own or administer. It receives the key on its next poll. Dashboard session only.',
     request: { body: json(z.object({ userCode: UserCode }).strict()) }, responses: { 200: response(z.object({ userCode: z.string(), status: z.literal('approved'), workspaceId: z.string() }).openapi('AgentDeviceApproval')), ...errors, ...gone } }), async c => {
     const { workspaceId, userId } = person(c, true), code = await codeOf(c, userId, c.req.valid('json').userCode);
