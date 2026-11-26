@@ -45,9 +45,9 @@ export const supportAgentRoute = (method: string, path: string) => method === 'G
 const BASE32 = 'abcdefghijklmnopqrstuvwxyz234567';
 const newApprovalId = () => `sag_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => BASE32[b & 31]).join('')}`;
 const approvalLink = (c: Ctx, code: string) => `${new URL('/operator/agents', c.env.config.publicUrl).href}?code=${shownCode(code)}`;
-/** What an approval lets the agent do, in the words the approval page and the tools use. */
-export const SUPPORT_AGENT_CAN = ['Read the support inbox and its conversations', 'Reply to a conversation’s customer as you', 'Add staff notes, mark done and hand back to the support AI',
-  'Send or discard the support AI’s held answers'] as const;
+/** What an approval lets the agent do and never lets it do, as the approval page says it. */
+export const SUPPORT_AGENT_CAN = 'Read the support inbox, reply to customers as you, add notes, mark done, send or discard held AI answers.';
+export const SUPPORT_AGENT_NEVER = 'Choose who a reply goes to, approve proposals, change limits or billing.';
 
 export type AgentOperator = OperatorIdentity & { agent: { approvalId: string; grantId: string } };
 const agentsOff = () => new ApiError(403, 'SUPPORT_AGENTS_OFF', `Agents can’t use the support inbox on this installation. Use the dashboard.`);
@@ -97,7 +97,7 @@ const UserCode = z.string().trim().min(1).max(20).describe('The code the agent s
 const Agent = z.object({ connectionId: z.string().describe('The MCP connection (its approval\u2019s ID).'), client: z.string().nullable().describe('The client, as the connection names itself: its claim, never verified.'),
   profile: z.string().nullable().describe('The label on its MCP URL (?profile=), if any.'), connectedAt: z.string() });
 const AgentRequest = z.object({ userCode: z.string(), agent: Agent, status: z.enum(['pending', 'approved', 'denied', 'expired']), createdAt: z.string(), expiresAt: z.string(),
-  can: z.array(z.string()).describe('What approving lets the agent do.'), days: z.number().int().describe('How long an approval lasts.') }).openapi('SupportAgentRequest');
+  can: z.string().describe('What approving lets the agent do.'), never: z.string().describe('What it never can.'), days: z.number().int().describe('How long an approval lasts.') }).openapi('SupportAgentRequest');
 const Approval = z.object({ id: z.string(), agent: Agent, approvedAt: z.string(), expiresAt: z.string(), lastUsedAt: z.string().nullable() }).openapi('SupportAgentApproval');
 type AgentRow = { grant_id: string; client_id: string | null; profile: string | null; connected_at: string | null };
 /** A connection as the approval page shows it; the client's name is the connection's own claim (mcp-auth.ts clientLabel, loaded on demand). */
@@ -134,7 +134,7 @@ export function registerSupportAgents(app: App) {
     if (!row) throw noRequest();
     const [{ agent }] = await agentsOf([row]);
     return c.json({ userCode: shownCode(code), agent, status: row.status === 'pending' && (row.expired || !row.client_id) ? 'expired' as const : row.status,
-      createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, can: [...SUPPORT_AGENT_CAN], days: SUPPORT_AGENT_DAYS }, 200);
+      createdAt: isoTime(row.created_at)!, expiresAt: isoTime(row.expires_at)!, can: SUPPORT_AGENT_CAN, never: SUPPORT_AGENT_NEVER, days: SUPPORT_AGENT_DAYS }, 200);
   });
   app.openapi(createRoute({ hide: true, tags, security, method: 'post', path: '/v1/operator/support-agents/approve', operationId: 'operatorApproveSupportAgent',
     description: `Approve one of your own agent connections for the support inbox (the operator role, a staff sign-in), for ${SUPPORT_AGENT_DAYS} days: it replaces an earlier approval of the same connection. On the audit trail.`,

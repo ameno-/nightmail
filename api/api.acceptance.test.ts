@@ -11930,7 +11930,7 @@ describe('Hosted MCP OAuth and tools', () => {
             error(await send('POST', '/v1/operator/support-agents/approve', session(other), { userCode: code }), 404, 'NOT_FOUND');
             error(await lookUp({ authorization: `Bearer ${mine.token}` }), 403, 'OPERATOR_REQUIRED');
             const request = ok(await lookUp(session(operator), code.replace('-', '').toLowerCase()));
-            assert.deepEqual([request.userCode, request.status, request.agent.client, request.days, request.can.length], [code, 'pending', 'opencode', 30, 4]);
+            assert.deepEqual([request.userCode, request.status, request.agent.client, request.days, typeof request.can, typeof request.never], [code, 'pending', 'opencode', 30, 'string', 'string']);
             const approval = ok(await send('POST', '/v1/operator/support-agents/approve', session(operator), { userCode: code }), 201);
             assert.match(approval.id, /^sag_[a-z2-7]{26}$/);
             error(await send('POST', '/v1/operator/support-agents/approve', session(operator), { userCode: code }), 409, 'SUPPORT_AGENT_DECIDED');

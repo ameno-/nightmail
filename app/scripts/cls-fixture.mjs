@@ -616,6 +616,8 @@ async function supportInbox(db, webhookId) {
   await line(msg('samfive'), chat, 5, 'staff', 'I added a note to your ticket. Our DNS check also ran against an old resolver; I re-ran it and it should turn green shortly.', 12, { kind: 'reply', staff: 'user_dana', delivery: 'sent' });
   await line(msg('samnote'), chat, 6, 'staff', 'Their agency’s DNS host caches for a day. If it is still pending tomorrow, check the resolver fix shipped.', 11, { kind: 'note', staff: 'user_dana' });
   await line(msg('samsix'), chat, 7, 'customer', 'Still pending here. Is there anything else I should change?', 4);
+  // Dana's reply went through her agent (api/src/support-agents.ts): the thread says "via agent" after her name.
+  await db.query("UPDATE support_messages SET agent_approval_id = 'sag_' || repeat('a', 26) WHERE id = $1", [msg('samfive')]);
   await db.query(`UPDATE support_conversations SET ticket_brief = $2 WHERE id = $1`, [chat, JSON.stringify({ title: 'DKIM will not verify for mail.northwind.example', summary: 'Sam added the missing s3._domainkey CNAME, but the domain still shows pending a day later. DNS is managed by their agency.', ask: 'Why is DKIM still pending after adding the record?', recommendation: 'Re-run the DNS check against a fresh resolver; if the record resolves, verify the domain by hand.' })]);
   const happened = (conversation, kind, minutes, user, details) => db.query('INSERT INTO support_events(conversation_id,kind,user_id,details,created_at) VALUES ($1,$2,$3,$4::jsonb,now()-$5::float8*interval \'1 minute\')', [conversation, kind, user, JSON.stringify(details), minutes]);
   await happened(chat, 'ticket', 38, null, { ticketId: supportId('tkt', 'samdkim', 16), type: 'bug', severity: 'P3' });

@@ -204,7 +204,7 @@ function chatRows(detail: SupportDetail): ChatRow[] {
     if (entry.event) { rows.push({ type: 'proposal', key: entry.key, at: entry.at, text: `Waiting for approval: ${sentenceCase(String(entry.event.details.label ?? 'a change'))}` }); previous = null; continue }
     const m = entry.message!, { author, role } = describe(m, c)
     const row: ChatMessage = { type: 'message', key: entry.key, m, role, author, first: true, last: true }
-    if (previous && previous.author === author && previous.role === role && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false }
+    if (previous && previous.author === author && previous.role === role && !previous.m.staff?.viaAgent === !m.staff?.viaAgent && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false }
     rows.push(row)
     previous = row
   }
@@ -276,7 +276,7 @@ function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: Sup
   return <div className="sinbox-msg" data-role={role} data-first={row.first || undefined} data-last={row.last || undefined} data-email={m.email ? '' : undefined} data-pending={pending || undefined}>
     {row.first && <p className="sinbox-msg__meta">
       {!customer && <Mark name={row.author} agent={m.author === 'agent'} />}
-      <span className="sinbox-msg__author">{row.author}</span>
+      <span className="sinbox-msg__author">{row.author}{m.staff?.viaAgent && ' · via agent'}</span>
       {role === 'note' && <span className="sinbox-msg__note" title="Only staff see notes"><Lock size={12} aria-hidden="true" />Note<span className="sr-only">: only staff see it</span></span>}
       <Time at={m.at} />
     </p>}

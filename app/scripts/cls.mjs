@@ -244,8 +244,8 @@ const pages = ids => [
   ['Operator', '/operator', { from: '/overview' }],
   ['Operator · workspace', `/operator/workspaces/${ids.restricted}`, { from: '/operator', row: 'Harbor Supply' }],
   ['Operator · UI notes', '/operator/notes', { from: '/operator', click: 'UI notes' }],
-  // Your agents in the support inbox, and an agent's link: its approval dialog opens over the list once the request loads.
-  ['Operator · agents', '/operator/agents', { from: '/operator', click: 'Agents' }],
+  // Your agents (the support inbox's menu), and an agent's link: its approval dialog opens over the list once the request loads.
+  ['Operator · agents', '/operator/agents', { from: '/support' }],
   ['Operator · agents · approve', '/operator/agents?code=GHJK-LMNP', {}],
   ['Operator · waitlist', '/operator?view=waitlist', { from: '/operator?view=signups', click: 'Waitlist' }],
   // Sign-ups: the limit and what fills it over every workspace; Set limit opens its fields once the numbers are in.

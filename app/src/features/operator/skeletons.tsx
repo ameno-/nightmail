@@ -4,6 +4,8 @@ import { Link, useLocation } from 'react-router'
 import { useSession } from '../../data/context'
 import { Button, type ButtonProps, EmptyState, FacetRail, LoadingRegion, Meter, MetricRow, PageHeader, SearchField, SectionHeader, Select, Skeleton, Sparkline, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
 import type { AbuseBand, DeliverabilityWindow } from '../../data/operator'
+import { CopyAction } from '../../components/motion'
+import { supportAgentPrompt } from '../../data/support-agents'
 import './operator.css'
 
 // Not an operator: no such page. An operator signed in with GitHub: staff tools need this account's Google sign-in
@@ -238,7 +240,7 @@ export function OperatorClusterSkeleton({ actions }: { actions: boolean }) {
   </>
 }
 
-const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'health', label: 'Health' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }, { value: 'agents', label: 'Agents' }]
+const baseTabs = [{ value: 'queue', label: 'Review queue' }, { value: 'health', label: 'Health' }, { value: 'signups', label: 'Sign-ups' }, { value: 'abuse', label: 'Abuse' }, { value: 'actions', label: 'Actions' }]
 /** The view a /operator address opens (old ?view=waitlist and ?view=lists URLs stay valid and open inside Sign-ups and Abuse). */
 export const operatorView = (search: string) => { const view = new URLSearchParams(search).get('view'); return view === 'actions' || view === 'waitlist' || view === 'abuse' || view === 'lists' || view === 'signups' || view === 'health' ? view : 'queue' }
 /** The top-level tab active for a given operator view. */
@@ -246,11 +248,10 @@ export const operatorTab = (view: ReturnType<typeof operatorView>) => view === '
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
-/** Where an operator tab leads: Agents and UI notes are pages of their own, the rest views of /operator. */
-export const operatorTabPath = (value: string) => value === 'agents' ? '/operator/agents' : value === 'notes' ? '/operator/notes' : value === 'queue' ? '/operator' : `/operator?view=${encodeURIComponent(value)}`
 
-// Agents (/operator/agents, ./agents): your own agents approved for the support inbox (api/src/support-agents.ts). A
-// phone's card shows the agent, when it was approved and when it expires, its last use, and its menu at the end.
+// Your agents (/operator/agents, ./agents, reached from the support inbox's menu): your own agents approved for the
+// support inbox (api/src/support-agents.ts). A phone's card shows the agent, when it was approved and when it expires,
+// its last use, and its menu at the end.
 export const agentColumnDefs: SkeletonColumn[] = [
   { key: 'agent', label: 'Agent', card: 'title' },
   { key: 'approved', label: 'Approved', width: 168, card: 'line' },
@@ -258,12 +259,13 @@ export const agentColumnDefs: SkeletonColumn[] = [
   { key: 'used', label: 'Last used', width: 144, card: 'line' },
   { key: 'actions', label: '', width: 56, card: 'end' },
 ]
-export const AgentsLead = () => <p className="op-agents-lead muted">Your own agents that may work the support inbox as you. An agent asks first and shows you a link to approve it here; an approval lasts 30 days.</p>
+/** The page's header, the same loading and loaded: Copy for your agent copies the prompt that sets an agent up. */
+export const AgentsHeader = () => <PageHeader title="Your agents" backTo="/support" actions={<CopyAction value={supportAgentPrompt(window.location.origin)} label="Copy for your agent" text="Copy for your agent" />} />
+export const AgentsLead = () => <p className="op-agents-lead muted">Agents you approved to work the support inbox as you.</p>
 export function OperatorAgentsSkeleton() {
   return <>
-    <PageHeader title="Operator" actions={<GlassLink />} />
+    <AgentsHeader />
     <LoadingRegion label="Loading agents"><div className="op-page">
-      <Tabs value="agents" onValueChange={() => {}} disabled items={useOperatorTabs()} label="Operator views" />
       <AgentsLead />
       <TableSkeleton columns={agentColumnDefs} rows={3} />
     </div></LoadingRegion>
