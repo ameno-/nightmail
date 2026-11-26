@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { ArrowRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
+import { Alert, Button, CopyButton, DataTable, Disclosure, DropdownMenu, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -322,20 +322,26 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const all = rows.flatMap(row => row.record.id === 'dmarc-policy' ? [] : [row.record])
   const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
   const policy = domain.dmarc
-  return <section className="section stack domain-records-section">
+  // Once verified (and no required record such as a new custom MAIL FROM is pending), fold the DNS records behind one
+  // disclosure. A domain that isn't verified or loses verification renders them open directly.
+  const foldRecords = domain.status === 'verified' && !domain.records.some(required)
+  const content = <>
     {(summary || actions || all.length > 0) && <div className="domain-records-actions">
       {summary && <p className="domain-check-summary" data-tone={summary.tone} title={summary.text} role="status">{summary.text}</p>}
       {actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}
     </div>}
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
-    {receivingView && alert}
-    {receivingView && warning && <Alert tone="warning">{warning}</Alert>}
-    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records, then check again.</Alert>}
     {rows.length > 0 && <div className="domain-records-list">
       <DnsRecordTable domain={domain.name} rows={rows} />
       {mailFrom && !domain.mailFromDomain && mailFromRecords.length === 0 && <div className="domain-records-add"><Button variant="ghost" onClick={mailFrom.onEdit}><Plus size={14} aria-hidden />Add custom MAIL FROM</Button></div>}
       {linkNote && <p className="muted">{linkNote}</p>}
     </div>}
+  </>
+  return <section className="section stack domain-records-section">
+    {receivingView && alert}
+    {receivingView && warning && <Alert tone="warning">{warning}</Alert>}
+    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records, then check again.</Alert>}
+    {foldRecords ? <Disclosure title="DNS records · Verified" headingAs="h2" className="domain-records-disclosure">{content}</Disclosure> : content}
   </section>
 }

@@ -56,8 +56,12 @@
 .ui-section-header > .domain-group-title { gap: var(--space-8); }
 .domain-group-title h3 { font-size: var(--text-sm); line-height: var(--leading-sm); font-weight: var(--font-weight-bold); }
 .settings-facts.domain-facts { display: flex; flex-wrap: wrap; gap: var(--space-8) var(--space-40); }
-.ui-section-header:has(> .domain-group-title) { align-items: flex-start; }
+.ui-section-header:has(> .domain-group-title) { align-items: center; }
 .domain-records-section > .dns-issue { margin-top: 0; }
+.domain-records-disclosure > summary { padding-inline: var(--space-12); border-radius: var(--radius-sm); background: var(--color-well); transition: background var(--motion-duration); }
+@media (hover: hover) and (pointer: fine) { .domain-records-disclosure > summary:hover { background: var(--color-well-hover); } }
+.domain-records-disclosure > summary:focus-visible { background: var(--color-well-hover); }
+.domain-records-disclosure > .ui-disclosure__body { padding-top: var(--space-16); gap: var(--space-16); }
 .domain-records-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: var(--space-8); }
 /* Check now's answer: one line beside the record actions (two on a phone, on its own row), the same height before and
    after a check, so the records never move. The full text is its title; each row's status says the rest. */
