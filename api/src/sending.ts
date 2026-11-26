@@ -32,7 +32,7 @@ import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threa
 import { assertTopics, topicAllows, topicRule, type TopicRule } from './topics.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { decodedDisplayName, AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
+import { foundLinkOrigin, linkAllowance, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -251,7 +251,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   consent: z.object({ source: z.string(), confirmedAt: z.string() }).nullable().describe('The consent source confirmed at launch, if any.'),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), linkHold: z.enum(['daily_budget', 'blocklist']).optional().describe('When present, the daily pacing window is the shared link allowance, or the link record is held for operator review.'), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
   feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 /** The daily cap of a campaign's `index`th 24-hour window: its plan's batch (the last repeating), else pacePerDay; null for none. */
 const dailyCap = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'pacePerDay' | 'windowIndex'>, index = row.windowIndex) =>
@@ -265,12 +265,14 @@ const firstBatchWait = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'p
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
   if (!row.reviewId) return null;
   const next = dailyCap(row) !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
+  const wait = row.waitingReason === 'link_budget' ? { reason: 'pacing_window', linkHold: 'daily_budget' }
+    : row.waitingReason === 'link_listing' ? { reason: 'link_record', linkHold: 'blocklist' } : { reason: row.waitingReason };
   return Delivery.parse({ total: row.total, prepared: row.prepared, expanded: row.expanded, canceled: row.canceled, error: row.error ?? null,
     pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, rateShare: row.rateShare ?? 1, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next,
       plan: row.pacePlan, batch: row.pacePlan ? Math.min(row.windowIndex, row.pacePlan.length - 1) + 1 : null,
       firstBatch: row.pacePlan && row.paceFirstBatch && row.paceFirstWaitMinutes ? { size: row.paceFirstBatch, waitMinutes: row.paceFirstWaitMinutes } : null },
     consent: row.consent ? { source: row.consent.source, confirmedAt: row.consent.confirmedAt } : null,
-    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null,
+    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { ...wait, until: row.waitingUntil } : null,
     feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null });
 }
 const CampaignRamp = z.object({ step: z.number().int().describe('The step the campaign releases at, from 1.'), steps: z.number().int().describe('How many steps the ramp has; past the last one only the other limits apply.'), ceilingPerHour: z.number().int().describe('Most recipients this step releases in its hour.'),
@@ -521,6 +523,7 @@ const CampaignReadiness = z.object({
     linkDomain: z.object({ name: z.string().describe('The registrable domain the links go on, when it is not the From domain\'s.'), registeredAt: z.string().nullable(), registeredDays: z.number().int().nullable() }).nullable().optional(),
     dmarc: z.enum(['reject', 'quarantine', 'none', 'missing', 'invalid']).nullable().describe('The DMARC policy last observed; null when not checked yet.'),
     mailFrom: z.enum(['verified', 'pending', 'failed', 'not_configured']).describe('The custom MAIL FROM domain (aligned SPF).'),
+    sharedLinkPacing: z.boolean().optional().describe('This campaign shares the link domain’s daily sending allowance.'),
     linkHost: z.enum(['not_configured']).describe('Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.'),
     ownLinkHost: z.object({ hostname: z.string().describe('links.<domain>.'), active: z.boolean().describe('true: the links go there. false: it isn\u2019t set up yet, so they go on linkOrigin (the link domain) meanwhile.') }).nullable()
       .describe('The domain\'s own link host, when this workspace has them; null without one.'),
@@ -775,6 +778,7 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   return CampaignReadiness.parse({ verdict: judged.verdict, summary, reasons: legacy, findings,
     domain: { name: domain, firstSeenAt: f!.first_seen ? new Date(f!.first_seen).toISOString() : null, ageDays, dmarc,
       mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured',
+      ...(!row.draft.requiredNotice && runtime.config.linkHost && runtime.config.linkWarmup && links.origin === `https://${runtime.config.linkHost}` ? { sharedLinkPacing: true } : {}),
       linkHost: 'not_configured', ownLinkHost: links.own, linkOrigin: links.origin, registeredAt: reg?.at ?? null, registeredDays: reg?.days ?? null, linkDomain: link },
     history: { workspace: { largestSend: f!.ws_largest, firstSentAt: f!.first_sent ? new Date(f!.first_sent).toISOString() : null, usualDay, sent: wsAccepted, bounceRate: rate(Number(f!.ws_bounced ?? 0), wsAccepted), complaintRate: rate(Number(f!.ws_complained ?? 0), wsAccepted) },
       domain: { largestSend: f!.dom_largest, sent: f!.dom_accepted, bounceRate: rate(f!.dom_bounced, f!.dom_accepted), complaintRate: rate(f!.dom_complained, f!.dom_accepted) } },
@@ -1502,6 +1506,16 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     }
     shadowBilling(d.billing, wid);
     if (d.allowed) {
+      if (s.kind === 'marketing') {
+        // Pre-upgrade scheduled snapshots carry the generated header rather than a separate origin.
+        const origin = s.linkOrigin ?? s.headers.find(h => h.Name.toLowerCase() === 'list-unsubscribe')?.Value.match(/^<(https?:\/\/[^/]+)\/unsubscribe\//)?.[1];
+        if (origin) {
+          const n = hostedCost(s.to, s.cc, s.bcc), allowance = await linkAllowance(tx, runtime.config, wid, origin);
+          // Roll back admission's charges along with the attempt, and retry the same scheduled email.
+          if (allowance && n > allowance.left) throw new JobDeferred(allowance.until, payload);
+          if (new URL(origin).hostname === runtime.config.linkHost) await recordLinkUse(tx, wid, runtime.config.linkHost, n);
+        }
+      }
       const route = d.mails[0]!;
       const needsVerdict = !isSimulatedSes(runtime) && !s.screenVerdict && ((route.connection?.kind === 'shared' && runtime.config.hostedScreen) || (s.screen && s.kind === 'transactional'));
       const { rows: [lim] } = await tx.execute<{ rate: number | null }>(route.connection?.aws_account_id
@@ -1567,6 +1581,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
       if (m.kind === 'marketing') {
         // Only the token's hash and destination come from local preparation; the statement gives it the workspace.
         const link = await (await loadOpsUnsub()).createUnsubscribeLink(origins[i] ?? linkHostMissing(), '', snapshot.to[0]!);
+        snapshot.linkOrigin = origins[i];
         marketingFooter(snapshot, link.url, { postalAddress }); message.token = { hash: link.record.tokenHash, email: link.record.email };
       }
     } catch (e) { if (e instanceof ModuleLoadError) throw e; message.invalid = atItem(e, batch ? i : undefined); }
@@ -1816,6 +1831,8 @@ const admissionMails = (runtime: Runtime, out: Outgoing[]): AdmissionMail[] => o
  */
 async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number }; scheduledAt?: string }): Promise<SendReceipt | { data: SendReceipt[] }> {
   const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch, at = options.scheduledAt;
+  const guarded = !at && (cfg.linkHost || cfg.linkHosts) && out.some(m => m.snapshot.kind === 'marketing' && m.snapshot.linkOrigin);
+  if (guarded && !call.db) return runtime.db.transaction(db => admitSends({ ...call, db }, body, out, identity, options));
   // A scheduled send keeps the region it asked for, if any: its release resolves the sender's region again.
   if (at) for (const m of out) if (m.snapshot.region) m.snapshot.requestedRegion = m.snapshot.region;
   let expanded = 0;
@@ -1883,6 +1900,20 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     if (key !== undefined) await (call.db ?? runtime.db).execute(sql`DELETE FROM sending_idempotency WHERE workspace_id = ${result.workspace_id} AND actor_key_id = ${result.id} AND path = ${call.path} AND request_key = ${key}`);
     throw recipientIneligibleError(result.ineligible, batch);
   }
+  if (guarded) {
+    const counts = new Map<string, number>();
+    for (const { snapshot, recipients } of out) if (snapshot.kind === 'marketing' && snapshot.linkOrigin) counts.set(snapshot.linkOrigin, (counts.get(snapshot.linkOrigin) ?? 0) + recipients);
+    for (const [origin, n] of [...counts].sort(([a], [b]) => a.split('.').reverse().join('.').localeCompare(b.split('.').reverse().join('.')))) {
+      const budget = await linkAllowance(call.db!, cfg, a.workspaceId, origin);
+      if (budget && n > budget.left) {
+        const error = new ApiError(429, budget.reason === 'link_listing' ? 'LINK_DOMAIN_HELD' : 'LINK_BUDGET_REACHED',
+          budget.reason === 'link_listing' ? 'Marketing on this link domain is paused for review.' : 'The shared link domain has no room for this send today. Campaigns send the remainder on later days.', undefined, true);
+        error.retryAfterSeconds = Math.max(1, Math.ceil((Date.parse(budget.until)-Date.now())/1000));
+        throw error;
+      }
+      if (new URL(origin).hostname === cfg.linkHost) await recordLinkUse(call.db!, a.workspaceId, cfg.linkHost, n);
+    }
+  }
   // Its release job wakes the dispatcher at its time; one due within a minute needs the scheduler awake now to follow it.
   if (at) { if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); return receipt; }
   const maxSendRate = typeof result.max_send_rate === 'number' && result.max_send_rate > 0 ? result.max_send_rate : undefined;
@@ -1940,8 +1971,6 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   // whose use these recipients are recorded in; refused while the workspace is paused.
   const choose = marketing ? linkChoices(call.runtime, db, a.workspaceId) : undefined;
   const choices = choose ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? choose(m.from).catch(error => { throw atItem(error, batch ? i : undefined); }) : undefined)) : [];
-  const shared = choices.flatMap((choice, i) => choice?.shared ? [{ host: choice.shared.host, recipients: hostedCost(mails[i]!.to, mails[i]!.cc, mails[i]!.bcc) }] : []);
-  if (shared.length) await recordLinkUse(db, a.workspaceId, shared[0]!.host, shared.reduce((n, s) => n + s.recipients, 0));
   const out = await directMessages(call.runtime, mails, batch, address, choices.map(choice => choice?.origin));
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   if (platformTestTo) for (const m of out) m.platformTestTo = platformTestTo;
@@ -3500,9 +3529,8 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     sizeCheck(keyed, rows);
     return { mail: { ...mail, snapshot: withoutLegacyFonts({ ...keyed, headers: [...keyed.headers] }) }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
   }
-  // The link host the launch froze. A review frozen before link hosts has none: its links go on the sender's link host as
-  // it is now, or are refused on Hosted without one, never on this installation's own domain.
-  const origin = review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
+  // Keep the origin charged at release (or already rendered on an earlier attempt). Only older rows need a fresh lookup.
+  const origin = mail.snapshot.linkOrigin ?? (mail.snapshot.unsubscribeUrl ? new URL(mail.snapshot.unsubscribeUrl).origin : undefined) ?? review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl?.startsWith(`${origin}/unsubscribe/`) ? mail.snapshot.unsubscribeUrl : undefined;
   // Its link is about the campaign's topic (src/topics.ts), when it has one: its one-click opts out of that topic alone.
@@ -4188,11 +4216,11 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // (src/link-domains.ts). With none to use (the workspace paused, or with own link hosts only, none active), it waits
   // without releasing anyone and looks again every 15 minutes; a domain's own host turning active wakes it at once
   // (wakeLinkRecordHolds). On the link domain, the release records its recipients there.
-  let shared: { host: string } | undefined;
+  let releaseOrigin = row.reviewDraft!.requiredNotice ? undefined : row.reviewDraft!.linkOrigin;
   if (!row.reviewDraft!.linkOrigin && !row.reviewDraft!.requiredNotice) {
     const choice = await linkChoice(runtime, runtime.db, a.workspaceId, row.reviewDraft!.from).catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return null; throw error; });
     if (!choice) return hold('link_record', new Date(nowMs + LINK_RECORD_RECHECK_MS).toISOString());
-    shared = choice.shared;
+    releaseOrigin = choice.origin;
   }
   // A stale/nonexistent sample is not an unlimited allowance. When a known quota (or a
   // previously held campaign) needs a new sample, use the dispatcher's elected cache refresher.
@@ -4391,7 +4419,12 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
-    const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
+    const links = releaseOrigin ? await linkAllowance(db, runtime.config, a.workspaceId, releaseOrigin) : null;
+    if (links && !links.left) {
+      await db.execute(holdCampaign(ref, links.reason, links.until));
+      return { count: 0, completed: false, linkUntil: links.until, hostedUntil: null, balanceUntil: null };
+    }
+    const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, Math.min(capacity, links?.left ?? capacity));
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
     // Refuse unknown future hash formats before releasing any row so the campaign pauses intact instead of burning recipients.
     if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
@@ -4434,9 +4467,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     // per-recipient headers, base content, asset IDs, or denormalized attachment links.
     const prepared=recipients.map(r=>({id:rowId('email'),ordinal:r.ordinal,address:r.recipient.email,subject:r.subject??draft.subject}));
     // On the link domain: the release's recipients are recorded there (src/link-domains.ts recordLinkUse).
-    if (shared && prepared.length) await recordLinkUse(db, a.workspaceId, shared.host, prepared.length);
+    if (runtime.config.linkHost && releaseOrigin === `https://${runtime.config.linkHost}` && prepared.length) await recordLinkUse(db, a.workspaceId, runtime.config.linkHost, prepared.length);
     const tpl = row.reviewScreen?.template;
-    const stub={kind:'marketing',deferredCampaign:true,...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
+    const stub={kind:'marketing',deferredCampaign:true,...(!draft.linkOrigin && releaseOrigin ? {linkOrigin:releaseOrigin} : {}),...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
     if (prepared.length) await db.execute(sql`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,scheduled_at)
       SELECT p.id,${a.workspaceId},${a.keyId},${draft.region},${campaign.id},${campaign.reviewId},p.ordinal,${draft.from},jsonb_build_array(p.address),'[]','[]',p.subject,${JSON.stringify(stub)}::jsonb,${campaign.simulated},true,${campaign.scheduledAt}
       FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) p(id text,ordinal int,address text,subject text)`);
@@ -4452,6 +4485,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   if (released.count) try { await runtime.dispatch?.(draft.region, row.account?.aws_account_id, released.count, row.account?.kind, false, Number(row.rate) > 0 ? Number(row.rate) : undefined); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId: row.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
   // Usually the oldest bucket expires first. Also notice an earlier refund or operator raise.
   // Waiting on balance: billing.restored wakes the run as soon as credit lands; otherwise look again in an hour.
+  if ('linkUntil' in released && released.linkUntil) throw new JobDeferred(released.linkUntil, payload);
   if (released.balanceUntil && !released.completed) throw new JobDeferred(released.balanceUntil, payload);
   if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
   if (released.completed) { if (!released.count) await settle(); return 'done'; }

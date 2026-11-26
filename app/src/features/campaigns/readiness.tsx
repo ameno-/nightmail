@@ -59,7 +59,7 @@ export function ReadinessPanel({ readiness, start, choice, onChoice, consent, on
     </div>}
     <dl className="review-facts">
       <dt>Domain</dt><dd>{[domain.name, registered(domain.registeredAt), added(domain.ageDays), domain.dmarc ? dmarcLabels[domain.dmarc] : 'DMARC not checked yet', mailFromLabels[domain.mailFrom]].filter(Boolean).join(' · ')}</dd>
-      <dt>Links</dt><dd>{linksLine(domain)}</dd>
+      <dt>Links</dt><dd>{linksLine(domain)}{domain.sharedLinkPacing && ' · If the shared link domain reaches its daily limit, the remaining recipients will get this campaign on later days.'}</dd>
       <dt>This domain</dt><dd>{history(readiness.history.domain)}</dd>
       <dt>Workspace</dt><dd>{history(readiness.history.workspace)}</dd>
       <dt>List</dt><dd>{listLine}</dd>

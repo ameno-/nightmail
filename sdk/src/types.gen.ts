@@ -2008,6 +2008,10 @@ export type CampaignDelivery = {
      */
     waiting: {
         reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record';
+        /**
+         * When present, the daily pacing window is the shared link allowance, or the link record is held for operator review.
+         */
+        linkHold?: 'daily_budget' | 'blocklist';
         until: string;
     } | null;
     /**
@@ -2408,6 +2412,10 @@ export type CampaignAudienceCounts = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
+             * This campaign shares the link domain’s daily sending allowance.
+             */
+            sharedLinkPacing?: boolean;
+            /**
              * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
             linkHost: 'not_configured';
@@ -2736,6 +2744,10 @@ export type CampaignQueued = {
              * The custom MAIL FROM domain (aligned SPF).
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * This campaign shares the link domain’s daily sending allowance.
+             */
+            sharedLinkPacing?: boolean;
             /**
              * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
