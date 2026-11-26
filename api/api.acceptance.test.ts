@@ -28292,6 +28292,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       // one exists (nor is hello@ at the built-in domain, which can't send).
       const stray = ok(await local('POST', '/v1/inbound/addresses', { address: `forward@${name}` }), 201);
       assert.equal(stray.receiving?.turnedOn, true);
+      // The address builder's case where the refusal named this domain: the address it makes there (turning receiving on, as
+      // its address step warned) is the one that asks.
+      const asked = ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'stray-team', address: 'stray@outside.example', from: stray.address }), 201);
+      assert.equal(asked.status, 'pending');
+      assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'stray-team'])).rows[0].request_from, stray.address);
       await db.query("UPDATE mailboxes SET created_at=now()-interval '1 day' WHERE workspace_id=$1 AND id=$2", [wid, stray.id]);
       ok(await local('POST', '/v1/endpoints', { type: 'forward', name: 'team-3', address: 'third@outside.example' }), 201);
       assert.equal((await db.query('SELECT request_from FROM mailbox_webhooks WHERE workspace_id=$1 AND key=$2', [wid, 'team-3'])).rows[0].request_from, box.address);

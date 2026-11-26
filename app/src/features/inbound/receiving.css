@@ -347,3 +347,6 @@ html[data-privacy='on'] .trace-to.private-field:not(:hover, :focus)::placeholder
 
 /* The address builder's receiving note: the host's live status on its own line under the MX record. */
 .builder-receiving-status { display: block; margin-top: var(--space-6); }
+.builder-receiving-actions { margin-top: var(--space-8); }
+/* What a Save made, refused or waits for, under the flow; nothing until then. */
+.builder-outcome:empty { display: none; }
