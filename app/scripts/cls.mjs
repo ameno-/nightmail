@@ -817,6 +817,30 @@ async function settle(page, net) {
     calm = !net.size && net.started === mark && !fetches ? calm + 1 : 0;
   }
 }
+// Where a scrolling box comes to rest after a scroll the reader started (smooth, by the keyboard; a wheel; a script): the
+// browser's scrollend after its last scroll, where it has the event, and in any case its position the same over 10 frames
+// and 300 ms. A loaded runner draws few frames, and a short wait read a column still finishing its smooth scroll as at
+// rest (2037, then 2040, in a merge queue run on Nov 26). watchScroll goes before the action, so no scrollend is missed;
+// restOf after it, which answers where the box rests and where it was when watched, or that it never came to rest.
+const watchScroll = (page, selector) => page.evaluate(selector => {
+  const box = document.querySelector(selector);
+  const watch = window.__clsScroll = { box, from: box?.scrollTop ?? null, scrolled: 0, ended: 0 };
+  box?.addEventListener('scroll', () => { watch.scrolled = performance.now(); }, { passive: true });
+  box?.addEventListener('scrollend', () => { watch.ended = performance.now(); });
+}, selector);
+const restOf = page => page.evaluate(limit => new Promise(done => {
+  const watch = window.__clsScroll, box = watch?.box, began = performance.now(), ends = !!box && 'onscrollend' in box;
+  let at = box?.scrollTop, same = 0, since = began;
+  const frame = () => {
+    if (!box?.isConnected) return done({ gone: true, from: watch?.from ?? null });
+    const now = performance.now();
+    if (box.scrollTop !== at) { at = box.scrollTop; same = 0; since = now; } else same++;
+    if (same >= 10 && now - since >= 300 && (!ends || watch.ended >= watch.scrolled)) return done({ top: at, from: watch.from });
+    if (now - began > limit) return done({ moving: true, top: at, from: watch.from });
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+}), 15_000);
 const sharp = n => Math.round(n * 10000) / 10000;
 // A step that should ask first: whichever comes first, the question (asked) or the page going on without it (left). Both
 // can take seconds on a loaded runner, where a fixed 3 or 5 s wait read a slow question as none (Nov 23).
@@ -1015,22 +1039,31 @@ async function measure(browser, job, fx) {
       }
       const painted = await page.evaluate(() => !!document.getElementById('page-shell')) ? await words() : null;
       // The contents the reader scrolled before the app is up stay where they left them: by a script (as a wheel would), or
-      // by the keyboard (Tab to the first contents link, then PageDown), where their focus stays on that link.
-      let contents = job.firstTouch === 'contents' ? await page.evaluate(() => { const box = document.querySelector('#page-shell .ui-subnav__scroll'); box.scrollTop += 400; return box.scrollTop; }) : null;
-      if (job.firstTouch === 'keyboard') {
-        for (let i = 0; i < 15 && !await page.evaluate(() => document.activeElement === document.querySelector('#page-shell .ui-subnav__scroll a')); i++) await page.keyboard.press('Tab');
-        for (let i = 0; i < 3; i++) await page.keyboard.press('PageDown');
-        // PageDown scrolls smoothly: read where the column comes to rest.
-        await page.waitForFunction(() => new Promise(done => { const box = document.querySelector('#page-shell .ui-subnav__scroll'), at = box?.scrollTop; setTimeout(() => done(!box || (at > 0 && box.scrollTop === at)), 150); }), null, { timeout: 5_000 }).catch(() => {});
-        contents = await page.evaluate(() => document.getElementById('page-shell') && document.activeElement === document.querySelector('#page-shell .ui-subnav__scroll a') ? document.querySelector('#page-shell .ui-subnav__scroll').scrollTop : null);
-        if (contents === null) problems.push('the keyboard reached the contents only after the app took over: the case was not exercised');
+      // by the keyboard (Tab to the first contents link, then PageDown, which scrolls smoothly), where their focus stays on
+      // that link. Each position is read once the column is at rest (restOf), on the painted page and in the app's.
+      let contents = null;
+      if (job.firstTouch === 'contents' || job.firstTouch === 'keyboard') {
+        if (job.firstTouch === 'keyboard') for (let i = 0; i < 15 && !await page.evaluate(() => document.activeElement === document.querySelector('#page-shell .ui-subnav__scroll a')); i++) await page.keyboard.press('Tab');
+        await watchScroll(page, '#page-shell .ui-subnav__scroll');
+        if (job.firstTouch === 'contents') await page.evaluate(() => { document.querySelector('#page-shell .ui-subnav__scroll').scrollTop += 400; });
+        else for (let i = 0; i < 3; i++) await page.keyboard.press('PageDown');
+        const rest = await restOf(page);
+        const focused = job.firstTouch !== 'keyboard' || await page.evaluate(() => document.activeElement === document.querySelector('#page-shell .ui-subnav__scroll a'));
+        if (rest.moving) problems.push(`the painted contents never came to rest after the ${job.firstTouch === 'keyboard' ? 'keyboard' : 'script'} scrolled them (still moving after 15 s, at ${rest.top} from ${rest.from}): the case was not measured`);
+        else if (rest.gone || !focused) problems.push(`the ${job.firstTouch === 'keyboard' ? 'keyboard' : 'script'} reached the contents only after the app took over: the case was not exercised`);
+        else if (!(rest.top > rest.from)) problems.push(`the painted contents didn't scroll (at ${rest.top} from ${rest.from}): the case was not exercised`);
+        else contents = rest;
       }
       await page.keyboard.press('Shift');
       await page.waitForFunction(() => !document.querySelector('#price-shell, #page-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the painted page'));
       if (contents !== null) {
-        await page.waitForTimeout(300);
-        const now = await page.evaluate(() => document.querySelector('#root .ui-subnav__scroll')?.scrollTop ?? null);
-        if (now === null || Math.abs(now - contents) > 1) problems.push(`the contents scrolled to ${contents} before the app took over are at ${now} after`);
+        // What the bug was: the column going back toward where the reader started. At least where it rested, within 2 px.
+        await watchScroll(page, '#root .ui-subnav__scroll');
+        const now = await restOf(page);
+        if (now.gone || now.top === undefined) problems.push('the app has no contents column after it takes over');
+        else if (now.moving) problems.push(`the app's contents never came to rest after it took over (still moving after 15 s, at ${now.top})`);
+        else if (now.top < contents.top - 1) problems.push(`the contents went back toward where they started: at rest at ${contents.top} before the app took over (scrolled from ${contents.from}), at ${now.top} after`);
+        else if (now.top > contents.top + 2) problems.push(`the contents moved on from where the reader left them: at rest at ${contents.top} before the app took over, at ${now.top} after`);
         if (job.firstTouch === 'keyboard' && !await page.evaluate(() => document.activeElement === document.querySelector('#root .ui-subnav__scroll a'))) problems.push('the keyboard focus on the first contents link was not kept');
       }
       if (painted !== null) {
