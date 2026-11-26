@@ -311,6 +311,8 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async inboxState(conversationId: string) { return (await this.platform()).inboxState(conversationId); }
   async pullOutbox(conversationId?: string) { return (await this.platform()).pullOutbox(conversationId); }
   async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
+  async staffMail() { return (await this.platform()).staffMail(); }
+  async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }
 }
