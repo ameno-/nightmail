@@ -8,7 +8,7 @@ import { ENTRIES } from './src/features/pricing/compare/index.ts'
 import { PRICE_LINKS, PRICE_PAGES_LIVE } from './src/features/pricing/live.ts'
 import { PRICE_PAGES } from './src/features/pricing/pages.ts'
 import { PANEL_IDS } from './src/features/pricing/panels.ts'
-import { entryProblems, lastChecked } from './src/features/pricing/prices.ts'
+import { entryProblems } from './src/features/pricing/prices.ts'
 import * as readable from './src/features/pricing/readable.ts'
 import { jsonLd, llmsSiteIndex, markdownPath } from './src/features/pricing/readable.ts'
 
@@ -113,6 +113,11 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
         for (const name of ['property="og:image"', 'name="twitter:image"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(image))
         for (const name of ['property="og:image:alt"', 'name="twitter:image:alt"']) set(new RegExp(`(<meta ${name} content=")[^"]*`), attr(page.card.alt))
         set(/(<meta property="og:image:type" content=")[^"]*/, 'image/jpeg')
+        // The card's size as its file has it (a card cut short once said 630 and was 542 high).
+        const size = jpegSize(readFileSync(resolve(publicDir, page.card.file)))
+        if (!size) return this.error(`public/${page.card.file} is no JPEG with a size this build can read.`)
+        set(/(<meta property="og:image:width" content=")[^"]*/, String(size.width))
+        set(/(<meta property="og:image:height" content=")[^"]*/, String(size.height))
         set(/(<!-- Link previews\.)[^>]*-->/, ' This page\'s own (app/price-pages.ts). -->')
         set(/(<meta property="og:type" content="website" \/>)/, `\n    <meta property="og:url" content="${attr(canonical)}" />\n    <link rel="canonical" href="${attr(canonical)}" />`)
         set(/(<link rel="alternate" type="text\/markdown" href=")[^"]*(?=" title=")/, attr(canonicalOrigin + markdownPath(page.path)))
@@ -139,7 +144,8 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       for (const { file, source } of words.markdownFiles()) this.emitFile({ type: 'asset', fileName: file, source })
       this.emitFile({ type: 'asset', fileName: 'llms-site.txt', source: llmsSiteIndex() })
       this.emitFile({ type: 'asset', fileName: 'llms-full.txt', source: words.llmsFull() })
-      const listed = [{ path: '/', modified: null as string | null }, ...PRICE_PAGES_LIVE ? PRICE_PAGES.map(page => ({ path: page.path, modified: page.comparison ? lastChecked(page.comparison) : null })) : []]
+      // The homepage's lastmod: the newest figure it quotes or links (every comparison's, which the price pages carry).
+      const listed = [{ path: '/', modified: PRICE_PAGES.map(page => page.modified).sort().at(-1)! }, ...PRICE_PAGES_LIVE ? PRICE_PAGES.map(page => ({ path: page.path, modified: page.modified })) : []]
       this.emitFile({ type: 'asset', fileName: 'robots.txt', source: `User-agent: *\nAllow: /\n\nSitemap: ${canonicalOrigin}/sitemap.xml\n` })
       this.emitFile({ type: 'asset', fileName: 'sitemap.xml', source: `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${listed.map(({ path, modified }) => `  <url><loc>${canonicalOrigin}${path}</loc>${modified ? `<lastmod>${modified}</lastmod>` : ''}</url>\n`).join('')}</urlset>\n` })
     } },
@@ -150,6 +156,16 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
  *  the homepage's. */
 export const priceFirstFiles = (files: string[]) => [/^assets\/(?:moondust-\d+|wall-\d+|lamp)-[\w-]+\.(?:avif|webp)$/, /^assets\/(?:pricing|board-page|machines)-[\w-]+\.(?:js|css)$/]
   .flatMap(pattern => files.filter(name => pattern.test(name)))
+
+/** A JPEG's width and height, from its start-of-frame marker. */
+function jpegSize(bytes: Buffer): { width: number; height: number } | null {
+  for (let at = 2; at + 9 < bytes.length && bytes[at] === 0xff;) {
+    const marker = bytes[at + 1]!, length = bytes.readUInt16BE(at + 2)
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return { height: bytes.readUInt16BE(at + 5), width: bytes.readUInt16BE(at + 7) }
+    at += 2 + length
+  }
+  return null
+}
 
 /** The stylesheets the chunks of these modules load, theirs and their imports'. */
 function pageCss(bundle: Rollup.OutputBundle, modules: string[]) {

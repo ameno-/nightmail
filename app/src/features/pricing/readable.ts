@@ -3,7 +3,7 @@ import { productName, publicOrigin } from '../../../../api/src/brand.ts'
 import { COMPARISONS, OFFERS } from './compare/index.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
-import { billMath, claim, dayOf, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, opening, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
+import { billMath, claim, dayOf, formatCount, listOf, money, nightmail, nightmailBill, opening, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
 
 // What the public pages say, for readers that aren't browsers (app/price-pages.ts writes each file): a Markdown twin of
 // the homepage (/index.md), the calculator (/pricing.md) and each comparison (/compare/<slug>.md) with the same facts
@@ -159,15 +159,15 @@ const app = () => ({
 })
 const site = () => ({ '@type': 'WebSite', '@id': url('/#website'), name: productName, url: url('/') })
 /** A page's JSON-LD: the page, the product it's about with its price, and the questions it answers. */
-export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'description' | 'comparison'> | 'home'): object {
+export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'description' | 'comparison' | 'modified'> | 'home'): object {
   if (page === 'home') return { '@context': 'https://schema.org', '@graph': [site(), app()] }
   const c = page.comparison
   return {
     '@context': 'https://schema.org',
     '@graph': [
       { '@type': 'WebPage', '@id': url(page.path), url: url(page.path), name: page.searchTitle, description: page.description, inLanguage: 'en',
-        isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') },
-        ...c ? { dateModified: lastChecked(c), mentions: { '@type': 'SoftwareApplication', name: c.vendor, url: c.offer.pricing }, citation: pagesRead(c).map(source => source.url) } : {} },
+        isPartOf: { '@id': url('/#website') }, about: { '@id': url('/#app') }, dateModified: page.modified,
+        ...c ? { mentions: { '@type': 'SoftwareApplication', name: c.vendor, url: c.offer.pricing }, citation: pagesRead(c).map(source => source.url) } : {} },
       site(), app(),
       ...c?.faq?.length ? [{ '@type': 'FAQPage', '@id': url(`${page.path}#questions`), mainEntity: c.faq.map(item => ({ '@type': 'Question', name: item.question, acceptedAnswer: { '@type': 'Answer', text: item.answer } })) }] : [],
     ],
