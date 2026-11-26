@@ -21,6 +21,8 @@ import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
 export const SHOWN_OTHERS = 6
 
 /** "Nov 2026", for a title. */
+/** A small count in words, as a caption says it: "six alternatives". */
+const spelled = (n: number) => ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][n] ?? String(n)
 const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 
 export function vendorAlternatives(c: Comparison): Doc {
@@ -39,25 +41,31 @@ export function vendorAlternatives(c: Comparison): Doc {
   const self = group.find(row => row.o === c)!, priced = group.filter(row => row.o !== c && row.bills[1]!.theirsCents !== null)
   // (priced is in the order of the middle size's price, the group's order breaking a tie.)
   const shown = priced.slice(0, SHOWN_OTHERS), left = group.filter(row => row !== self && !shown.includes(row))
-  const lowest = Math.min(...[self, ...shown].map(mid))
+  // The headline's "N others from $X": the services on the table besides Nightmail (the vendor and the six), and the lowest
+  // of their prices at the middle size, the one the caption names. Scoped by the count, never "alternatives start at".
+  const counted = [self, ...shown], lowest = Math.min(...counted.map(mid))
+  if (!Number.isFinite(lowest) || counted.some(row => row.bills[1]!.theirsCents === null) || !(ours[1]!.oursUc < BigInt(lowest) * 1_000_000n))
+    throw new Error(`/alternatives/${c.slug}'s headline would price ${counted.length} services from ${money(lowest)} at ${formatCount(sizes[1]!)}: each must have a price there above Nightmail's (docs/alternatives.ts).`)
   const checked = [...new Set([self, ...shown].map(row => row.o.offer.checked))].sort()
   const when = checked.length === 1 ? dayOf(checked[0]!) : `${dayOf(checked[0]!)} to ${dayOf(checked.at(-1)!)}`
 
   // ---------------------------------------------------------------- the page: the headline, one table, the facts
 
   const middleBill = ours[1]!, size = perSize(c, sizes[1]!)
-  const h1: Doc['h1'] = [[`${productName} `, { ours: middleBill.ours, sent: middleBill.u.sent, received: middleBill.u.received }, '.'], [`Others from ${money(lowest)}.`]]
-  const caption = `${vendor} alternatives, ${size.charAt(0).toLowerCase()}${size.slice(1)} · checked ${when.replaceAll(' ', '\u00a0')}`
+  const h1: Doc['h1'] = [[`${productName} `, { ours: middleBill.ours, sent: middleBill.u.sent, received: middleBill.u.received }, '.'], [`${counted.length} others from ${money(lowest)}.`]]
+  const caption = `${vendor} and ${spelled(shown.length)} alternatives, ${size.charAt(0).toLowerCase()}${size.slice(1)} · checked ${when.replaceAll(' ', '\u00a0')}`
   const assume = m.per === 'contact' ? `${m.sendsPerContact} emails a month to each contact, ${m.seats === 1 ? '1 teammate' : `${m.seats} teammates`}` : 'One recipient each, nothing received'
   const head = [m.per === 'contact' ? 'Contacts' : 'Emails a month', ...sizes.map(formatCount)]
   const row = ({ o, bills }: (typeof group)[number]) => ({ mark: o === c, cells: [[{ text: o.offer.vendor, href: o.path }], ...bills.map(b => [b.theirs ?? '—'])] as Text[] })
   const nightmailRow = { cells: [[productName], ...ours.map(b => [{ ours: b.ours, sent: b.u.sent, received: b.u.received }])] as Text[] }
   const table = (rows: (typeof group)[number][], note: Text): Table => ({ kind: 'table', numeric: [1, 2, 3], caption: note, head, rows: [nightmailRow, ...rows.map(row)] })
   const claim = `${productName} costs less than each service here at every size shown.`
+  // Priced by contacts, the columns are contacts, and Nightmail's bill follows the emails they're sent: said per column.
+  const perColumn = m.per === 'contact' ? ` ${productName}’s figures are for ${ours.slice(0, -1).map(b => formatCount(b.u.sent)).join(', ')} and ${formatCount(ours.at(-1)!.u.sent)} emails a month (${m.sendsPerContact} to each contact); the others are priced by contacts, with ${m.seats === 1 ? '1 teammate' : `${m.seats} teammates`}.` : ''
   const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? ' A dash: no plan priced at that size.' : ''
   const visible: Section = {
     id: 'alternatives', title: `${vendor} alternatives, a month at three sizes`, quiet: true,
-    blocks: [table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`])],
+    blocks: [table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.${perColumn} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`])],
   }
   const sections: Section[] = [visible, factsSection(rowLines(c.rows))]
 
@@ -94,7 +102,7 @@ export function vendorAlternatives(c: Comparison): Doc {
     { title: c.title, path: c.path, line: `${vendor} and ${productName} at every size ${vendor} prices, side by side.` },
     { title: 'Compare', path: '/compare', line: `${productName} beside every email service it is compared with.` },
   ]
-  const cardWords: Doc['cardWords'] = { lines: [`${productName} ${middleBill.ours}.`, `Others from ${money(lowest)}.`], caption: fitWords([`${vendor} alternatives, ${size.replace(/^Per /, '')}, checked ${dayOf(checked.at(-1)!)}.`, `${vendor} alternatives, checked ${dayOf(checked.at(-1)!)}.`], 70) }
+  const cardWords: Doc['cardWords'] = { lines: [`${productName} ${middleBill.ours}.`, `${counted.length} others from ${money(lowest)}.`], caption: fitWords([`${vendor} and ${spelled(shown.length)} alternatives, ${size.replace(/^Per /, '')}, checked ${dayOf(checked.at(-1)!)}.`, `${vendor} and ${spelled(shown.length)} alternatives, checked ${dayOf(checked.at(-1)!)}.`, `${vendor} and ${shown.length} more, checked ${dayOf(checked.at(-1)!)}.`], 70) }
   return {
     path, title: `${vendor} alternatives`, searchTitle, description, h1, answer: [[caption]], cardWords, sections, questions: [],
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] },

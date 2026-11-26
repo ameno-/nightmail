@@ -63,7 +63,7 @@
 /* Its parts, each after the first led by its dot (the text's " · ") in the gap before it; the line pulled back by that
    gap and clipped, so a part that starts a line shows no dot: one line with dots, two plain lines where it wraps. */
 .pp-parts { display: flex; flex-wrap: wrap; margin-left: -3ch; }
-.pp-parts > span { position: relative; padding-left: 3ch; }
+.pp-parts > span { position: relative; padding-left: 3ch; text-wrap: balance; }
 .pp-parts .pp-dot { position: absolute; top: 0; left: 0; width: 3ch; text-align: center; }
 .pp-way { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 28px; }
 /* The airmail label at an ordinary button's size: 44 px tall in all, a thumb's press, the button itself (its striped
