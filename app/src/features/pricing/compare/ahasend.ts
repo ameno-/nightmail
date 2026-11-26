@@ -6,7 +6,7 @@ import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Tier
 // are the rates' exact sums (50,000: $10 + 25 × $0.50 = $22.50). Max costs more at every size here ($80 with 100,000,
 // then the same $0.50). Past 1,000,000 AhaSend's page doesn't say whether its lower rates apply to every email or only
 // to those past each band, so no price past it is here. So 'points': only these sizes.
-const CHECKED = '2026-11-25'
+const CHECKED = '2026-11-26'
 const read = readOn(CHECKED)
 
 const AHASEND = 'https://ahasend.com/pricing'
