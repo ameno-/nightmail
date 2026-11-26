@@ -3,6 +3,7 @@ import { flushSync } from 'react-dom'
 import { Input } from '../../components/ui'
 import { NameText, PrivateAddress } from '../../components/PrivateAddress'
 import { nameParts } from '../../lib/private-address'
+import { validEmail } from '../../lib/domain'
 import { invalidSender } from './copy'
 import { previousDomains } from '../../../../api/src/brand'
 import './sender-input.css'
@@ -23,8 +24,6 @@ export type CampaignSenderInputProps = Sender & {
 
 const formatSender = ({ name, email }: Sender) => email ? (name ? `${name} <${email}>` : email) : name
 const validName = (name: string) => name.length <= 200 && !/[\x00-\x1f\x7f]/.test(name)
-// Match the API's practical ASCII address shape, not a general mailbox grammar.
-const validEmail = (email: string) => email.length <= 254 && /^(?!\.)(?!.*\.\.)([A-Za-z0-9_'+\-\.]*)[A-Za-z0-9_+-]@([A-Za-z0-9][A-Za-z0-9\-]*\.)+[A-Za-z]{2,}$/.test(email)
 const verifiedDomain = (domain: string, parents: readonly string[]) => parents.some(parent => domain === parent || domain.endsWith(`.${parent}`))
 const unquote = (name: string) => name.startsWith('"') && name.endsWith('"') ? name.slice(1, -1).replace(/\\(["\\])/g, '$1') : name
 const draftName = (text: string) => unquote((text.includes('<') ? text.slice(0, text.indexOf('<')) : text.includes('@') ? '' : text).trim())

@@ -2022,6 +2022,15 @@ test('Sign-up limit: places admit proven mailboxes, oldest waiting first, one ea
   assert.deepEqual(await signIn(full2).then(r=>[r.auth,r.place,r.session]),['waitlist',null,'']);
   assert.deepEqual(await ask(full2.email),[202,{requested:true}]);
   assert.deepEqual(await links(full2),[]);
+  // An address the API refuses names its field (never its value), and asking past the allowance says how long to wait:
+  // when this browser's oldest pending sign-in ends, as Retry-After and in the error's details.
+  const invalid = await request('/api/auth/sign-in/link','POST','',{email:'name@example'});
+  assert.deepEqual([invalid.status,(await invalid.json()).error.field],[422,'email']);
+  let capped: Response | undefined;
+  for (let i = 0; i < 9 && !capped; i++) { const asked = await request('/api/auth/sign-in/link','POST','',{email:full2.email}); if (asked.status === 429) capped = asked; else assert.equal(asked.status,202); }
+  const wait = Number(capped?.headers.get('retry-after')), refusal = (await capped!.json()).error;
+  assert.ok(wait >= 1 && wait <= 660, `Retry-After ${wait}`);
+  assert.deepEqual([refusal.code,refusal.details,refusal.message],['AUTH_STATE_LIMIT',[{retryAfterSeconds:wait}],`Too many pending sign-ins. Try again in ${Math.ceil(wait/60)} minute${Math.ceil(wait/60) === 1 ? '' : 's'}.`]);
 });
 
 // The customers list (signups.ts): every account that owns a workspace, at its verified address, is a contact of one list

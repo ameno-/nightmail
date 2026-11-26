@@ -14,6 +14,7 @@ import { BootLoader } from '../components/BootLoader'
 import { PrivateAddress } from '../components/PrivateAddress'
 import { chunk } from '../lib/preloadable'
 import { canonicalOrigin } from '../lib/public-origin'
+import { validEmail } from '../lib/domain'
 import { queries, type QueryDef } from './queries'
 import { invalidateResources, resourceOf, staleAfterWrite, type InvalidationTarget } from './invalidation'
 import { useGuardedMutation } from '../lib/single-flight'
@@ -214,21 +215,60 @@ function WaitlistPage({ busy, error, onSwitch }: { busy: boolean; error: unknown
 }
 // A sign-in link to an address with a place (api/src/signups.ts sendSigninLink): the refused sign-in's own address when a
 // place is held for it or open, in one click, else the address typed. The answer never says whether there is a place.
-// Its words replace the hint in one slot sized for the longest, so asking shifts nothing.
-const linkLines = { idle: 'The link works once, for 30 minutes.', sent: 'If there’s a place for that address, a link is on its way.', failed: 'Couldn’t ask for a link. Try again in a few minutes.' }
+// Asked, the form turns into what to do next: the address as typed (so a typo shows), and Send again after a minute.
+// At the cap on pending sign-ins (429 AUTH_STATE_LIMIT) it says the earlier links are on their way and counts down the
+// wait the API gives (Retry-After). An address the API wouldn't take is caught here first (the same shape, lib/domain.ts),
+// and one press makes one request. Both views share one cell sized for the taller, and the lines under the button share
+// one slot, so nothing moves when an answer comes.
+const RESEND_SECONDS = 60
+const linkLines = { idle: 'The link works once, for 30 minutes.', invalid: 'Check the address, like name@company.com.', failed: 'Couldn’t ask for a link. Try again in a minute.' }
+type LinkState = { view: 'ask'; line: keyof typeof linkLines } | { view: 'sent'; address: string; until: number; capped: boolean }
+const waitOf = (error: ApiError) => error.retryAfter ?? (typeof error.details?.[0]?.retryAfterSeconds === 'number' ? error.details[0].retryAfterSeconds : 600)
+const countdown = (seconds: number) => `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 function SignInLinkForm({ to }: { to: string | null }) {
-  const [typed, setTyped] = useState(''), [state, setState] = useState<'idle' | 'sending' | 'sent' | 'failed'>('idle')
-  async function send(event: FormEvent) {
-    event.preventDefault()
-    setState('sending')
-    try { await accountApi.signInLink(to ?? typed.trim()); setState('sent') } catch { setState('failed') }
+  const [typed, setTyped] = useState(''), [state, setState] = useState<LinkState>({ view: 'ask', line: 'idle' }), [sending, setSending] = useState(false), [now, setNow] = useState(Date.now)
+  const inFlight = useRef(false), field = useRef<HTMLInputElement>(null)
+  const sent = state.view === 'sent', left = sent ? Math.max(0, Math.ceil((state.until - now) / 1000)) : 0
+  useEffect(() => {
+    if (!left) return
+    const timer = window.setInterval(() => setNow(Date.now()), 250)
+    return () => window.clearInterval(timer)
+  }, [left > 0])
+  async function send(address: string) {
+    if (inFlight.current) return
+    if (!validEmail(address)) { setState({ view: 'ask', line: 'invalid' }); field.current?.focus(); return }
+    inFlight.current = true
+    setSending(true)
+    try {
+      await accountApi.signInLink(address)
+      setState({ view: 'sent', address, until: Date.now() + RESEND_SECONDS * 1000, capped: false })
+    } catch (error) {
+      if (error instanceof ApiError && error.code === 'AUTH_STATE_LIMIT') setState({ view: 'sent', address, until: Date.now() + waitOf(error) * 1000, capped: true })
+      else setState({ view: 'ask', line: error instanceof ApiError && error.code === 'AUTH_INPUT_INVALID' ? 'invalid' : 'failed' })
+    } finally { inFlight.current = false; setSending(false); setNow(Date.now()) }
   }
-  const shown = state === 'sending' ? 'idle' : state
-  return <form className="signed-out__link-form" onSubmit={event => void send(event)}>
-    {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input id="waitlist-link-address" type="email" autoComplete="email" required value={typed} onChange={event => { setTyped(event.target.value); setState('idle') }} /></Field>}
-    <Button type="submit" variant={to ? 'primary' : 'secondary'} loading={state === 'sending'} data-analytics="sign-in/waitlist-link">Email me a sign-in link</Button>
-    <p className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === shown || undefined}>{linkLines[key]}</span>)}</p>
-  </form>
+  const ask = (event: FormEvent) => { event.preventDefault(); void send(to ?? typed.trim()) }
+  const line = state.view === 'ask' ? state.line : 'idle'
+  const capped = sent && state.capped
+  return <div className="signed-out__link-box" data-sent={sent || undefined}>
+    <form className="signed-out__link-form" noValidate onSubmit={ask} inert={sent} aria-hidden={sent || undefined}>
+      {to ? null : <Field label="Address you joined the waitlist with" htmlFor="waitlist-link-address"><Input ref={field} id="waitlist-link-address" type="email" autoComplete="email" required value={typed} aria-invalid={line === 'invalid' || undefined} aria-describedby="waitlist-link-line" onChange={event => { setTyped(event.target.value); if (line !== 'idle') setState({ view: 'ask', line: 'idle' }) }} /></Field>}
+      <Button type="submit" variant={to ? 'primary' : 'secondary'} loading={sending && !sent} data-analytics="sign-in/waitlist-link">Email me a sign-in link</Button>
+      <p id="waitlist-link-line" className="signed-out__status muted" role="status">{(Object.keys(linkLines) as (keyof typeof linkLines)[]).map(key => <span key={key} data-shown={key === line || undefined} data-tone={key === 'idle' ? undefined : 'danger'}>{linkLines[key]}</span>)}</p>
+    </form>
+    <div className="signed-out__link-sent" inert={!sent} aria-hidden={!sent || undefined}>
+      <p className="signed-out__link-title" role="status">{sent ? 'Check your email' : null}</p>
+      <p className="signed-out__link-address"><bdi data-own-address="">{sent ? state.address : '\u00a0'}</bdi></p>
+      <p className="signed-out__link-text">
+        <span data-shown={!capped || undefined} aria-hidden={capped || undefined}>If there’s a place for this address, a link is on its way. Nothing after a few minutes? Look in spam{to ? '' : ', or check the address'}.</span>
+        <span data-shown={capped || undefined} aria-hidden={!capped || undefined}>You’ve asked a few times. If there’s a place for this address, a link is already on its way.</span>
+      </p>
+      <div className="signed-out__link-actions">
+        <Button disabled={left > 0 || sending} aria-busy={(sending && sent) || undefined} onClick={() => { if (sent) void send(state.address) }} data-analytics="sign-in/waitlist-link-again"><span className="signed-out__countdown">{([['sending', 'Sending…'], ['wait', `Send again in ${countdown(left)}`], ['ready', 'Send again']] as const).map(([key, label]) => { const shown = key === (sending ? 'sending' : left > 0 ? 'wait' : 'ready'); return <span key={key} data-shown={shown || undefined} aria-hidden={!shown || undefined}>{label}</span> })}</span></Button>
+        {to ? null : <Button variant="ghost" disabled={sending} onClick={() => { setState({ view: 'ask', line: 'idle' }); requestAnimationFrame(() => field.current?.focus()) }}>Change address</Button>}
+      </div>
+    </div>
+  </div>
 }
 /** Pages anyone can open, signed in or not. Continuing an emailed support request (features/support/continue.tsx) is one:
  *  a person signed in without a workspace has no /v1/me but can confirm it, and someone signed out signs in from it. */

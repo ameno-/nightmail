@@ -625,12 +625,11 @@ export function registerSupportConversations(app: App) {
     if (c.env.platformCaller) throw denied('DASHBOARD_AUTH_REQUIRED', 'Use a signed-in dashboard session.', { credential: 'dashboard' });
     // Someone signed in, with any sign-in (it is the one that can't confirm), from the dashboard's own origin, who holds
     // this email's link. Never a bearer credential.
-    const [{ LINK_ANSWER_MS, requireDashboardOrigin }, { verifiedDashboardUser }] = await Promise.all([import('./account-login.js'), import('./dashboard-auth.js')]);
+    const [{ LINK_ANSWER_MS, requireDashboardOrigin, reserveAuthState }, { verifiedDashboardUser }] = await Promise.all([import('./account-login.js'), import('./dashboard-auth.js')]);
     requireDashboardOrigin(c.env, c.req.raw);
     const presser = await verifiedDashboardUser(c.env, c.req.raw.headers);
     // Every network's allowance of sign-in links (account-login.ts /api/auth/sign-in/link), before anything is looked up.
-    const slots = await c.env.db.execute(sql`SELECT reserve_auth_state(${await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`)}) AS ok`);
-    if (!slots.rows[0]?.ok) throw new ApiError(429, 'AUTH_STATE_LIMIT', 'Too many pending sign-ins. Try again later.');
+    await reserveAuthState(c.env.db, await digest(`signin-link:${c.req.header(clientIpHeader) ?? 'unknown'}`));
     const conversationId = c.req.valid('param').id, messageId = c.req.valid('json').messageId, answerAt = Date.now() + LINK_ANSWER_MS;
     const { LINK_MINUTES, newLinkId } = await import('./signups.js'), { signinLink } = await import('./account-notices.js');
     const address = await c.env.db.transaction(async tx => {
