@@ -1,6 +1,6 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, quote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier } from '../prices.ts'
+import { dayOf, fitWords, formatCount, lastChecked, listOf, money, nightmail, quote, shownSources, sourceNote, sourcesOf, ucOf, type Comparison, type Plan, type Source, type Tier } from '../prices.ts'
 import { billAt, middle, perSize, priceTable, verdictHeading, verdictOf } from '../page/comparison.ts'
 import { factsSection, rowLines } from '../page/facts.ts'
 import { comparisonQuestions } from '../questions.ts'
@@ -44,7 +44,7 @@ function readOn(read: { source: Source; what: string }[]): Text {
   }
   const list = [...pages.values()], days = [...new Set(list.map(page => page.source.checked))]
   return [days.length === 1 ? `Read ${dayOf(days[0]!)}: ` : 'Read ', ...list.flatMap(({ source, what }, i) => [
-    i === 0 ? '' : i === list.length - 1 ? '; and ' : '; ', `${listOf([...what])} on `, link(source, label(source.url)), days.length === 1 ? '' : `, ${dayOf(source.checked)}`,
+    i === 0 ? '' : i === list.length - 1 ? '; and ' : '; ', `${listOf([...what])} on `, link(source, label(source.url)), sourceNote(source.url), days.length === 1 ? '' : `, ${dayOf(source.checked)}`,
   ]), '.']
 }
 
@@ -137,10 +137,10 @@ export function vendorPricing(c: Comparison, pricingPages: { slug: string; vendo
       }) }],
   }
   // Where the sizes' figures were read: the plans' prices, the rate past a plan where a size uses it, and the teammates
-  // where the size assumes some.
-  const tableRead = rows.flatMap(({ q }) => q.kind !== 'price' ? [] : [
+  // where the size assumes some; a data file as the pricing page it belongs to (prices.ts, shownSources).
+  const tableRead = shownSources(rows.flatMap(({ q }) => q.kind !== 'price' ? [] : [
     q.tier.source, ...q.payg?.tier.overageSource ? [q.payg.tier.overageSource] : [], ...m.per === 'contact' && m.seats > 1 && q.plan.seats ? [q.plan.seats.source] : [],
-  ])
+  ]), offer)
   const sizesTable: Section = {
     id: 'sizes', title: `What ${vendor} costs at each size`, quiet: true,
     blocks: [

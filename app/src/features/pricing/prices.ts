@@ -316,6 +316,16 @@ export const sourcesOf = (entry: Pick<Entry, 'offer' | 'rows'>): Source[] => [
   ...entry.offer.plans.flatMap(plan => [...plan.tiers.flatMap(tier => [tier.source, ...tier.overageSource ? [tier.overageSource] : [], ...tier.extra ? [tier.extra.source] : []]), ...plan.seats ? [plan.seats.source] : [], ...plan.max ? [plan.max.source] : []]),
   ...entry.offer.beyond ? [entry.offer.beyond.source] : [], ...entry.rows.flatMap(row => row.source ? [row.source] : []),
 ]
+/** A script or data file a vendor's pricing page reads its prices from (Postmark's pricing.<hash>.js, Ghost's
+ *  pricing.min.js): where the figures were read, but not a page a person opens, and its address changes when the vendor
+ *  deploys. (A PDF, a Markdown page or an llms.txt is text a person can read.) */
+export const isDataFile = (url: string) => /\.(?:m?js|json|csv|xml)$/i.test(new URL(url).pathname)
+/** The sources a page shows a visitor, in its note or its list of pages read: a data file is shown as the vendor's
+ *  pricing page it belongs to, read the same day. The entry keeps it, and the Markdown copies name it (sourceNote). */
+export const shownSources = (sources: Source[], offer: Pick<Offer, 'pricing'>): Source[] =>
+  sources.map(source => isDataFile(source.url) && !isDataFile(offer.pricing) ? { ...source, url: offer.pricing } : source)
+/** What a Markdown copy says after a source that is a data file. */
+export const sourceNote = (url: string) => isDataFile(url) ? ' (the pricing page’s own price data)' : ''
 /** The last day any of an entry's figures was read: when its page last changed (the sitemap's lastmod). */
 export const lastChecked = (entry: Pick<Entry, 'offer' | 'rows'>) => [entry.offer.checked, ...sourcesOf(entry).map(source => source.checked)].sort().at(-1)!
 /** The tier sizes an offer's page lists from `from` to `to`, in order: a fader's usual steps. */

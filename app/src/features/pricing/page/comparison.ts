@@ -2,7 +2,7 @@
 import { productName } from '../../../../../api/src/brand.ts'
 import { COMPARISONS } from '../compare/index.ts'
 import { comparisonQuestions } from '../questions.ts'
-import { dayOf, formatCount, lastChecked, money, nightmail, nightmailBill, sourcesOf, theirPrice, type Comparison, type Usage } from '../prices.ts'
+import { dayOf, formatCount, lastChecked, money, nightmail, nightmailBill, shownSources, sourcesOf, theirPrice, type Comparison, type Usage } from '../prices.ts'
 import { factsSection, rowLines } from './facts.ts'
 import type { PageDoc, Table, Text } from './shape.ts'
 import { ownPages } from '../docs/registry.ts'
@@ -74,7 +74,7 @@ export function comparisonDoc(c: Comparison): PageDoc {
     // says (facts.ts).
     factsSection(rowLines(c.rows))],
     questions: comparisonQuestions(c),
-    sources: sourcesOf(c),
+    sources: shownSources(sourcesOf(c), c.offer),
     // The vendor's own pages first (docs/registry.ts: its pricing page), then the other comparisons of its kind.
     related: [...ownPages(c.slug).map(path => ({ title: `${vendor} pricing`, path, line: `Every ${vendor} plan, and what a month costs at each size.` })), ...ORDERED.filter(other => other.focus === c.focus && other.slug !== c.slug).map(other => {
       const o = verdictOf(other)
