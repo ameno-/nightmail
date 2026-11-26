@@ -157,8 +157,9 @@ async function refreshEvidence(db: DbExecutor, limit: number) {
       SELECT d.workspace_id,(v.hour AT TIME ZONE 'UTC')::date AS day,sum(v.screened)::int AS screened,sum(v.rejected)::int AS rejected FROM due d JOIN hosted_screen_hourly v ON v.workspace_id=d.workspace_id
         AND v.hour>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END GROUP BY 1,2
     ), unsub AS (
-      SELECT a.workspace_id,(a.occurred_at AT TIME ZONE 'UTC')::date AS day,count(*)::int AS n FROM due d JOIN audience_consent_audit a ON a.workspace_id=d.workspace_id AND a.status='unsubscribed'
-        AND a.source IN ('footer-confirm','rfc8058-post','ses-subscription') AND a.occurred_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
+      -- People, not decisions: one who leaves two topics and then everything (src/topics.ts) is one unsubscribe that day.
+      SELECT a.workspace_id,(a.occurred_at AT TIME ZONE 'UTC')::date AS day,count(DISTINCT a.contact_id)::int AS n FROM due d JOIN audience_consent_audit a ON a.workspace_id=d.workspace_id AND a.status='unsubscribed'
+        AND a.source IN ('footer-confirm','rfc8058-post','ses-subscription','preferences') AND a.occurred_at>=date_trunc('day',now(),'UTC')-CASE WHEN d.evidence_at IS NULL THEN interval '30 days' ELSE interval '7 days' END
       GROUP BY 1,2
     ), parts AS (
       SELECT workspace_id,day,emails,accepted,delivered,bounced,first_sends,first_bounced,complained,0 AS screened,0 AS rejected,suppressed,marketing_delivered,0 AS unsubscribed,clicked FROM days

@@ -29,9 +29,10 @@ import { bulkFlags, CAMPAIGN_TESTS, hostedCost, probationReason, realDestination
 import { mailboxAddresses, mailboxKeys } from './db/mailbox.js';
 import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
+import { assertTopics, topicAllows, topicRule, type TopicRule } from './topics.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { decodedDisplayName, AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
+import { foundLinkOrigin, linkAllowance, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -124,12 +125,14 @@ const AttachmentIds = z.array(z.string().min(1).max(120)).max(SEND_LIMITS.attach
   .describe(`IDs of files uploaded first (uploadAttachment). ${ATTACHMENT_LIMITS_TEXT}`);
 /** The send docs' attachment rules (sendEmail, sendEmailBatch, uploadAttachment), so an agent knows them before a refusal. */
 const ATTACHMENT_NOTE = `Attachments: ${ATTACHMENT_LIMITS_TEXT} ${ATTACHMENT_RULES_TEXT} ${ATTACHMENT_REFUSALS_TEXT}`;
+const TopicId = z.string().min(1).max(120);
 const ContentFields = { subject: Subject.optional(), html: z.string().min(1).max(MAX_BODY).optional(), text: z.string().min(1).max(MAX_BODY).optional() };
 const SendInput = z.object({
   from: Address.describe('An address at a domain verified in this workspace, or at a subdomain of one. Hosted: also any address at the workspace\u2019s built-in domain (connection.builtinDomain in GET /v1/me) until a domain of its own verifies.'), fromName: FromName.optional(), to: z.union([Address, z.array(Address).min(1).max(50)]), cc: z.array(Address).max(49).default([]), bcc: z.array(Address).max(49).default([]), replyTo: z.array(Address).max(10).default([]),
   region: Region.optional().describe(`Usually omitted: hosted ${productName} sends from the region bound to the sender domain, and a different value fails with SENDER_REGION_MISMATCH. Self-hosted installations default to their default region.`), kind: z.enum(['transactional', 'marketing']).default('transactional').describe(`marketing adds ${productName}'s footer (an Unsubscribe link, with the workspace's postal address under it when it has one) and the one-click List-Unsubscribe headers.`), ...ContentFields,
   template: z.object({ name: z.string().min(1).max(64).regex(/^[a-zA-Z0-9_-]+$/), data: StoredTemplateData }).strict().describe('Uses native SES stored-template rendering and snapshots its rendered MIME. SES does not automatically escape HTML; callers must escape untrusted HTML-context values. Simulated deployments do not render AWS templates.').optional(),
   attachments: AttachmentIds, tracking: z.boolean().optional(), headers: CustomHeaders.optional(),
+  topicId: TopicId.optional().describe('kind marketing only (422 TOPIC_REQUIRES_MARKETING otherwise): the topic it is about (listTopics). A recipient who opted out of the topic is refused (reason topic_unsubscribed), and its one-click unsubscribe opts out of this topic only.'),
   screen: z.boolean().optional().describe('Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.'),
 }).strict().superRefine((v, ctx) => {
   if (v.template ? (v.subject !== undefined || v.html !== undefined || v.text !== undefined) : (!v.subject || (!v.html && !v.text))) ctx.addIssue({ code: 'custom', message: 'Provide subject and html/text, or template, but not both.' });
@@ -206,6 +209,7 @@ const Removed = z.object({ id: z.string(), deleted: z.literal(true) }).openapi('
 const DraftAudience = AudienceSpec.partial({ listId: true }).default({});
 const BlockHtml = z.string().max(MAX_BODY).describe('Block HTML: h1-h3, p, ul/ol, blockquote, pre>code, hr, img, buttons, columns and styled sections with inline formatting. A constrained email-safe style attribute supports color, typography, spacing, borders, radius and dimensions; arbitrary CSS remains rejected. No wrappers, tables, class or id. Call getContentGuide in MCP or GET /v1/campaign-content-guide for the full vocabulary and examples.');
 const CampaignDraftFields = { name: z.string().trim().min(1).max(200), from: z.union([Address, z.literal('')]).default(''), fromName: FromName.optional(), previewText: PreviewText.optional(), replyTo: z.array(Address).max(10).default([]), region: Region, regionPinned:z.boolean().optional().describe('Regional MX only. False follows the From domain; the displayed region is a hint. A supplied region on create or a changed region on edit pins it. To unpin, pass false and omit region.'), subject: z.union([Subject, z.literal('')]).default(''), attachments: AttachmentIds, tracking: z.boolean().default(true), audience: DraftAudience, defaults: Data, unsubscribePageUrl: unsubscribePageUrl().optional(),
+  topicId: TopicId.optional().describe('The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.'),
   requiredNotice: z.boolean().optional().describe('A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).') };
 const CAMPAIGN_INPUT_NOTES = 'Drafts may omit sender, subject, content and audience until review or send, except that domain-restricted keys must supply a From address on one of their domains. Content is block HTML (see html); the same form is what the dashboard composer reads and writes, so people and agents edit one document. Simple {{name}} personalization works in text and quoted href/alt attributes; values are HTML-escaped and rendered URLs are validated. Durable campaign preparation is bounded and runs in background jobs.';
 const CampaignInput = z.object({ ...CampaignDraftFields, html: BlockHtml.optional() }).strict().describe(CAMPAIGN_INPUT_NOTES).openapi('CampaignDraftInput');
@@ -246,7 +250,7 @@ const Delivery = z.object({ total: z.number().int().describe('Fixed recipient co
   consent: z.object({ source: z.string(), confirmedAt: z.string() }).nullable().describe('The consent source confirmed at launch, if any.'),
   pausedAt: z.string().nullable(), pauseReason: Failure.nullable(),
   deliveredOnly: z.boolean().describe('After a resumed list-probe quarantine: the rest goes only to contacts this workspace delivered to before; the others are counted in canceled. Never for a required notice.'),
-  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
+  waiting: z.object({ reason: z.enum(['pacing_window', 'ses_daily_quota', 'hosted_daily_quota', 'list_probe', 'balance', 'feedback_lag', 'ramp', 'link_record']), linkHold: z.enum(['daily_budget', 'blocklist']).optional().describe('When present, the daily pacing window is the shared link allowance, or the link record is held for operator review.'), until: z.string() }).nullable().describe('Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender\'s first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour\'s step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace\'s sending is paused, or with own link hosts, its domain\'s isn\'t active yet); it continues by itself.'),
   feedbackLag: z.object({ oldestMs: z.number().int(), lane: z.enum(['routine', 'priority']) }).nullable().describe('Present while a campaign is preparing, sending, or paused when delivery feedback ingestion is at least 2 minutes behind.') }).describe('The current launch: null until the campaign is sent or scheduled, and cleared by a new revision.').openapi('CampaignDelivery');
 /** The daily cap of a campaign's `index`th 24-hour window: its plan's batch (the last repeating), else pacePerDay; null for none. */
 const dailyCap = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'pacePerDay' | 'windowIndex'>, index = row.windowIndex) =>
@@ -254,11 +258,13 @@ const dailyCap = (row: Pick<typeof campaigns.$inferSelect, 'pacePlan' | 'pacePer
 function deliveryView(row: Omit<typeof campaigns.$inferSelect, 'draft' | 'stats'>, feedbackLag: FeedbackLag | null = null) {
   if (!row.reviewId) return null;
   const next = dailyCap(row) !== null && row.windowStartedAt ? new Date(Date.parse(row.windowStartedAt) + DAY_MS).toISOString() : null;
+  const wait = row.waitingReason === 'link_budget' ? { reason: 'pacing_window', linkHold: 'daily_budget' }
+    : row.waitingReason === 'link_listing' ? { reason: 'link_record', linkHold: 'blocklist' } : { reason: row.waitingReason };
   return Delivery.parse({ total: row.total, prepared: row.prepared, expanded: row.expanded, canceled: row.canceled, error: row.error ?? null,
     pacing: { perDay: row.pacePerDay, autoPause: row.autoPause, rateShare: row.rateShare ?? 1, windowStartedAt: row.windowStartedAt, windowExpanded: row.windowExpanded, nextWindowAt: next,
       plan: row.pacePlan, batch: row.pacePlan ? Math.min(row.windowIndex, row.pacePlan.length - 1) + 1 : null },
     consent: row.consent ? { source: row.consent.source, confirmedAt: row.consent.confirmedAt } : null,
-    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { reason: row.waitingReason, until: row.waitingUntil } : null,
+    pausedAt: row.pausedAt, pauseReason: row.pauseReason ?? null, deliveredOnly: row.deliveredOnly, waiting: row.waitingReason && row.waitingUntil ? { ...wait, until: row.waitingUntil } : null,
     feedbackLag: ['preparing', 'sending', 'paused'].includes(row.state) ? feedbackLag : null });
 }
 const CampaignRamp = z.object({ step: z.number().int().describe('The step the campaign releases at, from 1.'), steps: z.number().int().describe('How many steps the ramp has; past the last one only the other limits apply.'), ceilingPerHour: z.number().int().describe('Most recipients this step releases in its hour.'),
@@ -503,6 +509,7 @@ const CampaignReadiness = z.object({
   domain: z.object({ name: z.string(), firstSeenAt: z.string().nullable().describe('When the From domain (or the domain it is under) was added to this workspace.'), ageDays: z.number().int().nullable(),
     dmarc: z.enum(['reject', 'quarantine', 'none', 'missing', 'invalid']).nullable().describe('The DMARC policy last observed; null when not checked yet.'),
     mailFrom: z.enum(['verified', 'pending', 'failed', 'not_configured']).describe('The custom MAIL FROM domain (aligned SPF).'),
+    sharedLinkPacing: z.boolean().optional().describe('This campaign shares the link domain’s daily sending allowance.'),
     linkHost: z.enum(['not_configured']).describe('Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.'),
     ownLinkHost: z.object({ hostname: z.string().describe('links.<domain>.'), active: z.boolean().describe('true: the links go there. false: it isn\u2019t set up yet, so they go on linkOrigin (the link domain) meanwhile.') }).nullable()
       .describe('The domain\'s own link host, when this workspace has them; null without one.'),
@@ -716,6 +723,7 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   return CampaignReadiness.parse({ verdict: judged.verdict, summary, reasons: judged.reasons.map(code => ({ code, message: messages[code]() })),
     domain: { name: domain, firstSeenAt: f!.first_seen ? new Date(f!.first_seen).toISOString() : null, ageDays, dmarc,
       mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured',
+      ...(!row.draft.requiredNotice && runtime.config.linkHost && runtime.config.linkWarmup && links.origin === `https://${runtime.config.linkHost}` ? { sharedLinkPacing: true } : {}),
       linkHost: 'not_configured', ownLinkHost: links.own, linkOrigin: links.origin },
     history: { workspace: { largestSend: f!.ws_largest, sent: wsAccepted, bounceRate: rate(Number(f!.ws_bounced ?? 0), wsAccepted), complaintRate: rate(Number(f!.ws_complained ?? 0), wsAccepted) },
       domain: { largestSend: f!.dom_largest, sent: f!.dom_accepted, bounceRate: rate(f!.dom_bounced, f!.dom_accepted), complaintRate: rate(f!.dom_complained, f!.dom_accepted) } },
@@ -1231,6 +1239,16 @@ async function requiredNoticesAllowed(db: DbExecutor, draft: Pick<CampaignDraft,
   const { rows: [row] } = await db.execute<{ on: boolean | null }>(sql`SELECT required_notices AS on FROM workspaces WHERE id=${workspaceId}`);
   if (!row?.on) throw new ApiError(403, 'REQUIRED_NOTICES_OFF', message, 'requiredNotice');
 }
+/** A draft's topic (src/topics.ts): marketing only, and one the workspace has and hasn't archived whenever it is set or
+ *  changed. One archived since it was set stays on the draft, and its launch is refused (topicRule). */
+async function draftTopic(db: DbExecutor, a: Actor, draft: Pick<CampaignDraft, 'topicId' | 'requiredNotice'>, current?: Pick<CampaignDraft, 'topicId'>) {
+  if (!draft.topicId) return;
+  if (draft.requiredNotice) throw new ApiError(422, 'TOPIC_REQUIRES_MARKETING', 'A required notice has no unsubscribe, so it can\u2019t have a topic.', 'topicId');
+  if (draft.topicId !== current?.topicId) await assertTopics(db, a.workspaceId, [draft.topicId], () => 'topicId');
+}
+/** The topic a campaign's audience is read with: none for a required notice. `active`: as topicRule's. */
+const campaignTopic = (db: DbExecutor, workspaceId: string, draft: Pick<CampaignDraft, 'topicId' | 'requiredNotice'>, active: boolean): Promise<TopicRule | null> =>
+  draft.topicId && !draft.requiredNotice ? topicRule(db, workspaceId, draft.topicId, active) : Promise.resolve(null);
 // `postalAddress`: the workspace's (CAN-SPAM), under the link in the same quiet style, one line per line.
 // `requiredNotice`: a required notice has no unsubscribe, so its footer is the postal address alone and it gets no
 // List-Unsubscribe headers; `url` is then unused.
@@ -1256,7 +1274,7 @@ function footerParts(parts: { html?: string; text?: string }, url: string, { uns
   parts.text = (parts.text ?? '') + '\n\n' + [...link ? [`Unsubscribe: ${link}`] : [], ...lines].join('\n');
 }
 function structuredSnapshot(input:SendRequest & {region:string}):EmailSnapshot {
-  return { testCampaignId: null, untrustedContent: !!input.headers?.some(h => h.name.toLowerCase() === 'in-reply-to'), from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}) };
+  return { testCampaignId: null, untrustedContent: !!input.headers?.some(h => h.name.toLowerCase() === 'in-reply-to'), from: input.from, ...(input.fromName !== undefined ? { fromName: input.fromName } : {}), to: Array.isArray(input.to) ? input.to : [input.to], cc: input.cc, bcc: input.bcc, replyTo: input.replyTo, region: input.region, kind: input.kind, subject: input.subject ?? '', html: input.html, text: input.text, attachments: input.attachments, tracking: input.tracking ?? input.kind === 'marketing', headers: (input.headers ?? []).map(header => ({ Name: header.name, Value: header.value })), ...(input.screen && input.kind === 'transactional' ? { screen: true } : {}), ...(input.topicId && input.kind === 'marketing' ? { topicId: input.topicId } : {}) };
 }
 // The dispatcher screens Hosted shared mail on a live installation with a classifier (dispatcher.ts prepareMail).
 // Admission measures what that screen would read and refuses, with the numbers, what it would refuse, instead of
@@ -1433,6 +1451,16 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     }
     shadowBilling(d.billing, wid);
     if (d.allowed) {
+      if (s.kind === 'marketing') {
+        // Pre-upgrade scheduled snapshots carry the generated header rather than a separate origin.
+        const origin = s.linkOrigin ?? s.headers.find(h => h.Name.toLowerCase() === 'list-unsubscribe')?.Value.match(/^<(https?:\/\/[^/]+)\/unsubscribe\//)?.[1];
+        if (origin) {
+          const n = hostedCost(s.to, s.cc, s.bcc), allowance = await linkAllowance(tx, runtime.config, wid, origin);
+          // Roll back admission's charges along with the attempt, and retry the same scheduled email.
+          if (allowance && n > allowance.left) throw new JobDeferred(allowance.until, payload);
+          if (new URL(origin).hostname === runtime.config.linkHost) await recordLinkUse(tx, wid, runtime.config.linkHost, n);
+        }
+      }
       const route = d.mails[0]!;
       const needsVerdict = !isSimulatedSes(runtime) && !s.screenVerdict && ((route.connection?.kind === 'shared' && runtime.config.hostedScreen) || (s.screen && s.kind === 'transactional'));
       const { rows: [lim] } = await tx.execute<{ rate: number | null }>(route.connection?.aws_account_id
@@ -1498,6 +1526,7 @@ async function directMessages(runtime: Runtime, mails: SendRequest[], batch: boo
       if (m.kind === 'marketing') {
         // Only the token's hash and destination come from local preparation; the statement gives it the workspace.
         const link = await (await loadOpsUnsub()).createUnsubscribeLink(origins[i] ?? linkHostMissing(), '', snapshot.to[0]!);
+        snapshot.linkOrigin = origins[i];
         marketingFooter(snapshot, link.url, { postalAddress }); message.token = { hash: link.record.tokenHash, email: link.record.email };
       }
     } catch (e) { if (e instanceof ModuleLoadError) throw e; message.invalid = atItem(e, batch ? i : undefined); }
@@ -1545,10 +1574,11 @@ async function checkRecipientsEligible(db: DbExecutor, workspaceId: string, out:
     marketing: m.snapshot.kind === 'marketing',
     destinations: [...m.snapshot.to, ...m.snapshot.cc, ...m.snapshot.bcc].map(e => e.toLowerCase()),
     reply_authors: m.snapshot.replyAuthors ?? [],
+    topic: m.snapshot.topicId ?? null,
   }));
   const { rows } = await db.execute<{ ord: number; email: string; reason: string }>(sql`
     SELECT x.ord, d.email, cause.reason
-    FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb) AS x(ord int, marketing boolean, destinations jsonb, reply_authors jsonb)
+    FROM jsonb_to_recordset(${JSON.stringify(input)}::jsonb) AS x(ord int, marketing boolean, destinations jsonb, reply_authors jsonb, topic text)
     CROSS JOIN LATERAL jsonb_array_elements_text(x.destinations) WITH ORDINALITY d(email, n)
     LEFT JOIN audience_contacts c ON c.workspace_id = ${workspaceId} AND c.email = d.email
     CROSS JOIN LATERAL (SELECT CASE
@@ -1557,6 +1587,7 @@ async function checkRecipientsEligible(db: DbExecutor, workspaceId: string, out:
         AND c.marketing_consent <> 'unsubscribed' AND x.reply_authors ? d.email, false) THEN coalesce(c.suppression_reason, 'suppressed')
       WHEN x.marketing AND c.deleted_at IS NOT NULL THEN 'contact_deleted'
       WHEN x.marketing AND c.marketing_consent IS DISTINCT FROM 'subscribed' THEN 'consent_missing'
+      WHEN x.marketing AND NOT ${topicAllows(sql`c.workspace_id`, sql`c.id`, sql`x.topic`)} THEN 'topic_unsubscribed'
       WHEN x.marketing AND c.risk IS NOT NULL AND NOT c.risk_allowed THEN 'risky_' || c.risk
     END AS reason) cause
     WHERE cause.reason IS NOT NULL
@@ -1745,6 +1776,8 @@ const admissionMails = (runtime: Runtime, out: Outgoing[]): AdmissionMail[] => o
  */
 async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identity: Identity, options: { batch: boolean; campaign?: { id: string; revision: number }; scheduledAt?: string }): Promise<SendReceipt | { data: SendReceipt[] }> {
   const runtime = call.runtime, cfg = runtime.config, sim = isSimulatedSes(runtime), key = call.key, batch = options.batch, at = options.scheduledAt;
+  const guarded = !at && (cfg.linkHost || cfg.linkHosts) && out.some(m => m.snapshot.kind === 'marketing' && m.snapshot.linkOrigin);
+  if (guarded && !call.db) return runtime.db.transaction(db => admitSends({ ...call, db }, body, out, identity, options));
   // A scheduled send keeps the region it asked for, if any: its release resolves the sender's region again.
   if (at) for (const m of out) if (m.snapshot.region) m.snapshot.requestedRegion = m.snapshot.region;
   let expanded = 0;
@@ -1783,6 +1816,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
         AND c.marketing_consent <> 'unsubscribed' AND r.reply_authors ? d.email, false) THEN coalesce(c.suppression_reason, 'suppressed')
       WHEN r.marketing AND c.deleted_at IS NOT NULL THEN 'contact_deleted'
       WHEN r.marketing AND c.marketing_consent IS DISTINCT FROM 'subscribed' THEN 'consent_missing'
+      WHEN r.marketing AND NOT ${topicAllows(sql`c.workspace_id`, sql`c.id`, sql`r.snapshot->>'topicId'`)} THEN 'topic_unsubscribed'
       WHEN r.marketing AND c.risk IS NOT NULL AND NOT c.risk_allowed THEN 'risky_' || c.risk
     END AS reason) cause
     WHERE cause.reason IS NOT NULL
@@ -1794,7 +1828,7 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
   ${out.some(m => m.countScreened) ? sql`screen_counted AS (${countScreened(sql`SELECT workspace_id, 0 AS rejected FROM submitted WHERE count_screened AND hosted_real_cost(destinations) > 0`)}),` : sql``}
   ${at ? sql`scheduled AS (${scheduledEvent(sql`SELECT workspace_id,id FROM submitted`, 'scheduled', at, sim)}), release AS (${queueRelease(sql`SELECT workspace_id,id FROM submitted`, at)}),` : sql``}
   links AS (INSERT INTO sending_attachment_links(workspace_id,attachment_id,owner_type,owner_id) SELECT workspace_id,a,'email',id FROM submitted,jsonb_array_elements_text(snapshot->'attachments') a),
-  tokens AS (INSERT INTO operation_unsubscribe_tokens(workspace_id,token_hash,email) SELECT workspace_id,hash,email FROM submitted WHERE hash IS NOT NULL)
+  tokens AS (INSERT INTO operation_unsubscribe_tokens(workspace_id,token_hash,email,topic_id) SELECT workspace_id,hash,email,snapshot->>'topicId' FROM submitted WHERE hash IS NOT NULL)
   SELECT k.id,k.workspace_id,k.permissions,k.domains,k.used,k.max_requests,k.s,
     (SELECT jsonb_agg(to_jsonb(i)) FROM ineligible i) AS ineligible,
     (SELECT l.max_send_rate FROM provider_account_limits l WHERE l.aws_account_id = (k.s->'mails'->0->'connection'->>'aws_account_id') AND l.region = (k.s->'mails'->0->>'region') AND l.max_send_rate > 0) AS max_send_rate
@@ -1810,6 +1844,20 @@ async function admitSends(call: SendCall, body: unknown, out: Outgoing[], identi
     // The statement's own claim holds this receipt, and nothing was queued: free the key so a retry is judged again.
     if (key !== undefined) await (call.db ?? runtime.db).execute(sql`DELETE FROM sending_idempotency WHERE workspace_id = ${result.workspace_id} AND actor_key_id = ${result.id} AND path = ${call.path} AND request_key = ${key}`);
     throw recipientIneligibleError(result.ineligible, batch);
+  }
+  if (guarded) {
+    const counts = new Map<string, number>();
+    for (const { snapshot, recipients } of out) if (snapshot.kind === 'marketing' && snapshot.linkOrigin) counts.set(snapshot.linkOrigin, (counts.get(snapshot.linkOrigin) ?? 0) + recipients);
+    for (const [origin, n] of [...counts].sort(([a], [b]) => a.split('.').reverse().join('.').localeCompare(b.split('.').reverse().join('.')))) {
+      const budget = await linkAllowance(call.db!, cfg, a.workspaceId, origin);
+      if (budget && n > budget.left) {
+        const error = new ApiError(429, budget.reason === 'link_listing' ? 'LINK_DOMAIN_HELD' : 'LINK_BUDGET_REACHED',
+          budget.reason === 'link_listing' ? 'Marketing on this link domain is paused for review.' : 'The shared link domain has no room for this send today. Campaigns send the remainder on later days.', undefined, true);
+        error.retryAfterSeconds = Math.max(1, Math.ceil((Date.parse(budget.until)-Date.now())/1000));
+        throw error;
+      }
+      if (new URL(origin).hostname === cfg.linkHost) await recordLinkUse(call.db!, a.workspaceId, cfg.linkHost, n);
+    }
   }
   // Its release job wakes the dispatcher at its time; one due within a minute needs the scheduler awake now to follow it.
   if (at) { if (Date.parse(at) - Date.now() < 60_000) a.wakeJobs = Math.max(a.wakeJobs ?? 0, 1); return receipt; }
@@ -1855,6 +1903,11 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   assertBuiltinInput(call.runtime.config, mails.map(m => ({ ...m, scheduledAt })), batch);
   await assertBuiltinRecipients(call.runtime, call.db ?? call.runtime.db, a.workspaceId, mails.map(m => ({ from: m.from, recipients: [...(Array.isArray(m.to) ? m.to : [m.to]), ...m.cc, ...m.bcc] })), batch);
   if (mails.some(m => isBuiltinHost(call.runtime.config, m.from.split('@')[1]!))) await awaitBuiltinSetup(call.runtime, a.workspaceId);
+  // A topic is about marketing (src/topics.ts): its opt-outs and its one-click unsubscribe. One read for the whole send.
+  const at = (i: number, field: string) => batch ? `emails.${i}.${field}` : field;
+  const plain = mails.findIndex(m => m.topicId && m.kind !== 'marketing');
+  if (plain >= 0) throw new ApiError(422, 'TOPIC_REQUIRES_MARKETING', 'A topic is for marketing mail (kind: marketing): transactional mail has no unsubscribe.', at(plain, 'topicId'));
+  await assertTopics(call.db ?? call.runtime.db, a.workspaceId, mails.map(m => m.topicId), i => at(i, 'topicId'));
   // Marketing mail's footer carries the workspace's postal address when it has one. Unlike a campaign, a marketing send
   // without one is not refused: its caller writes the whole message and may include the address itself.
   const marketing = mails.some(m => m.kind === 'marketing'), db = call.db ?? call.runtime.db;
@@ -1863,8 +1916,6 @@ async function admitEmails(call: SendCall, a: Actor, input: SendRequest | { emai
   // whose use these recipients are recorded in; refused while the workspace is paused.
   const choose = marketing ? linkChoices(call.runtime, db, a.workspaceId) : undefined;
   const choices = choose ? await Promise.all(mails.map((m, i) => m.kind === 'marketing' ? choose(m.from).catch(error => { throw atItem(error, batch ? i : undefined); }) : undefined)) : [];
-  const shared = choices.flatMap((choice, i) => choice?.shared ? [{ host: choice.shared.host, recipients: hostedCost(mails[i]!.to, mails[i]!.cc, mails[i]!.bcc) }] : []);
-  if (shared.length) await recordLinkUse(db, a.workspaceId, shared[0]!.host, shared.reduce((n, s) => n + s.recipients, 0));
   const out = await directMessages(call.runtime, mails, batch, address, choices.map(choice => choice?.origin));
   if (sealed) for (const m of out) m.snapshot.sealed = true;
   if (platformTestTo) for (const m of out) m.platformTestTo = platformTestTo;
@@ -2114,8 +2165,11 @@ async function campaignWithFooter(runtime: Runtime, a: Actor, campaignId: string
     ? (await linkChoice(runtime, runtime.db, a.workspaceId, found.row.draft.from).catch(() => null))?.origin : undefined);
   return { row: found.row, footer: { unsubscribePageUrl: found.row.draft.unsubscribePageUrl, postalAddress: found.address, requiredNotice: found.row.draft.requiredNotice, ...link ? { linkOrigin: link } : {} } };
 }
-const displayAudience = (runtime: Runtime, a: Actor, draft: CampaignDraft, spec: z.infer<typeof AudienceSpec>) =>
-  wrapModuleLoad(() => import('./audience.js')).then(m => m.countCampaignAudienceForDisplay(runtime.db, a, spec, draft.requiredNotice === true));
+// A draft's topic counts its opt-outs as not eligible, archived or not: archiving lets none of them through.
+const displayAudience = async (runtime: Runtime, a: Actor, draft: CampaignDraft, spec: z.infer<typeof AudienceSpec>) => {
+  const [m, topic] = await Promise.all([wrapModuleLoad(() => import('./audience.js')), campaignTopic(runtime.db, a.workspaceId, draft, false)]);
+  return m.countCampaignAudienceForDisplay(runtime.db, a, spec, draft.requiredNotice === true, topic);
+};
 type DisplayAudience = ReturnType<typeof displayAudience>;
 
 async function savedCampaignAudience(runtime: Runtime, a: Actor, row: typeof campaigns.$inferSelect, shared?: DisplayAudience, withReadiness = false) {
@@ -2133,7 +2187,7 @@ async function savedCampaignAudience(runtime: Runtime, a: Actor, row: typeof cam
   if (!row.draft.requiredNotice && row.draft.from) {
     const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
     const lastSent = await audienceMod.listLastSent(runtime.db, a, audience.data.listId);
-    const neverMailed = await audienceMod.countNeverMailed(runtime.db, a, audience.data, false, lastSent);
+    const neverMailed = await audienceMod.countNeverMailed(runtime.db, a, audience.data, false, lastSent, await campaignTopic(runtime.db, a.workspaceId, row.draft, false));
     readiness = await sendReadiness(runtime, runtime.db, a, row, { recipients: counts.eligible, matched: counts.matched, risky: counts.risky, neverMailed, lastSent });
   }
   return AudienceCounts.parse({ ...counts, readiness });
@@ -2542,9 +2596,10 @@ export function registerSending(app: App) {
     await assertBlockContent(input.html);
     const result = await idempotent(c.env.db, keyed(c, a), input, async db => {
       const campaignId = id('campaign'); const source = input.templateId ? await (await wrapModuleLoad(() => import('./templates.js'))).instantiateTemplate(c.env, db, a, input.templateId) : null;
-      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}), ...(input.requiredNotice ? { requiredNotice: true } : {}) };
+      const draft = { name: input.name, from: input.from, ...(input.fromName ?? source?.draft.fromName ? { fromName: input.fromName ?? source?.draft.fromName } : {}), ...(input.previewText ?? source?.draft.previewText ? { previewText: input.previewText ?? source?.draft.previewText } : {}), replyTo: input.replyTo.length ? input.replyTo : source?.draft.replyTo ?? [], ...await draftRegion(c.env,db,a,input), subject: input.subject || source?.draft.subject || '', attachments: [...new Set([...(source?.draft.attachments ?? []), ...input.attachments])], tracking: input.tracking ?? source?.draft.tracking ?? true, audience: input.audience, defaults: { ...(source?.draft.defaults ?? {}), ...input.defaults }, ...(input.html ?? source?.draft.html ? { html: input.html ?? source?.draft.html } : {}), ...(input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl ? { unsubscribePageUrl: input.unsubscribePageUrl ?? source?.draft.unsubscribePageUrl } : {}), ...(input.topicId ? { topicId: input.topicId } : {}), ...(input.requiredNotice ? { requiredNotice: true } : {}) };
       draftSender(c.env, a, draft);
       await draftAudience(db, a, draft.audience);
+      await draftTopic(db, a, draft);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await linkAttachments(db, a, draft.attachments, 'campaign', campaignId);
       const [row] = await db.insert(campaigns).values({ id: campaignId, workspaceId: a.workspaceId, draft, sourceTemplateId: source?.templateId ?? null, sourceTemplateRevision: source?.templateRevision ?? null }).returning();
@@ -2681,11 +2736,12 @@ export function registerSending(app: App) {
       draftSender(c.env, a, draft);
       draftSender(c.env, a, current.draft); editable(current, input.revision);
       await draftAudience(db, a, draft.audience, current.draft.audience);
+      await draftTopic(db, a, draft, current.draft);
       await requiredNoticesAllowed(db, draft, a.workspaceId);
       await attachmentRows(db, a, input.draft.attachments, true);
       await db.delete(attachmentLinks).where(and(scope(attachmentLinks, a), eq(attachmentLinks.ownerType, 'campaign'), eq(attachmentLinks.ownerId, campaignId)));
       await linkAttachments(db, a, input.draft.attachments, 'campaign', campaignId);
-      const audienceChanged = JSON.stringify(draft.audience ?? null) !== JSON.stringify(current.draft.audience ?? null) || Boolean(draft.requiredNotice) !== Boolean(current.draft.requiredNotice);
+      const audienceChanged = JSON.stringify(draft.audience ?? null) !== JSON.stringify(current.draft.audience ?? null) || Boolean(draft.requiredNotice) !== Boolean(current.draft.requiredNotice) || (draft.topicId ?? null) !== (current.draft.topicId ?? null);
       const revised = await db.execute<typeof campaigns.$inferSelect>(reviseCampaign(campaignRef(a, campaignId), sql`,draft=${JSON.stringify(draft)}::jsonb,revision=${current.revision + 1}${audienceChanged ? sql`,audience_estimate=NULL` : sql``}`));
       if (!revised.rows.length) throw new ApiError(409, 'CAMPAIGN_LOCKED', 'The campaign changed while it was being saved; fetch it and try again.');
       return (await findCampaign(db, a, campaignId))!;
@@ -2913,6 +2969,9 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   // A required notice: still allowed for this workspace, and confirmed by the sender as having no promotion.
   await requiredNoticesAllowed(db, draft, a.workspaceId);
   if (draft.requiredNotice && !input.confirmRequiredNotice) throw new ApiError(422, 'REQUIRED_NOTICE_UNCONFIRMED', 'Confirm that this is a required notice with no promotion (confirmRequiredNotice: true).', 'confirmRequiredNotice');
+  // Its topic, which it still has and hasn't archived: the capture leaves out its opt-outs, and the dispatcher skips those
+  // made after it, whatever becomes of the topic (frozen with the draft in the review).
+  const topic = await campaignTopic(db, a.workspaceId, draft, true);
   const rendered = await renderCampaignContent(runtime, draft), cfg = runtime.config;
   // What the campaign's screen would refuse in the background, measured now; admission refuses it for screened mail.
   let oversize: ApiError | undefined;
@@ -2954,7 +3013,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
   if (smallList) {
     // The list probe's sample leads only where the probe applies (Hosted shared sending, live); elsewhere the order is the list's.
     const probed = runtime.config.multiTenant && !isSimulatedSes(runtime) && Boolean((await db.execute(sql`SELECT 1 WHERE ${sharedConnection(a.workspaceId)}`)).rowCount);
-    const counts = await audienceMod.snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys, draft.requiredNotice === true, { large: false, ...probed ? { leading: probeSize } : {} }).catch(error => {
+    const counts = await audienceMod.snapshotCampaignAudience(db, a, draft.audience, reviewId, propertyKeys, draft.requiredNotice === true, { large: false, topic, ...probed ? { leading: probeSize } : {} }).catch(error => {
       // A statement past the database's limit (or cancelled) ends the launch; its transaction keeps nothing.
       if ([error, (error as { cause?: unknown })?.cause].some(e => (e as { code?: string } | null)?.code === '57014')) throw captureTimedOut();
       throw error;
@@ -2964,7 +3023,7 @@ async function launch(runtime: Runtime, db: DbExecutor, a: Actor, campaignId: st
     capturedAt = now();
     // Sync launch finalizes sending_campaigns in this same transaction, so capturedCount stays NULL (no pending finalizeCapture).
   } else {
-    const estimate = await audienceMod.estimateCampaignAudience(db, a, draft.audience, draft.requiredNotice === true, row.audienceEstimate ?? null);
+    const estimate = await audienceMod.estimateCampaignAudience(db, a, draft.audience, draft.requiredNotice === true, row.audienceEstimate ?? null, topic);
     if (estimate.definitive === 'empty') throw audienceMod.emptyAudience(draft.requiredNotice === true);
     if (estimate.definitive === 'over_limit') throw new ApiError(422, 'AUDIENCE_LIMIT_EXCEEDED', 'Campaign reviews support at most 2,000,000 matching contacts. No recipients were truncated.');
     queued = estimate.queued;
@@ -3413,14 +3472,15 @@ export async function materializeCampaignEmail(runtime: Runtime, a: Actor, mail:
     sizeCheck(keyed, rows);
     return { mail: { ...mail, snapshot: withoutLegacyFonts({ ...keyed, headers: [...keyed.headers] }) }, rows, unsubscribe: undefined, stored: { kind: 'marketing' as const, deferredCampaign: true, requiredNotice: true as const }, keyed };
   }
-  // The link host the launch froze. A review frozen before link hosts has none: its links go on the sender's link host as
-  // it is now, or are refused on Hosted without one, never on this installation's own domain.
-  const origin = review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
+  // Keep the origin charged at release (or already rendered on an earlier attempt). Only older rows need a fresh lookup.
+  const origin = mail.snapshot.linkOrigin ?? (mail.snapshot.unsubscribeUrl ? new URL(mail.snapshot.unsubscribeUrl).origin : undefined) ?? review.draft.linkOrigin ?? await linkOrigin(runtime, runtime.db, a.workspaceId, review.draft.from);
   // A retried row (throttled requeue) reuses the link it was first rendered with, so every attempt sends the same message.
   const reused = mail.snapshot.unsubscribeUrl?.startsWith(`${origin}/unsubscribe/`) ? mail.snapshot.unsubscribeUrl : undefined;
+  // Its link is about the campaign's topic (src/topics.ts), when it has one: its one-click opts out of that topic alone.
+  const topicId = review.draft.topicId ?? null;
   const unsubscribe = reused
-    ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase() } }
-    : await (await loadOpsUnsub()).createUnsubscribeLink(origin, a.workspaceId, customer.to[0]!);
+    ? { url: reused, record: { tokenHash: await digest(reused.slice(reused.lastIndexOf('/') + 1)), workspaceId: a.workspaceId, email: customer.to[0]!.trim().toLowerCase(), topicId } }
+    : await (await loadOpsUnsub()).createUnsubscribeLink(origin, a.workspaceId, customer.to[0]!, topicId);
   const page = review.draft.unsubscribePageUrl;
   // Its inline pictures are linked from the same host as its unsubscribe link (src/linked-images.ts).
   const snapshot = { ...withoutLegacyFonts(withUnsubscribe(runtime, customer, unsubscribe.url, { ...review.draft, linkOrigin: origin })), linkOrigin: origin };
@@ -3909,6 +3969,7 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
     ? await prepareStaticStamp(runtime, draft, review.rendered, prepCheck.lockedAttachments, row.reviewVersion!)
     : undefined;
   const audienceMod = await wrapModuleLoad(() => import('./audience.js'));
+  const topic = await campaignTopic(runtime.db, a.workspaceId, draft, false);
   const started = Date.now();
   let aborted = false;
 
@@ -3917,6 +3978,7 @@ async function captureStep(runtime: Runtime, a: Actor, row: RunRow, jobId: strin
       await tx.execute(sql`SET TRANSACTION ISOLATION LEVEL REPEATABLE READ`);
       const counts = await audienceMod.snapshotCampaignAudience(tx, a, audienceSpec, row.reviewId!, propertyKeys, draft.requiredNotice === true, {
         large: true,
+        topic,
         staticStamp,
         // The list probe's sample leads only where the probe applies (Hosted shared sending, live).
         ...row.account?.kind === 'shared' && !row.simulated ? { leading: probeSize } : {},
@@ -4097,11 +4159,11 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   // (src/link-domains.ts). With none to use (the workspace paused, or with own link hosts only, none active), it waits
   // without releasing anyone and looks again every 15 minutes; a domain's own host turning active wakes it at once
   // (wakeLinkRecordHolds). On the link domain, the release records its recipients there.
-  let shared: { host: string } | undefined;
+  let releaseOrigin = row.reviewDraft!.requiredNotice ? undefined : row.reviewDraft!.linkOrigin;
   if (!row.reviewDraft!.linkOrigin && !row.reviewDraft!.requiredNotice) {
     const choice = await linkChoice(runtime, runtime.db, a.workspaceId, row.reviewDraft!.from).catch(error => { if (error instanceof ApiError && error.code === 'LINK_RECORD_REQUIRED') return null; throw error; });
     if (!choice) return hold('link_record', new Date(nowMs + LINK_RECORD_RECHECK_MS).toISOString());
-    shared = choice.shared;
+    releaseOrigin = choice.origin;
   }
   // A stale/nonexistent sample is not an unlimited allowance. When a known quota (or a
   // previously held campaign) needs a new sample, use the dispatcher's elected cache refresher.
@@ -4294,7 +4356,12 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
       throw new JobDeferred(new Date(Date.now() + drainDelayMs(backlog, buffer!.rate)).toISOString(), payload);
     }
     const allowed = admitted(runtime, buffer!.decision, a.workspaceId);
-    const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, capacity);
+    const links = releaseOrigin ? await linkAllowance(db, runtime.config, a.workspaceId, releaseOrigin) : null;
+    if (links && !links.left) {
+      await db.execute(holdCampaign(ref, links.reason, links.until));
+      return { count: 0, completed: false, linkUntil: links.until, hostedUntil: null, balanceUntil: null };
+    }
+    const chunk = await recipientChunk(db, campaign.reviewId!, campaign.expanded, Math.min(capacity, links?.left ?? capacity));
     if (!chunk.length || chunk.some((recipient, index) => !recipient.content_hash || recipient.ordinal !== campaign.expanded + index + 1)) throw new ApiError(409, 'CAMPAIGN_SNAPSHOT_INVALID', 'The prepared audience is incomplete.');
     // Refuse unknown future hash formats before releasing any row so the campaign pauses intact instead of burning recipients.
     if (chunk.some(recipient => !isSupportedContentHash(recipient.content_hash))) throw unsupportedHashFormat();
@@ -4337,9 +4404,9 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
     // per-recipient headers, base content, asset IDs, or denormalized attachment links.
     const prepared=recipients.map(r=>({id:rowId('email'),ordinal:r.ordinal,address:r.recipient.email,subject:r.subject??draft.subject}));
     // On the link domain: the release's recipients are recorded there (src/link-domains.ts recordLinkUse).
-    if (shared && prepared.length) await recordLinkUse(db, a.workspaceId, shared.host, prepared.length);
+    if (runtime.config.linkHost && releaseOrigin === `https://${runtime.config.linkHost}` && prepared.length) await recordLinkUse(db, a.workspaceId, runtime.config.linkHost, prepared.length);
     const tpl = row.reviewScreen?.template;
-    const stub={kind:'marketing',deferredCampaign:true,...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
+    const stub={kind:'marketing',deferredCampaign:true,...(!draft.linkOrigin && releaseOrigin ? {linkOrigin:releaseOrigin} : {}),...(tpl ? { screenVerdict: { status: 'passed', spam: tpl.spam, model: tpl.model, digest: tpl.key } } : {})};
     if (prepared.length) await db.execute(sql`INSERT INTO sending_emails(id,workspace_id,actor_key_id,region,campaign_id,review_id,review_ordinal,from_address,to_addresses,cc_addresses,bcc_addresses,subject,snapshot,simulated,screened,scheduled_at)
       SELECT p.id,${a.workspaceId},${a.keyId},${draft.region},${campaign.id},${campaign.reviewId},p.ordinal,${draft.from},jsonb_build_array(p.address),'[]','[]',p.subject,${JSON.stringify(stub)}::jsonb,${campaign.simulated},true,${campaign.scheduledAt}
       FROM jsonb_to_recordset(${JSON.stringify(prepared)}::jsonb) p(id text,ordinal int,address text,subject text)`);
@@ -4355,6 +4422,7 @@ async function releaseStep(runtime: Runtime, a: Actor, row: RunRow, payload: Rec
   if (released.count) try { await runtime.dispatch?.(draft.region, row.account?.aws_account_id, released.count, row.account?.kind, false, Number(row.rate) > 0 ? Number(row.rate) : undefined); } catch { log('warn', { code: 'DISPATCH_WAKE_FAILED', campaignId: row.id, message: 'Released mail is durable; the dispatcher polls and the scheduler pings it.' }); }
   // Usually the oldest bucket expires first. Also notice an earlier refund or operator raise.
   // Waiting on balance: billing.restored wakes the run as soon as credit lands; otherwise look again in an hour.
+  if ('linkUntil' in released && released.linkUntil) throw new JobDeferred(released.linkUntil, payload);
   if (released.balanceUntil && !released.completed) throw new JobDeferred(released.balanceUntil, payload);
   if (released.hostedUntil) throw new JobDeferred(new Date(Math.min(Date.parse(released.hostedUntil),dbNow+QUOTA_REFRESH_MS)).toISOString(),payload);
   if (released.completed) { if (!released.count) await settle(); return 'done'; }

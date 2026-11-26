@@ -105,8 +105,8 @@ const values = z.object({
   // Hosted only: abuse monitoring (src/abuse.ts) is off until this names the instant it starts (RFC 3339, with Z or an
   // offset). Nothing is recorded before it, or before the database first ran with it. Unset turns it off; expiry still runs.
   NIGHTMAIL_ABUSE_MONITORING: optional(z.iso.datetime({ offset: true })),
-  // Hosted only: a Slack incoming webhook for abuse-monitoring alerts (src/abuse-alerts.ts). Unset, alerts are stored
-  // for operators and nothing is posted. Treat as a secret.
+  // Hosted only: a Slack incoming webhook for abuse-monitoring alerts (src/abuse-alerts.ts). Unset, they go to
+  // OPERATOR_SLACK_WEBHOOK_URL; with neither, alerts are stored for operators and nothing is posted. Treat as a secret.
   ABUSE_SLACK_WEBHOOK_URL: optional(z.string().url().max(2048).refine(value => value.startsWith('https://hooks.slack.com/'), 'Use a Slack incoming webhook URL.')),
   // Hosted only: a Slack incoming webhook for the operator alerts (src/operator-alerts.ts): a new sign-up, a pause, a
   // marketing hold, the daily limit, a full customer share, slow sign-in mail; and the health alerts (src/health.ts): a
@@ -141,6 +141,11 @@ const values = z.object({
   NIGHTMAIL_POSTMASTER_CREDENTIALS: optional(z.string().max(4000)),
   // Licensed DBL-compatible DNS zone (may contain a subscription key). Never log it.
   NIGHTMAIL_PLACEMENT_DBL_ZONE: optional(z.string().trim().toLowerCase().max(253).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
+  // Private: initial volume, full daily volume, day reaching full volume, workspace percentage.
+  NIGHTMAIL_LINK_WARMUP: optional(z.string().regex(/^\d+:\d+:\d+:\d+$/).transform(value => {
+    const [initial, full, days, workspacePercent] = value.split(':').map(Number) as [number, number, number, number];
+    return { initial, full, days, workspacePercent };
+  }).refine(p => p.initial > 0 && p.full >= p.initial && p.full <= 2147483647 && p.days >= 2 && p.days <= 366 && p.workspacePercent > 0 && p.workspacePercent <= 100)),
   // Hosted: the link domain (src/link-domains.ts): the host the links in campaign and marketing mail (unsubscribe,
   // forwarding) go on, links.nightmailedge.com, served by the Worker's route on that zone. Never a name of PUBLIC_URL's domain.
   NIGHTMAIL_LINK_HOST: optional(z.string().trim().toLowerCase().max(240).regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/)),
@@ -262,7 +267,7 @@ const featureSettings = {
   builtinDomains: ['NIGHTMAIL_BUILTIN_DOMAIN', 'NIGHTMAIL_BUILTIN_SEND_SCOPE'],
   listHygiene: ['NIGHTMAIL_HYGIENE_LISTS'], dnsHygiene: ['NIGHTMAIL_HYGIENE_DNS'],
   linkHosts: ['NIGHTMAIL_LINK_SAAS_ZONE_ID', 'NIGHTMAIL_LINK_SAAS_TOKEN', 'NIGHTMAIL_LINK_SAAS_TARGET', 'NIGHTMAIL_LINK_HOST_WORKSPACES'],
-  sharedLinks: ['NIGHTMAIL_LINK_HOST'],
+  sharedLinks: ['NIGHTMAIL_LINK_HOST'], linkWarmup: ['NIGHTMAIL_LINK_WARMUP'],
   postmaster: ['NIGHTMAIL_POSTMASTER_CREDENTIALS'],
   supportChat: ['NIGHTMAIL_SUPPORT_URL', 'NIGHTMAIL_SUPPORT_SIGNING_KEY'],
   supportEmail: ['NIGHTMAIL_SUPPORT_ADDRESS_IDS'],
@@ -417,7 +422,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     abuseMonitoring: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_MONITORING ? { since: new Date(v.NIGHTMAIL_ABUSE_MONITORING).toISOString() } : undefined,
     hygieneLists: v.NIGHTMAIL_HYGIENE_LISTS === 'on',
     hygieneDnsUrl: v.NIGHTMAIL_HYGIENE_DNS === 'off' ? null : v.NIGHTMAIL_HYGIENE_DNS ?? (v.MULTI_TENANT === 'true' ? 'https://cloudflare-dns.com/dns-query' : null),
-    abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL : undefined,
+    abuseEnforce: v.MULTI_TENANT==='true' && v.NIGHTMAIL_ABUSE_ENFORCE==='true', abuseSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.ABUSE_SLACK_WEBHOOK_URL ?? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     operatorSlackWebhookUrl: v.MULTI_TENANT==='true' ? v.OPERATOR_SLACK_WEBHOOK_URL : undefined,
     databaseDiskBytes: v.DATABASE_DISK_GB === undefined ? undefined : v.DATABASE_DISK_GB * 1024 ** 3,
     deploy: { sha: typeof v.DEPLOY_SHA === 'string' && /^[0-9a-f]{7,40}$/.test(v.DEPLOY_SHA) ? v.DEPLOY_SHA : null,
@@ -437,7 +442,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     accountClient: v.ACCOUNT_CLIENT_ID && v.ACCOUNT_CLIENT_PRIVATE_KEY ? { id:v.ACCOUNT_CLIENT_ID, privateKey:v.ACCOUNT_CLIENT_PRIVATE_KEY, algorithm:v.ACCOUNT_ID_TOKEN_ALG } : undefined,
     encryptionKey: deriveEncryptionKey(v.NIGHTMAIL_ROOT_SECRET),
     previousEncryptionKey: v.PREVIOUS_NIGHTMAIL_ROOT_SECRET ? deriveEncryptionKey(v.PREVIOUS_NIGHTMAIL_ROOT_SECRET) : v.ENCRYPTION_KEY,
-    publicUrl: url.origin, linkHost, linkHosts, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
+    publicUrl: url.origin, linkHost, linkHosts, linkWarmup: v.NIGHTMAIL_LINK_WARMUP, linkedImages: (v.CAMPAIGN_IMAGES ?? (url.protocol === 'https:' ? 'linked' : 'embedded')) === 'linked', sesFeedbackUrl: v.SES_FEEDBACK_URL, regions, liveEnabled: v.ENABLE_LIVE_SES === 'true',
     simulatedSes: { latencyMs: v.SIMULATED_SES_LATENCY_MS, maxSendRate: v.SIMULATED_SES_RATE, deliveryDelayMs: v.SIMULATED_SES_DELIVERY_DELAY_MS },
     dispatch: { rateFactor: v.DISPATCH_RATE_FACTOR, txReservePercent: v.DISPATCH_TX_RESERVE_PERCENT, targetRate: v.DISPATCH_TARGET_RATE, dailyHeadroomPercent: v.DISPATCH_DAILY_HEADROOM_PERCENT, customerSharePercent: v.HOSTED_CUSTOMER_SHARE_PERCENT },
     aws,

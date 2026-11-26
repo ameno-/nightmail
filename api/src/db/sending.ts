@@ -50,6 +50,8 @@ export type EmailSnapshot = {
   mailApp?: true;
   /** An ordinary send whose In-Reply-To names a stored message its sender could read: that message's thread (thread-view.ts joinReplies). */
   threadId?: string;
+  /** A marketing send's topic (src/topics.ts): who opted out of it is skipped, and its unsubscribe link is about it alone. */
+  topicId?: string;
 };
 export type CampaignDraft = {
   regionPinned?: boolean;
@@ -65,6 +67,8 @@ export type CampaignDraft = {
   attachments: string[]; tracking: boolean; unsubscribePageUrl?: string;
   /** A required notice (src/sending.ts): to everyone in the audience but the suppressed, without an unsubscribe link. */
   requiredNotice?: boolean;
+  /** The topic the campaign is about (src/topics.ts); never on a required notice. */
+  topicId?: string;
   audience: { listId?: string; segmentId?: string; excludeListIds?: string[]; excludeSegmentIds?: string[] };
   defaults: Record<string, string | number | boolean | null>;
 };
@@ -119,7 +123,7 @@ export const campaigns = pgTable('sending_campaigns', {
   pacePerDay: integer('pace_per_day'), autoPause: boolean('auto_pause').notNull().default(true), rateShare: doublePrecision('rate_share'),
   windowStartedAt: time('window_started_at'), windowExpanded: integer('window_expanded').notNull().default(0),
   pausedAt: time('paused_at'), pauseReason: jsonb('pause_reason').$type<CampaignFailure>(), healthCheckedAt: time('health_checked_at'),
-  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp'>(), waitingUntil: time('waiting_until'),
+  waitingReason: text('waiting_reason').$type<'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record' | 'link_budget' | 'link_listing'>(), waitingUntil: time('waiting_until'),
   // Hosted list probe (migration 231): when release may continue after the probe, when it was cleared, and how many quarantines this launch had.
   probeWaitUntil: time('probe_wait_until'), probeClearedAt: time('probe_cleared_at'), quarantines: smallint('quarantines').notNull().default(0),
   // When a sender in good standing skipped the probe (migration 357): kept apart from a probe that went out and passed.

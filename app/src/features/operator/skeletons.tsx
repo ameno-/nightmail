@@ -155,7 +155,7 @@ export const clusterColumnDefs: SkeletonColumn[] = [
 ]
 export const alertColumnDefs: SkeletonColumn[] = [
   { key: 'alert', label: 'Alert', card: 'title' },
-  { key: 'status', label: 'Slack', width: 132, card: 'aside' },
+  { key: 'status', label: 'Status', width: 132, card: 'aside' },
   { key: 'workspaces', label: 'Workspaces', width: 112, align: 'right', card: 'inline' },
   { key: 'created', label: 'Created', width: 168, card: 'line' },
 ]
@@ -193,21 +193,23 @@ export function AbuseSkeleton({ search }: { search: string }) {
   return <SplitPane className="op-abuse" collapse="row" rail={<FacetRail label="Abuse views" groups={abuseFacets(view)} />}><TableSkeleton className="op-table" columns={view.alerts ? alertColumnDefs : clusterColumnDefs} rows={6} /></SplitPane>
 }
 export const dailyLimitError = 'A whole number from 1 to 10,000,000.'
-export const clusterFacts = ['Risk', 'Score', 'Accounts', 'Workspaces', 'First seen', 'Changed'] as const
+export const clusterFacts = ['Risk', 'Score', 'Accounts', 'Workspaces', 'First seen', 'Changed', 'Alert', 'Review'] as const
+/** The cluster's review actions in its header, for the operator role: the same two buttons while it loads. */
+export const reviewActions = ['Watch', 'Dismiss'] as const
 // The cluster's rail on a wide window: the other clusters, to step through them. Rows are 32px in every state.
 export function ClusterRailSkeleton() {
   return <ul className="op-cluster-rail" aria-hidden="true">{Array.from({ length: 6 }, (_, i) => <li key={i}><span className="op-cluster-rail__row"><Skeleton width={72} height={12} /><Skeleton width={96} height={12} /></span></li>)}</ul>
 }
 export function ClusterBodySkeleton() {
   return <div className="op-page" aria-hidden="true">
-    <dl className="op-facts">{clusterFacts.map(title => <div key={title}><dt>{title}</dt><dd><Skeleton width={88} height={14} /></dd></div>)}</dl>
+    <dl className="op-facts op-facts--four">{clusterFacts.map(title => <div key={title}><dt>{title}</dt><dd><Skeleton width={88} height={14} /></dd></div>)}</dl>
     <div className="op-grid"><section className="op-section"><SectionHeader title="Why" /><Skeleton height={224} /></section><section className="op-section"><SectionHeader title="Links" /><Skeleton height={224} /></section></div>
     <section className="op-section"><SectionHeader title="Workspaces" /><TableSkeleton className="op-table" columns={clusterWorkspaceColumnDefs} rows={3} /></section>
   </div>
 }
-export function OperatorClusterSkeleton() {
+export function OperatorClusterSkeleton({ actions }: { actions: boolean }) {
   return <>
-    <PageHeader title="Related accounts" backTo="/operator?view=abuse" />
+    <PageHeader title="Related accounts" backTo="/operator?view=abuse" actions={actions ? reviewActions.map(action => <Button key={action} disabled>{action}</Button>) : undefined} />
     <LoadingRegion label="Loading the cluster"><SplitPane className="op-cluster" rail={<ClusterRailSkeleton />}><ClusterBodySkeleton /></SplitPane></LoadingRegion>
   </>
 }
@@ -422,13 +424,13 @@ export const vdmColumns = [['isp', 'ISP'], ['send', 'Sent'], ['delivered', 'Deli
 /** Mailbox providers (api/src/deliverability.ts PROVIDERS) and VDM's rows: every provider has a row, mail or none. */
 export const PROVIDER_SLOTS = 7, VDM_SLOTS = 6
 export type DeliverabilityRow = { cells: ReactNode[]; tones?: (Tone | undefined)[]; empty?: boolean }
-export type DeliverabilityFill = { tile: (key: string) => GlassTileFill; providers: DeliverabilityRow[]; vdm: { status: ReactNode; rows: DeliverabilityRow[] }; row: (group: string, row: string) => GlassFill }
+export type DeliverabilityFill = { domainCount: number; tile: (key: string) => GlassTileFill; providers: DeliverabilityRow[]; vdm: { status: ReactNode; rows: DeliverabilityRow[] }; row: (group: string, row: string) => GlassFill }
 export const deliverabilityGroups: GlassGroupDef[] = [
   { key: 'engagement', title: 'Engagement', rows: [{ key: 'opened', label: 'Opened', spark: true }, { key: 'human', label: 'Opened by people', spark: true }, { key: 'machine', label: 'Opened by machines only' },
     { key: 'clicked', label: 'Clicked', spark: true }, { key: 'cto', label: 'Clicks per opener' },
     { key: 'note', note: 'Over delivered mail. Apple Mail Privacy Protection and link scanners open mail by themselves; SES flags those opens, counted here as machines. Clicks are the firmer signal.' }] },
   { key: 'ses', title: 'SES accounts', to: ['/operator?view=health', 'Health'], rows: slots('region', GLASS_REGION_SLOTS) },
-  { key: 'domains', title: 'Our domains', rows: [...slots('dbl', 2), ...slots('postmaster', 2)] },
+  { key: 'domains', title: 'Domains', rows: [{ key: 'budget', label: 'Shared link recipients today' }, ...slots('dbl', 2), ...slots('postmaster', 2)] },
   { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }] },
   { key: 'complaints', title: 'Most complaints', to: ['/operator', 'Queue'], rows: slots('ws', 10) },
   { key: 'bounces', title: 'Most bounces', to: ['/operator', 'Queue'], rows: slots('ws', 10) },
@@ -451,7 +453,8 @@ export function DeliverabilityBoard({ fill, controls, stale = false }: { fill?: 
       <SectionHeader title="By mailbox provider · worst first" />
       <DeliverabilityTable label="By mailbox provider" columns={providerColumns} rows={fill?.providers} slots={PROVIDER_SLOTS} className="dlv-table--providers" />
     </section>
-    <GlassGroupList groups={deliverabilityGroups} row={fill?.row} />
+    <GlassGroupList groups={deliverabilityGroups.map(group => group.key === 'domains' && fill && fill.domainCount > 2
+      ? { ...group, rows: [...group.rows, ...Array.from({ length: fill.domainCount - 2 }, (_, i) => ({ key: `dbl:${i + 2}` }))] } : group)} row={fill?.row} />
     <section className="glass-section" aria-label="Amazon VDM estimates">
       <SectionHeader title="Amazon VDM · estimates" />
       <p className="dlv-status">{fill ? fill.vdm.status : <Skeleton width={320} height={12} />}</p>
@@ -465,6 +468,6 @@ export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'op
   const { pathname, search } = useLocation(), identity = useSession()?.identity, uiNotes = identity?.uiNotes === true
   if (!operator) return identity && identity.multiTenant !== true && pathname === '/operator' ? <SelfHostedHealthSkeleton /> : null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
-  if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton />
+  if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton actions={operator === 'operator'} />
   return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} canAct={operator === 'operator'} />
 }

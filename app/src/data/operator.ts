@@ -99,7 +99,8 @@ export interface Deliverability {
   regions: { region: string; place: string; sending: boolean
     ses: CheckState & { enforcement: string | null; sendingEnabled: boolean | null; productionAccess: boolean | null; vdm: boolean | null; engagement: boolean | null; error: string | null }
     vdm: CheckState & { error: string | null; since: string; until: string; previousSince: string; providers: { provider: MailProvider | 'all'; current: VdmCounts; previous: VdmCounts }[] } }[]
-  blocklist: (CheckState & { domain: string })[]
+  linkBudget: { used: number; limit: number } | null
+  blocklist: (CheckState & { domain: string; held: boolean })[]
   postmaster: (CheckState & { domain: string; url: string; error: string | null; spamRatio: { current: number | null; previous: number | null }
     latest: { day: string; spamRatio: number | null; spf: number | null; dkim: number | null; dmarc: number | null; deliveryErrorRatio: number | null } | null })[]
   standing: { grades: Record<GlassGrade, number>; calibrating: number; steps: Record<StandingStep, number> }
@@ -122,7 +123,9 @@ export interface AbuseClusterDetail extends Omit<AbuseCluster, 'accounts' | 'wor
 export interface AbuseClusterPage { items: AbuseCluster[]; nextCursor: string | null; counts: Record<AbuseBand, number>; alerts: number; monitoring: boolean }
 /** A Slack message as it is, or would be, posted: the blocks this page draws. */
 export interface SlackCard { text: string; blocks: { type: string; text?: { text: string }; fields?: { text: string }[]; elements?: { type: string; text?: { text: string } | string; url?: string }[] }[] }
-export interface AbuseAlert { id: string; clusterId: string; band: 'review' | 'high'; score: number; kind: 'new' | 'raised' | 'grew'; workspaces: number; status: 'stored' | 'sent' | 'failed'; attempts: number; createdAt: string; sentAt: string | null; payload: SlackCard }
+/** An operator's decision on an alert. watch: reviewed, raised again only at a higher level. dismiss: not abuse. by: their sign-in address. */
+export interface AbuseReview { action: 'watch' | 'dismiss'; at: string; by: string | null }
+export interface AbuseAlert { id: string; clusterId: string; band: 'review' | 'high'; score: number; kind: 'new' | 'raised' | 'grew'; workspaces: number; status: 'stored' | 'sent' | 'failed'; attempts: number; createdAt: string; sentAt: string | null; payload: SlackCard; review: AbuseReview | null }
 /** An action taken from the abuse view: the note stays in the staff audit; the workspace's own records get a fixed reason. */
 export type AbuseEvidence = { cluster: string; note: string; ticketRef?: string }
 export type OperatorReceipt = { ok: true; version: number | null; step: string | null }
@@ -184,10 +187,11 @@ export const operatorApi = {
     return { items: page.data, nextCursor: page.nextCursor, counts: page.counts, alerts: page.alerts, monitoring: page.monitoring }
   },
   abuseCluster: (clusterId: string, signal?: AbortSignal) => request<AbuseClusterDetail>(`${base}/abuse/clusters/${id(clusterId)}`, { signal }),
-  abuseAlerts: async (input: { cursor?: string }, signal?: AbortSignal) => {
-    const page = await request<{ data: AbuseAlert[]; nextCursor: string | null; delivery: 'slack' | 'off' }>(`${base}/abuse/alerts${query({ cursor: input.cursor, limit: 50 })}`, { signal })
+  abuseAlerts: async (input: { cluster?: string; cursor?: string; limit?: number }, signal?: AbortSignal) => {
+    const page = await request<{ data: AbuseAlert[]; nextCursor: string | null; delivery: 'slack' | 'off' }>(`${base}/abuse/alerts${query({ cluster: input.cluster, cursor: input.cursor, limit: input.limit ?? 50 })}`, { signal })
     return { items: page.data, nextCursor: page.nextCursor, delivery: page.delivery }
   },
+  abuseReview: (alertId: string, action: AbuseReview['action']) => request<AbuseAlert>(`${base}/abuse/alerts/${id(alertId)}/review`, { method: 'POST', body: { action } }),
   abusePause: (workspaceId: string, input: AbuseEvidence, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/pause`, 'POST', evidence(input), guard),
   abuseLimit: (workspaceId: string, input: AbuseEvidence & { daily: number }, guard: OperatorGuard) => write(`/workspaces/${id(workspaceId)}/limit`, 'PUT', { daily: input.daily, expiresAt: null, ...evidence(input) }, guard),
   billing: (workspaceId: string, signal?: AbortSignal) => request<OperatorBilling>(`${base}/billing/${id(workspaceId)}`, { signal }),

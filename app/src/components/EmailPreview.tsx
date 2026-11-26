@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
 import { ImageOff } from 'lucide-react';
 import { errorText, type AttachmentApi } from '../data/types';
 import { useApi } from '../data/context';
-import { cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
+import { attachmentKind, cachedInlineAttachments, cidImageSources, isRasterDataUrl, loadInlineAttachments } from '../features/campaigns/composer-content';
 import { mentionsRemoteImage, withoutFontStyles } from '../lib/html-scan';
 import DOMPurify from 'dompurify';
 import { heldImageSource, px } from '../lib/held-image';
@@ -148,7 +149,9 @@ function emailDocument(html: string, { respectStyles, remoteImages, inline, asSe
  *  on a dark canvas when the email opts in to dark mode (declaresDark), otherwise undefined. */
 export function useEmailDocument({ html, attachmentIds = [], attachmentApi: providedAttachmentApi, respectStyles = false, remoteImages = false, inlineImages, asSent = false, dark = false }: Omit<EmailPreviewProps, 'title' | 'className'> & { dark?: boolean }) {
   const api = useApi();
+  const cache = useQueryClient();
   const attachmentApi = providedAttachmentApi ?? api.attachments;
+  const kind = attachmentKind(api, providedAttachmentApi);
   const attachmentKey = [...new Set(attachmentIds)].sort().join(',');
   const [resolved, setResolved] = useState<{html: string; attachmentKey: string; api: AttachmentApi | undefined; sources: Map<string, string>} | null>(null);
   const [error, setError] = useState('');
@@ -167,17 +170,24 @@ export function useEmailDocument({ html, attachmentIds = [], attachmentApi: prov
     try { const parsed = new URL(url); return parsed.protocol === 'https:' ? [[`cid:${id}`, parsed]] : []; } catch { return []; }
   })), [inlineKey]);
   const needed = useMemo(() => new Set([...cidImageSources(html)].filter(id => !inline.has(`cid:${id}`))), [html, inline]);
+  const cachedSync = useMemo(() => {
+    if (!needed.size) return new Map<string, string>();
+    const ids = attachmentKey ? attachmentKey.split(',') : [];
+    const hit = cachedInlineAttachments(kind, ids, needed);
+    return hit.missing.size === 0 ? hit.sources : undefined;
+  }, [kind, attachmentKey, needed]);
   useEffect(() => {
+    if (cachedSync) return;
     const controller = new AbortController();
     setError('');
-    loadInlineAttachments(attachmentApi, attachmentKey ? attachmentKey.split(',') : [], needed, controller.signal).then(result => {
+    loadInlineAttachments(attachmentApi, attachmentKey ? attachmentKey.split(',') : [], needed, controller.signal, { cache, kind }).then(result => {
       if (controller.signal.aborted) return;
       setResolved({html, attachmentKey, api: attachmentApi, sources: result.sources});
       if (result.sources.size < needed.size) setError('Couldn’t resolve some inline images from this message’s attachments.');
     }).catch(cause => { if (!controller.signal.aborted) setError(errorText(cause, 'Inline image preview is unavailable.')); });
     return () => controller.abort();
-  }, [html, attachmentKey, attachmentApi, needed]);
-  const sources = resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined;
+  }, [html, attachmentKey, attachmentApi, needed, cache, kind, cachedSync]);
+  const sources = cachedSync ?? (resolved?.html === html && resolved.attachmentKey === attachmentKey && resolved.api === attachmentApi ? resolved.sources : undefined);
   const options = useMemo(() => ({ respectStyles, remoteImages, inline, asSent }), [respectStyles, remoteImages, inline, asSent]);
   const doc = useMemo(() => fontFaces === null ? null : emailDocument(html, { ...options, scheme: 'light' }, sources, fontFaces), [html, options, sources, fontFaces]);
   const hasDark = useMemo(() => dark && declaresDark(html), [dark, html]);
