@@ -71,7 +71,7 @@ export function ConversationBodySkeleton({ panel }: { panel: boolean }) {
       <div className="sinbox-message__meta"><Skeleton width={96} height={12} /></div>
       <div className="sinbox-message__body"><SkeletonText width={`${width}%`} lineHeight={22} /><SkeletonText width={`${width - 24}%`} lineHeight={22} /></div>
     </li>)}</ol></div>
-    {panel && <aside className="sinbox-panel"><div className="sinbox-panel__body"><h3 className="ui-label ui-label--rule">Account</h3><Skeleton height={140} /><h3 className="ui-label ui-label--rule">Conversation</h3><Skeleton height={112} /></div></aside>}
+    {panel && <aside className="sinbox-panel"><div className="sinbox-panel__body"><h3 className="ui-label ui-label--rule">Customer</h3><Skeleton height={140} /></div></aside>}
   </div>
 }
 /** The header's actions: Customer (the panel, on a phone), Done (e: marks it done if it needs you, and opens the next) and

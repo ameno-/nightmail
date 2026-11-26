@@ -660,55 +660,60 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
 
 // ---------------------------------------------------------------- the customer panel
 
-const verification: Record<SupportConversation['verification'], string> = { handoff: 'Signed in (chat)', dmarc: 'Email passed DMARC', signin: 'Signed in to claim it', none: 'Not verified', credential: 'The workspace’s credential' }
-const mode: Record<SupportConversation['mode'], string> = { member: 'Member', non_member: 'No workspace', pending_signin: 'Waiting for sign-in', unverified: 'Unverified' }
+/** One line for how the person was verified (keeps read-only and unverified states unmistakable without repeating Proof, Access and DMARC). */
+function verifiedRow(c: SupportDetail['conversation'], hasUser: boolean): ReactNode {
+  if (c.verification === 'none') return <StatusBadge status={c.mode === 'pending_signin' ? 'Waiting for sign-in' : 'Not verified'} tone="warning" />
+  if (c.verification === 'handoff') return c.mode === 'non_member' ? 'Signed in (chat) · no workspace' : 'Signed in (chat)'
+  if (c.verification === 'signin') return 'Signed in to claim · read only'
+  if (c.verification === 'dmarc') {
+    const dkim = c.evidence.dkimAligned === false ? ', DKIM unaligned' : ''
+    return hasUser ? `Email (DMARC${dkim}) · read only` : `Email (DMARC${dkim}) · no account`
+  }
+  return 'Workspace credential'
+}
 // The customer panel (Signal Log): each section a small caps label with its rule over muted keys and mono values, or a short list.
 const Label = ({ children }: { children: ReactNode }) => <h3 className="ui-label ui-label--rule">{children}</h3>
-const None = ({ children }: { children: ReactNode }) => <p className="sinbox-none">{children}</p>
 function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const { conversation: c, customer } = detail, user = customer.user, evidence = c.evidence
   const others = customer.conversations
-  const facts: [string, ReactNode][] = [
-    ...c.workspace && c.channel !== 'agent_feedback' ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
+  const extra: [string, ReactNode][] = [
+    ...c.ticket ? [['Ticket', <span title={c.ticket.id}>{ticketText(c)}</span>] as [string, ReactNode]] : [],
     ...c.page ? [['Opened from', c.page] as [string, ReactNode]] : [],
-    ...evidence.dmarc ? [['DMARC', `${evidence.dmarc}${evidence.dkimAligned === null ? '' : evidence.dkimAligned ? ' · DKIM aligned' : ' · DKIM not aligned'}`] as [string, ReactNode]] : [],
-    ['Ticket', c.ticket ? <span className="sinbox-ticket"><span>{ticketText(c)}</span><span className="sinbox-faint">{c.ticket.id}</span></span> : 'None'],
-    ['Agent', `${number(c.turns)} ${c.turns === 1 ? 'turn' : 'turns'} · $${c.costUsd.toFixed(2)}`],
-    ['Started', when(c.createdAt)],
+  ]
+  const customerRows: [string, ReactNode][] = user ? [
+    ...user.name ? [['Name', user.name] as [string, ReactNode]] : [],
+    ...user.email ? [['Email', <span className="sinbox-address"><PrivateAddress value={user.email} />{!user.emailVerified && <StatusBadge status="Unverified" tone="warning" />}</span>] as [string, ReactNode]] : [],
+    ['Verified', verifiedRow(c, true)],
+    ...extra,
+  ] : [
+    ['Sender', c.sender ? <span className="sinbox-address"><PrivateAddress value={c.sender} /></span> : '—'],
+    ['Verified', verifiedRow(c, false)],
+    ...extra,
   ]
   return <div className="sinbox-panel__body">
     {c.channel === 'agent_feedback' ? <section><Label>Filed by</Label>
       <KeyValues className="sinbox-kv" items={[
-        ['Workspace', c.workspace ? <span className="sinbox-ticket"><Link to={`/operator/workspaces/${encodeURIComponent(c.workspace.id)}`}>{c.workspace.name}</Link><span className="sinbox-faint">{c.workspace.id}</span></span> : '—'],
-        ['Credential', evidence.filedBy ? <span className="sinbox-ticket"><span>{evidence.filedBy}</span>{evidence.credentialId && <span className="sinbox-faint">{evidence.credentialId}</span>}</span> : '—'],
+        ['Workspace', c.workspace ? <Link to={`/operator/workspaces/${encodeURIComponent(c.workspace.id)}`} title={c.workspace.id}>{c.workspace.name}</Link> : '—'],
+        ['Credential', evidence.filedBy ? <span title={evidence.credentialId ?? undefined}>{evidence.filedBy}</span> : '—'],
+        ...extra,
       ]} />
-    </section> : <section><Label>Account</Label>
-      <KeyValues className="sinbox-kv" items={user ? [
-        ['Name', user.name ?? '—'],
-        ['Email', user.email ? <span className="sinbox-address"><PrivateAddress value={user.email} />{user.emailVerified ? <StatusBadge status="Verified" tone="success" /> : <StatusBadge status="Unverified" tone="warning" />}</span> : '—'],
-        ['Proof', verification[c.verification]], ['Access', mode[c.mode]], ['Signed up', when(user.createdAt)],
-      ] : [['Sender', c.sender ? <span className="sinbox-address"><PrivateAddress value={c.sender} /></span> : '—'], ['Proof', verification[c.verification]], ['Access', 'No account linked']]} />
+    </section> : <section><Label>Customer</Label>
+      <KeyValues className="sinbox-kv" items={customerRows} />
     </section>}
-    <section><Label>Conversation</Label><KeyValues className="sinbox-kv" items={facts} /></section>
-    {user && <section><Label>Workspaces</Label>
-      {customer.workspaces.length ? <ul className="sinbox-list">{customer.workspaces.map(w => <li key={w.id}>
+    {user && customer.workspaces.length > 0 && <section><Label>Workspaces</Label>
+      <ul className="sinbox-list">{customer.workspaces.map(w => <li key={w.id}>
         <Link to={`/operator/workspaces/${encodeURIComponent(w.id)}`} className="sinbox-list__main">{w.name}</Link>
         <span className="sinbox-list__meta">{[w.role, w.standing && w.standing !== 'ok' ? w.standing : null, w.sending?.paused ? 'paused' : null, w.inScope ? 'in scope' : null].filter(Boolean).join(' · ')}</span>
-      </li>)}</ul> : <None>No workspaces</None>}
+      </li>)}</ul>
     </section>}
-    {user && <section><Label>Notes</Label>
-      {customer.notes.length ? <ul className="sinbox-notes">{customer.notes.map(n => <li key={n.id}><p>{n.text}</p><span className="sinbox-list__meta">{n.author} · {when(n.createdAt)}</span></li>)}</ul> : <None>No notes</None>}
+    {user && customer.notes.length > 0 && <section><Label>Notes</Label>
+      <ul className="sinbox-notes">{customer.notes.map(n => <li key={n.id}><p>{n.text}</p><span className="sinbox-list__meta">{n.author} · {when(n.createdAt)}</span></li>)}</ul>
     </section>}
-    <section><Label>Other conversations</Label>
-      {others.length ? <ul className="sinbox-list">{others.map(o => <li key={o.id}>
+    {others.length > 0 && <section><Label>Other conversations</Label>
+      <ul className="sinbox-list">{others.map(o => <li key={o.id}>
         <Link to={`/support/${o.id}`} className="sinbox-list__main">{o.subject ?? channelLabels[o.channel as Channel] ?? 'Chat'}</Link>
         <span className="sinbox-list__meta">{[o.status, o.ticket?.severity, ago(o.lastMessageAt ?? o.createdAt)].filter(Boolean).join(' · ')}</span>
-      </li>)}</ul> : <None>No other conversations</None>}
-    </section>
-    {user && <section><Label>Recent activity</Label>
-      {customer.activity.length ? <ul className="sinbox-list">{customer.activity.slice(0, 10).map(e => <li key={e.id}>
-        <span className="sinbox-list__main">{label(e.action.replace(/[._]/g, ' '))}</span><time className="sinbox-list__meta" dateTime={e.at} title={when(e.at)}>{ago(e.at)}</time>
-      </li>)}</ul> : <None>No activity yet</None>}
+      </li>)}</ul>
     </section>}
   </div>
 }
