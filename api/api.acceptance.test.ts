@@ -717,7 +717,7 @@ test('MCP: every API operation is a tool or a documented human step, and docs/mc
   for(const name of ['listEmails','getEmail','getEmailContent','getEmailDetail','listEmailEvents','listWebhookDeliveries','getWebhookDelivery','previewEmail','listLogs','testRouting','testRules','listInboundMessages','getInboundMessage','getInboundThread'])assert.equal(catalog.get(name)?.untrustedContent,true,name);
   for(const op of catalog.values()){assert.ok((TOOLSETS as readonly string[]).includes(op.toolset),op.tool.name);assert.equal(op.tool.outputSchema?.type,'object',op.tool.name);assert.match(op.tool.name,/^[a-z][A-Za-z]+$/,op.tool.name)}
   // Internal routes (operators and support grants) are never tools, whatever their security scheme.
-  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','downloadInboundAttachment','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
+  const bearer=Object.entries(spec.paths??{}).filter(([path])=>!/^\/v1\/(?:support|operator)\//.test(path)).flatMap(([,item])=>Object.values(item??{})).filter((o:Json)=>o?.security?.some((s:Json)=>s.bearerAuth)&&!o.operationId.endsWith('Ritual')&&!/Ritual[A-Z]|Rituals|OmenOptIns/.test(o.operationId)&&!['receiveSesSnsEvent','revealWebhookSecret','downloadInboundAttachment','getRuleVersion','createBillingTopUp','updateBillingAutoRecharge','createBillingCardSetup','deleteBillingPaymentMethod','bindMcpConnection','listAgents','revokeAgent'].includes(o.operationId)).map((o:Json)=>o.operationId as string);
   // Members, invitations and Activity are session routes that an owner's or admin's own sign-in also calls (core.ts memberAdminRoute).
   assert.deepEqual([...catalog.keys()].sort(), [...bearer,'waitForMessage','listWorkspaceMembers','listWorkspaceInvitations','createWorkspaceInvitation','revokeWorkspaceInvitation','listActivity'].sort());
   const { resourceTools, resourceInventory, listedTool } = await import('./src/mcp-resources.js'), { workspaceTools, workspaceResource } = await import('./src/mcp.js');
@@ -5952,8 +5952,8 @@ describe('Hosted MCP OAuth and tools', () => {
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?codemode=false')).tools, catalog.tools);
     assert.deepEqual((await rpc(token, 'tools/list', {}, '/mcp?toolsets=all')).tools, catalog.tools);
     assert.ok(defaults.some((tool:Json)=>tool.name==='describe_tool') && defaults.some((tool:Json)=>tool.name==='workspaces'));
-    // Every plain tool but describe_tool, workspaces and sendFeedback (one action: its arguments, no branches) has actions.
-    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces','sendFeedback'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
+    // Every plain tool but describe_tool, workspaces and single-action tools (sendFeedback, connections) has actions.
+    assert.ok(defaults.every((tool:Json)=>(['describe_tool','workspaces','sendFeedback','connections'].includes(tool.name) || tool.inputSchema.oneOf?.length) && !tool.outputSchema));
     // Every workspace tool takes the workspace it acts in; the account service's token names a person, not a workspace.
     assert.ok(defaults.every((tool:Json)=>tool.name==='describe_tool' || tool.inputSchema.properties.workspace?.type==='string'));
     assert.ok(catalog.tools.every((tool:Json)=>tool.name==='workspaces' || tool.inputSchema.properties.workspace?.type==='string'));
@@ -8500,7 +8500,7 @@ describe('Hosted MCP OAuth and tools', () => {
       // An owner's sign-in: the four tools, never role changes or removal, in Code Mode and as actions of the plain settings resource.
       const ownerTools = await listed(owner.token);
       for (const name of tools) assert.ok(ownerTools.includes(name), name);
-      for (const name of ['inviteWorkspaceMember', 'updateWorkspaceMember', 'removeWorkspaceMember', 'acceptWorkspaceInvitation']) assert.ok(!ownerTools.includes(name), name);
+      for (const name of ['inviteWorkspaceMember', 'updateWorkspaceMember', 'removeWorkspaceMember', 'acceptWorkspaceInvitation', 'bindMcpConnection', 'listAgents', 'revokeAgent', 'configureRegion', 'provisionRegion', 'configureRegionAutoValidation']) assert.ok(!ownerTools.includes(name), name);
       const plain = (await mcp(owner.token, 'tools/list', {}, '/mcp')).tools.find((tool: Json) => tool.name === 'settings');
       for (const action of ['members', 'invitations', 'invite', 'revokeInvitation']) assert.ok(plain?.inputSchema.properties.action.enum.includes(action), action);
       const people = done(await call(owner.token, 'listWorkspaceMembers')).data;

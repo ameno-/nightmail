@@ -87,8 +87,9 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     identity: 'getCurrentIdentity', setup: 'getOverviewSetup', get: 'getWorkspaceSettings', update: 'updateWorkspaceSettings', ses: 'getSesSettings', inboundPolicy: 'getInboundScanPolicy', updateInboundPolicy: 'updateInboundScanPolicy',
     members: 'listWorkspaceMembers', invitations: 'listWorkspaceInvitations', invite: 'createWorkspaceInvitation', revokeInvitation: 'revokeWorkspaceInvitation', activity: 'listActivity',
   } },
-  connections: { label: 'Connected agents (MCP sign-ins) and inbox connections', actions: {
-    bind: 'bindMcpConnection', createInbox: 'createInboxConnection', agents: 'listAgents', revokeAgent: 'revokeAgent',
+  // One action: listed as that action's own arguments, with no action argument (resolveAction in mcp.ts takes the one).
+  connections: { label: 'Create a least-privilege inbox MCP connection', actions: {
+    createInbox: 'createInboxConnection',
   } },
   regions: { label: 'SES regions', actions: {
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',
@@ -131,12 +132,22 @@ function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
   if (field.$ref) return fieldSummary(defs[field.$ref.slice('#/$defs/'.length)], defs, depth);
   if (field.const !== undefined) return { const: field.const };
   // Long enums nested in a request (e.g. email clients in each preview source variant) belong in describe_tool.
-  if (field.enum) return depth >= 2 && field.enum.length > 8 && field.type === 'string' ? { type: 'string' } : { enum: field.enum };
+  if (field.enum) return depth >= 1 && field.enum.length > 8 && field.type === 'string' ? { type: 'string' } : { enum: field.enum };
   const variants: Schema[] | undefined = field.oneOf ?? field.anyOf;
-  if (variants) return { anyOf: variants.map(v => fieldSummary(v, defs, depth)) };
+  if (variants) {
+    const resolved = variants.map(v => v.$ref ? defs[v.$ref.slice('#/$defs/'.length)] : v);
+    if (resolved.every(v => v.type === 'string' || (Array.isArray(v.enum) && v.enum.every((x: unknown) => typeof x === 'string')))) return { type: 'string' };
+    if (resolved.length === 2 && resolved.some(v => v.type === 'null')) {
+      const other = resolved.find(v => v.type !== 'null');
+      if (other && typeof other.type === 'string' && !other.properties && !other.items && !other.enum && !other.oneOf && !other.anyOf) return { type: [other.type, 'null'] };
+    }
+    // Nested unions (e.g. segment rule ASTs) belong in describe_tool rather than duplicating every variant in tools/list.
+    if (depth >= 1) return resolved.every(v => v.type === 'object' || v.properties) ? { type: 'object' } : {};
+    return { anyOf: variants.map(v => fieldSummary(v, defs, depth + 1)) };
+  }
   const schema: Schema = field.type ? { type: field.type } : {};
-  if (field.items) schema.items = depth < 2 ? fieldSummary(field.items, defs, depth + 1) : {};
-  if (depth < 2 && field.properties) {
+  if (field.items) schema.items = depth < 1 ? fieldSummary(field.items, defs, depth + 1) : {};
+  if (depth < 1 && field.properties) {
     const required: string[] = field.required ?? [];
     const properties = Object.entries<Schema>(field.properties).filter(([k]) => required.includes(k) || commonBodyFields.has(k));
     if (properties.length) schema.properties = Object.fromEntries(properties.map(([k, v]) => [k, fieldSummary(v, defs, depth + 1)]));
