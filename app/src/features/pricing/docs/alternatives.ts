@@ -113,7 +113,7 @@ export function vendorAlternatives(c: Comparison): Doc {
     { title: c.title, path: c.path, line: `${vendor} and ${productName} at every size ${vendor} prices, side by side.` },
     { title: 'Compare', path: '/compare', line: `${productName} beside every email service it is compared with.` },
   ]
-  const cardWords: Doc['cardWords'] = { lines: [`${productName} ${middleBill.ours}.`, `${counted.length} others from ${money(lowest)}.`], caption: fitWords([`${vendor} and ${spelled(shown.length)} alternatives, ${size.replace(/^Per /, '')}, checked ${dayOf(checked.at(-1)!)}.`, `${vendor} and ${spelled(shown.length)} alternatives, checked ${dayOf(checked.at(-1)!)}.`, `${vendor} and ${shown.length} more, checked ${dayOf(checked.at(-1)!)}.`], 70) }
+  const cardWords: Doc['cardWords'] = { lines: [`${productName} ${middleBill.ours}.`, `${counted.length} others from ${money(lowest)}.`], caption: fitWords([`${vendor} and ${spelled(shown.length)} alternatives, ${size.replace(/^Per /, '')}, checked ${when}.`, `${vendor} and ${spelled(shown.length)} alternatives, checked ${when}.`, `${vendor} and ${shown.length} more, checked ${when}.`], 70) }
   return {
     path, title: `${vendor} alternatives`, searchTitle, description, h1, answer: [[caption]], cardWords, sections, questions: [],
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] },

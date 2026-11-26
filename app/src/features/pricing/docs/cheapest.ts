@@ -1,6 +1,6 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, money, nightmail, quote, shownSources, type Source } from '../prices.ts'
+import { fitWords, formatCount, money, nightmail, quote, shownSources, type Source } from '../prices.ts'
 import { billAt, ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
@@ -16,7 +16,8 @@ import { checkedOn, DASH, month, spelled } from './alternatives.ts'
 /** The sizes, as /compare's sending table prices the developer APIs (page/hub.ts). */
 export const CHEAPEST_SIZES = [10_000, 100_000, 1_000_000]
 /** Services on the page's table: the lowest priced at the middle size, as many as stay one calm table on a phone (ten rows
- *  with Nightmail's, as /email-for-ai-agents). The rest are in the Markdown copy. */
+ *  with Nightmail's, as /email-for-ai-agents), and any priced the same as the last of them: a tie at the cut is shown
+ *  whole, never split by the order the data lists them in. The rest are in the Markdown copy. */
 export const SHOWN_CHEAPEST = 9
 
 export function cheapestEmailApi(): Doc {
@@ -28,7 +29,8 @@ export function cheapestEmailApi(): Doc {
   // Ryan's rule (A294): Nightmail costs less than each service listed at every size shown; the build stops where it isn't.
   for (const { c, bills } of group) for (const b of bills) if (b.theirsCents !== null && !(b.oursUc < BigInt(b.theirsCents) * 1_000_000n))
     throw new Error(`/cheapest-email-api would show Nightmail at ${b.ours} and ${c.offer.vendor} at ${b.theirs} for ${formatCount(b.size)} emails a month: Nightmail must cost less at every size shown (docs/cheapest.ts).`)
-  const shown = group.filter(row => row.bills[1]!.theirsCents !== null).slice(0, SHOWN_CHEAPEST), left = group.filter(row => !shown.includes(row))
+  const priced = group.filter(row => row.bills[1]!.theirsCents !== null), cut = priced[SHOWN_CHEAPEST - 1]
+  const shown = cut ? priced.filter((row, i) => i < SHOWN_CHEAPEST || mid(row) === mid(cut)) : priced, left = group.filter(row => !shown.includes(row))
   const lowest = Math.min(...shown.map(mid)), lowestAll = Math.min(...group.map(mid))
   if (lowest !== lowestAll || !(ours[1]!.oursUc < BigInt(lowest) * 1_000_000n)) throw new Error('/cheapest-email-api: the headline\'s "from" price must be the lowest of the services compared and above Nightmail\'s.')
   const checked = [...new Set(group.map(row => row.c.offer.checked))].sort()
@@ -48,7 +50,8 @@ export function cheapestEmailApi(): Doc {
   const terms = `${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.`
   const basis = 'One recipient each, nothing received. The others: monthly list prices before tax, each one’s least expensive plan for the size'
   const table = (rows: (typeof group)[number][], note: Text): Table => ({ kind: 'table', numeric: [1, 2, 3], caption: note, head, rows: [nightmailRow, ...rows.map(row)] })
-  const visibleNote: Text = [`${scope} The table shows the ${shown.length} lowest of those with a price read at ${at} emails a month; `, { text: 'the comparisons page', href: '/compare' }, ` has every one. ${claim} ${terms} ${basis}, checked ${when}; each name links to its comparison and the page it was read on.${dash(shown)}`]
+  const rule = `the ${spelled(Math.min(SHOWN_CHEAPEST, priced.length))} lowest, and any priced the same as the last of them`
+  const visibleNote: Text = [`${scope} The table shows the ${shown.length} lowest of those with a price read at ${at} emails a month (${rule}); `, { text: 'the comparisons page', href: '/compare' }, ` has every one. ${claim} ${terms} ${basis}, checked ${when}; each name links to its comparison and the page it was read on.${dash(shown)}`]
   const sections: Section[] = [
     { id: 'apis', title: `Email APIs: a month at ${CHEAPEST_SIZES.map(formatCount).join(', ')} emails`, quiet: true, blocks: [table(shown, visibleNote)] },
     factsSection(),
@@ -57,19 +60,20 @@ export function cheapestEmailApi(): Doc {
   const cited = read(shown), all: Source[] = [...new Map(read(group).map(source => [source.url, source])).values()]
   const copySections: Section[] = [
     { id: 'every', title: `All ${n} email APIs compared, at the same sizes`, blocks: [table(group, [`${scope} ${claim} ${terms} ${basis}, no promotions, read ${when} on each service’s pricing page (its comparison names the page and quotes it).${dash(group)}`])] },
-    ...left.length ? [{ id: 'left', title: 'Not on the page’s table', blocks: [{ kind: 'p' as const, text: [`The page lists the ${shown.length} lowest of those with a price read at ${at} emails a month, so it stays one table on a phone. The others here: ${left.map(r => r.c.offer.vendor).join(', ')}.`] }] }] : [],
+    ...left.length ? [{ id: 'left', title: 'Not on the page’s table', blocks: [{ kind: 'p' as const, text: [`The page lists the ${shown.length} lowest of those with a price read at ${at} emails a month (${rule}), so it stays one table on a phone. The others here: ${left.map(r => r.c.offer.vendor).join(', ')}.`] }] }] : [],
   ]
 
   const path = '/cheapest-email-api', latest = checked.at(-1)!
   const searchTitle = fitWords([`Cheapest email API? ${productName} and ${n} others priced (${month(latest)})`, `Cheapest email API? ${n} priced at three sizes (${month(latest)})`, `Cheapest email API? ${n} compared (${month(latest)})`], 60)
+  // Every form says "a month" and the day or days read; only the words around them shorten.
   const description = fitWords([
     `Email API prices, checked ${when}: ${productName} and the ${n} email-sending APIs it has compared itself with. At ${at} emails a month, ${productName} ${middle.ours}, the others from ${money(lowestAll)}.`,
-    `Email API prices, checked ${when}: ${productName} and the ${n} email-sending APIs it compared itself with. At ${at} emails, ${productName} ${middle.ours}, the others from ${money(lowestAll)}.`,
-    `Email API prices, ${when}: ${productName} and the ${n} email-sending APIs it compared itself with. At ${at} emails, ${productName} ${middle.ours}, the others from ${money(lowestAll)}.`,
+    `Email API prices, checked ${when}: ${productName} and the ${n} email-sending APIs it compared itself with. At ${at} emails a month, ${productName} ${middle.ours}, others from ${money(lowestAll)}.`,
+    `Email API prices, checked ${when}: ${productName} and ${n} email-sending APIs it compared itself with. ${at} emails a month: ${productName} ${middle.ours}, others from ${money(lowestAll)}.`,
   ], 160, 140)
   const doc: Doc = {
     path, title: 'Email API prices', searchTitle, description, h1, answer: [[caption]], sections, questions: [],
-    cardWords: { lines: [`${productName} ${middle.ours}.`, `${shown.length} others from ${money(lowest)}.`], caption: fitWords([`${capital(spelled(shown.length))} of ${n} email APIs compared, ${at} emails a month.`, `${capital(spelled(shown.length))} of ${n} email APIs compared, checked ${dayOf(latest)}.`], 70) },
+    cardWords: { lines: [`${productName} ${middle.ours}.`, `${shown.length} others from ${money(lowest)}.`], caption: fitWords([`${capital(spelled(shown.length))} of ${n} email APIs compared, ${at} emails a month.`, `${capital(spelled(shown.length))} of ${n} email APIs compared, checked ${when}.`], 70) },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] }, lead: scope,
     related: [
       { title: 'Compare', path: '/compare', line: `${productName} beside every email service it is compared with.` },

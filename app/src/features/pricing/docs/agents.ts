@@ -1,6 +1,6 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, money, nightmail, quote, shownSources, type Source } from '../prices.ts'
+import { fitWords, formatCount, money, nightmail, quote, shownSources, type Source } from '../prices.ts'
 import { billAt, ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
@@ -68,7 +68,7 @@ export function emailForAgents(): Doc {
   ], 160, 140)
   return {
     path, title: 'Email for AI agents', searchTitle, description, h1, answer: [[caption]], sections, questions: [],
-    cardWords: { lines: [`${productName} ${middle.ours}.`, `${shown.length} others from ${money(lowest)}.`], caption: fitWords([`${AGENT_SIZES[1]} agent inboxes, ${each}, checked ${dayOf(latest)}.`, `${AGENT_SIZES[1]} agent inboxes, checked ${dayOf(latest)}.`], 70) },
+    cardWords: { lines: [`${productName} ${middle.ours}.`, `${shown.length} others from ${money(lowest)}.`], caption: fitWords([`${AGENT_SIZES[1]} agent inboxes, ${each}, checked ${when}.`, `${AGENT_SIZES[1]} agent inboxes, checked ${when}.`], 70) },
     sources: [], cited, copy: { sections: copySections, questions: [], sources: all, related: [] },
     related: [
       { title: 'Compare', path: '/compare', line: `${productName} beside every email service it is compared with.` },
