@@ -13599,7 +13599,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           || (method === 'post' && [...AUTHENTICATED_CREATES, ...MAILBOX_CREATES].some(route => route.test(concrete)))) routes.set(op.operationId, concrete);
       }
       const expires = ['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendDomainTestEmail', 'createInboundThread', 'replyToInboundThread'];
-      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
+      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'createTopic', 'previewContactImport', 'createCampaignTemplate',
         'uploadTemplateAsset', 'importTemplateImage', 'uploadAttachment', 'uploadAttachmentBytes', 'createCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'createWebhook',
         'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundWebhook',
         'createBillingTopUp', 'createBillingTopUpLink'];
