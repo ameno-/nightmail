@@ -366,9 +366,10 @@ export default {
       if (pathname.startsWith('/assets/') || pathname.startsWith('/og/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
-      // A price page (app/price-pages.ts writes one per comparison), or its Markdown twin: the file, compressed here
-      // (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash) go back as they are.
-      if (pathname === '/pricing' || pathname.startsWith('/compare/')) {
+      // A price page (app/price-pages.ts writes one per comparison, and /compare's), or its Markdown twin: the file,
+      // compressed here (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash)
+      // go back as they are.
+      if (pathname === '/pricing' || pathname === '/compare' || pathname.startsWith('/compare/')) {
         const page = await assets.fetch(request);
         if (page.ok || page.status === 304) return untransformed(page, request);
         if (page.status !== 404) return fastSecure(page);
