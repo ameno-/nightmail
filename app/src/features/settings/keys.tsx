@@ -90,8 +90,8 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   }
   const [initial, setInitial] = useState(() => linked(params))
   const [open, setOpen] = useState(Boolean(initial))
-  // A form opened from a link waits for its domains, so they don't push its fields down as they arrive.
-  const linkedDomains = useDomainOptions(Boolean(initial) && open)
+  // Warm domains while on API keys so Create key opens directly to the API key form without shifting as domains land.
+  const createDomains = useDomainOptions(true)
   const [connecting, setConnecting] = useState(connectLink)
   useEffect(() => {
     if (!params.has('create')) return
@@ -116,16 +116,26 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const editReady = editing && !(editing.access.type === 'workspace' ? editDomains.isPending : editing.access.type === 'inbox' && editInboxes.isPending)
   const actions = (row: Row) => [...editable(row) ? [{ label: 'Edit', onSelect: () => { opener.current = null; setEditing(row.key) } }] : [], { label: revokeLabel(row), destructive: true, onSelect: () => { opener.current = null; setRevoking(row) } }]
 
+  // Hide empty credential-type tabs once counts arrive; keep a tab if its read failed so the user can retry it.
+  const countsReady = !keys.isPending && !agents.isPending && !passwords.isPending
+  const nonEmpty = keyTypes.filter(item => item.value !== 'all' && (
+    item.value === 'api' ? Boolean(keys.error || keys.data?.length)
+      : item.value === 'agent' ? Boolean(agents.error || agents.data?.length)
+      : Boolean(passwords.error || passwords.data?.length)
+  ))
+  const visibleTabs = !countsReady ? [...keyTypes].filter(item => item.value !== 'app') : nonEmpty.length > 1 ? [keyTypes[0], ...nonEmpty] : []
+  const activeType: KeyTypeFilter = visibleTabs.some(item => item.value === type) ? type : 'all'
+
   // API keys page by cursor; agents and app passwords aren't paginated, so they join the first page. Each source fails
   // on its own: the others still list, with one error and a retry for every source that failed.
   const firstPage = !cursor
   const sources = [
-    ...(type === 'all' || type === 'api' ? [{ query: keys }] : []),
-    ...((type === 'all' && firstPage) || type === 'agent' ? [{ query: agents }] : []),
-    ...((type === 'all' && firstPage) || type === 'app' ? [{ query: passwords }] : []),
+    ...(activeType === 'all' || activeType === 'api' ? [{ query: keys }] : []),
+    ...((activeType === 'all' && firstPage) || activeType === 'agent' ? [{ query: agents }] : []),
+    ...((activeType === 'all' && firstPage) || activeType === 'app' ? [{ query: passwords }] : []),
   ]
   const failed = sources.filter(source => source.query.error)
-  const keysShown = type === 'all' || type === 'api'
+  const keysShown = activeType === 'all' || activeType === 'api'
   // Addresses name a limited key's scope; without them the key would list IDs, so it waits for them (not their failure).
   // A previous page or filter kept as placeholder counts as loading, so its rows never show live Revoke buttons as this page's.
   const listLoading = sources.some(source => source.query.isPending || source.query.isPlaceholderData) || keysShown && addresses.isPending
@@ -140,9 +150,9 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const active = showRevoked ? '' : 'active '
   const empty = failed.length ? <EmptyState title="Nothing else to show" />
     : cursor && keysShown ? <EmptyState title="No keys on this page" />
-    : type === 'api' ? <EmptyState title={`No ${active}API keys`} />
-    : type === 'agent' ? <EmptyState title="No agents connected" action={<Button onClick={() => setConnecting(true)}>Connect your agent</Button>} />
-    : type === 'app' ? <EmptyState title="No app passwords" />
+    : activeType === 'api' ? <EmptyState title={`No ${active}API keys`} />
+    : activeType === 'agent' ? <EmptyState title="No agents connected" action={<Button onClick={() => setConnecting(true)}>Connect your agent</Button>} />
+    : activeType === 'app' ? <EmptyState title="No app passwords" />
     : <EmptyState title={`No ${active}keys`} />
 
   const keyAccess = (key: ApiKey): { first: ReactNode; second: string } => {
@@ -185,14 +195,17 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
   const [nameColumn, typeColumn, accessColumn, prefixColumn, lastColumn, actionsColumn] = settingsColumns.keys
 
   return <div className="stack">
-    <PageHeader title="API keys" actions={<><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /><Button variant="primary" onClick={() => { setInitial(undefined); setOpen(true) }} data-analytics="keys/create">Create key</Button></>} />
+    <PageHeader title="API keys" actions={<Button variant="primary" onClick={() => { setInitial(undefined); setOpen(true) }} data-analytics="keys/create">Create key</Button>} />
     <div className="keys-sections">
       <section className="section stack" aria-label="Keys">
-        <Tabs label="Type" value={type} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={[...keyTypes]} />
+        <div className="data-toolbar keys-toolbar">
+          {visibleTabs.length > 0 && <Tabs label="Type" value={activeType} disabled={!countsReady} onValueChange={value => { setType(value as KeyTypeFilter); pagination.reset() }} items={visibleTabs} />}
+          <div className="keys-inactive"><Checkbox label="Show inactive" checked={showRevoked} onCheckedChange={checked => { setShowRevoked(checked); pagination.reset() }} /></div>
+        </div>
         {!listFailed && <DataTable className="keys-table ui-table--two-line" loading={listLoading} skeletonRows={3} rows={rows} rowKey={row => row.id} onRowClick={view} empty={empty}
           columns={[
             { ...nameColumn, render: row => <TwoLines nested={row.kind === 'token'} first={name(row).first} second={name(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{name(row).first}</span> },
-            ...(type === 'all' ? [{ ...typeColumn, render: (row: Row) => typeName[row.kind] }] : []),
+            ...(activeType === 'all' ? [{ ...typeColumn, render: (row: Row) => typeName[row.kind] }] : []),
             { ...accessColumn, render: row => <TwoLines first={access(row).first} second={access(row).second} />, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{access(row).first} · {access(row).second}</span> },
             { ...prefixColumn, render: row => row.kind === 'key' ? <code>{row.key.prefix}</code> : <span className="muted">—</span> },
             { ...lastColumn, render: used, cardRender: row => <span className={row.kind === 'token' ? 'keys-nested' : undefined}>{cardLast(row)}</span> },
@@ -203,7 +216,7 @@ function ApiKeys({ connectLink }: { connectLink: boolean }) {
         {keysShown && !listLoading && (!keys.error || pagination.page > 1) && <Pagination page={pagination.page} pageSize={100} nextCursor={keys.data?.nextCursor} onPageChange={next => pagination.onPageChange(next, keys.data?.nextCursor)} />}
       </section>
     </div>
-    {open && (!initial || !linkedDomains.isPending) && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} onConnectAgent={() => setConnecting(true)} />}
+    {open && !createDomains.isPending && <CreateKeyDialog open onOpenChange={setOpen} initial={initial} onCreated={setSecret} />}
     <ConnectAgentDialog open={connecting} onOpenChange={setConnecting} />
     <SecretDialog secret={secret?.secret ?? null} title={secret?.title ?? 'Key created'} description={secret?.description} onClose={() => setSecret(null)}>{secret?.sendExample && <KeySendExample apiKey={secret.secret} />}{secret?.agent && <McpKeySetup secret={secret.secret} env={apiKeyEnv} />}{secret?.mail && <MailSettings username={secret.mail.username} imap={secret.mail.imap} smtp={secret.mail.smtp} />}</SecretDialog>
     <KeyDetails row={viewing} fields={viewing ? details(viewing) : []} onClose={() => setViewing(null)} onRevoke={row => { setViewing(null); setRevoking(row) }} onEdit={key => { setViewing(null); setEditing(key) }} />

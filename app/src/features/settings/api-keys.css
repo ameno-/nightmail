@@ -21,13 +21,14 @@
 /* An agent's short-lived tokens sit under it, indented. */
 .keys-cell--nested, .keys-nested { padding-left: var(--space-16); }
 
-/* Create key, first step: the three types as rows that go straight to their form. */
-.keys-types { display: flex; flex-direction: column; gap: var(--space-4); margin: 0 calc(-1 * var(--focus-reach)); padding: 0; list-style: none; }
-.keys-type { display: flex; align-items: center; gap: var(--space-12); width: 100%; padding: var(--space-12) var(--focus-reach); border: 0; border-radius: var(--radius-sm); background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; transition: background-color 100ms ease-out; }
-.keys-type > svg { flex: none; margin-left: auto; color: var(--color-faint); }
-.keys-type__label { font-weight: var(--font-weight-bold); }
-.keys-type:focus-visible { background: var(--color-hover); }
-@media (hover: hover) and (pointer: fine) { .keys-type:hover { background: var(--color-hover); transition-duration: 0ms; } }
+/* Toolbar: type tabs on the left (only when 2+ credential types exist), Show inactive on the right. */
+.keys-toolbar { align-items: center; gap: var(--space-8) var(--space-16); min-height: var(--control-height); }
+.keys-inactive { margin-left: auto; }
+@media (max-width: 640px) { .keys-toolbar { flex-wrap: wrap; } .keys-inactive { margin-left: 0; } }
+/* Secondary links under the API key form for SMTP login and app password. */
+.keys-alt { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-4) var(--space-8); margin-top: var(--space-16); font-size: var(--text-sm); }
+.keys-alt > .cluster { gap: var(--space-4); }
+@media (pointer: coarse), (max-width: 899px) { .keys-alt .ui-button { min-height: 44px; } }
 .keys-form-note { margin: 0; font-size: var(--text-sm); }
 /* What this key can do: the choices above in plain lines, closed until asked for. */
 .keys-can ul { display: flex; flex-direction: column; gap: var(--space-6); margin: 0; padding-left: var(--space-16); font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
