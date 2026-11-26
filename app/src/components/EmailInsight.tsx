@@ -7,6 +7,7 @@ import { usePhone } from '../lib/media'
 import { useTheme } from '../lib/theme'
 import { AddressText } from './AddressText'
 import { EmailFrame, FRAME_WIDTH, frameDocument, frameKey, frameSize, shownWidth, useFrameSizes, type FrameDevice, type FrameScheme } from './EmailFrame'
+import { HeldImages } from './EmailPreview'
 import { Alert, Button, Disclosure, DropdownMenu, ErrorText, Sheet, Skeleton, SkeletonText, Tooltip } from './ui'
 import './email-insight.css'
 
@@ -341,7 +342,9 @@ const useClientDocs = (previews: ClientPreview[] | undefined) => useMemo(() => n
  * tall as the email. `wide`: where there is room, the phone width beside the desktop one. `compact` (a phone or tablet): one row of controls, the view picked from a sheet, no captions;
  * a phone always shows phone width. `loading`: the draft's HTML is on its way.
  */
-export function EmailViews({ source, previewSource, check, original, loading = false, fill = false, wide = false, compact = false, toolbarEnd }: { source: InsightSource; previewSource: PreviewSource | null; check?: Check; original?: OriginalEmail; loading?: boolean; fill?: boolean; wide?: boolean; compact?: boolean; toolbarEnd?: ReactNode }) {
+// `heldImages`: the email as sent has remote images held back (useEmailDocument's `held`): its view says so, with Load
+// images, in the row over the frames, where nothing moves when the line comes or goes (on a phone, over the frame).
+export function EmailViews({ source, previewSource, check, original, loading = false, fill = false, wide = false, compact = false, toolbarEnd, heldImages }: { source: InsightSource; previewSource: PreviewSource | null; check?: Check; original?: OriginalEmail; loading?: boolean; fill?: boolean; wide?: boolean; compact?: boolean; toolbarEnd?: ReactNode; heldImages?: { why: string; onLoad: () => void } | null }) {
   const phone = usePhone()
   const id = useId()
   const [room, canvas] = useRoom()
@@ -430,6 +433,7 @@ export function EmailViews({ source, previewSource, check, original, loading = f
   }
   const showDevice = !(slots.some(slot => slot.device === 'desktop') && slots.some(slot => slot.device === 'mobile'))
   const showFrames = frameView && !failedQuery && !missing
+  const held = Boolean(heldImages) && view === 'original' && showFrames
   const listing = hasHtml && !clientsReady && (loading || Boolean(previewSource))
   const offTheme = themed ? undefined : view === 'original' && hasHtml ? 'This email doesn’t opt in to dark mode. Pick a client to see it dark.' : 'Dark mode depends on the client', offWidth = sourceView || !hasHtml ? 'Width applies to previews' : undefined
   const sourceName = view === 'html' ? 'HTML source' : view === 'headers' ? 'Headers' : 'Plain text'
@@ -459,9 +463,11 @@ export function EmailViews({ source, previewSource, check, original, loading = f
       {!compact && <div className="ev-captions">
         {sourceView ? <Caption label={sourceName} />
           : view === 'original' && original && !hasHtml ? null
+          : held && columns.length > 0 && columns.every(column => column.view === 'original') ? <HeldImages why={heldImages!.why} onLoad={heldImages!.onLoad} style={{ width: widths.reduce((sum, width) => sum + width, 0) + GAP * (columns.length - 1) }} />
           : showFrames && columns.map((column, index) => { const about = describe(column); return <Caption key={column.key} label={about.label} width={widths[index]} issues={about.issues} classic={about.classic}
             open={Boolean(about.key && openIssues[about.key])} onOpenChange={open => setOpenIssues(state => ({ ...state, [about.key!]: open }))} panel={`${id}-${column.key}`} /> })}
       </div>}
+      {compact && held && <HeldImages why={heldImages!.why} onLoad={heldImages!.onLoad} />}
       <div ref={canvas} className={fill ? 'ev-canvas ui-scroll-fade' : 'ev-canvas'}>
         {sourceView && original ? <pre className="email-source">{view === 'html' ? original.html || 'No HTML part.' : view === 'headers' ? original.headers || 'No headers stored.' : original.text || 'No plain-text part.'}</pre>
           : view === 'original' && original && !hasHtml ? <pre className="email-text" data-scheme={shownTheme}>{original.text || 'This email has no body.'}</pre>

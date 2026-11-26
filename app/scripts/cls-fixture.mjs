@@ -403,6 +403,16 @@ const RECEIPT_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta nam
 <tr><td style="padding:0 32px 28px;font-size:12px;line-height:18px;color:#71717a">Northwind, 120 Harbor Street, Portland, OR 97209</td></tr>
 </table></td></tr></table></body></html>`;
 const JUNK_SUBJECT = 'FINAL NOTICE: YOU ARE A WINNER!!!';
+const IMAGE_SUBJECT = 'Your order is on its way';
+const IMAGE_HTML = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${IMAGE_SUBJECT}</title></head><body style="margin:0;background:#f4f4f5">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5"><tr><td align="center" style="padding:32px 16px">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" style="width:100%;max-width:560px;background:#ffffff;border-radius:8px;font-family:Arial,Helvetica,sans-serif;color:#18181b">
+<tr><td style="padding:28px 32px 8px"><img src="https://cdn.northwind.example/brand/northwind-logo.png" width="132" height="32" alt="Northwind" style="display:block;border:0"></td></tr>
+<tr><td style="padding:16px 32px 4px;font-size:22px;font-weight:bold">Your order is on its way</td></tr>
+<tr><td style="padding:8px 32px 24px;font-size:15px;line-height:1.6;color:#3f3f46">Order NW-20418 left our warehouse this morning and should arrive on Friday. You can follow it from your account at any time.</td></tr>
+<tr><td style="padding:0 32px 32px;font-size:13px;line-height:1.6;color:#71717a">Northwind · 120 Harbor Street, Portland, OR 97209</td></tr>
+</table></td></tr></table></body></html>`;
+const IMAGE_TEXT = 'Your order is on its way\n\nOrder NW-20418 left our warehouse this morning and should arrive on Friday. You can follow it from your account at any time.\n\nNorthwind · 120 Harbor Street, Portland, OR 97209';
 const JUNK_HTML = `<html><head><style>.wrap{display:flex;gap:12px}.hero{background:#fde047}</style></head><body>
 <div class="wrap"><div class="hero"><img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGN4KOsBAAMpAUf+vsNwAAAAAElFTkSuQmCC" width="600" height="420"></div></div>
 <p style="font-size:1px;color:#ffffff">you are a winner you are a winner you are a winner you are a winner</p>
@@ -795,7 +805,7 @@ export async function seed(fx) {
     ('ws_northwind','user_sam','support','sgr_fixture','Nightmail support','support','support.view','workspace','ws_northwind','{"ticket":"T-1042","member":"user_sam"}',NULL,'req_fixture_support',NULL,NULL,false,now()-interval '2 days',now()+interval '1 year')`);
   const email = await mail(db, 'ws_northwind', 30);
   // The newest receipt as a well-made transactional email, and a junk-like one sent a minute ago (EmailInsight's two cases).
-  // Neither links a remote image: the sent-mail preview loads those, and the gate allows no external request.
+  // Neither links a remote image (the gate allows no external request; the one email that does is below).
   await db.query('UPDATE sending_emails SET snapshot = snapshot || $2::jsonb WHERE id = $1', [email, JSON.stringify({ kind: 'transactional', fromName: 'Northwind', html: RECEIPT_HTML, text: RECEIPT_TEXT })]);
   // Its delivery line: handed to SES, accepted and delivered, as the dispatcher and SES feedback record them.
   for (const [type, ms] of [['dispatch_attempt', 0], ['accepted', 400], ['delivery', 2100]]) await db.query(`INSERT INTO sending_email_events(id,workspace_id,email_id,type,provider_id,external_id,data,simulated,created_at)
@@ -804,6 +814,12 @@ export async function seed(fx) {
   await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
     VALUES ($1,'ws_northwind','${REGION}','fixture','deals@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '1 minute')`,
     [junkEmail, JUNK_SUBJECT, JSON.stringify({ kind: 'marketing', region: REGION, subject: JUNK_SUBJECT, html: JUNK_HTML, attachments: [] })]);
+  // A shipping notice whose only image is a remote logo: its preview holds the logo back (a quiet tile at its size, never
+  // fetched) under the line that offers Load images, which the gate never presses.
+  const imageEmail = rid('email');
+  await db.query(`INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at)
+    VALUES ($1,'ws_northwind','${REGION}','fixture','orders@mail.northwind.example','["customer@example.net"]','[]','[]',$2,$3::jsonb,false,'delivered','provider-'||$1,3,now()-interval '2 minutes')`,
+    [imageEmail, IMAGE_SUBJECT, JSON.stringify({ kind: 'transactional', region: REGION, subject: IMAGE_SUBJECT, fromName: 'Northwind', html: IMAGE_HTML, text: IMAGE_TEXT, attachments: [] })]);
   // A bounced and a delayed email, each with what its page says under the delivery (features/logs/reason.ts): the
   // receiving server's reply as SES feedback stores it, and for the delay SES's type and its retry deadline.
   const failed = {};
@@ -1091,7 +1107,7 @@ export async function seed(fx) {
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile,receiving) VALUES('mcp_at_cls_live','https://account.anoma.ly','user_kai','user_kai','opencode','ws_live','{read,send,manage}',now()+interval '1 day',0,'work',true)");
   fx.liveKey = agent.secret;
   return {
-    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
+    ...newsletterIds, mcp, deviceCode: 'BCDF-GHJK', abuseCluster, restricted: 'ws_harbor', email, junkEmail, imageEmail, bouncedEmail: failed.bounced, delayedEmail: failed.delayed, receivedEmail: 'msg_northwind_invoice', threadEmail: thread.email, threadReceived: thread.received, supportThread: thread.thread, domain: nw.id, sendingDomain: sendingDomain.id, stuckDomain: stuckDomain.id, correctDomain: correctDomain.id, noDnsDomain: noDnsDomain.id, wildcardDomain: wildcardDomain.id, parkedDomain: parkedDomain.id, builtinDomain: builtinDomain.id, address: A.support.id, inbox, inboundWebhook: crmId,
     webhook: hook.webhook?.id ?? hook.id, list: list.id, contact: contact.id, campaign: campaign.id, readyCampaign: readyCampaign.id, rampCampaign: rampCampaign.id, template: template.id ?? template.template?.id, segment: segment.id, propertySegment: propertySegment.id, supportConversation, supportEmail, supportAction, continueConversation, continueMessage,
   };
 }

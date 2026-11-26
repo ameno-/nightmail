@@ -5,6 +5,7 @@ import { auditInsert, operatorContext, operatorRequired } from './audit.js';
 import { signedUrl } from './inbound-threads.js';
 import { htmlToPlain, replyText } from './mailbox-store.js';
 import { boundedHtmlFragment } from './bounded-html.js';
+import { plainText } from './plain-text.js';
 import { mutate, operatorActor, type OperatorIdentity } from './operator.js';
 import type { OperatorRole } from './operator-identity.js';
 import { supportPlatformOnly } from './support-conversations.js';
@@ -87,6 +88,8 @@ const Message = z.object({
   heldReason: z.enum(HELD_REASONS).nullable().describe('A held agent answer: paused (staff took over after it was written), gate (the output check held it), access (the customer’s access shrank), closed (the conversation ended first), earlier (written by an earlier build).'),
   files: z.array(z.object({ id: z.string(), name: z.string().nullable(), type: z.string().nullable(), size: z.number().int().nullable() })).describe('The attachments (screenshots held by the support platform), with their names when it sent them.'),
   email: EmailSource.nullable(),
+  draft: z.object({ outcome: z.enum(['sent', 'edited', 'replaced', 'discarded']), by: z.object({ userId: z.string(), name: z.string().nullable() }), at: z.string(), replyId: z.string().nullable() }).nullable()
+    .describe('A held agent answer staff decided: sent as it was, edited and sent, replaced by a fresh reply (replyId: the staff reply), or discarded.'),
   deliveredAt: z.string().nullable(), at: z.string(),
 }).openapi('SupportInboxMessage');
 const Event = z.object({ id: z.string(), kind: z.enum(EVENT_KINDS), by: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('The staff member, or null for the support platform or the customer.'),
@@ -234,9 +237,11 @@ type EmailRow = { id: string; subject: string; from_address: string; from_name: 
   attachments: { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }[]; clean: boolean };
 type MessageRow = { id: string; seq: number; author: z.infer<typeof Author>; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[];
   staff_user_id: string | null; staff_name: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
-  email?: EmailRow | null; delivered_at: string | null; created_at: string };
+  email?: EmailRow | null; draft_outcome: 'sent' | 'edited' | 'replaced' | 'discarded' | null; draft_by: string | null; draft_by_name: string | null; draft_at: string | null; draft_reply: string | null;
+  delivered_at: string | null; created_at: string };
 const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, delivery,
-  held_reason, files, delivered_at::text AS delivered_at, created_at::text AS created_at`;
+  held_reason, files, draft_outcome, draft_by, (SELECT name FROM nightmail_users WHERE id = draft_by) AS draft_by_name, draft_at::text AS draft_at, draft_reply,
+  delivered_at::text AS delivered_at, created_at::text AS created_at`;
 /** The stored email behind a customer message (`m`), for the conversation page: its text up to EMAIL_TEXT_LIMIT and its attachments' metadata. */
 const emailOf = sql`(SELECT json_build_object('id', mm.id, 'subject', mm.subject, 'from_address', mm.from_address, 'from_name', mm.from_name,
     'to', (SELECT coalesce(jsonb_agg(x), '[]') FROM (SELECT x FROM jsonb_array_elements(mm."to") x LIMIT 10) t(x)), 'cc', (SELECT coalesce(jsonb_agg(x), '[]') FROM (SELECT x FROM jsonb_array_elements(mm.cc) x LIMIT 10) t(x)),
@@ -257,7 +262,8 @@ const message = (m: MessageRow): z.infer<typeof Message> => {
   return { id: m.id, seq: m.seq, author: m.author, kind: m.kind, text: m.text, tools: m.tools, attachments: m.attachments,
     staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name } : null, delivery: m.delivery, heldReason: m.held_reason ?? null,
     files: m.attachments.map(id => { const f = named.get(id); return { id, name: f?.name ?? null, type: f?.type ?? null, size: f?.size ?? null }; }),
-    email: m.email ? email(m.email) : null, deliveredAt: isoTime(m.delivered_at), at: isoTime(m.created_at)! };
+    email: m.email ? email(m.email) : null, deliveredAt: isoTime(m.delivered_at), at: isoTime(m.created_at)!,
+    draft: m.draft_outcome && m.draft_by ? { outcome: m.draft_outcome, by: { userId: m.draft_by, name: m.draft_by_name }, at: isoTime(m.draft_at)!, replyId: m.draft_reply } : null };
 };
 /** Records what happened to a conversation (support_events), in the caller's statement or transaction. */
 const event = (id: string, kind: (typeof EVENT_KINDS)[number], userId: string | null, details: Record<string, unknown> = {}) =>
@@ -513,6 +519,7 @@ export function registerSupportInbox(app: App) {
         conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id) AS page,
         (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.delivery,
           m.held_reason, m.files, CASE WHEN m.source_message_id IS NOT NULL THEN ${emailOf} END AS email,
+          m.draft_outcome, m.draft_by, (SELECT name FROM nightmail_users WHERE id = m.draft_by) AS draft_by_name, m.draft_at::text AS draft_at, m.draft_reply,
           m.delivered_at::text AS delivered_at, m.created_at::text AS created_at FROM support_messages m LEFT JOIN nightmail_users su ON su.id = m.staff_user_id
           WHERE m.conversation_id = conv.id ORDER BY m.seq DESC LIMIT ${TRANSCRIPT_LIMIT}) m) AS messages,
         (SELECT coalesce(json_agg(e ORDER BY e.at, e.n), '[]') FROM (
@@ -580,30 +587,89 @@ export function registerSupportInbox(app: App) {
       details: messageId ? { message: messageId } : undefined, ticketRef: id, internal: true })));
   }
 
+  /**
+   * Queues a staff reply in the caller's change: refused on a closed conversation or while the support platform is not
+   * pulling replies; it pauses the agent as this staff member, undoes Done, and its author has read everything up to it.
+   */
+  async function queueReply(tx: DbExecutor, operator: OperatorIdentity, conversation: Locked, id: string, text: string) {
+    if (conversation.status === 'closed') throw closedConversation();
+    if (conversation.channel === 'agent_feedback') throw noAgent();
+    if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
+      throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
+    const messageId = newMessageId();
+    if (conversation.agent_state === 'active') await tx.execute(event(id, 'paused', operator.userId, { by: 'staff', reply: true }));
+    const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (
+        UPDATE support_conversations SET messages = messages + 1, last_message_at = now(), agent_state = 'paused', paused_by = ${operator.userId},
+          paused_at = CASE WHEN agent_state = 'paused' AND paused_by = ${operator.userId} THEN paused_at ELSE now() END, done_at = NULL, done_by = NULL
+        WHERE id = ${id} RETURNING messages), seen AS (${markRead(operator.userId, id, sql`(SELECT messages FROM c)`)})
+      INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, delivery) SELECT ${messageId}, ${id}, c.messages, 'staff', 'reply', ${text}, ${operator.userId}, 'queued' FROM c
+      RETURNING ${messageColumns}`);
+    return message(row!);
+  }
+  const wakeAfter = (c: Ctx, id: string) => c.env.deferNudge ? c.env.deferNudge(async () => { await wakeSupport(c.env.config, id); }) : wakeSupport(c.env.config, id);
+
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/replies', operationId: 'operatorReplySupportConversation',
     description: 'Reply to the customer as staff (the operator role). The reply is queued for the support platform to deliver, the agent is paused until someone hands back, and the support platform is woken. Needs an Idempotency-Key: repeating it queues nothing new. Refused while the support platform is not pulling replies.',
     request: { params: ConversationParam, headers: z.object({ 'idempotency-key': z.string().min(1).max(200) }), body: json(z.object({ text: z.string().trim().min(1).max(8000) }).strict()) },
     responses: { 201: response(Message), ...errors } }), async c => {
     const id = c.req.valid('param').id, body = c.req.valid('json');
     const reply = await change(c, id, 'support.reply', async (tx, operator, conversation) => {
-      if (conversation.status === 'closed') throw closedConversation();
-      if (conversation.channel === 'agent_feedback') throw noAgent();
-      if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
-        throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
-      const messageId = newMessageId();
-      if (conversation.agent_state === 'active') await tx.execute(event(id, 'paused', operator.userId, { by: 'staff', reply: true }));
-      // The reply is new (it undoes Done), and its author has read everything up to it.
-      const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (
-          UPDATE support_conversations SET messages = messages + 1, last_message_at = now(), agent_state = 'paused', paused_by = ${operator.userId},
-            paused_at = CASE WHEN agent_state = 'paused' AND paused_by = ${operator.userId} THEN paused_at ELSE now() END, done_at = NULL, done_by = NULL
-          WHERE id = ${id} RETURNING messages), seen AS (${markRead(operator.userId, id, sql`(SELECT messages FROM c)`)})
-        INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, delivery) SELECT ${messageId}, ${id}, c.messages, 'staff', 'reply', ${body.text}, ${operator.userId}, 'queued' FROM c
-        RETURNING ${messageColumns}`);
-      return { result: message(row!), message: messageId };
+      const queued = await queueReply(tx, operator, conversation, id, body.text);
+      return { result: queued, message: queued.id };
     }, body);
-    if (c.env.deferNudge) c.env.deferNudge(async () => { await wakeSupport(c.env.config, id); });
-    else await wakeSupport(c.env.config, id);
+    await wakeAfter(c, id);
     return c.json(reply, 201);
+  });
+
+  // A held agent answer: staff send it (as the agent wrote it, or edited) as their own reply, or discard it. Either is
+  // decided once; what goes out is a staff reply, delivered like any other. Sent as written, it reads as the agent's own
+  // answers do on that channel: plain text by email (the support platform sends the agent's email answers so), Markdown
+  // in the chat panel. One held because the person's access shrank, or written by an earlier build, may hold account
+  // details they can no longer see: it is never sent, as written or edited. Staff write a fresh reply, which replaces it.
+  const DraftParams = ConversationParam.extend({ messageId: z.string().regex(MESSAGE_ID) });
+  const FRESH_REPLY: Record<string, string> = { access: 'This person’s access changed after the agent wrote this answer', earlier: 'An earlier version of the agent wrote this answer' };
+  async function heldDraft(tx: DbExecutor, id: string, messageId: string) {
+    // answered: a reply written after it reached the customer (a staff reply, or an agent answer not held or failed).
+    const { rows: [draft] } = await tx.execute<{ text: string; held: boolean; outcome: string | null; reason: string | null; answered: boolean }>(sql`SELECT m.text, m.author = 'agent' AND m.delivery = 'held' AS held,
+        m.draft_outcome AS outcome, m.held_reason AS reason, EXISTS (SELECT 1 FROM support_messages o WHERE o.conversation_id = m.conversation_id AND o.seq > m.seq AND o.kind IS DISTINCT FROM 'note'
+          AND ((o.author = 'staff' AND o.delivery IN ('queued','sent')) OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed'))) AS answered
+      FROM support_messages m WHERE m.id = ${messageId} AND m.conversation_id = ${id} FOR UPDATE OF m`);
+    if (!draft?.held) notFound('Held answer');
+    if (draft!.outcome) throw new ApiError(409, 'SUPPORT_DRAFT_DECIDED', 'This held answer was already sent or discarded.');
+    return draft!;
+  }
+  app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/drafts/{messageId}/send', operationId: 'operatorSendSupportDraft',
+    description: 'Send a held agent answer to the customer as a staff reply (the operator role): as the agent wrote it (by email as plain text, as the agent’s email answers are; in chat as written), or with text (edited). One held because the person’s access shrank, or written by an earlier build, is never sent: send a fresh reply as text (not its text), which replaces it; anything else is 409 SUPPORT_DRAFT_FRESH_REPLY. It is queued, pauses the agent and wakes the support platform like any staff reply, and the held answer records who sent or replaced it. Needs an Idempotency-Key. Refused once decided, on a closed conversation, or while the support platform is not pulling replies.',
+    request: { params: DraftParams, headers: z.object({ 'idempotency-key': z.string().min(1).max(200) }), body: { ...json(z.object({ text: z.string().trim().min(1).max(8000).optional().describe('The edited text, or the fresh reply; omit to send it as the agent wrote it.') }).strict()), required: false } },
+    responses: { 201: response(Message), ...errors } }), async c => {
+    const { id, messageId } = c.req.valid('param'), body: { text?: string } = c.req.valid('json') ?? {};
+    const reply = await change(c, id, 'support.draft_send', async (tx, operator, conversation) => {
+      const draft = await heldDraft(tx, id, messageId), written = draft.text.trim(), asWritten = conversation.channel === 'email' ? plainText(written) : written;
+      const fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
+      if (fresh && (body.text === undefined || body.text === written || body.text === asWritten))
+        throw new ApiError(409, 'SUPPORT_DRAFT_FRESH_REPLY', `${fresh}, so it can’t be sent. Write a fresh reply.`, 'text');
+      // As written, it would answer an earlier moment than a reply the customer already has: staff edit it, or discard it.
+      if (draft.answered && (body.text === undefined || body.text === written || body.text === asWritten))
+        throw new ApiError(409, 'SUPPORT_DRAFT_STALE', 'A newer reply already reached the customer, so this held answer can’t be sent as written. Edit it, or discard it.', 'text');
+      const text = body.text ?? asWritten;
+      if (text.length > 8000) throw new ApiError(422, 'VALIDATION_FAILED', 'This answer is longer than a reply can be: edit it before sending.', 'text');
+      const queued = await queueReply(tx, operator, conversation, id, text);
+      const outcome = fresh ? 'replaced' : body.text === undefined || body.text === written || body.text === asWritten ? 'sent' : 'edited';
+      await tx.execute(sql`UPDATE support_messages SET draft_outcome = ${outcome}, draft_by = ${operator.userId}, draft_at = now(), draft_reply = ${queued.id} WHERE id = ${messageId}`);
+      return { result: queued, message: queued.id };
+    }, body);
+    await wakeAfter(c, id);
+    return c.json(reply, 201);
+  });
+  app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/drafts/{messageId}/discard', operationId: 'operatorDiscardSupportDraft',
+    description: 'Discard a held agent answer (the operator role): it is never sent, and records who discarded it. Repeats safely with an Idempotency-Key.',
+    request: { params: DraftParams, headers: changeHeaders }, responses: { 200: response(Message), ...errors } }), async c => {
+    const { id, messageId } = c.req.valid('param');
+    return c.json(await change(c, id, 'support.draft_discard', async (tx, operator) => {
+      await heldDraft(tx, id, messageId);
+      const { rows: [row] } = await tx.execute<MessageRow>(sql`UPDATE support_messages SET draft_outcome = 'discarded', draft_by = ${operator.userId}, draft_at = now() WHERE id = ${messageId} RETURNING ${messageColumns}`);
+      return { result: message(row!), message: messageId };
+    }), 200);
   });
 
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/pause', operationId: 'operatorPauseSupportAgent',

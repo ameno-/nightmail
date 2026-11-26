@@ -1,8 +1,8 @@
-import { useLayoutEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useLocation } from 'react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, ChevronRight, Lock } from 'lucide-react'
-import { Button, ConfirmDialog, CopyButton, Dialog, ErrorState, Input, Select, Skeleton, StatusBadge, MutationError } from '../../components/ui'
+import { Button, ConfirmDialog, CopyButton, Dialog, ErrorState, Input, Select, Skeleton, StatusBadge, SubNav, MutationError } from '../../components/ui'
 import { FocusPicker } from '../../components/FocusPicker'
 import { focusLabels, useSaveFocus, type WorkspaceFocus } from '../../data/focus'
 import { useApiDef, useApiMutation, useSession, useWorkspaceAccess } from '../../data/context'
@@ -30,16 +30,16 @@ import { connectionTitle } from './key-labels'
 import { hostedHosts, productName } from '../../../../api/src/brand'
 import { PostalAddressDialog, postalAddressLine } from '../../components/PostalAddress'
 
-// Hosted settings: a grouped rail and one section at a time. Settings are rows, the label on the left and the
+// Hosted settings: the grouped list of sections (SubNav, as Docs has) and one section at a time. Settings are rows, the label on the left and the
 // control on the right, each 53px tall so values loading in never move anything. Old links still land: #workspace on
 // General, and #usage (Plan & usage, now part of Billing) on Billing.
 type SectionKey = 'general' | 'members' | 'sending' | 'webhooks' | 'activity' | 'billing' | 'account'
 const moved: Record<string, SectionKey> = { workspace: 'general', usage: 'billing' }
-// Members see every section in the rail: owner and admin ones carry a lock and open a short explanation instead of
+// Members see every section in the list: owner and admin ones carry a lock and open a short explanation instead of
 // controls they can't use, so nothing is silently missing.
 const groups: { title: string; items: { key: SectionKey; label: string; admin?: boolean }[] }[] = [
   { title: 'Workspace', items: [{ key: 'general', label: 'General' }, { key: 'members', label: 'Members', admin: true }, { key: 'sending', label: 'Sending', admin: true }, { key: 'webhooks', label: 'Webhooks', admin: true }, { key: 'activity', label: 'Activity', admin: true }, { key: 'billing', label: 'Billing' }] },
-  { title: 'You', items: [{ key: 'account', label: 'Account' }] },
+  { title: 'Personal', items: [{ key: 'account', label: 'Account' }] },
 ]
 
 export function HostedSettings() {
@@ -47,7 +47,7 @@ export function HostedSettings() {
   const { canAdminister } = useWorkspaceAccess()
   const identity = useSession()?.identity
   // Sending is a connected AWS account's section (its role, its health, Disconnect), and the way to one where that is
-  // offered. Hosted mail has nothing to set there, so its rail has no Sending and an old #sending link opens General.
+  // offered. Hosted mail has nothing to set there, so its list has no Sending and an old #sending link opens General.
   const ownAws = identity?.connection?.kind === 'byo' || identity?.byo === true
   const shown = groups.map(group => ({ ...group, items: group.items.filter(item => item.key !== 'sending' || ownAws) }))
   const items = shown.flatMap(group => group.items)
@@ -56,21 +56,10 @@ export function HostedSettings() {
   const section = items.find(item => item.key === (moved[requested] ?? requested))?.key ?? 'general'
   const locked = (item: typeof items[number]) => !canAdminister && Boolean(item.admin)
   const current = items.find(item => item.key === section)!
-  // On a phone the rail is one scrolling row: the selected section's link scrolls into it (the page itself doesn't move).
-  const rail = useRef<HTMLDivElement>(null)
-  useLayoutEffect(() => {
-    const row = rail.current, link = row?.querySelector<HTMLElement>('a[aria-current="page"]')
-    if (!row || !link || row.scrollWidth <= row.clientWidth) return
-    const box = row.getBoundingClientRect(), at = link.getBoundingClientRect()
-    if (at.left < box.left || at.right > box.right) row.scrollLeft += at.left - box.left - (box.width - at.width) / 2
-  }, [section])
-  return <div className="hosted-settings">
-    <nav className="settings-rail" aria-label="Settings">
-      <h1 className="settings-rail__title">Settings</h1>
-      <div ref={rail} className="settings-rail__groups">{shown.map(group => <div key={group.title} className="settings-rail__group">
-        {group.items.map(item => <Link key={item.key} to={`/settings#${item.key}`} replace aria-current={item.key === section ? 'page' : undefined} data-locked={locked(item) || undefined} title={locked(item) ? 'Owners and admins only' : undefined}>{item.label}{locked(item) && <Lock size={12} aria-label="Owners and admins only" />}</Link>)}
-      </div>)}</div>
-    </nav>
+  // A section's link replaces the history entry: the sections are one page.
+  return <SubNav className="hosted-settings" title="Settings" label="Settings sections" replace
+    groups={shown.map(group => ({ title: group.title, items: group.items.map(item => ({ to: `/settings#${item.key}`, label: item.label, current: item.key === section,
+      ...locked(item) && { title: 'Owners and admins only', text: `${item.label} (owners and admins)`, trail: <Lock size={12} aria-label="Owners and admins only" /> } })) }))}>
     {/* Keyed, so switching sections fades the new one in. */}
     <div key={section} className="hosted-settings__content" data-section={section}>
       {locked(current) ? <AdminOnly title={current.label} />
@@ -84,7 +73,7 @@ export function HostedSettings() {
           {section === 'account' && <AccountRows />}
         </>}
     </div>
-  </div>
+  </SubNav>
 }
 
 // A row is its label and its value or control, with no caption: a row that needs one gets a clearer label or value, or

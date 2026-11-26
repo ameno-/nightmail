@@ -255,7 +255,9 @@
    light), 16px inside, 8px from the stream, no rule; its rows' hover and selection take the frame's solid steps. The
    stream: 32px rows on their quiet band under a sticky 28px head bar, its text 12px inside the bar. */
 .ui-split.logs-split { column-gap: var(--space-24); padding: var(--space-4) var(--space-16) var(--space-16); }
-.ui-split.logs-split > .ui-split__rail { min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: var(--space-4) 0; background: none; }
+/* The rail scrolls, so it clips: it reaches 6px past its column on each side (and pads the same) so a row's hover and
+   selection, which sit 6px outside the dot and the count, are drawn whole. */
+.ui-split.logs-split > .ui-split__rail { min-height: 0; overflow-y: auto; overscroll-behavior: contain; margin-inline: calc(-1 * var(--space-6)); padding: var(--space-4) var(--space-6); background: none; }
 .ui-split.logs-split > .ui-split__main { padding-left: 0; }
 .logs-split .ui-facets { gap: var(--space-12); padding-top: 0; }
 .logs-split .ui-facet { height: 26px; }
