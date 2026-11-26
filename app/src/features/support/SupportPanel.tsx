@@ -45,7 +45,8 @@ export function SupportPanel({ mode, open, onClose, onUnread, resume }: { mode: 
     if (mode === 'demo') return createDemoTransport({ firstName: identity?.name?.trim().split(/\s+/)[0] || 'Ryan', workspace: { id: workspaceId, name: workspaceName ?? 'Acme' } })
     const origin = supportOrigin()
     return origin ? createSocketTransport({ origin, userId, workspaceId, resume }) : createUnavailableTransport()
-  }, { read: () => loadDraft(mode, userId, workspaceId), write: draft => saveDraft(mode, userId, workspaceId, draft) }), [mode, userId, workspaceId])
+  }, { read: () => loadDraft(mode, userId, workspaceId), write: draft => saveDraft(mode, userId, workspaceId, draft),
+    parked: { read: () => loadDraft(mode, userId, workspaceId, 'parked'), write: text => saveDraft(mode, userId, workspaceId, text, 'parked') } }), [mode, userId, workspaceId])
   const state = useSyncExternalStore(store.subscribe, store.getSnapshot)
   const panel = useRef<HTMLElement>(null), input = useRef<HTMLTextAreaElement>(null)
   useEffect(() => {

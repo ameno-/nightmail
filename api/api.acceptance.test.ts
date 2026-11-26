@@ -12395,6 +12395,12 @@ describe('Hosted MCP OAuth and tools', () => {
       assert.equal((await inbox()).some(c => c.id === id), false);
       ok(await file('Still bouncing today.'), 201);
       assert.equal((await inbox()).some(c => c.id === id), true);
+      // Review of #960: the same words again after Done are not stored twice, but come back to Needs you all the same.
+      ok(await send('POST', `/v1/operator/support-inbox/${id}/done`, session(operator), {}));
+      assert.equal((await inbox()).some(c => c.id === id), false);
+      ok(await file('Still bouncing today.'), 201);
+      assert.equal((await inbox()).some(c => c.id === id), true, 'The same words after Done reach Needs you.');
+      assert.equal((await db.query('SELECT messages FROM support_conversations WHERE id = $1', [id])).rows[0].messages, 3);
 
       // The support platform reads what it needs to adopt it, through the binding only.
       const filed = await platform.filedConversation(id);
@@ -12422,6 +12428,94 @@ describe('Hosted MCP OAuth and tools', () => {
       error(await file('One too many'), 429, 'SUPPORT_RATE_LIMITED');
       assert.equal((await db.query(`SELECT count(*)::int AS n FROM support_messages WHERE text = 'One too many'`)).rows[0].n, 0);
     });
+  });
+
+  test('Support chat panel: a short drop waits for the chat, a refusal files at once, and words Nightmail could not take stay in the saved draft', async t => {
+    // The Help panel's store (app/src/features/support/store.ts) over a scripted transport, with the clock mocked.
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const hadWindow = 'window' in globalThis;
+    if (!hadWindow) Object.assign(globalThis, { window: new EventTarget() });
+    t.after(() => { if (!hadWindow) delete (globalThis as { window?: unknown }).window; });
+    // Loaded by a path the API's type check doesn't follow: the dashboard's modules are checked by its own build.
+    const panel = (name: string) => import(`../app/src/features/support/${name}.ts`);
+    const [{ SupportStore }, { FileError }] = await Promise.all([panel('store'), panel('protocol')]);
+    type Store = { setDraft(text: string): void; send(): boolean; dispose(): void; getSnapshot(): { messages: Json[]; draft: string; fileProblem: string | null } };
+    const ticket = { conversationId: `conv_${'a'.repeat(26)}`, messageId: `msg_${'b'.repeat(16)}`, replyTo: 'ren@example.com' };
+    const settle = () => new Promise(resolve => setImmediate(resolve));
+    const transport = (file: (text: string) => Promise<typeof ticket>) => {
+      const listeners = new Set<(event: Json) => void>(), sent: Json[] = [], filed: string[] = [], connects: Json[] = [];
+      let open = false;
+      return { kind: 'live' as const, uploads: false, sent, filed, connects,
+        emit: (event: Json) => { for (const listener of listeners) listener(event); },
+        reconnected: () => { open = true; for (const event of [{ type: 'connection', state: 'open' }, { type: 'server', message: { v: 1, seq: 0, type: 'history', messages: [], pending: { consent: null, ticket: null } } }]) for (const listener of listeners) listener(event); },
+        connect: (options?: Json) => { connects.push(options ?? {}); },
+        send: (message: Json) => { if (!open) return false; sent.push(message); return true; },
+        file: async (text: string) => { filed.push(text); return file(text); },
+        allowContent: async () => {}, readAction: async () => { throw new Error('unused'); }, decideAction: async () => { throw new Error('unused'); },
+        restart: () => {}, upload: async () => ({ id: 'att_unused' }), dispose: () => {},
+        subscribe: (listener: (event: Json) => void) => { listeners.add(listener); return () => { listeners.delete(listener); }; } };
+    };
+    const saved = () => { const slots = { draft: '', parked: '' }; return { slots, store: { read: () => slots.draft, write: (draft: string) => { slots.draft = draft; }, parked: { read: () => slots.parked, write: (text: string) => { slots.parked = text; } } } }; };
+    const say = (store: Store, text: string) => { store.setDraft(text); assert.equal(store.send(), true); };
+    const working = (store: Store) => store.getSnapshot().messages.some(m => m.role === 'assistant' && m.streaming);
+
+    // A short drop (a deploy, a phone changing networks): the message waits with "Working on it…", tries the chat again
+    // at once, and goes through the chat when it is back, never filed.
+    const blip = transport(async () => ticket), blipStore = <Store>new SupportStore(blip as never, saved().store);
+    blip.emit({ type: 'connection', state: 'offline' });
+    say(blipStore, 'Is sending paused?');
+    assert.deepEqual([blip.filed.length, working(blipStore), blip.connects.some(c => c.create === true)], [0, true, true]);
+    t.mock.timers.tick(7000); await settle();
+    assert.equal(blip.filed.length, 0, 'Not filed within the wait.');
+    blip.reconnected();
+    assert.deepEqual(blip.sent.map(m => m.text), ['Is sending paused?']);
+    t.mock.timers.tick(10_000); await settle();
+    assert.equal(blip.filed.length, 0, 'Not filed once the chat took it.');
+    blipStore.dispose();
+
+    // Still down after the wait: filed, shown as filed.
+    const down = transport(async () => ticket), downStore = <Store>new SupportStore(down as never, saved().store);
+    down.emit({ type: 'connection', state: 'offline' });
+    say(downStore, 'Sending is stuck.');
+    t.mock.timers.tick(8000); await settle();
+    assert.deepEqual(down.filed, ['Sending is stuck.']);
+    assert.ok(downStore.getSnapshot().messages.some(m => m.filed && m.filedId === ticket.messageId) && !working(downStore));
+    downStore.dispose();
+
+    // A refusal is no blip: filed at once.
+    const refused = transport(async () => ticket), refusedStore = <Store>new SupportStore(refused as never, saved().store);
+    refused.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    say(refusedStore, 'How do I connect my agent?'); await settle();
+    assert.deepEqual(refused.filed, ['How do I connect my agent?']);
+    refusedStore.dispose();
+
+    // Nightmail itself out of reach: the words go back into the box and its saved draft, so a reload keeps them, and they
+    // go, unchanged, as soon as Nightmail answers.
+    let reachable = false;
+    const fileOrNot = async () => { if (!reachable) throw new FileError('unreachable'); return ticket; };
+    const lost = transport(fileOrNot), drafts = saved(), lostStore = <Store>new SupportStore(lost as never, drafts.store);
+    lost.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    say(lostStore, 'Our domain stopped verifying.'); await settle();
+    assert.deepEqual([lostStore.getSnapshot().fileProblem, lostStore.getSnapshot().draft, drafts.slots.draft, drafts.slots.parked], ['waiting', 'Our domain stopped verifying.', 'Our domain stopped verifying.', 'Our domain stopped verifying.']);
+    assert.equal(lostStore.getSnapshot().messages.some(m => m.role === 'user'), false, 'Not shown as sent.');
+    lostStore.dispose();
+    const reload = transport(fileOrNot), reloaded = <Store>new SupportStore(reload as never, drafts.store);
+    reload.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    assert.deepEqual([reloaded.getSnapshot().draft, reloaded.getSnapshot().fileProblem], ['Our domain stopped verifying.', 'waiting'], 'A reload keeps the words, and the promise.');
+    reachable = true;
+    t.mock.timers.tick(15_000); await settle();
+    assert.deepEqual(reload.filed, ['Our domain stopped verifying.']);
+    assert.deepEqual([reloaded.getSnapshot().draft, drafts.slots.draft, drafts.slots.parked, reloaded.getSnapshot().fileProblem], ['', '', '', null]);
+    assert.ok(reloaded.getSnapshot().messages.some(m => m.filed));
+    // Words the person changed meanwhile are theirs to send: never sent on their own.
+    reachable = false;
+    const edited = transport(fileOrNot), editedDrafts = saved(), editedStore = <Store>new SupportStore(edited as never, editedDrafts.store);
+    edited.emit({ type: 'connection', state: 'unavailable', reason: 'NO_HANDOFF' });
+    say(editedStore, 'First words.'); await settle();
+    editedStore.setDraft('First words, and more.');
+    reachable = true; t.mock.timers.tick(15_000); await settle();
+    assert.deepEqual([edited.filed, editedDrafts.slots.parked, editedStore.getSnapshot().fileProblem], [['First words.'], '', null]);
+    reloaded.dispose(); editedStore.dispose();
   });
 
   test('Support request logs: Workers Logs lines of the conversation’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {

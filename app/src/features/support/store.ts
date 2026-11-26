@@ -54,8 +54,9 @@ export interface ChatState {
   announcement: string
   /** Something went to the team as a ticket in this panel: where they reply by email. */
   ticket: { replyTo: string | null } | null
-  /** Why the latest message couldn't be filed: past the hourly limit with earlier messages with the team (capped) or none
-   *  (capped_first), both put back in the message box; or Nightmail couldn't be reached (waiting: kept and tried again). */
+  /** Why the latest message couldn't be filed, each put back in the message box (and its saved draft): past the hourly
+   *  limit with earlier messages with the team (capped) or none (capped_first); or Nightmail couldn't be reached
+   *  (waiting: sent again, unchanged, as soon as it can). */
   fileProblem: 'capped' | 'capped_first' | 'waiting' | null
 }
 
@@ -138,6 +139,9 @@ function actionError(error: unknown) {
   return error instanceof Error && error.message ? error.message : `Couldn’t reach ${productName}. Try again.`
 }
 
+/** Where the message box survives a reload; `parked` there marks words Nightmail couldn't take yet. */
+export type DraftStore = { read: () => string; write: (draft: string) => void; parked?: { read: () => string; write: (text: string) => void } }
+
 export class SupportStore {
   private state: ChatState = initial()
   private listeners = new Set<() => void>()
@@ -153,17 +157,23 @@ export class SupportStore {
   private unanswered: { clientMessageId: string; text: string } | null = null
   private fileTimer: ReturnType<typeof setTimeout> | null = null
   private filingNow = false
-  private readonly online = () => { if (this.state.fileProblem === 'waiting') void this.fileAll() }
+  /** The words put back in the box because Nightmail couldn't be reached: sent again while the box still holds exactly them. */
+  private parked: string | null = null
+  private readonly online = () => { if (this.parked) this.retryParked() }
   /** Local previews of sent screenshots by attachment ID, so history after a reconnect still shows them. */
   private previews = new Map<string, string>()
   private readonly unsubscribe: () => void
   private disposed = false
 
-  constructor(readonly transport: SupportTransport, private readonly draftStore?: { read: () => string; write: (draft: string) => void }) {
+  constructor(readonly transport: SupportTransport, private readonly draftStore?: DraftStore) {
     this.unsubscribe = transport.subscribe(event => this.handle(event))
     window.addEventListener('online', this.online)
     const savedDraft = (draftStore?.read() ?? '').slice(0, MAX_MESSAGE)
     if (savedDraft) this.state = { ...this.state, draft: savedDraft }
+    // After a reload: words Nightmail couldn't take are still in the box, and go as soon as they can.
+    const parked = draftStore?.parked?.read() ?? ''
+    if (parked && parked === savedDraft.trim()) { this.parked = parked; this.state = { ...this.state, fileProblem: 'waiting' }; this.fileTimer = setTimeout(() => this.retryParked(), FILE_RETRY_MS) }
+    else if (parked) draftStore?.parked?.write('')
   }
   readonly subscribe = (listener: () => void) => { this.listeners.add(listener); return () => { this.listeners.delete(listener) } }
   readonly getSnapshot = () => this.state
@@ -194,7 +204,22 @@ export class SupportStore {
   setVisible(visible: boolean) { this.visible = visible; if (visible && this.state.unread) this.set({ unread: false }); if (visible) this.rereadFailed() }
   start() { if (this.state.connection === 'idle' && !this.state.hello) this.transport.connect() }
   reconnect() { this.transport.connect({ create: this.outbox.length > 0 || this.pendingHumanRequest }) }
-  setDraft(draft: string) { const next = draft.slice(0, MAX_MESSAGE); this.draftStore?.write(next); this.set({ draft: next }) }
+  setDraft(draft: string) {
+    const next = draft.slice(0, MAX_MESSAGE)
+    this.draftStore?.write(next)
+    // Changed by the person: no longer sent on its own, and no longer what "kept and goes as soon as it can" promised.
+    if (this.parked !== null && next.trim() !== this.parked) { this.park(null); this.set({ draft: next, fileProblem: this.state.fileProblem === 'waiting' ? null : this.state.fileProblem }); return }
+    this.set({ draft: next })
+  }
+  private park(text: string | null) { this.parked = text; this.draftStore?.parked?.write(text ?? '') }
+  /** Sends the words Nightmail couldn't take, while the box still holds exactly them: through the chat when it is back, else filed. */
+  private retryParked() {
+    this.cancelFiling()
+    if (this.parked === null || this.disposed) return
+    if (this.state.draft.trim() !== this.parked) { this.park(null); return }
+    // Not sendable yet (a screenshot still uploading): try again later.
+    if (!this.send()) this.fileTimer = setTimeout(() => this.retryParked(), FILE_RETRY_MS)
+  }
   /** Whether the message box can be sent: something to send, and every screenshot uploaded. */
   sendable() { const { draft, attachments } = this.state; return (draft.trim() !== '' || attachments.length > 0) && attachments.every(item => item.state === 'ready') }
   /** Sends the message box. It goes in the log at once, with the reply's status line under it; before the conversation
@@ -204,19 +229,24 @@ export class SupportStore {
     const text = this.state.draft.trim(), attached = this.state.attachments
     const ids = attached.map(item => item.attachmentId!), clientMessageId = id()
     const message = { clientMessageId, text, ...ids.length ? { attachments: ids } : {} }
-    // The chat can't take it now (refused, or its connection lost): it goes to the team as a ticket instead.
-    const down = this.down()
-    const sent = !down && this.socketSynced && this.transport.send({ type: 'user.message', ...message })
+    // Words Nightmail couldn't take go now, as this message (or were replaced by it): their retry is over.
+    if (this.parked !== null) { this.park(null); this.cancelFiling() }
+    // A refused chat files it at once, as does a lost connection once a ticket is open here; a lost connection otherwise
+    // may be a blip (a deploy, a phone changing networks): it tries again now and waits FILE_AFTER_MS ("Working on it…")
+    // before filing, so a few seconds never turn an AI chat into a staff ticket.
+    const fileNow = this.state.connection === 'unavailable' || (this.state.connection === 'offline' && this.state.ticket !== null)
+    const sent = !this.down() && this.socketSynced && this.transport.send({ type: 'user.message', ...message })
     if (!sent) {
       this.outbox.push(message)
-      if (!down) this.transport.connect({ create: true })
+      if (!fileNow) this.transport.connect({ create: true })
+      if (!fileNow && this.state.connection === 'offline') this.scheduleFiling(FILE_AFTER_MS)
     } else { this.lastUserMessage = message; this.unanswered = message }
     attached.forEach(item => this.previews.set(item.attachmentId!, item.url))
     this.draftStore?.write('')
     this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + ids.length,
       messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: text ? [{ kind: 'text', text }] : [], images: attached.map(({ url, name }) => ({ url, name })), streaming: false, restored: false, local: !sent },
-        ...down || state.messages.some(item => item.local && item.role === 'assistant') ? [] : [placeholder(clientMessageId)]] }))
-    if (down) void this.fileAll()
+        ...fileNow || state.messages.some(item => item.local && item.role === 'assistant') ? [] : [placeholder(clientMessageId)]] }))
+    if (fileNow) void this.fileAll()
     return true
   }
   /** The chat can't take a message now: it refused (unavailable) or its connection is lost (offline). */
@@ -261,11 +291,14 @@ export class SupportStore {
             this.setDraft([...back.map(item => item.text).filter(Boolean), this.state.draft].filter(Boolean).join('\n\n'))
             break
           }
-          if (fromOutbox) this.outbox.unshift(next)
-          else this.unanswered = next
-          this.update(next.clientMessageId, item => ({ ...item, filing: false }))
-          this.set({ fileProblem: 'waiting' })
-          this.fileTimer = setTimeout(() => { this.fileTimer = null; void this.fileAll() }, FILE_RETRY_MS)
+          // Nightmail couldn't be reached (or this browser is offline): the words go back into the box and its saved
+          // draft, so a reload keeps them too, and are sent again, unchanged, as soon as they can.
+          const back = [next, ...this.outbox.splice(0)], ids = new Set(back.map(item => item.clientMessageId))
+          const draft = [...back.map(item => item.text).filter(Boolean), this.state.draft].filter(Boolean).join('\n\n')
+          this.park(draft.trim())
+          this.set(state => ({ messages: state.messages.filter(item => !ids.has(item.id)), fileProblem: 'waiting' }))
+          this.setDraft(draft)
+          this.fileTimer = setTimeout(() => this.retryParked(), FILE_RETRY_MS)
           break
         }
       }
@@ -283,7 +316,7 @@ export class SupportStore {
         ...state.messages.some(message => message.streaming && message.role === 'assistant') ? [] : [placeholder(next.clientMessageId)]] }))
     }
     if (this.pendingHumanRequest && this.transport.send({ type: 'human.request' })) this.pendingHumanRequest = false
-    if (this.state.fileProblem === 'waiting' && !this.outbox.length) this.set({ fileProblem: null })
+    if (this.parked !== null) this.retryParked()
   }
   /** Drops the reply placeholder: no answer is coming for it (a refusal, an error, the end of the conversation). */
   private settle(failed?: string) {
@@ -533,7 +566,7 @@ export class SupportStore {
 
 // One store per account and workspace (and mode). Switching either starts a new conversation, as the protocol asks.
 let current: { key: string; store: SupportStore } | null = null
-export function supportStore(key: string, create: () => SupportTransport, draft?: { read: () => string; write: (draft: string) => void }) {
+export function supportStore(key: string, create: () => SupportTransport, draft?: DraftStore) {
   if (current?.key !== key) { current?.store.dispose(); current = { key, store: new SupportStore(create(), draft) } }
   return current.store
 }

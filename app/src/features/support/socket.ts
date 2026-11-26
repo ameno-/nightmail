@@ -15,22 +15,23 @@ class StartError extends Error { constructor(readonly status: number, readonly c
 // its token expires. Keyed by user and workspace in sessionStorage; cleared on sign-out or account change.
 type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string }
 const storageKey = (userId: string, workspaceId: string) => `bane.support.conversation.${userId}.${workspaceId}`
-const draftKey = (mode: 'demo' | 'live', userId: string, workspaceId: string) => `bane.support.draft.${mode}.${userId}.${workspaceId}`
+// `parked`: the words in the box Nightmail couldn't take yet (store.ts), sent again while the box still holds exactly them.
+const draftKey = (mode: 'demo' | 'live', userId: string, workspaceId: string, slot: 'draft' | 'parked' = 'draft') => `bane.support.${slot}.${mode}.${userId}.${workspaceId}`
 /** Forgets saved conversations and drafts: every account's (a sign-out), or only legacy slots from earlier releases. */
 export function forgetSaved(all: boolean) {
   try {
     for (const key of Object.keys(sessionStorage)) {
-      if (all && /^bane\.support\.(conversation|last|draft)\./.test(key)) sessionStorage.removeItem(key)
+      if (all && /^bane\.support\.(conversation|last|draft|parked)\./.test(key)) sessionStorage.removeItem(key)
       else if (!all && (/^bane\.support\.last\./.test(key) || (/^bane\.support\.conversation\./.test(key) && !/^bane\.support\.conversation\.[^.]+\.[^.]+$/.test(key)))) sessionStorage.removeItem(key)
     }
   } catch { /* Session-only. */ }
 }
-export function loadDraft(mode: 'demo' | 'live', userId: string, workspaceId: string): string {
-  try { return sessionStorage.getItem(draftKey(mode, userId, workspaceId)) ?? '' } catch { return '' }
+export function loadDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, slot: 'draft' | 'parked' = 'draft'): string {
+  try { return sessionStorage.getItem(draftKey(mode, userId, workspaceId, slot)) ?? '' } catch { return '' }
 }
-export function saveDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, draft: string) {
+export function saveDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, draft: string, slot: 'draft' | 'parked' = 'draft') {
   try {
-    const key = draftKey(mode, userId, workspaceId)
+    const key = draftKey(mode, userId, workspaceId, slot)
     if (draft) sessionStorage.setItem(key, draft)
     else sessionStorage.removeItem(key)
   } catch { /* Session-only. */ }
