@@ -1237,7 +1237,7 @@ export class SupportConversation extends DurableObject<Env> {
     // Daily caps (review M5): this person's turns and everyone's, before any model call.
     const allowed = await this.turnAllowed(meta);
     if (!allowed.ok) {
-      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? `${productName} support is answering a lot of questions today. Email ${addresses.support} and the team will reply.` : `You’ve reached today’s limit for support answers. Email ${addresses.support} and the team will reply.`, retryable: false });
+      this.broadcast({ type: 'error', code: 'BUDGET_EXHAUSTED', message: allowed.global ? `${productName} support is answering a lot of questions today. Email ${addresses.support} and the team will reply.` : allowed.workspace ? `Your workspace has reached today’s limit for support answers. Email ${addresses.support} and the team will reply.` : `You’ve reached today’s limit for support answers. Email ${addresses.support} and the team will reply.`, retryable: false });
       return;
     }
     // Fail closed before any model call: without the gateway key there is no agent, and the panel says so.
@@ -1564,10 +1564,10 @@ export class SupportConversation extends DurableObject<Env> {
 
   /**
    * The daily turn caps, before any model call. Signed-in chats and verified customer emails draw from the customer
-   * reserve (`global:turns`). General (non-member) emails draw from their own per-domain and daily budget so they can
-   * never exhaust the customer reserve.
+   * reserve (`global:turns`), within their person's cap and their workspace's. General (non-member) emails draw from their
+   * own per-domain and daily budget so they can never exhaust the customer reserve.
    */
-  private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false): Promise<{ ok: boolean; global: boolean }> {
+  private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false): Promise<{ ok: boolean; global: boolean; workspace?: true }> {
     const cap = limits(this.env), email = meta.channel === 'email';
     if (!(await count(this.env, `${await this.person(meta)}:${email ? 'email_turns' : 'turns'}`, email ? cap.turnsPerEmailSender : cap.turnsPerPerson)).ok) return { ok: false, global: false };
     if (email && !verifiedEmail) {
@@ -1577,6 +1577,8 @@ export class SupportConversation extends DurableObject<Env> {
       return { ok: true, global: false };
     }
     if (email && verifiedEmail && meta.userId && !(await count(this.env, `user:${meta.userId}:turns`, cap.turnsPerPerson)).ok) return { ok: false, global: false };
+    // The workspace the conversation is about (a chat's, or the one a verified email chose): all its people together.
+    if (meta.workspace && !(await count(this.env, `workspace:${meta.workspace.id}:turns`, cap.turnsPerWorkspace)).ok) return { ok: false, global: false, workspace: true };
     if (!(await count(this.env, 'global:turns', cap.turnsPerDay)).ok) { await alertOnce(this.env, 'turns', cap.turnsPerDay); return { ok: false, global: true }; }
     return { ok: true, global: false };
   }

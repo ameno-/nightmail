@@ -226,7 +226,7 @@ const baseEnv = (overrides: Record<string, unknown> = {}) => ({
   TRIAGE: { type: 'durable-object' as const, worker: 'support', exportName: 'SupportTriage' },
   INTAKE_ADDRESSES: text('abuse@dev.bane.mx,privacy@dev.bane.mx,legal@dev.bane.mx'), BANE_INTAKE_WEBHOOK_SECRET: text(INTAKE_SECRET), BANE_INTAKE_INBOX_KEY: text(`bane_mbx_${'8'.repeat(64)}`),
   // The main suite runs many conversations as one person in one day: caps high here, tested low in their own instance.
-  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_TURNS_PER_EMAIL_DOMAIN: text('1000'), LIMIT_TURNS_GENERAL_PER_DAY: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS: text('200'),
+  LIMIT_TICKETS_PER_PERSON: text('50'), LIMIT_TURNS_PER_PERSON: text('1000'), LIMIT_TURNS_PER_WORKSPACE: text('1000'), LIMIT_TURNS_PER_EMAIL_SENDER: text('1000'), LIMIT_TURNS_PER_EMAIL_DOMAIN: text('1000'), LIMIT_TURNS_GENERAL_PER_DAY: text('1000'), LIMIT_MAIL_PER_SENDER: text('200'), LIMIT_CONFIRMS_PER_ADDRESS: text('20'), LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS: text('200'),
   DB: { type: 'd1' as const, id: 'support-test' },
   UPLOADS: { type: 'r2' as const, name: 'support-test-uploads' },
   BANE: { type: 'worker' as const, worker: 'fake-bane', exportName: 'SupportPlatform' },
@@ -785,6 +785,33 @@ describe('support Worker', () => {
       assert.equal((await chat.until(f => f.type === 'message.end' && f.text === 'OK.', 60_000)).text, 'OK.');
       chat.ws.close();
     } finally { await isolated.dispose(); }
+  }, 180_000);
+
+  test('turn caps: 40 a day per person and 80 per workspace by default, 1,500 in all; past its workspace\u2019s cap a chat gets the plain message with the support address, and another workspace is still answered', async () => {
+    const { DEFAULT_LIMITS } = await import('../src/limits.js');
+    assert.deepEqual([DEFAULT_LIMITS.turnsPerDay, DEFAULT_LIMITS.turnsPerPerson, DEFAULT_LIMITS.turnsPerWorkspace], [1500, 40, 80]);
+    const capped = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TURNS_PER_WORKSPACE: text('2') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(capped);
+      const ask = async (user: string, workspace: string, id: string) => {
+        const chat = await chatIn(capped, handoff(user, false, workspace));
+        chat.send({ type: 'user.message', clientMessageId: id, text: 'How do I add a domain?' });
+        const frame = await chat.until(f => (f.type === 'message.end' && f.text === 'OK.') || (f.type === 'error' && f.code === 'BUDGET_EXHAUSTED'), 60_000);
+        chat.ws.close();
+        return frame;
+      };
+      // Two people of one workspace share its cap; a third answer that day is refused for the workspace, not the person.
+      assert.equal((await ask('usr_wcap_a', 'ws_acme', 'wcap_1')).text, 'OK.');
+      assert.equal((await ask('usr_wcap_b', 'ws_acme', 'wcap_2')).text, 'OK.');
+      const refused = await ask('usr_wcap_c', 'ws_acme', 'wcap_3');
+      assert.deepEqual([refused.type, refused.retryable], ['error', false]);
+      assert.equal(refused.message, `Your workspace has reached today\u2019s limit for support answers. Email ${addresses.support} and the team will reply.`);
+      // Another workspace's people are still answered.
+      assert.equal((await ask('usr_wcap_d', 'ws_other', 'wcap_4')).text, 'OK.');
+      const db = await capped.getD1Database('DB', 'support');
+      assert.deepEqual((await db.prepare("SELECT key, n FROM daily_counters WHERE key LIKE 'workspace:%' ORDER BY key").all()).results, [{ key: 'workspace:ws_acme:turns', n: 3 }, { key: 'workspace:ws_other:turns', n: 1 }]);
+    } finally { await capped.dispose(); }
   }, 180_000);
 
   test('chat ingress limits queued messages before persisting them', async () => {

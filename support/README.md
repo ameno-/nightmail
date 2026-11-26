@@ -172,7 +172,7 @@ Nightmail records a `message.received` event for every message an address receiv
 ## Limits and retention
 
 - **Daily caps** (`src/limits.ts`; override each with a `LIMIT_*` var). The budgets are separate, so one can't starve another:
-  - model turns: 1,500 a day, 100 per chat person, and 5 per email sender address (`LIMIT_TURNS_PER_EMAIL_SENDER`); a verified email's turn counts against its person's 100 as well;
+  - model turns: 1,500 a day, 40 per chat person, 80 per workspace (all its people together, `LIMIT_TURNS_PER_WORKSPACE`), and 5 per email sender address (`LIMIT_TURNS_PER_EMAIL_SENDER`); a verified email's turn counts against its person's 40 and its workspace's 80 as well;
   - tickets: a 60-a-day reserve for verified customers, 40 a day per intake address for everyone else, and 3 per customer or DMARC-passing sender;
   - mail: 20 a day per DMARC-passing sender, 30 per address for all unauthenticated mail together (a spoofed From can't spread across keys), of which at most 3 per From address at support@ (`LIMIT_MAIL_UNAUTHENTICATED_PER_ADDRESS`, so a forged address can't use up the sign-in replies of every sender without DMARC), and 2,000 in total.
 
