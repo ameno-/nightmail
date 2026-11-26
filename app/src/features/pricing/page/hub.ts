@@ -2,6 +2,7 @@
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
 import { dayOf, formatCount, type Comparison } from '../prices.ts'
 import { billAt, GROUPS, ORDERED } from './comparison.ts'
+import { factsSection } from './facts.ts'
 import type { CardWords } from '../../../../link-card.ts'
 import { plain, type PageDoc, type Table, type Text } from './shape.ts'
 
@@ -39,12 +40,12 @@ function table(spec: (typeof TABLES)[number]): Table {
 export function hubDoc(): PageDoc {
   const modified = ORDERED.map(c => c.offer.checked).sort().at(-1)!
   const counts = GROUPS.map(group => `${ORDERED.filter(c => c.focus === group.focus).length} ${group.noun}`)
-  const sections = GROUPS.map(group => ({ id: group.id, title: group.title, blocks: TABLES.filter(spec => spec.group === group.id).map(table) }))
+  const sections = [...GROUPS.map(group => ({ id: group.id, title: group.title, blocks: TABLES.filter(spec => spec.group === group.id).map(table) })), factsSection()]
   return {
     path: '/compare', title: 'Compare', searchTitle: 'Email API alternatives and pricing compared',
     description: `${productName} beside ${ORDERED.length} email services, developer APIs, newsletters and agent inboxes: a month at three sizes on each, read ${dayOf(modified)}.`,
     h1: [[`${productName} costs less`], [`than each of these ${ORDERED.length}.`]],
-    answer: [[`At every size shown · checked ${dayOf(modified).replaceAll(' ', '\u00a0')}`]],
+    answer: [[`At every size shown ·\u00a0checked\u00a0${dayOf(modified).replaceAll(' ', '\u00a0')}`]],
     sections,
     questions: [], sources: [], related: [],
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }],
@@ -59,7 +60,7 @@ export function hubMarkdown(doc = hubDoc()): string {
   const cell = (text: Text) => text.map(part => typeof part === 'string' ? part : 'href' in part ? `[${part.text}](${publicOrigin}${part.href}.md)` : part.ours).join('').replaceAll('|', '\\|')
   return [
     `# ${(typeof doc.h1 === 'string' ? [[doc.h1]] : doc.h1).map(plain).join(' ')}`, `> ${doc.answer.map(plain).join(' ')}`, `Canonical page: ${publicOrigin}${doc.path}`,
-    ...doc.sections.flatMap(section => [`## ${section.title}`, ...section.blocks.flatMap(block => block.kind !== 'table' ? [] : [plain(block.caption), [
+    ...doc.sections.flatMap(section => [`## ${section.title}`, ...section.blocks.flatMap(block => block.kind === 'list' ? [block.items.map(item => `- ${plain(item)}`).join('\n')] : block.kind !== 'table' ? [] : [plain(block.caption), [
       `| Service | ${block.head.slice(1).join(' | ')} |`, `| --- | ${block.head.slice(1).map(() => '---:').join(' | ')} |`, ...block.rows.map(row => `| ${row.cells.map(cell).join(' | ')} |`),
     ].join('\n')])]),
     'Each comparison names the pages its prices were read on. Product names belong to their owners and only identify their products. Nightmail isn’t affiliated with them.',

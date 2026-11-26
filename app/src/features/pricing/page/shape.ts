@@ -5,8 +5,9 @@ import type { Source } from '../prices.ts'
 // A public price page as one piece of data, which page.tsx draws: the shape the other price pages are made in (the
 // seo/pricing-pages branch's docs/doc.ts, Doc), so a comparison (comparison.ts), the comparisons' index (hub.ts) and those
 // pages (a vendor's pricing, alternatives, ranked lists) are all drawn by the same renderer. The same field names and
-// types, structurally: a Doc from there is a PageDoc here. One addition: h1 may be lines (the verdict's two), in which a
-// Nightmail figure is marked (Inline's `ours`), so the renderer can set Nightmail's line apart; a plain string still is one.
+// types, structurally: a Doc from there is a PageDoc here. Two additions: h1 may be lines (the verdict's two), in which a
+// Nightmail figure is marked (Inline's `ours`), so the renderer can set Nightmail's line apart (a plain string still is
+// one); and a section may be quiet (its title for screen readers only).
 // Once doc.ts lands, this file becomes `export type { … } from '../docs/doc.ts'` with that addition made there.
 
 /** A run of words: text, a link (a site path, or a vendor's https page), or a Nightmail figure marked with the usage it
@@ -23,7 +24,8 @@ export type Table = {
   numeric: number[]
 }
 export type Block = { kind: 'p'; text: Text } | { kind: 'list'; items: Text[] } | Table
-export type Section = { id: string; title: string; blocks: Block[] }
+/** quiet: its title is for screen readers only (the price table straight under the verdict: page.tsx). */
+export type Section = { id: string; title: string; blocks: Block[]; quiet?: boolean }
 /** A question the page answers, word for word as the page shows it and its FAQPage carries it (pricing/questions.ts). */
 export type Question = { id: string; question: string; answer: string }
 export type PageDoc = {

@@ -48,12 +48,23 @@
 .pp-verdict { margin: 0; font: 700 clamp(22px, calc(min(100vw - 40px, 720px) / (var(--chars, 14) * .62)), 64px) / 1.06 var(--font-mono); letter-spacing: -.01em; text-transform: uppercase; text-wrap: balance; }
 .pp-line { display: block; }
 .pp-line[data-lead] { color: var(--ours); }
+/* The verdict as the television draws its type (home/tv/tv.tsx, the tube's shader, FRAG), still and in CSS, only on
+   these two lines: the phosphor's glow round the letters (BLOOM .50, tinted .85 .92 1), the colour a tape smears to
+   the right, which only coloured type carries (BLEED .016 of the screen; here .05em, so the figures stay sharp at
+   320 px), and the scanlines over them (SCAN .30 deep, three device pixels a line). Paint only: the box, the words and
+   what a screen reader hears are the heading's own, painted with the page, and nothing moves. */
+.pp-verdict { position: relative; }
+.pp-line { text-shadow: 0 0 .3em rgb(217 235 255 / 26%); }
+.pp-line[data-lead] { text-shadow: .05em 0 rgb(157 174 255 / 38%), .1em 0 rgb(157 174 255 / 16%), 0 0 .3em rgb(170 190 255 / 34%); }
+.pp-verdict::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 30%) 2px 3px); }
+@media (min-resolution: 2dppx) { .pp-verdict::after { background: repeating-linear-gradient(to bottom, transparent 0 1px, rgb(0 0 0 / 30%) 1px 1.5px); } }
 .pp-caption { margin: 14px 0 0; color: var(--soft); font: 700 13px / 1.45 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; text-wrap: pretty; }
 .pp-way { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 28px; }
-/* The airmail label at an ordinary button's size: its border narrower, its paper 44 px tall (a thumb's press), its words
-   15 px. */
-.pp .pp-label { --stripe: 5px; display: inline-grid; width: auto; box-shadow: 0 2px 5px rgb(0 0 0 / 70%); }
-.pp .pp-label .chyp-go { height: 44px; padding: 0 16px; font-size: 15px; letter-spacing: .02em; word-spacing: -.12em; text-decoration: none; color: #0A0B0F; }
+/* The airmail label at an ordinary button's size: 44 px tall in all, a thumb's press, the button itself (its striped
+   edge is its own border, so the whole label takes the press), the edge 4 px, thinned with the height (the homepage's
+   is 1.25% of the set's height: tv.css, .chyp), its words 15 px. The stripes are tv.css's: red, paper, blue, paper. */
+.pp .pp-label { display: inline-grid; width: auto; padding: 0; background: none; box-shadow: 0 2px 5px rgb(0 0 0 / 70%); }
+.pp .pp-label .chyp-go { box-sizing: border-box; height: 44px; padding: 0 14px; border: 4px solid #F6F1E3; border-image: repeating-linear-gradient(-45deg, #D23B2D 0 5px, #F6F1E3 0 10px, #2F4FA8 0 15px, #F6F1E3 0 20px) 4; font-size: 15px; letter-spacing: .02em; word-spacing: -.12em; text-decoration: none; color: #0A0B0F; }
 /* Join the waitlist and Open dashboard, the longer wordings, a step smaller (as tv.css sets them on the homepage). */
 .pp .pp-label .chyp-go .srt-cta-wait, .pp .pp-label a.chyp-go { font-size: 13px; }
 .pp-consent { margin: 0; color: var(--faint); font-size: 12px; line-height: 16px; }
@@ -90,11 +101,24 @@
 @media (hover: hover) { .pp-table tbody tr:has(a:hover) > * { background: var(--bar); } }
 .pp-table tbody tr:has(a:focus-visible) > * { background: var(--bar); }
 
-.pp-qa + .pp-qa { margin-top: 18px; }
-.pp-qa h3 { margin: 0 0 4px; font-size: 15px; font-weight: 600; line-height: 1.45; }
-.pp-qa p { margin: 0; color: var(--soft); font-size: 14px; line-height: 1.55; text-wrap: pretty; }
-.pp-more { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 0 20px; margin: 0; padding: 0; list-style: none; }
-.pp-more a { display: flex; align-items: center; min-height: 44px; color: var(--soft); font-size: 14px; }
+/* The questions, for agents and crawlers: closed rows that open on a tap or a key. */
+.pp-qa { border-bottom: 1px solid var(--line); }
+.pp-qa:first-of-type { border-top: 1px solid var(--line); }
+.pp-qa summary { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 44px; padding: 8px 0; cursor: pointer; list-style: none; -webkit-tap-highlight-color: transparent; }
+.pp-qa summary::-webkit-details-marker { display: none; }
+.pp-qa summary::after { content: '+'; flex: none; color: var(--faint); font: 700 15px / 1 var(--font-mono); }
+.pp-qa[open] summary::after { content: '−'; }
+.pp-qa h3 { margin: 0; color: var(--soft); font-size: 14px; font-weight: 500; line-height: 1.4; }
+@media (hover: hover) { .pp-qa summary:hover h3 { color: var(--ink); } }
+.pp-qa summary:focus-visible h3, .pp-qa[open] h3 { color: var(--ink); }
+.pp-qa p { margin: 0 0 14px; color: var(--soft); font-size: 14px; line-height: 1.55; text-wrap: pretty; }
+/* The facts under the table: one line each. */
+#facts .pp-list { gap: 6px; margin: 0; }
+#facts .pp-list li { padding-left: .2em; }
+#facts .pp-list li::marker { color: var(--ours); }
+/* The other comparisons: "vs SendGrid", each on one line, as many to a line as fit. */
+.pp-more { display: flex; flex-wrap: wrap; gap: 0 20px; margin: 0; padding: 0; list-style: none; }
+.pp-more a { display: flex; align-items: center; min-height: 44px; color: var(--soft); font-size: 14px; white-space: nowrap; }
 .pp-print { margin-top: 48px; padding-top: 14px; border-top: 1px solid var(--line); color: var(--faint); font-size: 12px; line-height: 18px; }
 .pp-print p { margin: 0; overflow-wrap: anywhere; }
 .pp-print p + p { margin-top: 6px; }
@@ -145,9 +169,9 @@
   .pp .pp-stage { padding: 0 20px; }
   .pp .pp-stage .chy-col { --h: calc((100vw - 20px) / 1.3587); padding-top: 8px; }
   .pp .pp-stage .chy-set { left: 0; }
-  .pp-more { grid-template-columns: 1fr 1fr; gap: 0 12px; }
-  .pp-table tr[data-mark] > :first-child { box-shadow: -8px 0 0 var(--bar); }
-  .pp-table tr[data-mark] > :last-child { box-shadow: 8px 0 0 var(--bar); }
+  .pp-more { gap: 0 16px; }
+  .pp-table:not([data-fold]) tr[data-mark] > :first-child { box-shadow: -8px 0 0 var(--bar); }
+  .pp-table:not([data-fold]) tr[data-mark] > :last-child { box-shadow: 8px 0 0 var(--bar); }
 }
 @media (max-width: 400px) {
   /* The narrowest phones: a table of several sizes in a step smaller type. */
