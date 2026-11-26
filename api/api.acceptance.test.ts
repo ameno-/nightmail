@@ -33390,11 +33390,13 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       runtime.config.rampLines = { blocklistPause: {}, domainStop: {}, planHealth: true };
       t.after(() => { runtime.config.rampLines = original; });
       const list = ok(await local('POST', '/v1/lists', { name: unique('guards') }), 201);
-      // 150 subscribers at a domain that no longer takes mail, and 600 elsewhere.
+      // 150 subscribers at a domain that no longer takes mail, and 600 elsewhere. A campaign releases its list in contact-id
+      // order (src/audience-query.ts), so the ids set it: exactly 25 of the first day's 100 are at the dead domain.
+      const key = (n: string) => `'con_' || substr(md5($1 || $2), 1, 8) || lpad((${n})::text, 24, '0')`;
       const join = async (where: string) => db.query(`INSERT INTO audience_list_members (workspace_id, list_id, contact_id) SELECT workspace_id, $2, id FROM audience_contacts WHERE workspace_id = $1 AND ${where}`, [ws, list.id]);
-      await db.query("INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT 'con_' || md5($1 || $2 || n::text), $1, 'p' || n || '@' || $3, 'subscribed' FROM generate_series(1, 150) AS n", [ws, tag, dead]);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT ${key('CASE WHEN n <= 25 THEN n ELSE 100 + n END')}, $1, 'p' || n || '@' || $3, 'subscribed' FROM generate_series(1, 150) AS n`, [ws, tag, dead]);
       await join(`email LIKE '%@${dead}'`);
-      await db.query("INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT 'con_' || md5($1 || $2 || 'g' || n::text), $1, 'g' || n || '-' || $2 || '@example.net', 'subscribed' FROM generate_series(1, 600) AS n", [ws, tag]);
+      await db.query(`INSERT INTO audience_contacts (id, workspace_id, email, marketing_consent) SELECT ${key('CASE WHEN n <= 75 THEN 25 + n ELSE 1000 + n END')}, $1, 'g' || n || '-' || $2 || '@example.net', 'subscribed' FROM generate_series(1, 600) AS n`, [ws, tag]);
       await join(`email LIKE '%-${tag}@example.net'`);
       await db.query(`INSERT INTO sending_region_limits (workspace_id, region, max_send_rate, checked_at) VALUES ($1, $2, 5000, clock_timestamp())
         ON CONFLICT ON CONSTRAINT sending_region_limits_pkey DO UPDATE SET max_send_rate = 5000, max_24_hour_send = 0, sent_last_24_hours = 0, checked_at = clock_timestamp()`, [ws, REGION]);
@@ -33412,7 +33414,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const sentTo = async (domain: string) => (await db.query("SELECT count(*)::int AS n FROM sending_emails WHERE campaign_id = $1 AND to_addresses->>0 LIKE '%@' || $2", [campaign.id, domain])).rows[0].n;
       await db.query("UPDATE sending_emails SET status = CASE WHEN to_addresses->>0 LIKE '%@' || $2 THEN 'bounced' ELSE 'delivered' END, provider_id = 'sim_' || id WHERE campaign_id = $1", [campaign.id, dead]);
       const deadFirst = await sentTo(dead);
-      assert.ok(deadFirst >= 20, String(deadFirst));
+      assert.equal(deadFirst, 25);
       await nextWindow();
       // The same run checked the campaign, stopped the domain, then released the next day.
       assert.deepEqual((await db.query('SELECT domain, resolved, bounced FROM campaign_stopped_domains WHERE campaign_id = $1', [campaign.id])).rows, [{ domain: dead, resolved: deadFirst, bounced: deadFirst }]);
