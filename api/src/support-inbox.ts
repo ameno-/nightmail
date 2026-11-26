@@ -13,6 +13,8 @@ import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID, FILE_AUDIENCE, signSupportToken, type InboxState, type OutboxReply } from './support-platform.js';
 import { EXPIRES_MS, heldWhy, isKind, KINDS, validToken } from './support-approvals.js';
 import { agentOperator, SUPPORT_AGENT_CLOSES_PER_HOUR, SUPPORT_AGENT_REPLIES_PER_HOUR } from './support-agents.js';
+import { gate, LINK_ORIGINS, namedIn } from './output-gate.js';
+import { addresses, productName } from './brand.js';
 
 // The support inbox (api/README.md "Support integration"): every support conversation, its transcript and the staff
 // replies to it. Internal, in two halves:
@@ -372,6 +374,15 @@ const staffContext = (c: Ctx, operator: OperatorIdentity) => operatorContext(c, 
 /** What an agent did is marked so on the conversation's timeline (support_events details). */
 const via = (operator: OperatorIdentity) => operator.agent ? { viaAgent: true } : {};
 const closedConversation = () => new ApiError(409, 'SUPPORT_CONVERSATION_CLOSED', 'This conversation is closed.');
+/** A staff member's agent's words refused by the output check (src/output-gate.ts): nothing is queued, and the trail records the reasons. */
+class CheckRefusal extends ApiError {
+  constructor(readonly reasons: string[], message: string) { super(422, 'SUPPORT_AGENT_REPLY_REFUSED', message, 'text'); this.details = [{ reasons }]; }
+}
+/** The check's reasons in an agent's words. */
+const CHECK_WORDS: Record<string, string> = { 'email address outside the conversation': 'an email address that isn’t this conversation’s', 'credential-shaped string': 'something shaped like a key or token',
+  'long opaque string': 'a long encoded string', 'internal hostname': 'an internal hostname', 'ID outside the grant': 'an ID from outside this conversation', 'internal name': 'an internal name',
+  'harness markup': 'tool markup such as <untrusted>', 'confirmation link': 'a link to a confirm page', [`link outside ${productName}`]: `a link outside ${productName}` };
+const listed = (items: string[]) => items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0]!;
 /** Agent feedback (src/feedback.ts) has no support platform or agent behind it: nobody to reply to, pause or wake. */
 const noAgent = () => new ApiError(409, 'SUPPORT_AGENT_FEEDBACK', 'This is agent feedback: there is no customer to reply to and no support agent to pause, hand back or wake. Resolve its ticket or mark it done.');
 
@@ -645,7 +656,7 @@ export function registerSupportInbox(app: App) {
   async function change<T>(c: Ctx, id: string, action: string, work: (tx: DbExecutor, operator: OperatorIdentity, conversation: Locked) => Promise<{ result: T; message?: string }>, body?: unknown, agent = false) {
     const operator = await staff(c, 'operator', agent);
     let subject: string | null = null, messageId: string | undefined;
-    return mutate(c, operator, '', body, async tx => {
+    try { return await mutate(c, operator, '', body, async tx => {
       const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, channel, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at,
           done_by, done_at > now() - ${UNDO_WINDOW} AS undoable
         FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
@@ -655,7 +666,14 @@ export function registerSupportInbox(app: App) {
       messageId = done.message;
       return { result: done.result, audit: { action, reason: action, ticketRef: id } };
     }, (tx, audit) => tx.execute(auditInsert(staffContext(c, operator), { action: audit.action, workspaceId: null, userId: subject ?? operator.userId, target: { type: 'support_conversation', id },
-      details: messageId || operator.agent ? { ...messageId ? { message: messageId } : {}, ...operator.agent ? { agent: operator.agent.approvalId } : {} } : undefined, ticketRef: id, internal: true })));
+      details: messageId || operator.agent ? { ...messageId ? { message: messageId } : {}, ...operator.agent ? { agent: operator.agent.approvalId } : {} } : undefined, ticketRef: id, internal: true }))); }
+    catch (error) {
+      // What the check refused is on the trail as the person, via agent, with its reasons and never the text: written
+      // after the change's own transaction rolled back.
+      if (error instanceof CheckRefusal && operator.agent) await c.env.db.execute(auditInsert(staffContext(c, operator), { action: 'support.agent_refused', workspaceId: null, userId: subject ?? operator.userId,
+        target: { type: 'support_conversation', id }, details: { attempted: action, reasons: error.reasons, agent: operator.agent.approvalId }, ticketRef: id, internal: true }));
+      throw error;
+    }
   }
 
   /**
@@ -668,7 +686,7 @@ export function registerSupportInbox(app: App) {
     if (conversation.channel === 'agent_feedback') throw noAgent();
     if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
       throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
-    if (operator.agent) await agentAllowed(tx, operator.userId, 'replies');
+    if (operator.agent) { await agentCheck(tx, operator, id, text); await agentAllowed(tx, operator.userId, 'replies'); }
     const messageId = newMessageId();
     if (conversation.agent_state === 'active') await tx.execute(event(id, 'paused', operator.userId, { by: 'staff', reply: true, ...via(operator) }));
     const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (
@@ -697,6 +715,25 @@ export function registerSupportInbox(app: App) {
     const { rows: [used] } = await tx.execute<{ count: number; wait: number | null }>(sql`SELECT count(*)::int AS count, ceil(extract(epoch FROM min(at) + interval '1 hour' - now()))::int AS wait
       FROM audit_events WHERE actor_type = 'operator' AND actor_id = ${userId} AND via = 'mcp' AND action = ANY(${sql.param([...allowance.actions])}::text[]) AND at > now() - interval '1 hour'`);
     if (used!.count >= allowance.limit) throw Object.assign(new ApiError(429, allowance.code, allowance.message), { retryAfterSeconds: Math.max(1, used!.wait ?? 60) });
+  }
+  /**
+   * What an agent sends a customer passes the support AI's own output check (src/output-gate.ts) before anything is
+   * queued, scoped to this conversation: its customer's addresses; its ID, its ticket and the workspaces (IDs and names)
+   * staff see on it, the one in scope and the customer's own; what the customer wrote in it (their messages and the
+   * subject); links only to Nightmail's own sites; no prompt to leak. The staff member's own name is theirs to sign with.
+   */
+  async function agentCheck(tx: DbExecutor, operator: OperatorIdentity, id: string, text: string) {
+    const { rows: [scope] } = await tx.execute<{ emails: string[]; ids: string[]; names: string[]; written: string; own: string | null }>(sql`WITH c AS (SELECT * FROM support_conversations WHERE id = ${id}),
+        theirs AS (SELECT w.id, w.name FROM workspaces w WHERE w.id = (SELECT workspace_id FROM c)
+          OR w.id IN (SELECT m.workspace_id FROM workspace_members m WHERE m.user_id = (SELECT user_id FROM c) ORDER BY m.workspace_id LIMIT 50))
+      SELECT array_remove(ARRAY[(SELECT email FROM nightmail_users WHERE id = c.user_id), c.pending_address], NULL) AS emails,
+        array_remove(ARRAY[c.id, c.ticket_id], NULL) || coalesce((SELECT array_agg(id) FROM theirs), '{}') AS ids, coalesce((SELECT array_agg(name) FROM theirs), '{}') AS names,
+        concat_ws(E'\n', c.subject, (SELECT string_agg(m.text, E'\n' ORDER BY m.seq) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer')) AS written,
+        (SELECT name FROM nightmail_users WHERE id = ${operator.userId}) AS own
+      FROM c`);
+    const checked = gate(text, { emails: scope!.emails, allowedIds: scope!.ids, allowedNames: scope!.names, theirs: namedIn(scope!.written), promptFragments: [], supportAddress: addresses.support,
+      linkOrigins: LINK_ORIGINS, ownName: scope!.own });
+    if (!checked.ok) throw new CheckRefusal(checked.reasons, `Nothing was sent. The reply has ${listed(checked.reasons.map(reason => CHECK_WORDS[reason] ?? reason))}. Send it from the dashboard if it is intended.`);
   }
   const wakeAfter = (c: Ctx, id: string) => c.env.deferNudge ? c.env.deferNudge(async () => { await wakeSupport(c.env.config, id); }) : wakeSupport(c.env.config, id);
 
@@ -738,6 +775,9 @@ export function registerSupportInbox(app: App) {
    */
   async function sendDraft(tx: DbExecutor, operator: OperatorIdentity, conversation: Locked, id: string, messageId: string, edited?: string) {
     const draft = await heldDraft(tx, id, messageId), written = draft.text.trim(), asWritten = conversation.channel === 'email' ? plainText(written) : written;
+    // What the check held stays held for an agent, as written or edited: a person sends it from the dashboard.
+    if (operator.agent && draft.reason === 'gate') throw new CheckRefusal(['held by the output check'],
+      'Nothing was sent. The support AI’s answer was held by the same check, so only a person can send it, from the dashboard. Write a fresh reply instead.');
     const unchanged = edited === undefined || edited === written || edited === asWritten, fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
     if (fresh && unchanged) throw new ApiError(409, 'SUPPORT_DRAFT_FRESH_REPLY', `${fresh}, so it can’t be sent. Write a fresh reply.`, 'text');
     // As written, it would answer an earlier moment than a reply the customer already has: staff edit it, or discard it.

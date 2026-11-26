@@ -22,7 +22,7 @@ export const supportTools: Tool[] = [
   { name: 'supportConversation', description: 'One support conversation: its messages, held answers and the support AI’s brief.',
     inputSchema: { type: 'object', properties: { conversationId: CONVERSATION }, required: ['conversationId'], additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false } },
-  { name: 'supportAct', description: 'Act on one conversation as you. reply (text): to its customer only, and pauses the support AI; confirm the text with the person first. note (text): staff only. done. handBack: to the support AI. sendHeld (messageId, text to edit it) or discardHeld (messageId): a held AI answer.',
+  { name: 'supportAct', description: 'Act on one conversation as you. reply (text): to its customer only, output-checked; pauses the support AI; confirm the text with the person first. note (text): staff only. done. handBack: to the support AI. sendHeld (messageId, text to edit it) or discardHeld (messageId): a held AI answer.',
     inputSchema: { type: 'object', properties: { conversationId: CONVERSATION, action: { enum: [...ACTIONS] }, text: { type: 'string', minLength: 1, maxLength: 8000 },
       messageId: { type: 'string', pattern: '^msg_[a-z2-7]{16}$' }, confirm: { const: true }, idempotencyKey: { type: 'string', minLength: 1, maxLength: 200, pattern: '^[\\x21-\\x7E]+$' } },
       required: ['conversationId', 'action', 'confirm', 'idempotencyKey'], additionalProperties: false },

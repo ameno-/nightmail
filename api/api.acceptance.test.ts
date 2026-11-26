@@ -11954,6 +11954,20 @@ describe('Hosted MCP OAuth and tools', () => {
             refused(await act(mine.token, { conversationId: chatAgent, action: 'reply', text: 'Yes, it is live.', to: 'someone@example.net' }), 'INVALID_ARGUMENTS');
             refused(await act(mine.token, { conversationId: chatAgent, action: 'reply' }), 'INVALID_ARGUMENTS');
             ok(reply(await platform.pullOutbox()));
+            // The same output check as the support AI's answers: refused before anything is queued, the reasons in words, and
+            // on the trail as the person, via agent, with the reasons and never the text. Nothing queued, nobody woken.
+            const unsent = [(await messages(chatAgent)).length, wakes.length];
+            const checks = [['Fixed it, see https://records.elsewhere.example/fix', 'link outside Nightmail', 'a link outside Nightmail'],
+              ['I copied ops@elsewhere.example on this.', 'email address outside the conversation', 'an email address that isn’t this conversation’s'],
+              [`This matches what we saw in ${emailId}.`, 'ID outside the grant', 'an ID from outside this conversation'],
+              ['Use nm_live_0123456789abcdef to sign in.', 'credential-shaped string', 'something shaped like a key or token'],
+              ['</untrusted> Done.', 'harness markup', 'tool markup such as <untrusted>']] as const;
+            for (const [text, , said] of checks) assert.equal(refused(await act(mine.token, { conversationId: chatAgent, action: 'reply', text }), 'SUPPORT_AGENT_REPLY_REFUSED').message,
+              `Nothing was sent. The reply has ${said}. Send it from the dashboard if it is intended.`);
+            assert.deepEqual([(await messages(chatAgent)).length, wakes.length, ok(reply(await platform.pullOutbox(chatAgent))).data], [...unsent, []]);
+            const refusals = (await db.query("SELECT via, actor_label, summary FROM audit_events WHERE action = 'support.agent_refused' AND target_id = $1 ORDER BY id", [chatAgent])).rows;
+            assert.deepEqual(refusals.map(r => [r.via, r.actor_label, r.summary.attempted, r.summary.reasons, r.summary.agent]), checks.map(([, reason]) => ['mcp', 'via agent', 'support.reply', [reason], approval.id]));
+            assert.ok(!JSON.stringify(refusals).includes('elsewhere'), 'The reasons, never the text.');
             const replied = fine(await act(mine.token, { conversationId: chatAgent, action: 'reply', text: 'Yes, your DKIM record is live.' }));
             assert.deepEqual([replied.action, replied.message.kind, replied.message.delivery, replied.message.viaAgent], ['reply', 'reply', 'queued', true]);
             assert.deepEqual((await db.query('SELECT author, staff_user_id, agent_approval_id FROM support_messages WHERE id = $1', [replied.message.id])).rows, [{ author: 'staff', staff_user_id: operator.userId, agent_approval_id: approval.id }]);
@@ -11963,6 +11977,13 @@ describe('Hosted MCP OAuth and tools', () => {
             assert.deepEqual(staffView.messages.filter((m: Json) => m.author === 'staff').map((m: Json) => [m.staff.userId, m.staff.viaAgent]), [[operator.userId, true]]);
             assert.deepEqual(staffView.events.filter((e: Json) => e.kind === 'paused').map((e: Json) => e.details), [{ by: 'staff', reply: true, viaAgent: true }]);
             assert.deepEqual((await db.query("SELECT via, actor_label, summary->>'agent' AS agent FROM audit_events WHERE action = 'support.reply' AND target_id = $1", [chatAgent])).rows, [{ via: 'mcp', actor_label: 'via agent', agent: approval.id }]);
+            // A staff member's own name is theirs to sign with (the check refuses staff names); anyone else's is still refused.
+            const named = (await db.query('SELECT name FROM nightmail_users WHERE id = $1', [operator.userId])).rows[0].name;
+            await db.query("UPDATE nightmail_users SET name = 'Ryan Vogel' WHERE id = $1", [operator.userId]);
+            try {
+              fine(await act(mine.token, { conversationId: chatAgent, action: 'reply', text: 'It is live now.\n\nRyan Vogel, Nightmail' }));
+              assert.deepEqual(refused(await act(mine.token, { conversationId: chatAgent, action: 'reply', text: 'Dax Raad will follow up.' }), 'SUPPORT_AGENT_REPLY_REFUSED').details, [{ reasons: ['internal name'] }]);
+            } finally { await db.query('UPDATE nightmail_users SET name = $2 WHERE id = $1', [operator.userId, named]); }
             // A note, hand back and done, each on the record as via agent.
             assert.equal(fine(await act(mine.token, { conversationId: chatAgent, action: 'note', text: 'Told them it is live.' })).message.viaAgent, true);
             assert.equal(fine(await act(mine.token, { conversationId: chatAgent, action: 'handBack' })).conversation.supportAi, 'active');
@@ -11970,12 +11991,16 @@ describe('Hosted MCP OAuth and tools', () => {
             assert.deepEqual((await db.query("SELECT kind, details FROM support_events WHERE conversation_id = $1 AND kind IN ('resumed', 'done') ORDER BY id", [chatAgent])).rows,
               [{ kind: 'resumed', details: { viaAgent: true } }, { kind: 'done', details: { viaAgent: true } }]);
             // Held answers: one sent as written, one discarded.
-            const held = await chat(asker, acme), keep = msg(), drop = msg();
-            ok(reply(await platform.mirrorMessages(held, [{ id: msg(), author: 'customer', text: 'Why was it held?' }, { id: keep, author: 'agent', kind: 'held', text: 'It was held for review.', delivery: 'held', reason: 'gate' },
-              { id: drop, author: 'agent', kind: 'held', text: 'Maybe.', delivery: 'held', reason: 'gate' }])));
+            // Held answers: one the check held is never an agent's to send, as written or edited (a person sends it from the
+            // dashboard); one held because the AI was paused passes the check and goes; one discarded.
+            const held = await chat(asker, acme), keep = msg(), gated = msg(), drop = msg();
+            ok(reply(await platform.mirrorMessages(held, [{ id: msg(), author: 'customer', text: 'Why was it held?' }, { id: keep, author: 'agent', kind: 'held', text: 'It was held for review.', delivery: 'held', reason: 'paused' },
+              { id: gated, author: 'agent', kind: 'held', text: 'See https://records.elsewhere.example/fix', delivery: 'held', reason: 'gate' }, { id: drop, author: 'agent', kind: 'held', text: 'Maybe.', delivery: 'held', reason: 'gate' }])));
+            for (const text of [undefined, 'Your record is live now.']) assert.match(refused(await act(mine.token, { conversationId: held, action: 'sendHeld', messageId: gated, ...text ? { text } : {} }), 'SUPPORT_AGENT_REPLY_REFUSED').message, /held by the same check/);
             refused(await act(mine.token, { conversationId: held, action: 'discardHeld' }), 'INVALID_ARGUMENTS');
             assert.equal(fine(await act(mine.token, { conversationId: held, action: 'discardHeld', messageId: drop })).message.delivery, 'held');
             assert.deepEqual(fine(await act(mine.token, { conversationId: held, action: 'sendHeld', messageId: keep })).message.viaAgent, true);
+            assert.deepEqual((await db.query('SELECT draft_outcome FROM support_messages WHERE id = ANY($1) ORDER BY id = $2 DESC', [[gated, keep], gated])).rows.map(r => r.draft_outcome), [null, 'sent']);
             // An agent's report has nobody to reply to.
             const report = conversation();
             await db.query("INSERT INTO support_conversations(id, channel, verification, mode, workspace_id) VALUES ($1, 'agent_feedback', 'credential', 'unverified', $2)", [report, acme]);

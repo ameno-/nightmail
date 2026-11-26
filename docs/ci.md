@@ -24,7 +24,7 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | Dashboard including bundled legal Markdown | Dashboard build and pre-merge checks, Worker bundle/preview and CLS. Acceptance also exercises asset-headers, the theme and signed-in scripts, shared lib, data types and Settings helpers. |
 | API code used by the dashboard | Also the dashboard build: `api/openapi.json` (rendered in Docs), and `api/src/{analytics-events,billing/rates,block-style,brand,mcp-clients,ritual-schema,standing-model,webhook-signature-guide}.ts`. The dashboard does not import the generated SDK. |
 | SDK or standalone MCP client code | Build (type-check the SDK consumer and regenerate the contract/SDK) and acceptance. |
-| Support Worker | Support, including its bundled system prompt and voice guide. Also selected by its API dependencies: brand, log, billing rates, mail-servers and the production Wrangler config. |
+| Support Worker | Support, including its bundled system prompt and voice guide. Also selected by its API dependencies: brand, log, billing rates, mail-servers, the output gate, plain text and the production Wrangler config. |
 | Gateway | Rust format, lint and tests. |
 | Other fixture/test inputs | Acceptance for Domain Connect templates, shared AWS policies, the Pulumi receiving alarm, the S3 fixture, `api/README.md`'s executable example or the asserted `docs/mcp-coverage.md`. |
 | Other Markdown/docs | No heavy suites. Nightly still runs the full acceptance and CLS suites on dev. |
