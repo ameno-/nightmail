@@ -582,6 +582,40 @@ const hostedAccepted = (mail: SQL) => sql`NOT ${mail}.simulated AND ${mail}.prov
 const ownMail = (mail: SQL) => sql`(${mail}.snapshot @> '{"screenVerdict":{"status":"platform"}}'::jsonb OR ${mail}.snapshot->>'testCampaignId' IS NOT NULL
   OR NOT EXISTS (SELECT FROM jsonb_array_elements_text(${mail}.to_addresses||${mail}.cc_addresses||${mail}.bcc_addresses) r(address) WHERE NOT EXISTS (
     SELECT FROM workspace_members m JOIN nightmail_users u ON u.id=m.user_id WHERE m.workspace_id=${mail}.workspace_id AND u.email_verified AND lower(u.email)=lower(r.address))))`;
+/** How long after its stamp an accepted event may become visible, as far as the sample's mark assumes (settledThrough). */
+export const SAMPLE_SETTLE = { marginMs: 15 * 60_000 };
+/**
+ * The latest instant a read can be recorded through without skipping mail that becomes visible after it, or null when
+ * that cannot be known (then no mark is set for a workspace with nothing eligible, as before this existed). Accepted
+ * mail is stamped with the database's clock inside the statement that writes it (dispatcher.ts recordOutcomes,
+ * sending.ts persistEmailEvent and ingestRoutineSesEvents; check-premerge.ts holds every writer to it; simulated mail, stamped
+ * with the Worker's clock, is never sampled: NOT v.simulated below), so the earlier of:
+ * - the start of the oldest transaction open now that holds a transaction ID: mail still invisible was stamped by a
+ *   transaction open now (at or after its start; one that locked or wrote anything has an ID) or one that begins
+ *   later, however long it then takes to commit;
+ * - SAMPLE_SETTLE.marginMs before now: covers a writer that stamps before it holds an ID, and a stamp a little older
+ *   than its statement (another clock), for as long as the margin.
+ * pg_stat_activity shows a session's start only to the same role: one holding an ID whose start is hidden (another
+ * role) makes the result unknown, never ignored. It is a snapshot taken at its first read in a transaction, so it is
+ * cleared first.
+ */
+async function settledThrough(runtime: Hosted) {
+  try {
+    const { rows: [view] } = await bounded(runtime, async tx => {
+      await tx.execute(sql`SELECT pg_stat_clear_snapshot()`);
+      return tx.execute<{ at: string; hidden: number }>(sql`SELECT ${utc(sql`(least(clock_timestamp()-make_interval(secs=>${SAMPLE_SETTLE.marginMs / 1000}),
+          min(xact_start) FILTER (WHERE backend_xid IS NOT NULL))-interval '1 microsecond')`)} AS at,
+        count(*) FILTER (WHERE backend_xid IS NOT NULL AND xact_start IS NULL)::int AS hidden
+        FROM pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`);
+    });
+    if (view && view.hidden === 0 && view.at) return view.at;
+    log('error', { code: 'ABUSE_SAMPLE_MARKS_HELD', reason: 'hidden_writer', writers: view?.hidden ?? 0 });
+  } catch (error) {
+    if (timeError(error)) throw error;
+    log('error', { code: 'ABUSE_SAMPLE_MARKS_HELD', reason: 'unreadable' });
+  }
+  return null;
+}
 /**
  * Fingerprints a bounded sample of the mail each workspace had accepted since it was last sampled, its own mail
  * (ownMail) left out: content bands and the hashed domains it links to and sends from (never the built-in domain, whose
@@ -596,19 +630,9 @@ async function sampleSends(runtime: Hosted, run: Run) {
   let sampled = 0;
   // No time left for it at all: said so, as any stop with work left.
   if (spent(run)) { cut(run, 'sample'); return 0; }
-  // How far a read can be recorded without skipping mail that becomes visible late. An accepted event is stamped by the
-  // transaction that writes it (the dispatcher's clock_timestamp()), so one this run cannot see yet belongs to a
-  // transaction open now, stamped at or after that transaction's start, or to one that begins later, stamped later
-  // still. So everything stamped before the oldest open writer's start (or before now, with none open) that will ever
-  // be visible already is, for every read below, which comes after this one; a mark never passes it.
-  // (pg_stat_activity is a snapshot taken at its first read in a transaction: cleared first, so it is current here.)
-  // If it cannot be read, a workspace with no eligible mail is not recorded, as before.
-  let settled: string | null = null;
-  try {
-    const { rows: [visible] } = await bounded(runtime, async tx => { await tx.execute(sql`SELECT pg_stat_clear_snapshot()`); return tx.execute<{ at: string }>(sql`SELECT ${utc(sql`(least(clock_timestamp(),(SELECT min(xact_start) FROM pg_stat_activity
-      WHERE datname=current_database() AND backend_xid IS NOT NULL AND pid<>pg_backend_pid()))-interval '1 microsecond')`)} AS at`); });
-    settled = visible?.at ?? null;
-  } catch (error) { if (timeError(error)) throw error; log('warn', { code: 'ABUSE_STEP_FAILED', step: 'visibility' }); }
+  // How far a read of a workspace with nothing eligible can be recorded without skipping mail that becomes visible
+  // late: the earlier of two bounds, each covering what the other cannot (settledThrough). Hidden or unreadable: no mark.
+  const settled = await settledThrough(runtime);
   const floor = (workspaceId: SQL) => sql`greatest(coalesce((SELECT s.sampled_through FROM abuse_sampling s WHERE s.workspace_id=${workspaceId}),'-infinity'::timestamptz),
     coalesce((SELECT f.ignore_through FROM abuse_floors f WHERE f.entity_type='workspace' AND f.entity_id=${workspaceId}),'-infinity'::timestamptz),${run.since}::timestamptz,now()-interval '1 day')`;
   for (let page = 0; page < WORKSPACE_PAGES && sampled < SAMPLED_A_RUN && !spent(run); page++) {

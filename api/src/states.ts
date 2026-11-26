@@ -37,7 +37,7 @@ export const terminalColumns = sql`id,workspace_id,status,region,simulated,error
  *  webhook payload from the published event, so neither ever holds it. */
 export function terminalEvents(rows: SQL, extra = sql`'{}'::jsonb`) {
   return sql`terminal AS (${rows}), emitted AS (
-    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data)
+    INSERT INTO sending_email_events(id,workspace_id,email_id,type,external_id,simulated,data) /* premerge-accepted: never (a terminal status or reject) */
     SELECT public.row_id('event'),workspace_id,id,CASE WHEN status='rejected' THEN 'reject' ELSE status END,
       CASE status WHEN 'acceptance_unknown' THEN 'interrupted:'||id||':'||dispatch_version WHEN 'rejected' THEN 'preflight-failed:'||id ELSE status||':'||id END,simulated,
       jsonb_strip_nulls(jsonb_build_object('status',status,'code',error_code,'suppressionReason',suppression_reason)) || ${extra}

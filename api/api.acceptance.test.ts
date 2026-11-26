@@ -34611,38 +34611,65 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       admission.mock.restore();
     });
   });
-  test('abuse monitoring: the sample remembers how far it read a workspace even when none of its mail was eligible, so a workspace whose mail is all its own costs nothing the next run, while one that then mails others is sampled at the next run; the mark never passes a transaction still open, so mail that becomes visible late is still read', async t => {
+  test('abuse monitoring: the sample remembers how far it read a workspace even when none of its mail was eligible, so a workspace whose mail is all its own costs nothing the next run, while one that then mails others is sampled at the next run; the mark never passes a transaction still open, nor comes within 15 minutes of the run, so mail that becomes visible late is still read', async t => {
     await simulatedSesFixture(t, async ({ runtime, db }) => {
       const h = await abuseHarness(runtime, db), { abuse } = h;
       await h.hourly();
+      // Monitoring started an hour ago, so mail from the last hour is in scope.
+      await db.query(`UPDATE abuse_state SET active_since=now()-interval '1 hour'`);
       const sample = () => abuse.runAbuseStage(runtime, 'sample');
       const marks = async (ids: string[]) => (await db.query('SELECT workspace_id AS id,sampled_through::text AS through FROM abuse_sampling WHERE workspace_id=ANY($1) ORDER BY workspace_id', [ids])).rows as { id: string; through: string }[];
-      // Three workspaces whose mail so far is all their own (a campaign test each: never fingerprinted).
-      const own = [await h.workspace('own-mail-1', [await h.user('own-mail-1')]), await h.workspace('own-mail-2', [await h.user('own-mail-2')]), await h.workspace('own-mail-3', [await h.user('own-mail-3')])];
-      for (const workspace of own) await h.mail({ workspace, snapshot: { testCampaignId: 'cmp_fixture' } });
+      const sampledOf = async (id: string) => (await h.kinds('workspace', id)).includes('content');
+      // When a workspace was last read (whether or not anything was eligible).
+      const readAt = async (id: string) => (await db.query('SELECT sampled_at::text AS at FROM abuse_sampling WHERE workspace_id=$1', [id])).rows[0]?.at as string | undefined;
+      // Workspaces whose mail so far is all their own (a campaign test each: never fingerprinted), from half an hour ago.
+      const workspace = async (name: string) => h.workspace(name, [await h.user(name)]);
+      const own = [await workspace('own-mail-1'), await workspace('own-mail-2'), await workspace('own-mail-3')];
+      for (const id of own) await h.mail({ workspace: id, snapshot: { testCampaignId: 'cmp_fixture' }, accepted: `now()-interval '30 minutes'` });
       const first = await sample();
       assert.deepEqual([first.checked, first.items, (await marks(own)).length], [3, 0, 3], 'Read once, nothing to fingerprint, and how far it read is recorded.');
       assert.deepEqual([(await sample()).checked, (await marks(own)).map(m => m.through)], [0, (await marks(own)).map(m => m.through)], 'The next run reads none of them.');
       // One of them mails someone outside it: sampled at the next run, and only it is read.
-      await h.mail({ workspace: own[0]!, html: h.offer(1) });
+      await h.mail({ workspace: own[0]!, html: h.offer(1), accepted: `now()-interval '20 minutes'` });
       const third = await sample();
-      assert.deepEqual([third.checked, third.items, (await h.kinds('workspace', own[0]!)).includes('content')], [1, 1, true]);
-      // A transaction still open (it could be writing an accepted event stamped now, visible only when it commits): the
-      // mark stops before its start, though this workspace's newest mail is later, so its mail is read again next run.
-      const open = new pg.Client({ connectionString: process.env.DATABASE_URL }); await open.connect();
+      assert.deepEqual([third.checked, third.items, await sampledOf(own[0]!)], [1, 1, true]);
+
+      // Mail that becomes visible only after a run read the workspace, stamped before the newest mail that run read:
+      // never skipped while the stamp is within 15 minutes of the run (SAMPLE_SETTLE), the mark stopping that far back.
+      // 1. A writer whose transaction began 5 minutes before the run, held no transaction ID when the run looked (so the
+      //    oldest-open-writer bound cannot see it), and stamps its row with its own start.
+      const late = await workspace('late-writer');
+      await h.mail({ workspace: late, snapshot: { testCampaignId: 'cmp_fixture' }, accepted: `clock_timestamp()-interval '1 minute'` });
+      assert.equal((await sample()).checked, 1);
+      await h.mail({ workspace: late, html: h.offer(2), accepted: `clock_timestamp()-interval '5 minutes'` }); // Committed after the run.
+      assert.deepEqual([(await sample()).items, await sampledOf(late)], [1, true], 'Stamped at its transaction\'s start: still read.');
+      // 2. A stamp older than the newest mail the run read: another clock (a Worker's, the provider's) 30 seconds behind.
+      await h.mail({ workspace: own[2]!, snapshot: { testCampaignId: 'cmp_fixture' }, accepted: `clock_timestamp()-interval '1 minute'` });
+      const before = (await marks([own[2]!]))[0]!.through; await sample();
+      assert.notEqual((await marks([own[2]!]))[0]!.through, before, 'Read, and how far recorded.');
+      await h.mail({ workspace: own[2]!, html: h.offer(3), accepted: `clock_timestamp()-interval '90 seconds'` }); // Committed after the run.
+      assert.deepEqual([(await sample()).items, await sampledOf(own[2]!)], [1, true], 'Stamped before the last read: still read.');
+
+      // The other bound on its own (no margin): a transaction still open (it may hold an accepted event stamped now,
+      // visible only when it commits, however long that takes) stops the mark before its start, though this
+      // workspace's newest mail is later, so its mail is read again until it is gone.
+      const margin = abuse.SAMPLE_SETTLE.marginMs, open = new pg.Client({ connectionString: process.env.DATABASE_URL });
+      abuse.SAMPLE_SETTLE.marginMs = 0; await open.connect();
       try {
         await open.query('BEGIN'); await open.query('SELECT txid_current()');
         const started = (await open.query('SELECT xact_start::text AS at FROM pg_stat_activity WHERE pid=pg_backend_pid()')).rows[0].at as string;
         await h.mail({ workspace: own[1]!, snapshot: { testCampaignId: 'cmp_fixture' } });
-        assert.equal((await sample()).checked, 1);
+        await sample(); const firstRead = await readAt(own[1]!);
         const [held] = (await db.query(`SELECT s.sampled_through<$2::timestamptz AS before_open,(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1)>$2::timestamptz AS newest_after
           FROM abuse_sampling s WHERE s.workspace_id=$1`, [own[1], started])).rows;
         assert.deepEqual(held, { before_open: true, newest_after: true }, 'Never past the start of a transaction still open.');
-        assert.equal((await sample()).checked, 1, 'Read again while it is open: nothing it might commit is skipped.');
-      } finally { await open.query('ROLLBACK').catch(() => {}); await open.end(); }
-      // Once it is gone, one more read moves the mark up to the newest mail, and the run after reads nothing.
-      assert.equal((await sample()).checked, 1);
-      assert.deepEqual([(await sample()).checked, (await db.query('SELECT s.sampled_through=(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1) AS caught_up FROM abuse_sampling s WHERE s.workspace_id=$1', [own[1]])).rows[0].caught_up], [0, true]);
+        await sample(); assert.notEqual(await readAt(own[1]!), firstRead, 'Read again while it is open: nothing it might commit is skipped.');
+        await open.query('ROLLBACK');
+        // Once it is gone, one more read moves the mark up to the newest mail, and the run after does not read it.
+        await sample(); const caughtUp = await readAt(own[1]!);
+        await sample();
+        assert.deepEqual([await readAt(own[1]!), (await db.query('SELECT s.sampled_through=(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1) AS caught_up FROM abuse_sampling s WHERE s.workspace_id=$1', [own[1]])).rows[0].caught_up], [caughtUp, true]);
+      } finally { abuse.SAMPLE_SETTLE.marginMs = margin; await open.query('ROLLBACK').catch(() => {}); await open.end(); }
     });
   });
 

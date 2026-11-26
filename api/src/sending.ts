@@ -1472,7 +1472,7 @@ const releaseJobId = (emailId: string) => `release:${emailId}`;
 const queueRelease = (rows: SQL, at: string) => sql`INSERT INTO jobs(id,type,workspace_id,payload,available_at)
   SELECT 'release:'||r.id,'sending.release',r.workspace_id,jsonb_build_object('emailId',r.id,'run',${id('run')}::text),${at}::timestamptz FROM (${rows}) r
   ON CONFLICT(id) DO UPDATE SET status='pending',attempts=0,payload=excluded.payload,available_at=excluded.available_at,lease_until=NULL,last_error=NULL RETURNING 1`;
-const scheduledEvent = (rows: SQL, type: 'scheduled' | 'rescheduled', at: string, simulated: boolean) => sql`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data)
+const scheduledEvent = (rows: SQL, type: 'scheduled' | 'rescheduled', at: string, simulated: boolean) => sql`INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data) /* premerge-accepted: never (scheduled or rescheduled) */
   SELECT public.row_id('event'),r.workspace_id,r.id,${type},${simulated},jsonb_build_object('scheduledAt',${at}::text) FROM (${rows}) r RETURNING 1`;
 /** A send time within the schedule's bounds (the same as send_admission's), in UTC. */
 function scheduleTime(value: string) {
@@ -1537,7 +1537,7 @@ const releaseScheduled: JobHandler = retryDatabaseFailures(async (runtime, paylo
     const hold = async (code: string, until: number, data: Record<string, unknown> = {}) => {
       const at = new Date(Math.max(until, Date.now() + 1000)).toISOString(), changed = payload.heldBy !== code;
       await tx.execute(sql`WITH moved AS (UPDATE sending_emails SET scheduled_at=${at}::timestamptz,updated_at=clock_timestamp() WHERE workspace_id=${wid} AND id=${emailId} AND status='scheduled' RETURNING workspace_id,id)
-        ${changed ? sql`, noted AS (INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data)
+        ${changed ? sql`, noted AS (INSERT INTO sending_email_events(id,workspace_id,email_id,type,simulated,data) /* premerge-accepted: never (dispatch_deferred) */
           SELECT public.row_id('event'),workspace_id,id,'dispatch_deferred',${row.simulated},${JSON.stringify({ code, providerCalled: false, until: at, ...data })}::jsonb FROM moved RETURNING 1)` : sql``} SELECT 1`);
       if (changed) log('info', { code: 'SCHEDULED_EMAIL_HELD', workspaceId: wid, emailId, reason: code, until: at });
       const since = code !== 'RAMP_LIMIT_REACHED' || heldSince === null ? new Date().toISOString() : payload.heldSince;
@@ -3369,7 +3369,9 @@ export async function ingestRoutineSesEvents(runtime: Runtime, inputs: RoutineIn
     ), inserted AS (
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at,recipient_hashes)
        SELECT x.event_id, x.workspace_id, x.email_id, x.type, x.provider_id, x.external_id,
-         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated, x.event_time,
+         x.data || jsonb_build_object('emailId', x.email_id, 'providerId', x.provider_id), x.simulated,
+         -- SES's event time, except accepted mail (not simulated): the database's clock, as the abuse sample's mark relies on.
+         CASE WHEN x.type='accepted' AND NOT x.simulated THEN clock_timestamp() ELSE x.event_time END,
          ${mx && effects ? sql`CASE WHEN x.type IN ('bounce','complaint') AND jsonb_typeof(x.effects->'reported')='array'
            AND EXISTS(SELECT FROM provider_feedback_history WHERE topic_arn=x.topic_arn AND kind='shared') THEN ARRAY(
            SELECT encode(sha256(convert_to(x.email_id,'UTF8') || decode('00','hex') || convert_to(r.address,'UTF8')),'hex')
@@ -3444,7 +3446,10 @@ async function persistEmailEvent(runtime: Runtime, input: EmailEventInput & { em
   ), inserted AS (
     INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at, recipient_hashes)
     SELECT ${rowId('event')}, ${input.workspaceId}, mail.id, ${input.type}, ${input.providerId ?? null},
-      ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated, ${input.createdAt ?? now()}::timestamptz, ${sql.param(input.recipientHashes ?? null)}::text[]
+      ${input.externalId ?? null}, ${JSON.stringify(input.data ?? {})}::jsonb, mail.simulated,
+      -- Accepted mail (not simulated) is stamped with the database's clock inside this statement, never another clock: the
+      -- abuse sample's mark relies on it (abuse.ts settledThrough; check-premerge.ts holds every writer to it).
+      CASE WHEN ${input.type}::text='accepted' AND NOT mail.simulated THEN clock_timestamp() ELSE ${input.createdAt ?? now()}::timestamptz END, ${sql.param(input.recipientHashes ?? null)}::text[]
     FROM mail ON CONFLICT DO NOTHING RETURNING *
   ), updated AS (
     UPDATE sending_emails e SET

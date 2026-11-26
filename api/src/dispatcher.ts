@@ -876,6 +876,9 @@ async function recordOutcomes(runtime: Runtime, outcomes: Outcome[]) {
       SELECT e.id, e.workspace_id, e.status, e.error_code, e.region, e.dispatch_version FROM sending_emails e JOIN input x ON e.workspace_id = x.workspace_id AND e.id = x.email_id
       ORDER BY e.id FOR UPDATE
     ), inserted AS (
+      -- Accepted mail is stamped with the database's clock inside this statement, after the FOR UPDATE above gave it a
+      -- transaction ID, never another clock: the abuse sample's mark relies on it (abuse.ts settledThrough;
+      -- check-premerge.ts holds every writer of sending_email_events to it).
       INSERT INTO sending_email_events(id, workspace_id, email_id, type, provider_id, external_id, data, simulated, created_at)
       SELECT x.event_id, m.workspace_id, m.id, x.type, x.provider_id, x.external_id, x.data, ${simulated}::boolean, clock_timestamp()
       FROM input x JOIN mail m ON m.id = x.email_id ORDER BY m.workspace_id,m.id ON CONFLICT DO NOTHING RETURNING *

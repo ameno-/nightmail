@@ -507,6 +507,31 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
   if (failed === before) console.log(`Operation summaries: all ${operations.length} operations are named in at most ${most} characters, so every docs title fits in 60.`);
 }
 
+// 13. Accepted mail is stamped with the database's clock inside the statement that writes it. The abuse sample records
+// how far it read a workspace (src/abuse.ts settledThrough) and relies on this: mail stamped with another clock (a
+// Worker's, SES's) or with its transaction's start can become visible behind that mark and is never read. So every
+// statement that inserts into sending_email_events either stamps created_at with clock_timestamp() (for accepted mail
+// at least) or says, in an SQL comment inside the statement, that it never writes type 'accepted':
+// /* premerge-accepted: never (why) */. The check is textual: it holds each writer to declaring one or the other.
+{
+  const before = failed;
+  const files = (dir: string, keep: (name: string) => boolean): string[] => readdirSync(new URL(dir, api), { withFileTypes: true })
+    .flatMap(e => e.isDirectory() ? files(`${dir}${e.name}/`, keep) : keep(e.name) ? [`${dir}${e.name}`] : []);
+  const scanned = [...files('src/', n => n.endsWith('.ts')), ...files('scripts/', n => n.endsWith('.ts') && n !== 'check-premerge.ts'), ...files('migrations/', n => Number(n.slice(0, 3)) >= 580)];
+  let writers = 0;
+  for (const path of scanned) {
+    const text = readFileSync(new URL(path, api), 'utf8');
+    for (const match of text.matchAll(/INSERT\s+INTO\s+sending_email_events\s*\(([^)]*)\)/gi)) {
+      writers++;
+      const rest = text.slice(match.index! + match[0].length), stop = rest.search(/\bRETURNING\b|\bON\s+CONFLICT\b|`/i), window = match[0] + rest.slice(0, stop < 0 ? 2000 : Math.min(stop, 2000));
+      const line = text.slice(0, match.index).split('\n').length;
+      if (/premerge-accepted: never/.test(window)) continue;
+      if (!/\bcreated_at\b/.test(match[1]!) || !/clock_timestamp\(\)/.test(window)) fail('Accepted mail stamp', `This insert into sending_email_events neither stamps created_at with clock_timestamp() nor says it never writes accepted mail. Stamp accepted mail (not simulated) with clock_timestamp() inside the statement, or add /* premerge-accepted: never (why) */ to it: the abuse sample's mark relies on it (src/abuse.ts settledThrough).`, `api/${path}`, line);
+    }
+  }
+  if (failed === before) console.log(`Accepted mail stamp: all ${writers} inserts into sending_email_events stamp accepted mail with the database's clock or never write it.`);
+}
+
 if (failed) {
   console.log(`\n${failed} pre-merge check${failed === 1 ? '' : 's'} failed. docs/ci.md explains each one and how to fix it.`);
   process.exitCode = 1;
