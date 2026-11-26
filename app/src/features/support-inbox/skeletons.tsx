@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { ChevronRight, MoreHorizontal } from 'lucide-react'
+import { Bot, ChevronRight, Mail, MessageSquare, MoreHorizontal } from 'lucide-react'
 import { useLocation } from 'react-router'
 import { BackLink, Button, IconButton, LoadingRegion, PageHeader, SearchField, Select, Skeleton, SkeletonText, TableSkeleton, Tabs, type SkeletonColumn, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -64,13 +64,16 @@ export function whoOf(c: SupportConversation): ReactNode {
   const address = c.customer?.email ?? c.sender
   return c.customer?.name ?? (address ? <PrivateAddress value={address} /> : c.workspace?.name ?? 'Unknown sender')
 }
-/** A conversation's header, loaded or not (one height either way): back, who and where it stands (a button that opens
- *  Details, with a chevron on a phone), then Details on a wide screen, Done and the menu. */
-export function ConversationHeader({ who, status, onDetails, done, menu }: { who?: ReactNode; status?: ReactNode; onDetails?: () => void; done?: { onClick: () => void; title: string }; menu?: ReactNode }) {
+const channelIcons = { chat: MessageSquare, email: Mail, agent_feedback: Bot }
+/** A conversation's header, loaded or not (one height either way): back, who (after the channel's icon, its slot held
+ *  while loading) and where it stands (a button that opens Details, with a chevron on a phone), then Details on a wide
+ *  screen, Done and the menu. */
+export function ConversationHeader({ channel, who, status, onDetails, done, menu }: { channel?: Channel; who?: ReactNode; status?: ReactNode; onDetails?: () => void; done?: { onClick: () => void; title: string }; menu?: ReactNode }) {
+  const Icon = channel && channelIcons[channel]
   return <header className="sinbox-chat__header sinbox-chat__column">
     <BackLink to="/support" />
     <button type="button" className="sinbox-chat__who" disabled={!onDetails} onClick={onDetails} aria-haspopup="dialog" title={onDetails ? 'Details' : undefined}>
-      <span className="sinbox-chat__name"><span className="sinbox-chat__name-text">{who ?? <Skeleton width={140} height={14} />}</span>{who && <ChevronRight size={16} aria-hidden="true" className="sinbox-chat__chevron" />}</span>
+      <span className="sinbox-chat__name"><span className="sinbox-chat__channel">{Icon && <Icon size={14} aria-label={channelLabels[channel!]} />}</span><span className="sinbox-chat__name-text">{who ?? <Skeleton width={140} height={14} />}</span>{who && <ChevronRight size={16} aria-hidden="true" className="sinbox-chat__chevron" />}</span>
       <span className="sinbox-chat__state">{status}</span>
     </button>
     <div className="cluster sinbox-chat__actions">
@@ -83,7 +86,6 @@ export function ConversationHeader({ who, status, onDetails, done, menu }: { who
 /** The thread before it loads: a few bubbles and lines where the messages go. */
 export function ThreadSkeleton() {
   return <div className="sinbox-chat__scroll"><LoadingRegion label="Loading the conversation"><div className="sinbox-chat__column sinbox-chat__thread" aria-hidden="true">
-    <div className="sinbox-chat__intro"><p className="sinbox-chat__facts"><Skeleton width={200} height={10} /></p></div>
     {[62, 78, 48].map((width, index) => <div key={index} className="sinbox-msg" data-role={index % 2 ? 'agent' : 'customer'} data-first="">
       <p className="sinbox-msg__meta"><Skeleton width={96} height={10} /></p>
       <div className={index % 2 ? 'sinbox-msg__prose' : 'sinbox-msg__bubble'} style={{ width: `${width}%` }}><SkeletonText width="100%" lineHeight={20} /><SkeletonText width="60%" lineHeight={20} /></div>

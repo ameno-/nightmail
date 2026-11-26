@@ -86,7 +86,7 @@ export function SupportConversationPage() {
   const status = conversation && triageOf(conversation)
   const marks = canAct && conversation?.needsYou != null
   return <div className="sinbox-chat">
-    <ConversationHeader who={conversation && whoOf(conversation)} status={status && <StatusBadge status={status.text} tone={status.tone} />}
+    <ConversationHeader channel={conversation?.channel} who={conversation && whoOf(conversation)} status={status && <StatusBadge status={status.text} tone={status.tone} />}
       onDetails={detail.data ? () => setDetails(true) : undefined}
       done={conversation ? { onClick: finish, title: `${marks ? 'Mark done and open' : 'Open'} ${next ?? previous ? 'the next conversation' : 'the list'} (e)` } : undefined}
       menu={conversation && <DropdownMenu label="Conversation actions" title={titleOf(conversation)} items={menuItems(conversation, { canAct, actions, onConfirm: setConfirming, done: false })} />} />
@@ -96,6 +96,7 @@ export function SupportConversationPage() {
     {detail.data && <Dialog open={details} onOpenChange={setDetails} title="Details" size="lg" className="sinbox-details">
       {detail.data.brief && <div className="sinbox-details__brief"><AiSummary brief={detail.data.brief} subject={titleOf(detail.data.conversation)} /></div>}
       <CustomerPanel detail={detail.data} />
+      <Activity detail={detail.data} />
     </Dialog>}
     <ConfirmAction confirming={confirming} onClose={() => setConfirming(null)} actions={actions} />
     <ApprovalPrompt conversationId={id} canAct={canAct} />
@@ -148,8 +149,8 @@ function ApprovalPrompt({ conversationId, canAct }: { conversationId: string; ca
 /** Who wrote a message, as the chat shows them: the customer's words, the agent's or staff's, a note (staff's, or the
  *  triage agent's on an agent report), or the agent's held answer, a draft until someone decides. */
 type Role = 'customer' | 'agent' | 'staff' | 'note' | 'draft'
-type ChatMessage = { type: 'message'; key: string; m: SupportMessage; role: Role; author: string; via: string | null; first: boolean; last: boolean }
-type ChatRow = { type: 'day'; key: string; label: string } | { type: 'event'; key: string; at: string; text: string; kind: string } | ChatMessage
+type ChatMessage = { type: 'message'; key: string; m: SupportMessage; role: Role; author: string; first: boolean; last: boolean }
+type ChatRow = { type: 'day'; key: string; label: string } | { type: 'proposal'; key: string; at: string; text: string } | ChatMessage
 
 const day = (iso: string) => new Date(iso).toISOString().slice(0, 10)
 const dayFormat = new Intl.DateTimeFormat('en-US', { weekday: 'short', month: 'short', day: 'numeric', timeZone: 'UTC' })
@@ -166,41 +167,57 @@ const initials = (name: string) => name.replace(/@.*/, '').split(/[\s._-]+/).fil
 /** Our sender's mark: the agent's bot, a person's initials. */
 const Mark = ({ name, agent }: { name: string; agent: boolean }) => <span className="sinbox-mark" data-agent={agent || undefined} aria-hidden="true">{agent ? <Bot size={12} /> : initials(name)}</span>
 
-export function describe(m: SupportMessage, c: SupportConversation) {
+/** The support platform's replies the customer saw (a fixed reply, a reply asking them to sign in) are part of the
+ *  conversation; its records (a choice they made, an email it won't answer yet, an agent report's provenance) are
+ *  Activity. */
+const toCustomer = (m: SupportMessage) => m.author === 'system' && (m.kind === 'notice' || m.kind === 'waiting')
+function describe(m: SupportMessage, c: SupportConversation) {
   const note = m.kind === 'note' && (m.author === 'staff' || m.author === 'agent')
-  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? note ? 'Triage agent' : 'Nightmail AI' : m.staff?.name ?? m.emailFrom ?? 'Staff'
-  const role: Role = note ? 'note' : held(m) ? 'draft' : m.author === 'customer' ? 'customer' : m.author === 'agent' ? 'agent' : 'staff'
-  const via = note ? (m.emailFrom ? 'Note by email' : null) : m.author === 'customer' ? (m.email ? 'Email' : c.channel === 'agent_feedback' ? channelLabels[c.channel] : null) : null
-  return { author, role, via }
+  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer')
+    : m.author === 'agent' ? note ? 'Triage agent' : 'Nightmail AI' : m.author === 'system' ? productName : m.staff?.name ?? m.emailFrom ?? 'Staff'
+  const role: Role = note ? 'note' : held(m) ? 'draft' : m.author === 'customer' ? 'customer' : m.author === 'staff' ? 'staff' : 'agent'
+  return { author, role }
 }
+/** A proposal the agent made is waiting while no approval or decline for it came after. */
+function waitingProposals(events: SupportEvent[]) {
+  const decided = new Set(events.filter(e => e.kind === 'approved' || e.kind === 'declined').map(e => String(e.details.approval ?? '')))
+  return events.filter(e => e.kind === 'proposed' && !decided.has(String(e.details.approval ?? '')))
+}
+const sentenceCase = (text: string) => /^[A-Z][a-z]/.test(text) ? text[0]!.toLowerCase() + text.slice(1) : text
 const GROUP_MS = 10 * 60_000
 /**
- * The conversation as chat rows, oldest first, by time (an event before a message written in the same moment: a
- * take-over comes before the reply that made it): a day separator where the day changes, events as lines, and each run
- * of messages from one sender (within ten minutes, nothing between them) marked first and last; a draft and an email
- * stand alone. Events eventText leaves out are not shown.
+ * The thread is what people said and what needs a decision: the messages, oldest first, and a proposal still waiting
+ * for approval, by time. Each run of messages from one sender (within ten minutes, nothing between them) shares one
+ * name and time; a draft and an email stand alone. Days are separated only when the thread spans more than one.
+ * Everything else that happened is Activity, in Details.
  */
 function chatRows(detail: SupportDetail): ChatRow[] {
-  const c = detail.conversation, rows: ChatRow[] = []
-  const events = detail.events.flatMap(event => { const text = eventText(event); return text === null ? [] : [{ event, text }] })
+  const c = detail.conversation
   const entries = [
-    ...events.map(({ event, text }, order) => ({ key: event.id, at: event.at, event, text, message: undefined, rank: event.kind === 'closed' ? 2 : 0, order })),
-    ...detail.messages.map(message => ({ key: message.id, at: message.at, event: undefined, text: '', message, rank: 1, order: message.seq })),
+    ...waitingProposals(detail.events).map((event, order) => ({ key: event.id, at: event.at, event, message: undefined, rank: 0, order })),
+    ...detail.messages.filter(m => m.author !== 'system' || toCustomer(m)).map(message => ({ key: message.id, at: message.at, event: undefined, message, rank: 1, order: message.seq })),
   ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at) || a.rank - b.rank || a.order - b.order)
+  const days = new Set(entries.map(entry => day(entry.at))).size > 1, rows: ChatRow[] = []
   let lastDay = '', previous: ChatMessage | null = null
   for (const entry of entries) {
-    if (day(entry.at) !== lastDay) { lastDay = day(entry.at); rows.push({ type: 'day', key: `day:${lastDay}`, label: dayLabel(entry.at) }); previous = null }
-    if (entry.event) { rows.push({ type: 'event', key: entry.key, at: entry.at, text: entry.text, kind: entry.event.kind }); previous = null; continue }
-    const m = entry.message!
-    // The support platform's own notices (a fixed reply, an agent report's notice) are a line, like an event.
-    if (m.author === 'system') { rows.push({ type: 'event', key: entry.key, at: entry.at, text: m.text, kind: 'system' }); previous = null; continue }
-    const { author, role, via } = describe(m, c)
-    const row: ChatMessage = { type: 'message', key: entry.key, m, role, author, via, first: true, last: true }
+    if (days && day(entry.at) !== lastDay) { lastDay = day(entry.at); rows.push({ type: 'day', key: `day:${lastDay}`, label: dayLabel(entry.at) }); previous = null }
+    if (entry.event) { rows.push({ type: 'proposal', key: entry.key, at: entry.at, text: `Waiting for approval: ${sentenceCase(String(entry.event.details.label ?? 'a change'))}` }); previous = null; continue }
+    const m = entry.message!, { author, role } = describe(m, c)
+    const row: ChatMessage = { type: 'message', key: entry.key, m, role, author, first: true, last: true }
     if (previous && previous.author === author && previous.role === role && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false }
     rows.push(row)
     previous = row
   }
   return rows
+}
+/** Everything else that happened, oldest first, for Details: events, what the agent checked before it answered, and
+ *  the support platform's records. */
+function activityOf(detail: SupportDetail) {
+  return [
+    ...detail.events.map(event => ({ key: event.id, at: event.at, text: eventText(event, detail.conversation), ok: undefined as boolean | undefined })),
+    ...detail.messages.flatMap(m => m.tools.map((tool, index) => ({ key: `${m.id}:${index}`, at: m.at, text: tool.label, ok: tool.ok }))),
+    ...detail.messages.filter(m => m.author === 'system' && !toCustomer(m)).map(m => ({ key: m.id, at: m.at, text: m.text, ok: undefined })),
+  ].sort((a, b) => Date.parse(a.at) - Date.parse(b.at))
 }
 
 /**
@@ -233,27 +250,26 @@ function Thread({ detail, canAct, actions, composer, onConfirm }: { detail: Supp
   // Edit and send: the held answer goes into the reply box, marked as that draft, so sending it decides the draft.
   // A fresh reply starts from an empty box: nothing of the held answer is carried over.
   const edit = (m: SupportMessage, fresh: boolean) => { updateInboxDraft(user, c.id, () => ({ text: fresh ? '' : m.text.trim(), key: crypto.randomUUID(), mode: 'reply', draftOf: m.id, failed: null })); composer.current?.focus('reply') }
-  const facts = [channelLabels[c.channel], c.ticket && [c.ticket.severity, c.ticket.type && c.ticket.type !== 'agent_feedback' ? label(c.ticket.type) : null].filter(Boolean).join(' '), `started ${shortDateTime(c.createdAt)}`].filter(Boolean).join(' · ')
   return <>
     <div className="sinbox-chat__scroll" ref={scroller}>
       <div className="sinbox-chat__column sinbox-chat__thread" ref={content}>
-        <div className="sinbox-chat__intro">{c.subject && c.channel !== 'agent_feedback' && <p className="sinbox-chat__subject">{c.subject}</p>}<p className="sinbox-chat__facts">{facts}</p></div>
+        {c.channel === 'email' && c.subject && <p className="sinbox-chat__subject">{c.subject}</p>}
         {detail.earlierMessages > 0 && <p className="sinbox-chat__event">{number(detail.earlierMessages)} earlier {detail.earlierMessages === 1 ? 'message isn’t' : 'messages aren’t'} shown.</p>}
         {rows.map(row => row.type === 'day' ? <p key={row.key} className="sinbox-chat__day">{row.label}</p>
-          : row.type === 'event' ? <p key={row.key} className="sinbox-chat__event" data-kind={row.kind}><span>{row.text} · <Time at={row.at} /></span></p>
+          : row.type === 'proposal' ? <p key={row.key} className="sinbox-chat__proposal"><span aria-hidden="true" />{row.text} · <Time at={row.at} /></p>
           : <Message key={row.key} row={row} c={c} canAct={canAct} actions={actions} onEdit={edit} />)}
         {!rows.some(row => row.type === 'message') && <p className="sinbox-chat__empty">No messages yet</p>}
       </div>
     </div>
     <footer className="sinbox-chat__dock sinbox-chat__column">
-      <DockStatus c={c} canAct={canAct} actions={actions} onConfirm={onConfirm} />
+      <DockStatus detail={detail} canAct={canAct} actions={actions} onConfirm={onConfirm} />
       {canAct && <Composer ref={composer} detail={detail} actions={actions} />}
     </footer>
   </>
 }
 
-/** One message. The customer's in a bubble; ours as text under the mark; a note or a held answer as a card. Delivery
- *  shows only when it isn't plain: Queued while a reply waits to go, Not sent when it failed. */
+/** One message: its sender and time (the first of a run), then the customer's words in a bubble, ours as text under the
+ *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent. */
 function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: SupportConversation; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
   const { m, role } = row, customer = role === 'customer', pending = m.id.startsWith('pending:')
   const queued = m.author === 'staff' && m.kind !== 'note' && (m.delivery === 'queued' || pending)
@@ -261,17 +277,14 @@ function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: Sup
     {row.first && <p className="sinbox-msg__meta">
       {!customer && <Mark name={row.author} agent={m.author === 'agent'} />}
       <span className="sinbox-msg__author">{row.author}</span>
-      {m.email && <span className="sinbox-msg__from"><PrivateAddress value={m.email.from.address} /></span>}
-      {row.via && <span>{row.via}</span>}
-      {role === 'note' && <span className="sinbox-msg__note"><Lock size={12} aria-hidden="true" />Internal note · only staff see it</span>}
+      {role === 'note' && <span className="sinbox-msg__note" title="Only staff see notes"><Lock size={12} aria-hidden="true" />Note<span className="sr-only">: only staff see it</span></span>}
       <Time at={m.at} />
     </p>}
     {customer ? <div className="sinbox-msg__bubble sinbox-raised"><Body m={m} c={c} /></div>
       : role === 'draft' ? <div className="sinbox-msg__card sinbox-raised" data-draft=""><DraftLabel m={m} /><Body m={m} c={c} /><DraftFoot m={m} c={c} canAct={canAct} actions={actions} onEdit={onEdit} /></div>
       : role === 'note' ? <div className="sinbox-msg__card sinbox-raised"><Body m={m} c={c} /></div>
       : <div className="sinbox-msg__prose"><Body m={m} c={c} /></div>}
-    {(m.tools.length > 0 || m.delivery === 'failed' || queued) && <div className="sinbox-msg__below">
-      {m.tools.length > 0 && <ul className="sinbox-tools" aria-label="What the agent checked">{m.tools.map((tool, index) => <li key={index}>{tool.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />}{tool.label}</li>)}</ul>}
+    {(m.delivery === 'failed' || queued) && <div className="sinbox-msg__below">
       {m.delivery === 'failed' ? <span className="sinbox-delivery" data-state="failed"><AlertCircle size={12} aria-hidden="true" />Not sent</span>
         : queued && <span className="sinbox-delivery"><Clock size={12} aria-hidden="true" />Queued</span>}
     </div>}
@@ -285,17 +298,20 @@ function Body({ m, c }: { m: SupportMessage; c: SupportConversation }) {
     {m.files.length > 0 && !m.email && <Files conversationId={c.id} files={m.files} />}
   </>
 }
-const DraftLabel = ({ m }: { m: SupportMessage }) => <p className="sinbox-draft__label" data-decided={m.draft ? '' : undefined}><span aria-hidden="true" />{m.draft ? (m.draft.outcome === 'discarded' ? 'Draft, discarded' : 'Draft, sent by staff') : 'Draft, not sent'}</p>
+/** A held answer's label: Draft, not sent, until someone decides, then who decided what. Why it was held is the
+ *  card's tooltip; only a reason that leaves just a fresh reply is spelled out, since it takes Send away. */
+const DraftLabel = ({ m }: { m: SupportMessage }) => <p className="sinbox-draft__label" data-decided={m.draft ? '' : undefined} title={!m.draft && m.heldReason ? heldWhy[m.heldReason] : m.draft ? when(m.draft.at) : undefined}>
+  <span aria-hidden="true" />{m.draft ? `${decidedText[m.draft.outcome]} ${m.draft.by.name ?? 'staff'}` : 'Draft, not sent'}</p>
 function DraftFoot({ m, c, canAct, actions, onEdit }: { m: SupportMessage; c: SupportConversation; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
+  const fresh = !m.draft && m.heldReason ? freshOnly[m.heldReason] : undefined
   return <>
-    {!m.draft && <p className="sinbox-held">{m.heldReason ? freshOnly[m.heldReason] ?? heldWhy[m.heldReason] : 'Not sent.'}</p>}
-    {m.draft && <p className="sinbox-held">{decidedText[m.draft.outcome]} {m.draft.by.name ?? 'staff'} · <time dateTime={m.draft.at} title={when(m.draft.at)}>{shortDateTime(m.draft.at)}</time></p>}
+    {fresh && <p className="sinbox-held">{fresh}</p>}
     {!m.draft && canAct && c.status !== 'closed' && !m.id.startsWith('pending:') && <DraftActions m={m} c={c} actions={actions} onEdit={onEdit} />}
   </>
 }
 const heldWhy: Record<HeldReason, string> = {
-  paused: 'Not sent: staff took over after the agent wrote it.', gate: 'Not sent: the output check held it.', access: 'Not sent: the customer’s access changed before it went out.',
-  closed: 'Not sent: the conversation ended first.', earlier: 'Not sent: an earlier version of the agent wrote it.',
+  paused: 'Held: staff took over after the agent wrote it.', gate: 'Held by the output check.', access: 'Held: the customer’s access changed before it went out.',
+  closed: 'Held: the conversation ended first.', earlier: 'Held: an earlier version of the agent wrote it.',
 }
 const held = (m: SupportMessage) => m.author === 'agent' && (m.delivery === 'held' || m.kind === 'held')
 const size = (bytes: number | null) => bytes === null ? '' : bytes < 1024 ? `${bytes} B` : bytes < 1024 * 1024 ? `${Math.round(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -357,17 +373,16 @@ function Files({ conversationId, files }: { conversationId: string; files: Suppo
   </li>)}</ul>
 }
 
-// What happened besides the messages, as one quiet line each.
+// What happened besides the messages, in words, for Activity.
 /** A safe action the agent took on its own (api/src/support-actions.ts), in words, with what it acted on. */
 const actionWords: Record<string, string> = { verify_domain: 'The agent re-checked DNS for', recheck_receiving_host: 'The agent re-checked the MX of', resend_forward: 'The agent resent the forward confirmation for' }
-// Not shown (null): the opening (the first message says it) and a pause a staff reply made (the reply says it).
-function eventText(e: SupportEvent): string | null {
+function eventText(e: SupportEvent, c: SupportConversation): string {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
-    case 'opened': return null
+    case 'opened': return c.channel === 'agent_feedback' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
     case 'ticket': return d.by === 'nightmail' ? `Ticket opened: this needs a person${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
-    case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? null : `${who ?? 'Staff'} paused the agent`
+    case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? `${who ?? 'Staff'} replied and took over from the agent` : `${who ?? 'Staff'} paused the agent`
     case 'resumed': return `${who ?? 'Staff'} handed back to the agent`
     case 'resolved': return `${who ?? 'Staff'} resolved the ticket`
     case 'done': return `${who ?? 'Staff'} marked it done`
@@ -381,27 +396,28 @@ function eventText(e: SupportEvent): string | null {
 }
 const approvalWords = (d: Record<string, unknown>) => d.kind === 'retry_work' ? 'retrying the stuck work' : typeof d.label === 'string' ? `“${d.label}”` : 'a proposed action'
 
-/** Over the reply box: what needs staff before they write. The agent's work stuck (Retry now), a customer who got no
- *  reply, and a paused agent with who paused it (Hand back). */
-function DockStatus({ c, canAct, actions, onConfirm }: { c: SupportConversation; canAct: boolean; actions: Actions; onConfirm: (confirming: Confirming) => void }) {
-  const feedback = c.channel === 'agent_feedback', open = c.status !== 'closed' && !feedback
-  const blocked = !feedback && c.blockedWork > 0, noReply = c.needsYou?.reasons.includes('no_reply') ?? false, paused = open && c.agentState === 'paused'
-  if (!blocked && !noReply && !paused) return null
-  const by = c.pausedBy?.kind === 'ticket' ? ' for the ticket' : c.pausedBy?.name ? ` by ${c.pausedBy.name}` : ''
-  return <div className="sinbox-chat__status">
-    {blocked && <p data-tone="warning"><AlertCircle size={14} aria-hidden="true" /><span>The agent’s work here is stuck.</span>{canAct && <Button size="sm" variant="ghost" onClick={() => void actions.wake(c)}>Retry now</Button>}</p>}
-    {noReply && <p data-tone="danger"><AlertCircle size={14} aria-hidden="true" /><span>No reply sent: the customer is still waiting for one.</span></p>}
-    {paused && <p><Hand size={14} aria-hidden="true" /><span>Agent paused{by}.</span>{canAct && <Button size="sm" variant="ghost" onClick={() => onConfirm({ action: 'resume', conversation: c })}>Hand back</Button>}</p>}
-  </div>
+/** Over the reply box, at most one short line, and only when there is something to know or do, most pressing first:
+ *  replies off, the agent's work stuck (Retry), a customer who got no reply, the AI paused (Resume). */
+function DockStatus({ detail, canAct, actions, onConfirm }: { detail: SupportDetail; canAct: boolean; actions: Actions; onConfirm: (confirming: Confirming) => void }) {
+  const c = detail.conversation, feedback = c.channel === 'agent_feedback', open = c.status !== 'closed' && !feedback
+  const line = open && canAct && !detail.replyAvailable ? { tone: 'warning', text: 'Replies are off: the support service is offline' }
+    : !feedback && c.blockedWork > 0 ? { tone: 'warning', text: 'The AI’s work here is stuck', action: canAct && <Button size="sm" variant="ghost" onClick={() => void actions.wake(c)}>Retry</Button> }
+    : c.needsYou?.reasons.includes('no_reply') ? { tone: 'danger', text: 'No reply sent' }
+    : open && c.agentState === 'paused' ? { tone: 'muted', text: 'AI paused', action: canAct && <Button size="sm" variant="ghost" onClick={() => onConfirm({ action: 'resume', conversation: c })}>Resume</Button> }
+    : null
+  if (!line) return null
+  return <p className="sinbox-chat__status" data-tone={line.tone}>{line.tone === 'muted' ? <Hand size={14} aria-hidden="true" /> : <AlertCircle size={14} aria-hidden="true" />}<span>{line.text}</span>{line.action}</p>
 }
 
 export type ComposerHandle = { focus: (mode?: ComposeMode) => void }
 type ComposeMode = 'reply' | 'note'
 // The staff reply, or an internal note, always ready: typing changes nothing; sending a reply pauses the agent if it is
-// active, and says so. A note changes nothing for the customer or the agent, and says inside the box that it's one, so a
-// key never sends a note as a reply. Enter sends (isSendKey: not on a touch keyboard, not mid-composition), never an
-// empty box or while the last one is still sending. What is typed, and a reply that failed with why, stay with the
-// conversation until sent or discarded, wherever staff go meanwhile. The box grows with what is typed, then scrolls.
+// active (Send's tooltip says so, and who gets it). A note changes nothing for the customer or the agent; in note mode
+// the box is tinted and marked Note and its button says Add note, so a key never sends a note as a reply. Enter sends
+// (isSendKey: not on a touch keyboard, not mid-composition), never an empty box or while the last one is still sending.
+// Nothing sits under the box and nothing in it changes height on focus, so the row with Reply, Note and Send stays where
+// the finger is; the field grows upward with what is typed, then scrolls. What is typed, and a reply that failed with
+// why, stay with the conversation until sent or discarded, wherever staff go meanwhile.
 const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Actions }>(function Composer({ detail, actions }, ref) {
   const c = detail.conversation, identity = useSession()?.identity, user = identity?.id ?? ''
   const draft = useSyncExternalStore(subscribeInboxDrafts, () => inboxDraft(user, c.id)), text = draft?.text ?? ''
@@ -430,35 +446,45 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
       error => updateInboxDraft(user, c.id, now => ({ sending: null, mode, draftOf, failed: error instanceof ApiError ? error.message : failedText,
         ...now.text ? { text: `${sent.text}\n\n${now.text}`, key: crypto.randomUUID() } : { text: sent.text, key: sent.key } })))
   }
-  const name = c.customer?.name ?? 'the customer', me = identity?.name ?? 'you', target = detail.replyTarget
+  const name = c.customer?.name ?? 'the customer', target = detail.replyTarget
   const editing = !note && draft?.draftOf ? detail.messages.find(m => m.id === draft.draftOf && !m.draft) : undefined
-  const hint = feedback ? 'An agent filed this report: there’s nobody to reply to. Mark it done when handled; notes are for staff.' : note ? 'Only staff see notes. The customer and the agent never do.'
-    : offline ? 'The support service is offline, so replies are off.'
-    : c.channel === 'email' ? <>Replying as {me} · an email in this thread{target.address ? <> to <PrivateAddress value={target.address} /></> : ''}, from {productName} support{!target.verified && '. Their email didn’t pass DMARC, so it may not be delivered'}{handling ? '. Sending pauses the agent.' : '.'}</>
-    : <>Replying as {me} in their chat{target.address ? <> (emailed to <PrivateAddress value={target.address} /> if it’s closed)</> : ''}{handling ? '. Sending pauses the agent.' : '.'}</>
-  return <form className="sinbox-composer" data-mode={mode} data-filled={text ? true : undefined} data-unavailable={offline || undefined} onSubmit={send}>
+  const keys = touch ? '' : ` · Enter ${note ? 'adds it' : 'sends'}, Shift+Enter makes a new line`
+  const title = note ? `Only staff see notes${keys}` : `To ${name}${c.channel === 'email' ? ' by email' : ' in their chat'}${c.channel === 'email' && !target.verified ? ' (their email didn’t pass DMARC, so it may not arrive)' : ''}${handling ? '. Sending pauses the AI' : ''}${keys}`
+  return <form className="sinbox-composer" data-mode={mode} data-unavailable={offline || undefined} onSubmit={send}>
     <div className="sinbox-composer__box sinbox-raised">
-      {note && <p className="sinbox-composer__note"><Lock size={12} aria-hidden="true" />Internal note · only staff see it</p>}
-      {editing && <p className="sinbox-composer__editing">{editing.heldReason && freshOnly[editing.heldReason] ? 'A fresh reply instead of the agent’s held answer, which can’t be sent.' : 'Editing the agent’s held answer: sending it goes out as your reply.'} <button type="button" onClick={() => updateInboxDraft(user, c.id, () => ({ draftOf: null }))}>Keep it separate</button></p>}
-      <Textarea ref={field} aria-label={note ? 'Internal note' : 'Reply'} placeholder={note ? 'Add an internal note' : `Reply to ${name}`} value={text} maxLength={8000} disabled={offline} rows={1}
+      {draft?.failed && <p className="sinbox-composer__failed" role="alert">Not sent: {draft.failed}</p>}
+      {editing && <p className="sinbox-composer__editing">{editing.heldReason && freshOnly[editing.heldReason] ? 'A fresh reply in place of the AI’s draft' : 'Editing the AI’s draft'} · <button type="button" onClick={() => updateInboxDraft(user, c.id, () => ({ draftOf: null }))}>Keep it separate</button></p>}
+      <Textarea ref={field} aria-label={note ? 'Internal note' : 'Reply'} placeholder={note ? (feedback ? 'Add a note about this report' : 'Add a note for staff') : `Reply to ${name}`} value={text} maxLength={8000} disabled={offline} rows={1}
         onChange={event => { const value = event.target.value; updateInboxDraft(user, c.id, () => ({ text: value, key: crypto.randomUUID(), mode })) }}
         onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
         onKeyDown={event => { if (!composing.current && isSendKey(event, touch)) { event.preventDefault(); send() } else if (event.key === 'Escape') { event.preventDefault(); event.currentTarget.blur() } }} />
       <div className="sinbox-composer__bar">
-        {!closed && <div className="sinbox-composer__modes" role="group" aria-label="Write">
-          <button type="button" aria-pressed={!note} onClick={() => focus('reply')}>Reply</button>
-          <button type="button" aria-pressed={note} onClick={() => focus('note')}>Note</button>
-        </div>}
-        {!touch && <span className="sinbox-composer__keys">Enter to {note ? 'add' : 'send'}, Shift+Enter for a new line</span>}
+        {closed ? <span className="sinbox-composer__mark" title="Only staff see notes"><Lock size={12} aria-hidden="true" />Note</span>
+          : <div className="sinbox-composer__modes" role="group" aria-label="Write">
+            <button type="button" aria-pressed={!note} onClick={() => focus('reply')}>Reply</button>
+            <button type="button" aria-pressed={note} title="Only staff see notes" onClick={() => focus('note')}>{note && <Lock size={12} aria-hidden="true" />}Note</button>
+          </div>}
         <span className="cluster sinbox-composer__buttons">{draft?.failed && <Button variant="ghost" onClick={() => updateInboxDraft(user, c.id, () => null)}>Discard</Button>}
-          <Button type="submit" variant="primary" disabled={!text.trim() || offline || Boolean(draft?.sending)}>{note ? 'Add note' : 'Send reply'}</Button></span>
+          <Button type="submit" variant="primary" title={title} disabled={!text.trim() || offline || Boolean(draft?.sending)}>{note ? 'Add note' : 'Send'}</Button></span>
       </div>
     </div>
-    {draft?.failed ? <p className="sinbox-composer__failed" role="alert">Not sent: {draft.failed}</p> : <p className="sinbox-composer__hint">{hint}</p>}
   </form>
 })
 
 // ---------------------------------------------------------------- details
+
+/** What happened besides what was said, oldest first, each with its time: events, what the agent checked before it
+ *  answered (with whether it worked), and the support platform's records (an agent report's provenance among them). */
+function Activity({ detail }: { detail: SupportDetail }) {
+  const items = activityOf(detail)
+  if (!items.length) return null
+  return <section className="sinbox-activity"><h3 className="ui-label ui-label--rule">Activity</h3>
+    <ol>{items.map(item => <li key={item.key}>
+      <span className="sinbox-activity__text">{item.ok !== undefined && (item.ok ? <Check size={12} aria-label="Done" /> : <X size={12} aria-label="Failed" />)}{item.text}</span>
+      <time dateTime={item.at} title={when(item.at)}>{shortDateTime(item.at)}</time>
+    </li>)}</ol>
+  </section>
+}
 
 /** The agent's ticket brief, folded: its own summary, in Details and never in place of the messages. */
 function AiSummary({ brief, subject }: { brief: SupportBrief; subject: string }) {
@@ -492,7 +518,11 @@ const Label = ({ children }: { children: ReactNode }) => <h3 className="ui-label
 function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const { conversation: c, customer } = detail, user = customer.user, evidence = c.evidence
   const others = customer.conversations
+  const target = detail.replyTarget
+  const replies: ReactNode = c.channel === 'email' ? target.address ? <span className="sinbox-address"><PrivateAddress value={target.address} />{!target.verified && <StatusBadge status="Didn’t pass DMARC" tone="warning" />}</span> : '—'
+    : target.address ? 'Their chat, or by email once it’s closed' : 'Their chat'
   const extra: [string, ReactNode][] = [
+    ...c.channel !== 'agent_feedback' && c.status !== 'closed' ? [['Replies go to', replies] as [string, ReactNode]] : [],
     ...c.ticket ? [['Ticket', <span title={c.ticket.id}>{ticketText(c)}</span>] as [string, ReactNode]] : [],
     ...c.page ? [['Opened from', c.page] as [string, ReactNode]] : [],
   ]
