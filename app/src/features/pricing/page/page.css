@@ -54,7 +54,10 @@
    15 px. */
 .pp .pp-label { --stripe: 5px; display: inline-grid; width: auto; box-shadow: 0 2px 5px rgb(0 0 0 / 70%); }
 .pp .pp-label .chyp-go { height: 44px; padding: 0 16px; font-size: 15px; letter-spacing: .02em; word-spacing: -.12em; text-decoration: none; color: #0A0B0F; }
+/* Join the waitlist and Open dashboard, the longer wordings, a step smaller (as tv.css sets them on the homepage). */
+.pp .pp-label .chyp-go .srt-cta-wait, .pp .pp-label a.chyp-go { font-size: 13px; }
 .pp-consent { margin: 0; color: var(--faint); font-size: 12px; line-height: 16px; }
+.pp-full { min-height: 16px; }
 .pp .pp-consent a { text-decoration-color: rgb(140 139 136 / 50%); }
 
 /* The page under the verdict. The first section (the price table) follows it closely; the rest are spaced apart. */

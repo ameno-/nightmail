@@ -1,5 +1,8 @@
 import { Fragment, type CSSProperties, type ReactNode } from 'react'
+import { SignInConsent } from '../../../components/LegalLinks'
 import { NightmailWordmark } from '../../../components/NightmailLogo'
+import { WaitlistLine } from '../../home/get-started'
+import type { Start } from '../board'
 import { dayOf, type Source } from '../prices'
 import { linesOf, plain, type Block, type Inline, type PageDoc, type Table, type Text } from './shape'
 
@@ -21,12 +24,16 @@ function Run({ text }: { text: Text }) {
       : <span key={i} data-nightmail-sent={part.sent} data-nightmail-received={part.received}>{part.ours}</span>)}</>
 }
 
-/** The way in: the television's airmail label (home/tv/tv.css, .chyp), an ordinary button's size, opening Overview with
- *  the page's focus (data/landing-focus.ts), and the terms signing in agrees to under it. */
-function Way({ focus }: { focus?: string }) {
+/** The way in, the price pages' own (board.tsx, Start): the homepage's button in the television's airmail label
+ *  (home/tv/tv.css, .chyp) at an ordinary button's size. Painted (page/prerender.tsx) it is a visitor's Get started; the
+ *  app's (view.tsx) signs in with the page's focus, says Join the waitlist when no place is open (home/signups-open.ts),
+ *  and is Open dashboard for someone signed in. Under it for a visitor, the terms signing in agrees to and the waitlist
+ *  line, which is always laid out and shown only when no place is open, so its arrival moves nothing. */
+function Way({ start }: { start?: Start }) {
+  if (!start) return null
   return <div className="pp-way">
-    <div className="chyp chyp-under pp-label"><a className="chyp-go" href={focus ? `/overview?focus=${focus}` : '/overview'}><span className="srt-cta-label">Get started</span></a></div>
-    <p className="pp-consent">By continuing you agree to the <a href="/legal/terms">Terms of Service</a> and <a href="/legal/privacy">Privacy Policy</a>.</p>
+    <div className="chyp chyp-under pp-label">{start.button('chyp-go')}</div>
+    {!start.signedIn && <><SignInConsent className="pp-consent" /><WaitlistLine className="pp-consent pp-full" full={start.full} /></>}
   </div>
 }
 
@@ -74,7 +81,7 @@ function Checked({ sources }: { sources: Source[] }) {
   return <p>{days.map((day, d) => { const on = pages.filter(source => source.checked === day); return <Fragment key={day}>{`${d === 0 ? 'Checked ' : '; '}${dayOf(day)} on `}{on.map((source, i) => <Fragment key={source.url}>{join(i, on.length)}<a href={source.url} target="_blank" rel="noopener noreferrer">{pageName(source.url)}</a></Fragment>)}</Fragment> })}.</p>
 }
 
-export function PricePageView({ doc, set }: { doc: PageDoc; set?: ReactNode }) {
+export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNode; start?: Start }) {
   const comparisons = doc.related.length > 0 && doc.related.every(page => page.path.startsWith('/compare/'))
   return <div className="pp" data-set={set ? '' : undefined}>
     <Crumbs doc={doc} />
@@ -83,7 +90,7 @@ export function PricePageView({ doc, set }: { doc: PageDoc; set?: ReactNode }) {
       <section className="pp-hero" aria-labelledby="pp-h1">
         <Heading doc={doc} id="pp-h1" />
         {doc.answer.map((text, i) => <p key={i} className="pp-caption"><Run text={text} /></p>)}
-        <Way focus={doc.focus} />
+        <Way start={start} />
       </section>
       {doc.sections.map((section, i) => <section key={section.id} id={section.id} className="pp-section" aria-labelledby={`${section.id}-title`}>
         <h2 id={`${section.id}-title`} className={doc.sections.length === 1 && section.blocks[0]?.kind === 'table' ? 'sr-only' : 'pp-h2'}>{section.title}</h2>

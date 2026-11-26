@@ -157,9 +157,13 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
             ...fonts.map(font => `<link rel="preload" href="${font.url}" as="font" type="font/woff2" crossorigin />`),
             ...withSet ? [`<link rel="preload" href="${drawn.scene}" as="image" fetchpriority="high" />`] : [],
           ].map(line => `\n    ${line}`).join(''))
+          set(/(<script src="\/theme.js")(?=><\/script>)/, ' data-plain=""')
+          // Painted as a visitor sees it, as the boards are (#price-shell), and the app's page takes over from it at the
+          // reader's first touch, key or scroll (page/pricing.tsx): its Get started then signs in, or says Join the
+          // waitlist, or is Open dashboard.
           set(/(<\/title>)/, '\n    <link rel="expect" href="#root" blocking="render" />')
-          set(/(<\/title>)/, `\n    <style>${pruneCss(drawn.css, usedNames(html + body, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
-          html = html.replace('<div id="root"></div>', `${body}\n    <div id="root"></div>`)
+          set(/(<\/title>)/, `\n    <style data-shell-css>${SHELL_CSS}${pruneCss(drawn.css, usedNames(html + body, THEME_ATTRIBUTES)).replace(WHOLE_FACES, '')}</style>\n    <style>${faces}</style>`)
+          html = html.replace('<div id="root"></div>', `<div id="price-shell">${body}</div>\n    <div id="root"></div>\n    <script src="${boot}" defer data-shell="price-shell" data-press="button" data-wait="none" data-keep=".boot-loader, .price-page, .pp" data-css="${styles[0]}" data-preload="${preload.join(' ')}" data-entry="${entry[0]}"></script>`)
           this.emitFile({ type: 'asset', fileName: file, source: html })
           continue
         }

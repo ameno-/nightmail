@@ -1,6 +1,6 @@
-import { lazy, use, useEffect, useLayoutEffect, type ReactNode } from 'react'
+import { lazy, use, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
 import { useLocation, useSearchParams } from 'react-router'
-import { PricePage as Calculator } from '..'
+import { fontsReady, PricePage as Calculator, useShellTakeover } from '..'
 import { comparisons } from '../compare'
 import { PRICE_PAGES } from '../pages'
 import { hubDoc } from './hub'
@@ -14,15 +14,14 @@ const view = () => import('./view')
 const ComparisonView = lazy(() => view().then(m => ({ default: m.ComparisonView })))
 const HubView = lazy(() => view().then(m => ({ default: m.HubView })))
 
-// (As ../index.tsx: text drawn before the web fonts arrive rewraps when they do, so the page waits for them, at most 3 s.)
-const fontsReady = typeof document === 'undefined' ? Promise.resolve() : Promise.race([
-  Promise.all(['400 16px Inter', '700 16px "OpenTUI Mono"', '400 16px "OpenTUI Mono"'].map(font => document.fonts.load(font, 'a1'))),
-  new Promise(resolve => setTimeout(resolve, 3000)),
-]).catch(() => {})
+/** As ../index.tsx's PriceFrame: the fonts first (text drawn before them rewraps), the tab's title, and the page's place:
+ *  it takes over from the page's painted HTML (useShellTakeover: the reader's scroll, focus and a press made while the
+ *  app loaded carry over), or opens at its top. */
 function Frame({ title, children }: { title: string; children: ReactNode }) {
   use(fontsReady)
   useEffect(() => { document.title = title }, [title])
-  useLayoutEffect(() => { window.scrollTo(0, 0) }, [title])
+  const painted = useShellTakeover(), opened = useRef(false)
+  useLayoutEffect(() => { if (opened.current || !painted) window.scrollTo(0, 0); opened.current = true }, [title, painted])
   return children
 }
 
