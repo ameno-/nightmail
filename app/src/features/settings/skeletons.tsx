@@ -172,17 +172,12 @@ export function DomainDetailSkeleton() {
   </LoadingRegion>
 }
 
-// The API keys header, inert while the page loads: the same controls, so nothing in it moves when they come alive.
-function KeysHeaderActions() {
-  return <><Checkbox label="Show inactive" checked={false} onCheckedChange={() => {}} disabled /><Button variant="primary" disabled>Create key</Button></>
-}
-
 export function SettingsRouteSkeleton({ kind, isNew = false }: { kind: 'keys' | 'domains' | 'domain' | 'settings' | 'webhook'; isNew?: boolean }) {
   const { regionId } = useRegion()
   const { multiTenant } = useWorkspaceAccess()
   if (kind === 'domain') return <DomainDetailSkeleton />
   if (kind === 'webhook') return <LoadingRegion className="stack settings-page" label="Loading webhook"><PageHeader title={isNew ? 'Add webhook' : <SkeletonText width={240} lineHeight={28} />} backTo="/settings#webhooks" actions={isNew ? undefined : <><Skeleton width={70} /><ControlSkeleton width="calc(5ch + 26px)" /><ControlSkeleton width={128} /></>} /><WebhookBodySkeleton isNew={isNew} /></LoadingRegion>
   if (kind === 'settings') return <LoadingRegion className="stack settings-ses settings-page" label="Loading settings"><PageHeader title="Settings" />{!multiTenant && <><SesSendingSkeleton regionId={regionId} /><WorkspaceFormSkeleton /></>}</LoadingRegion>
-  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<KeysHeaderActions />} /><div className="keys-sections"><section className="section stack"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={[...keyTypes]} /><TableSkeleton className="keys-table ui-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
+  if (kind === 'keys') return <LoadingRegion className="stack" label="Loading API keys"><PageHeader title="API keys" actions={<Button variant="primary" disabled>Create key</Button>} /><div className="keys-sections"><section className="section stack"><div className="data-toolbar keys-toolbar"><Tabs label="Type" value="all" onValueChange={() => {}} disabled items={keyTypes.filter(item => item.value !== 'app')} /><div className="keys-inactive"><Checkbox label="Show inactive" checked={false} onCheckedChange={() => {}} disabled /></div></div><TableSkeleton className="keys-table ui-table--two-line" columns={settingsColumns.keys} rows={3} /></section></div></LoadingRegion>
   return <LoadingRegion className="stack" label="Loading domains"><PageHeader title="Domains" actions={<ControlSkeleton width="calc(10ch + 26px)" />} /><TableSkeleton className="domains-table" columns={domainColumns(multiTenant)} rows={3} pagination /></LoadingRegion>
 }

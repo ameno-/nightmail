@@ -34,15 +34,8 @@ const purposes: { value: Purpose; label: string; does: string }[] = [
   { value: 'inbox', label: 'One agent inbox', does: 'Reads one agent inbox. Stops working when the inbox is deleted.' },
   { value: 'create', label: 'Creates agent inboxes', does: 'Creates agent inboxes and reads only the ones it created.' },
 ]
-type Kind = 'api' | 'smtp' | 'agent' | 'app'
-// The type's name says who uses it; the page's "Which key to use" compares them.
-const kinds: { value: Kind; label: string }[] = [
-  { value: 'api', label: 'API key for your app or script' },
-  { value: 'smtp', label: 'SMTP login for an app' },
-  { value: 'agent', label: 'Connect your agent over MCP' },
-  { value: 'app', label: 'App password for a mail app' },
-]
-const forms: Partial<Record<Kind, { title: string; id: string; submit: string }>> = {
+type Kind = 'api' | 'smtp' | 'app'
+const forms: Record<Kind, { title: string; id: string; submit: string }> = {
   api: { title: 'Create API key', id: 'create-key', submit: 'Create key' },
   smtp: { title: 'Create SMTP login', id: 'create-smtp-login', submit: 'Create login' },
   app: { title: 'Create app password', id: 'create-app-password', submit: 'Create password' },
@@ -52,32 +45,32 @@ const forms: Partial<Record<Kind, { title: string; id: string; submit: string }>
 const NAME_MAX = 100
 export type CreatedSecret = { secret: string; title: string; description?: string; sendExample?: boolean; agent?: boolean; mail?: { username: ReactNode; imap: boolean; smtp: boolean } }
 
-/** Create key: the type first (API key, SMTP login, agent token, app password), then what it can reach. An agent token
- *  is the Connect your agent flow, so choosing it hands over to that dialog. `initial` opens straight on an API key's form,
- *  as Overview's "Create key" does with the domain it just verified, or on an SMTP login's. Render only while open, so form state and the created
- *  secret in mutation state go away on close. */
-export function CreateKeyDialog({ open, onOpenChange, onCreated, onConnectAgent, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; onConnectAgent: () => void; initial?: { purpose?: Purpose; domain?: string; smtp?: boolean; app?: boolean } }) {
-  // SMTP needs the installation's mail gateway: without one, the form never opens.
+/** Create key: opens directly to the API key form, with SMTP login and app password as secondary links below it.
+ *  `initial` can still open straight to SMTP login (/api-keys?create=smtp) or app password (/api-keys?create=app).
+ *  Render only while open, so form state and the created secret in mutation state go away on close. */
+export function CreateKeyDialog({ open, onOpenChange, onCreated, initial }: { open: boolean; onOpenChange: (open: boolean) => void; onCreated: (created: CreatedSecret) => void; initial?: { purpose?: Purpose; domain?: string; smtp?: boolean; app?: boolean } }) {
+  // SMTP needs the installation's mail gateway: without one, fall back to the API key form.
   const servers = useMailServers()
-  const [kind, setKind] = useState<Kind | null>(initial?.smtp && servers ? 'smtp' : initial?.app ? 'app' : initial?.purpose ? 'api' : null)
+  const [kind, setKind] = useState<Kind>(initial?.smtp && servers ? 'smtp' : initial?.app ? 'app' : 'api')
   const [pending, setPending] = useState(false)
   useDomainOptions(open)
-  // One dialog for every step, so moving between them keeps focus inside it.
-  const form = kind && (kind !== 'smtp' || servers) ? forms[kind] : undefined
+  const active: Kind = kind === 'smtp' && !servers ? 'api' : kind
+  const form = forms[active]
   const props = { open, onOpenChange, onPending: setPending, onCreated }
-  return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title={form?.title ?? 'Create key'}
-    footer={form && <><Button disabled={pending} onClick={() => setKind(null)}>Back</Button><Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></>}>
-    {kind === 'api' ? <ApiKeyForm {...props} initial={initial} />
-      : kind === 'smtp' && servers ? <SmtpLoginForm {...props} />
-      : kind === 'app' ? <AppPasswordForm {...props} />
-      : <ul className="keys-types" aria-label="What kind of key?">
-        {kinds.filter(item => item.value !== 'smtp' || servers).map(item => <li key={item.value}>
-          <button type="button" className="keys-type" onClick={() => { if (item.value === 'agent') { onOpenChange(false); onConnectAgent() } else setKind(item.value) }}>
-            <span className="keys-type__label">{item.label}</span>
-            <ChevronRight size={16} aria-hidden="true" />
-          </button>
-        </li>)}
-      </ul>}
+  return <Dialog open={open} onOpenChange={next => { if (!pending) onOpenChange(next) }} title={form.title}
+    footer={<>{active === 'api' ? <Button disabled={pending} onClick={() => onOpenChange(false)}>Cancel</Button> : <Button disabled={pending} onClick={() => setKind('api')}>Back</Button>}<Button variant="primary" loading={pending} type="submit" form={form.id}>{form.submit}</Button></>}>
+    {active === 'api' ? <>
+      <ApiKeyForm {...props} initial={initial} />
+      <div className="keys-alt">
+        <span className="muted">Or create</span>
+        <div className="cluster">
+          {servers && <Button variant="ghost" size="sm" disabled={pending} onClick={() => setKind('smtp')}>SMTP login</Button>}
+          <Button variant="ghost" size="sm" disabled={pending} onClick={() => setKind('app')}>App password</Button>
+        </div>
+      </div>
+    </>
+      : active === 'smtp' ? <SmtpLoginForm {...props} />
+      : <AppPasswordForm {...props} />}
   </Dialog>
 }
 
