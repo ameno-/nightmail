@@ -10,7 +10,7 @@ export type InboxView = 'needs_you' | 'agent' | 'waiting' | 'done' | 'all'
 export type Channel = 'chat' | 'email' | 'agent_feedback'
 export const channelLabels: Record<Channel, string> = { chat: 'Chat', email: 'Email', agent_feedback: 'Agent feedback' }
 export type SupportAuthor = 'customer' | 'agent' | 'staff' | 'system'
-export type TriageReason = 'ticket' | 'blocked' | 'failed' | 'paused'
+export type TriageReason = 'ticket' | 'blocked' | 'failed' | 'paused' | 'no_reply'
 export interface SupportTicket { id: string; type: string | null; severity: string | null; resolvedAt: string | null }
 export interface SupportConversation {
   id: string; channel: Channel; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none' | 'credential'
@@ -109,9 +109,11 @@ export function triage(c: SupportConversation): SupportConversation['needsYou'] 
   if (c.done) return null
   const ticket = Boolean(c.ticket && !c.ticket.resolvedAt), blocked = c.blockedWork > 0, failed = c.needsYou?.reasons.includes('failed') ?? false
   const paused = c.agentState === 'paused' && c.status !== 'closed' && c.lastAuthor !== 'staff'
-  const reasons = ([['ticket', ticket], ['blocked', blocked], ['failed', failed], ['paused', paused]] as const).filter(([, on]) => on).map(([reason]) => reason)
+  // Only the API knows how long the customer has waited; a reply from staff answers it.
+  const noReply = (c.needsYou?.reasons.includes('no_reply') ?? false) && c.lastAuthor === 'customer'
+  const reasons = ([['ticket', ticket], ['blocked', blocked], ['failed', failed], ['paused', paused], ['no_reply', noReply]] as const).filter(([, on]) => on).map(([reason]) => reason)
   if (!reasons.length) return null
-  return { reasons, urgent: (ticket && c.ticket?.severity === 'P1') || failed || (c.lastAuthor === 'customer' && (paused || blocked)), since: c.needsYou?.since ?? new Date().toISOString() }
+  return { reasons, urgent: (ticket && c.ticket?.severity === 'P1') || failed || noReply || (c.lastAuthor === 'customer' && (paused || blocked)), since: c.needsYou?.since ?? new Date().toISOString() }
 }
 /** The agent or staff wrote last (a held draft wasn't sent), so the customer has the next word. */
 const answered = (c: SupportConversation) => (c.lastAuthor === 'agent' || c.lastAuthor === 'staff') && !c.preview?.held

@@ -567,9 +567,9 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
   useImperativeHandle(ref, () => ({ focus: take }), [mode])
   const handling = c.agentState === 'active'
   if (mode === 'reply' && handling && !taken && !text && !draft?.failed) {
-    const blocked = c.blockedWork > 0
-    return <div className="sinbox-composer sinbox-composer--idle" data-blocked={blocked || undefined}>
-      <span>{blocked ? 'The agent is blocked: its work here is waiting.' : 'The agent is handling this.'}</span>
+    const blocked = c.blockedWork > 0, noReply = c.needsYou?.reasons.includes('no_reply') ?? false
+    return <div className="sinbox-composer sinbox-composer--idle" data-blocked={blocked || noReply || undefined}>
+      <span>{blocked ? 'The agent is blocked: its work here is waiting.' : noReply ? 'No reply sent: the customer is still waiting for one.' : 'The agent is handling this.'}</span>
       <span className="cluster">{blocked && <Button onClick={() => void actions.wake(c)}>Retry now</Button>}<Button variant="ghost" onClick={() => take('note')}>Add note</Button><Button onClick={() => take('reply')}>Take over</Button></span>
     </div>
   }
