@@ -72,6 +72,9 @@ export const SUPPORT_CEILINGS: Ceiling[] = [
   { method: 'GET', path: '/v1/support/receiving/routes', roles: MANAGERS, counterpart: 'GET /v1/routing', chatOnly: true },
   { method: 'GET', path: '/v1/support/receiving/retired', roles: MANAGERS, counterpart: 'GET /v1/inbound/policy', chatOnly: true },
   { method: 'GET', path: '/v1/support/receiving/forwards', roles: MANAGERS, counterpart: 'GET /v1/endpoints', chatOnly: true },
+  // SMTP refusals (src/smtp-refusals.ts): mail apps sign in with app passwords and send-only keys, an owner's or admin's
+  // in the dashboard (API keys). Each names the reply the app got, which can name an attached file: a chat's.
+  { method: 'GET', path: '/v1/support/smtp/refusals', roles: MANAGERS, counterpart: 'GET /v1/api-keys', chatOnly: true },
   { method: 'GET', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/me', views: false },
   { method: 'POST', path: '/v1/support/scope', roles: EVERYONE, counterpart: 'GET /v1/me', views: false },
   // Notes are the person's own (src/support-notes.ts), filtered by their memberships, never a workspace's data.

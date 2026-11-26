@@ -208,6 +208,8 @@ export const TOOLS: ToolSpec[] = [
     params: { workspaceId: workspaceParam }, label: fixed('Checking addresses held after a deletion…', 'Checked addresses held after a deletion'), execute: read((a, h) => `/v1/support/receiving/retired${query(a, h)}`) },
   { name: 'pending_verifications', description: `Verification emails ${productName} sent that nobody has confirmed yet: forwards waiting for their recipient (from which address and when it went, whether its 24-hour link is open, lapsed or was declined, and the recipient’s domain). A domain is verified by DNS, never by email: use list_domains or domain_health for that.`,
     params: { workspaceId: workspaceParam }, label: fixed('Checking verification emails still waiting…', 'Checked verification emails still waiting'), execute: read((a, h) => `/v1/support/receiving/forwards${query(a, h)}`) },
+  { name: 'smtp_refusals', description: `Sends from a mail app or SMTP client (signed in to ${productName}’s SMTP with an app password or an SMTP login) that ${productName} refused in the last 7 days, grouped by reply, newest first: the SMTP code and text the app showed (e.g. 550 5.7.1 Rejected, or 550 5.6.1 naming a refused attachment), ${productName}’s error code behind it (e.g. RECIPIENT_INELIGIBLE, SENDER_NOT_OWNED), how many times and when, and the recipients’ domains. No addresses or content.`,
+    params: { workspaceId: workspaceParam }, label: fixed('Checking sends your mail apps were refused…', 'Checked sends your mail apps were refused'), execute: read((a, h) => `/v1/support/smtp/refusals${query(a, h)}`) },
   { name: 'search_docs', description: `Search ${productName}’s published docs (sending limits and the sender score, receiving and routing, rules and endpoints, agent inboxes, MCP, list hygiene, the SDK) for how something works, a limit, a setting or a dashboard path. Returns up to 3 short excerpts, each with its link: cite the link you used. Search instead of guessing; when nothing matches, say you don’t know.`,
     params: { query: { type: 'string', description: 'A few keywords, e.g. "catch-all addresses per hour" or "release marketing"', max: 200 } },
     label: fixed('Searching the docs…', 'Searched the docs'), execute: async (a, h) => toolResult(h.searchDocs(String(a.query ?? '')), h.hidden()) },
@@ -265,14 +267,14 @@ export const TOOL_NAMES = TOOLS.map(t => t.name);
  * of those roles.
  */
 export const MANAGER_TOOLS: ReadonlySet<string> = new Set(['list_domains', 'domain_health', 'list_webhook_deliveries', 'get_billing', 'get_audit', 'api_errors', 'explain_request', 'propose_action', 'recheck_domain',
-  'receiving_hosts', 'receiving_routes', 'held_addresses', 'pending_verifications']);
+  'receiving_hosts', 'receiving_routes', 'held_addresses', 'pending_verifications', 'smtp_refusals']);
 /** An unverified email reads no account: its turns answer through reply, can search the public docs and file a ticket, nothing else. */
 const EMAIL_TOOLS: ReadonlySet<string> = new Set(['reply', 'search_docs', 'file_ticket']);
 /**
  * Everything a verified email may call: account status, domains and receiving hosts, standing and aggregate deliverability
  * summaries (by role), the docs, workspace choice, reply and file_ticket. Individual sent-mail metadata, delivery events,
  * campaigns, screens, audience data, billing, the activity trail, request logs, webhook deliveries, receiving routes,
- * held addresses and confirmations, changes, notes and content access require the signed-in dashboard Help chat (and
+ * held addresses and confirmations, SMTP refusals, changes, notes and content access require the signed-in dashboard Help chat (and
  * Nightmail enforces the same boundary).
  */
 export const EMAIL_TOOLS_VERIFIED: ReadonlySet<string> = new Set(['account_context', 'list_workspaces', 'list_domains', 'domain_health', 'receiving_hosts', 'get_standing',

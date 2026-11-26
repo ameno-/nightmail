@@ -2716,10 +2716,40 @@ test('mail gateway: SMTP queues dispatchable content with a single database conn
   const unlimited=await submit('Subject: no quota\r\n\r\nKept\r\n'),kept=await unlimited.json() as Json;
   assert.equal(unlimited.status,200,JSON.stringify(kept));assert.equal(kept.sentCopy,true);
   await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed) VALUES($1,$2,'sink@example.invalid',true)",[unique('contact'),wid]);
+  // Each refusal the app sees as an SMTP reply is recorded for support (smtp-refusals.ts), and only after the answer: the
+  // workspace, the reply the app got with the API's code, and the recipients' domains. Never an address.
+  const deferred:((runtime:typeof rt)=>Promise<void>)[]=[];rt.deferNudge=work=>{deferred.push(work);};
+  const refusals=(code:string)=>db.query('SELECT workspace_id,reply_code,reason,code,recipient_domains FROM smtp_refusals WHERE workspace_id=$1 AND code=$2',[wid,code]).then(r=>r.rows);
+  const flush=async()=>{for(const work of deferred.splice(0))await work(rt);};
   const denied=await submit('Subject: suppressed\r\n\r\nNo send\r\n');assert.equal(denied.status,422);
   assert.equal(((await denied.json()) as Json).error.code,'RECIPIENT_INELIGIBLE');
+  assert.deepEqual(await refusals('RECIPIENT_INELIGIBLE'),[],'The answer went first: nothing is written before it.');
+  await flush();
+  assert.deepEqual(await refusals('RECIPIENT_INELIGIBLE'),[{workspace_id:wid,reply_code:'550 5.7.1',reason:'Rejected',code:'RECIPIENT_INELIGIBLE',recipient_domains:['example.invalid']}]);
   await db.query('SELECT inbox_revoke_password($1,$2,$3)',[wid,bid,kid]);
   assert.equal((await submit('Subject: revoked\r\n\r\nNo send\r\n')).status,403);
+  await flush();rt.deferNudge=undefined;
+  // The streamed signed message past 8 MiB, the suppressed recipient and the revoked password: one row each, no address.
+  const recorded=(await db.query('SELECT reply_code,reason,code,recipient_domains FROM smtp_refusals WHERE workspace_id=$1 ORDER BY id',[wid])).rows;
+  assert.deepEqual(recorded.map(r=>[r.code,r.reply_code,r.reason,r.recipient_domains]),[['SEALED_MESSAGE_SIZE','552 5.3.4','Signed or encrypted messages can be at most 8 MiB',['example.invalid']],
+    ['RECIPIENT_INELIGIBLE','550 5.7.1','Rejected',['example.invalid']],['CREDENTIAL_REVOKED','550 5.7.1','Rejected',['example.invalid']]]);
+  assert.ok(!JSON.stringify(recorded).includes('@'),'No address is kept.');
+  // At most SMTP_REFUSALS_PER_HOUR a workspace an hour: a client retrying into a send limit can't grow the table without bound.
+  {const {recordSmtpRefusal,SMTP_REFUSALS_PER_HOUR}=await import('./src/smtp-refusals.js'),{ApiError}=await import('./src/core.js');
+    await db.query(`INSERT INTO smtp_refusals(workspace_id,reply_code,reason,code) SELECT $1,'451 4.7.1','Send limit reached','REQUEST_RATE_LIMITED' FROM generate_series(1,$2::int)`,[wid,SMTP_REFUSALS_PER_HOUR-recorded.length]);
+    const later:((runtime:typeof rt)=>Promise<void>)[]=[];rt.deferNudge=work=>{later.push(work);};
+    for(let i=0;i<3;i++)recordSmtpRefusal(rt,kid,['x@example.invalid'],new ApiError(429,'REQUEST_RATE_LIMITED','x'));
+    for(const work of later.splice(0))await work(rt);rt.deferNudge=undefined;
+    assert.equal((await db.query("SELECT count(*)::int n FROM smtp_refusals WHERE workspace_id=$1 AND at>now()-interval '1 hour'",[wid])).rows[0].n,SMTP_REFUSALS_PER_HOUR,'Past the hour\'s cap, nothing more is written.');}
+  // The reply as the gateway words it (remote.rs submit_error, whose test uses these same refusals): a refused attachment
+  // in the API's words on one printable line of at most 400 characters; a refusal it can't name, "Rejected"; a deploy's
+  // signature mismatch or the API's own failure is no refusal (the app retries).
+  const {smtpReply}=await import('./src/smtp-refusals.js');
+  assert.deepEqual(smtpReply(422,'ATTACHMENT_CONTENT_MISMATCH','Message not sent: attachment "Rechnung März.pdf" is a Windows program, whatever it is called, and programs are never sent.\r\n250 2.0.0 ok'),
+    {code:'550 5.6.1',text:'Message not sent: attachment "Rechnung M?rz.pdf" is a Windows program, whatever it is called, and programs are never sent.??250 2.0.0 ok'});
+  assert.equal(smtpReply(422,'ATTACHMENT_TYPE_UNSCREENABLE','Message not sent: '+'x'.repeat(600))!.text.length,400);
+  assert.deepEqual([smtpReply(422,'UNSUPPORTED_ATTACHMENT_TYPE',''),smtpReply(422,'VALIDATION_FAILED','x'),smtpReply(402,'BALANCE_EMPTY','x')?.code,smtpReply(429,'REQUEST_RATE_LIMITED','x')?.code,smtpReply(403,'PROTOCOL_DENIED','x'),smtpReply(503,'MAIL_STORE_UNAVAILABLE','x')],
+    [{code:'550 5.6.1',text:'Attachment refused'},{code:'550 5.7.1',text:'Rejected'},'451 4.7.1','451 4.7.1',null,null]);
   // plain, attachment, large text, blind, 25 MiB, 100 recipients (two), signed, forwarded, two without a copy, no quota.
   assert.equal((await db.query('SELECT count(*)::int n FROM sending_emails WHERE actor_key_id=$1',[kid])).rows[0].n,12);
 });
@@ -9813,6 +9843,40 @@ describe('Hosted MCP OAuth and tools', () => {
         assert.deepEqual((await get(mailed.id, `/v1/support/receiving/hosts?workspaceId=${harbor}`)).data.map((h: Json) => h.host), [harborDomain, `in.${harborDomain}`]);
         for (const path of ['routes', 'retired', 'forwards']) error(await stamped(mailed.id, 'GET', `/v1/support/receiving/${path}?workspaceId=${harbor}`), 403, 'SUPPORT_CHAT_ONLY');
         for (const done of [own, deputyChat, memberChat, theirs, mailed.id]) ok(reply(await platform.closeConversation(done)));
+      });
+
+      await t.test('18 SMTP refusals: the replies a workspace’s mail apps got in the last 7 days, each with how many times and the recipients’ domains, for an owner or admin of that workspace only; never a member, never another workspace; a chat’s; older ones go', async () => {
+        // Dock has an owner and a member; Quay, another customer, has a refusal of its own.
+        const keeper = await sessionFixture(t), viewer = await sessionFixture(t), stranger = await sessionFixture(t), dock = unique('dock-ws'), quay = unique('quay-ws');
+        await db.query('INSERT INTO workspaces(id,name,slug) VALUES ($1,$1,$1),($2,$2,$2)', [dock, quay]);
+        await db.query(`INSERT INTO workspace_members(id,workspace_id,user_id,role) VALUES ($1,$2,$3,'owner'),($4,$2,$5,'member'),($6,$7,$8,'owner')`,
+          [unique('mem'), dock, keeper.userId, unique('mem'), viewer.userId, unique('mem'), quay, stranger.userId]);
+        await db.query("DELETE FROM workspace_members WHERE workspace_id='default' AND user_id=ANY($1)", [[keeper, viewer, stranger].map(f => f.userId)]);
+        // Dock's mail app was refused the same file three times, to two domains, and a suppressed recipient once; a refusal
+        // 8 days old is past the window.
+        const file = 'Message not sent: attachment "deck.key" is not a file type mail apps can send.';
+        await db.query(`INSERT INTO smtp_refusals(workspace_id, at, reply_code, reason, code, recipient_domains) VALUES
+          ($1, now() - interval '2 hours', '550 5.6.1', $3, 'UNSUPPORTED_ATTACHMENT_TYPE', '{example.net}'), ($1, now() - interval '1 hour', '550 5.6.1', $3, 'UNSUPPORTED_ATTACHMENT_TYPE', '{example.net,example.org}'),
+          ($1, now() - interval '10 minutes', '550 5.6.1', $3, 'UNSUPPORTED_ATTACHMENT_TYPE', '{example.org}'), ($1, now() - interval '30 minutes', '550 5.7.1', 'Rejected', 'RECIPIENT_INELIGIBLE', '{example.com}'),
+          ($1, now() - interval '8 days', '550 5.7.1', 'Rejected', 'SENDER_NOT_OWNED', '{old.example}'), ($2, now(), '451 4.7.1', 'Send limit reached', 'REQUEST_RATE_LIMITED', '{quay.example}')`, [dock, quay, file]);
+        const own = await chat(keeper, dock), memberChat = await chat(viewer, dock), theirs = await chat(stranger, quay), path = '/v1/support/smtp/refusals';
+        const read = ok(await stamped(own, 'GET', path)), shown = (rows: Json[]) => rows.map(r => [r.workspaceId, r.smtpCode, r.reason, r.code, r.count, r.recipientDomains, r.domainCount]);
+        assert.deepEqual(shown(read.data), [[dock, '550 5.6.1', file, 'UNSUPPORTED_ATTACHMENT_TYPE', 3, ['example.net', 'example.org'], 2], [dock, '550 5.7.1', 'Rejected', 'RECIPIENT_INELIGIBLE', 1, ['example.com'], 1]]);
+        const [repeated] = read.data as Json[];
+        assert.deepEqual([read.truncated, Math.round((Date.now() - Date.parse(repeated!.at)) / 60_000), Math.round((Date.now() - Date.parse(repeated!.firstAt)) / 60_000)], [false, 10, 120], 'The latest and the first time.');
+        assert.equal((await lastRead(own))?.route, path, 'On the support trail.');
+        // A member reads none, and naming the workspace is 404, as is naming another customer's; Quay's reads only Quay's.
+        assert.deepEqual(ok(await stamped(memberChat, 'GET', path)).data, []);
+        error(await stamped(memberChat, 'GET', `${path}?workspaceId=${dock}`), 404);
+        error(await stamped(own, 'GET', `${path}?workspaceId=${quay}`), 404);
+        assert.deepEqual(shown(ok(await stamped(theirs, 'GET', path)).data), [[quay, '451 4.7.1', 'Send limit reached', 'REQUEST_RATE_LIMITED', 1, ['quay.example'], 1]]);
+        // By email it is a chat's: the reply can name an attached file.
+        const mailed = await email(keeper.email);
+        error(await stamped(mailed.id, 'GET', `${path}?workspaceId=${dock}`), 403, 'SUPPORT_CHAT_ONLY');
+        // The hourly retention deletes what is older than 7 days.
+        await (await import('./src/maintenance.js')).cleanup(runtime);
+        assert.deepEqual((await db.query('SELECT code FROM smtp_refusals WHERE workspace_id = $1 ORDER BY at', [dock])).rows.map(r => r.code), ['UNSUPPORTED_ATTACHMENT_TYPE', 'UNSUPPORTED_ATTACHMENT_TYPE', 'RECIPIENT_INELIGIBLE', 'UNSUPPORTED_ATTACHMENT_TYPE']);
+        for (const done of [own, memberChat, theirs, mailed.id]) ok(reply(await platform.closeConversation(done)));
       });
     });
   });
