@@ -521,6 +521,36 @@ describe('support Worker', () => {
     rejoined.ws.close();
   }, 180_000);
 
+  test('a reply to a staff email never becomes a conversation: Nightmail notes a verified staff member’s and ignores any other, with the team address the Worker keeps; no registration, model or answer; one Nightmail can’t judge is retried', async () => {
+    const judged = async (messageId: string, answer: object) => assert.equal((await fakeHook('/__staffreply', { messageId, answer })).status, 204);
+    await judged('msg_staff_note_1', { reply: true, notes: 1, ignored: null });
+    await judged('msg_staff_other_1', { reply: true, notes: 0, ignored: 'not_staff' });
+    await judged('msg_staff_later_1', { status: 503 });
+    const from = (await fakeCalls()).length, models = recorded.length, db = await mf.getD1Database('DB', 'support');
+    assert.equal((await signedHook('msg_staff_note_1', 'thr_staff_1', 'ryan@anoma.ly')).status, 200);
+    assert.equal((await signedHook('msg_staff_other_1', 'thr_staff_1', 'kim@else.test')).status, 200);
+    // Nightmail can't say yet: the webhook fails, so Nightmail delivers it again, and the message waits for that.
+    assert.ok((await signedHook('msg_staff_later_1', 'thr_staff_1', 'ryan@anoma.ly')).status >= 500);
+    assert.equal(await db.prepare("SELECT count(*) AS n FROM support_work WHERE message_id = 'msg_staff_later_1'").first('n'), 0);
+    await judged('msg_staff_later_1', { reply: true, notes: 1, ignored: null });
+    assert.equal((await signedHook('msg_staff_later_1', 'thr_staff_1', 'ryan@anoma.ly')).status, 200);
+    // A redelivery changes nothing.
+    assert.equal((await signedHook('msg_staff_note_1', 'thr_staff_1', 'ryan@anoma.ly')).status, 200);
+    await sleep(1500);
+    const calls = (await fakeCalls()).slice(from), staff = ['msg_staff_note_1', 'msg_staff_other_1', 'msg_staff_later_1'];
+    // Asked once per delivery, with TICKET_TO; nothing else about these messages reached Nightmail.
+    assert.deepEqual(calls.filter(c => c[0] === 'staffMailReply').map(c => [c[1], c[2]]), [['msg_staff_note_1', 'ryan@anoma.ly'], ['msg_staff_other_1', 'ryan@anoma.ly'], ['msg_staff_later_1', 'ryan@anoma.ly'], ['msg_staff_later_1', 'ryan@anoma.ly']]);
+    assert.deepEqual(calls.filter(c => c[0] !== 'staffMailReply' && staff.some(id => JSON.stringify(c).includes(id))), []);
+    assert.deepEqual(calls.filter(c => JSON.stringify(c).includes('thr_staff_1')), [], 'No reply in the staff thread.');
+    assert.equal(await db.prepare("SELECT count(*) AS n FROM conversations WHERE thread_id LIKE 'thr_staff_1%'").first('n'), 0, 'No conversation.');
+    assert.ok(!recorded.slice(models).some(r => JSON.stringify(r.body).includes('thr_staff_1') || JSON.stringify(r.body).includes('msg_staff_')), 'No model call.');
+    assert.deepEqual((await db.prepare("SELECT message_id, object, kind, state, reason, detail FROM support_work WHERE message_id LIKE 'msg_staff_%' ORDER BY message_id").all()).results.map((r: any) => ({ ...r, detail: JSON.parse(r.detail) })), [
+      { message_id: 'msg_staff_later_1', object: '', kind: 'message', state: 'done', reason: 'staff_reply', detail: { notes: 1, ignored: null } },
+      { message_id: 'msg_staff_note_1', object: '', kind: 'message', state: 'done', reason: 'staff_reply', detail: { notes: 1, ignored: null } },
+      { message_id: 'msg_staff_other_1', object: '', kind: 'message', state: 'done', reason: 'staff_reply', detail: { notes: 0, ignored: 'not_staff' } },
+    ]);
+  });
+
   test('consent counts only when Nightmail’s scope says so, never on the frame', async () => {
     const chat = await chatIn();
     const ask = async (n: number) => {
@@ -2977,6 +3007,8 @@ describe('support Worker', () => {
       await sweep(); await settle();
       assert.equal((await delivered(first)).length, 0);
       assert.ok(!(await fakeCalls(instance)).some(c => c[0] === 'staffMailSent'), 'Not reported sent.');
+      // The failed try is reported, with its error's code: after three, Glass shows the email as not sent until it goes.
+      assert.deepEqual((await fakeCalls(instance)).filter(c => c[0] === 'staffMailFailed').map(c => [c[1], c[2]]), [[first, { code: 'UNAVAILABLE' }]]);
       await outage('/v1/inbound/threads');
       await sweep(); await settle();
       const [started] = await delivered(first);

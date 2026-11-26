@@ -15,6 +15,19 @@ import type { OperatorIdentity } from './operator.js';
 export const APPROVAL_HOURS = 72;
 
 /**
+ * Why the support platform held an agent answer instead of sending it (support_messages.held_reason, which it mirrors as
+ * one of these words, nothing else), in plain words: the staff email and the confirm step say it the same way. Held by
+ * the output check is as specific as what is stored: the check's own findings reach Nightmail only in the text of the
+ * guardrail ticket's brief, which belongs to the conversation, not to the answer. A draft from before reasons were kept
+ * says so; it is never blank.
+ */
+export const HELD_WHY: Record<'gate' | 'paused' | 'access' | 'closed' | 'earlier' | 'unknown', string> = {
+  gate: 'Held by the output check', paused: 'Held by a staff pause', access: 'Held because their access changed before it went',
+  closed: 'Held because the conversation ended before it went', earlier: 'Held because an earlier version of the agent wrote it', unknown: 'Reason not recorded',
+};
+export const heldWhy = (reason: string | null | undefined) => HELD_WHY[(reason ?? 'unknown') as keyof typeof HELD_WHY] ?? HELD_WHY.unknown;
+
+/**
  * What a kind runs with: the same code as the dashboard's own buttons, inside the decision's transaction, as the operator
  * who approved it. wake: Retry now; sendDraft: Send on a held answer, as the agent wrote it (refused when it needs a fresh
  * reply, or a newer reply reached the customer first). A risky kind runs the operator console's own change (operator.ts
