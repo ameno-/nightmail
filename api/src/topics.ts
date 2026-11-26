@@ -6,7 +6,7 @@ import { enqueue } from './jobs.js';
 
 /**
  * Topics: the kinds of marketing mail a workspace sends ("Product updates", "Events"), and each contact's choice about
- * each one (migration 540). A marketing send or campaign may name one topic; its one-click unsubscribe then opts the
+ * each one (migration 541). A marketing send or campaign may name one topic; its one-click unsubscribe then opts the
  * person out of that topic alone. A contact's marketing consent stays the switch for everything: a topic is sent only to
  * contacts subscribed to marketing who did not opt out of it (or, for a topic nobody gets by default, opted in).
  * A topic is never deleted, only archived: sends launched with it keep honoring its opt-outs, and it can come back.
@@ -34,7 +34,7 @@ export const ContactTopic = z.object({
 }).openapi('ContactTopic');
 
 const limitReached = () => new ApiError(409, 'TOPIC_LIMIT_REACHED', `A workspace has at most ${TOPICS_MAX} topics that aren\u2019t archived. Archive one you no longer send.`);
-// The unique index on the names of topics that aren't archived (migration 540) settles two writes racing for one name.
+// The unique index on the names of topics that aren't archived (migration 541) settles two writes racing for one name.
 const named = <T>(work: Promise<T>) => work.catch(error => { throw databaseCodeOf(error) === '23505' ? new ApiError(409, 'TOPIC_EXISTS', 'The workspace already has a topic with this name.', 'name') : error; });
 const activeCount = (workspaceId: string) => sql`(SELECT count(*) FROM audience_topics WHERE workspace_id = ${workspaceId} AND archived_at IS NULL)`;
 const topicView = (row: typeof topics.$inferSelect) => ({ id: row.id, workspaceId: row.workspaceId, name: row.name, description: row.description, subscribedByDefault: row.subscribedByDefault, archivedAt: isoTime(row.archivedAt), createdAt: isoTime(row.createdAt)!, updatedAt: isoTime(row.updatedAt)! });
