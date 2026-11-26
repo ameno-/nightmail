@@ -153,7 +153,7 @@ function Conversation({ state, store, open, loading }: { state: ChatState; store
       </div> : <>
         <article className="support-message support-message--agent support-message--opening"><div className="support-text"><p>{OPENING}</p></div></article>
         {state.messages.map((message, index) => message.role === 'user' ? <UserMessage key={message.key ?? message.id} message={message} onRetry={() => store.retry()}
-          filed={message.filed && !state.messages[index + 1]?.filed ? { count: filedRun(state.messages, index), replyTo: state.ticket?.replyTo ?? null } : null} />
+          filed={message.filed && !state.messages[index + 1]?.filed ? { replyTo: state.ticket?.replyTo ?? null } : null} />
           : <AgentMessage key={message.key ?? message.id} message={message} store={store} closed={Boolean(state.closed)} />)}
       </>}
       <InlineStatus state={state} store={store} />
@@ -161,9 +161,8 @@ function Conversation({ state, store, open, loading }: { state: ChatState; store
   </div>
 }
 
-/** How many filed messages end at `index`: one line under the last says where they all went. */
-function filedRun(messages: ChatMessage[], index: number) { let n = 0; while (index - n >= 0 && messages[index - n]!.filed) n++; return n }
-function UserMessage({ message, onRetry, filed }: { message: ChatMessage; onRetry: () => void; filed: { count: number; replyTo: string | null } | null }) {
+// One line under the last of a run of filed messages says where they all went.
+function UserMessage({ message, onRetry, filed }: { message: ChatMessage; onRetry: () => void; filed: { replyTo: string | null } | null }) {
   const text = message.parts.map(part => part.kind === 'text' ? part.text : '').join('')
   return <div className="support-message support-message--user" data-restored={message.restored || undefined}>
     {message.images?.length ? <div className="support-user-images">{message.images.map((image, i) => image.url
@@ -173,7 +172,7 @@ function UserMessage({ message, onRetry, filed }: { message: ChatMessage; onRetr
     {text && <p className="support-user">{text}</p>}
     {message.failed && <p className="support-failed"><span>{message.failed}</span><Button variant="ghost" size="sm" onClick={onRetry}>Try again</Button></p>}
     {/* The chat couldn't take it: it went to the team as a ticket, who answer by email (and here, when the chat is back). */}
-    {filed && <p className="support-filed"><Check size={12} strokeWidth={2.5} aria-hidden="true" /><span>Chat wasn’t available, so {filed.count > 1 ? 'these' : 'this'} went to our team as a ticket. We’ll reply by email{filed.replyTo ? <> to <PrivateAddress value={filed.replyTo} /></> : null}.</span></p>}
+    {filed && <p className="support-filed"><Check size={12} strokeWidth={2.5} aria-hidden="true" /><span>Filed as a ticket.{filed.replyTo ? <> We’ll reply to <PrivateAddress value={filed.replyTo} />.</> : ' We’ll reply by email.'}</span></p>}
   </div>
 }
 
@@ -344,14 +343,13 @@ function MaskedAddress({ value }: { value: string | null | undefined }) {
 function InlineStatus({ state, store }: { state: ChatState; store: SupportStore }) {
   if (state.closed) return null
   const line = (tone: 'warning' | 'danger', text: ReactNode, action?: ReactNode) => <div className="support-inline" data-tone={tone}><span className="support-inline__dot" aria-hidden="true" /><span>{text}</span>{action}</div>
-  const replyTo = state.ticket?.replyTo ? <> to <PrivateAddress value={state.ticket.replyTo} /></> : null
   // A message that couldn't be filed: past the hour's limit (it is back in the message box), or Nightmail out of reach.
-  if (state.fileProblem === 'capped') return line('warning', <>You’ve sent a lot in the last hour. Your earlier messages are with our team, and we’ll reply by email{replyTo}.</>)
-  if (state.fileProblem === 'capped_first') return line('warning', 'You’ve contacted support a lot in the last hour, so this couldn’t go yet. It’s kept in the message box.')
-  if (state.fileProblem === 'waiting') return line('warning', 'Can’t reach our team right now. Your message is kept here and goes as soon as it can.')
+  if (state.fileProblem === 'capped') return line('warning', 'That’s the limit for this hour. Your earlier messages are with our team.')
+  if (state.fileProblem === 'capped_first') return line('warning', 'That’s the limit for this hour. Your message is kept in the box.')
+  if (state.fileProblem === 'waiting') return line('warning', 'Can’t reach us right now. Your message is kept and goes as soon as it can.')
   // Once something is with the team, its line says so; until then, say what sending does while the chat is down.
   if (state.ticket && down(state)) return null
-  if (state.connection === 'unavailable') return line('warning', 'Chat isn’t available right now. What you send goes to our team, and we’ll reply by email.')
+  if (state.connection === 'unavailable') return line('warning', 'Chat isn’t available right now. What you send is filed as a ticket.')
   // A lost connection with a message being answered: the message says "Working on it…" and the header the reconnecting.
   if (state.connection === 'offline') return state.messages.some(message => message.streaming || message.local) ? null
     : line('warning', `Reconnecting to ${productName} support.`, <Button variant="ghost" size="sm" onClick={() => store.reconnect()}>Try now</Button>)

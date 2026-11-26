@@ -252,7 +252,7 @@ export class SupportStore {
           const ticket = await this.transport.file(next.text)
           if (this.disposed) return
           this.update(next.clientMessageId, item => ({ ...item, local: false, filing: false, failed: undefined, filed: true, filedId: ticket.messageId }))
-          this.set({ ticket: { replyTo: ticket.replyTo }, fileProblem: null, announcement: `Chat wasn’t available, so your message went to the ${productName} team as a ticket.${ticket.replyTo ? ` They’ll reply by email to ${ticket.replyTo}.` : ''}` })
+          this.set({ ticket: { replyTo: ticket.replyTo }, fileProblem: null, announcement: `Filed as a ticket for the ${productName} team.${ticket.replyTo ? ` They’ll reply to ${ticket.replyTo}.` : ''}` })
         } catch (error) {
           if (this.disposed) return
           if (error instanceof FileError && error.reason === 'capped') {
