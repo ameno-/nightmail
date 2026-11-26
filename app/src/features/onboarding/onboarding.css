@@ -80,11 +80,13 @@
 .onboarding-field .ui-field__hint { overflow-wrap: anywhere; }
 /* Line up with the input, below its label. */
 .onboarding-inline-form > .ui-button { height: var(--onb-control-height); margin-top: calc(var(--leading-sm) + var(--space-8)); }
-.onboarding-skip { min-height: 32px; padding: 0 var(--space-4); border: 0; background: none; color: var(--color-muted); font-size: var(--text-sm); text-decoration: underline; text-decoration-color: transparent; text-underline-offset: 4px; transition: color 100ms ease-out, text-decoration-color 100ms ease-out; }
+/* A quiet text control: its one hover is the text colour, as Back's is (an underline as well drew its own line under
+   each part of it, a key hint included). */
+.onboarding-skip { min-height: 32px; padding: 0 var(--space-4); border: 0; background: none; color: var(--color-muted); font-size: var(--text-sm); transition: color 100ms ease-out; }
 /* Its words start on the column, as Back's do: the button's inset hangs outside it. */
 .onboarding-skip:not(.connect-another) { margin-inline-start: calc(-1 * var(--space-4)); }
-@media (hover: hover) and (pointer: fine) { .onboarding-skip:hover:not(:disabled) { color: var(--color-text); text-decoration-color: currentColor; transition-duration: 0ms; } }
-.onboarding-skip:focus-visible { color: var(--color-text); text-decoration-color: currentColor; }
+@media (hover: hover) and (pointer: fine) { .onboarding-skip:hover:not(:disabled) { color: var(--color-text); transition-duration: 0ms; } }
+.onboarding-skip:focus-visible { color: var(--color-text); }
 
 /* Connect AWS (BYO step 2): one task, a live status in one solid well (its state in the ink and the mark, never a tinted
    box), and clear ways out. */
@@ -151,9 +153,7 @@
 .onboarding-actions::before { content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 24px; background: linear-gradient(to bottom, transparent, var(--color-surface)); pointer-events: none; }
 .onboarding-step:has(.onboarding-actions) { padding-bottom: var(--space-8); }
 
-/* Key hints (keys.tsx): set into the control they belong to; ui.css hides them on touch screens and below 900 px. */
-.onboarding-surface .onb-kbd { margin-inline-end: calc(-1 * var(--space-4)); background: var(--color-kbd-inset); }
-.onboarding-surface .ui-button--primary > .onb-kbd { background: color-mix(in oklab, var(--color-on-accent) 16%, transparent); color: var(--color-on-accent-muted); }
+/* Key hints (keys.tsx) take ui.css's one treatment inside a button; it hides them on touch screens and below 900 px. */
 
 
 /* Get started (get-started.tsx): two tabs whose panels share one cell (the taller sets the
@@ -167,13 +167,9 @@
 .onb-panel[data-enter='right'] { animation: onb-from-right 300ms var(--ease-out-strong) both; }
 @keyframes onb-from-left { from { opacity: 0; transform: translateX(-24px); } }
 @keyframes onb-from-right { from { opacity: 0; transform: translateX(24px); } }
-.onb-panel__actions { display: flex; }
 .onb-panel__line { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
-/* The prompt fills what the panel has left (at least eight lines) and scrolls; its text fades where it runs on. */
-.onb-prompt { flex: 1 1 0; height: 0; min-height: 168px; margin-top: var(--space-4); }
-.onb-prompt.developer-code { padding: 0; overflow: hidden; display: flex; }
-.onb-prompt > code { flex: 1; min-width: 0; padding: var(--space-12) var(--space-16); overflow-y: auto; --fade-top: 0px; --fade-bottom: 0px;
-  mask-image: linear-gradient(to bottom, transparent, #000 var(--fade-top), #000 calc(100% - var(--fade-bottom)), transparent); }
+/* The agent prompt (AgentPromptPanel, docs/developer.css) fills what the panel has left, at least eight lines. */
+.onb-panel .agent-prompt__box { flex: 1 1 0; height: 0; min-height: 168px; margin-top: var(--space-4); }
 .onb-key { display: flex; flex-direction: column; gap: var(--space-8); }
 .onb-key__slot { justify-items: start; align-items: center; min-height: var(--onb-control-height); }
 .onb-key__secret { align-self: stretch; width: 100%; min-height: var(--onb-control-height); padding: var(--space-4) var(--space-4) var(--space-4) var(--space-12); border-radius: var(--radius-sm); background: var(--color-layer-1); font-size: var(--text-sm); line-height: var(--leading-sm); }
@@ -229,9 +225,9 @@
   .onboarding-connect-actions { flex-direction: column; align-items: stretch; }
   .onboarding-actions .ui-button { flex: 1; }
   /* Get started: full-width actions, and two lines kept for the test email's line, which names the domain once it exists. */
-  .onb-panel__actions > .ui-button, .onb-key__slot > span:first-child, .onb-key__slot .ui-button, .onb-start-test .first-send-test > .ui-button { width: 100%; }
+  .onb-key__slot > span:first-child, .onb-key__slot .ui-button, .onb-start-test .first-send-test > .ui-button { width: 100%; }
   .onb-key__slot { justify-items: stretch; }
   .onb-start-test .first-send-test { align-items: stretch; }
   .onb-start-test .first-send-test > .muted { min-height: calc(2 * var(--leading-sm)); }
-  .onb-prompt { min-height: 200px; }
+  .onb-panel .agent-prompt__box { min-height: 200px; }
 }

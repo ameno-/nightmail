@@ -4,11 +4,10 @@ import { Download, Paperclip } from 'lucide-react'
 import { useApiDef, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import type { ReceivedEmailDetail } from '../../data/types'
-import { Alert, Button, CopyButton, ErrorState, Identifier, PageHeader, Sheet, Tooltip, type Fact, type Tone } from '../../components/ui'
+import { Alert, CopyButton, ErrorState, Identifier, PageHeader, Sheet, type Fact, type Tone } from '../../components/ui'
 import { useEmailDocument } from '../../components/EmailPreview'
 import { EmailViews, type InsightSource } from '../../components/EmailInsight'
 import { AddressList, PrivateAddress, Sender } from '../../components/PrivateAddress'
-import { mentionsRemoteImage } from '../../lib/html-scan'
 import { fileSize, label, shortDateTime } from '../../lib/format'
 import { EmailBar, EmailDetailSkeleton, EmailFactsStrip } from './skeletons'
 import { useDetailLayout } from './detail-layout'
@@ -81,13 +80,11 @@ function ReceivedEmail({ email, focus }: { email: ReceivedEmailDetail; focus: st
   // img[src="cid:…"] after sanitizing, never by text replacement in sender-controlled HTML (L15).
   const inlineImages = useMemo(() => Object.fromEntries(email.attachments.flatMap(file => file.contentId && file.url ? [[file.contentId, file.url]] : [])), [email.attachments])
   const [imagesFor, setImagesFor] = useState<string | null>(null)
-  const remote = useMemo(() => mentionsRemoteImage(html), [html]), loadImages = imagesFor === html
+  const loadImages = imagesFor === html
   const original = useEmailDocument({ html, inlineImages, remoteImages: loadImages, respectStyles: true, asSent: true, dark: true })
   const source = useMemo<InsightSource>(() => ({ kind: 'email', id: email.id, html: hasHtml }), [email.id, hasHtml])
   const headers = canAdminister && email.headers ? email.headers.map(header => header.name + ': ' + header.value).join('\n') : undefined
-  const images = remote && !loadImages && <Tooltip content="Remote images are hidden so the sender can’t tell when you open this message.">
-    <Button variant="ghost" size="sm" onClick={() => setImagesFor(html)}>Load images</Button>
-  </Tooltip>
+  const heldImages = original.held ? { why: 'Remote images are hidden so the sender can’t tell when you open this message.', onLoad: () => setImagesFor(html) } : null
   const compact = mode === 'stack'
   const spam = isSpam(email)
   const subject = email.subject || '(no subject)'
@@ -108,7 +105,7 @@ function ReceivedEmail({ email, focus }: { email: ReceivedEmailDetail; focus: st
         {thread && mode === 'panel' && <ThreadRows items={items} part="before" open={open} />}
         <EmailViews source={source} previewSource={null} original={{ doc: original.complete ? original.doc : null, dark: original.darkDoc === undefined ? undefined : original.complete ? original.darkDoc : null, error: original.error, html, text: email.text, headers }}
           fill={!compact} wide={!compact} compact={compact}
-          toolbarEnd={<>{images}{mode === 'panel' && <button type="button" className="ev-details" aria-expanded={panel} aria-controls={panelId} onClick={() => setPanel(!panel)}>Details</button>}</>} />
+          heldImages={heldImages} toolbarEnd={<>{mode === 'panel' && <button type="button" className="ev-details" aria-expanded={panel} aria-controls={panelId} onClick={() => setPanel(!panel)}>Details</button>}</>} />
         {thread && mode === 'panel' && <ThreadRows items={items} part="after" open={open} />}
         {compact && email.attachments.length > 0 && <Attachments email={email} />}
       </section>

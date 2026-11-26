@@ -476,7 +476,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
       </> : <>
         {!accepted && <Button variant="ghost" disabled={pending} onClick={() => setTemplatesOpen(true)}>Use a template</Button>}
         <Button variant="secondary" disabled={!accepted || blocked} title={!accepted ? `Name the ${thing} first` : undefined} onClick={() => save('test')}>Send test</Button>
-        <Button variant="primary" disabled={blocked} loading={preparing} onClick={review} aria-keyshortcuts="Meta+Enter Control+Enter" data-analytics="campaigns/review">Continue<kbd className="ui-kbd" aria-hidden="true">{modKey}↩</kbd></Button>
+        <Button variant="primary" disabled={blocked} loading={preparing} onClick={review} aria-keyshortcuts="Meta+Enter Control+Enter" data-analytics="campaigns/review">Continue<kbd className="ui-kbd" aria-hidden="true">{modKey}↵</kbd></Button>
       </>}
     </>} />
     {options.isError && <ErrorState error={options.error} onRetry={() => options.refetch()} />}

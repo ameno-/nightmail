@@ -1,5 +1,5 @@
-import { useState, type ReactNode } from 'react'
-import { Check, Download } from 'lucide-react'
+import { useEffect, useRef, useState, type ReactNode, type UIEvent } from 'react'
+import { Check } from 'lucide-react'
 import { SectionHeader } from '../../components/ui'
 import { CopyAction } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -11,7 +11,7 @@ import { recordsFor } from '../settings/domain-records'
 import { McpSignInSetup } from './connect-agent'
 import { mcpServerUrl } from '../../../../api/src/mcp-clients'
 import './developer.css'
-import { apiKeyEnv, productName, productSlug, sdkPackage, secretPrefixes } from '../../../../api/src/brand'
+import { apiKeyEnv, productName, sdkPackage, secretPrefixes } from '../../../../api/src/brand'
 import { builtinLimitsText } from '../../../../api/src/builtin-limits'
 import { ATTACHMENT_LIMITS_TEXT, ATTACHMENT_RULES_TEXT } from '../../../../api/src/attachment-limits'
 
@@ -96,11 +96,6 @@ export function MaskedText({ text }: { text: string }) {
   return <>{parts}</>
 }
 
-// A data URL needs no object URL to revoke, so the download can't race the cleanup.
-export function downloadText(name: string, text: string) {
-  Object.assign(document.createElement('a'), { href: `data:text/plain;charset=utf-8,${encodeURIComponent(text + '\n')}`, download: name }).click()
-}
-
 type SetupStatus = { id: string; status: 'waiting' | 'connected' | 'expired' | 'replaced'; keyName: string | null }
 export type AgentSetupState = 'idle' | SetupStatus['status'] | 'failed'
 export type AgentSetup = { state: AgentSetupState; keyName: string | null; error: unknown;
@@ -152,22 +147,28 @@ export function AgentSetupStatus({ setup, idle }: { setup: AgentSetup; idle?: Re
   </div>
 }
 
-// A null prompt is still loading: the section keeps its place and its actions stay hidden. `compact` (onboarding) is the
-// prompt and its actions without the docs' paragraph on how to use it. With `setup` (an owner or admin), copying puts a
-// fresh setup token in the prompt (`copy` makes it), and the line above it says when the agent used it. A download never
-// has one, so no live credential lands in a file: it is `download`, the prompt with the device flow instead.
-export const agentPromptFile = `${productSlug}-agent-prompt.txt`
-export function AgentPrompt({ prompt, compact = false, setup, copy, download }: { prompt: string | null; compact?: boolean; setup?: AgentSetup | null; copy?: () => Promise<string>; download?: string }) {
-  const value = setup && copy ? copy : prompt ?? ''
-  return <section id="agent-prompt" className="section stack developer-section" aria-label="Agent prompt" aria-busy={prompt === null || undefined}>
-    <SectionHeader title="Agent prompt" actions={<span className="developer-icon-actions" data-pending={prompt === null || undefined} inert={prompt === null}>
-      <button type="button" className="ui-button ui-button--ghost ui-button--sm developer-copy-icon" aria-label="Download agent prompt as .txt" title="Download as .txt" onClick={() => downloadText(agentPromptFile, download ?? prompt ?? '')}><Download size={14} aria-hidden="true" /></button>
-      <CopyAction value={value} label="Copy agent prompt" variant="ghost" size="sm" compact className="developer-copy-icon" />
-    </span>} />
-    {!compact && <p className="muted developer-copy">Paste this into your coding agent, or download it as a .txt file for it to read. It has this workspace’s real values; the API key stays in your environment.</p>}
-    {setup && <AgentSetupStatus setup={setup} />}
-    <pre className="developer-code developer-code--prompt" tabIndex={0} aria-label="Agent prompt"><code><MaskedText text={prompt ?? ''} /></code></pre>
-  </section>
+/**
+ * The agent prompt as Get started and the docs show it, one source for both: Copy (the primary action), a line saying
+ * what copying does (for an owner or admin, AgentSetupStatus: copying adds a setup token, then whether the agent used
+ * it), and the prompt as the agent will read it, in a box that scrolls with its edges fading where it runs on. `value`:
+ * the prompt, or a function that makes it when Copy is pressed (with a fresh setup token); `preview` is what the box
+ * shows. `pending`: the prompt is still loading; Copy keeps its place, hidden. A fragment, so the page lays it out.
+ */
+export function AgentPromptPanel({ value, preview, setup, idle, line, pending = false }: { value: string | (() => Promise<string>); preview: string; setup: AgentSetup | null; idle?: ReactNode; line: ReactNode; pending?: boolean }) {
+  return <>
+    <div className="agent-prompt__actions" data-pending={pending || undefined} inert={pending}><CopyAction value={value} label="Copy agent prompt" text="Copy agent prompt" variant="primary" /></div>
+    {setup ? <AgentSetupStatus setup={setup} idle={idle} /> : <p className="muted agent-prompt__line">{line}</p>}
+    <PromptBox text={preview} />
+  </>
+}
+function PromptBox({ text }: { text: string }) {
+  const ref = useRef<HTMLElement>(null)
+  const fade = (node: HTMLElement) => {
+    node.style.setProperty('--fade-top', `${Math.min(24, node.scrollTop)}px`)
+    node.style.setProperty('--fade-bottom', `${Math.min(24, node.scrollHeight - node.clientHeight - node.scrollTop)}px`)
+  }
+  useEffect(() => { if (ref.current) fade(ref.current) }, [text])
+  return <pre className="developer-code developer-code--prompt agent-prompt__box"><code ref={ref} tabIndex={0} aria-label="Agent prompt" onScroll={(event: UIEvent<HTMLElement>) => fade(event.currentTarget)}><MaskedText text={text} /></code></pre>
 }
 
 // The hosted MCP server, set up as you: the same URL and one-line setups as Connect an agent (connect-agent.tsx).

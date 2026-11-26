@@ -1,4 +1,5 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
+import { heldImageSource } from '../lib/held-image'
 
 // One sandboxed frame per column of the preview (the email as sent and each emulated client). A frame follows the
 // preview contract: srcdoc in an iframe with sandbox="" (no scripts, an opaque origin) and a CSP that blocks remote
@@ -12,11 +13,21 @@ import { useEffect, useState, useSyncExternalStore } from 'react'
 export const FRAME_WIDTH = { desktop: 800, mobile: 390 } as const
 export type FrameDevice = keyof typeof FRAME_WIDTH
 export type FrameScheme = 'light' | 'dark'
-// An emulation drops remote images' src (the API's previewEmail): their boxes show as flat placeholders, so a missing
-// image reads as one not loaded, not as the email's design.
-const GUARD = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none'"><meta name="referrer" content="no-referrer"><style>html{scrollbar-width:none}html::-webkit-scrollbar{display:none}img:not([src]){background:rgba(128,128,128,.22)}</style>`
+// An emulation drops remote images' src (the API's previewEmail): each shows as the quiet tile the email as sent shows for
+// an image it holds back (lib/held-image.ts), at its size and with its alt text, so a missing image reads as one not
+// loaded, never as the email's design or a broken image.
+const GUARD = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src 'none'; form-action 'none'; base-uri 'none'"><meta name="referrer" content="no-referrer"><style>html{scrollbar-width:none}html::-webkit-scrollbar{display:none}</style>`
 /** An emulated client's HTML (the API's previewEmail) as a frame document, with the guard first in its head. */
-export const frameDocument = (html: string) => /<head\b[^>]*>/i.test(html) ? html.replace(/<head\b[^>]*>/i, head => head + GUARD) : GUARD + html
+export function frameDocument(html: string) {
+  if (/<img\b/i.test(html)) {
+    const page = new DOMParser().parseFromString(html, 'text/html'), dropped = [...page.querySelectorAll('img:not([src]), img[src=""]')]
+    if (dropped.length) {
+      for (const image of dropped) image.setAttribute('src', heldImageSource(image))
+      html = (html.match(/^\s*<!doctype[^>]*>/i)?.[0] ?? '') + page.documentElement.outerHTML
+    }
+  }
+  return /<head\b[^>]*>/i.test(html) ? html.replace(/<head\b[^>]*>/i, head => head + GUARD) : GUARD + html
+}
 
 /** A document laid out at a width: `width` it renders at (wider than asked when its content is), the `height` of its
  *  content, and the span [left, right) the frame shows: its content with a margin, or all of it. */
