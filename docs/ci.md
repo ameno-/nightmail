@@ -34,16 +34,16 @@ Every change reaches production through `dev`: a PR merges into `dev`, the dev d
 | When | Job | What it proves |
 | --- | --- | --- |
 | PR, merge group, direct `dev` push | `build` | Types, SDK and docs regenerate cleanly, both Workers bundle, the public API stays compatible, and the **pre-merge invariants** below |
-| PR, merge group, direct `dev` push | `acceptance` | Three isolated Postgres/S3 shards (integration, simulated, simulated-heavy), each with the **deadlock guard** |
+| PR, merge group, direct `dev` push | `acceptance` | Four isolated Postgres/S3 shards (two integration, two simulated), each with the **deadlock guard** |
 | PR, merge group, direct `dev` push | `preview` | The real Worker under `wrangler dev` on a database upgraded from `dev`'s schema; see **Preview stack** |
-| PR, merge group, direct `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across four independent runners, and the support Worker tests |
+| PR, merge group, direct `dev` push | `audit`, `gateway`, `cls`, `support` | Dependency advisories, the Rust mail gateway (selected by the table above), layout shift on every main page across nine independent runners, and the support Worker tests on two fixtures |
 | Every `dev` push | Deploy dev | Migrate, deploy, health and live dev E2E. Support prepares alongside the main Worker but waits for its health check before changing D1 or its service binding. |
 | Daily 07:17 UTC, or by hand | Nightly | The acceptance suite (quarantined tests included) and the CLS gate, once each by default (5, 10 or 20 by hand), reported in one issue |
 | `production` push | Deploy production | Requires a passing live dev E2E and CI proof (see **Releasing to production**) |
 | Daily 03:00 ET, on Ryan's Mac | Nightly report | The last 24 hours of production and dev logs against the previous week; files `nightly` issues and starts a self-improve session (below) |
 | On demand (`api/ bun run tear:ci`) | Model-based tear suite | Runs on demand against a disposable local Postgres (`anomalyco/tear` is private); public CI's `acceptance` shard verifies the disposable-DB guard on all 11 real `api/tear/**/*.host.ts` processes |
 
-CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every selected matrix job to succeed.
+CI, nightly and deploy use Blacksmith Ubuntu 24.04 (4 vCPUs for builds, tests and deploys; 2 for the PR/queue acceptance and support shards and lightweight checks). `release.yml` stays on GitHub-hosted runners for npm trusted publishing. Blacksmith routes `actions/cache` to its local cache. Postgres runs on tmpfs; the CLS cache holds the locked Playwright browser and an exact-SHA Vite build, never a deploy artifact. Each protected suite check requires every selected matrix job to succeed.
 
 ## Releasing to production
 
@@ -168,7 +168,7 @@ A flaky check costs every PR a re-run and teaches everyone to ignore red. The po
 
 ### CLS shards
 
-PR/queue CI divides the complete measurement list round-robin across four Postgres/browser fixtures after sorting by weight, distributing the shared and exclusive measurements separately within each fixture API's traffic. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. The `alone` pages (the running homepage machine) still run one at a time after the shared pages on each shard's own fixture. A failing shard uploads its own shift sources. Local and nightly runs default to the whole list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=4 bun run cls` from `app/` (indices 0–3).
+PR/queue CI hashes each shared measurement's page, viewport/theme and mode across eight Postgres/browser fixtures. A ninth runs the exclusive pages one at a time and the television build. Each job keeps its original global page index, network timing, viewport, theme and 0.001 threshold. A failing shard uploads its own shift sources. Local and nightly runs default to the whole production list; to reproduce one CI shard use `CLS_SHARD_INDEX=0 CLS_SHARD_COUNT=9 bun run cls` from `app/` (indices 0–7 or `alone`).
 
 ### CLS: web fonts load before any text, every run
 
