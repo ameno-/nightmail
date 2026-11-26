@@ -5,6 +5,7 @@ import { docGraph, docMarkdown } from './docs/doc.ts'
 import { ownPages } from './docs/registry.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { comparisonQuestions, faqPage } from './questions.ts'
+import { START } from './start.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
 import { billMath, claim, dayOf, formatCount, listOf, money, nightmail, nightmailBill, opening, sourcesOf, theirPrice, vendorRows, type Comparison, type Usage } from './prices.ts'
 
@@ -54,6 +55,7 @@ export function comparisonMarkdown(c: Comparison): string {
     `# ${c.title}`,
     `> ${quotable(c)} ${c.lead} ${productName}’s price: ${price}.`,
     `Canonical page: ${url(c.path)}`,
+    START,
     `## A month at each size`,
     `${c.assume} Monthly billing, no promotions. ${vendor}’s prices checked ${dayOf(c.offer.checked)} on [${host(c.offer.pricing)}](${c.offer.pricing}).`,
     table(head, rows, sizeHead.map((_, i) => i).concat([sizeHead.length, sizeHead.length + 1])),
@@ -91,6 +93,7 @@ export function pricingMarkdown(): string {
     `# ${productName} price calculator`,
     `> What ${productName} costs at your size, beside ${listOf(vendors)}: ${price}. Contacts and teammates are free.`,
     `Canonical page: ${url('/pricing')}`,
+    START,
     `## How ${productName} charges`,
     terms(),
     `At ${formatCount(medium.sent)} emails sent and ${formatCount(medium.received)} received a month: sent ${billMath(bill.sent)} = ${bill.sent.text}; received ${billMath(bill.received)} = ${bill.received.text}; ${bill.text} a month.`,
@@ -136,6 +139,7 @@ export function markdownFiles(): { file: string; source: string }[] {
 /** more: lines for the site's other pages (price-pages.ts: /compare, when the build has it). */
 export function llmsSiteIndex(more: string[] = []): string {
   return [
+    START,
     `Hosted ${productName} charges ${price}. Contacts and teammates: no charge.`,
     `## Product and pricing`,
     `- [${productName}](${url('/index.md')}): what it does and what it costs\n- [Price calculator](${url('/pricing.md')}): ${productName} beside ${listOf([...new Set(OFFERS.map(offer => offer.vendor))])} at three sizes, and how to price any other\n- [The website in full](${url('/llms-full.txt')}): these pages and every comparison, in one file${more.map(line => `\n${line}`).join('')}`,
@@ -145,10 +149,11 @@ export function llmsSiteIndex(more: string[] = []): string {
   ].join('\n\n') + '\n\n'
 }
 /** llms-full.txt: every page's Markdown twin, one after another, without the list of the other pages each twin ends with
- *  (the calculator's Comparisons, a comparison's More): the homepage's Compared lists them once. */
+ *  (the calculator's Comparisons, a comparison's More): the homepage's Compared lists them once; and the line on how to
+ *  start (start.ts) once, at the top, not in every twin. */
 export function llmsFull(files = markdownFiles()): string {
-  const own = (source: string) => source.trim().replace(/\n## (?:More|Comparisons)\n[\s\S]*$/, '')
-  return [`# ${productName}: the website in full`, `> The homepage, the price calculator and every comparison, as Markdown. ${productName} charges ${price}. API documentation: ${url('/docs.md')}.`, ...files.map(({ source }) => own(source).replace(/^# /, '## ').replace(/\n(#{2,5}) /g, '\n#$1 '))].join('\n\n') + '\n'
+  const own = (source: string) => source.trim().replace(/\n## (?:More|Comparisons)\n[\s\S]*$/, '').replaceAll(`\n\n${START}`, '')
+  return [`# ${productName}: the website in full`, `> The homepage, the price calculator and every comparison, as Markdown. ${productName} charges ${price}. API documentation: ${url('/docs.md')}.`, START, ...files.map(({ source }) => own(source).replace(/^# /, '## ').replace(/\n(#{2,5}) /g, '\n#$1 '))].join('\n\n') + '\n'
 }
 
 // ---------------------------------------------------------------- structured data (JSON-LD)
