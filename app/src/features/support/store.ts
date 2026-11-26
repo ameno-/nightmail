@@ -340,7 +340,7 @@ export class SupportStore {
       if (event.state !== 'open') this.socketSynced = false
       const synced = event.state === 'ready' ? true : this.state.synced
       this.set({ connection: event.state, synced, retryAt: event.retryAt ?? null, reason: event.reason ?? null })
-      if (event.state === 'unavailable') this.settle('Not sent: support chat isn’t available.')
+      if (event.state === 'unavailable') this.settle('Not sent.')
       if (event.state === 'open') this.rereadFailed()
       return
     }

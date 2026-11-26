@@ -22,7 +22,6 @@ import { TeamSkeleton } from './skeletons'
 import { BillingSection } from './billing'
 import { WebhooksSection } from './webhooks'
 import { ActivitySection } from './activity'
-import { ContactSupportDialog } from '../../components/ContactSupport'
 import { Invitations, InviteDialog, Members } from './workspace-members'
 import './hosted.css'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -228,13 +227,11 @@ function AccountRows() {
   const agents = useApiDef(queries.agents(true))
   const apps = agents.data?.filter(agent => agent.own)
   const revoke = useApiMutation((api, id: string) => api.credentials.revokeAgent(id), 'Agent revoked', false, invalidate.agents)
-  const [support, setSupport] = useState(false)
   if (!session?.identity) return null
   return <div className="settings-rows">
     <Row title="Name">{session.identity.name || '—'}</Row>
     <Row title="Email">{session.identity.email ? <PrivateAddress value={session.identity.email} /> : '—'}</Row>
     <Row title="Role">{access.role ? roleLabel[access.role] : '—'}</Row>
-    <Row title="Support"><Button onClick={() => setSupport(true)}>Contact support</Button></Row>
     <Row title="Session"><Button onClick={() => session.logout()}>Sign out</Button></Row>
     {/* An agent signs in to the account service, which lists and disconnects it everywhere. Nightmail lists each connected
         agent below: its default workspace, and Revoke, which ends its access here and everything it set up. */}
@@ -243,7 +240,6 @@ function AccountRows() {
       :<McpApproval key={`${app.id}:${app.workspaceId}`} app={app} workspaces={session.identity?.workspaces??[]} onRevoke={()=>revoke.mutate(app.id)} />)}
     {agents.error && <ErrorState error={agents.error} onRetry={() => void agents.refetch()} />}
     <MutationError error={revoke.error}/>
-    {support && <ContactSupportDialog onClose={() => setSupport(false)} />}
   </div>
 }
 // One connected agent per client and account. Its tools act in the workspace each call names, checked against your role

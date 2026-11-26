@@ -10,8 +10,9 @@
    above the tab bar. */
 .app-shell--compact .support-panel:not(.support-panel--sheet) { inset: calc(var(--mobile-bar-height) + env(safe-area-inset-top)) var(--page-inset) max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom) + var(--page-inset)), calc(var(--keyboard-inset, 0px) + var(--page-inset))) auto; width: min(400px, calc(100vw - 2 * var(--page-inset))); height: auto; max-height: 720px; transform-origin: right top; }
 
-/* Phone: a full-height sheet resting on the tab bar (which stays in reach), above the keyboard while typing. */
-.support-panel--sheet { inset: max(var(--space-12), env(safe-area-inset-top)) 0 max(calc(var(--tab-bar-height) + env(safe-area-inset-bottom)), var(--keyboard-inset, 0px)); z-index: 29; width: auto; height: auto; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; opacity: 1; transform: translateY(100%); transition: transform 220ms var(--ease-out-strong), visibility 0s 220ms; }
+/* Phone: a full-height sheet resting on the tab bar (which stays in reach), above the keyboard while typing. Get started
+   has no tab bar: the sheet rests on the screen's bottom edge. */
+.support-panel--sheet { inset: max(var(--space-12), env(safe-area-inset-top)) 0 max(calc(var(--tab-bar-height, 0px) + env(safe-area-inset-bottom)), var(--keyboard-inset, 0px)); z-index: 29; width: auto; height: auto; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; opacity: 1; transform: translateY(100%); transition: transform 220ms var(--ease-out-strong), visibility 0s 220ms; }
 .support-panel--sheet[data-open] { transform: none; transition: transform 320ms var(--ease-drawer), visibility 0s; }
 @starting-style { .support-panel--sheet[data-open] { transform: translateY(100%); } }
 .support-panel--sheet .ui-sheet__grab { height: 16px; padding-top: var(--space-6); }

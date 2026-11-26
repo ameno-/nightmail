@@ -79,7 +79,8 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // [name, path, { user, from, click, row, switchTo, support, notes, panel, dialog, tab, still, alone, phoneOnly, notFound, waitlist }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
-// the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above);
+// the router's history. It must land on `path`. `support` opens the support chat first (`'menu'`: from the workspace menu's
+// Help, on Get started), `dialog` a dialog (see above);
 // `tab` clicks the tab whose text starts with it once the page has settled, and the measurement covers both;
 // `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
 // `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice;
@@ -297,6 +298,9 @@ const pages = ids => [
   // Get started on the built-in domain, ready (onboarding/get-started.tsx): the Agent tab, and By hand's key and send example.
   ['Onboarding · get started', '/onboarding', { user: 'uma' }],
   ['Onboarding · get started by hand', '/onboarding', { user: 'uma', tab: 'By hand' }],
+  // Get started has no sidebar: Help in the workspace menu opens the support chat. With no support Worker here, the chat
+  // says it isn't available and gives the support address.
+  ['Onboarding · support chat', '/onboarding', { user: 'uma', support: 'menu' }],
   // The same while the built-in domain is still being set up: the same screen (a test email pressed now waits for it).
   ['Onboarding · get started provisioning', '/onboarding', { user: 'ula' }],
   // On a domain of the workspace's own, just verified (the step after its records): no built-in domain line.
@@ -517,6 +521,7 @@ const phonePages = new Set([
   'Domain · built-in',
   'Onboarding · get started',
   'Onboarding · get started by hand',
+  'Onboarding · support chat',
   'Onboarding · get started provisioning',
   'Onboarding · get started own domain',
   'API keys',
@@ -915,8 +920,12 @@ async function measure(browser, job, fx) {
       await settle(page, net);
     }
     if (job.support) {
-      // Open the chat and let the greeting finish: the panel is idle and no caret is left in it.
-      const opened = await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
+      // Open the chat and let the greeting finish: the panel is idle and no caret is left in it. From the workspace menu,
+      // a dropdown opens on pointer down and the phone's sheet on click.
+      const opened = job.support === 'menu'
+        ? await page.evaluate(() => { const trigger = document.querySelector('#sidebar-workspace'); trigger?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); trigger?.click(); return Boolean(trigger); })
+          && await page.waitForFunction(() => [...document.querySelectorAll('[role=menuitem], .ui-action-sheet__item')].find(el => el.getClientRects().length && el.textContent.trim() === 'Help'), null, { timeout: 10_000 }).then(item => item.evaluate(el => { el.click(); return true; }), () => false)
+        : await page.evaluate(() => { const button = document.getElementById('support-trigger'); button?.click(); return Boolean(button); });
       if (!opened) problems.push('no Help button');
       else await page.waitForFunction(() => document.querySelector('#support-panel[data-open]:not([data-busy])') && !document.querySelector('#support-panel .support-caret'), null, { timeout: 30_000, polling: 100 });
       await settle(page, net);

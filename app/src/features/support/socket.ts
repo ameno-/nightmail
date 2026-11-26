@@ -107,6 +107,16 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
   let socket: WebSocket | null = null, state: Connection = 'idle'
   let started: Started | null = saved?.socketUrl && fresh(saved.expiresAt) ? { conversationId: saved.conversationId, chatToken: '', socketUrl: saved.socketUrl, expiresAt: saved.expiresAt! } : null
   let wantCreate = false, connecting: Promise<void> | null = null
+  // A handoff not spent yet (its token lasts 10 minutes): retrying after the support service failed reuses it rather than
+  // signing another, so an outage doesn't use up the person's handoffs for the hour (10, api/src/support.ts) and keep the
+  // chat refused after the service is back.
+  let unspent: { token: string; at: number } | null = null
+  const nextHandoff = async () => {
+    if (unspent && Date.now() - unspent.at < 8 * 60_000) return unspent.token
+    const token = await handoff(false)
+    unspent = { token, at: Date.now() }
+    return token
+  }
   let attempt = 0, retry: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
   let disposed = false, generation = 0
   const setState = (next: Connection, extra: Omit<Extract<TransportEvent, { type: 'connection' }>, 'type' | 'state'> = {}) => { state = next; emit({ type: 'connection', state: next, ...extra }) }
@@ -122,10 +132,12 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
           conversationId = found?.id ?? null
           if (!conversationId && !wantCreate) return null
         }
-        const token = await handoff(false)
-        return conversationId
+        const token = await nextHandoff()
+        const result = conversationId
           ? await post(origin, '/chat/resume', { conversationId, handoff: token })
           : await post(origin, '/chat/start', { handoff: token, resume: true })
+        unspent = null
+        return result
       } catch (error) {
         if (!(error instanceof StartError)) throw error
         // Stale or closed conversation, or an email conversation: forget it, then stay ready or start fresh if sending.
@@ -135,6 +147,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
           if (!wantCreate) return null
           continue
         }
+        if (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED') unspent = null
         if (tries === 0 && (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED')) continue
         throw error
       }
@@ -260,6 +273,20 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
     restart() { save(key, null); started = null; wantCreate = false; generation++; teardown(); attempt = 0; setState('ready') },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
+  }
+}
+
+/** No support Worker for this dashboard (supportOrigin() is null): refused from the start (a listener hears it as it
+ *  subscribes, so the panel never shows a loading state first), and the panel gives the support address instead. */
+export function createUnavailableTransport(): SupportTransport {
+  const listeners = new Set<(event: TransportEvent) => void>()
+  const refused: TransportEvent = { type: 'connection', state: 'unavailable', reason: 'NOT_CONFIGURED' }
+  const refuse = () => { for (const listener of listeners) listener(refused) }
+  const unavailable = () => Promise.reject(new Error(`${productName} support isn’t available here.`))
+  return {
+    kind: 'live', connect: refuse, send: () => false, allowContent: async () => {}, readAction: unavailable, decideAction: unavailable, restart: refuse,
+    uploads: false, upload: unavailable, dispose: () => listeners.clear(),
+    subscribe(listener) { listeners.add(listener); listener(refused); return () => { listeners.delete(listener) } },
   }
 }
 

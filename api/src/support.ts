@@ -16,7 +16,7 @@ import { productName } from './brand.js';
 // Support integration (api/README.md "Support integration"). Internal: these routes are for Nightmail's operators and its
 // support platform, never for customers.
 //
-// 1. A signed-in member presses "Contact support" (POST /v1/contact-support): Nightmail stores a handoff (workspace, user,
+// 1. A signed-in member opens Help, the support chat (POST /v1/contact-support): Nightmail stores a handoff (workspace, user,
 //    page, recent request IDs, and whether they share message content for this request) and returns the support
 //    platform's URL carrying an Ed25519-signed handoff token.
 // 2. The support platform registers a conversation from that handoff (src/support-conversations.ts): Nightmail checks

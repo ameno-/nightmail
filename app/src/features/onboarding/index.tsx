@@ -8,7 +8,8 @@ import { BootLoader } from '../../components/BootLoader'
 import { ThemeToggle } from '../../components/ThemeToggle'
 import { AccountSwitcher } from '../../components/AccountSwitcher'
 import { AgentWaiting } from '../../components/AgentWaiting'
-import { useApiMutation, useApiQuery, useSession } from '../../data/context'
+import { SupportHost, useSupportChat } from '../../components/SupportChat'
+import { useApiMutation, useApiQuery, useSession, useWorkspaceAccess } from '../../data/context'
 import { connectionApi, retryableConnectionErrors, useConnectionCache } from '../../data/connections'
 import { finishedStep, readDomainStep, readRegionalDomain, setDomainStep, setRegionalDomain, startStep, storedStage, useDomainStep, type OnboardingStage } from '../../data/onboarding'
 import { useSaveFocus } from '../../data/focus'
@@ -69,16 +70,19 @@ function useConnectionMutation<T>(write: (input: T) => Promise<ProviderConnectio
   })
 }
 
-// Full-page shell for /onboarding: no dashboard navigation or dashboard data.
+// Full-page shell for /onboarding: no dashboard navigation or dashboard data. Help is in the workspace menu, and opens the
+// support chat docked in the corner (a sheet on a phone), as in the dashboard.
 export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> }) {
   const session = useSession()
+  const access = useWorkspaceAccess()
+  const support = useSupportChat({ hosted: access.multiTenant, staff: Boolean(session?.identity?.operator) })
   useEffect(() => { document.title = `Get started · ${productName.toLowerCase()}` }, [])
   return <div className="onboarding-shell">
     <a className="skip-link" href="#main-content">Skip to content</a>
     <header className="onboarding-header">
       <span className="wordmark"><NightmailWordmark title={productName.toLowerCase()} /></span>
       <div className="onboarding-header-actions">
-        <div className="onboarding-workspace"><AccountSwitcher /></div>
+        <div className="onboarding-workspace"><AccountSwitcher help={support.mode ? () => support.setOpen(true) : null} /></div>
         <ThemeToggle />
         <Button variant="ghost" className="onboarding-signout" title="Sign out" onClick={() => void session?.logout()}><LogOut size={16} aria-hidden /><span className="onboarding-signout-label">Sign out</span></Button>
       </div>
@@ -88,6 +92,7 @@ export function OnboardingPage({ stage }: { stage: NonNullable<OnboardingStage> 
       <OnboardingSteps stage={stage} />
     </main>
     <AgentWaiting />
+    {support.mode && <SupportHost chat={support} />}
   </div>
 }
 

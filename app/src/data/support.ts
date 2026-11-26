@@ -1,7 +1,7 @@
 import { recentFailedRequestIds, request } from './live'
 
-// The in-app support handoff (hosted): POST /v1/contact-support opens a support conversation for this workspace.
-// `url` is the support platform's page for it, when one is configured; otherwise the reference `id` goes in an email.
+// The support chat's handoff (hosted): POST /v1/contact-support signs who is asking, in which workspace, from which page
+// and after which failed requests; the Help panel opens or resumes its conversation with `token` (features/support/socket.ts).
 export type SupportHandoff = { id: string; url: string | null; token: string | null; expiresAt: string; shareContent: boolean }
 /** The signed-in person's open chat conversation in the current workspace, from GET /v1/support-conversations/current. */
 export type CurrentSupportConversation = { id: string; status: 'open' | 'ticketed'; createdAt: string; lastMessageAt: string | null }
@@ -10,11 +10,11 @@ export type SupportPendingEmail = { id: string; messageId: string; subject: stri
 export const supportApi = {
   /** The open support chat conversation for this person and workspace, or null when none is open. */
   current: () => request<{ conversation: CurrentSupportConversation | null }>('/v1/support-conversations/current'),
-  contact: (input: { shareContent: boolean; message?: string }) => {
+  /** A handoff for the chat, carrying the page this person is on and the last failed requests' IDs. */
+  contact: (input: { shareContent: boolean }) => {
     const requestIds = recentFailedRequestIds()
     return request<SupportHandoff>('/v1/contact-support', { method: 'POST', body: {
-      kind: 'support', page: window.location.pathname.slice(0, 200), shareContent: input.shareContent,
-      ...(requestIds.length ? { requestIds } : {}), ...(input.message ? { message: input.message } : {}),
+      kind: 'support', page: window.location.pathname.slice(0, 200), shareContent: input.shareContent, ...(requestIds.length ? { requestIds } : {}),
     } })
   },
   /** The chat's own person lets support read message content in its workspace (support/PROTOCOL.md §4.3). */
