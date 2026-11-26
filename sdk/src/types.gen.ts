@@ -1991,10 +1991,10 @@ export type CampaignDelivery = {
      */
     deliveredOnly: boolean;
     /**
-     * Why releasing recipients is currently held, and the best estimate of until when. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace's sending is paused, or with own link hosts, its domain's isn't active yet); it continues by itself.
+     * Why releasing recipients is currently held, and the best estimate of until when. link_budget: the shared link domain or the workspace has used its daily allowance. link_listing: an operator must resume this link domain after a confirmed listing. list_probe: Hosted sent the first recipients (the list probe) and waits for their bounces and complaints before releasing the rest. feedback_lag: releasing is briefly held while priority safety feedback (bounces/complaints) catches up. ramp: a Hosted sender's first large campaigns release in growing hourly steps (sendEstimate.ramp); this hour's step is used up, or its delivery results are still coming in before the next step. link_record: the campaign has no host for its unsubscribe link right now (its workspace's sending is paused, or with own link hosts, its domain's isn't active yet); it continues by itself.
      */
     waiting: {
-        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record';
+        reason: 'pacing_window' | 'ses_daily_quota' | 'hosted_daily_quota' | 'list_probe' | 'balance' | 'feedback_lag' | 'ramp' | 'link_record' | 'link_budget' | 'link_listing';
         until: string;
     } | null;
     /**
@@ -2376,6 +2376,10 @@ export type CampaignAudienceCounts = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
+             * This campaign shares the link domain’s daily sending allowance.
+             */
+            sharedLinkPacing?: boolean;
+            /**
              * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
             linkHost: 'not_configured';
@@ -2649,6 +2653,10 @@ export type CampaignQueued = {
              * The custom MAIL FROM domain (aligned SPF).
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
+            /**
+             * This campaign shares the link domain’s daily sending allowance.
+             */
+            sharedLinkPacing?: boolean;
             /**
              * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
