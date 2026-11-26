@@ -209,10 +209,12 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   const hasPrompt = canAdminister && Boolean(identity)
   const activeMode = hasPrompt ? mode : 'mcp'
   return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title={inboxView ? 'Connect your agent to one inbox' : 'Connect your agent'} analytics="Connect an agent" className="connect-agent-dialog" sensitive={!!result} footer={footer}>
-    {!inboxView ? <div className="stack connect-agent">
+    {!inboxView ? <>
       {hasPrompt && <Tabs label="How to connect" value={activeMode} onValueChange={value => setMode(value as 'prompt' | 'mcp')} items={[{ value: 'prompt', label: 'Agent prompt' }, { value: 'mcp', label: 'MCP' }]} />}
-      {activeMode === 'prompt' ? <SetupPrompt /> : <><McpSignInSetup urlLine={false} picker client={signIn} onClient={setSignIn} /><ConnectedAgents onLeave={close} /></>}
-    </div> : <div className="stack">
+      <div className="stack connect-agent">
+        {activeMode === 'prompt' ? <SetupPrompt /> : <><McpSignInSetup urlLine={false} picker client={signIn} onClient={setSignIn} /><ConnectedAgents onLeave={close} /></>}
+      </div>
+    </> : <div className="stack">
       {!result && <>
         {searchable && <SearchField aria-label="Search inboxes" placeholder="Search address or name" value={query} onChange={event => setQuery(event.target.value)} />}
         {inboxes.error && !inboxes.data && !active.length ? <ErrorState error={inboxes.error} onRetry={() => void inboxes.refetch()} />
