@@ -27,7 +27,7 @@ import { registerLogs } from './logs.js';
 import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 import { legacyAddressOperations, productName } from './brand.js';
-import { receivingIssueSchema } from './operations.js';
+import { followMxJob, receivingIssueSchema } from './operations.js';
 import { addHost, enableHosted, listHosts, receiveForAddress, removeHost, updateHost } from './receiving-hosts.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
@@ -277,9 +277,13 @@ function registerReceivingDomains(app: App) {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
     return c.json((await domainViews(c, [row]))[0]!, 200);
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/check`, operationId: 'checkInboundDomain', summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(InboundDomainSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: `${base}/{id}/check`, operationId: 'checkInboundDomain', summary: 'Check MX records now', description: 'Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Hosted: also checks every receiving host of the domain again in the background within seconds, and keeps checking a host that waits for its MX for a while; read listReceivingHosts for each host’s status. Never changes DNS or AWS.', request: { params: IdParam }, responses: { 200: response(InboundDomainSchema), ...errors } }), async c => {
     admin(c); const row = await operationDomain(c, c.req.valid('param').id);
-    if (c.env.config.multiTenant) { const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,view!.region)},200); }
+    if (c.env.config.multiTenant) {
+      // Every host of the domain, not only the one this answer's mx reads: the same DNS check the hourly sweep runs, now.
+      if ((await c.env.db.execute(followMxJob(row.workspaceId, sql`SELECT d.id,dc.token FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name WHERE d.workspace_id=${row.workspaceId} AND d.id=${row.id}`))).rowCount) { const actor = c.get('actor'); if (actor) actor.wakeJobs = Math.max(actor.wakeJobs ?? 0, 1); }
+      const [view]=await domainViews(c,[row]);return c.json({...view!,mx:await checkMx(view!.name,view!.region)},200);
+    }
     const mx = await checkMx(row.name, row.region);
     await saveMailboxMx(c.env.db,row.workspaceId,row.id,mx);
     const [view] = await domainViews(c, [row]);

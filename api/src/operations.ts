@@ -409,7 +409,9 @@ const sends = (row: Pick<ClaimState,'sending_state'>) => row.sending_state==='ve
 export async function verifyHostedDomain(runtime: Runtime, a: Actor, domainId: string) {
   const row=await hostedDomain(runtime.db,a.workspaceId,domainId,false,{domains:a.domains,mode:'manual',platformAccount:runtime.config.platformAccount}) ?? notFound('Domain'); allowedDomain(a,row.name);
   assertSharedAccount(runtime,row.connection);
-  if (row.queued) a.wakeJobs=1;
+  // Check now covers every receiving host: the background verification observes them all, and one still waiting for its MX
+  // is followed up (followMxJob).
+  if ((await runtime.db.execute(followMxJob(a.workspaceId,sql`SELECT ${row.id}::text AS id,${row.token}::uuid AS token`))).rowCount || row.queued) a.wakeJobs=1;
   return derivedReadiness(row, runtime.config);
 }
 /** The readiness document is derived: SES/DNS facts give the records, the explicit states give every boolean. */
@@ -720,6 +722,16 @@ function dnsSetupActor(c:Ctx) {
   if (a.credential!=='dashboard' || (a.role!=='owner' && a.role!=='admin')) throw denied('PERMISSION_DENIED','Use an owner or admin dashboard session to set up DNS.',{ permission: 'configuration', level: 'write', credential: 'dashboard', person: 'admin' });
   return a;
 }
+/**
+ * While a receiving host waits for its MX, the domain's DNS-only check (domain.mx) runs again soon, not at the next hourly
+ * sweep: a host added and published minutes later stayed "MX missing" for over half an hour, and the inbound check didn't
+ * look at it at all. Queued when a host is added and by every check on request; each run that still finds a host waiting
+ * defers itself (FOLLOW_MX), then the hourly sweep takes over. A run already under way is left to finish.
+ */
+export const FOLLOW_MX = [30_000, 60_000, 120_000, 300_000, 600_000, 900_000, 900_000, 900_000, 900_000, 900_000, 900_000];
+export const followMxJob = (wid: string, source: SQL) => sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT 'domain.mx:'||r.token,'domain.mx',${wid},
+  jsonb_build_object('domainId',r.id,'token',r.token,'follow',0) FROM (${source}) r
+  ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),attempts=0,payload=excluded.payload,lease_until=NULL,last_error=NULL,created_at=now() WHERE jobs.status<>'running' RETURNING id`;
 export function recheckJob(wid: string, source: SQL, mode:'manual'|'dashboard'|'supersede'='manual') {
   // A recovered creation or MAIL FROM change supersedes even a running poll based on an older SES read.
   // Dashboard reads only advance the due time. Preserve the background poll count and use the job's
@@ -924,6 +936,11 @@ const domainMx:JobHandler=async(runtime,payload,job)=>{
     const attested=!current.identity.adopted || platformClaim(runtime.config,job.workspaceId,current);
     await saveObservation(db,current,job.workspaceId,current.identity.ses,observation,{sending:undefined,identityVerified:current.identity.ses.VerificationStatus==='SUCCESS',proven:proof??(current.identity.proven && attested)},dmarc);
   });
+  // A host still waiting for its MX is looked at again soon (followMxJob), until the follow-ups run out.
+  const follow=typeof payload.follow==='number' ? payload.follow : null;
+  if(observation && follow!==null && follow<FOLLOW_MX.length && (await runtime.db.execute(sql`SELECT 1 FROM mailbox_domains m WHERE m.workspace_id=${job.workspaceId} AND m.status='waiting_for_mx'
+    AND (m.domain_id=${row.id} OR m.parent_id IN (SELECT o.id FROM mailbox_domains o WHERE o.workspace_id=${job.workspaceId} AND o.domain_id=${row.id} AND o.parent_id IS NULL)) LIMIT 1`)).rowCount)
+    throw new JobDeferred(new Date(Date.now()+FOLLOW_MX[follow]!).toISOString(),{...payload,follow:follow+1});
   if(dmarc===undefined) throw dnsUnavailable(); // Retry after committing any independent MX change.
 };
 

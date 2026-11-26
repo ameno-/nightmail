@@ -27168,6 +27168,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await deliver(`x@race.${name}`)).routed, 0);
       });
 
+      // A host added before its MX is published (an agent added its domain's root, published the MX, and the root stayed
+      // "MX missing", its check time frozen, for over half an hour; the inbound check looked only at the domain's other host):
+      // adding it, the inbound check and Check now each queue the DNS check of every host, which runs again soon while one waits.
+      await t.test('a receiving host waiting for its MX is checked again soon, by the inbound check and Check now too, then left to the hourly sweep', async () => {
+        const { JobDeferred } = await import('./src/jobs.js');
+        const name = `${unique('rx-follow')}.example`, d = await claim(name, { receivingHost: `reply.${name}` });
+        zone.set(`reply.${name}`, { mx: [ses] }); await recheck(d);
+        const hostsPath = `/v1/inbound/domains/${d.id}/hosts`, states = async () => Object.fromEntries((ok(await local('GET', hostsPath)).data as Json[]).map(h => [h.name, h.status]));
+        const job = async () => (await db.query('SELECT status,payload FROM jobs WHERE id=$1', ['domain.mx:' + d.token])).rows[0];
+        const run = async () => { const j = await job(); return operationJobs['domain.mx']!(runtime, j.payload, { id: 'domain.mx:' + d.token, attempts: 1, workspaceId: wid }); };
+        ok(await local('POST', hostsPath, { name, confirm: true }), 201);
+        assert.deepEqual([(await job()).status, (await job()).payload.follow], ['pending', 0], 'Adding a host queues its DNS check now.');
+        // No MX yet: the check defers itself, sooner than the hourly sweep.
+        await assert.rejects(run(), (e: unknown) => e instanceof JobDeferred && e.payload?.follow === 1 && Date.parse(e.availableAt) - Date.now() <= 60_000);
+        assert.equal((await states())[name], 'pending');
+        // The MX is published: the next run sees it, the host receives, and nothing more is queued.
+        zone.set(name, { mx: [ses] });
+        await db.query(`UPDATE jobs SET payload=payload||'{"follow":1}' WHERE id=$1`, ['domain.mx:' + d.token]);
+        await run();
+        assert.deepEqual(await states(), { [`reply.${name}`]: 'active', [name]: 'active' });
+        // The inbound check and Check now queue the same check of every host.
+        await db.query("UPDATE jobs SET status='completed',payload=payload-'follow' WHERE id=$1", ['domain.mx:' + d.token]);
+        ok(await local('POST', `/v1/inbound/domains/${d.id}/check`));
+        assert.deepEqual([(await job()).status, (await job()).payload.follow], ['pending', 0], 'checkInboundDomain checks every host.');
+        await db.query("UPDATE jobs SET status='completed',payload=payload-'follow' WHERE id=$1", ['domain.mx:' + d.token]);
+        ok(await local('POST', `/v1/domains/${d.id}/verify`));
+        assert.deepEqual([(await job()).status, (await job()).payload.follow], ['pending', 0], 'Check now checks every host.');
+        // With every host receiving, a follow-up ends without deferring; the hourly sweep keeps it from there.
+        await run();
+      });
+
       // What a rollback runs on what this release writes. The MX check, receipt router and BYO reconciler are the previous
       // release's, unchanged (it shipped them first so that it is this release's safe rollback), so each case below is that
       // release on state this release's hosts operations made: a removed host, a recovered grace, the original host removed.
