@@ -42381,7 +42381,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Two slots of this workspace's share remain. Its campaign releases those two, then waits at its cursor.
       const paced = await launch(), view = async () => ok(await local('GET', `/v1/campaigns/${paced.id}`)).delivery;
       await run('campaign.run'); await run('email.dispatch'); await run('campaign.run');
-      assert.deepEqual([(await view()).expanded,(await view()).waiting.reason,await used()], [2,'link_budget',6]);
+      const heldBudget = await view();
+      assert.deepEqual([heldBudget.expanded,heldBudget.waiting.reason,heldBudget.waiting.linkHold,await used()], [2,'pacing_window','daily_budget',6]);
       assert.deepEqual(hostsOf(delivered.splice(0)), [shared,shared]);
       error(await marketingTo('link-domain-2@example.net'),429,'LINK_BUDGET_REACHED');
       assert.equal(await used(),6,'A refused admission consumes nothing.');
@@ -42436,7 +42437,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await db.query("INSERT INTO deliverability_checks(kind,subject,status,checked_at,held_at) VALUES ('dbl',$1,'listed',now(),now())",[registered]);
       await run('campaign.run');
       const heldOwn = ok(await local('GET',`/v1/campaigns/${ownCampaign.id}`)).delivery;
-      assert.deepEqual([heldOwn.expanded,heldOwn.waiting.reason], [0,'link_listing']);
+      assert.deepEqual([heldOwn.expanded,heldOwn.waiting.reason,heldOwn.waiting.linkHold], [0,'link_record','blocklist']);
       error(await marketingTo('link-domain-1@example.net'),429,'LINK_DOMAIN_HELD');
       // A scheduled message is judged on release, not on its scheduling day.
       const later = ok(await local('POST','/v1/emails/send',{from,to:'link-domain-2@example.net',subject:'Scheduled',text:'Later',kind:'marketing',scheduledAt:new Date(Date.now()+3600000).toISOString()}),202);
