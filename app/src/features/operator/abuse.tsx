@@ -1,18 +1,20 @@
 import { useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { keepPreviousData, useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Alert, Button, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, ErrorText, FacetRail, Field, Input, MutationError, PageHeader, SectionHeader, SplitPane, StatusBadge, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
+import { Alert, Button, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, ErrorText, FacetRail, Field, Input, MutationError, PageHeader, SectionHeader, Skeleton, SplitPane, StatusBadge, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
 import type { StandingStep } from '../../data/types'
-import { isoTime, operatorApi, type AbuseAccount, type AbuseAlert, type AbuseBand, type AbuseCluster, type AbuseClusterDetail, type AbuseLink, type AbuseReason, type AbuseWorkspace, type SlackCard } from '../../data/operator'
+import { isoTime, operatorApi, type AbuseAccount, type AbuseAlert, type AbuseBand, type AbuseCluster, type AbuseClusterDetail, type AbuseLink, type AbuseReason, type AbuseReview, type AbuseWorkspace, type SlackCard } from '../../data/operator'
+import { errorText } from '../../data/types'
 import { label, number, shortDateTime } from '../../lib/format'
-import { abuseFacets, abuseView, alertColumnDefs, bandLabel, bandTone, ClusterBodySkeleton, clusterAccountColumnDefs, clusterColumnDefs, clusterFacts, ClusterRailSkeleton, clusterWorkspaceColumnDefs, dailyLimitError, StaffOnly } from './skeletons'
+import { abuseFacets, abuseView, alertColumnDefs, bandLabel, bandTone, ClusterBodySkeleton, clusterAccountColumnDefs, clusterColumnDefs, clusterFacts, ClusterRailSkeleton, clusterWorkspaceColumnDefs, dailyLimitError, reviewActions, StaffOnly } from './skeletons'
 
 // Operator → Abuse: accounts and workspaces that abuse monitoring found related, by risk, for a person to review.
 // A cluster opens beside the list of the others: why it scored, what links its members (kinds and counts, never a
 // value), and its workspaces with this month's free use. Nothing here acts by itself: an operator clicks Pause or Set
-// limit, and the note they give stays in the staff audit. Every read of this area is recorded for staff.
+// limit, and the note they give stays in the staff audit; or reviews the cluster's alert with Watch or Dismiss. Every
+// read of this area is recorded for staff.
 const def = (defs: typeof clusterColumnDefs, key: string) => defs.find(column => column.key === key)!
 const when = (value: string | null | undefined) => value ? `${shortDateTime(isoTime(value))} UTC` : '—'
 const At = ({ value }: { value: string | null | undefined }) => <span className="nowrap">{when(value)}</span>
@@ -33,14 +35,18 @@ const clusterColumns: Column<AbuseCluster>[] = [
   { ...def(clusterColumnDefs, 'changed'), render: row => <At value={row.changedAt} />, cardRender: row => `changed ${when(row.changedAt)}` },
 ]
 const kindText: Record<AbuseAlert['kind'], string> = { new: 'New', raised: 'Risk raised', grew: 'New member' }
-// Stored: waiting for the next post to Slack, or, with no webhook set, kept here only.
+// Stored: waiting for a post to Slack for a day, else kept here only (no webhook is set, or its day has passed).
 const statusText: Record<AbuseAlert['status'], string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
 const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger' }
+const deliveryText = (row: AbuseAlert, posting: boolean) => row.status !== 'stored' ? statusText[row.status] : posting && row.band === 'review' && Date.now() - Date.parse(row.createdAt) < 86_400_000 ? 'Queued' : 'Not posted'
+const reviewText: Record<AbuseReview['action'], string> = { watch: 'Watched', dismiss: 'Dismissed' }
+// When, in a tooltip; who, as a masked address where it shows (never in a tooltip, which can't mask it).
+const reviewTitle = (review: AbuseReview) => `${reviewText[review.action]} ${when(review.at)}`
 const alertTitle = (row: AbuseAlert) => `${bandLabel[row.band]} risk · ${kindText[row.kind]} · ${row.score}`
 // The alert's name opens its card; on a phone the whole card does.
 const alertColumns = (open: (row: AbuseAlert) => void, posting: boolean): Column<AbuseAlert>[] => [
   { ...def(alertColumnDefs, 'alert'), render: row => <button type="button" className="op-reason" onClick={event => { event.stopPropagation(); open(row) }}>{alertTitle(row)}</button>, cardRender: alertTitle },
-  { ...def(alertColumnDefs, 'status'), render: row => <StatusBadge status={row.status === 'stored' && !posting ? 'Not posted' : statusText[row.status]} tone={statusTones[row.status]} /> },
+  { ...def(alertColumnDefs, 'status'), render: row => row.review ? <span title={reviewTitle(row.review)}><StatusBadge status={reviewText[row.review.action]} tone="neutral" /></span> : <StatusBadge status={deliveryText(row, posting)} tone={statusTones[row.status]} /> },
   { ...def(alertColumnDefs, 'workspaces'), render: row => number(row.workspaces), cardRender: row => `${number(row.workspaces)} ${row.workspaces === 1 ? 'workspace' : 'workspaces'}` },
   { ...def(alertColumnDefs, 'created'), render: row => <At value={row.createdAt} /> },
 ]
@@ -106,16 +112,33 @@ export function OperatorClusterPage() {
   const role = useSession()?.identity?.operator ?? null
   const id = useParams().id ?? ''
   const detail = useQuery({ queryKey: ['operator', 'abuse', 'cluster', id], queryFn: ({ signal }) => operatorApi.abuseCluster(id, signal), enabled: Boolean(role && id) })
+  // The cluster's latest alert, which Slack links here: what Watch and Dismiss decide on.
+  const alerts = useQuery({ queryKey: ['operator', 'abuse', 'alerts', id], queryFn: ({ signal }) => operatorApi.abuseAlerts({ cluster: id, limit: 1 }, signal), enabled: Boolean(role && id) })
+  const alert = alerts.data ? { alert: alerts.data.items[0] ?? null, posting: alerts.data.delivery === 'slack' } : undefined
   const [action, setAction] = useState<Pending | null>(null)
   if (!role) return <StaffOnly />
   return <>
-    <PageHeader title="Related accounts" backTo="/operator?view=abuse" />
+    <PageHeader title="Related accounts" backTo="/operator?view=abuse" actions={role === 'operator' ? <ReviewActions alert={alert?.alert} /> : undefined} />
     <SplitPane className="op-cluster" rail={<ClusterRail current={id} />}>
-      {detail.data ? <ClusterBody cluster={detail.data} canAct={role === 'operator'} onAct={(kind, workspace) => setAction({ kind, workspace, key: crypto.randomUUID() })} />
+      {detail.data ? <ClusterBody cluster={detail.data} alert={alert} canAct={role === 'operator'} onAct={(kind, workspace) => setAction({ kind, workspace, key: crypto.randomUUID() })} />
         : detail.isError ? <ErrorState error={detail.error} onRetry={() => void detail.refetch()} /> : <ClusterBodySkeleton />}
     </SplitPane>
     <ActionDialog action={action} cluster={id} onClose={() => setAction(null)} />
   </>
+}
+// Watch (reviewed: alert again only at a higher risk) or Dismiss (not abuse: alert again only with new members or
+// reasons) the cluster's latest alert; Pause is on each workspace. Disabled while it loads, without an alert, and for
+// the decision already taken.
+function ReviewActions({ alert }: { alert: AbuseAlert | null | undefined }) {
+  const client = useQueryClient(), toast = useToast()
+  const mutation = useMutation({
+    mutationFn: (action: AbuseReview['action']) => operatorApi.abuseReview(alert!.id, action),
+    onSuccess: (_, action) => { toast(action === 'watch' ? 'Alert watched' : 'Alert dismissed', 'success'); void client.invalidateQueries({ queryKey: ['operator', 'abuse'] }) },
+    onError: error => toast(errorText(error), 'error'),
+  })
+  const titles = { watch: 'Reviewed: alert again only at a higher risk', dismiss: 'Not abuse: alert again only with new members or reasons' }
+  return <>{(['watch', 'dismiss'] as const).map((action, i) => <Button key={action} title={titles[action]} disabled={!alert || alert.review?.action === action || mutation.isPending}
+    loading={mutation.isPending && mutation.variables === action} onClick={() => mutation.mutate(action)}>{reviewActions[i]}</Button>)}</>
 }
 // The other clusters, highest risk first, to step through without going back to the list.
 function ClusterRail({ current }: { current: string }) {
@@ -131,11 +154,13 @@ const stepTone: Record<StandingStep, Tone> = { ok: 'success', notice: 'neutral',
 const stepLabel: Record<StandingStep, string> = { ok: 'Good', notice: 'Notice', warn: 'Warn', restrict: 'Restrict', pause: 'Pause' }
 const planLabel: Record<AbuseWorkspace['plan'], string> = { free: 'Free', paid: 'Paid', exempt: 'Not billed' }
 const use = (value: { used: number; limit: number }) => `${number(value.used)} / ${number(value.limit)}`
-function ClusterBody({ cluster, canAct, onAct }: { cluster: AbuseClusterDetail; canAct: boolean; onAct: (kind: Pending['kind'], workspace: AbuseWorkspace) => void }) {
-  const navigate = useNavigate()
+function ClusterBody({ cluster, alert, canAct, onAct }: { cluster: AbuseClusterDetail; alert?: { alert: AbuseAlert | null; posting: boolean }; canAct: boolean; onAct: (kind: Pending['kind'], workspace: AbuseWorkspace) => void }) {
+  const navigate = useNavigate(), latest = alert?.alert
   const facts: Record<(typeof clusterFacts)[number], ReactNode> = {
     Risk: <StatusBadge status={bandLabel[cluster.band]} tone={bandTone[cluster.band]} />, Score: `${cluster.score} · peak ${cluster.peak}`, Accounts: number(cluster.accounts.length), Workspaces: number(cluster.workspaces.length),
     'First seen': <span title={when(cluster.firstAt)}>{shortDateTime(isoTime(cluster.firstAt))}</span>, Changed: <span title={when(cluster.changedAt)}>{shortDateTime(isoTime(cluster.changedAt))}</span>,
+    Alert: !alert ? <Skeleton width={88} height={14} /> : latest ? <span className="op-cell" title={when(latest.sentAt ?? latest.createdAt)}>{bandLabel[latest.band]} · {deliveryText(latest, alert.posting)}</span> : '—',
+    Review: !alert ? <Skeleton width={88} height={14} /> : latest?.review ? <><span title={reviewTitle(latest.review)}>{reviewText[latest.review.action]}</span>{latest.review.by && <><span className="op-review-by">·</span><PrivateAddress value={latest.review.by} /></>}</> : latest ? 'Open' : '—',
   }
   const workspaceColumns: Column<AbuseWorkspace>[] = [
     { ...def(clusterWorkspaceColumnDefs, 'name'), render: w => <span className="op-ws" title={`${w.name} · ${w.id}`}><Link className="op-cell" to={`/operator/workspaces/${encodeURIComponent(w.id)}`}>{w.name}</Link><span className="op-muted-id">{w.id}</span></span>, cardRender: w => w.name },
@@ -157,7 +182,7 @@ function ClusterBody({ cluster, canAct, onAct }: { cluster: AbuseClusterDetail; 
   ]
   const reasons = [...cluster.reasons].sort((a, b) => b.points - a.points), shared = cluster.links.filter(link => !link.owner)
   return <div className="op-page">
-    <dl className="op-facts">{clusterFacts.map(title => <div key={title}><dt>{title}</dt><dd>{facts[title]}</dd></div>)}</dl>
+    <dl className="op-facts op-facts--four">{clusterFacts.map(title => <div key={title}><dt>{title}</dt><dd>{facts[title]}</dd></div>)}</dl>
     <div className="op-grid">
       <section className="op-section" aria-labelledby="op-why"><SectionHeader title={<span id="op-why">Why</span>} />
         <ul className="op-why">{reasons.map(reason => <li key={reason.code}><span className="op-cell" title={reason.code}>{reasonText(reason)}</span><span className="op-why__count">{reason.count === undefined ? '' : `× ${number(reason.count)}`}</span><span className="op-why__points">+{reason.points}</span></li>)}</ul>
