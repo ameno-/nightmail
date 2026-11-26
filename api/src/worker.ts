@@ -10,7 +10,7 @@ import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
 import { isMissingComparePage, SITE_INDEX, withSiteIndex } from './site-index.js';
-import { linkHostRequest } from './link-hosts.js';
+import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
 // Keep top-level evaluation empty so cold-started isolates answer /health without
@@ -332,6 +332,8 @@ export default {
     // With either on, every host that is none of this installation's own came through the link zone's route.
     const own = [String((env as { PUBLIC_URL?: unknown }).PUBLIC_URL), ...String((env as { PREVIOUS_PUBLIC_URLS?: unknown }).PREVIOUS_PUBLIC_URLS ?? '').split(',')]
       .flatMap(origin => { try { return [new URL(origin.trim()).hostname]; } catch { return []; } }).concat(eventsHost ? [eventsHost.replace(/:\d+$/, '')] : []);
+    const info = own.includes(url.hostname) ? null : sharedLinkPage(request, setting(env, 'LINK_HOST'));
+    if (info) return fastSecure(info);
     const linkAnswer = linkHostRequest(!!setting(env, 'LINK_HOST') || !!setting(env, 'LINK_SAAS_ZONE_ID') && !!setting(env, 'LINK_SAAS_TOKEN'), url.hostname, pathname, own);
     if (linkAnswer === 'missing') return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
     // A name of the zone that isn't this Worker's (dev, support, media): the zone-wide route runs before its custom domain

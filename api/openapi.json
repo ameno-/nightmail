@@ -6330,6 +6330,14 @@
                   "link_record"
                 ]
               },
+              "linkHold": {
+                "type": "string",
+                "enum": [
+                  "daily_budget",
+                  "blocklist"
+                ],
+                "description": "When present, the daily pacing window is the shared link allowance, or the link record is held for operator review."
+              },
               "until": {
                 "type": "string"
               }
@@ -7440,6 +7448,10 @@
                     ],
                     "description": "The custom MAIL FROM domain (aligned SPF)."
                   },
+                  "sharedLinkPacing": {
+                    "type": "boolean",
+                    "description": "This campaign shares the link domain’s daily sending allowance."
+                  },
                   "linkHost": {
                     "type": "string",
                     "enum": [
@@ -8201,6 +8213,10 @@
                       "not_configured"
                     ],
                     "description": "The custom MAIL FROM domain (aligned SPF)."
+                  },
+                  "sharedLinkPacing": {
+                    "type": "boolean",
+                    "description": "This campaign shares the link domain’s daily sending allowance."
                   },
                   "linkHost": {
                     "type": "string",

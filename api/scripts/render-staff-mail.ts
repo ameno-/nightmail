@@ -38,7 +38,7 @@ const row = (r: Partial<StaffRow>): StaffRow => ({
   last_author: 'agent', last_text: null, last_held: true, queued: 0, opening: null, done_at: null, done_by: null, done_by_name: null, unread: true, needs_you: true, urgency: 2, since: minutesAgo(40),
   why_ticket: true, why_blocked: false, why_failed: false, why_paused: false, why_no_reply: true,
   brief: null, evidence: null, staff_thread: null, staff_seq: 0, staff_reasons: [], role: 'owner', max_seq: 3, held_reason: null, held_seq: null,
-  first_words: { text: 'Why did my bounce rate jump on the last campaign?', at: minutesAgo(40) }, fresh_words: null, operation: null, request_id: null, filed_at: null, failed_by: null, ...r,
+  first_words: { text: 'Why did my bounce rate jump on the last campaign? It was 0.4% last month and now it says 6%.\nI only sent to the same list as always, plus the people who signed up at the Oct 25 event.\nIs something wrong with my domain?\nThanks, Ada', at: minutesAgo(40) }, fresh_words: null, operation: null, request_id: null, filed_at: null, failed_by: null, ...r,
 });
 const reasons = (r: StaffRow) => (['ticket', 'blocked', 'failed', 'paused', 'no_reply'] as const).filter(x => r[`why_${x}`]);
 const conversation = (name: string, title: string, r: StaffRow, first = true, approval: { label: string; url: string } | null = null) => {
@@ -47,8 +47,9 @@ const conversation = (name: string, title: string, r: StaffRow, first = true, ap
 };
 
 const held = row({ held_reason: 'gate', held_seq: 2, brief: { title: 'Bounce rate jumped on the Autumn campaign', summary: 'Ada asked why her last campaign bounced so much. Gmail hard-bounced 61 of 1,000 sends, all from one import on Oct 25.', ask: 'Why did my bounce rate jump?',
-  recommendation: 'Send it: the addresses it names are her own recipients.', tried: [{ tool: 'bounce_reasons', finding: '61 hard bounces at Gmail' }, { tool: 'list_events', finding: 'all from the Oct 25 import' }] } });
-conversation('held-answer', 'An answer the output check held (a signed-in chat)', held);
+  recommendation: 'Send it. The addresses it names are her own recipients.', tried: [{ tool: 'bounce_reasons', finding: '61 hard bounces at Gmail' }, { tool: 'list_events', finding: 'all from the Oct 25 import' }] } });
+conversation('held-answer', 'An answer the output check held (a signed-in chat), with its approve link', held, true,
+  { label: 'Send the held answer', url: `${origin}/support/conv_7qk2m4xw9tbp3n6hr5vjc8sdfa?approval=apr_m2n3b4v5c6x7z2l3k4j5h6g7f2&token=U2VuZCB0aGUgaGVsZCBhbnN3ZXIgdG9rZW4` });
 conversation('held-answer-update', 'The same, 40 minutes later: they wrote again', { ...held, staff_thread: 'conv:x', staff_seq: 3, staff_reasons: ['ticket', 'no_reply'], fresh_words: [{ text: 'Hello? Is anyone looking at this?', at: minutesAgo(2) }] }, false);
 conversation('no-reply', 'No reply sent, to a sender with no account (email)', row({ channel: 'email', mode: 'non_member', verification: 'dmarc', user_id: null, user_name: null, user_email: null, workspace_id: null, workspace_name: null,
   pending_address: 'kim@elsewhere.example', why_ticket: false, last_author: 'customer', last_held: false, since: minutesAgo(65), first_words: { text: 'Hi, can I move my sending domain to another workspace without verifying it again?', at: minutesAgo(65) } }));

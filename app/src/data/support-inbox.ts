@@ -39,6 +39,8 @@ export interface SupportApproval {
   id: string; conversationId: string; kind: string; label: string; effect: string; risky: boolean; reason: string; proposedBy: 'nightmail' | 'agent'
   state: 'proposed' | 'approved' | 'declined' | 'failed' | 'expired'; createdAt: string; expiresAt: string; decidedAt: string | null
   decidedBy: { userId: string; name: string | null } | null; result: Record<string, unknown> | null
+  /** Send the held answer: exactly what would go, and why it can't, when it can't. */
+  preview: { text: string | null; blocked: string | null } | null
 }
 export interface SupportEvent { id: string; kind: SupportEventKind; by: { userId: string; name: string | null } | null; details: Record<string, unknown>; at: string }
 export interface SupportBrief { title: string; summary: string; ask: string; recommendation: string }
