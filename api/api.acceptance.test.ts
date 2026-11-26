@@ -33555,7 +33555,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const schema = 'abuse_test_'+randomUUID().replaceAll('-',''), control = await fixtureDatabase(t);
       await control.query('CREATE SCHEMA '+schema);
       cleanup(t, async () => { await control.query('DROP SCHEMA '+schema+' CASCADE'); });
-      const tables = ['jobs','abuse_work_versions','abuse_state','nightmail_signin_attempts','nightmail_oidc_identities','nightmail_users','billing_payment_attempts',
+      const tables = ['jobs','abuse_work_versions','abuse_signin_queue','abuse_state','nightmail_signin_attempts','nightmail_oidc_identities','nightmail_users','billing_payment_attempts',
         'workspaces','workspace_members','abuse_signals','abuse_alerts','identity_links','abuse_clusters','abuse_cluster_members','abuse_exclusions','abuse_floors','abuse_sampling',
         'sending_emails','sending_email_events','provider_feedback_history'];
       await control.query('SET search_path='+schema+',public');
@@ -33850,16 +33850,45 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await seedAbuseStages(on(one));
         assert.equal((await control.query("SELECT FROM jobs WHERE status='pending'")).rowCount,0,'The minute tick never restarts a finished walk.');
 
-        await seed(16,'timeout-');
+        await seed(224,'timeout-');
         await control.query(`CREATE TRIGGER always_slow BEFORE INSERT ON abuse_signals FOR EACH ROW EXECUTE FUNCTION slow_fold();
           UPDATE jobs SET status='pending',available_at=now(),payload='{}' WHERE id='abuse.stage.signIns'`);
         await drainJobs(on(one),1,1,1000,'work');
         const delayed = (await control.query("SELECT status,available_at>now() AS delayed,payload FROM jobs WHERE id='abuse.stage.signIns'")).rows[0];
         assert.equal(delayed.status,'pending'); assert.ok(delayed.delayed && delayed.payload.stalls===1 && delayed.payload.batchSize<16);
-        assert.equal((await control.query("SELECT FROM abuse_signals WHERE value IN (SELECT md5('timeout-'||i) FROM generate_series(1,16)i)")).rowCount,0);
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE value IN (SELECT md5('timeout-'||i) FROM generate_series(1,224)i)")).rowCount,0);
         await control.query("DROP TRIGGER always_slow ON abuse_signals; UPDATE jobs SET available_at=now() WHERE id='abuse.stage.signIns'");
+        await drainJobs(on(one),1,1,1000,'work');
+        const recovered = (await control.query("SELECT status,payload FROM jobs WHERE id='abuse.stage.signIns'")).rows[0];
+        assert.equal(recovered.status,'pending'); assert.equal(recovered.payload.batchSize,16); assert.equal(recovered.payload.stalls,0);
         await drainJobs(on(one),4,1,1000,'work');
-        assert.equal((await control.query("SELECT FROM abuse_signals WHERE seen=1 AND value IN (SELECT md5('timeout-'||i) FROM generate_series(1,16)i)")).rowCount,16);
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE seen=1 AND value IN (SELECT md5('timeout-'||i) FROM generate_series(1,224)i)")).rowCount,224);
+      });
+
+      await t.test('a partial discovery pass resumes; a moved tuple, an erasure and a late commit behind its scan are safe', async () => {
+        await seed(3,'physical-');
+        await control.query(`INSERT INTO nightmail_signin_attempts(issuer,subject,outcome)
+          SELECT 'unobserved',repeat('x',150)||i,'not_approved' FROM generate_series(1,6000)i`);
+        const block = async () => (await control.query('SELECT abuse_stage_signin_page() AS next')).rows[0].next;
+        assert.equal(Number(await block()),64);
+        // Change a staged tuple before the next process finishes the pass.
+        await control.query("UPDATE nightmail_signin_attempts SET attempts=attempts+1,observed=jsonb_build_array(jsonb_build_object('kind','provider','value',md5('moved'))) WHERE subject='physical-1'");
+        await abuseSubject(on(two),{subject:{issuer:'fixture',subject:'physical-2'}},'erase');
+        assert.equal((await control.query("SELECT FROM abuse_signin_queue WHERE source_key=abuse_key('fixture','physical-2')")).rowCount,0);
+        await runAbuseStage(on(two),'signIns');
+        assert.equal((await control.query("SELECT FROM abuse_signals WHERE value IN (md5('physical-1'),md5('physical-2'))")).rowCount,0);
+        assert.deepEqual((await control.query("SELECT seen FROM abuse_signals WHERE value IN (md5('moved'),md5('physical-3'))")).rows,[{seen:1},{seen:1}]);
+        // A source transaction invisible throughout a complete pass can commit
+        // behind the scan. The next sweep starts at block zero, not a timestamp.
+        await one.query('BEGIN');
+        try {
+          await one.query(`INSERT INTO nightmail_signin_attempts(issuer,subject,outcome,observed,last_at)
+            VALUES ('fixture','late-commit','signed_in',jsonb_build_array(jsonb_build_object('kind','provider','value',md5('late-commit'))),now()-interval '1 minute')`);
+          assert.equal((await runAbuseStage(on(two),'signIns')).items,0);
+          await one.query('COMMIT');
+        } catch (error) { await one.query('ROLLBACK'); throw error; }
+        assert.equal((await runAbuseStage(on(two),'signIns')).items,1);
+        assert.equal((await runAbuseStage(on(two),'signIns')).items,0);
       });
     });
   });

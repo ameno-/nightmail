@@ -351,7 +351,8 @@ export async function linkDomains(html?: string | null, text?: string | null): P
 // Work limits of one run. Each stage stops at its limit or its own wall-time budget and continues from committed receipts or its cursor.
 const SIGN_INS_A_RUN = 200, PAYMENTS_A_RUN = 200, WORKSPACE_PAGE = 200, WORKSPACE_PAGES = 10, SAMPLED_A_RUN = 100, MESSAGES_A_WORKSPACE = 6, NEW_ROWS_A_RUN = 5000;
 type Cursors = { signIns?: { at: string; key: string }; payments?: { at: string; id: string }; workspaces?: string };
-type Run = { batchSize: number; advanced: boolean; since: string; cursors: Cursors; items: number; added: number; deadline: number; cuts: Record<string, Cut> };
+type SignInPosition = { at: string; key: string; source_key: string };
+type Run = { signInSeek: SignInPosition | null; scanningSignIns: boolean; batchSize: number; advanced: boolean; since: string; cursors: Cursors; items: number; added: number; deadline: number; cuts: Record<string, Cut> };
 /** Why a stage stopped with work left: its share of the time ran out, or it reached a per-run limit. */
 export type Cut = 'time' | 'limit' | 'retry';
 const spent = (run: Run) => Date.now() >= run.deadline || run.added >= NEW_ROWS_A_RUN;
@@ -373,7 +374,9 @@ const outstanding = (stage: string, key: SQL, at: SQL, count = sql`0`, health = 
     (${stage},${key},${at},${count}) AND (v.failures=0 ${health ? sql`` : sql`OR v.failures>=${FAILURE_LIMIT}`}))`;
 const signInKey = sql`abuse_key(a.issuer,a.subject)`, paymentKey = sql`abuse_key(p.id)`;
 const eligibleSignIn = (since: SQL, at: SQL, key: SQL, health = false) => sql`a.observed IS NOT NULL AND a.last_at>${since} AND
-  (a.last_at,md5(a.issuer||' '||a.subject))>(coalesce(${at},${since}),coalesce(${key},'')) AND ${outstanding('signIns',signInKey,sql`a.last_at`,sql`a.attempts`,health)}`;
+  (a.last_at,md5(a.issuer||' '||a.subject))>(coalesce(${at},${since}),coalesce(${key},'')) AND
+  coalesce((SELECT ${health ? sql`v.failures<>0` : sql`v.failures BETWEEN 1 AND ${FAILURE_LIMIT-1}`} FROM abuse_work_versions v
+    WHERE (v.stage,v.source_key,v.version_at,v.version_count)=('signIns',${signInKey},a.last_at,a.attempts)),true)`;
 const eligiblePayment = (since: SQL, at: SQL, id: SQL, health = false) => sql`p.created_at>=${since} AND NOT EXISTS (SELECT FROM abuse_floors f WHERE f.entity_type='workspace' AND f.entity_id=p.workspace_id AND f.ignore_through>=p.updated_at) AND
   (p.updated_at,p.id)>(coalesce(${at},${since}),coalesce(${id},'')) AND ${outstanding('payments',paymentKey,sql`p.updated_at`,sql`0`,health)}`;
 
@@ -401,6 +404,9 @@ export async function isolateItem(tx: AbuseTx, stage: string, version: WorkVersi
       VALUES (${stage},${version.source_key},${version.at}::timestamptz,${version.attempts ?? 0},1,${reason})
       ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=v.failures+1,reason=excluded.reason
       WHERE v.failures BETWEEN 1 AND ${FAILURE_LIMIT-1} RETURNING failures`);
+    if (stage==='signIns' && row?.failures===FAILURE_LIMIT) {
+      await tx.execute(sql`DELETE FROM abuse_signin_queue WHERE source_key=${version.source_key}`);
+    }
     log('warn',{code: row?.failures === FAILURE_LIMIT ? 'ABUSE_ITEM_QUARANTINED' : 'ABUSE_ITEM_RETRY', stage, reason});
     return false;
   }
@@ -409,35 +415,51 @@ type Candidate = { issuer: string; subject: string; user_id: string | null };
 async function foldSignIns(runtime: Hosted, run: Run) {
   const legacy = run.cursors.signIns, where = eligibleSignIn(sql`${run.since}::timestamptz`,sql`${legacy?.at ?? null}::timestamptz`,sql`${legacy?.key ?? null}::text`);
   let items = 0;
-  // Within this pass move on from busy guards; every new job starts at the earliest unacknowledged version.
-  const skipped: string[] = [];
-  let after: {at:string;key:string} | undefined, retrySingles = false;
-  // This seek lasts only this pass. The next job always starts before every
-  // outstanding version, including replacements that committed behind the seek.
+  // The earliest pending hint survives a job cut. Seek past busy guards within the slice.
+  let after: SignInPosition | undefined = run.signInSeek ?? undefined;
+  let retrySingles = false, busy = false;
+  let scanning = run.scanningSignIns;
   while (!spent(run) && items < SIGN_INS_A_RUN) {
+    if (scanning) {
+      after = undefined;
+      const page = await bounded(runtime, tx => tx.execute<{ more: boolean }>(sql`SELECT abuse_stage_signin_page()>=0 AS more`));
+      scanning = page.rows[0]!.more;
+      if (scanning) { run.advanced = true; continue; }
+    }
     const started = Date.now();
     const size = Math.min(run.batchSize,SIGN_INS_A_RUN-items);
     let folding = false, next = after;
     const batch = await bounded(runtime, async tx => {
-      const { rows: page } = await tx.execute<Candidate & { at:string; key:string }>(sql`SELECT a.issuer,a.subject,i.user_id,${utc(sql`a.last_at`)} AS at,md5(a.issuer||' '||a.subject) AS key FROM nightmail_signin_attempts a
-        LEFT JOIN nightmail_oidc_identities i USING(issuer,subject) WHERE ${where}
-          ${after ? sql`AND (a.last_at,md5(a.issuer||' '||a.subject))>(${after.at}::timestamptz,${after.key})` : sql``}
-          AND NOT ((a.issuer||' '||a.subject)=ANY(${sql.param(skipped)}::text[]))
-        ORDER BY a.last_at,md5(a.issuer||' '||a.subject) LIMIT ${size}`);
-      if (!page.length) return { read: 0, folded: 0, added: 0 };
-      next = page.at(-1);
+      // Limit the ordered index walk BEFORE resolving identities. Neither the
+      // receipt count nor a burst sharing one timestamp changes the pick size.
+      const { rows: page } = await tx.execute<SignInPosition & {issuer: string|null;subject:string|null;user_id:string|null}>(sql`WITH heads AS MATERIALIZED (
+        SELECT * FROM abuse_signin_queue
+        ${after ? sql`WHERE (version_at,order_key,source_key)>(${after.at}::timestamptz,${after.key},${after.source_key})` : sql``}
+        ORDER BY version_at,order_key,source_key LIMIT ${size})
+        SELECT ${utc(sql`h.version_at`)} AS at,h.order_key AS key,h.source_key,a.issuer,a.subject,i.user_id FROM heads h
+        LEFT JOIN LATERAL (SELECT issuer,subject FROM nightmail_signin_attempts a WHERE a.ctid=h.source_tid
+          AND abuse_key(a.issuer,a.subject)=h.source_key LIMIT 1) a ON true
+        LEFT JOIN LATERAL (SELECT user_id FROM nightmail_oidc_identities i WHERE (i.issuer,i.subject)=(a.issuer,a.subject) LIMIT 1) i ON true
+        ORDER BY h.version_at,h.order_key,h.source_key`);
+      const last = page.at(-1);
+      next = last && { at: last.at, key: last.key, source_key: last.source_key };
+      const candidates = page.filter((r): r is SignInPosition & Candidate => r.issuer!==null && r.subject!==null);
       const keys = (r: Candidate) => [guardKey(subjectGuard(r.issuer,r.subject)),guardKey({type:'attempt',id:attemptEntity(runtime.config,r.issuer,r.subject)}),
         ...(r.user_id ? [guardKey({type:'user',id:r.user_id})] : [])];
-      const held = await tryGuards(tx,page.flatMap(keys));
-      const ready = page.filter(r => keys(r).every(k => held.has(k)));
+      const held = candidates.length ? await tryGuards(tx,candidates.flatMap(keys)) : new Set<string>();
+      const ready = candidates.filter(r => keys(r).every(k => held.has(k)));
+      busy ||= ready.length < candidates.length;
       // A fresh READ COMMITTED statement after taking the locks: erasures, exclusions,
       // admissions and replacements committed since discovery are visible here.
       const { rows } = ready.length ? await tx.execute<Candidate & WorkVersion & { observed: unknown }>(sql`SELECT a.issuer,a.subject,i.user_id,a.observed,a.attempts,${signInKey} AS source_key,${utc(sql`a.last_at`)} AS at
         FROM jsonb_to_recordset(${JSON.stringify(ready)}::jsonb) r(issuer text,subject text,user_id text)
-        JOIN nightmail_signin_attempts a USING(issuer,subject) LEFT JOIN nightmail_oidc_identities i ON (i.issuer,i.subject)=(a.issuer,a.subject)
+        JOIN LATERAL (SELECT * FROM nightmail_signin_attempts a WHERE (a.issuer,a.subject)=(r.issuer,r.subject) LIMIT 1) a ON true
+        LEFT JOIN LATERAL (SELECT user_id FROM nightmail_oidc_identities i WHERE (i.issuer,i.subject)=(a.issuer,a.subject) LIMIT 1) i ON true
         WHERE ${where} AND i.user_id IS NOT DISTINCT FROM r.user_id ORDER BY a.last_at,md5(a.issuer||' '||a.subject)`) : { rows: [] };
-      const current = new Set(rows.map(r => r.issuer+' '+r.subject));
-      skipped.push(...page.map(r => r.issuer+' '+r.subject).filter(k => !current.has(k)));
+      const current = new Set(rows.map(r => r.source_key));
+      const stale = [...page.filter(r => r.subject===null),...ready.filter(r => !current.has(r.source_key))];
+      if (stale.length) await tx.execute(sql`WITH removed AS (DELETE FROM abuse_signin_queue WHERE source_key=ANY(${sql.param(stale.map(r=>r.source_key))}::text[]) RETURNING 1)
+        UPDATE abuse_state SET signin_rescan=true WHERE id='monitor' AND EXISTS (SELECT FROM removed)`);
       if (!rows.length) return { read: page.length, folded: 0, added: 0 };
       const validated = rows.map(({ observed, ...r }) => {
         const signals = Observed.safeParse(observed).data;
@@ -447,7 +469,8 @@ async function foldSignIns(runtime: Hosted, run: Run) {
       await graphLock(tx);
       let added = 0;
       const fold = async () => {
-        const result = await tx.execute<{ added: number }>(sql`SELECT abuse_fold_signins(${JSON.stringify(validated)}::jsonb) AS added`);
+        const result = await tx.execute<{ added: number }>(sql`SELECT abuse_fold_signins(${JSON.stringify(validated)}::jsonb,
+          ${busy || retrySingles ? null : JSON.stringify(next)}::jsonb) AS added`);
         await wakeClusters(tx, validated.map(r => r.user_id ? { type: 'user', id: r.user_id } : { type: 'attempt', id: r.attempt }));
         added = result.rows[0]!.added;
       };
@@ -467,13 +490,21 @@ async function foldSignIns(runtime: Hosted, run: Run) {
     after = next;
     retrySingles ||= 'singleFailed' in batch;
     items += batch.folded; run.items = items; run.added += batch.added;
-    if (batch.folded) log('info', { code: 'ABUSE_SIGNIN_BATCH', items: batch.folded, msPerItem: (Date.now()-started)/batch.folded });
+    if (batch.folded) {
+      log('info', { code: 'ABUSE_SIGNIN_BATCH', items: batch.folded, msPerItem: (Date.now()-started)/batch.folded });
+      // A whole successful batch earns back capacity, including across job cuts.
+      if (batch.folded===size) run.batchSize=Math.min(BATCH_SIZE,run.batchSize*2);
+    }
     if (items < SIGN_INS_A_RUN && batch.read < size) {
       if (retrySingles) { after=undefined; retrySingles=false; continue; }
-      if (skipped.length) cut(run,'signIns','limit');
-      return items;
+      if (busy) { cut(run,'signIns','limit'); return items; }
+      const reset = await bounded(runtime,tx=>tx.execute<{rescan:boolean}>(sql`WITH prior AS MATERIALIZED (
+        SELECT signin_rescan OR EXISTS (SELECT FROM abuse_signin_queue) AS rescan FROM abuse_state WHERE id='monitor')
+        UPDATE abuse_state SET signin_scan_block=0,signin_scan_end=NULL,signin_rescan=false,signin_seek=NULL FROM prior
+        WHERE id='monitor' AND signin_scan_block<0 RETURNING prior.rescan`));
+      if (reset.rows[0] && !reset.rows[0].rescan) return items;
+      scanning=true; after=undefined;
     }
-    if (skipped.length >= SIGN_INS_A_RUN) break;
   }
   cut(run,'signIns'); return items;
 }
@@ -650,10 +681,16 @@ export async function seedAbuseStages(runtime: Hosted, hourly = false) {
         VALUES('monitor',${since}::timestamptz,greatest(${since}::timestamptz,now()),'infinity')
         ON CONFLICT (id) DO UPDATE SET lease_until=excluded.lease_until,configured=excluded.configured,
           active_since=CASE WHEN s.configured=excluded.configured THEN s.active_since ELSE excluded.active_since END,
+          signin_scan_block=CASE WHEN s.configured=excluded.configured THEN s.signin_scan_block ELSE 0 END,
+          signin_scan_end=CASE WHEN s.configured=excluded.configured THEN s.signin_scan_end END,
           cursors=CASE WHEN s.configured=excluded.configured THEN s.cursors ELSE '{}'::jsonb END
         WHERE s.lease_until IS NULL OR s.lease_until<=now() OR s.lease_until='infinity' RETURNING id`);
       if (!state.rowCount) return false;
     }
+    // Even a long drain or a held subject gets a fresh source sweep on the
+    // hourly tick. Never restart a partial sweep or pull its pending job forward.
+    if (hourly) await tx.execute(sql`UPDATE abuse_state SET signin_scan_block=0,signin_scan_end=NULL
+      WHERE id='monitor' AND signin_scan_block<0`);
     await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT t,t,'platform','{}'::jsonb
       FROM unnest(${sql.param(STAGES.map(s => 'abuse.stage.'+s))}::text[]) t ORDER BY t
       ON CONFLICT(id) ${hourly ? sql`DO UPDATE SET status='pending',available_at=now(),attempts=0,last_error=NULL,lease_until=NULL,
@@ -696,7 +733,7 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
   if (monitoring(host.config)) try {
     await withStageConnection(host,runtime.deadline,async db => {
       runtime.db = db;
-      const { rows: [state] } = await bounded(runtime, tx => tx.execute<{ since: string; cursors: Cursors }>(sql`SELECT ${utc(sql`active_since`)} AS since,cursors
+      const { rows: [state] } = await bounded(runtime, tx => tx.execute<{ since: string; cursors: Cursors; scanningSignIns:boolean; signInSeek:SignInPosition | null }>(sql`SELECT ${utc(sql`active_since`)} AS since,cursors,signin_scan_block>=0 AS "scanningSignIns",signin_seek AS "signInSeek"
         FROM abuse_state WHERE configured=${host.config.abuseMonitoring!.since}::timestamptz AND lease_until='infinity'
         ${runtime.lease ? sql`AND EXISTS (SELECT FROM jobs WHERE id=${'abuse.stage.'+stage} AND status='running' AND lease_until=${runtime.lease}::timestamptz)` : sql``}`));
       if (state) {
@@ -806,7 +843,9 @@ export async function abuseSubject(runtime: Hosted, target: SubjectTarget, actio
     if (action === 'erase' || action === 'exclude') {
       // Delete monitor receipts under the same guards as folding. A payment still
       // in its source log is covered by the erasure floor; no signal can return.
-      for (const s of subjects) await tx.execute(sql`DELETE FROM abuse_work_versions WHERE stage='signIns' AND source_key=abuse_key(${s.issuer},${s.subject})`);
+      for (const s of subjects) await tx.execute(sql`WITH hints AS (DELETE FROM abuse_signin_queue WHERE source_key=abuse_key(${s.issuer},${s.subject})),
+        seek AS (UPDATE abuse_state SET signin_seek=NULL WHERE signin_seek->>'source_key'=abuse_key(${s.issuer},${s.subject}))
+        DELETE FROM abuse_work_versions WHERE stage='signIns' AND source_key=abuse_key(${s.issuer},${s.subject})`);
       await tx.execute(sql`DELETE FROM abuse_work_versions WHERE
         (stage='payments' AND source_key IN (SELECT abuse_key(id) FROM billing_payment_attempts WHERE workspace_id=ANY(${sql.param(owned)}::text[])))
         OR (stage='scores' AND source_key IN (SELECT abuse_key(cluster_id) FROM abuse_cluster_members WHERE (entity_type,entity_id) IN (${pairs})))

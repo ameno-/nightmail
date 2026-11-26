@@ -219,13 +219,19 @@ function expired(name: string, table: string, by: SQL, where: SQL, extra: Partia
   return { name, oldest: sql`SELECT min(${by}) FROM ${t} WHERE ${where}`, size: extra.size, lane: extra.lane, batches: extra.batches,
     statement: () => sql`WITH gone AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where}${order} LIMIT ${size} FOR UPDATE SKIP LOCKED) RETURNING 1) SELECT count(*)::int AS n FROM gone` };
 }
-/** expired() for two tables as one step, under `name`: a batch of each in one statement, each taken as expired() takes it.
- *  n is their sum, so the step repeats while either table still fills its batch; oldest is the older of the two. */
-function expiredTogether(name: string, tables: [{ table: string; by: SQL; where: SQL }, { table: string; by: SQL; where: SQL }]): Drain {
-  const [a, b] = tables.map(({ table, by, where }) => ({ t: sql`${sql.identifier(table)}`, by, where }));
-  const batch = ({ t, by, where }: { t: SQL; by: SQL; where: SQL }) => sql`DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where} ORDER BY ${by} LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1`;
-  return { name, oldest: sql`SELECT least((SELECT min(${a!.by}) FROM ${a!.t} WHERE ${a!.where}),(SELECT min(${b!.by}) FROM ${b!.t} WHERE ${b!.where}))`,
-    statement: () => sql`WITH gone AS (${batch(a!)}), also AS (${batch(b!)}) SELECT ((SELECT count(*) FROM gone)+(SELECT count(*) FROM also))::int AS n` };
+/** One retention turn for related tables: take one bounded batch per table and report their total. */
+function expiredTogether(name: string, tables: { table: string; by: SQL; where: SQL }[]): Drain {
+  const batches = tables.map(({ table, by, where }, i) => {
+    const t = sql.identifier(table), gone = sql.identifier(`gone_${i}`);
+    return {
+      oldest: sql`(SELECT min(${by}) FROM ${t} WHERE ${where})`,
+      remove: sql`${gone} AS (DELETE FROM ${t} WHERE ctid IN (SELECT ctid FROM ${t} WHERE ${where}
+        ORDER BY ${by} LIMIT ${RETENTION_BATCH} FOR UPDATE SKIP LOCKED) RETURNING 1)`,
+      count: sql`(SELECT count(*) FROM ${gone})`,
+    };
+  });
+  return { name, oldest: sql`SELECT least(${sql.join(batches.map(b=>b.oldest),sql`,`)})`,
+    statement: () => sql`WITH ${sql.join(batches.map(b=>b.remove),sql`,`)} SELECT (${sql.join(batches.map(b=>b.count),sql`+`)})::int AS n` };
 }
 const unordered = { unordered: true } as const;
 const at = (column: string) => sql`${sql.identifier(column)}`;
@@ -325,6 +331,7 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     // Drop obsolete receipts with source retention. Never age out the marker of a
     // still-readable payment or sign-in: doing so would count its last version again.
     expiredTogether('abuse_signals', [{table:'abuse_signals',by:at('last_at'),where:abuseExpired},
+      {table:'abuse_signin_queue',by:at('version_at'),where:sql`version_at < ${cutoff}`},
       {table:'abuse_work_versions',by:at('version_at'),where:sql`version_at < ${cutoff}
       AND NOT (stage='signIns' AND EXISTS (SELECT FROM nightmail_signin_attempts a WHERE a.last_at=version_at AND a.attempts=version_count AND abuse_key(a.issuer,a.subject)=source_key))
       AND NOT (stage='payments' AND EXISTS (SELECT FROM billing_payment_attempts p WHERE p.updated_at=version_at AND abuse_key(p.id)=source_key))
