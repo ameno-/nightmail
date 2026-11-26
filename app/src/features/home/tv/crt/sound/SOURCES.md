@@ -1,7 +1,7 @@
 # The set's sounds: where they came from
 
 None of these is a recording or a sample of someone else's work. Each was generated for this page with ElevenLabs,
-on Anomaly's subscription, from a text description, and then cut and levelled here (librosa and ffmpeg).
+on Anomaly's account, from a text description, and then cut and levelled here (librosa and ffmpeg).
 
 | File | What it is | Made with |
 | --- | --- | --- |
@@ -14,5 +14,5 @@ on Anomaly's subscription, from a text description, and then cut and levelled he
 | `tape.mp3` | the tape starting | ElevenLabs Sound Effects; trimmed |
 | `static.mp3` | static between channels, a loop | ElevenLabs Sound Effects; four seconds cut into a seamless loop |
 
-Terms: ElevenLabs' terms of use (https://elevenlabs.io/terms-of-use), under which what a paid subscription generates
-may be used commercially. They are part of this repository on those terms, not under its source licence.
+Terms: ElevenLabs' terms of use (https://elevenlabs.io/terms-of-use) govern what its tools generate; these files are
+in the repository for this page on those terms.

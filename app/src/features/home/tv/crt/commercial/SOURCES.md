@@ -13,9 +13,9 @@ recording or a sample of someone else's work.
 | `cut`, `engine`, `muffle` | the click as the sound cuts, a car's engine, a phone buzzing under a hymn book | ffmpeg (synthesised, or filtered from another clip here) |
 | `bed`, `jingle`, `bots`, `buzz`, `buzz_storm`, `cheer`, `ding`, `kaching`, `pager`, `pop`, `sent`, `snore`, `sparkle`, `tap`, `typing`, `whoosh` | the music bed, the jingle and the small effects | made for the first version of the commercial, before it was in this repository; its history here does not say with which tool |
 
-Terms for the ElevenLabs files: ElevenLabs' terms of use (https://elevenlabs.io/terms-of-use), under which what a
-paid subscription generates may be used commercially; they were generated on Anomaly's subscription. They are part of
-this repository on those terms, not under its source licence.
+Terms for the ElevenLabs files: they were generated on Anomaly's account, and ElevenLabs' terms of use
+(https://elevenlabs.io/terms-of-use) govern what its tools generate; they are in the repository for the commercial on
+those terms.
 
 ## Fonts (`public/fonts`)
 
