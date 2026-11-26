@@ -97,7 +97,17 @@ export function CampaignEditorPage() {
   return <CampaignEditorLoader key={scope.current.key} id={id} fallbackRegion={fallbackRegion} preserveEditor={next => {scope.current.createdId = next.id}} />
 }
 
+function cachedCampaignSummary(cache: ReturnType<typeof useQueryClient>, id?: string): Campaign | undefined {
+  if (!id) return undefined
+  for (const [, data] of cache.getQueriesData<{ items?: Campaign[] }>({ queryKey: ['nightmail', 'campaigns'] })) {
+    const match = data?.items?.find(item => item.id === id)
+    if (match) return match
+  }
+  return undefined
+}
+
 function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: string; fallbackRegion: string; preserveEditor: (campaign: Campaign) => void }) {
+  const cache = useQueryClient()
   const query = useApiQuery<Campaign | null>(['campaign', id ?? 'new'], (api, signal) => id ? api.campaigns.get(id, signal) : Promise.resolve(null))
   // "New issue" on a newsletter's page (?newsletter=): the draft starts with that newsletter's sender and readers.
   const [search] = useSearchParams(), issueOf = id ? '' : search.get('newsletter') ?? ''
@@ -111,7 +121,7 @@ function CampaignEditorLoader({ id, fallbackRegion, preserveEditor }: { id?: str
   // Once opened, background refetches must never unmount an unsaved working copy.
   if (issueOf && opened.current === null && !newsletter.data) return newsletter.isError ? <ErrorState error={newsletter.error} onRetry={() => newsletter.refetch()} /> : <CampaignRouteSkeleton kind="editor" isNew />
   if (opened.current !== undefined) return <CampaignEditor initial={opened.current} newsletter={newsletter.data} fallbackRegion={fallbackRegion} preserveEditor={preserveEditor} />
-  if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} />
+  if (query.isPending) return <CampaignRouteSkeleton kind="editor" isNew={!id} summary={cachedCampaignSummary(cache, id)} />
   if (query.isError) return <ErrorState error={query.error} onRetry={() => query.refetch()} />
   // Archived and sent campaigns can't be edited: their review page is where to read, restore or follow them.
   if (query.data) return <Navigate to={campaignRoute(query.data, 'review')} replace />
@@ -501,7 +511,7 @@ function CampaignEditor({ initial, newsletter, fallbackRegion, preserveEditor }:
               <div><div className="campaign-compose-row"><label htmlFor="campaign-preview">Preview</label><Input ref={previewInput} id="campaign-preview" aria-label="Preview text" maxLength={200} placeholder="Shown after the subject" value={form.previewText} onChange={event => change('previewText', event.target.value)} disabled={controlsDisabled} /></div></div>
             </div>
           </div>
-          <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer key={`${generation}.${rebased.body}`} ref={composer} personalize attachmentIds={form.attachments ?? []} knownAttachmentIds={[...seenAttachments.current]} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
+          <ChunkFallback.Provider value={<ComposerSkeleton html={form.html} attachmentIds={form.attachments ?? []} />}><EmailComposer key={`${generation}.${rebased.body}`} ref={composer} personalize attachmentIds={form.attachments ?? []} knownAttachmentIds={[...seenAttachments.current]} initialHtml={form.html} disabled={controlsDisabled} onReady={handleComposerReady} onDirty={handleComposerDirty} onBusy={value => {busyRef.current = value || attachmentsBusy || guard.current || loadingLatest; setComposerBusy(value); if (value) markDirty()}} onAttach={() => {markDirty(); attachments.current?.open()}} /></ChunkFallback.Provider>
           <CampaignAttachments key={`attachments:${generation}`} ref={attachments} ids={form.attachments ?? []} persisted={form.draft?.attachments ?? []} body={form.draft?.html ?? form.html} shown={composerReady} onChange={ids => change('attachments', ids)} onBusy={value => {busyRef.current = value || guard.current || loadingLatest; setAttachmentsBusy(value)}} disabled={preparing || autosaving || saveMutation.isPending || composerBusy || loadingLatest || readOnly} />
           {/* Every contact has an email, so {{email}} needs no fallback and no row. */}
           {/* With the composer, like the attachments: before it, the rows would sit where the email is about to open. */}

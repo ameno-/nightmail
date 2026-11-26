@@ -19,9 +19,11 @@
 .composer-visual[hidden] { display: none; }
 .composer-canvas { position: relative; display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; min-height: 320px; padding: 0; background: var(--color-email-surface); color: var(--color-email-text); color-scheme: light; }
 /* The starting lines sit where the loading composer's were (.composer-skeleton-canvas) and the email's text will be. */
-.composer-starting { position: absolute; inset: 0; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16) var(--space-40); }
+.composer-starting { position: absolute; inset: 0; z-index: 2; display: flex; flex-direction: column; gap: var(--space-16); padding: var(--space-16) var(--space-40); background: var(--color-email-surface); }
+.composer-starting.composer-static-preview { position: relative; inset: auto; flex: 1 0 auto; gap: 0; padding: 0; }
 .composer-starting .ui-skeleton-block { background: #EDEDED; }
 .composer-document { display: flex; flex-direction: column; flex: 1 0 auto; min-width: 0; }
+.composer-document--mounting { position: absolute; inset: 0; visibility: hidden; pointer-events: none; overflow: hidden; }
 /* The editor theme converts its px sizes to em against a 14px root; keep that root so a 16px paragraph edits at 16px.
    The sheet is 680px and the email's column the delivered 600px, 40px in on both sides, under the header rows' labels. */
 .composer-document .tiptap { flex: 1 0 auto; min-height: 320px; width: 100%; max-width: none; margin: 0; color: var(--color-email-text); font-family: var(--font-email); font-size: 14px; line-height: 1.6; outline: none; overflow-wrap: anywhere; }
@@ -138,7 +140,7 @@ body > div:has(> [data-re-slash-command]) { z-index: 90; }
 /* Phones and tablets: the email's text 16px in, as the header rows' labels. */
 @media (max-width: 899px) {
   .composer-document .tiptap.ProseMirror[data-editor-theme-scope] > .node-container { padding: var(--space-12) var(--space-16) var(--space-32); }
-  .composer-starting { padding: var(--space-12) var(--space-16); }
+  .composer-starting:not(.composer-static-preview) { padding: var(--space-12) var(--space-16); }
   .email-composer > :is(.ui-alert, .composer-error) { margin-inline: var(--space-16); }
 }
 /* The library's floating menus are sized for a mouse: on touch the buttons grow to the shared 36 px (44 px with the slash menu rows) and the bubble menu wraps instead of running off a phone, and fields are 16 px so iOS never zooms in. */

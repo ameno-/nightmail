@@ -1,7 +1,8 @@
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link, useLocation, useSearchParams } from 'react-router'
+import { useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight } from 'lucide-react'
-import { useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
+import { useApi, useApiDef, useRegion, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
 import { useRegionCatalog, useRegionDiscovery } from '../../data/regions'
 import { accountStatus, ratePercent, rateStatus } from '../../lib/reputation'
@@ -15,7 +16,7 @@ import { AsideSkeleton, ChartSkeleton, factTitles, FactTilesSkeleton, latestColu
 import { latestRequest, useLatestRowCount } from './latest'
 import { logHref, logRowLabel, useLogRowIntent } from '../logs/rows'
 import { routeChunks, usePrefetchQueries } from '../../data/prefetch'
-import { composer } from '../campaigns/composer-chunk'
+import { warmCampaignEditor } from '../campaigns/composer-content'
 import { DailyLimit, useSendingLimitPending, useSetupRead, type SetupRead } from './setup'
 import { useCompactShell, useMediaQuery } from '../../lib/media'
 import { setPanelHidden } from './panel'
@@ -239,10 +240,12 @@ function LatestEmails({ params, count, reserve, held, range, figures, figuresFai
 }
 // Up to three, in the detail column's list style: the name, then how it went (or its status while not sent).
 function Campaigns({ rows }: { rows: Campaign[] }) {
+  const api = useApi()
+  const cache = useQueryClient()
   const warm = usePrefetchQueries()
   return <nav className="next-steps ov-campaigns" aria-label="Recent campaigns">
     <div className="ov-campaigns__head"><h2 className="ov-label">Campaigns</h2><Link className="ui-button ui-button--ghost ui-button--sm" to="/campaigns">All <Icon icon={ArrowUpRight} size="sm" /></Link></div>
-    <ul>{rows.map((row, i) => { const sent = ['sent', 'done'].includes(row.status), intent = () => { void warm([queries.campaign(row.id)]); if (campaignEditable(row)) void composer.preload().catch(() => {}) }
+    <ul>{rows.map((row, i) => { const sent = ['sent', 'done'].includes(row.status), intent = () => { if (!row.archivedAt && campaignEditable(row)) void warmCampaignEditor(cache, api, row.id); else void warm([queries.campaign(row.id)]) }
       return <li key={row.id} style={{ '--i': i } as CSSProperties}><Link to={`/campaigns/${row.id}/${campaignEditable(row) ? 'edit' : 'review'}`} title={row.name} onPointerEnter={intent} onFocus={intent}>
         <span>{row.name}</span><span className="muted">{sent ? `${date(row.updatedAt, { month: 'short', day: 'numeric' })} · ${percent(row.recipients ? row.delivered / row.recipients : 0, 0)} delivered` : label(row.status)}</span><Icon icon={ArrowUpRight} size="sm" />
       </Link></li> })}</ul>

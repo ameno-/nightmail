@@ -11,10 +11,9 @@ import { Notices } from '../../components/Notices'
 import { date, shortDateTime, time } from '../../lib/format'
 import { CampaignAttachments, type CampaignAttachmentsRef } from './CampaignAttachments'
 import type { EmailComposerRef } from './EmailComposer'
-import { draftAttachments } from './composer-content'
+import { draftAttachments, onIdle, warmTemplateEditor } from './composer-content'
 import { composer as composerChunk, EmailComposer } from './composer-chunk'
 import { queries } from '../../data/queries'
-import { usePrefetchQueries } from '../../data/prefetch'
 import { ChunkFallback } from '../../lib/preloadable'
 import { CampaignRouteSkeleton, ComposerSkeleton, templateColumns } from './skeletons'
 import { RowProblem } from './steps'
@@ -70,8 +69,10 @@ export function TemplatePickerDialog({ onOpenChange }: { onOpenChange: (open: bo
 
 export function TemplatesPage() {
   const navigate = useNavigate()
-  const warm = usePrefetchQueries()
+  const api = useApi()
+  const cache = useQueryClient()
   const toast = useToast()
+  useEffect(() => onIdle(() => { void composerChunk.preload().catch(() => {}) }), [])
   const { start, pending, unavailable } = useStartFromTemplate()
   const [params, setParams] = useSearchParams()
   const archived = params.get('archived') === 'true'
@@ -91,7 +92,7 @@ export function TemplatesPage() {
     <CampaignsHeader actions={<Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button>} />
     <div className="data-toolbar"><div className="cluster"><SearchField className="search-box--list" aria-label="Search templates" placeholder="Search templates" value={search} onChange={event => setParams(previous => { const next = new URLSearchParams(previous); event.target.value ? next.set('search', event.target.value) : next.delete('search'); next.delete('page'); return next })} /><Select aria-label="Filter templates" value={archived ? 'archived' : 'active'} onValueChange={value => setParams(previous => { const next = new URLSearchParams(previous); value === 'archived' ? next.set('archived', 'true') : next.delete('archived'); next.delete('page'); return next })} options={[{value: 'active', label: 'Active'}, {value: 'archived', label: 'Archived'}]} /></div></div>
     {query.isError ? <ErrorState error={query.error} onRetry={() => query.refetch()} /> : <>
-      <DataTable className="campaigns-table ui-table--two-line" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/campaigns/templates/${encodeURIComponent(row.id)}`} onRowIntent={row => { void warm([queries.template(row.id)]); void composerChunk.preload().catch(() => {}) }} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
+      <DataTable className="campaigns-table ui-table--two-line" loading={query.isPending} skeletonRows={4} minRows={4} rows={query.data?.items ?? []} rowKey={row => row.id} rowHref={row => `/campaigns/templates/${encodeURIComponent(row.id)}`} onRowIntent={row => { void warmTemplateEditor(cache, api, row.id) }} empty={<EmptyState title={search ? 'No matching templates' : archived ? 'No archived templates' : 'No templates yet'} action={!search && !archived ? <Button variant="primary" onClick={() => setCreateOpen(true)}>Create template</Button> : undefined} />} columns={[
         {...templateColumns[0], render: row => { const about = row.subject || row.description; return <div className="campaign-row-name"><span title={row.name}>{row.name}</span>{about && <span className="muted" title={about}>{about}</span>}</div> }, cardRender: row => row.name},
         {...templateColumns[1], render: row => <StatusBadge status={row.published ? 'Published' : 'Draft'} />},
         {...templateColumns[2], render: row => row.description || row.subject || 'No subject yet'},
@@ -221,7 +222,7 @@ function TemplateEditor({ initial }: {initial: CampaignTemplate}) {
         <div className="campaign-compose-row"><label htmlFor="template-reply">Reply to</label><Input id="template-reply" type="text" inputMode="email" autoCapitalize="none" spellCheck={false} placeholder="reply@example.com" value={replyToText} disabled={archived} aria-invalid={Boolean(replyToValidation) || undefined} aria-describedby={replyToValidation ? 'template-reply-error' : undefined} onChange={event => { setReplyToText(event.target.value); change('replyTo', replyToAddresses(event.target.value)) }} /></div>
         <RowProblem id="template-reply-error" message={replyToValidation} />
       </div>
-      <ChunkFallback.Provider value={<ComposerSkeleton />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
+      <ChunkFallback.Provider value={<ComposerSkeleton html={draft.html ?? ''} attachmentIds={draft.attachments} kind="templates" />}><EmailComposer ref={composer} personalize attachmentApi={api.templateAssets} attachmentIds={draft.attachments} initialHtml={draft.html ?? ''} disabled={archived} onReady={() => setReady(true)} onDirty={changed} onBusy={setComposerBusy} onAttach={() => attachments.current?.open()} /></ChunkFallback.Provider>
       <CampaignAttachments ref={attachments} attachmentApi={api.templateAssets} ids={draft.attachments} persisted={template.draft.attachments} body={template.draft.html ?? ''} shown={ready} onChange={ids => change('attachments', ids)} onBusy={setAssetBusy} disabled={archived || saving || composerBusy} />
     </div></div></section>
     {leaveGuard}

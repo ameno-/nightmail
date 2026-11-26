@@ -142,7 +142,7 @@ export interface Config {
   hygieneDnsUrl?: string | null;
   /** NIGHTMAIL_ABUSE_MONITORING: abuse monitoring (src/abuse.ts) records from this instant on. Undefined: off. */
   abuseMonitoring?: { since: string };
-  /** ABUSE_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
+  /** ABUSE_SLACK_WEBHOOK_URL, else OPERATOR_SLACK_WEBHOOK_URL: where abuse-monitoring alerts are posted (src/abuse-alerts.ts). Undefined: stored only. */
   abuseSlackWebhookUrl?: string;
   /** OPERATOR_SLACK_WEBHOOK_URL: where the operator alerts (src/operator-alerts.ts) and the health alerts (src/health.ts) are posted. Undefined: nothing is posted. */
   operatorSlackWebhookUrl?: string;
