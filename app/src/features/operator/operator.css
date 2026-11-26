@@ -26,6 +26,10 @@
 .op-facts dt { height: 16px; color: var(--color-muted); font-family: var(--font-body); font-size: var(--text-xs); line-height: var(--leading-xs); }
 /* Sign-ups: four facts in one row; two rows of two on a phone. */
 .op-facts.op-facts--four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+/* The review's who, after its decision: a masked address that shrinks before the decision does. */
+.op-review-by { flex: none; padding-inline: var(--space-6); color: var(--color-muted); }
+.op-facts dd > .private-address { min-width: 0; }
+.op-facts > div > dd > .private-address > .private-address__value, .op-facts > div > dd > .private-address[data-revealed] > .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .op-facts dd { display: flex; align-items: center; height: 24px; margin: var(--space-4) 0 0; min-width: 0; overflow: hidden; font-family: var(--font-mono); font-size: var(--text-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 
 /* Health: identifiers (queue names, job types, route templates) in mono; a figure that is out of date in the danger tone. */
