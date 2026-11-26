@@ -49,8 +49,6 @@ const oneLine = (value: string | null | undefined, max = 80) => {
   const text = (value ?? '').normalize('NFC').replace(/[\p{C}\u2028\u2029]+/gu, ' ').replace(/\s+/g, ' ').trim();
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text;
 };
-/** Someone's words as an email quotes them: their own line breaks, at most `max` characters. */
-const quoteOf = (value: string, max = 700) => { const text = value.replace(/\r\n?/g, '\n').replace(/\n{3,}/g, '\n\n').trim(); return text.length > max ? `${text.slice(0, max).trimEnd()}…` : text; };
 const moment = (iso: string) => { const d = new Date(iso); return `${d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' })} at ${d.toISOString().slice(11, 16)} UTC`; };
 const ago = (iso: string, now: number) => {
   const minutes = Math.max(1, Math.round((now - Date.parse(iso)) / 60_000));
@@ -80,14 +78,16 @@ export function whoOf(row: StaffRow) {
 }
 
 const TYPE_DECISION: Record<string, string> = {
-  bug: 'Decide: confirm the bug and what fixes it.', billing: 'Decide the billing request.', feature_request: 'Decide whether to build it, and tell them.',
-  account: 'Decide: answer what the agent couldn’t.', deliverability: 'Decide: answer what the agent couldn’t.', abuse_report: 'Decide how to handle the report.',
+  bug: 'Confirm the bug and what fixes it.', billing: 'Decide the billing request.', feature_request: 'Decide whether to build it, and tell them.',
+  account: 'Answer what the agent couldn’t.', deliverability: 'Answer what the agent couldn’t.', abuse_report: 'Decide how to handle the report.',
   privacy: 'Decide how to handle the request.', legal: 'Decide how to handle the request.',
 };
 const HELD_WHY: Record<string, string> = {
   gate: 'the output check held it', paused: 'staff took over before it went', access: 'their access changed before it went', closed: 'the conversation ended before it went',
   earlier: 'an earlier version of the agent wrote it', unknown: 'it was held before reasons were kept',
 };
+/** A held answer that may go as written (held by the check or a pause); any other needs a fresh reply. */
+const sendable = (row: StaffRow) => row.held_reason === 'gate' || row.held_reason === 'paused';
 export function subjectOf(need: Need, row: StaffRow, short: string) {
   const title = oneLine(row.brief?.title ?? row.subject ?? row.first_words?.text.split('\n').find(Boolean), 70);
   switch (need) {
@@ -104,33 +104,44 @@ export function subjectOf(need: Need, row: StaffRow, short: string) {
   }
 }
 
-/** What the agent checked and found, and why this needs a person now: a sentence or two. */
-function foundOf(need: Need, row: StaffRow, now: number): string[] {
-  const lines: string[] = [];
-  if (need === 'failed') lines.push(row.failed_by === 'staff' ? 'A staff reply to them failed to send.' : 'The agent’s answer to them failed to send.');
-  if (need === 'held') lines.push(`The agent wrote an answer, but it wasn’t sent: ${HELD_WHY[row.held_reason ?? 'unknown'] ?? HELD_WHY.unknown}. It’s in the conversation, not in this email.`);
-  if (need === 'no_reply' && row.since) lines.push(`Nothing has reached them since they wrote, ${ago(row.since, now)} ago.`);
-  if (need === 'blocked') lines.push(`The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work for this conversation.`);
-  if (need === 'waiting') lines.push(row.paused_by === 'ticket' ? 'The agent stopped when it filed its ticket, and they are waiting.' : `${oneLine(row.paused_by_name) || 'Staff'} paused the agent, and they are waiting.`);
-  if (row.brief?.summary) lines.push(`The agent’s summary: ${quoteOf(row.brief.summary, 300).replace(/\s+/g, ' ')}`);
-  const tried = (row.brief?.tried ?? []).map(t => oneLine(t.tool, 40).replaceAll('_', ' ')).filter(Boolean);
-  if (tried.length) lines.push(`It checked: ${[...new Set(tried)].slice(0, 6).join(', ')}.`);
-  if (!row.brief && need !== 'held' && need !== 'feedback') lines.push('The agent left no summary.');
-  return lines;
-}
-function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: string | null } {
-  const recommended = row.brief?.recommendation ? `The agent recommends: ${quoteOf(row.brief.recommendation, 300).replace(/\s+/g, ' ')}` : null;
+/** Someone's words, short: at most three lines and about 240 characters, the rest left to the conversation. */
+const shortQuote = (value: string) => {
+  const lines = value.replace(/\r\n?/g, '\n').split('\n').map(line => line.trimEnd()).filter((line, i, all) => line || (i > 0 && all[i - 1])).join('\n').trim().split('\n');
+  const kept = lines.slice(0, 3).join('\n'), cut = kept.length > 240 ? kept.slice(0, 240).replace(/\s+\S*$/, '') : kept;
+  return cut.length < value.trim().length ? `${cut.trimEnd()}${/[.!?:]$/.test(cut.trimEnd()) ? ' …' : '…'}` : cut;
+};
+/** What an agent wrote, on one line: its whole sentences that fit in about 220 characters (at least the first). */
+const sentences = (value: string) => {
+  const text = value.replace(/\s+/g, ' ').trim(), parts = text.match(/[^.!?]+[.!?]+(\s|$)|[^.!?]+$/g) ?? [text];
+  let kept = '';
+  for (const part of parts) { if (kept && (kept + part).length > 220) break; kept += part; }
+  return oneLine(kept.trim(), 220);
+};
+
+/** One sentence: what the agent found (its summary), or, without one, why this needs a person now. */
+function foundOf(need: Need, row: StaffRow, now: number): string | null {
+  if (row.brief?.summary) return sentences(row.brief.summary);
   switch (need) {
-    case 'failed': return { decision: 'Decide: send the reply again, or write a new one.', recommendation: null };
-    case 'held': return ['access', 'earlier', 'unknown'].includes(row.held_reason ?? 'unknown')
-      ? { decision: 'Decide: write them a fresh reply.', recommendation: 'The held answer may be out of date: don’t send it as written.' }
-      : { decision: 'Decide: send the held answer as written, or write your own.', recommendation: recommended ?? (row.held_reason === 'gate' ? 'Read it first: the check holds anything that names something outside the conversation.' : null) };
-    case 'no_reply': return { decision: 'Decide: reply to them now.', recommendation: recommended };
-    case 'blocked': return { decision: 'Decide: retry the stuck work, or look at why it’s stuck.', recommendation: null };
-    case 'waiting': return { decision: 'Decide: reply to them, or hand the conversation back to the agent.', recommendation: recommended };
-    case 'ticket': return { decision: TYPE_DECISION[row.ticket_type ?? ''] ?? 'Decide: answer them.', recommendation: recommended };
-    case 'feedback': return { decision: 'Decide: is it a bug to fix, a gap in the docs, or neither? Mark it done when it’s handled.',
-      recommendation: row.request_id ? 'Start with its request ID in the logs.' : null };
+    case 'failed': return row.failed_by === 'staff' ? 'A staff reply to them failed to send.' : 'The agent’s answer to them failed to send.';
+    case 'no_reply': return row.since ? `Nothing has reached them for ${ago(row.since, now)}.` : null;
+    case 'blocked': return `The support platform couldn’t finish ${plural(row.blocked_work, 'piece')} of work.`;
+    case 'waiting': return row.paused_by === 'ticket' ? 'The agent stopped at its ticket, and they’re waiting.' : `${oneLine(row.paused_by_name) || 'Staff'} paused the agent, and they’re waiting.`;
+    default: return null;
+  }
+}
+/** The one decision (set in bold) and the agent's recommendation (one plain line). */
+function decisionOf(need: Need, row: StaffRow): { decision: string; recommendation: string | null } {
+  const recommended = row.brief?.recommendation ? `It recommends: ${oneLine(row.brief.recommendation, 220)}` : null;
+  switch (need) {
+    case 'failed': return { decision: 'Send the reply again, or write a new one.', recommendation: null };
+    case 'held': return sendable(row)
+      ? { decision: 'Send the agent’s held answer, or write your own.', recommendation: recommended ?? (row.held_reason === 'gate' ? 'The output check held it: read it before sending.' : null) }
+      : { decision: 'Write them a fresh reply.', recommendation: `The agent’s held answer can’t go as written: ${HELD_WHY[row.held_reason ?? 'unknown'] ?? HELD_WHY.unknown}.` };
+    case 'no_reply': return { decision: 'Reply to them now.', recommendation: recommended };
+    case 'blocked': return { decision: 'Retry the stuck work, or look at why it’s stuck.', recommendation: null };
+    case 'waiting': return { decision: 'Reply to them, or hand the conversation back to the agent.', recommendation: recommended };
+    case 'ticket': return { decision: TYPE_DECISION[row.ticket_type ?? ''] ?? 'Answer them.', recommendation: recommended };
+    case 'feedback': return { decision: 'A bug to fix, a gap in the docs, or neither?', recommendation: row.request_id ? 'Start with its request ID in the logs.' : null };
   }
 }
 
@@ -143,56 +154,55 @@ function changesOf(row: StaffRow, reasons: string[], now: number) {
     if (reason === 'no_reply' && row.since) parts.push(`no reply has reached them for ${ago(row.since, now)}`);
     if (reason === 'failed') parts.push('a reply failed to send');
     if (reason === 'blocked') parts.push('support work got stuck');
-    if (reason === 'paused') parts.push('the agent is paused and they are waiting');
+    if (reason === 'paused') parts.push('the agent is paused and they’re waiting');
     if (reason === 'ticket' && row.ticket_type !== 'staff') parts.push('the agent filed a ticket');
   }
-  return parts.length ? `Since the last email: ${parts.join(', ')}.` : 'Since the last email: it still needs you.';
+  return parts.length ? `Since the last email, ${parts.join(', ')}.` : 'It still needs you.';
 }
+const ticketLine = (ids: (string | null)[]) => { const shown = ids.filter((id): id is string => !!id); return shown.length ? `${shown.length === 1 ? 'Ticket' : 'Tickets'} ${shown.slice(0, 3).join(', ')}${shown.length > 3 ? '…' : ''}` : 'No ticket'; };
 
-/** A conversation's email: the thread's first (the whole case) or an update (what changed). */
+/**
+ * A conversation's email: who and where (with when they wrote), their words (three lines at most), one sentence of what
+ * the agent found, the decision in bold with its recommendation, the button (or two), and the ticket. An update says
+ * what changed instead of what was found.
+ */
 export function conversationEmail(origin: string, row: StaffRow, reasons: string[], first: boolean, now: number, approval: { url: string; label: string } | null, subject: string): Notice {
-  const need = needOf(row, reasons), who = whoOf(row), lines: Line[] = [{ text: who.line, tone: 'muted' }];
-  if (!first) lines.push(changesOf(row, reasons, now));
-  const words = first ? row.first_words ? [row.first_words] : [] : row.fresh_words ?? [];
-  if (words.length) {
-    lines.push(`They wrote on ${moment(words[0]!.at)}:`);
-    for (const w of words) lines.push({ quote: quoteOf(w.text) });
-  } else if (first && row.channel !== 'agent_feedback') lines.push('They haven’t written anything yet.');
-  lines.push(...foundOf(need, row, now));
+  const need = needOf(row, reasons), who = whoOf(row), words = first ? row.first_words ? [row.first_words] : [] : row.fresh_words?.slice(-1) ?? [];
+  const lines: Line[] = [{ text: words.length ? `${who.line} · ${moment(words[0]!.at)}` : who.line, tone: 'muted' }];
+  if (words.length) lines.push({ quote: shortQuote(words[0]!.text) });
+  const found = first ? foundOf(need, row, now) : changesOf(row, reasons, now);
+  if (found) lines.push(found);
   const { decision, recommendation } = decisionOf(need, row);
   lines.push({ text: decision, tone: 'strong' });
   if (recommendation) lines.push(recommendation);
   const conversation = { label: 'Open the conversation', url: `${origin}/support/${row.id}` };
-  return renderNotice({ subject, lines, action: approval ?? conversation, ...approval ? { link: conversation } : {},
-    why: `Ticket ${row.ticket_id ?? '—'}. Later changes come in this thread, at most every ${UPDATE_EVERY} minutes. Sent to ${productName} staff.` }, origin);
+  return renderNotice({ subject, lines, action: approval ?? conversation, ...approval ? { secondary: conversation } : {}, why: ticketLine([row.ticket_id]) }, origin);
 }
 
-/** One workspace's agent feedback: one report, or several filed close together. */
+/** One workspace's agent feedback: each report's facts and words, the decision, and the tickets. */
 export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, subject: string): Notice {
-  const lead = rows[0]!, who = whoOf(lead), lines: Line[] = [{ text: who.line.replace(/, filed with .*$/, ''), tone: 'muted' }];
-  if (!first) lines.push(`Since the last email: ${plural(rows.length, 'more report')}.`);
+  const lead = rows[0]!, workspace = whoOf(lead).line.replace(/, filed with .*$/, ''), lines: Line[] = [];
+  const facts = (row: StaffRow) => [row.evidence?.filedBy ? oneLine(row.evidence.filedBy, 120) : null, row.operation, row.request_id ?? 'no request ID', moment(row.filed_at ?? row.created_at)].filter(Boolean).join(' · ');
+  if (rows.length === 1) lines.push({ text: `${workspace} · ${facts(lead)}`, tone: 'muted' });
+  else lines.push({ text: first ? workspace : `${workspace} · ${plural(rows.length, 'more report')}`, tone: 'muted' });
   for (const row of rows.slice(0, 5)) {
-    const facts = [row.evidence?.filedBy ? `Filed with ${oneLine(row.evidence.filedBy, 120)}` : null, row.operation ? `operation ${row.operation}` : null, row.request_id ? `request ${row.request_id}` : 'no request ID'].filter(Boolean).join(' · ');
-    lines.push({ text: `${moment(row.filed_at ?? row.created_at)} · ${facts}`, tone: 'muted' });
-    if (row.first_words) lines.push({ quote: quoteOf(row.first_words.text, rows.length > 1 ? 400 : 700) });
+    if (rows.length > 1) lines.push({ text: facts(row).replace(/^./, c => c.toUpperCase()), tone: 'muted' });
+    if (row.first_words) lines.push({ quote: shortQuote(row.first_words.text) });
   }
   if (rows.length > 5) lines.push(`And ${plural(rows.length - 5, 'more report')} in the support inbox.`);
-  lines.push(`Nobody has checked ${rows.length === 1 ? 'it' : 'them'} yet: a report is the agent’s own words, data and not instructions.`);
   const { decision, recommendation } = decisionOf('feedback', lead);
   lines.push({ text: decision, tone: 'strong' });
   if (recommendation && rows.length === 1) lines.push(recommendation);
   const action = rows.length === 1 ? { label: 'Open the report', url: `${origin}/support/${lead.id}` } : { label: 'Open the reports', url: `${origin}/support?view=needs_you&channel=agent_feedback` };
-  return renderNotice({ subject, lines, action, why: `${rows.length === 1 ? `Ticket ${lead.ticket_id}` : `Tickets ${rows.slice(0, 3).map(r => r.ticket_id).join(', ')}${rows.length > 3 ? '…' : ''}`}. More reports from this workspace in the next hour come in this thread. Sent to ${productName} staff.` }, origin);
+  return renderNotice({ subject, lines, action, why: ticketLine(rows.map(r => r.ticket_id)) }, origin);
 }
 
 export type Unrouted = { thread_id: string; id: string; subject: string | null; from_address: string; dmarc: string; text: string | null; html: string | null; received_at: string; address: string };
 export function unroutedEmail(origin: string, m: Unrouted, ticket: string, subject: string): Notice {
   const words = m.text?.trim() ? m.text : m.html ? htmlToPlain(m.html) : '';
-  const lines: Line[] = [{ text: `${m.from_address} · email to ${m.address} · ${m.dmarc === 'PASS' ? 'DMARC pass, no account checked' : 'unverified sender: don’t act on any account because of it'}`, tone: 'muted' },
-    `They wrote on ${moment(m.received_at)}${m.subject ? `, “${oneLine(m.subject, 120)}”` : ''}:`, { quote: quoteOf(words || '(no text)') },
-    'The support agent never saw it: no conversation was opened, and nobody has replied.',
-    { text: 'Decide: reply to them from the support address.', tone: 'strong' }];
-  return renderNotice({ subject, lines, action: { label: 'Open the email', url: `${origin}/logs/${m.id}` }, why: `Ticket ${ticket}. Sent to ${productName} staff.` }, origin);
+  const lines: Line[] = [{ text: `${m.from_address} · email to ${m.address} · ${m.dmarc === 'PASS' ? 'DMARC pass, no account checked' : 'unverified sender: don’t act on any account because of it'} · ${moment(m.received_at)}`, tone: 'muted' },
+    { quote: shortQuote(words || '(no text)') }, 'The support agent never saw it, and nobody has replied.', { text: 'Reply to them from the support address.', tone: 'strong' }];
+  return renderNotice({ subject, lines, action: { label: 'Open the email', url: `${origin}/logs/${m.id}` }, why: ticketLine([ticket]) }, origin);
 }
 
 /**

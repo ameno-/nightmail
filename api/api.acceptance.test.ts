@@ -10328,10 +10328,11 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual([opened.ticket_type, opened.status, opened.staff_thread, first.threadId], ['staff', 'ticketed', `conv:${held}`, null]);
           const sender = (await db.query('SELECT pending_address FROM support_conversations WHERE id = $1', [held])).rows[0].pending_address;
           assert.equal(first.subject, `Review a held answer to ${sender}`);
-          const text = first.text as string, order = ['email, unverified sender', 'They wrote on', '> Why did my bounce rate jump?', 'The agent wrote an answer, but it wasn’t sent: the output check held it.',
-            'Decide: send the held answer as written, or write your own.', `Open the conversation: ${new URL(runtime.config.publicUrl).origin}/support/${held}`, `Ticket ${opened.ticket_id}.`];
+          const text = first.text as string, order = ['email, unverified sender', '> Why did my bounce rate jump?', 'Send the agent’s held answer, or write your own.', 'The output check held it: read it before sending.',
+            `Open the conversation: ${new URL(runtime.config.publicUrl).origin}/support/${held}`, `Ticket ${opened.ticket_id}\n`];
           assert.deepEqual(order.map(part => text.indexOf(part) >= 0), order.map(() => true), text);
-          assert.ok(order.every((part, i) => i === 0 || text.indexOf(part) > text.indexOf(order[i - 1]!)), 'Who, their words, what was found, the decision, the link.');
+          assert.ok(order.every((part, i) => i === 0 || text.indexOf(part) > text.indexOf(order[i - 1]!)), 'Who, their words, the decision and its recommendation, the buttons, the ticket.');
+          assert.ok(!text.includes('Sent to') && !text.includes('Later changes'), 'The footer is the ticket alone.');
           assert.ok(text.includes('https://nightmail.example@evil.example/x (links to evil.example)'), 'A link in their words shows where it really goes.');
           assert.ok(first.html.includes('&lt;b&gt;See https:\u200b//nightmail.\u200bexample@evil.\u200bexample/x (links to evil.\u200bexample)') && !first.html.includes('<b>See') && !/href="https:\/\/[^"]*evil/.test(first.html),
             'Their words are escaped, never a link, and nothing of theirs loads.');
@@ -10345,7 +10346,7 @@ describe('Hosted MCP OAuth and tools', () => {
           await db.query("UPDATE support_staff_threads SET last_sent_at = now() - interval '31 minutes' WHERE key = $1", [`conv:${held}`]);
           const [update] = await due();
           assert.deepEqual([update?.threadId, update?.replyToMessageId, update?.subject], [`thr_staff_${sends}`, `msg_staff_${sends}`, first.subject]);
-          assert.ok(update.text.includes('Since the last email: they wrote again.') && update.text.includes('> Hello? Anyone there?'), update.text);
+          assert.ok(update.text.includes('Since the last email, they wrote again.') && update.text.includes('> Hello? Anyone there?'), update.text);
           await sent(update);
           // The agent's own ticket, mirrored later, takes the place of the one opened here.
           const agentTicket = ticketId();
@@ -10448,7 +10449,7 @@ describe('Hosted MCP OAuth and tools', () => {
           const mails = await due(), mailOf = (id: string) => mails.find((m: Json) => m.text.includes(`/support/${id}`))!;
           const linkOf = (mail: Json) => { const found = /Send the held answer: (\S+)/.exec(mail.text); return found ? new URL(found[1]!) : null; };
           assert.equal(linkOf(mailOf(shrunk.id)), null, 'One that needs a fresh reply is never proposed.');
-          assert.ok(mailOf(shrunk.id).text.includes('Decide: write them a fresh reply.'));
+          assert.ok(mailOf(shrunk.id).text.includes('Write them a fresh reply.'));
           for (const mail of mails) await sent(mail);
           const staffReplies = async (id: string) => (await db.query("SELECT text FROM support_messages WHERE conversation_id = $1 AND author = 'staff'", [id])).rows.map(r => r.text);
 

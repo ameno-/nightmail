@@ -28,7 +28,8 @@ export type Notice = { subject: string; text: string; html: string };
  * someone else's words quoted (untrusted: escaped, every link shown with its real host and kept from turning into one).
  */
 export type Line = string | { text: string; tone: 'muted' | 'strong' } | { quote: string };
-export type Parts = { subject: string; lines: Line[]; card?: ScoreCard; records?: SetupRecord[]; link?: { label: string; url: string }; action: { label: string; url: string }; why: string };
+/** `secondary`: a quieter second button beside the action (an outline); on a narrow screen it wraps below it. */
+export type Parts = { subject: string; lines: Line[]; card?: ScoreCard; records?: SetupRecord[]; link?: { label: string; url: string }; action: { label: string; url: string }; secondary?: { label: string; url: string }; why: string };
 /** The sender score as the dashboard's card shows it (app/src/features/score), at the moment the email is made. */
 export type ScoreCard = { score: number; grade: string; /** The daily limit then; null is none. */ daily: number | null; at: Date };
 /** A DNS record as the setup reminder lists it: the name as the DNS provider asks for it (relative to the zone when known). */
@@ -105,7 +106,7 @@ const PAPER = '#ffffff', INK = '#171717', MUTED = '#5d5d5d';
 // The button is the dashboard's primary (app/src/styles/ui.css .ui-button--primary): the text colour as a solid fill,
 // #111111 with white words on light and #F2F2F2 with #111111 on dark, semibold. Its one-pixel edge, a step off the fill,
 // is what keeps it visible in Gmail on Android, whose forced dark leaves a near-black fill on a near-black page.
-const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-quote{color:#ededed!important;border-left-color:#4a4a4a!important}.nm-why{color:#a3a3a3!important}.nm-action-cell{background-color:#f2f2f2!important;border-color:#f2f2f2!important}.nm-action{background-color:#f2f2f2!important;color:#111111!important}';
+const DARK = '.nm-page{background-color:#181818!important;color:#ededed!important}.nm-text{color:#ededed!important}.nm-quote{color:#ededed!important;border-left-color:#4a4a4a!important}.nm-secondary-cell{border-color:#4a4a4a!important}.nm-secondary{color:#ededed!important}.nm-why{color:#a3a3a3!important}.nm-action-cell{background-color:#f2f2f2!important;border-color:#f2f2f2!important}.nm-action{background-color:#f2f2f2!important;color:#111111!important}';
 
 // The first grade's card: the sender score as a picture of the dashboard's card (src/score-card.ts), light where the
 // client keeps light colours and dark in a client that asks for dark (Apple Mail, Outlook on the web), on a cell in the
@@ -135,7 +136,7 @@ const page = `class="nm-page" bgcolor="${PAPER}"`, ink = (style = '') => `class=
  */
 export function renderNotice(p: Parts, origin: string): Notice {
   const records = p.records ?? [];
-  const text = [...p.card ? [cardText(p.card)] : [], p.lines.map(lineText).join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, p.why].join('\n\n') + '\n';
+  const text = [...p.card ? [cardText(p.card)] : [], p.lines.map(lineText).join('\n\n'), ...records.map(r => `${r.type} record\nName: ${r.name}\nValue: ${r.value}`), ...p.link ? [`${p.link.label}: ${p.link.url}`] : [], `${p.action.label}: ${p.action.url}`, ...p.secondary ? [`${p.secondary.label}: ${p.secondary.url}`] : [], p.why].join('\n\n') + '\n';
   const field = (label: string, value: string) => `<tr><td class="nm-why" style="width:40px;padding:2px 12px 2px 0;vertical-align:top;font-size:13px;line-height:20px;color:${MUTED};white-space:nowrap">${label}</td><td class="nm-text" style="padding:2px 0;font-family:${MONO};font-size:14px;line-height:20px;color:${INK};word-break:break-all">${escapeHtml(value)}</td></tr>`;
   const paragraphs = p.lines.map(line => typeof line === 'string' ? `<p ${ink()}>${escapeHtml(line)}</p>`
     : 'quote' in line ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 16px"><tr><td class="nm-quote" style="border-left:3px solid #d4d4d4;padding:2px 0 2px 14px;font-size:15px;line-height:24px;color:${INK};white-space:pre-wrap;word-break:break-word">${quotedHtml(line.quote)}</td></tr></table>`
@@ -147,8 +148,10 @@ export function renderNotice(p: Parts, origin: string): Notice {
     + `<body ${page} style="margin:0;padding:0;background-color:${PAPER};color:${INK};-webkit-font-smoothing:antialiased;-webkit-text-size-adjust:100%"><table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" ${page} style="background-color:${PAPER}"><tr><td ${page} style="padding:28px 20px 40px;background-color:${PAPER};color:${INK}">`
     + `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:520px"><tr><td class="nm-text" style="font-family:${FONT};font-size:16px;line-height:26px;color:${INK}">`
     + `${p.card ? cardHtml(p.card, origin) : ''}${paragraphs}`
-    // A table cell carries the fill, so Outlook on Windows (which pads no link) still draws the button.
-    + `<table role="presentation" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 0"><tr><td class="nm-action-cell" bgcolor="#111111" style="border:1px solid #3a3a3a;border-radius:8px;background-color:#111111"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:12px 20px;border-radius:8px;background-color:#111111;color:#ffffff;font-family:${FONT};font-size:15px;line-height:20px;font-weight:600;text-decoration:none">${escapeHtml(p.action.label)}</a></td></tr></table>`
+    // A table cell carries the fill, so Outlook on Windows (which pads no link) still draws the button. Each button is its
+    // own left-aligned table, so a second one sits beside the first where there is room and wraps below it where there isn't.
+    + `<table role="presentation"${p.secondary ? ' align="left"' : ''} cellpadding="0" cellspacing="0" border="0" style="margin:8px ${p.secondary ? '8px' : '0'} 0 0"><tr><td class="nm-action-cell" bgcolor="#111111" style="border:1px solid #3a3a3a;border-radius:8px;background-color:#111111"><a class="nm-action" href="${escapeHtml(p.action.url)}" style="display:inline-block;padding:12px 20px;border-radius:8px;background-color:#111111;color:#ffffff;font-family:${FONT};font-size:15px;line-height:20px;font-weight:600;text-decoration:none">${escapeHtml(p.action.label)}</a></td></tr></table>`
+    + (p.secondary ? `<table role="presentation" align="left" cellpadding="0" cellspacing="0" border="0" style="margin:8px 0 0"><tr><td class="nm-secondary-cell" style="border:1px solid #d4d4d4;border-radius:8px"><a class="nm-secondary" href="${escapeHtml(p.secondary.url)}" style="display:inline-block;padding:12px 20px;border-radius:8px;color:${INK};font-family:${FONT};font-size:15px;line-height:20px;font-weight:600;text-decoration:none">${escapeHtml(p.secondary.label)}</a></td></tr></table><div style="clear:both;height:0;line-height:0;font-size:0">&nbsp;</div>` : '')
     + `<p class="nm-why" style="margin:32px 0 0;font-size:13px;line-height:20px;color:${MUTED}">${escapeHtml(p.why)}</p>`
     + '</td></tr></table></td></tr></table></body></html>';
   return { subject: p.subject, text, html };
