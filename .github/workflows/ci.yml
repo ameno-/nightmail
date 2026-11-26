@@ -43,6 +43,7 @@ jobs:
         env:
           EVENT_BASE: ${{ github.event.merge_group.base_sha || github.event.before }}
           PR_HEAD_REPO_ID: ${{ github.event.pull_request.head.repo.id }}
+          PR_FULL_CI: ${{ contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: bash .github/scripts/ci-scope.sh
 
   build-work:
@@ -504,3 +505,25 @@ jobs:
         include:
           - { check: acceptance, job: acceptance-shard, flag: acceptance }
     steps: *verify-required
+
+  # The failed checks live on a synthetic commit, not on the PR that entered the queue.
+  report-queue-failure:
+    needs: [audit, required, required-cls, required-acceptance]
+    if: failure() && github.event_name == 'merge_group' && github.event.merge_group.base_ref == 'refs/heads/dev'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Comment on the queue entry's pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QUEUE_REF: ${{ github.event.merge_group.head_ref }}
+        run: |
+          set -euo pipefail
+          [[ $QUEUE_REF =~ ^refs/heads/gh-readonly-queue/dev/pr-([0-9]+)-[0-9a-f]+$ ]]
+          pr=${BASH_REMATCH[1]}
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT"
+          failed=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?filter=latest&per_page=100" \
+            --jq '[.jobs[] | select(.conclusion == "failure" or .conclusion == "timed_out") | .name] | join(", ")')
+          gh pr comment "$pr" -R "$GITHUB_REPOSITORY" --body "Merge-queue CI failed on \`$GITHUB_SHA\`: ${failed:-see the failed checks}. [Queue run]($run)"
