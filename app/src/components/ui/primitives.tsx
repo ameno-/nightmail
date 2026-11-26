@@ -117,22 +117,29 @@ export function Tabs({ value, onValueChange, items, label = 'Sections', disabled
     } finally { activating.current = false; }
   }
   // One marker under the selected tab slides to the next one (200 ms); it lands without moving on first paint and when
-  // a tab's width changes (a count, the web font).
+  // a tab's width changes (a count, the web font). At rest it is placed by layout (left, top, width), whose box the
+  // browser snaps to whole device pixels: placed by a transform it wasn't, and a 1 px line half a pixel off read as a
+  // grey 2 px smear on 1x screens (ultra-wide monitors). Only the slide is a transform, from where it was to its place.
   const marker = useRef<HTMLSpanElement>(null);
-  const placed = useRef('');
+  const placed = useRef<{ left: number; top: number; width: number } | null>(null);
   const index = items.findIndex(item => item.value === value), order = items.map(item => item.value).join('\n');
   useLayoutEffect(() => {
     const place = (animate: boolean) => {
       const bar = marker.current, tab = refs.current[index];
       if (!bar) return;
-      // Sub-pixel layout positions, undoing any scale on an ancestor (a dialog opening).
-      const list = bar.parentElement!, box = list.getBoundingClientRect(), rect = tab?.getBoundingClientRect(), scale = box.width / list.offsetWidth || 1;
-      const at = rect ? `translate(${(rect.left - box.left) / scale - list.clientLeft + list.scrollLeft}px, ${(rect.bottom - box.top) / scale - list.clientTop + list.scrollTop - 1}px) scaleX(${rect.width / scale})` : '';
-      if (at === placed.current) return;
-      bar.toggleAttribute('data-animate', animate && placed.current !== '' && at !== '');
-      bar.style.transform = at;
-      bar.style.opacity = at ? '1' : '0';
+      // Layout offsets inside the list (which scrolls with them), untouched by any scale on an ancestor (a dialog opening).
+      const at = tab ? { left: tab.offsetLeft, top: tab.offsetTop + tab.offsetHeight - 1, width: tab.offsetWidth } : null;
+      const was = placed.current;
+      if (at && was && at.left === was.left && at.top === was.top && at.width === was.width) return;
+      // Mid-slide, it carries on from where it is now, not from where it was going.
+      const from = animate && was && at ? (() => { const list = bar.parentElement!.getBoundingClientRect(), now = bar.getBoundingClientRect(), scale = list.width / bar.parentElement!.offsetWidth || 1; return { left: (now.left - list.left) / scale + bar.parentElement!.scrollLeft, width: now.width / scale }; })() : null;
+      bar.getAnimations().forEach(running => running.cancel());
       placed.current = at;
+      bar.style.opacity = at ? '1' : '0';
+      if (!at) return;
+      Object.assign(bar.style, { left: `${at.left}px`, top: `${at.top}px`, width: `${at.width}px` });
+      if (from && at.width > 0 && !matchMedia('(prefers-reduced-motion: reduce)').matches)
+        bar.animate([{ transform: `translateX(${from.left - at.left}px) scaleX(${from.width / at.width})` }, { transform: 'none' }], { duration: 200, easing: 'cubic-bezier(.2, .8, .2, 1)' });
     };
     place(true);
     const observer = new ResizeObserver(() => place(false));

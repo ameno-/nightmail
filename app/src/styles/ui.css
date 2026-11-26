@@ -144,7 +144,8 @@ a.ui-button:focus-visible { text-decoration: none; }
 .ui-switch__thumb { width: 14px; height: 14px; border-radius: var(--radius-2xs); background: var(--color-surface); transform: translateX(0); transition: transform var(--motion-duration); }
 .ui-switch__thumb[data-state='checked'] { transform: translateX(12px); }
 /* Tabs: no track under the strip; the selected tab alone carries its marker (or, in a segmented switch, a solid fill). */
-.ui-tabs { display: flex; align-items: center; gap: var(--space-6); min-height: 29px; overflow-x: auto; }
+/* Tabs sit at the strip's top, on whole pixels: centred, the 28px tabs sat half a pixel down in it. */
+.ui-tabs { display: flex; align-items: flex-start; gap: var(--space-6); min-height: 29px; overflow-x: auto; }
 .ui-tabs + .data-toolbar { margin-top: var(--page-gap); }
 .ui-tab { display: inline-flex; align-items: center; justify-content: center; gap: var(--space-8); height: 28px; padding: 0 var(--space-6); border: 0; border-radius: 0; background: var(--color-transparent); color: var(--color-muted); white-space: nowrap; }
 .ui-tab[aria-selected='true'], .ui-tab[aria-current='page'] { color: var(--color-text); background: transparent; }
@@ -155,8 +156,7 @@ a.ui-button:focus-visible { text-decoration: none; }
 /* Tabs (role=tablist) draw one marker that slides to the selected tab instead of each tab's own underline. */
 .ui-tabs--marker { position: relative; }
 .ui-tabs--marker > .ui-tab::after { content: none; }
-.ui-tabs__marker { position: absolute; top: 0; left: 0; width: 1px; height: 1px; background: var(--color-text); opacity: 0; transform-origin: 0 0; pointer-events: none; }
-.ui-tabs__marker[data-animate] { transition: transform 200ms var(--ease-swap); }
+.ui-tabs__marker { position: absolute; top: 0; left: 0; width: 0; height: 1px; background: var(--color-text); opacity: 0; transform-origin: 0 0; pointer-events: none; }
 a.ui-tab { text-decoration: none; }
 @media (hover: hover) and (pointer: fine) { .ui-tab:hover:not([aria-selected='true'], [aria-current='page']) { color: var(--color-text); } }
 .ui-tab__count { color: var(--color-faint); font-family: var(--font-mono); font-size: var(--text-label); font-variant-numeric: tabular-nums; }

@@ -71,7 +71,8 @@ const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 // `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
 // `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice;
 // `skipped` is a workspace whose onboarding domain step this browser skipped (data/onboarding.ts); `start` is
-// [workspace, how this browser left Overview's get-started strip for it] (features/overview/first-run.tsx).
+// [workspace, how this browser left Overview's get-started strip for it] (features/overview/first-run.tsx); `wide`
+// measures the page on a 3440 × 1440 1x screen instead of the 1440 × 900 desktop.
 // dana owns an established hosted workspace (and is a Nightmail operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
@@ -128,6 +129,8 @@ const pages = ids => [
   // A workspace with no receiving domain yet: the three steps that start it.
   ['Mail routing · new workspace', '/receiving', { user: 'nia' }],
   ['Mail routing · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
+  // An ultra-wide 1x screen (3440 × 1440, `wide`): the tab marker slides on whole pixels there too.
+  ['Mail routing · ultra-wide', '/receiving?tab=rules', { from: '/receiving', click: 'Rules', wide: true }],
   // The flow panel: an address chosen in the list (a full-height sheet on a phone), and an address typed in the search
   // that has none of its own, whose panel says where its mail would go once its test answers.
   // guard: Edit on the panel opens the address's route editor (never the builder, which only creates) and writes nothing.
@@ -416,6 +419,7 @@ const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newslett
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
+  wide: { viewport: { width: 3440, height: 1440 }, deviceScaleFactor: 1 },
 };
 
 // Every API path gets a stable delay of 300–1300 ms in 200 ms steps: slow, and out of request order, the same way
@@ -1047,8 +1051,10 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start }] of pages(ids)) {
-    if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
+  for (const [pass, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start, wide }] of pages(ids)) {
+    if (only && !only.test(name) || pass === 'phone' && !phonePages.has(name) || phoneOnly && pass !== 'phone') continue;
+    // `wide` pages take the desktop passes at 3440 × 1440.
+    const device = wide && pass === 'desktop' ? 'wide' : pass;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
     const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
