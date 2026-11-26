@@ -25,6 +25,9 @@ const inbox = new Map();
 let inboxDown = false;
 // Staff emails a test queued: { key, group, thread (the group to reply in, for a later one), subject, text, html }, and each group's thread once sent.
 const staffMail = [], staffThreads = new Map();
+// What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply), as a test sets it (/__staffreply):
+// any other message is no such reply. An answer with a status is Nightmail failing to say.
+const staffReplies = new Map();
 // Agent feedback reports and the triage agent's routes (api/src/feedback-triage.ts): a report belongs to one workspace, a
 // request trace to one workspace, and every read answers for the report's own workspace only. A report is handed out once
 // (claimed); its note is written once, with only its four fields and duplicates the related read names. /__feedback
@@ -308,6 +311,18 @@ export class SupportPlatform extends WorkerEntrypoint {
     return ok({ data: staffMail.filter(m => !m.sent && (!m.thread || staffThreads.has(m.thread))).map(m => ({ key: m.key, subject: m.subject, text: m.text, html: m.html,
       threadId: m.thread ? staffThreads.get(m.thread).threadId : null, replyToMessageId: m.thread ? staffThreads.get(m.thread).messageId : null })) });
   }
+  async staffMailReply(messageId, team) {
+    calls.push(['staffMailReply', messageId, team]);
+    const answer = staffReplies.get(messageId);
+    return answer?.status ? refuse(answer.status, 'UNAVAILABLE') : ok(answer ?? { reply: false });
+  }
+  async staffMailFailed(key, failed) {
+    calls.push(['staffMailFailed', key, failed]);
+    const mail = staffMail.find(m => m.key === key);
+    if (!mail) return missing();
+    if (!mail.sent) mail.attempts = (mail.attempts ?? 0) + 1;
+    return ok({ key, attempts: mail.attempts ?? 0, failed: !mail.sent && (mail.attempts ?? 0) >= 3, sent: !!mail.sent });
+  }
   async staffMailSent(key, sent) {
     calls.push(['staffMailSent', key, sent]);
     const mail = staffMail.find(m => m.key === key);
@@ -371,6 +386,7 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === '/__calls') return Response.json(calls);
     // The staff inbox: register a conversation, pause or resume its agent, queue a staff reply, take Nightmail down; and read it.
+    if (url.pathname === '/__staffreply') { const { messageId, answer } = await request.json(); staffReplies.set(messageId, answer); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__feedback') {
       if (request.method === 'GET') return Response.json([...reports.values()]);
       const { add = [], traces: more = {}, release, drop } = await request.json();

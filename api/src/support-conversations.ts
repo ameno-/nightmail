@@ -173,7 +173,7 @@ export function sameMailbox(a: string, b: string) {
  * The last two get the same fixed reply, with a sign-in for this message (`signIn`). dkimAligned records whether a sole
  * signature of the From domain passed too.
  */
-async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: string) {
+export async function emailEvidence(db: DbExecutor, addressIds: string[], messageId: string) {
   const { rows: [m] } = await db.execute<{ thread_id: string; from_address: string; verdicts: Verdicts; headers: MailHeader[]; author_verified: boolean | null; rfc_message_id: string | null;
     ses_message_id: string | null; sending_email_id: string | null; addressed: boolean; recent: boolean }>(sql`SELECT m.thread_id, m.from_address, m.verdicts, m.headers, m.message_id AS rfc_message_id,
       m.ses_message_id, m.sending_email_id, links.author_verified,

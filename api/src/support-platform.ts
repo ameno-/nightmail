@@ -35,6 +35,9 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   // One path to a human (src/support-staff-mail.ts): the staff emails due, and each one sent.
   ['POST', /^\/v1\/operator\/support\/staff-mail$/],
   ['POST', /^\/v1\/operator\/support\/staff-mail\/staff-[0-9a-f]{24}-[0-9]{1,6}\/sent$/],
+  // A staff email that failed to send, and a reply to one (a note on its conversation, or nothing).
+  ['POST', /^\/v1\/operator\/support\/staff-mail\/staff-[0-9a-f]{24}-[0-9]{1,6}\/failed$/],
+  ['POST', /^\/v1\/operator\/support\/staff-mail\/replies$/],
   // The feedback triage agent (src/feedback-triage.ts): the reports due, and for one report its request trace, the
   // reports beside it and its one note. Nothing else: no route that sends, replies, resolves or changes an account.
   ['POST', /^\/v1\/operator\/support\/feedback\/due$/],
@@ -227,6 +230,15 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     /** A staff email went out: its thread and message, so the next one in the thread replies to it. */
     staffMailSent: (key: string, sent: { threadId: string; messageId: string }) =>
       call<{ key: string; sentAt: string }>('POST', `/v1/operator/support/staff-mail/${encodeURIComponent(String(key))}/sent`, sent),
+    /** A staff email failed to send this time (its error's code): after three tries it shows on Glass until it goes. */
+    staffMailFailed: (key: string, failed: { code: string }) =>
+      call<{ key: string; attempts: number; failed: boolean; sent: boolean }>('POST', `/v1/operator/support/staff-mail/${encodeURIComponent(String(key))}/failed`, failed),
+    /**
+     * Before an email to a support address is a customer's: whether it replies to a staff email (reply false: it doesn't,
+     * handle it as any support email), and if so the note it became on its conversation, or why none (ignored).
+     */
+    staffMailReply: (messageId: string, team: string | null) =>
+      call<{ reply: boolean; notes?: number; ignored?: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null }>('POST', '/v1/operator/support/staff-mail/replies', { messageId, team }),
     /** Claims the agent feedback reports still to read (at most `limit`, at most 5), oldest first: each is handed out at most twice. */
     feedbackDue: (limit: number) => call<{ data: FeedbackReport[] }>('POST', '/v1/operator/support/feedback/due', { limit }),
     /** One request's trace, in the report's own workspace only: any other request ID is 404. */

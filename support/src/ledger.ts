@@ -1,5 +1,5 @@
 import type { Env } from './env.js';
-import { nightmailApi, platformBody, type OutboxReply } from './nightmail.js';
+import { nightmailApi, NightmailError, platformBody, type OutboxReply } from './nightmail.js';
 import { INTAKE, type Mailbox } from './intake.js';
 import { countToday, limits, overflowRow, resendNotices, today } from './limits.js';
 import { replay } from './replay.js';
@@ -38,7 +38,7 @@ function accepted(env: Env, flow: Flow, object: string, messageId: string, threa
 }
 
 /** A message kept before any object: held for the digest, or blocked until its address is configured. */
-function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string; state: 'held' | 'blocked'; reason: 'rate' | 'unconfigured' | 'replay_closed'; source: Source; detail?: object }) {
+function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string; state: 'held' | 'blocked' | 'done'; reason: 'rate' | 'unconfigured' | 'replay_closed' | 'staff_reply'; source: Source; detail?: object }) {
   const now = Date.now();
   return env.DB.prepare(`INSERT INTO support_work (flow, object, id, kind, state, reason, source, message_id, thread_id, detail, created_at, updated_at)
     VALUES (?, '', ?, 'message', ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (flow, object, id) DO NOTHING`)
@@ -48,9 +48,19 @@ function edge(env: Env, flow: Flow, input: { messageId: string; threadId: string
 /**
  * Support mail into its thread's conversation (created on first use). The object stores the message and arms its alarm
  * before this returns, so once the ledger row is written the message can't be lost. False: D1 lost the thread's row.
+ *
+ * A reply to one of the staff emails (api/src/support-staff-mail.ts) is never a customer's email: Nightmail, which alone
+ * knows the staff threads and the sender's proof, makes a verified staff member's reply an internal note on its
+ * conversation and ignores any other. Either way it ends here, as a ledger row: no conversation, no answer, no model.
  */
 export async function acceptSupport(env: Env, input: { messageId: string; threadId: string; deliveryId: string; source: Source }) {
   const { messageId, threadId } = input, now = Date.now();
+  const staff = platformBody(await env.BANE.staffMailReply(messageId, env.TICKET_TO || null));
+  if (staff.reply) {
+    log(staff.notes ? 'info' : 'warn', { event: 'email', code: staff.notes ? 'STAFF_REPLY_NOTED' : 'STAFF_REPLY_IGNORED', notes: staff.notes, reason: staff.ignored ?? undefined });
+    await edge(env, 'support', { messageId, threadId, state: 'done', reason: 'staff_reply', source: input.source, detail: { notes: staff.notes, ignored: staff.ignored } }).run();
+    return true;
+  }
   let row = await env.DB.prepare('SELECT id FROM conversations WHERE thread_id = ?').bind(threadId).first<{ id: string }>();
   if (!row) {
     await env.DB.prepare("INSERT INTO conversations (id, channel, thread_id, created_at, updated_at) VALUES (?, 'email', ?, ?, ?) ON CONFLICT (thread_id) DO NOTHING").bind(newId('conv'), threadId, now, now).run();
@@ -136,13 +146,20 @@ async function staffMail(env: Env) {
   const due = platformBody(await env.BANE.staffMail()).data, api = nightmailApi(env);
   let n = 0;
   for (const mail of due) {
+    let sent: { id: string; threadId: string };
     try {
-      const sent = mail.threadId && mail.replyToMessageId
+      sent = mail.threadId && mail.replyToMessageId
         ? await api.reply(mail.threadId, { replyToMessageId: mail.replyToMessageId, to: env.TICKET_TO, subject: mail.subject, text: mail.text, html: mail.html, addressId: env.SUPPORT_ADDRESS_ID }, mail.key)
         : await api.startThread({ to: [env.TICKET_TO], subject: mail.subject, text: mail.text, html: mail.html }, mail.key);
-      platformBody(await env.BANE.staffMailSent(mail.key, { threadId: sent.threadId, messageId: sent.id }));
-      n++;
-    } catch (error) { logError(error, { event: 'ticket', code: 'STAFF_MAIL_FAILED', key: mail.key }, 'warn'); }
+    } catch (error) {
+      // Each failed send is reported, with its error's code: after three, Glass shows the email as not sent until it goes.
+      logError(error, { event: 'ticket', code: 'STAFF_MAIL_FAILED', key: mail.key }, 'warn');
+      const code = error instanceof NightmailError && /^[A-Z][A-Z0-9_]{0,63}$/.test(error.code) ? error.code : 'SEND_FAILED';
+      await env.BANE.staffMailFailed(mail.key, { code }).then(reply => platformBody(reply)).catch(failure => logError(failure, { event: 'ticket', code: 'STAFF_MAIL_FAILURE_UNREPORTED', key: mail.key }, 'warn'));
+      continue;
+    }
+    try { platformBody(await env.BANE.staffMailSent(mail.key, { threadId: sent.threadId, messageId: sent.id })); n++; }
+    catch (error) { logError(error, { event: 'ticket', code: 'STAFF_MAIL_SENT_UNREPORTED', key: mail.key }, 'warn'); }
   }
   return n;
 }
