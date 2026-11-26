@@ -441,7 +441,8 @@
   .cb-stencil { order: 1; }
   .cb-console .cb-key { order: 3; width: 100%; margin-top: 10px; }
   .cb-try { order: 4; margin-top: 2px; }
-  .cb-consent-hero { text-align: center; }
+  /* The lines under Get started wrap inside the screen, though the console's grid column may run past it. */
+  .cb-consent-hero { justify-self: start; width: calc(100vw - 2 * var(--cb-gutter)); text-align: center; }
   .cb-other .cb-row { margin-top: 16px; }
   .cb-other .cb-name { --h: 24px; }
   .cb-plan { font-size: 11px; letter-spacing: .1em; }
