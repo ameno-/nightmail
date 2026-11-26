@@ -39,8 +39,8 @@ type Session = { identity: Identity | null; logout: () => Promise<void>; switchW
    *  Overview; focus (a comparison's) rides along as ?focus=, which onboarding reads. select: the account service shows its
    *  chooser first (a support email's sign-in link, which may be for another account than this browser's). */
   signIn: (focus?: WorkspaceFocus, select?: boolean) => void
-  /** A press starting on a sign-in button (pointer down): the sign-in request starts then, as the homepage's button does. */
-  signInIntent: (event: { button: number }, focus?: WorkspaceFocus) => void
+  /** A press starting on a sign-in button (a mouse's pointer down): the sign-in request starts then, as the homepage's button does. */
+  signInIntent: (event: { button: number; pointerType: string }, focus?: WorkspaceFocus) => void
   /** A sign-in is under way (its button shows it). */
   signingIn: boolean
   /** Until when (epoch ms) a refused start (429 AUTH_STATE_LIMIT) holds every sign-in button, which counts it down. */
@@ -514,11 +514,13 @@ export function ApiProvider({ children }: { children: ReactNode }) {
   async function logout() { setAuthError(null); try { await signOutAccount() } catch (error) { setAuthError(error) } }
   // Every sign-in request replaces the browser's single OAuth state cookie, so it starts on pointer down
   // (the click that follows is milliseconds away) rather than on hover or focus. The pending request is
-  // used by that click only; a pointer down that never becomes a click is dropped after a few seconds.
+  // used by that click only; a pointer down that never becomes a click is dropped after a few seconds. Only a mouse's: on a
+  // touch screen a scroll that begins on the button is a pointer down too, and every start holds one of the network's
+  // pending sign-ins for 11 minutes (reserve_auth_state) and asks the account service, so a touch starts on the click.
   const signIn = useRef<{ at: number; url: Promise<string> } | null>(null)
   // A start refused at the cap on pending sign-ins (429 AUTH_STATE_LIMIT; the cap is per network, not per person): said
-  // once in a toast, which covers nothing it would move, then every sign-in button stays disabled and counts down the
-  // API's wait, and no press or pointer down asks again until it ends. Kept for the tab, so a reload doesn't ask again.
+  // once in a toast (why only: the buttons are the clock), which covers nothing it would move, then every sign-in button
+  // stays disabled and counts down the API's wait, and no press or pointer down asks again until it ends. Kept for the tab, so a reload doesn't ask again.
   const [signInWait, setSignInWait] = useState<number | null>(() => { try { const until = Number(sessionStorage.getItem(SIGN_IN_WAIT_KEY)); return until > Date.now() ? until : null } catch { return null } })
   const held = () => signInWait !== null && Date.now() < signInWait
   useEffect(() => {
@@ -527,10 +529,10 @@ export function ApiProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(timer)
   }, [signInWait])
   function holdSignIn(error: ApiError) {
-    const seconds = waitSeconds(error), until = Date.now() + seconds * 1000, minutes = Math.ceil(seconds / 60)
+    const until = Date.now() + waitSeconds(error) * 1000
     setSignInWait(until)
     try { sessionStorage.setItem(SIGN_IN_WAIT_KEY, String(until)) } catch { /* Held for this page only. */ }
-    toast(`Too many sign-ins from this network just now. Try again in ${minutes} minute${minutes === 1 ? '' : 's'}.`, 'info')
+    toast('Too many sign-ins from this network just now.', 'info')
   }
   // select: the account service shows its account chooser first (the waitlist screen's "Use a different account").
   // method: it asks for that sign-in (staff tools need Google).
@@ -553,8 +555,8 @@ export function ApiProvider({ children }: { children: ReactNode }) {
       return url.href
     })
   }
-  function prepareLogin(event: { button: number }, focus?: WorkspaceFocus) {
-    if (busy || held() || event.button !== 0) return
+  function prepareLogin(event: { button: number; pointerType: string }, focus?: WorkspaceFocus) {
+    if (busy || held() || event.button !== 0 || event.pointerType !== 'mouse') return
     const url = accountUrl(false, undefined, focus)
     signIn.current = {at: Date.now(), url}
     url.catch(() => { if (signIn.current?.url === url) signIn.current = null })

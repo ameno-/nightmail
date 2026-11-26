@@ -355,7 +355,8 @@ const pages = ids => [
   ['Two accounts · switch', '/overview', { user: ['dana', 'nia'], from: '/overview', switchTo: 'Lumen Labs' }],
   ['Signed out', '/', { user: null, alone: true }],
   // Signed out on a dashboard page (a link from an email) and on an address the dashboard doesn't have.
-  ['Signed out · deep link', '/overview', { user: null }],
+  // guard: a touch's pointer down on Continue to sign in starts no sign-in; a tap, or a mouse press, starts exactly one.
+  ['Signed out · deep link', '/overview', { user: null, guard: 'sign-in-press' }],
   ['Signed out · page not found', '/no-such-page', { user: null, notFound: true }],
   // The link an agent shows, opened signed out: it says an agent is waiting, with its code, before the sign-in.
   ['Signed out · connect', `/connect?code=${ids.deviceCode}`, { user: null }],
@@ -1296,6 +1297,24 @@ async function measure(browser, job, fx) {
       result.screenshot = `${job.slug}.png`;
       await page.screenshot({ path: join(out, result.screenshot) });
     }
+    if (job.guard === 'sign-in-press' && job.mode === 'load') {
+      // A sign-in starts on a mouse's pointer down (data/context.tsx prepareLogin), never on a touch's: a scroll that begins
+      // on the button would hold one of the network's pending sign-ins. One press is one start either way.
+      let starts = 0;
+      await page.route('**/api/auth/sign-in/account', route => { starts++; return route.fulfill({ status: 429, contentType: 'application/json', headers: { 'retry-after': '600' }, body: JSON.stringify({ error: { code: 'AUTH_STATE_LIMIT', message: 'Too many pending sign-ins.', details: [{ retryAfterSeconds: 600 }] } }) }); });
+      const button = page.getByRole('button', { name: 'Continue to sign in' });
+      const settle = () => page.waitForTimeout(500);
+      if (job.device === 'phone') {
+        await button.dispatchEvent('pointerdown', { pointerType: 'touch', button: 0, isPrimary: true });
+        await button.dispatchEvent('pointercancel', { pointerType: 'touch', button: 0, isPrimary: true });
+        await settle();
+        if (starts) problems.push(`a touch pointer down on Continue to sign in started ${starts} sign-in(s)`);
+        await button.tap();
+      } else await button.click();
+      await settle();
+      if (starts !== 1) problems.push(`one ${job.device === 'phone' ? 'tap' : 'mouse press'} on Continue to sign in started ${starts} sign-ins`);
+      await page.unroute('**/api/auth/sign-in/account');
+    }
     if (job.guard === 'receiving-edit') {
       // Saving through the address builder never changes an address's routes or rules it wasn't told to: New address
       // turns away one that exists and a *, an unchanged Save writes nothing, and closing with a change asks first.
@@ -1545,7 +1564,7 @@ try {
     // `wide` pages take the desktop passes at 3440 × 1440.
     const device = wide && pass === 'desktop' ? 'wide' : pass;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, disclose, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, firstTouch, lands, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, disclose, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' || guard === 'sign-in-press' && device === 'phone' ? guard : undefined, firstTouch, lands, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
     if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, start, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }

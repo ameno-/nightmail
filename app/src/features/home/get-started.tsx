@@ -8,7 +8,7 @@ import { countdown, useSecondsLeft } from '../../lib/countdown'
  *  always laid out, one over the other, and only the one shown is visible: the button keeps the longer one's width
  *  from the first paint, so the swap after load moves nothing. waitUntil: a start refused at the cap (data/context.tsx
  *  holdSignIn) holds the button, disabled, counting the wait down in a third label laid out the same way. */
-export function GetStartedButton({ className, style, ref, busy = false, full = false, waitUntil = null, onSignIn, onSignInIntent }: { className: string; style?: CSSProperties; ref?: Ref<HTMLButtonElement>; busy?: boolean; full?: boolean; waitUntil?: number | null; onSignIn?: () => void; onSignInIntent?: (event: { button: number }) => void }) {
+export function GetStartedButton({ className, style, ref, busy = false, full = false, waitUntil = null, onSignIn, onSignInIntent }: { className: string; style?: CSSProperties; ref?: Ref<HTMLButtonElement>; busy?: boolean; full?: boolean; waitUntil?: number | null; onSignIn?: () => void; onSignInIntent?: (event: { button: number; pointerType: string }) => void }) {
   const left = useSecondsLeft(waitUntil)
   const icon = busy ? <LoaderCircle className="ui-spinner" size={16} aria-hidden="true" /> : <ArrowRight className="srt-cta-arrow" size={16} strokeWidth={2} aria-hidden="true" />
   return <button type="button" className={className} ref={ref} style={style} disabled={busy || left > 0} aria-busy={busy || undefined} data-busy={busy || undefined} data-cta="sign-in" data-full={full || undefined} onClick={onSignIn} onPointerDown={onSignInIntent}>
