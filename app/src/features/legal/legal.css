@@ -21,7 +21,10 @@
 .legal-toc-list { display: flex; flex-direction: column; gap: 1px; margin: 0; padding: 0; list-style: none; }
 .legal-toc-list a { display: block; padding: var(--space-4) var(--space-8); border-radius: var(--radius-sm); color: var(--color-muted); font-size: var(--text-sm); line-height: var(--leading-sm); text-decoration: none; text-wrap: pretty; transition: color var(--motion-duration), background-color var(--motion-duration); }
 .legal-toc-list a:is(:hover, :focus-visible) { color: var(--color-text); background: var(--color-hover); }
-.legal-toc-list a[aria-current='location'] { background: var(--color-active-bg); color: var(--color-text); }
+/* The section being read (index.tsx). The page painted before the app (prerender.tsx) has none marked: it shows the first,
+   as the app does at the top, unless the address names a section (:target), where it shows none until the app knows. */
+.legal-toc-list a[aria-current='location'],
+.legal-layout:not(:has(.legal-body :target)) .legal-toc > .legal-toc-list:not(:has([aria-current])) > li:first-child > a { background: var(--color-active-bg); color: var(--color-text); }
 .legal-toc-inline { display: none; }
 
 .legal-article { width: min(100%, 52em); }
