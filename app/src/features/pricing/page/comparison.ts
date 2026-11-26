@@ -12,7 +12,7 @@ import { ownPages } from '../docs/registry.ts'
 // what the figures assume and Nightmail's terms; the other comparisons of its kind; the pages read. Every figure is the
 // price pages' arithmetic (prices.ts), Nightmail's from the billing code.
 
-/** The comparison's three groups, as /compare lists them and each page's More comparisons and breadcrumb name them. */
+/** The comparison's three groups, as /compare lists them and each page's More links and breadcrumb name them. */
 export const GROUPS = [
   { focus: 'developer', id: 'developer', title: 'Developer email APIs', noun: 'developer email APIs' },
   { focus: 'newsletter', id: 'newsletter', title: 'Newsletter and marketing', noun: 'newsletter and marketing services' },
