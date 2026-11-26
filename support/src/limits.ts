@@ -13,9 +13,13 @@ import { productName } from '../../api/src/brand.js';
 // notices: frozen when first queued and resent by the cron sweep until Nightmail accepts them.
 
 export const DEFAULT_LIMITS = {
-  /** Daily model turns reserved for signed-in chats and verified customer emails, and per person. */
+  /**
+   * Daily model turns reserved for signed-in chats and verified customer emails; per person; and per workspace (all its
+   * people together), so a few heavy users can't spend everyone's day once every customer can open the chat.
+   */
   turnsPerDay: 1500,
-  turnsPerPerson: 100,
+  turnsPerPerson: 40,
+  turnsPerWorkspace: 80,
   /** Answers to agents' reports (api/src/feedback.ts FEEDBACK_ANSWERS caps them per credential and workspace): their own daily pool. */
   turnsAgentsPerDay: 200,
   /** Separate daily budget for general (non-member) email answers, in total and per sender domain. */
