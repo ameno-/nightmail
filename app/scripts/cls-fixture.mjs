@@ -142,7 +142,7 @@ export async function start(repo, { dist = 'app/dist', log = () => {}, servers =
       // Built-in domains (api/src/builtin-domain.ts): the workspaces seeded with one below show it in onboarding, Domains and Overview.
       NIGHTMAIL_BUILTIN_DOMAIN: 'nightmail.email',
       // Dana (an operator) may use staff UI notes; nobody else in the fixture can.
-      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
+      UI_NOTES_SUBJECTS: 'https://account.anoma.ly user_dana', SUPPORT_AGENT_ACCESS: 'on', BANE_HOSTED_SCREEN: 'false', NIGHTMAIL_HYGIENE_LISTS: 'off', NIGHTMAIL_HYGIENE_DNS: 'off', ENABLE_LIVE_SES: 'false', AWS_EC2_METADATA_DISABLED: 'true',
       ACCOUNT_CLIENT_ID: 'fixture', ACCOUNT_CLIENT_PRIVATE_KEY: 'unused-in-session-fixture', BANE_ROOT_SECRET: secret,
       WEBHOOK_ALLOWED_HOSTS: 'northwind.example', S3_ACCESS_KEY_ID: 'fixture', S3_SECRET_ACCESS_KEY: 'fixture', S3_BUCKET: 'fixture', S3_ENDPOINT: 'http://127.0.0.1:9',
       SIMULATED_SES_LATENCY_MS: '0', SIMULATED_SES_DELIVERY_DELAY_MS: '0',
@@ -616,6 +616,8 @@ async function supportInbox(db, webhookId) {
   await line(msg('samfive'), chat, 5, 'staff', 'I added a note to your ticket. Our DNS check also ran against an old resolver; I re-ran it and it should turn green shortly.', 12, { kind: 'reply', staff: 'user_dana', delivery: 'sent' });
   await line(msg('samnote'), chat, 6, 'staff', 'Their agency’s DNS host caches for a day. If it is still pending tomorrow, check the resolver fix shipped.', 11, { kind: 'note', staff: 'user_dana' });
   await line(msg('samsix'), chat, 7, 'customer', 'Still pending here. Is there anything else I should change?', 4);
+  // Dana's reply went through her agent (api/src/support-agents.ts): the thread says "via agent" after her name.
+  await db.query("UPDATE support_messages SET agent_approval_id = 'sag_' || repeat('a', 26) WHERE id = $1", [msg('samfive')]);
   await db.query(`UPDATE support_conversations SET ticket_brief = $2 WHERE id = $1`, [chat, JSON.stringify({ title: 'DKIM will not verify for mail.northwind.example', summary: 'Sam added the missing s3._domainkey CNAME, but the domain still shows pending a day later. DNS is managed by their agency.', ask: 'Why is DKIM still pending after adding the record?', recommendation: 'Re-run the DNS check against a fresh resolver; if the record resolves, verify the domain by hand.' })]);
   const happened = (conversation, kind, minutes, user, details) => db.query('INSERT INTO support_events(conversation_id,kind,user_id,details,created_at) VALUES ($1,$2,$3,$4::jsonb,now()-$5::float8*interval \'1 minute\')', [conversation, kind, user, JSON.stringify(details), minutes]);
   await happened(chat, 'ticket', 38, null, { ticketId: supportId('tkt', 'samdkim', 16), type: 'bug', severity: 'P3' });
@@ -1070,6 +1072,10 @@ export async function seed(fx) {
   // An MCP client dana connected as a labelled profile, waiting for its workspace (its page is /settings/mcp/<id>).
   const mcp = 'mcp_at_cls_fixture';
   await db.query("INSERT INTO nightmail_resource_grants(id,issuer,subject,user_id,client_id,workspace_id,permissions,expires_at,issued_at,profile) VALUES($1,'https://account.anoma.ly','user_dana','user_dana','opencode',NULL,'{read,send}',now()+interval '1 day',0,'work')", [mcp]);
+  // The same connection approved for the support inbox (api/src/support-agents.ts), and a second sign-in of it asking with a
+  // code: Operator → Agents lists the one and opens the other's approval from its link.
+  await db.query("INSERT INTO support_agent_approvals(id,grant_id,consent,user_id,expires_at,last_used_at) VALUES('sag_' || repeat('a',26),$1,'cls-consent-1','user_dana',now()+interval '30 days',now()-interval '5 minutes')", [mcp]);
+  await db.query("INSERT INTO support_agent_requests(id,user_code,grant_id,consent,user_id,expires_at) VALUES('cls-agent-request','GHJKLMNP',$1,'cls-consent-2','user_dana',now()+interval '14 minutes')", [mcp]);
   // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
   await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
   // Uma's agent came back to a spent setup token and asked her with a device code: her pages show it waiting for her.

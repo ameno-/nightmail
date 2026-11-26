@@ -53,6 +53,10 @@ const values = z.object({
   // Dashboard usage analytics (docs/analytics.md): first-party, stored in this installation's own bucket. Off by default;
   // off, the dashboard sends nothing and the ingest discards whatever arrives.
   DASHBOARD_ANALYTICS: z.enum(['on', 'off']).default('off'),
+  // Hosted: staff members' agents in the support inbox (src/support-agents.ts), each connection approved by its person
+  // from a staff dashboard session. Off by default; off, operators' MCP sign-ins list no support tools and every call
+  // is refused, approvals included.
+  SUPPORT_AGENT_ACCESS: z.enum(['on', 'off']).default('off'),
   // Hosted: the one email to a domain's owners when its records are still missing an hour after it was added
   // (src/domain-setup.ts). Off by default; the dashboard's banner and the DNS check run either way.
   DOMAIN_SETUP_REMINDER: z.enum(['on', 'off']).default('off'),
@@ -281,7 +285,7 @@ const featureSettings = {
   diskWebhook: ['PLANETSCALE_WEBHOOK_SECRET'],
   operatorAlerts: ['OPERATOR_SLACK_WEBHOOK_URL'], abuseAlerts: ['ABUSE_SLACK_WEBHOOK_URL'], reputationAlerts: ['REPUTATION_ALERT_SLACK_URL'],
   secondaryClassifier: ['JEVF_API_KEY', 'JEVF_ENDPOINT', 'JEVF_MODEL', 'JEVF_DEADLINE_MS', 'JEVF_MAX_CONCURRENCY', 'JEVF_SCREEN_THRESHOLD'],
-  dashboardAnalytics: ['DASHBOARD_ANALYTICS'], domainSetupReminder: ['DOMAIN_SETUP_REMINDER'], noDomainReminder: ['NO_DOMAIN_REMINDER'],
+  dashboardAnalytics: ['DASHBOARD_ANALYTICS'], supportAgentAccess: ['SUPPORT_AGENT_ACCESS'], domainSetupReminder: ['DOMAIN_SETUP_REMINDER'], noDomainReminder: ['NO_DOMAIN_REMINDER'],
   placementShadow: ['NIGHTMAIL_PLACEMENT_SHADOW'], abuseMonitoring: ['NIGHTMAIL_ABUSE_MONITORING'],
   uiNotes: ['UI_NOTES_SUBJECTS'], notices: ['NIGHTMAIL_NOTIFY_FROM'], diskCapacity: ['DATABASE_DISK_GB'], placementDns: ['NIGHTMAIL_PLACEMENT_DBL_ZONE'],
 } satisfies Record<string, (keyof typeof values.shape)[]>;
@@ -440,6 +444,7 @@ export function loadConfig(input: Record<string, unknown>): Config {
     hostedSendCaps: { firstWeek: EVALUATION.limit },
     domainConnect,
     allowedSubjects, staffGoogleDomains, defaultWorkspaceOwners, accountRequiredAcr: requiredAcr, uiNotesSubjects, dashboardAnalytics: v.DASHBOARD_ANALYTICS === 'on',
+    supportAgentAccess: v.MULTI_TENANT === 'true' && v.SUPPORT_AGENT_ACCESS === 'on',
     domainSetupReminder: v.MULTI_TENANT === 'true' && v.DOMAIN_SETUP_REMINDER === 'on', domainNsCheck: v.MULTI_TENANT === 'true', noDomainReminder: v.MULTI_TENANT === 'true' && v.NO_DOMAIN_REMINDER === 'on',
     analyticsPush: v.ANALYTICS_PUSH_URL && v.ANALYTICS_PUSH_SECRET ? { url: v.ANALYTICS_PUSH_URL, secret: v.ANALYTICS_PUSH_SECRET } : undefined,
     accountIssuer: v.ACCOUNT_ISSUER ?? 'https://account.anoma.ly', oauthScopePrefix: v.OAUTH_SCOPE_PREFIX, previousOrigins, byoStackPrefix: v.BYO_STACK_PREFIX,

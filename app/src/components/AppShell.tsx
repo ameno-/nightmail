@@ -272,7 +272,9 @@ export function AppShell() {
   const links: readonly NavItem[] = [...navigation.flatMap(item => item[0] === '/campaigns' ? [...newsletters, item] : [item]), ...session?.identity?.operator || session?.identity?.staffSignIn ? staffLinks : session?.identity && !access.multiTenant ? selfHostedLinks : []]
   // An issue open in the composer or its review belongs to its newsletter: that item is marked, not Campaigns.
   const shown = useShownNewsletter(), issueOf = shown && location.pathname.startsWith('/campaigns/') ? newsletters.find(([path]) => path === `/newsletters/${encodeURIComponent(shown)}`)?.[0] ?? (newsletters[0]?.[0] === '/newsletters' ? '/newsletters' : null) : null
-  const on = (path: string) => issueOf ? path === issueOf : undefined
+  // Your agents lives at /operator/agents (the address an agent's link carries) but belongs to Support, which opens it.
+  const shownUnder = location.pathname === '/operator/agents' ? '/support' : issueOf
+  const on = (path: string) => shownUnder ? path === shownUnder : undefined
   const locked = (path: string) => !access.canAdminister && adminOnly.has(path)
   const scoreHost = (scoreAbout.open || scoreAboutMounted) && <Suspense fallback={null}><ScoreAboutHost /></Suspense>
   const connectHost = (connecting || connectMounted) && <Suspense fallback={null}><ConnectAgentHost /></Suspense>

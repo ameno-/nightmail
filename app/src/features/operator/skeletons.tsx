@@ -4,6 +4,8 @@ import { Link, useLocation } from 'react-router'
 import { useSession } from '../../data/context'
 import { Button, type ButtonProps, EmptyState, FacetRail, LoadingRegion, Meter, MetricRow, PageHeader, SearchField, SectionHeader, Select, Skeleton, Sparkline, SplitPane, TableSkeleton, Tabs, type FacetGroup, type SkeletonColumn, type Tone } from '../../components/ui'
 import type { AbuseBand, DeliverabilityWindow } from '../../data/operator'
+import { CopyAction } from '../../components/motion'
+import { supportAgentPrompt } from '../../data/support-agents'
 import './operator.css'
 
 // Not an operator: no such page. An operator signed in with GitHub: staff tools need this account's Google sign-in
@@ -246,6 +248,29 @@ export const operatorTab = (view: ReturnType<typeof operatorView>) => view === '
 const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 /** UI notes has a tab only for the people the API allows (GET /v1/me uiNotes). */
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
+
+// Your agents (/operator/agents, ./agents, reached from the support inbox's menu): your own agents approved for the
+// support inbox (api/src/support-agents.ts). A phone's card shows the agent, then when it was approved, when it expires
+// and its last use, a line each (two on one line cut each other short at 320 px), and its menu at the end.
+export const agentColumnDefs: SkeletonColumn[] = [
+  { key: 'agent', label: 'Agent', card: 'title' },
+  { key: 'approved', label: 'Approved', width: 168, card: 'line' },
+  { key: 'expires', label: 'Expires', width: 168, card: 'line' },
+  { key: 'used', label: 'Last used', width: 144, card: 'line' },
+  { key: 'actions', label: '', width: 56, card: 'end' },
+]
+/** The page's header, the same loading and loaded: Copy for your agent copies the prompt that sets an agent up. */
+export const AgentsHeader = () => <PageHeader title="Your agents" backTo="/support" actions={<CopyAction className="op-agents-copy" value={supportAgentPrompt(window.location.origin)} label="Copy for your agent" text="Copy for your agent" />} />
+export const AgentsLead = () => <p className="op-agents-lead muted">Agents you approved to work the support inbox as you.</p>
+export function OperatorAgentsSkeleton() {
+  return <>
+    <AgentsHeader />
+    <LoadingRegion label="Loading agents"><div className="op-page">
+      <AgentsLead />
+      <TableSkeleton columns={agentColumnDefs} rows={3} />
+    </div></LoadingRegion>
+  </>
+}
 export const facts = ['Step', 'Score', 'Daily limit', 'Since', 'Strikes', 'Connection'] as const
 
 export const stepOptions = [{ value: '', label: 'Needs review' }, { value: 'pause', label: 'Paused' }, { value: 'restrict', label: 'Restricted' }, { value: 'warn', label: 'Warned' }, { value: 'notice', label: 'Notice' }]
@@ -505,6 +530,7 @@ export function OperatorRouteSkeleton({ operator }: { operator: 'operator' | 'op
   const { pathname, search } = useLocation(), identity = useSession()?.identity, uiNotes = identity?.uiNotes === true
   if (!operator) return identity && identity.multiTenant !== true && pathname === '/operator' ? <SelfHostedHealthSkeleton /> : null
   if (pathname === '/operator/notes') return uiNotes ? <OperatorNotesSkeleton /> : null
+  if (pathname === '/operator/agents') return <OperatorAgentsSkeleton />
   if (pathname.startsWith('/operator/abuse/')) return <OperatorClusterSkeleton actions={operator === 'operator'} />
   return pathname.startsWith('/operator/workspaces/') ? <OperatorWorkspaceSkeleton actions={operator === 'operator'} /> : <OperatorQueueSkeleton view={operatorView(search)} search={search} canAct={operator === 'operator'} />
 }

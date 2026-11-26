@@ -21,6 +21,7 @@ import { HealthView } from './health'
 // message bodies, and every address is masked. `operator:read` sees everything and changes nothing.
 // UI notes (/operator/notes) live in ./notes and load with this chunk.
 export { OperatorNotesPage } from './notes'
+export { OperatorAgentsPage } from './agents'
 export { OperatorClusterPage } from './abuse'
 export { GlassPage } from './glass'
 const useOperatorRole = () => useSession()?.identity?.operator ?? null

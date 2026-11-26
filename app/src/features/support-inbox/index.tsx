@@ -130,7 +130,7 @@ export function SupportInboxPage() {
   const empty = q || channel ? <EmptyState title="No conversation matches" action={<Button onClick={() => { setSearch(''); setChannel('') }}>Clear filters</Button>} />
     : <EmptyState title={view === 'needs_you' ? 'Nothing needs you' : 'No support conversations yet'} />
   return <>
-    <PageHeader title="Support" />
+    <PageHeader title="Support" actions={<DropdownMenu label="Support menu" title="Support" items={[{ label: 'Your agents', onSelect: () => navigate('/operator/agents') }]} />} />
     <div className="sinbox-page">
       <InboxTabs view={view} counts={counts} onChange={next => setParams(previous => { const params = new URLSearchParams(previous); if (next === 'needs_you') params.delete('view'); else params.set('view', next); return params }, { replace: true })} />
       <InboxToolbar search={search} onSearch={setSearch} channel={channel} onChannel={setChannel} />

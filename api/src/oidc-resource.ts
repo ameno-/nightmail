@@ -133,6 +133,10 @@ export type McpConnection = {
   listing: Actor;
   /** When the access token this request presented expires (epoch ms): nothing the request starts outlives it. */
   tokenExpiresAt?: number;
+  /** The account service's consent behind the presented token (its jti's first part): with keyId, the connection a staff member approves for the support inbox. */
+  consent?: string;
+  /** Its person holds the operator role: the support inbox tools are listed (support-agents.ts), and every call is checked again. */
+  operator?: boolean;
 };
 export class WorkspaceChoice extends Error {
   constructor(readonly code: 'WORKSPACE_REQUIRED' | 'WORKSPACE_NOT_FOUND' | 'WORKSPACE_AMBIGUOUS' | 'WORKSPACE_ACCESS_DENIED', message: string) { super(message); }
@@ -156,8 +160,9 @@ export function chooseWorkspace(connection: McpConnection, value: string | undef
 /** The workspaces an approval's person belongs to, with what this approval (narrowed to the presented token's scopes)
  * may do in each, and its default. */
 export async function mcpConnection(runtime: Runtime, keyId: string, scopes: Permission[] = permissions): Promise<McpConnection | null> {
-  const { rows } = await runtime.db.execute<{ user_id: string; permissions: Permission[]; chosen: string | null; last_used: string | null; id: string | null; name: string | null; slug: string | null; role: McpWorkspace['role'] | null }>(sql`
-    SELECT g.user_id, g.permissions, g.workspace_id AS chosen, u.selected_workspace_id AS last_used, w.id, w.name, w.slug, m.role
+  const { rows } = await runtime.db.execute<{ user_id: string; permissions: Permission[]; chosen: string | null; last_used: string | null; id: string | null; name: string | null; slug: string | null; role: McpWorkspace['role'] | null; platform_role: string | null }>(sql`
+    SELECT g.user_id, g.permissions, g.workspace_id AS chosen, u.selected_workspace_id AS last_used, w.id, w.name, w.slug, m.role,
+      (SELECT role FROM platform_operators WHERE user_id = g.user_id) AS platform_role
     FROM nightmail_resource_grants g JOIN nightmail_oidc_identities i ON (g.issuer, g.subject, g.user_id) = (i.issuer, i.subject, i.user_id)
     JOIN nightmail_users u ON u.id = i.user_id
     LEFT JOIN workspace_members m ON m.user_id = i.user_id AND m.role IN ('owner','admin','member')
@@ -177,7 +182,8 @@ export async function mcpConnection(runtime: Runtime, keyId: string, scopes: Per
   const listingPermissions = [...new Set(workspaces.flatMap(w => w.permissions))];
   const listing: Actor = { keyId, grantId: keyId.slice(4), workspaceId: defaultWorkspace?.id ?? best?.id ?? '', role: best?.role ?? 'member', permissions: permissions.filter(p => listingPermissions.includes(p)),
     receivingConsent: workspaces.some(w => w.role !== 'member'), domains: [], credential: 'mcp' };
-  return { keyId, userId: first.user_id, permissions: granted, workspaces, defaultWorkspace, listing };
+  return { keyId, userId: first.user_id, permissions: granted, workspaces, defaultWorkspace, listing,
+    operator: runtime.config.multiTenant && runtime.config.supportAgentAccess === true && first.platform_role === 'operator' };
 }
 
 /** Sets the workspace a connection's calls use when they name none. Only one of the person's own. */
@@ -346,5 +352,6 @@ export async function authorizeResource(runtime: Runtime, request: Request, hand
   if (!connection) return denied(403);
   if (!connection.workspaces.length) return denied(403, undefined, '', `This account belongs to no ${productName} workspace these scopes can act in. Join or create one in ${productName}, then reconnect.`);
   if (typeof claims.exp === 'number') connection.tokenExpiresAt = claims.exp * 1000;
+  if (consent) connection.consent = consent;
   return handler(connection);
 }

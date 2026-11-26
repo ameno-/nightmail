@@ -324,6 +324,28 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
   .glass-feed__list { flex: none; height: calc(12 * 52px); overflow: hidden; }
 }
 
+/* Your agents (./agents): one line above the list, and the approval dialog: the code and agent, what it can and never can
+   do, one quiet line, the checkbox. */
+.op-agents-lead { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); text-wrap: pretty; }
+.op-agent-review { display: flex; flex-direction: column; gap: var(--space-16); }
+.op-agent-facts { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-8) var(--space-16); margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.op-agent-facts dt { color: var(--color-muted); }
+.op-agent-facts dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
+.op-agent-facts code { font-size: var(--text-md); font-weight: var(--font-weight-bold); letter-spacing: .08em; }
+.op-agent-grants { display: flex; flex-direction: column; gap: var(--space-8); margin: 0; padding: 0; list-style: none; font-size: var(--text-sm); line-height: var(--leading-sm); }
+.op-agent-grants li { display: flex; align-items: flex-start; gap: var(--space-8); color: var(--color-muted); text-wrap: pretty; }
+.op-agent-grants li[data-can] { color: var(--color-text); }
+.op-agent-grants li > svg { flex-shrink: 0; height: 1lh; }
+.op-agent-grants li[data-can] > svg { color: var(--color-success); }
+.op-agent-note { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+/* The checkbox's label fills its row (44 px on a touch screen), so the whole row beside the box ticks it. */
+.op-agent-review .ui-check-field > label { align-self: stretch; display: flex; align-items: center; }
+/* Narrower than 360 px the header keeps one row: Copy for your agent becomes its icon, its name still its label. */
+@media (max-width: 359px) {
+  .ui-button.op-agents-copy { width: var(--control-height); padding: 0; }
+  .op-agents-copy .copy-action__text { display: none; }
+}
+
 @media (max-width: 1200px) { .op-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .op-grid { grid-template-columns: minmax(0, 1fr); gap: var(--page-gap); } }
 @media (max-width: 640px) {

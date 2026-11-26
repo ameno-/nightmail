@@ -29,7 +29,8 @@ export interface SupportEmail {
 }
 export interface SupportMessage {
   id: string; seq: number; author: SupportAuthor; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[]
-  staff: { userId: string; name: string | null } | null
+  /** viaAgent: their own agent wrote it for them (api/src/support-agents.ts); the customer never sees this. */
+  staff: { userId: string; name: string | null; viaAgent?: boolean } | null
   /** A note that came by email (a staff member's reply to a staff email): the verified address it came from. */
   emailFrom?: string | null; delivery: 'queued' | 'sent' | 'failed' | 'held' | null; heldReason: HeldReason | null
   files: { id: string; name: string | null; type: string | null; size: number | null }[]; email: SupportEmail | null; deliveredAt: string | null; at: string

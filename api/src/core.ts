@@ -46,6 +46,8 @@ export interface Actor {
   userId?: string;
   /** A dashboard session's sign-in proved hosted staff (a Google Workspace sign-in, account-policy.ts). Staff tools need it. */
   staff?: boolean;
+  /** An MCP sign-in: the account service's consent behind its token (oidc-resource.ts), which names the connection a staff member approved for the support inbox (support-agents.ts). */
+  mcpConsent?: string;
   role?: string; receivingConsent?:boolean; grantId?:string; tokenId?:string;
   /** An API key an agent received through agent setup (agent-setup.ts): it never administers keys or reaches billing
    *  (keyAdminRefusal, agentSetupRefusal). */
@@ -106,6 +108,8 @@ export interface Config {
   uiNotesSubjects?: { issuer: string; subject: string }[];
   /** Dashboard usage analytics (src/analytics.ts, DASHBOARD_ANALYTICS=on): off unless set. */
   dashboardAnalytics?: boolean;
+  /** Hosted: staff members' approved agents may use the support inbox over MCP (src/support-agents.ts, SUPPORT_AGENT_ACCESS=on). Off unless set. */
+  supportAgentAccess?: boolean;
   /** Hosted: email a domain's owners once when it is still pending an hour after it was added (src/domain-setup.ts, DOMAIN_SETUP_REMINDER=on). Off unless set. */
   /** Hosted: one NS lookup when a domain is added (createDomain, record-check.ts dnsZone). Always on for Hosted. */
   domainNsCheck?: boolean;

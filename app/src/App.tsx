@@ -88,6 +88,7 @@ const OverviewPage = overview.page(m => m.OverviewPage)
 const OperatorPage = operator.page(m => m.OperatorPage)
 const OperatorWorkspacePage = operator.page(m => m.OperatorWorkspacePage)
 const OperatorNotesPage = operator.page(m => m.OperatorNotesPage)
+const OperatorAgentsPage = operator.page(m => m.OperatorAgentsPage)
 const OperatorClusterPage = operator.page(m => m.OperatorClusterPage)
 const GlassPage = operator.page(m => m.GlassPage)
 const SupportInboxPage = supportInbox.page(m => m.SupportInboxPage)
@@ -205,7 +206,7 @@ const routes = <><Route path="legal/:doc?" element={<ChunkFallback.Provider valu
     <Route path="segments" element={<Moved to={() => '/audience/segments'} />} /><Route path="segments/:id" element={<Moved to={params => `/audience/segments/${id(params)}`} />} />
     <Route path="settings/webhooks" element={<Moved to={() => '/settings#webhooks'} />} /><Route path="settings/workspace" element={<Moved to={() => '/settings#workspace'} />} /><Route path="settings/account" element={<Moved to={() => '/settings#account'} />} />
     <Route path="docs/*" element={<DocsPage />} /><Route path="developer" element={<Moved to={() => '/docs'} />} />
-    <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} /><Route path="operator/abuse/:id" element={<OperatorClusterPage />} /><Route path="glass" element={<GlassPage />} />
+    <Route path="operator" element={<OperatorPage />} /><Route path="operator/notes" element={<OperatorNotesPage />} /><Route path="operator/agents" element={<OperatorAgentsPage />} /><Route path="operator/workspaces/:id" element={<OperatorWorkspacePage />} /><Route path="operator/abuse/:id" element={<OperatorClusterPage />} /><Route path="glass" element={<GlassPage />} />
     <Route path="support" element={<SupportInboxPage />} /><Route path="support/:id" element={<SupportConversationPage />} />
     <Route path="support/actions/:id" element={<><OverviewPage /><ChunkFallback.Provider value={null}><SupportActionDialog /></ChunkFallback.Provider></>} />
     <Route path="*" element={<EmptyState headingAs="h1" title="Page not found" action={<Link to="/overview">Return to overview</Link>} />} />

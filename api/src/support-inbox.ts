@@ -12,6 +12,9 @@ import type { OperatorRole } from './operator-identity.js';
 import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID, FILE_AUDIENCE, signSupportToken, type InboxState, type OutboxReply } from './support-platform.js';
 import { EXPIRES_MS, heldWhy, isKind, KINDS, validToken } from './support-approvals.js';
+import { agentOperator, SUPPORT_AGENT_CLOSES_PER_HOUR, SUPPORT_AGENT_REPLIES_PER_HOUR } from './support-agents.js';
+import { gate, LINK_ORIGINS, namedIn } from './output-gate.js';
+import { addresses, productName } from './brand.js';
 
 // The support inbox (api/README.md "Support integration"): every support conversation, its transcript and the staff
 // replies to it. Internal, in two halves:
@@ -88,7 +91,8 @@ const Message = z.object({
   id: z.string(), seq: z.number().int(), author: Author, kind: z.string().nullable(), text: z.string(),
   tools: z.array(z.object({ label: z.string(), ok: z.boolean() })).describe('The agent’s tool calls by label and outcome; never their content.'),
   attachments: z.array(z.string()).describe('Attachment IDs, held by the support platform.'),
-  staff: z.object({ userId: z.string(), name: z.string().nullable() }).nullable().describe('Who wrote a staff reply or note (null for a note by the team address alone).'),
+  staff: z.object({ userId: z.string(), name: z.string().nullable(), viaAgent: z.boolean().describe('Their own agent wrote it for them (src/support-agents.ts): show "via agent". The customer never sees this.') }).nullable()
+    .describe('Who wrote a staff reply or note (null for a note by the team address alone).'),
   emailFrom: z.string().nullable().describe('A note that came by email (a reply to a staff email): the verified address it came from. Null otherwise.'),
   delivery: Delivery.nullable().describe('A staff reply: queued until the support platform delivers it, then sent (or failed). An agent answer: sent, or held (frozen before a staff reply, never sent). A note: null.'),
   heldReason: z.enum(HELD_REASONS).nullable().describe('A held agent answer: paused (staff took over after it was written), gate (the output check held it), access (the customer’s access shrank), closed (the conversation ended first), earlier (written by an earlier build).'),
@@ -292,10 +296,10 @@ type EmailRow = { id: string; subject: string; from_address: string; from_name: 
   received_at: string; text: string | null; html_text: string | null; text_length: number; body_truncated: boolean; has_html: boolean;
   attachments: { id: string; filename: string; contentType: string; size: number; disposition: string; contentId: string | null }[]; clean: boolean };
 type MessageRow = { id: string; seq: number; author: z.infer<typeof Author>; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[];
-  staff_user_id: string | null; staff_name: string | null; email_from: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
+  staff_user_id: string | null; staff_name: string | null; via_agent?: boolean; email_from: string | null; delivery: z.infer<typeof Delivery> | null; held_reason: z.infer<typeof Message>['heldReason']; files: StoredFile[] | null;
   email?: EmailRow | null; draft_outcome: 'sent' | 'edited' | 'replaced' | 'discarded' | null; draft_by: string | null; draft_by_name: string | null; draft_at: string | null; draft_reply: string | null;
   delivered_at: string | null; created_at: string };
-const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, email_from, delivery,
+const messageColumns = sql`id, seq, author, kind, text, tools, attachments, staff_user_id, (SELECT name FROM nightmail_users WHERE id = staff_user_id) AS staff_name, agent_approval_id IS NOT NULL AS via_agent, email_from, delivery,
   held_reason, files, draft_outcome, draft_by, (SELECT name FROM nightmail_users WHERE id = draft_by) AS draft_by_name, draft_at::text AS draft_at, draft_reply,
   delivered_at::text AS delivered_at, created_at::text AS created_at`;
 /** The stored email behind a customer message (`m`), for the conversation page: its text up to EMAIL_TEXT_LIMIT and its attachments' metadata. */
@@ -316,7 +320,7 @@ function email(row: EmailRow): z.infer<typeof EmailSource> {
 const message = (m: MessageRow): z.infer<typeof Message> => {
   const named = new Map((m.files ?? []).map(f => [f.id, f]));
   return { id: m.id, seq: m.seq, author: m.author, kind: m.kind, text: m.text, tools: m.tools, attachments: m.attachments,
-    staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name } : null, emailFrom: m.email_from ?? null, delivery: m.delivery, heldReason: m.held_reason ?? null,
+    staff: m.staff_user_id ? { userId: m.staff_user_id, name: m.staff_name, viaAgent: m.via_agent === true } : null, emailFrom: m.email_from ?? null, delivery: m.delivery, heldReason: m.held_reason ?? null,
     files: m.attachments.map(id => { const f = named.get(id); return { id, name: f?.name ?? null, type: f?.type ?? null, size: f?.size ?? null }; }),
     email: m.email ? email(m.email) : null, deliveredAt: isoTime(m.delivered_at), at: isoTime(m.created_at)!,
     draft: m.draft_outcome && m.draft_by ? { outcome: m.draft_outcome, by: { userId: m.draft_by, name: m.draft_by_name }, at: isoTime(m.draft_at)!, replyId: m.draft_reply } : null };
@@ -358,13 +362,29 @@ export async function wakeSupport(config: Pick<Config, 'support' | 'publicUrl'>,
   }
 }
 
-/** The signed-in operator, from their own dashboard session: never the support platform, a key or a customer. */
-async function staff(c: Ctx, level: OperatorRole) {
+/**
+ * The signed-in operator, from their own dashboard session: never the support platform, a key or a customer. Where the
+ * route admits one (agent), also a staff member's own agent, through the connection they approved (src/support-agents.ts).
+ */
+async function staff(c: Ctx, level: OperatorRole, agent = false): Promise<OperatorIdentity> {
+  if (agent && !c.env.platformCaller && c.get('actor')?.credential === 'mcp') return agentOperator(c);
   if (c.env.platformCaller || c.get('actor')?.credential !== 'dashboard') throw operatorRequired();
   return operatorActor(c, level);
 }
-const staffContext = (c: Ctx, operator: OperatorIdentity) => operatorContext(c, { id: operator.userId, role: operator.role, via: 'console', userId: operator.userId });
+const staffContext = (c: Ctx, operator: OperatorIdentity) => operatorContext(c, { id: operator.userId, role: operator.role, via: operator.agent ? 'mcp' : 'console', userId: operator.userId,
+  ...operator.agent ? { label: 'via agent' } : {} });
+/** What an agent did is marked so on the conversation's timeline (support_events details). */
+const via = (operator: OperatorIdentity) => operator.agent ? { viaAgent: true } : {};
 const closedConversation = () => new ApiError(409, 'SUPPORT_CONVERSATION_CLOSED', 'This conversation is closed.');
+/** A staff member's agent's words refused by the output check (src/output-gate.ts): nothing is queued, and the trail records the reasons. */
+class CheckRefusal extends ApiError {
+  constructor(readonly reasons: string[], message: string) { super(422, 'SUPPORT_AGENT_REPLY_REFUSED', message, 'text'); this.details = [{ reasons }]; }
+}
+/** The check's reasons in an agent's words. */
+const CHECK_WORDS: Record<string, string> = { 'email address outside the conversation': 'an email address that isn’t this conversation’s', 'credential-shaped string': 'something shaped like a key or token',
+  'long opaque string': 'a long encoded string', 'internal hostname': 'an internal hostname', 'ID outside the grant': 'an ID from outside this conversation', 'internal name': 'an internal name',
+  'harness markup': 'tool markup such as <untrusted>', 'confirmation link': 'a link to a confirm page', [`link outside ${productName}`]: `a link outside ${productName}` };
+const listed = (items: string[]) => items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : items[0]!;
 /** Agent feedback (src/feedback.ts) has no support platform or agent behind it: nobody to reply to, pause or wake. */
 const noAgent = () => new ApiError(409, 'SUPPORT_AGENT_FEEDBACK', 'This is agent feedback: there is no customer to reply to and no support agent to pause, hand back or wake. Resolve its ticket or mark it done.');
 
@@ -537,7 +557,10 @@ export function registerSupportInbox(app: App) {
     }) },
     responses: { 200: response(z.object({ data: z.array(Item), nextCursor: z.string().nullable(), replyAvailable: z.boolean(),
       counts: z.object({ needsYou: z.number().int(), agent: z.number().int(), waiting: z.number().int() }).describe('The needs_you, agent and waiting views’ sizes, whatever this request’s filters.') })), ...errors } }), async c => {
-    const operator = await staff(c, 'operator:read'), me = operator.userId;
+    const operator = await staff(c, 'operator:read', true), me = operator.userId;
+    // An agent's reading of the inbox is on the trail too; a person's opening of the list isn't (each conversation is).
+    if (operator.agent) await c.env.db.execute(auditInsert(staffContext(c, operator), { action: 'support.inbox_list', workspaceId: null, userId: operator.userId,
+      details: { view: c.req.valid('query').view, agent: operator.agent.approvalId }, internal: true }));
     const q = c.req.valid('query'), binding = `support-inbox:${q.view}:${q.channel ?? ''}:${q.status ?? ''}:${q.q ?? ''}`, after = readCursor(q.cursor, binding);
     const pattern = q.q ? `%${q.q.replace(/[\\%_]/g, m => '\\' + m)}%` : null, triaged = q.view === 'needs_you';
     const filters: SQL[] = [{
@@ -569,17 +592,17 @@ export function registerSupportInbox(app: App) {
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'get', path: '/v1/operator/support-inbox/{id}', operationId: 'operatorGetSupportConversation',
     description: 'One conversation in one read: its timeline (every message, each customer email as it arrived, and what happened besides), the agent’s ticket brief, and who the customer is (verification, workspaces and roles, their other conversations and tickets, recent activity, notes). Each read is on the audit trail.',
     request: { params: ConversationParam }, responses: { 200: response(Detail), ...errors } }), async c => {
-    const operator = await staff(c, 'operator:read'), id = c.req.valid('param').id;
+    const operator = await staff(c, 'operator:read', true), id = c.req.valid('param').id;
     type Json = Record<string, unknown>;
     const viewed = auditInsert(staffContext(c, operator), { action: 'support.inbox_view', workspaceId: null, userId: sql`coalesce(conv.user_id, ${operator.userId})`,
-      target: { type: 'support_conversation', id }, ticketRef: id, internal: true }, { from: sql`conv` });
+      target: { type: 'support_conversation', id }, ticketRef: id, internal: true, ...operator.agent ? { details: { agent: operator.agent.approvalId } } : {} }, { from: sql`conv` });
     const { rows: [row] } = await c.env.db.execute<{ item: ItemRow; evidence: Json; thread_id: string | null; content_workspace_id: string | null; page: string | null; messages: MessageRow[];
       user: Json | null; workspaces: Json[]; conversations: (Json & { ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; ticket_resolved_at: string | null })[];
       activity: Json[]; notes: Json[]; available: boolean; events: { id: string; kind: z.infer<typeof Event>['kind']; user_id: string | null; name: string | null; details: Json; at: string }[]; brief: z.infer<typeof Brief> | null;
       reply_address: string | null; reply_verified: boolean }>(sql`WITH conv AS (SELECT * FROM support_conversations WHERE id = ${id}), logged AS (${viewed})
       SELECT (SELECT row_to_json(i) FROM (SELECT ${itemColumns} FROM ${itemFrom(operator.userId)} WHERE c.id = conv.id) i) AS item,
         conv.evidence, conv.thread_id, conv.content_workspace_id, (SELECT page FROM support_handoffs WHERE conversation_id = conv.id ORDER BY created_at LIMIT 1) AS page,
-        (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.email_from, m.delivery,
+        (SELECT coalesce(json_agg(m ORDER BY m.seq), '[]') FROM (SELECT m.id, m.seq, m.author, m.kind, m.text, m.tools, m.attachments, m.staff_user_id, su.name AS staff_name, m.agent_approval_id IS NOT NULL AS via_agent, m.email_from, m.delivery,
           m.held_reason, m.files, CASE WHEN m.source_message_id IS NOT NULL THEN ${emailOf} END AS email,
           m.draft_outcome, m.draft_by, (SELECT name FROM nightmail_users WHERE id = m.draft_by) AS draft_by_name, m.draft_at::text AS draft_at, m.draft_reply,
           m.delivered_at::text AS delivered_at, m.created_at::text AS created_at FROM support_messages m LEFT JOIN nightmail_users su ON su.id = m.staff_user_id
@@ -633,10 +656,10 @@ export function registerSupportInbox(app: App) {
   // Every staff change is one transaction with its internal audit row, and repeats safely with an Idempotency-Key.
   type Locked = { status: string; channel: string; user_id: string | null; agent_state: string; ticket_id: string | null; ticket_resolved_at: string | null; done_at: string | null; done_by: string | null; undoable: boolean };
   const changeHeaders = z.object({ 'idempotency-key': z.string().min(1).max(200).optional() });
-  async function change<T>(c: Ctx, id: string, action: string, work: (tx: DbExecutor, operator: OperatorIdentity, conversation: Locked) => Promise<{ result: T; message?: string }>, body?: unknown) {
-    const operator = await staff(c, 'operator');
+  async function change<T>(c: Ctx, id: string, action: string, work: (tx: DbExecutor, operator: OperatorIdentity, conversation: Locked) => Promise<{ result: T; message?: string }>, body?: unknown, agent = false) {
+    const operator = await staff(c, 'operator', agent);
     let subject: string | null = null, messageId: string | undefined;
-    return mutate(c, operator, '', body, async tx => {
+    try { return await mutate(c, operator, '', body, async tx => {
       const { rows: [conversation] } = await tx.execute<Locked>(sql`SELECT status, channel, user_id, agent_state, ticket_id, ticket_resolved_at::text AS ticket_resolved_at, done_at::text AS done_at,
           done_by, done_at > now() - ${UNDO_WINDOW} AS undoable
         FROM support_conversations WHERE id = ${id} FOR NO KEY UPDATE`);
@@ -646,27 +669,74 @@ export function registerSupportInbox(app: App) {
       messageId = done.message;
       return { result: done.result, audit: { action, reason: action, ticketRef: id } };
     }, (tx, audit) => tx.execute(auditInsert(staffContext(c, operator), { action: audit.action, workspaceId: null, userId: subject ?? operator.userId, target: { type: 'support_conversation', id },
-      details: messageId ? { message: messageId } : undefined, ticketRef: id, internal: true })));
+      details: messageId || operator.agent ? { ...messageId ? { message: messageId } : {}, ...operator.agent ? { agent: operator.agent.approvalId } : {} } : undefined, ticketRef: id, internal: true }))); }
+    catch (error) {
+      // What the check refused is on the trail as the person, via agent, with its reasons and never the text: written
+      // after the change's own transaction rolled back.
+      if (error instanceof CheckRefusal && operator.agent) await c.env.db.execute(auditInsert(staffContext(c, operator), { action: 'support.agent_refused', workspaceId: null, userId: subject ?? operator.userId,
+        target: { type: 'support_conversation', id }, details: { attempted: action, reasons: error.reasons, agent: operator.agent.approvalId }, ticketRef: id, internal: true }));
+      throw error;
+    }
   }
 
   /**
    * Queues a staff reply in the caller's change: refused on a closed conversation or while the support platform is not
    * pulling replies; it pauses the agent as this staff member, undoes Done, and its author has read everything up to it.
+   * Written by their own agent, it counts against SUPPORT_AGENT_REPLIES_PER_HOUR and is marked "via agent".
    */
   async function queueReply(tx: DbExecutor, operator: OperatorIdentity, conversation: Locked, id: string, text: string) {
     if (conversation.status === 'closed') throw closedConversation();
     if (conversation.channel === 'agent_feedback') throw noAgent();
     if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
       throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
+    if (operator.agent) { await agentCheck(tx, operator, id, text); await agentAllowed(tx, operator.userId, 'replies'); }
     const messageId = newMessageId();
-    if (conversation.agent_state === 'active') await tx.execute(event(id, 'paused', operator.userId, { by: 'staff', reply: true }));
+    if (conversation.agent_state === 'active') await tx.execute(event(id, 'paused', operator.userId, { by: 'staff', reply: true, ...via(operator) }));
     const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (
         UPDATE support_conversations SET messages = messages + 1, last_message_at = now(), agent_state = 'paused', paused_by = ${operator.userId},
           paused_at = CASE WHEN agent_state = 'paused' AND paused_by = ${operator.userId} THEN paused_at ELSE now() END, done_at = NULL, done_by = NULL
         WHERE id = ${id} RETURNING messages), seen AS (${markRead(operator.userId, id, sql`(SELECT messages FROM c)`)})
-      INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, delivery) SELECT ${messageId}, ${id}, c.messages, 'staff', 'reply', ${text}, ${operator.userId}, 'queued' FROM c
+      INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, delivery, agent_approval_id)
+      SELECT ${messageId}, ${id}, c.messages, 'staff', 'reply', ${text}, ${operator.userId}, 'queued', ${operator.agent?.approvalId ?? null} FROM c
       RETURNING ${messageColumns}`);
     return message(row!);
+  }
+  /**
+   * What an agent does for its person within their hourly allowances, counted from the audit trail (each action an
+   * agent takes is a row via mcp), one at a time per person and allowance: replies (a reply or a held answer sent) and
+   * closes (marking done, which also resolves the ticket, or discarding a held answer: the quiet ones nobody would notice).
+   */
+  const ALLOWANCES = {
+    replies: { actions: ['support.reply', 'support.draft_send'], limit: SUPPORT_AGENT_REPLIES_PER_HOUR, code: 'SUPPORT_AGENT_REPLY_LIMIT',
+      message: `Your agent has sent ${SUPPORT_AGENT_REPLIES_PER_HOUR} replies for you in the last hour, the most it may. Nothing was sent. Reply from the dashboard, or try again later.` },
+    closes: { actions: ['support.done', 'support.draft_discard'], limit: SUPPORT_AGENT_CLOSES_PER_HOUR, code: 'SUPPORT_AGENT_CLOSE_LIMIT',
+      message: `Your agent has marked conversations done or discarded held answers ${SUPPORT_AGENT_CLOSES_PER_HOUR} times for you in the last hour, the most it may. Nothing was changed. Do it from the dashboard, or try again later.` },
+  } as const;
+  async function agentAllowed(tx: DbExecutor, userId: string, kind: keyof typeof ALLOWANCES) {
+    const allowance = ALLOWANCES[kind];
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`support-agent-${kind}:${userId}`}, 0))`);
+    const { rows: [used] } = await tx.execute<{ count: number; wait: number | null }>(sql`SELECT count(*)::int AS count, ceil(extract(epoch FROM min(at) + interval '1 hour' - now()))::int AS wait
+      FROM audit_events WHERE actor_type = 'operator' AND actor_id = ${userId} AND via = 'mcp' AND action = ANY(${sql.param([...allowance.actions])}::text[]) AND at > now() - interval '1 hour'`);
+    if (used!.count >= allowance.limit) throw Object.assign(new ApiError(429, allowance.code, allowance.message), { retryAfterSeconds: Math.max(1, used!.wait ?? 60) });
+  }
+  /**
+   * What an agent sends a customer passes the support AI's own output check (src/output-gate.ts) before anything is
+   * queued, scoped to this conversation: its customer's addresses; its ID, its ticket and the workspaces (IDs and names)
+   * staff see on it, the one in scope and the customer's own; what the customer wrote in it (their messages and the
+   * subject); links only to Nightmail's own sites; no prompt to leak. The staff member's own name is theirs to sign with.
+   */
+  async function agentCheck(tx: DbExecutor, operator: OperatorIdentity, id: string, text: string) {
+    const { rows: [scope] } = await tx.execute<{ emails: string[]; ids: string[]; names: string[]; written: string; own: string | null }>(sql`WITH c AS (SELECT * FROM support_conversations WHERE id = ${id}),
+        theirs AS (SELECT w.id, w.name FROM workspaces w WHERE w.id = (SELECT workspace_id FROM c)
+          OR w.id IN (SELECT m.workspace_id FROM workspace_members m WHERE m.user_id = (SELECT user_id FROM c) ORDER BY m.workspace_id LIMIT 50))
+      SELECT array_remove(ARRAY[(SELECT email FROM nightmail_users WHERE id = c.user_id), c.pending_address], NULL) AS emails,
+        array_remove(ARRAY[c.id, c.ticket_id], NULL) || coalesce((SELECT array_agg(id) FROM theirs), '{}') AS ids, coalesce((SELECT array_agg(name) FROM theirs), '{}') AS names,
+        concat_ws(E'\n', c.subject, (SELECT string_agg(m.text, E'\n' ORDER BY m.seq) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer')) AS written,
+        (SELECT name FROM nightmail_users WHERE id = ${operator.userId}) AS own
+      FROM c`);
+    const checked = gate(text, { emails: scope!.emails, allowedIds: scope!.ids, allowedNames: scope!.names, theirs: namedIn(scope!.written), promptFragments: [], supportAddress: addresses.support,
+      linkOrigins: LINK_ORIGINS, ownName: scope!.own });
+    if (!checked.ok) throw new CheckRefusal(checked.reasons, `Nothing was sent. The reply has ${listed(checked.reasons.map(reason => CHECK_WORDS[reason] ?? reason))}. Send it from the dashboard if it is intended.`);
   }
   const wakeAfter = (c: Ctx, id: string) => c.env.deferNudge ? c.env.deferNudge(async () => { await wakeSupport(c.env.config, id); }) : wakeSupport(c.env.config, id);
 
@@ -678,7 +748,7 @@ export function registerSupportInbox(app: App) {
     const reply = await change(c, id, 'support.reply', async (tx, operator, conversation) => {
       const queued = await queueReply(tx, operator, conversation, id, body.text);
       return { result: queued, message: queued.id };
-    }, body);
+    }, body, true);
     await wakeAfter(c, id);
     return c.json(reply, 201);
   });
@@ -708,6 +778,9 @@ export function registerSupportInbox(app: App) {
    */
   async function sendDraft(tx: DbExecutor, operator: OperatorIdentity, conversation: Locked, id: string, messageId: string, edited?: string) {
     const draft = await heldDraft(tx, id, messageId), written = draft.text.trim(), asWritten = conversation.channel === 'email' ? plainText(written) : written;
+    // What the check held stays held for an agent, as written or edited: a person sends it from the dashboard.
+    if (operator.agent && draft.reason === 'gate') throw new CheckRefusal(['held by the output check'],
+      'Nothing was sent. The support AI’s answer was held by the same check, so only a person can send it, from the dashboard. Write a fresh reply instead.');
     const unchanged = edited === undefined || edited === written || edited === asWritten, fresh = draft.reason ? FRESH_REPLY[draft.reason] : undefined;
     if (fresh && unchanged) throw new ApiError(409, 'SUPPORT_DRAFT_FRESH_REPLY', `${fresh}, so it can’t be sent. Write a fresh reply.`, 'text');
     // As written, it would answer an earlier moment than a reply the customer already has: staff edit it, or discard it.
@@ -740,7 +813,7 @@ export function registerSupportInbox(app: App) {
     const reply = await change(c, id, 'support.draft_send', async (tx, operator, conversation) => {
       const queued = await sendDraft(tx, operator, conversation, id, messageId, body.text);
       return { result: queued, message: queued.id };
-    }, body);
+    }, body, true);
     await wakeAfter(c, id);
     return c.json(reply, 201);
   });
@@ -750,9 +823,10 @@ export function registerSupportInbox(app: App) {
     const { id, messageId } = c.req.valid('param');
     return c.json(await change(c, id, 'support.draft_discard', async (tx, operator) => {
       await heldDraft(tx, id, messageId);
+      if (operator.agent) await agentAllowed(tx, operator.userId, 'closes');
       const { rows: [row] } = await tx.execute<MessageRow>(sql`UPDATE support_messages SET draft_outcome = 'discarded', draft_by = ${operator.userId}, draft_at = now() WHERE id = ${messageId} RETURNING ${messageColumns}`);
       return { result: message(row!), message: messageId };
-    }), 200);
+    }, undefined, true), 200);
   });
 
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/pause', operationId: 'operatorPauseSupportAgent',
@@ -777,9 +851,9 @@ export function registerSupportInbox(app: App) {
       if (conversation.channel === 'agent_feedback') throw noAgent();
       if (conversation.agent_state !== 'paused') throw new ApiError(409, 'NOT_PAUSED', 'The agent is not paused here.');
       await tx.execute(sql`UPDATE support_conversations SET agent_state = 'active', paused_by = NULL, paused_at = NULL WHERE id = ${id}`);
-      await tx.execute(event(id, 'resumed', operator.userId));
+      await tx.execute(event(id, 'resumed', operator.userId, via(operator)));
       return { result: await one(tx, id, operator.userId) };
-    }), 200);
+    }, undefined, true), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'post', path: '/v1/operator/support-inbox/{id}/resolve', operationId: 'operatorResolveSupportTicket',
     description: 'Mark the conversation’s ticket resolved (the operator role).',
@@ -803,14 +877,15 @@ export function registerSupportInbox(app: App) {
       const open = conversation.ticket_id && !conversation.ticket_resolved_at ? conversation.ticket_id : null;
       if (body.ticketId !== undefined && body.ticketId !== open)
         throw new ApiError(409, 'SUPPORT_TICKET_CHANGED', 'This conversation’s ticket changed since it was shown. Open it again before marking it done.');
+      if (operator.agent) await agentAllowed(tx, operator.userId, 'closes');
       await tx.execute(sql`UPDATE support_conversations SET done_at = now(), done_by = ${operator.userId},
           done_ticket_id = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ticket_id END,
           ticket_resolved_by = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ${operator.userId} ELSE ticket_resolved_by END,
           ticket_resolved_at = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN now() ELSE ticket_resolved_at END
         WHERE id = ${id}`);
-      await tx.execute(event(id, 'done', operator.userId, open ? { ticketId: open } : {}));
+      await tx.execute(event(id, 'done', operator.userId, { ...open ? { ticketId: open } : {}, ...via(operator) }));
       return { result: await one(tx, id, operator.userId) };
-    }, body), 200);
+    }, body, true), 200);
   });
   app.openapi(createRoute({ hide: true, tags, security: sessionSecurity, method: 'delete', path: '/v1/operator/support-inbox/{id}/done', operationId: 'operatorUndoSupportConversationDone',
     description: `Undo Mark done (the operator role, the operator who marked it, within ${UNDO_MINUTES} minutes): the conversation is back where it was, and a ticket that Done resolved is open again.`,
@@ -850,10 +925,11 @@ export function registerSupportInbox(app: App) {
       const messageId = newMessageId();
       const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (UPDATE support_conversations SET messages = messages + 1 WHERE id = ${id} RETURNING messages),
           seen AS (${markRead(operator.userId, id, sql`(SELECT messages FROM c)`)})
-        INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id) SELECT ${messageId}, ${id}, c.messages, 'staff', 'note', ${body.text}, ${operator.userId} FROM c
+        INSERT INTO support_messages(id, conversation_id, seq, author, kind, text, staff_user_id, agent_approval_id)
+        SELECT ${messageId}, ${id}, c.messages, 'staff', 'note', ${body.text}, ${operator.userId}, ${operator.agent?.approvalId ?? null} FROM c
         RETURNING ${messageColumns}`);
       return { result: message(row!), message: messageId };
-    }, body);
+    }, body, true);
     return c.json(note, 201);
   });
 

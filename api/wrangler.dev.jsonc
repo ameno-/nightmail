@@ -41,6 +41,10 @@
     "UI_NOTES_SUBJECTS": "",
     // Dashboard usage analytics (docs/analytics.md): batches go to the ANALYTICS bucket, never Postgres. "off" discards them.
     "DASHBOARD_ANALYTICS": "on",
+    // Staff members' agents in the support inbox (src/support-agents.ts): an operator's MCP sign-in lists the support
+    // tools, and each connection works only once its person approves it from a staff dashboard session (Operator →
+    // Agents). "off" refuses every agent at once, approvals included.
+    "SUPPORT_AGENT_ACCESS": "on",
     // The domain setup reminder email (src/domain-setup.ts). Off: turning it on sends real email to customers.
     // The DNS check and the dashboard's banner run either way.
     "DOMAIN_SETUP_REMINDER": "off",

@@ -48,9 +48,11 @@ export function InboxToolbar({ search = '', onSearch, channel = '', onChannel, d
     <Select className="sinbox-channel-select" aria-label="Channel" value={channel || 'all'} options={channelOptions} disabled={disabled || !onChannel} onValueChange={value => onChannel?.(value === 'all' ? '' : value as Channel)} />
   </div></div>
 }
+/** The menu's place in the header (Your agents, ../operator/agents), held while the inbox loads. */
+export const SupportMenuSkeleton = () => <IconButton label="Support menu" disabled><MoreHorizontal size={16} /></IconButton>
 export function SupportInboxSkeleton({ view, channel }: { view: InboxView; channel: Channel | '' }) {
   return <>
-    <PageHeader title="Support" />
+    <PageHeader title="Support" actions={<SupportMenuSkeleton />} />
     <LoadingRegion label="Loading support conversations"><div className="sinbox-page">
       <InboxTabs view={view} counts={null} disabled />
       <InboxToolbar channel={channel} disabled />

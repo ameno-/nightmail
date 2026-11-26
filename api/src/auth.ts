@@ -27,6 +27,8 @@ export function dispatchAsMailboxAccess(app:Pick<App,'fetch'>,request:Request,ru
   const delegated={...withOuterRequest(runtime,origin),[delegatedMailbox]:access}; return app.fetch(request,delegated);
 }
 type DelegatedRuntime = Runtime & { [delegatedActor]?: Actor };
+/** The MCP sign-in an in-process dispatch acts as (dispatchAsActor), or undefined for any request from outside. */
+export const delegatedIdentity = (runtime: Runtime) => (runtime as DelegatedRuntime)[delegatedActor];
 export async function dispatchAsActor(app: Pick<App, 'fetch'>, request: Request, runtime: Runtime, identity: Actor, origin: RequestOrigin): Promise<Response> {
   if (identity.credential !== 'mcp' || !identity.keyId.startsWith('mcp_')) throw denied('PERMISSION_DENIED', 'Invalid delegated API principal.', { credential: 'signIn' });
   const delegatedRuntime: DelegatedRuntime = { ...withOuterRequest(runtime, origin), [delegatedActor]: identity };
