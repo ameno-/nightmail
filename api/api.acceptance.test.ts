@@ -34611,6 +34611,41 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       admission.mock.restore();
     });
   });
+  test('abuse monitoring: the sample remembers how far it read a workspace even when none of its mail was eligible, so a workspace whose mail is all its own costs nothing the next run, while one that then mails others is sampled at the next run; the mark never passes a transaction still open, so mail that becomes visible late is still read', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const h = await abuseHarness(runtime, db), { abuse } = h;
+      await h.hourly();
+      const sample = () => abuse.runAbuseStage(runtime, 'sample');
+      const marks = async (ids: string[]) => (await db.query('SELECT workspace_id AS id,sampled_through::text AS through FROM abuse_sampling WHERE workspace_id=ANY($1) ORDER BY workspace_id', [ids])).rows as { id: string; through: string }[];
+      // Three workspaces whose mail so far is all their own (a campaign test each: never fingerprinted).
+      const own = [await h.workspace('own-mail-1', [await h.user('own-mail-1')]), await h.workspace('own-mail-2', [await h.user('own-mail-2')]), await h.workspace('own-mail-3', [await h.user('own-mail-3')])];
+      for (const workspace of own) await h.mail({ workspace, snapshot: { testCampaignId: 'cmp_fixture' } });
+      const first = await sample();
+      assert.deepEqual([first.checked, first.items, (await marks(own)).length], [3, 0, 3], 'Read once, nothing to fingerprint, and how far it read is recorded.');
+      assert.deepEqual([(await sample()).checked, (await marks(own)).map(m => m.through)], [0, (await marks(own)).map(m => m.through)], 'The next run reads none of them.');
+      // One of them mails someone outside it: sampled at the next run, and only it is read.
+      await h.mail({ workspace: own[0]!, html: h.offer(1) });
+      const third = await sample();
+      assert.deepEqual([third.checked, third.items, (await h.kinds('workspace', own[0]!)).includes('content')], [1, 1, true]);
+      // A transaction still open (it could be writing an accepted event stamped now, visible only when it commits): the
+      // mark stops before its start, though this workspace's newest mail is later, so its mail is read again next run.
+      const open = new pg.Client({ connectionString: process.env.DATABASE_URL }); await open.connect();
+      try {
+        await open.query('BEGIN'); await open.query('SELECT txid_current()');
+        const started = (await open.query('SELECT xact_start::text AS at FROM pg_stat_activity WHERE pid=pg_backend_pid()')).rows[0].at as string;
+        await h.mail({ workspace: own[1]!, snapshot: { testCampaignId: 'cmp_fixture' } });
+        assert.equal((await sample()).checked, 1);
+        const [held] = (await db.query(`SELECT s.sampled_through<$2::timestamptz AS before_open,(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1)>$2::timestamptz AS newest_after
+          FROM abuse_sampling s WHERE s.workspace_id=$1`, [own[1], started])).rows;
+        assert.deepEqual(held, { before_open: true, newest_after: true }, 'Never past the start of a transaction still open.');
+        assert.equal((await sample()).checked, 1, 'Read again while it is open: nothing it might commit is skipped.');
+      } finally { await open.query('ROLLBACK').catch(() => {}); await open.end(); }
+      // Once it is gone, one more read moves the mark up to the newest mail, and the run after reads nothing.
+      assert.equal((await sample()).checked, 1);
+      assert.deepEqual([(await sample()).checked, (await db.query('SELECT s.sampled_through=(SELECT max(created_at) FROM sending_email_events WHERE workspace_id=$1) AS caught_up FROM abuse_sampling s WHERE s.workspace_id=$1', [own[1]])).rows[0].caught_up], [0, true]);
+    });
+  });
+
   test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack message is one line and three bullets with no personal data; both review and high alerts post through the job queue, to the abuse webhook or else the operator alerts\' one, each once, a refused post retried and given back its place, the last refusal and a missing webhook marked failed; operators read the outbox and Watch or Dismiss an alert; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const h = await abuseHarness(runtime, db), { payment, signIn, abuse } = h, wid = runtime.config.workspaceId, { loadConfig } = await import('./src/config.js'), alerts = await import('./src/abuse-alerts.js'), { REASON_CODES } = await import('./src/abuse-clusters.js');

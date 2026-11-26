@@ -352,7 +352,7 @@ export async function linkDomains(html?: string | null, text?: string | null): P
 const SIGN_INS_A_RUN = 200, PAYMENTS_A_RUN = 200, WORKSPACE_PAGE = 200, WORKSPACE_PAGES = 10, SAMPLED_A_RUN = 100, MESSAGES_A_WORKSPACE = 6, NEW_ROWS_A_RUN = 5000;
 type Cursors = { signIns?: { at: string; key: string }; payments?: { at: string; id: string }; workspaces?: string };
 type SignInPosition = { at: string; key: string; source_key: string };
-type Run = { signInSeek: SignInPosition | null; scanningSignIns: boolean; batchSize: number; advanced: boolean; since: string; cursors: Cursors; items: number; added: number; deadline: number; cuts: Record<string, Cut> };
+type Run = { signInSeek: SignInPosition | null; scanningSignIns: boolean; batchSize: number; advanced: boolean; since: string; cursors: Cursors; items: number; added: number; deadline: number; cuts: Record<string, Cut>; /** Workspaces the sample read mail of. */ checked?: number };
 /** Why a stage stopped with work left: its share of the time ran out, or it reached a per-run limit. */
 export type Cut = 'time' | 'limit' | 'retry';
 const spent = (run: Run) => Date.now() >= run.deadline || run.added >= NEW_ROWS_A_RUN;
@@ -588,12 +588,27 @@ const ownMail = (mail: SQL) => sql`(${mail}.snapshot @> '{"screenVerdict":{"stat
  * root every workspace shares), dated by the acceptance. Never mail accepted before monitoring
  * started, before the workspace's last erasure or more than a day ago, and never a message (or a campaign's frozen
  * review) created before monitoring started, so nothing scheduled earlier is read. Workspaces are visited in ID order
- * from a stored cursor, a page at a time.
+ * from a stored cursor, a page at a time. A workspace is read only when it accepted mail past how far it was last read
+ * (abuse_sampling.sampled_through), recorded whether or not any of that mail was eligible: one whose mail is all its own,
+ * or not through the Hosted pool, costs nothing again until it accepts more.
  */
 async function sampleSends(runtime: Hosted, run: Run) {
   let sampled = 0;
   // No time left for it at all: said so, as any stop with work left.
   if (spent(run)) { cut(run, 'sample'); return 0; }
+  // How far a read can be recorded without skipping mail that becomes visible late. An accepted event is stamped by the
+  // transaction that writes it (the dispatcher's clock_timestamp()), so one this run cannot see yet belongs to a
+  // transaction open now, stamped at or after that transaction's start, or to one that begins later, stamped later
+  // still. So everything stamped before the oldest open writer's start (or before now, with none open) that will ever
+  // be visible already is, for every read below, which comes after this one; a mark never passes it.
+  // (pg_stat_activity is a snapshot taken at its first read in a transaction: cleared first, so it is current here.)
+  // If it cannot be read, a workspace with no eligible mail is not recorded, as before.
+  let settled: string | null = null;
+  try {
+    const { rows: [visible] } = await bounded(runtime, async tx => { await tx.execute(sql`SELECT pg_stat_clear_snapshot()`); return tx.execute<{ at: string }>(sql`SELECT ${utc(sql`(least(clock_timestamp(),(SELECT min(xact_start) FROM pg_stat_activity
+      WHERE datname=current_database() AND backend_xid IS NOT NULL AND pid<>pg_backend_pid()))-interval '1 microsecond')`)} AS at`); });
+    settled = visible?.at ?? null;
+  } catch (error) { if (timeError(error)) throw error; log('warn', { code: 'ABUSE_STEP_FAILED', step: 'visibility' }); }
   const floor = (workspaceId: SQL) => sql`greatest(coalesce((SELECT s.sampled_through FROM abuse_sampling s WHERE s.workspace_id=${workspaceId}),'-infinity'::timestamptz),
     coalesce((SELECT f.ignore_through FROM abuse_floors f WHERE f.entity_type='workspace' AND f.entity_id=${workspaceId}),'-infinity'::timestamptz),${run.since}::timestamptz,now()-interval '1 day')`;
   for (let page = 0; page < WORKSPACE_PAGES && sampled < SAMPLED_A_RUN && !spent(run); page++) {
@@ -609,7 +624,7 @@ async function sampleSends(runtime: Hosted, run: Run) {
       if (sampled >= SAMPLED_A_RUN || spent(run)) { cut(run, 'sample'); return sampled; }
       // A workspace whose sample fails or times out is skipped until the cursor comes round again.
       try {
-        const added = await bounded(runtime, tx => sampleWorkspace(runtime, tx, run, workspace.id, floor(sql`${workspace.id}`)));
+        const added = await bounded(runtime, tx => sampleWorkspace(runtime, tx, run, workspace.id, floor(sql`${workspace.id}`), settled));
         run.advanced = true; // The workspace cursor committed even if no mail qualified.
         if (added !== null) { run.added += added; run.items = ++sampled; }
       } catch (error) {
@@ -626,17 +641,24 @@ async function sampleSends(runtime: Hosted, run: Run) {
   }
   return sampled;
 }
-async function sampleWorkspace(runtime: Hosted, tx: AbuseTx, run: Run, workspaceId: string, floor: SQL) {
+async function sampleWorkspace(runtime: Hosted, tx: AbuseTx, run: Run, workspaceId: string, floor: SQL, settled: string | null) {
   const workspace: Entity = { type: 'workspace', id: workspaceId }, guards = [workspace as Guard];
   // Under the workspace's lock, its exclusions and floor are read again before any content is.
   await lockGuards(tx, guards);
+  run.checked = (run.checked ?? 0) + 1;
+  // With nothing eligible: read through its newest accepted mail, never past what is surely visible (settled), never
+  // back from an earlier read.
+  const readThrough = settled === null ? null : sql`INSERT INTO abuse_sampling(workspace_id,sampled_through) SELECT ${workspaceId},least(max(v.created_at),${settled}::timestamptz) FROM sending_email_events v
+    WHERE v.workspace_id=${workspaceId} AND v.type='accepted' AND NOT v.simulated AND v.created_at>${floor} HAVING max(v.created_at) IS NOT NULL
+    ON CONFLICT (workspace_id) DO UPDATE SET sampled_through=greatest(abuse_sampling.sampled_through,excluded.sampled_through),sampled_at=clock_timestamp()`;
   const { rows: recent } = await tx.execute<{ id: string; review_id: string | null; campaign_id: string | null; subject: string; at: string }>(sql`WITH position AS (${samplePosition(workspaceId)}) SELECT e.id,e.review_id,e.campaign_id,e.subject,${utc(sql`v.created_at`)} AS at
     FROM sending_email_events v JOIN sending_emails e ON e.workspace_id=v.workspace_id AND e.id=v.email_id
     LEFT JOIN sending_campaign_reviews r ON r.workspace_id=e.workspace_id AND r.id=e.review_id
     WHERE v.workspace_id=${workspaceId} AND v.type='accepted' AND NOT v.simulated AND v.created_at>${floor} AND NOT ${excluded(guards)} AND ${hostedAccepted(sql`e`)} AND NOT ${ownMail(sql`e`)}
       AND e.created_at>=${run.since}::timestamptz AND (e.review_id IS NULL OR r.created_at>=${run.since}::timestamptz)
     ORDER BY v.created_at DESC LIMIT 40`);
-  if (!recent.length) return null;
+  // Nothing to fingerprint (all its own mail, or not through the Hosted pool): recorded, so it is not read again for it.
+  if (!recent.length) { if (readThrough) await tx.execute(readThrough); return null; }
   // One message per campaign or subject first, so a single large campaign doesn't use up the sample.
   const picked = [...new Map(recent.map(row => [row.review_id ?? row.campaign_id ?? row.subject, row])).values()].slice(0, MESSAGES_A_WORKSPACE);
   const { rows: mail } = await tx.execute<{ id: string; sender: string; html: string | null; text: string | null }>(sql`SELECT e.id,e.from_address AS sender,
@@ -656,6 +678,8 @@ async function sampleWorkspace(runtime: Hosted, tx: AbuseTx, run: Run, workspace
   await trimSignals(tx, workspace);
   await linkEntity(tx, workspace, signals);
   await wakeClusters(tx, [workspace]);
+  // Sampled: through the newest message it fingerprinted, as before (re-reading sampled mail would wake its links and
+  // clusters again for nothing).
   await tx.execute(sql`INSERT INTO abuse_sampling(workspace_id,sampled_through) VALUES(${workspaceId},${recent[0]!.at}::timestamptz)
     ON CONFLICT (workspace_id) DO UPDATE SET sampled_through=excluded.sampled_through,sampled_at=now()`);
   return added;
@@ -751,7 +775,7 @@ async function withStageConnection<T>(host: Hosted, deadline: number, work: (db:
 export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = budgets[stage], batchSize = BATCH_SIZE) {
   const started = Date.now(), runtime = { ...host, stage, deadline: Math.min(started+budget,host.deadline ?? Infinity,host.lease ? Date.parse(host.lease) : Infinity) };
   let retryAt: string | null = null;
-  let items = 0, added = 0, stopped: Cut | undefined;
+  let items = 0, added = 0, checked = 0, stopped: Cut | undefined;
   let active: Run | undefined;
   if (monitoring(host.config)) try {
     await withStageConnection(host,runtime.deadline,async db => {
@@ -761,7 +785,7 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
         ${runtime.lease ? sql`AND EXISTS (SELECT FROM jobs WHERE id=${'abuse.stage.'+stage} AND status='running' AND lease_until=${runtime.lease}::timestamptz)` : sql``}`));
       if (state) {
         runtime.epoch = state.since;
-        const run: Run = active = { ...state, batchSize, advanced: false, deadline: runtime.deadline, items: 0, added: 0, cuts: {} };
+        const run: Run = active = { ...state, batchSize, advanced: false, deadline: runtime.deadline, items: 0, added: 0, cuts: {}, checked: 0 };
         if (stage === 'signIns') items = await foldSignIns(runtime,run);
         if (stage === 'payments') items = await foldPayments(runtime,run);
         if (stage === 'sample') items = await sampleSends(runtime,run);
@@ -771,7 +795,7 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
           items = r.grouped+r.rescored;
           if (r.cut) cut(run,stage,r.cut);
         }
-        added = run.added; stopped = run.cuts[stage];
+        added = run.added; checked = run.checked ?? 0; stopped = run.cuts[stage];
         if (!stopped && stage!=='sample' && host.lease) {
           const {rows:[waiting]} = await bounded(runtime,tx=>tx.execute<{at:string|null}>(sql`SELECT
             CASE WHEN min(retry_after) IS NOT NULL THEN min(greatest(retry_after,slot_due)) END AS at FROM (SELECT live.retry_after,
@@ -785,11 +809,11 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
       if (!host.lease) throw error;
       log('error',{code:'ABUSE_STAGE_FAILED',stage,reason:databaseCodeOf(error) ?? 'STAGE_ERROR'});
     }
-    stopped = timeError(error) ? 'time' : 'retry'; items = active?.items ?? 0; added = active?.added ?? 0;
+    stopped = timeError(error) ? 'time' : 'retry'; items = active?.items ?? 0; added = active?.added ?? 0; checked = active?.checked ?? 0;
   }
   if (stopped) log(stopped === 'time' ? 'warn' : 'info', { code: 'ABUSE_STEP_CUT', step: stage, reason: stopped });
-  log('info', { code: 'ABUSE_STAGE', step: stage, items, added, ms: Date.now()-started, cut: stopped });
-  return { items, added, retryAt: retryAt as string|null, cut: stopped, advanced: items > 0 || !!active?.advanced, batchSize: active?.batchSize ?? batchSize };
+  log('info', { code: 'ABUSE_STAGE', step: stage, items, added, ...(stage === 'sample' && { checked }), ms: Date.now()-started, cut: stopped });
+  return { items, added, checked, retryAt: retryAt as string|null, cut: stopped, advanced: items > 0 || !!active?.advanced, batchSize: active?.batchSize ?? batchSize };
 }
 
 // A cut needs time to make its singleton due again. Bound the queue's status write as
