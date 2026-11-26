@@ -4,7 +4,7 @@ import { dayOf, fitWords, formatCount, money, nightmail, quote, shownSources, ty
 import { billAt, ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
-import { DASH, month, spelled } from './alternatives.ts'
+import { checkedOn, DASH, month, spelled } from './alternatives.ts'
 
 // /cheapest-email-api: the search "cheapest email API", answered with what the data shows and no more. The comparisons
 // hold only services Nightmail costs less than (Ryan, A294) and name neither Amazon SES nor Bento, so the page never says
@@ -32,7 +32,7 @@ export function cheapestEmailApi(): Doc {
   const lowest = Math.min(...shown.map(mid)), lowestAll = Math.min(...group.map(mid))
   if (lowest !== lowestAll || !(ours[1]!.oursUc < BigInt(lowest) * 1_000_000n)) throw new Error('/cheapest-email-api: the headline\'s "from" price must be the lowest of the services compared and above Nightmail\'s.')
   const checked = [...new Set(group.map(row => row.c.offer.checked))].sort()
-  const when = checked.length === 1 ? dayOf(checked[0]!) : `${dayOf(checked[0]!)} to ${dayOf(checked.at(-1)!)}`
+  const when = checkedOn(checked)
   const n = group.length, at = formatCount(CHEAPEST_SIZES[1]!)
 
   // The sentence that says what the list is and isn't (Ryan: no page lets a reader conclude more than its table shows).
