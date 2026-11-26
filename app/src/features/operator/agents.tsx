@@ -22,7 +22,10 @@ function readCode(value: string | null) {
 const def = (key: string) => agentColumnDefs.find(column => column.key === key)!
 const when = (value: string) => `${shortDateTime(value)} UTC`
 const agentName = (agent: SupportAgentConnection) => `${agent.client ?? 'Unnamed client'}${agent.profile ? ` · ${agent.profile}` : ''}`
-const minutesLeft = (at: string) => Math.max(1, Math.round((Date.parse(at) - Date.now()) / 60_000))
+function expiresIn(at: string) {
+  const minutes = Math.max(1, Math.round((Date.parse(at) - Date.now()) / 60_000))
+  return minutes < 90 ? `In ${minutes} min` : `In ${Math.round(minutes / 60)} h`
+}
 // What an approval never lets an agent do, beside what it does (the request's own list, from the API).
 const never = 'Choose who a reply goes to, approve proposals, pause sending, or change limits and billing'
 
@@ -35,10 +38,10 @@ export function OperatorAgentsPage() {
   const menu = useRef<HTMLElement | null>(null)
   if (!role) return <StaffOnly />
   const columns: Column<SupportAgentApproval>[] = [
-    { ...def('agent'), render: row => <span className="op-ws" title={agentName(row.agent)}><span className="op-cell"><bdi>{agentName(row.agent)}</bdi></span><span className="op-muted-id">as the connection names itself</span></span>,
-      cardRender: row => agentName(row.agent) },
+    // The client's name is the connection's own claim; the approval dialog says so.
+    { ...def('agent'), render: row => <span className="op-cell" title={`${agentName(row.agent)} (as the connection names itself)`}><bdi>{agentName(row.agent)}</bdi></span>, cardRender: row => agentName(row.agent) },
     { ...def('approved'), render: row => <span className="nowrap" title={when(row.approvedAt)}>{relativeTime(row.approvedAt)}</span>, cardRender: row => `Approved ${relativeTime(row.approvedAt)}` },
-    { ...def('expires'), render: row => <span className="nowrap" title={when(row.expiresAt)}>{relativeTime(row.expiresAt)}</span>, cardRender: row => `· expires ${relativeTime(row.expiresAt)}` },
+    { ...def('expires'), render: row => <span className="nowrap" title={when(row.expiresAt)}>{relativeTime(row.expiresAt)}</span>, cardRender: row => `expires ${relativeTime(row.expiresAt)}` },
     { ...def('used'), render: row => row.lastUsedAt ? <span className="nowrap" title={when(row.lastUsedAt)}>{relativeTime(row.lastUsedAt)}</span> : <span className="muted">Not yet</span>,
       cardRender: row => row.lastUsedAt ? `Last used ${relativeTime(row.lastUsedAt)}` : 'Not used yet' },
     { ...def('actions'), render: row => <DropdownMenu label="Agent actions" title={agentName(row.agent)} items={[{ label: 'Revoke…', destructive: true, onSelect: () => { menu.current = document.activeElement as HTMLElement | null; setRevoking(row) } }]} /> },
@@ -81,7 +84,7 @@ function ApproveDialog({ code, onClose, onApproved }: { code: string; onClose: (
     finally { setBusy(null) }
   }
   const close = () => { if (!busy) onClose() }
-  const title = decided === 'approved' ? 'Agent approved' : decided === 'denied' ? 'Agent denied' : pending ? 'Approve this agent?' : 'Support inbox agent'
+  const title = decided === 'approved' ? 'Agent approved' : decided === 'denied' ? 'Agent denied' : pending ? 'Approve this agent for the support inbox?' : 'Support inbox agent'
   return <Dialog open onOpenChange={next => { if (!next) close() }} title={title} className="op-agent-dialog" analytics="Approve support agent"
     description={pending ? 'Approve only an agent you’re using right now that shows this code. It works the support inbox as you.' : undefined}
     footer={pending ? <>
@@ -105,7 +108,7 @@ function Review({ agent, confirmed, onConfirmed, disabled }: { agent: SupportAge
       <dt>Agent</dt><dd>{agent.agent.client ? <><bdi>{agent.agent.client}</bdi><span className="muted"> · as it names itself</span></> : <span className="muted">Didn’t name itself</span>}</dd>
       {agent.agent.profile && <><dt>Profile</dt><dd><bdi>{agent.agent.profile}</bdi></dd></>}
       <dt>Signed in</dt><dd>{agent.agent.connectedAt ? `As you, ${relativeTime(agent.agent.connectedAt)}` : 'As you'}</dd>
-      <dt>Expires</dt><dd>In {minutesLeft(agent.expiresAt)} min</dd>
+      <dt>Expires</dt><dd>{expiresIn(agent.expiresAt)}</dd>
     </dl>
     <section className="op-agent-grants" aria-label="What the agent can do">
       <h3>For {agent.days} days, it can:</h3>

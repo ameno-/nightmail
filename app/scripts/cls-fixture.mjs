@@ -1073,7 +1073,7 @@ export async function seed(fx) {
   // The same connection approved for the support inbox (api/src/support-agents.ts), and a second sign-in of it asking with a
   // code: Operator → Agents lists the one and opens the other's approval from its link.
   await db.query("INSERT INTO support_agent_approvals(id,grant_id,consent,user_id,expires_at,last_used_at) VALUES('sag_' || repeat('a',26),$1,'cls-consent-1','user_dana',now()+interval '30 days',now()-interval '5 minutes')", [mcp]);
-  await db.query("INSERT INTO support_agent_requests(id,user_code,grant_id,consent,user_id,expires_at) VALUES('cls-agent-request','GHJKLMNP',$1,'cls-consent-2','user_dana',now()+interval '1 day')", [mcp]);
+  await db.query("INSERT INTO support_agent_requests(id,user_code,grant_id,consent,user_id,expires_at) VALUES('cls-agent-request','GHJKLMNP',$1,'cls-consent-2','user_dana',now()+interval '14 minutes')", [mcp]);
   // An agent waiting at /connect with its device code (api/src/agent-setup.ts): Connect · agent code approves or denies it.
   await db.query("INSERT INTO agent_setups(id,kind,secret_hash,user_code,client_name,expires_at) VALUES ($1,'device',repeat('0',64),'BCDFGHJK','OpenCode',now()+interval '1 day')", ['ags_' + 'c'.repeat(32)]);
   // Uma's agent came back to a spent setup token and asked her with a device code: her pages show it waiting for her.
