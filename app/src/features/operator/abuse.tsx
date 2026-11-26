@@ -45,11 +45,14 @@ const reviewText: Record<AbuseReview['action'], string> = { watch: 'Watched', di
 // When, in a tooltip; who, as a masked address where it shows (never in a tooltip, which can't mask it).
 const reviewTitle = (review: AbuseReview) => `${reviewText[review.action]} ${when(review.at)}`
 const alertTitle = (row: AbuseAlert) => `${bandLabel[row.band]} risk · ${kindText[row.kind]} · ${row.score}`
+// On a phone the card's title is the level and score, and the kind moves to the line below, so the status beside the
+// title ("Stale: risk dropped") never cuts the score off.
+const alertCardTitle = (row: AbuseAlert) => `${bandLabel[row.band]} risk · ${row.score}`
 // The alert's name opens its card; on a phone the whole card does.
 const alertColumns = (open: (row: AbuseAlert) => void, posting: boolean): Column<AbuseAlert>[] => [
-  { ...def(alertColumnDefs, 'alert'), render: row => <button type="button" className="op-reason" onClick={event => { event.stopPropagation(); open(row) }}>{alertTitle(row)}</button>, cardRender: alertTitle },
+  { ...def(alertColumnDefs, 'alert'), render: row => <button type="button" className="op-reason" onClick={event => { event.stopPropagation(); open(row) }}>{alertTitle(row)}</button>, cardRender: alertCardTitle },
   { ...def(alertColumnDefs, 'status'), render: row => row.review ? <span title={reviewTitle(row.review)}><StatusBadge status={reviewText[row.review.action]} tone="neutral" /></span> : <StatusBadge status={deliveryText(row, posting)} tone={statusTones[row.status]} /> },
-  { ...def(alertColumnDefs, 'workspaces'), render: row => number(row.workspaces), cardRender: row => `${number(row.workspaces)} ${row.workspaces === 1 ? 'workspace' : 'workspaces'}` },
+  { ...def(alertColumnDefs, 'workspaces'), render: row => number(row.workspaces), cardRender: row => `${kindText[row.kind]} · ${number(row.workspaces)} ${row.workspaces === 1 ? 'workspace' : 'workspaces'}` },
   { ...def(alertColumnDefs, 'created'), render: row => <At value={row.createdAt} /> },
 ]
 
@@ -95,9 +98,10 @@ function Alerts() {
     </Dialog>}
   </>
 }
-// Slack's mrkdwn as the cards use it: *bold*, `code` and line breaks.
+// Slack's mrkdwn as the cards use it: *bold*, `code`, line breaks and the level's mark (:mag: review, :rotating_light: high).
+const slackEmoji: Record<string, string> = { mag: '🔍', rotating_light: '🚨' }
 function mrkdwn(text: string): ReactNode[] {
-  return text.split('\n').flatMap((line, i) => [i > 0 ? <br key={`br${i}`} /> : null, ...line.split(/(\*[^*]+\*|`[^`]+`)/).filter(Boolean).map((part, j) =>
+  return text.replace(/:([a-z_]+):/g, (code, name: string) => slackEmoji[name] ?? code).split('\n').flatMap((line, i) => [i > 0 ? <br key={`br${i}`} /> : null, ...line.split(/(\*[^*]+\*|`[^`]+`)/).filter(Boolean).map((part, j) =>
     part.startsWith('*') ? <strong key={`${i}:${j}`}>{part.slice(1, -1)}</strong> : part.startsWith('`') ? <code key={`${i}:${j}`}>{part.slice(1, -1)}</code> : part)])
 }
 /** The card as Slack lays it out: a heading, fields two to a row, sections, its buttons (as their labels) and a footnote. */

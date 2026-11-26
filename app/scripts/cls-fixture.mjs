@@ -1106,17 +1106,29 @@ export async function seed(fx) {
     [owner('user_kai', 'ws_live'), owner('user_rae', 'ws_harbor'), { a: 'user:user_kai', b: 'user:user_rae', kinds: { provider: 1 } }], [{ code: 'MULTI_ACCOUNT', points: 25, count: 2 }, { code: 'SENDER_STANDING', points: 15, count: 1 }], 9);
   await db.query(`INSERT INTO billing_usage_hourly(workspace_id,hour,meter,quantity) VALUES ('ws_new',date_trunc('hour',now(),'UTC'),'send',4200),('ws_new',date_trunc('hour',now(),'UTC'),'receive',310),('ws_live',date_trunc('hour',now(),'UTC'),'send',1800)
     ON CONFLICT (workspace_id,hour,meter,rate_version) DO UPDATE SET quantity=excluded.quantity`);
-  // The messages as src/abuse-alerts.ts builds them: a level, counts, reasons in fixed words, workspace IDs and a link to
-  // the cluster. The older one was watched by Dana; the latest waits for a review.
-  const card = (head, why) => ({ text: head, unfurl_links: false, unfurl_media: false, blocks: [
-    { type: 'section', text: { type: 'mrkdwn', text: [`*${head}*`, '• *Who:* 2 workspaces: `ws_fresh`, `ws_new`', `• *Why:* ${why}`, '• *Sent in 7 days:* 4,200 emails, 1.4% bounced, 0.05% complaints'].join('\n') } },
-    { type: 'actions', elements: [{ type: 'button', action_id: 'review', style: 'primary', text: { type: 'plain_text', text: 'Review in Operator', emoji: false }, url: `${fx.origin}/operator/abuse/${abuseCluster}` }] }] });
+  // The messages as src/abuse-alerts.ts builds them: a level and its mark, counts, reasons in fixed words, workspace IDs
+  // and a link to the cluster. The oldest was watched by Dana; two stored by one run (at one instant) wait for their
+  // post, high first; four went stale before they were posted, one for each reason.
+  const card = (head, why, band = head.startsWith('High') ? 'high' : 'review', cluster = abuseCluster) => ({ text: head, unfurl_links: false, unfurl_media: false, blocks: [
+    { type: 'section', text: { type: 'mrkdwn', text: [`${band === 'high' ? ':rotating_light:' : ':mag:'} *${head}*`, '• *Who:* 2 workspaces: `ws_fresh`, `ws_new`', `• *Why:* ${why}`, '• *Sent in 7 days:* 4,200 emails, 1.4% bounced, 0.05% complaints'].join('\n') } },
+    { type: 'actions', elements: [{ type: 'button', action_id: 'review', style: band === 'high' ? 'danger' : 'primary', text: { type: 'plain_text', text: 'Review in Operator', emoji: false }, url: `${fx.origin}/operator/abuse/${cluster}` }] }] });
   const members = ['user:user_nia', 'workspace:ws_fresh', 'user:user_ona', 'workspace:ws_new', `attempt:${refused}`];
   await db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,members,reasons,status,attempts,sent_at,review,reviewed_by,reviewed_at,created_at) VALUES
     ($1,$3,'review',60,'new',2,$4::jsonb,$6,'{MULTI_ACCOUNT,SHARED_CARD,THROWAWAY_SIGNUP}','sent',1,now()-interval '3 days','watch','user_dana',now()-interval '2 days',now()-interval '3 days'),
     ($2,$3,'high',85,'raised',2,$5::jsonb,$6,'{MULTI_ACCOUNT,SHARED_CARD,SIMILAR_CONTENT,THROWAWAY_SIGNUP,SHARED_LINKS}','sent',1,now()-interval '3 hours',NULL,NULL,NULL,now()-interval '3 hours')`,
     ['aal_' + '1'.repeat(24), 'aal_' + '2'.repeat(24), abuseCluster, JSON.stringify(card('Review risk 60: 3 related accounts', 'the same payment card; throwaway or look-alike sign-up addresses')),
       JSON.stringify(card('High risk 85: 3 related accounts (risk raised)', 'the same payment card; near-identical mail; throwaway or look-alike sign-up addresses')), members]);
+  const alert = (n, cluster, band, score, kind, head, why, status, staleReason, ago, review = null) => db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,members,reasons,status,stale_reason,attempts,review,reviewed_by,reviewed_at,created_at)
+    VALUES ($1,$2,$3,$4,$5,2,$6::jsonb,$7,'{MULTI_ACCOUNT,SHARED_CARD}',$8,$9,0,$10,$11,$12,$13)`, ['aal_' + String(n).repeat(24), cluster, band, score, kind, JSON.stringify(card(head, why, band, cluster)), members, status, staleReason,
+    review, review ? 'user_dana' : null, review ? new Date(stored - 3_600_000).toISOString() : null, new Date(stored - ago).toISOString()]);
+  // One instant for all of them, as one run's alerts share theirs.
+  const minutes = 60_000, hours = 60 * minutes, stored = Date.now();
+  await alert(3, abuseCluster, 'review', 70, 'grew', 'Review risk 70: 3 related accounts (new member)', 'the same payment card; throwaway or look-alike sign-up addresses', 'stored', null, 20 * minutes);
+  await alert(4, abuseCluster, 'high', 85, 'grew', 'High risk 85: 3 related accounts (new member)', 'the same payment card; near-identical mail', 'stored', null, 20 * minutes);
+  await alert(5, 'acl_' + '3'.repeat(24), 'review', 55, 'new', 'Review risk 55: 2 related accounts', 'the same payment card', 'stale', 'cluster_gone', 26 * hours);
+  await alert(6, abuseWatch, 'review', 50, 'grew', 'Review risk 50: 2 related accounts (new member)', 'one network; a sender on warning', 'stale', 'band_dropped', 30 * hours);
+  await alert(7, abuseCluster, 'review', 60, 'grew', 'Review risk 60: 3 related accounts (new member)', 'the same payment card', 'stale', 'reviewed', 40 * hours, 'dismiss');
+  await alert(8, abuseCluster, 'high', 80, 'new', 'High risk 80: 3 related accounts', 'the same payment card; near-identical mail', 'stale', 'expired', 50 * hours);
   // Operator · Health: what a minute tick wrote (api/src/health.ts) on a bad afternoon, and the alerts it holds: a
   // queue and a job type behind, a pile of failed jobs, a campaign that will take twelve hours, a 45-second request.
   // Synthetic like the abuse rows: the fixture runs no job runner, so nothing overwrites it.
