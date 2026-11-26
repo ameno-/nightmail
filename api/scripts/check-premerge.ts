@@ -375,14 +375,15 @@ const warn = (check: string, message: string, file?: string) => console.log(`::w
     if (CHECKED_DAYS.test('checked recently')) fail('Price pages', 'The day check accepts a page with no day.', file)
     for (const { path, html } of out.docs) {
       const page = text(html)
-      checkFigures(path, html, 1)
+      // (The free plans page states allowances, not bills: Nightmail's is the billing code's, checked below.)
+      checkFigures(path, html, path === '/free-email-api' ? 0 : 1)
       for (const term of terms.slice(0, 2)) if (!page.includes(term)) fail('Price pages', `${path} doesn't say “${term}”, as src/billing/rates.ts has it.`, file)
       // (A page of several services, an alternatives page or a use-case page, links each to its comparison, which names the
       // pages read: docs/alternatives.ts, docs/agents.ts.)
       if (!CHECKED_DAYS.test(page) || !(!path.startsWith('/pricing/') ? /<a href="\/compare\/[a-z0-9-]+"/ : /<a href="https:\/\//).test(html)) fail('Price pages', `${path} doesn't give the day its prices were checked and a link to the vendor's page.`, file)
       if (/\bNaN\b|undefined|Infinity/.test(page)) fail('Price pages', `${path} shows NaN, undefined or Infinity.`, file)
     }
-    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs, ${out.boards.length} comparison pages (each as a board and from its data) and ${out.docs.length} pages of vendors and uses (pricing, alternatives, email for AI agents, email API prices) match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
+    if (failed === before) console.log(`Price pages: ${out.calculator.length} calculator inputs, ${out.boards.length} comparison pages (each as a board and from its data) and ${out.docs.length} pages of vendors and uses (pricing, alternatives, email for AI agents, email API prices, free plans) match src/billing/rates.ts; ${sources.length} competitor sources have a link, a day and a quote.`)
   }
 }
 

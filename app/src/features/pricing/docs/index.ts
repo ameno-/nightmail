@@ -3,6 +3,7 @@ import { comparisons } from '../compare/index.ts'
 import type { Doc } from './doc.ts'
 import { emailForAgents } from './agents.ts'
 import { cheapestEmailApi } from './cheapest.ts'
+import { freeEmailApi } from './free.ts'
 import { vendorAlternatives } from './alternatives.ts'
 import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './registry.ts'
 import { vendorPricing } from './vendor-pricing.ts'
@@ -18,6 +19,7 @@ export const DOCS: Doc[] = [
   // The use-case pages, each from the comparisons of its kind.
   emailForAgents(),
   cheapestEmailApi(),
+  freeEmailApi(),
 ]
 
 /** A vendor's pricing page needs this much of its own to be worth an address: a page with less is a template with a name
@@ -45,7 +47,7 @@ export function docProblems(): string[] {
     if (doc.searchTitle.length > 60) problems.push(`${doc.path}'s title is over 60 characters: ${doc.searchTitle}`)
     if (doc.description.length < 140 || doc.description.length > 160) problems.push(`${doc.path}'s description isn't 140 to 160 characters (${doc.description.length}): ${doc.description}`)
     if (!doc.cited.length) problems.push(`${doc.path}'s table cites no source.`)
-    if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send)|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.path === QUESTION.path ? doc.searchTitle.replace(QUESTION.title, '') : doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.cardWords, doc.sections, doc.copy, doc.llms])].join(' ')))
+    if (/\b(?:cheapest|best) (?:email|transactional|api|provider|service|option|choice|alternative|way to send|free)|\b(?:largest|biggest|most generous|highest) free\b|\bmost generous\b|Nightmail[^.]*\b(?:cheapest|best)\b/i.test([doc.path === QUESTION.path ? doc.searchTitle.replace(QUESTION.title, '') : doc.searchTitle, doc.description, JSON.stringify([doc.h1, doc.answer, doc.cardWords, doc.sections, doc.copy, doc.llms])].join(' ')))
       problems.push(`${doc.path} says "cheapest" or "best": no page states either of Nightmail (Ryan, A294).`)
     if (/\bAmazon SES\b|\bBento\b/.test(JSON.stringify(doc))) problems.push(`${doc.path} names Amazon SES or Bento: pages compare only providers Nightmail costs less than (Ryan, A294).`)
   }
