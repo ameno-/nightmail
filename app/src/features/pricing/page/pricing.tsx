@@ -1,5 +1,5 @@
 import { lazy, use, useEffect, useLayoutEffect, useRef, type ReactNode } from 'react'
-import { useLocation, useSearchParams } from 'react-router'
+import { useLocation } from 'react-router'
 import { fontsReady, PricePage as Calculator, useShellTakeover } from '..'
 import { comparisons } from '../compare'
 import { PRICE_PAGES } from '../pages'
@@ -8,8 +8,7 @@ import { hubDoc } from './hub'
 // (Named as ../index.tsx's chunk is, pricing-…, so the price pages' cache rule still finds it: price-pages.ts, priceFirstFiles.)
 // The app's price pages with the comparisons' new look (VERDICT_PAGES, page/switch.ts: app/price-pages.ts's verdictApp
 // gives App.tsx this module for features/pricing in that build): a comparison, and /compare, drawn from their data
-// (view.tsx) when the app reaches them from another of its pages, as their own HTML draws them; ?card, the page's
-// link-preview picture. Everything else is the price pages' own (../index.tsx: the calculator, a comparison not found).
+// (view.tsx) when the app reaches them from another of its pages, as their own HTML draws them. Everything else is the price pages' own (../index.tsx: the calculator, a comparison not found).
 const view = () => import('./view')
 const ComparisonView = lazy(() => view().then(m => ({ default: m.ComparisonView })))
 const HubView = lazy(() => view().then(m => ({ default: m.HubView })))
@@ -27,11 +26,10 @@ function Frame({ title, children }: { title: string; children: ReactNode }) {
 
 export function PricePage() {
   const { pathname } = useLocation()
-  const [search] = useSearchParams()
-  const at = pathname.replace(/\/+$/, ''), card = search.has('card')
-  if (at === '/compare' || at === '/compare/with-set') return <Frame title={hubDoc().searchTitle}><HubView set={at === '/compare/with-set'} card={card} /></Frame>
+  const at = pathname.replace(/\/+$/, '')
+  if (at === '/compare' || at === '/compare/with-set') return <Frame title={hubDoc().searchTitle}><HubView set={at === '/compare/with-set'} /></Frame>
   const vendor = at.startsWith('/compare/') ? at.slice('/compare/'.length) : null
   const comparison = vendor !== null && Object.hasOwn(comparisons, vendor) ? comparisons[vendor]! : null
-  if (comparison) return <Frame title={PRICE_PAGES.find(page => page.comparison === comparison)!.searchTitle}><ComparisonView comparison={comparison} card={card} /></Frame>
+  if (comparison) return <Frame title={PRICE_PAGES.find(page => page.comparison === comparison)!.searchTitle}><ComparisonView comparison={comparison} /></Frame>
   return <Calculator />
 }

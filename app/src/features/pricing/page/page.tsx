@@ -114,13 +114,3 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
     </nav></footer>
   </div>
 }
-
-/** The page's link-preview picture (scripts/price-cards.mjs photographs it at 1200 x 630): its heading and caption alone,
- *  on the room's dark, with the wordmark. */
-export function PriceCard({ doc }: { doc: PageDoc }) {
-  return <div className="pp pp-card"><div className="pp-card-in">
-    <Heading doc={doc} />
-    {doc.answer.slice(0, 1).map((text, i) => <p key={i} className="pp-caption"><Run text={text} /></p>)}
-    <p className="pp-card-mark"><NightmailWordmark /></p>
-  </div></div>
-}

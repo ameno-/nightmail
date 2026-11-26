@@ -115,13 +115,6 @@
 .pp-tube li { display: flex; justify-content: space-between; gap: 4cqw; margin-top: 2.6cqh; }
 .pp-tube li[data-ours] { color: #9DAEFF; }
 
-/* The link-preview picture. */
-.pp-card { display: flex; align-items: center; box-sizing: border-box; width: 1200px; height: 630px; min-height: 0; padding: 0 88px; }
-.pp-card .pp-verdict { font-size: min(80px, calc(1024px / (var(--chars, 14) * .62))); }
-.pp-card .pp-caption { margin-top: 22px; font-size: 26px; }
-.pp-card-mark { margin: 44px 0 0; color: var(--soft); }
-.pp-card-mark .nightmail-wordmark { --logo-cap: 22px; }
-
 @media (max-width: 640px) {
   .pp-top { padding: 4px 20px 0; }
   .pp-crumbs .nightmail-wordmark { --logo-cap: 11px; }

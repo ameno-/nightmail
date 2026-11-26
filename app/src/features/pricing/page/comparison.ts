@@ -64,6 +64,5 @@ export function comparisonDoc(c: Comparison): PageDoc {
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }, { name: vendor, path: c.path }],
     about: { name: vendor, url: c.offer.pricing }, modified: lastChecked(c), focus: c.focus,
     llms: `${productName} ${v.ours}, ${vendor} ${v.theirs}: ${v.at.replaceAll('\u00a0', ' ').toLowerCase()}.`,
-    card: { alt: `${productName} ${v.ours}. ${vendor} ${v.theirs}. ${v.at.replaceAll('\u00a0', ' ')}.`, shown: [v.ours, v.theirs, v.at] },
   }
 }

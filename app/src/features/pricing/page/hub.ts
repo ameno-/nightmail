@@ -50,7 +50,6 @@ export function hubDoc(): PageDoc {
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }],
     modified,
     llms: `What a month costs on ${productName} and on ${counts.join(', ')}, at three sizes each, read ${dayOf(modified)}.`,
-    card: { alt: `${productName} costs less than each of these ${ORDERED.length}. At every size shown, checked ${dayOf(modified)}.`, shown: sections.flatMap(section => section.blocks.flatMap(block => block.kind === 'table' ? block.rows.flatMap(row => row.cells.map(plain)) : [])) },
   }
 }
 
