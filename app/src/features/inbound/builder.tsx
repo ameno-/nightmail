@@ -265,7 +265,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const outcome = useRef<HTMLDivElement>(null)
   // Each write's idempotency (a retry of the same body reuses its key), and the destinations a save made, reused by a retry.
   const attempts = useRef(new Map<string, { key: string; body: string }>())
-  const made = useRef(new Map<string, { id: string; name: string; key?: string | null }>())
+  const made = useRef(new Map<string, { id: string; name: string; key?: string | null; status?: string }>())
   const attempt = (name: string) => { let a = attempts.current.get(name); if (!a) attempts.current.set(name, a = { key: '', body: '' }); return a }
   const api = useApi()
   const [boxSearch, setBoxSearch] = useState('')
@@ -308,17 +308,20 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
    *  to ask a forward's recipient, and the forwards waiting for them, or a forward that wasn't set up. Closing says it. */
   const leftBehind = () => {
     if (editing) return undefined
-    const asked = [...made.current.keys()].filter(key => key.startsWith('new:forward|')).map(key => key.slice(12))
-    if (!saved && !forwardFrom && !asked.length) return undefined
+    // Each forward a Save made, by the state the API answered with: still waiting for its recipient (emailed), or ready.
+    const forwards = [...made.current.entries()].filter(([key]) => key.startsWith('new:forward|')).map(([key, thing]) => ({ to: key.slice(12), ready: thing.status === 'ready' }))
+    const asked = forwards.filter(f => !f.ready).map(f => f.to), ready = forwards.filter(f => f.ready).map(f => f.to)
+    if (!saved && !forwardFrom && !forwards.length) return undefined
     const name = saved?.address ?? form.address.trim().toLowerCase()
-    const wanted = (['then', 'otherwise'] as Side[]).filter(side => draft[side] === 'new:forward').map(side => (draft.targets[side] ?? '').trim()).filter(to => to && !asked.includes(to))
+    const wanted = (['then', 'otherwise'] as Side[]).filter(side => draft[side] === 'new:forward').map(side => (draft.targets[side] ?? '').trim()).filter(to => to && !forwards.some(f => f.to === to))
     return {
       title: saved ? 'The address is made' : 'The address isn’t made yet',
       description: <>{saved && <><PrivateAddress value={name} /> keeps its mail in its inbox until it has a destination. Find it in Mail routing.</>}
         {forwardFrom && forwardFrom.id !== saved?.id && <> <PrivateAddress value={forwardFrom.address} /> is made too, to send the request.</>}
         {asked.map(to => <span key={to}> We emailed <PrivateAddress value={to} /> to confirm forwarding.</span>)}
+        {ready.map(to => <span key={to}> Forwarding to <PrivateAddress value={to} /> is set up, not connected to an address yet.</span>)}
         {saved && wanted.map(to => <span key={to}> Forwarding to <PrivateAddress value={to} /> wasn’t set up.</span>)}
-        {!saved && <> Save once they agree to make <PrivateAddress value={name} />.</>}</>,
+        {!saved && asked.length > 0 && <> Save once they agree to make <PrivateAddress value={name} />.</>}</>,
     }
   }
   // Leaving asks first: closing, Cancel, or a link out of the builder. With something typed, to discard it; once a Save
@@ -447,12 +450,13 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         const body = { type, name: names[side]!, address: value, ...(sender ? { from: sender } : {}) }
         let created: { id: string; name: string; status: string }
         try { created = await post({ ...body, preverify: true }) } catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
-        thing = { id: created.id, name: created.name }
+        thing = { id: created.id, name: created.name, status: created.status }
         made.current.set(cache, thing)
         if (created.status !== 'ready') { setWaiting(value); return 'waiting' }
       } else if (type === 'forward') {
         // Made by an earlier try and waiting for its recipient: saved once they confirm.
         const now = await request<{ status: string }>(`/v1/endpoints/${encodeURIComponent(thing.name)}`, { scope })
+        thing.status = now.status
         if (now.status !== 'ready') { setWaiting(value); return 'waiting' }
       }
       out[side] = type === 'inbox' ? { param: `inbox:${thing.key ?? ''}`, route: [thing.id], chat: false } : { param: thing.name, route: [thing.id], chat: false }
