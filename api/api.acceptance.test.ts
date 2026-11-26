@@ -38398,6 +38398,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         error(await request('DELETE',release,provision),403);error(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}),409,'ADDRESS_RETIRED');ok(await local('DELETE',release));ok(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}));
         assert.equal(error(await local('POST',root,{localPart:'reserved'}),409,'ADDRESS_TAKEN').message,`reserved@${host} belongs to team@${host} (${team.id}). Remove it there first (PATCH /v1/inbound/addresses/${team.id}), then create the inbox. Or omit localPart for a random address.`);
       });
+      // An agent deleted an inbox (202, deleting), then still saw its address listed, got 404 deleting it and was told the
+      // address was taken when it made it again: a deleting inbox is no address any more, and a real one frees its address at once.
+      await t.test('a deleting inbox is not listed as an address, and its address can be made again at once',async()=>{
+        const gone=ok(await local('POST',root,{localPart:'reused'}),201);ok(await local('DELETE',`${root}/${gone.id}`),202);
+        assert.ok(ok(await local('GET',`${root}?status=deleting`)).data.some((b:Json)=>b.id===gone.id),'The inbox itself says deleting.');
+        assert.ok(!ok(await local('GET','/v1/inbound/addresses')).data.some((b:Json)=>b.id===gone.id),'It is no longer listed as an address.');
+        error(await local('DELETE',`/v1/inbound/addresses/${gone.id}`),404,'NOT_FOUND');
+        const again=ok(await local('POST',root,{localPart:'reused'}),201);assert.deepEqual([again.address,again.id===gone.id],[gone.address,false]);
+        ok(await local('DELETE',`${root}/${again.id}`),202);
+      });
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
         const connected=ok(await local('POST','/v1/inbox-connections',{inboxes:[box.id],client:'generic',auth:'key'}),201);assert.equal((await db.query('SELECT k.expires_at=b.delete_after AS bounded FROM mailbox_keys k,mailboxes b WHERE k.id=$1 AND b.id=$2',[connected.id,box.id])).rows[0].bounded,true);

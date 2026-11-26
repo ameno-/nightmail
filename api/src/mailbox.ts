@@ -442,7 +442,7 @@ function registerAddresses(app: App) {
     requireDmarc: z.boolean().default(false).describe('Hold received mail without a DMARC pass for its From domain: it is stored with the unverified label and does not emit message.received.'),
     flow: CreateFlow.optional().describe('Where the new address’s mail goes, saved with the address in one transaction and one routing version: deliver creates the route for its own address, split adds a two-way rule on it (setInboundAddressFlow changes both later). If any part is refused, nothing is created. Needs what changing routes and rules needs.'),
   }).strict().openapi('CreateInboundAddress');
-  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. ' + readLimitNote(5),
+  app.openapi(createRoute({ ...meta, method: 'get', path: collection, ...addressAlias('listInboundAddresses'), summary: 'List receivable addresses', description: 'An address key sees only addresses it can access. An inbox being deleted isn\u2019t listed: its address is free to use again at once (a sandbox inbox\u2019s stays reserved), and GET /v1/inboxes?status=deleting lists it until it is erased. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. ' + readLimitNote(5),
     request: { query: z.object({ domain: z.string().max(253).optional(), origin: z.enum(['api', 'auto']).optional(), kind: z.enum(['address', 'inbox']).optional().describe('address: receiving addresses only; inbox: agent inboxes only. Default: both.'), q: z.string().max(200).optional(), cursor: z.string().max(200).optional(), limit: Limit }) }, responses: { 200: response(pageOf(InboundAddressSchema, 'InboundAddressPage')), ...errors } }), async c => {
     const value = access(c, 'read'); const q = c.req.valid('query');
     type RawBoxRow = {
@@ -451,7 +451,9 @@ function registerAddresses(app: App) {
       require_dmarc: boolean; expires_at: string | null; kind: 'inbox' | 'address'; delete_after: string | null; created_at: string; updated_at: string; candidate_count: number;
     };
     return await withBoundedRead(c, async () => {
-      const where = and(eq(mailboxes.workspaceId, value.workspaceId), value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
+      // A deleting inbox is gone everywhere else (its page and DELETE answer 404, Mail routing leaves it out) and its address
+      // is free at once: listed here, it looked like a live address that couldn't be deleted or made again.
+      const where = and(eq(mailboxes.workspaceId, value.workspaceId), sql`(${mailboxes.deleteAfter} IS NULL OR ${mailboxes.deleteAfter} > statement_timestamp())`, value.mailboxIds ? inArray(mailboxes.id, value.mailboxIds.length ? value.mailboxIds : ['']) : undefined,
         q.domain ? sql`split_part(${mailboxes.address}, '@', 2) = ${q.domain.toLowerCase()}` : undefined, q.origin ? eq(mailboxes.origin, q.origin) : undefined, q.kind ? eq(mailboxes.kind, q.kind) : undefined,
         q.q ? or(sql`${mailboxes.address} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`, sql`${mailboxes.displayName} ILIKE ${`%${q.q.replace(/[\\%_]/g, ch => `\\${ch}`)}%`}`) : undefined,
         q.cursor ? lt(mailboxes.id, q.cursor) : undefined);
