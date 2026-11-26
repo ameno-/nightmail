@@ -292,10 +292,10 @@ export type GlassRegionFill = { region: ReactNode; place: ReactNode; sending: Re
 export type GlassBoardFill = { tile: (key: string) => GlassTileFill; funnel: (key: string) => { value: ReactNode; share?: ReactNode; meter: { value: number; max: number } }
   regions: GlassRegionFill[]; total: GlassRegionFill; row: (group: string, row: string) => GlassFill }
 // Eight health-first tiles (2×4 desktop, 4×2 phone): Health leads so an operator on a phone sees platform status at once.
-export const glassTiles = [
+export const glassTiles: readonly (readonly [key: string, label: string, to?: string])[] = [
   ['health', 'Health'], ['errors', 'API errors'], ['delivered', 'Delivered'], ['bounced', 'Bounced'],
-  ['complained', 'Complained'], ['sent', 'Sent · 24 h'], ['support', 'Support · 7 d'], ['signups', 'Sign-ups'],
-] as const
+  ['complained', 'Complained'], ['sent', 'Sent · 24 h'], ['support', 'Support', '/support'], ['signups', 'Sign-ups'],
+]
 export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
 /** Region rows are kept for at least this many regions, so a page with fewer draws the same height. */
 export const GLASS_REGION_SLOTS = 2
@@ -312,18 +312,22 @@ export const glassGroups: GlassGroupDef[] = [
   { key: 'visitors', title: 'Visitors', rows: [{ key: 'views', label: 'Visitors today', spark: true }, ...slots('referrer', 3)] },
 ]
 
-function GlassTile({ label, fill }: { label: string; fill?: GlassTileFill }) {
-  return <div className="glass-tile" role="group" aria-label={label}>
+function GlassTile({ label, to, fill }: { label: string; to?: string; fill?: GlassTileFill }) {
+  const body = <>
     <div className="glass-tile__head"><span className="glass-tile__label">{label}</span>
       {/* Laid out from the head's right edge and pulled back by its own width: a change that grows never moves a box. */}
-      <span className="glass-delta">{fill?.delta && <span className={`ui-tone--${fill.delta.tone ?? 'neutral'}`} title={fill.delta.title}>{fill.delta.text}</span>}</span></div>
+      {to ? <ArrowUpRight size={14} className="glass-tile__arrow" aria-hidden="true" />
+        : <span className="glass-delta">{fill?.delta && <span className={`ui-tone--${fill.delta.tone ?? 'neutral'}`} title={fill.delta.title}>{fill.delta.text}</span>}</span>}</div>
     <div className={fill?.tone && fill.tone !== 'neutral' ? `glass-tile__figure ui-tone--${fill.tone}` : 'glass-tile__figure'}>{fill ? fill.value : <Skeleton width={96} height={22} />}</div>
     <div className="glass-tile__hint">{fill ? fill.hint : <Skeleton width={128} height={10} />}</div>
     <div className="glass-tile__foot">{fill?.parts ? <span className="glass-parts" role="img" aria-label={fill.parts.map(p => `${p.label} ${p.value}`).join(', ')}>{fill.parts.map(p => <i key={p.label} className={`ui-tone--${p.tone}`} style={{ flexGrow: p.value }} />)}</span>
       : fill?.meter ? <Meter value={fill.meter.value} max={fill.meter.max} tone={fill.meter.tone} label={fill.meter.label} />
       : fill?.note ? <span className="glass-tile__note">{fill.note}</span>
       : <Sparkline values={fill?.spark ?? []} />}</div>
-  </div>
+  </>
+  return to
+    ? <Link to={to} className="glass-tile glass-tile--link" aria-label={label}>{body}</Link>
+    : <div className="glass-tile" role="group" aria-label={label}>{body}</div>
 }
 const regionSkeleton: GlassRegionFill = { region: <Skeleton width={72} height={12} />, place: '', sending: <Skeleton width={56} height={12} />, receiving: <Skeleton width={56} height={12} />, rate: <Skeleton width={40} height={12} />,
   quota: <Skeleton width={96} height={12} />, share: '', checked: <Skeleton width={48} height={12} /> }
@@ -362,7 +366,7 @@ export function GlassBoard({ fill, feed, live }: { fill?: GlassBoardFill; feed?:
     : Array.from({ length: GLASS_REGION_SLOTS }, () => regionSkeleton)
   return <div className="glass-board">
     <div className="glass-main">
-      <section className="glass-tiles" aria-label="Now">{glassTiles.map(([key, label]) => <GlassTile key={key} label={label} fill={fill?.tile(key)} />)}</section>
+      <section className="glass-tiles" aria-label="Now">{glassTiles.map(([key, label, to]) => <GlassTile key={key} label={label} to={to} fill={fill?.tile(key)} />)}</section>
       <section className="glass-section" aria-label="Funnel · 30 days">
         <SectionHeader title="Funnel · 30 days" actions={groupLink(['/operator?view=signups', 'Workspaces'])} />
         <ol className="glass-funnel">{glassFunnel.map(([key, label]) => { const step = fill?.funnel(key); return <li key={key}>

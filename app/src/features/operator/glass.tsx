@@ -83,15 +83,16 @@ function tiles(g: Glass): (key: string) => GlassTileFill {
     complained: { value: day.accepted ? <Tick value={complained} format={rateText} /> : '—', tone: zone(complained, COMPLAINT_LINE), hint: `${number(day.complained)} · line at ${percent(COMPLAINT_LINE, 1)}`, spark: s.hourly.map(h => h.complained),
       delta: points(complained, rate(before.complained, before.accepted), 'down', 'Complained', day.accepted > 0 && before.accepted > 0) },
     sent: { value: <Tick value={day.accepted} />, hint: `${number(s.perMinute)}/min · ${compact(s.today.transactional + s.today.marketing)} today`, spark: s.hourly.map(h => h.accepted), delta: delta(day.accepted, before.accepted, null, 'Accepted') },
-    // The support AI's week (api/src/support-inbox.ts supportWeek): of the conversations it could answer, how many ended
-    // with no person stepping in, beside anyone who got no reply and any email to the team that couldn't be sent.
-    support: { value: <><Tick value={week.withoutHuman} /><span className="glass-tile__share">of {number(week.answerable)}{week.atLeast ? '+' : ''}{week.answerable ? ` (${percent(share(week.withoutHuman, week.answerable), 0)})` : ''}</span></>,
+    // Support: open conversations now, with the 7-day AI share (or setup warning) and red alerts whenever anyone got
+    // no reply or a staff email couldn't be sent. Clicking the tile opens /support.
+    support: { value: <Tick value={support.open} />,
       tone: support.noReply || support.staffMailFailed ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
-      hint: !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? 'Email not configured' : !support.configured.chat ? 'Chat not configured' : 'answered without a human',
-      note: <span title={`${plural(support.open, 'conversation')} open now · ${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(support.overLimit, 'email')} in 7 days got only the sign-in reply: over the answering limits · ${plural(support.staffMailFailed, 'email')} to the team not sent after 3 tries · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket: a person decides those, so the share counts them separately`}>
-        {support.noReply && support.staffMailFailed ? <span className="ui-tone--danger">{number(support.noReply)} no reply · {number(support.staffMailFailed)} not sent</span>
-          : support.staffMailFailed ? <span className="ui-tone--danger">{plural(support.staffMailFailed, 'email')} to team not sent</span>
-          : <>{number(support.open)} open · {support.noReply ? <span className="ui-tone--danger">{number(support.noReply)} with no reply</span> : <>{number(week.apart)} bug or billing</>}</>}</span> },
+      hint: !support.configured.chat || !support.configured.email ? 'open · not configured'
+        : week.answerable ? `open · ${percent(share(week.withoutHuman, week.answerable), 0)} AI (7 d)` : 'open now',
+      note: support.noReply && support.staffMailFailed ? <span className="ui-tone--danger">{number(support.noReply)} no reply · {number(support.staffMailFailed)} not sent</span>
+        : support.staffMailFailed ? <span className="ui-tone--danger">{plural(support.staffMailFailed, 'email')} to team not sent</span>
+        : support.noReply ? <span className="ui-tone--danger">{number(support.noReply)} with no reply</span>
+        : 'All replied' },
     signups: { value: <Tick value={signups.day.last} />, hint: `${number(places.open)} of ${number(places.limit)} open · ${number(places.waiting)} waiting`, spark: signups.hourly, delta: delta(signups.day.last, signups.day.previous, 'up', 'Sign-ups') },
   }
   return key => rows[key] ?? { value: '—' }
