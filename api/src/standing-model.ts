@@ -595,12 +595,12 @@ export function judgeReadiness(f: ReadinessFacts): { verdict: Verdict; reasons: 
  * The plan's daily batches for `recipients`: the first day the larger of the plan's first batch and cleanFactor times
  * `base` (the largest clean send or the usual day), each next `growth` times the last, at most maxBatches days, the last
  * taking the rest; one batch when they fit in the first. `split`: at least two days, the first the size that with the
- * growth covers the rest in two.
+ * growth covers the rest in two. Whole recipients: a fractional growth or clean factor is rounded each day.
  */
 export function rampPlan(recipients: number, base: number, o: { young?: boolean; split?: boolean; lines?: RampLines } = {}): number[] {
   const lines = o.lines ?? RAMP_LINES, p = o.young ? lines.young : lines.established, batches: number[] = [];
-  let left = Math.max(0, Math.floor(recipients)), size = Math.max(p.first, p.cleanFactor * base);
+  let left = Math.max(0, Math.floor(recipients)), size = Math.round(Math.max(p.first, p.cleanFactor * base));
   if (o.split && size >= left) size = Math.max(1, Math.ceil(left / (1 + p.growth)));
-  while (left > 0) { const n = batches.length === p.maxBatches - 1 ? left : Math.min(left, size); batches.push(n); left -= n; size *= p.growth; }
+  while (left > 0) { const n = batches.length === p.maxBatches - 1 ? left : Math.min(left, size); batches.push(n); left -= n; size = Math.round(size * p.growth); }
   return batches;
 }

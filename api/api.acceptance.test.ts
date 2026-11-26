@@ -34335,6 +34335,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await day(), [400, 2, 'pacing_window']);
       await nextDay();
       assert.deepEqual(await day(), [700, 2, null]);
+      // A setting whose growth isn't a whole number, an odd usual day and a registration not known yet: every day of the
+      // plan is still whole recipients, in the review and in the launched campaign.
+      for (let d = 1; d <= 3; d++) await db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails,accepted,delivered,bounced,complained)
+        VALUES ($1,$2,'marketing',date_trunc('hour',now(),'UTC')-make_interval(days=>$3::int),3001,3001,3001,0,0)`, [wid, REGION, d]);
+      runtime.config.rampLines = { established: { first: 1_000, cleanFactor: 2, growth: 1.5, maxBatches: 6 } };
+      const uneven = await create('Uneven growth'), unevenPath = `/v1/campaigns/${uneven.id}`;
+      const sized = ok(await local('GET', `${unevenPath}/audience?readiness=true`)).readiness;
+      assert.deepEqual([sized.domain.registeredAt, sized.history.workspace.usualDay, sized.plan.batches.slice(0, 3), sized.plan.batches.every(Number.isInteger),
+        sized.plan.batches.reduce((sum: number, n: number) => sum + n, 0)], [null, 3_001, [6_002, 9_003, 13_505], true, sized.list.recipients]);
+      ok(await local('POST', `${unevenPath}/send`, { revision: uneven.revision, pacing: { plan: 'recommended', rateShare: 1 } }), 202);
+      assert.deepEqual(ok(await local('GET', unevenPath)).delivery.pacing.plan, sized.plan.batches);
+      ok(await local('POST', `${unevenPath}/cancel`));
+      // If sizing the plan by the setting fails, a preview gets the review without the setting, saying so and never
+      // "ready"; a launch is refused, retryable, and nothing is sent or kept: the campaign stays a draft.
+      runtime.config.rampLines = { get established(): never { throw new Error('Sizing failed.'); } } as never;
+      const unsized = await create('Unsized'), soft = ok(await local('GET', `/v1/campaigns/${unsized.id}/audience?readiness=true`)).readiness;
+      assert.deepEqual([soft.verdict, soft.required?.reason, soft.plan.batches, typeof soft.unavailable, sized.unavailable], ['ramp_required', 'NEW_DOMAIN', review.plan.batches, 'string', undefined]);
+      const tiny = ok(await local('POST', '/v1/campaigns', { name: 'Small, unsized', from, subject: 'Small', html: '<p>Fixture.</p>', audience: { listId: small.id } }), 201);
+      const tinyReview = ok(await local('GET', `/v1/campaigns/${tiny.id}/audience?readiness=true`)).readiness;
+      assert.deepEqual([tinyReview.verdict, tinyReview.plan, tinyReview.summary, typeof tinyReview.unavailable], ['ramp_recommended', null, tinyReview.unavailable, 'string']);
+      for (const [refusedId, revision] of [[unsized.id, unsized.revision], [tiny.id, tiny.revision]] as const) {
+        const reply = await local('POST', `/v1/campaigns/${refusedId}/send`, { revision, pacing: { plan: 'recommended', rateShare: 1 } });
+        assert.equal(error(reply, 503, 'SEND_PLAN_UNAVAILABLE').retryable, true);
+        const kept = (await db.query(`SELECT c.state, c.review_id, c.expanded, (SELECT count(*)::int FROM sending_emails e WHERE e.campaign_id = c.id) AS emails,
+          (SELECT count(*)::int FROM sending_campaign_reviews r WHERE r.campaign_id = c.id) AS reviews FROM sending_campaigns c WHERE c.id = $1`, [refusedId])).rows[0];
+        assert.deepEqual(kept, { state: 'draft', review_id: null, expanded: 0, emails: 0, reviews: 0 });
+      }
+      runtime.config.rampLines = {};
     });
   });
   test('send guards: a recipient domain where the campaign\'s mail mostly bounced is skipped for the rest of it; replies naming a blocklist pause the campaign, with one operator alert, and the sender resumes only once they stop; a plan opens its next batch only after a healthy day', async t => {
