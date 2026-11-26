@@ -42,7 +42,7 @@ export function comparisonQuestions(c: Comparison): Question[] {
 }
 
 /** A page's FAQPage for schema.org: its questions word for word as the page shows them. One per page. */
-export const faqPage = (pageUrl: string, questions: Question[]) => ({
+export const faqPage = (pageUrl: string, questions: Pick<Question, 'question' | 'answer'>[]) => ({
   '@type': 'FAQPage', '@id': `${pageUrl}#questions`,
   mainEntity: questions.map(item => ({ '@type': 'Question', name: item.question, acceptedAnswer: { '@type': 'Answer', text: item.answer } })),
 })

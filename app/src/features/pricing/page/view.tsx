@@ -31,6 +31,10 @@ export function ComparisonView({ comparison }: { comparison: Comparison }) {
   const doc = useMemo(() => comparisonDoc(comparison), [comparison]), start = useStart(doc.focus)
   return <PricePageView doc={doc} start={start} />
 }
+/** A vendor's pricing page (/pricing/<vendor>: docs/), drawn from its data as the comparisons are. */
+export function DocView({ doc }: { doc: PageDoc }) {
+  return <PricePageView doc={doc} start={useStart(doc.focus)} />
+}
 /** /compare: with the television over it (set), or without. */
 export function HubView({ set }: { set?: boolean }) {
   const doc = useMemo(hubDoc, []), start = useStart(doc.focus)

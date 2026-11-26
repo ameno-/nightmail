@@ -375,6 +375,12 @@ const pages = ids => [
     ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
     ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
   ],
+  // The vendors' pricing pages (features/pricing/docs/), each its own HTML drawn from its data (page/), measured cold; an
+  // unknown vendor's is not found.
+  ['Pricing · SendGrid', '/pricing/sendgrid', { user: null }],
+  ['Pricing · Resend', '/pricing/resend', { user: null }],
+  ['Pricing · Mailchimp', '/pricing/mailchimp', { user: null }],
+  ['Pricing · unknown vendor', '/pricing/nobody', { user: null, notFound: true }],
   // The other comparisons, from the calculator's Compare line.
   ['Compare · AgentMail', '/compare/agentmail', { user: null, from: '/pricing', click: 'AgentMail' }],
   ['Compare · Bird', '/compare/bird', { user: null, from: '/pricing', click: 'Bird' }],
@@ -608,6 +614,9 @@ const phonePages = new Set([
   'Legal · privacy',
   'Pricing',
   'Pricing · large',
+  'Pricing · SendGrid',
+  'Pricing · Resend',
+  'Pricing · Mailchimp',
   'Compare · Mailchimp',
   'Compare · Mailchimp · steel frame',
   'Compare · Resend',
@@ -1068,8 +1077,11 @@ async function measure(browser, job, fx) {
         await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
       for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
     }
+    // A page that isn't there can say so a chunk later than the page settles (a lazy route behind the shell, as
+    // /pricing/<unknown> is): wait for it, up to 10 s, and say what was there instead.
+    if (job.notFound) await page.waitForFunction(() => [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found'), null, { timeout: 10_000 }).catch(() => {});
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
-    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
+    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? `expected "Page not found", found ${JSON.stringify(await page.evaluate(() => ({ headings: [...document.querySelectorAll('h1,h2')].map(h => h.textContent.slice(0, 60)), text: document.body.innerText.slice(0, 120) })))}`);
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop', job.user !== null));
     // Overview's latest emails reserve as many 32px rows as reach the page's bottom edge (features/overview/latest.ts):
     // the list must end less than a row above it (Help's taller bottom padding only applies in one column) and never

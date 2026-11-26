@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, isPublicPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isPublicPage, isSitePage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -367,10 +367,11 @@ export default {
       if (pathname.startsWith('/assets/') || pathname.startsWith('/og/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
-      // A price page (app/price-pages.ts writes one per comparison, and /compare's), or its Markdown twin: the file,
+      // A price page (app/price-pages.ts writes one per comparison, /compare's and the vendors' pricing pages), or its
+      // Markdown twin: the file,
       // compressed here (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash)
       // go back as they are.
-      if (pathname === '/pricing' || pathname === '/compare' || pathname.startsWith('/compare/')) {
+      if (pathname === '/pricing' || pathname === '/compare' || isSitePage(pathname)) {
         const page = await assets.fetch(request);
         if (page.ok || page.status === 304) return untransformed(page, request);
         if (page.status !== 404) return fastSecure(page);

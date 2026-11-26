@@ -12,6 +12,7 @@ import { hubDoc } from './hub'
 const view = () => import('./view')
 const ComparisonView = lazy(() => view().then(m => ({ default: m.ComparisonView })))
 const HubView = lazy(() => view().then(m => ({ default: m.HubView })))
+const DocView = lazy(() => view().then(m => ({ default: m.DocView })))
 
 /** As ../index.tsx's PriceFrame: the fonts first (text drawn before them rewraps), the tab's title, and the page's place:
  *  it takes over from the page's painted HTML (useShellTakeover: the reader's scroll, focus and a press made while the
@@ -31,5 +32,8 @@ export function PricePage() {
   const vendor = at.startsWith('/compare/') ? at.slice('/compare/'.length) : null
   const comparison = vendor !== null && Object.hasOwn(comparisons, vendor) ? comparisons[vendor]! : null
   if (comparison) return <Frame title={PRICE_PAGES.find(page => page.comparison === comparison)!.searchTitle}><ComparisonView comparison={comparison} /></Frame>
+  // A vendor's pricing page (docs/), or (another address under /pricing/) not found, as ../index.tsx says it.
+  const doc = at.startsWith('/pricing/') ? PRICE_PAGES.find(page => page.path === at)?.doc : undefined
+  if (doc) return <Frame title={doc.searchTitle}><DocView doc={doc} /></Frame>
   return <Calculator />
 }
