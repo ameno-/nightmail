@@ -945,6 +945,10 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
   if ((await runtime.db.execute(sql`SELECT FROM mail_forward_once WHERE workspace_id=${w} AND message_id=${first.id} AND endpoint=${endpointId}`)).rowCount) return;
   const { files, left } = await forwardAttachments(runtime, w, first);
   await runtime.db.transaction(async tx => {
+    // Still allowed, read under a lock that a decline or the stop link (answerForward's update) waits for: one that came
+    // while the attachments were fetched stops this message too, and one made now waits until it is sent.
+    if (!(await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} AND verified AND declined_at IS NULL FOR SHARE`)).rowCount)
+      throw new ApiError(422, 'CONNECTOR_UNAVAILABLE', 'Only confirmed endpoints receive routed, non-junk mail.');
     await checkExternal(tx, w, address);
     const m = await received(tx), box = await forwardSender(tx, w, recipient, requestFrom);
     const stopUrl = await forwardStopUrl(runtime, endpointId, await linkOrigin(runtime, tx, w, box.address, 'forward'));

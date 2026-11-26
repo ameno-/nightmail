@@ -42175,7 +42175,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         assert.deepEqual([Buffer.from(files['logo.png']!.content as ArrayBuffer),files['logo.png']!.contentId,files['logo.png']!.mimeType],[png,'<logo@example.org>','image/png']);
         assert.equal((await db.query("SELECT attachment_count FROM mail_messages WHERE workspace_id=$1 AND direction='outbound' AND subject='Fwd: Quarterly report'",[wid])).rows[0].attachment_count,2);
       });
-      await t.test('forwards: mail flows once the recipient allows it: a route names a pending forward, nothing reaches them before Allow or from before it, the link is single-use and its own, and a decline or the stop link ends it at once',async()=>{
+      await t.test('forwards: mail flows once the recipient allows it: a route names a pending forward, nothing reaches them before Allow or from before it, the link is single-use and its own, and a decline or the stop link ends it at once',async it=>{
         const {mailboxEventJobs}=await import('./src/mailbox-events.js'),{forwardStopUrl}=await import('./src/endpoints.js');
         const tokenFor=async(address:string)=>{
           const request=(await db.query(`SELECT e.snapshot->>'text' AS text FROM mail_messages m JOIN sending_emails e ON e.id=m.sending_email_id
@@ -42265,6 +42265,26 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         const declined=await mail('fwd-declined','nope@receive.example');
         assert.deepEqual(await forwardDelivery(nopeHook,declined.id),{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
         error(await local('POST','/v1/routing/routes',{match:'nope-again@receive.example',to:['forward:nope']}),422,'FORWARD_NOT_CONFIRMED');
+        // A decline that comes while a delivery fetches its attachments stops that message too: the send reads the forward
+        // again, under a lock the decline waits for.
+        await call('POST','/v1/endpoints',{type:'forward',name:'inflight',address:'inflight@example.net',from:box.id},201);
+        await route('inflight@receive.example',['forward:inflight'],'inflight');
+        assert.equal((await choose(await tokenFor('inflight@example.net'),'allow')).status,200);
+        const heldHook=(await db.query("SELECT id FROM mailbox_webhooks WHERE workspace_id=$1 AND key='inflight'",[wid])).rows[0].id;
+        const pdf=Buffer.from('%PDF-1.4\n% in-flight fixture\n%%EOF\n');
+        const attached=await receive('fwd-inflight',['inflight@receive.example'],['From: Ana <ana@example.org>','To: inflight@receive.example','Subject: fwd-inflight','Message-ID: <fwd-inflight@example.org>','MIME-Version: 1.0','Content-Type: multipart/mixed; boundary="m"','',
+          '--m','Content-Type: text/plain; charset=utf-8','','Report attached.','--m','Content-Type: application/pdf','Content-Transfer-Encoding: base64','Content-Disposition: attachment; filename="report.pdf"','',pdf.toString('base64'),'--m--',''].join('\r\n'));
+        assert.equal(attached.attachment_count,1);
+        let reached!:()=>void,release!:()=>void;
+        const atFetch=new Promise<void>(r=>{reached=r}),gate=new Promise<void>(r=>{release=r}),send=S3Client.prototype.send;
+        it.mock.method(S3Client.prototype,'send',async function(this:unknown,cmd:any){if(cmd.constructor.name==='GetObjectCommand'){reached();await gate;}return (send as any).call(this,cmd);});
+        const heldDelivery=forwardDelivery(heldHook,attached.id);
+        await Promise.race([atFetch,new Promise((_,fail)=>setTimeout(()=>fail(new Error('The delivery never fetched its attachment.')),10_000))]);
+        assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,heldHook,PUBLIC_ORIGIN),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
+        release();
+        assert.deepEqual(await heldDelivery,{status:'failed',last_error:'CONNECTOR_UNAVAILABLE',routed:true});
+        assert.deepEqual(await forwardedTo('inflight@example.net'),[]);
+        it.mock.restoreAll();
         const queued=await mail('fwd-stopped-queued','later@receive.example');
         assert.deepEqual(await deliveries(hookId,queued.id),[{status:'pending',last_error:null}],'Recorded while allowed.');
         assert.equal((await rawFetch(new Request(await forwardStopUrl(runtime,hookId,PUBLIC_ORIGIN),{method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin:PUBLIC_ORIGIN},body:'choice=decline'}))).status,200);
