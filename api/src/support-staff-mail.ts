@@ -194,7 +194,7 @@ export function feedbackEmail(origin: string, rows: StaffRow[], first: boolean, 
   for (const row of rows.slice(0, 5)) {
     if (rows.length > 1) lines.push({ text: facts(row).replace(/^./, c => c.toUpperCase()), tone: 'muted' });
     if (row.first_words) lines.push({ quote: shortQuote(row.first_words.text) });
-    if (row.triage_summary) lines.push(sentences(row.triage_summary));
+    if (row.triage_summary) lines.push({ untrusted: sentences(row.triage_summary) });
   }
   if (rows.length > 5) lines.push(`And ${plural(rows.length - 5, 'more report')} in the support inbox.`);
   const { decision, recommendation } = decisionOf('feedback', lead);
