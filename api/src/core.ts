@@ -158,8 +158,7 @@ export interface Config {
   deploy?: { sha: string | null; at: string | null };
   /** PLANETSCALE_WEBHOOK_SECRET: the database disk alert also checks PlanetScale's signature (src/disk-alert.ts). Undefined: token alone; null: invalid configured signer, webhook disabled. */
   planetscaleWebhookSecret?: string | null;
-  /** NIGHTMAIL_ABUSE_ENFORCE. Reserved: abuse monitoring never blocks, and no code reads this yet. */
-  abuseEnforce?: boolean;
+
   /** Hosted billing. stripe is undefined until STRIPE_SECRET_KEY and STRIPE_WEBHOOK_SECRET are set (money routes answer 503 BILLING_NOT_CONFIGURED). */
   billing?: { stripe?: { secretKey: string; webhookSecret: string; automaticTax: boolean; creditProduct: string; taxCode: string; apiBase: string } };
   placementShadow?: boolean;

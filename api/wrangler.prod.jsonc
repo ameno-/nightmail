@@ -22,7 +22,6 @@
     "run_worker_first": ["/", "/pricing", "/compare", "/compare/*", "/v1", "/v1/*", "/api", "/api/*", "/mcp", "/mcp/*", "/.well-known", "/.well-known/*", "/unsubscribe", "/unsubscribe/*", "/i/*", "/health", "/health/*", "/internal/*", "/openapi.json", "/docs.md", "/docs/operations/*", "/docs/tags/*", "/llms.txt"]
   },
   "vars": {
-    "NIGHTMAIL_MAIL_BUCKET": "nightmail-prod-mail",
     "BYO_STACK_PREFIX": "Nightmail",
     // Connected AWS accounts' SNS topics and stacks report here, and their role allows only this host.
     "BYO_EVENTS_ORIGIN": "https://events.nightmail.dev",
@@ -96,7 +95,6 @@
     "NIGHTMAIL_TRUSTED_POOL": "true",
     "NIGHTMAIL_REQUIRE_DMARC_FOR_BULK": "true",
     "NIGHTMAIL_HOSTED_SCREEN": "true",
-    "NIGHTMAIL_RECEIVING_REDRIVE": "true",
     // BYO_TEMPLATE_URL stays unset until a template is published in the dedicated account.
     "DEFAULT_SES_REGION": "us-east-2",
     // Stripe Tax is on: registrations are set up through Sphere (api/README.md, Stripe setup). The keys are Worker secrets.
@@ -105,12 +103,8 @@
     // until every send carries an SES TenantName.
     "ENABLE_LIVE_SES": "true",
     "JOB_CONCURRENCY": "6",
-    "SIMULATED_SES_LATENCY_MS": "170",
-    "SIMULATED_SES_RATE": "5000",
     "DISPATCH_SHARDS": "8",
     "DISPATCH_RATE_FACTOR": "1.05",
-    // The customer share: outside workspaces together may use this percent of each shared account's SES daily limit.
-    "HOSTED_CUSTOMER_SHARE_PERCENT": "50",
     "API_RATE_LIMIT_PER_MINUTE": "10000",
     "WORK_QUEUE_NAME": "nightmail-prod-work",
     "WEBHOOK_QUEUE_NAME": "nightmail-prod-webhooks",
