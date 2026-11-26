@@ -94,8 +94,10 @@ function tiles(g: Glass): (key: string) => GlassTileFill {
     support: { value: <><Tick value={week.withoutHuman} /><span className="glass-tile__share">of {number(week.answerable)}{week.atLeast ? '+' : ''}{week.answerable ? ` (${percent(share(week.withoutHuman, week.answerable), 0)})` : ''}</span></>,
       tone: support.noReply ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
       hint: !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? 'Email not configured' : !support.configured.chat ? 'Chat not configured' : 'answered without a human',
-      note: <span title={`${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket, counted apart`}>
-        <span className={support.noReply ? 'ui-tone--danger' : undefined}>{number(support.noReply)} no reply</span> · {number(week.apart)} apart</span> },
+      // The foot says what's waiting now: the open conversations, then anyone who got no reply (in words and in red, the
+      // tile too) or, when nobody is waiting, the bug, billing and abuse conversations the share leaves out. The title has all three.
+      note: <span title={`${plural(support.open, 'conversation')} open now · ${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket: a person decides those, so the share counts them separately`}>
+        {number(support.open)} open · {support.noReply ? <span className="ui-tone--danger">{number(support.noReply)} with no reply</span> : <>{number(week.apart)} bug or billing</>}</span> },
     screened: { value: <Tick value={screening.screened} />, hint: `${number(screening.rejected)} rejected`, spark: screening.hourly },
     classifiers: { value: screening.agree === null ? '—' : <Tick value={screening.agree} format={pct(1)} />, hint: `flagged: Jev ${number(screening.jevFlagged)} · JevF ${number(screening.jevfFlagged)}`,
       meter: { value: screening.agree ?? 0, max: 1, tone: screening.agree !== null && screening.agree < 0.95 ? 'warning' : 'neutral', label: 'Verdicts both classifiers agree on' } },
