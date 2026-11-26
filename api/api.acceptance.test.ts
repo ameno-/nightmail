@@ -3915,6 +3915,11 @@ describe('OIDC dashboard sessions and current-policy authorization', () => {
           const created=ok(await add(b.cookie,name),201), detail=`/v1/domains/${created.id}`, setup=detail+'/dns-setup';
           dc.after(async()=>{runtime.config.domainConnect=undefined; await local('DELETE',detail,undefined,b.cookie,select(b.org.id));});
           const getSetup=async(query='')=>ok(await local('GET',setup+query,undefined,b.cookie));
+          // An agent's key is refused the consent link (a person approves it at the provider) and told where the records are.
+          const keyed=ok(await local('POST','/v1/api-keys',{name:'DNS agent',permissions:['read','send','manage']},b.cookie,select(b.org.id)),201);
+          const keyRefusal=error(await http('GET',setup,keyed.secret,undefined,{origin},5000,origin,r=>app.fetch(r,runtime)),403,'PERMISSION_DENIED');
+          assert.ok(keyRefusal.message.startsWith(`One-click DNS setup is for an owner or admin signed in to the dashboard: it returns a link a person approves at their DNS provider. Every record to publish is in GET /v1/domains/${created.id} (dns: each record's name, type, value and status). Publish them at the DNS provider, then call POST /v1/domains/${created.id}/verify`),keyRefusal.message);
+          assert.ok(ok(await http('GET',detail,keyed.secret,undefined,{origin},5000,origin,r=>app.fetch(r,runtime))).dns.length>0,'The same key reads the records.');
           // Creation asks DNS one thing, whether anyone serves the name (its NS records); never the provider.
           assert.deepEqual(requests.map(u=>new URL(u).searchParams.get('type')),['NS'],'Domain creation does not discover the provider.'); requests.length=0;
           const expectedProvider={id:providerId,name:providerName};
@@ -27166,6 +27171,12 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         const race = (await hosts()).find(h => h.name === `race.${name}`)!;
         assert.deepEqual([race.status, race.issue?.code], ['pending', 'host_taken']);
         assert.equal((await deliver(`x@race.${name}`)).routed, 0);
+      });
+
+      await t.test('a subdomain on a domain that doesn\u2019t receive yet is refused with the call that turns receiving on', async () => {
+        const d = await claim(`${unique('rx-nosub')}.example`);
+        const refused = error(await local('POST', `/v1/inbound/domains/${d.id}/subdomains`, { name: 'acme' }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED');
+        assert.equal(refused.message, `${d.name} doesn\u2019t receive mail yet. Add a receiving host with POST /v1/inbound/domains/${d.id}/hosts and {"name":"<subdomain>"} (or turn receiving on with POST /v1/inbound/domains/${d.id}/enable), then add subdomains.`);
       });
 
       // What a rollback runs on what this release writes. The MX check, receipt router and BYO reconciler are the previous

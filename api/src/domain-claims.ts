@@ -86,7 +86,7 @@ export async function reserveClaim(runtime: Runtime, workspace: string, name: st
   if (row.error_code==='DOMAIN_REGION_CONFLICT') throw new ApiError(409,row.error_code,'The domain already has a different sending binding.','region');
   if (row.error_code==='POOL_PLACEMENT_MANAGED') throw new ApiError(422,row.error_code,`Hosted sending placement is managed by ${productName}.`,'region');
   if (row.error_code==='DOMAIN_LIMIT_REACHED') throw await domainLimitReached(runtime.db,workspace);
-  if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired. Remove the domain and add it again.');
+  if (row.error_code==='DOMAIN_CLAIM_EXPIRED') throw new ApiError(409,row.error_code,'The 72-hour ownership window expired before its ownership record was published. Remove the domain (DELETE /v1/domains/{id}), add it again with POST /v1/domains, and publish the new ownership record within 72 hours.');
   if (!row.token || !row.id) throw domainClaimed();
   return { ...row, connection: row.connection, token: row.token, claim: row.claim ?? { sending_state: 'pending', receiving_state: 'off', receiving_host: null, lost_since: null, receiving_lost_since: null, identity: null, proof_label: PROOF_LABELS[0], created_at: row.reserved_at, ever_proven: false } }; // A new claim's created_at is this transaction's now(), its proof_label the column default.
 }
