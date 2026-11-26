@@ -22711,7 +22711,7 @@ describe('List hygiene', () => {
       assert.deepEqual(pick((await stats())[dead]), { sent: 4, delivered: 1, hard: 3, soft: 0, opened: 0, since: 1, classes: { user_unknown: 3 } });
     });
   });
-  test('list risk: a marketing campaign\'s launch records the measure of its list on its review (flagged contacts, contacts at domains this workspace\'s mail failed at, never mailed), banded only with the private lines, and the send review\'s verdict is unchanged', async t => {
+  test('list risk: a marketing campaign\'s launch records the measure of its list on its review (flagged contacts, contacts at domains this workspace\'s mail failed at, never mailed) and what the review said, banded only with the private lines, and the send review\'s verdict is unchanged; staff operators read it in Operator → Lists', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
       const { bandListRisk, bandListRiskBefore, listRiskJob } = await import('./src/list-risk.js');
       // The job the launch queued (the dispatcher's map names it: scripts/check-premerge.ts checks that).
@@ -22763,6 +22763,28 @@ describe('List hygiene', () => {
         assert.deepEqual([second.sampled, second.counts.flagged, second.counts.flaggedUnproven, second.values.FLAGGED_SOURCE, second.previous.flaggedSource], [21, 4, 1, 1 / 21, 4 / 21]);
         // The two rules disagree here: by the first, four flagged contacts were high; now the list is elevated by its dead domain alone.
         assert.deepEqual([second.band, second.factors, second.previous.band], ['elevated', [{ code: 'DEAD_DOMAINS', level: 'elevated' }], 'high']);
+        // Operator → Lists: staff operators read the measure beside what the review said and what happened; nobody else.
+        const hosted = runtime.config.multiTenant;
+        runtime.config.multiTenant = true;
+        try {
+          error(await local('GET', '/v1/operator/lists'), 403, 'OPERATOR_REQUIRED');
+          const { setOperator } = await import('./scripts/set-operator.js');
+          await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic list reviewer']);
+          await db.query('UPDATE nightmail_sessions SET staff=true WHERE user_id IN (SELECT user_id FROM workspace_members WHERE workspace_id=$1)', [wid]);
+          // Simulated sends are left out of the list: this one stands in for a real one.
+          await db.query('UPDATE sending_campaigns SET simulated=false WHERE id=$1', [campaign.id]);
+          const row = ok(await local('GET', '/v1/operator/lists?limit=50')).data.find((r: Json) => r.campaignId === campaign.id);
+          assert.deepEqual([row.measure.band, row.measure.values.FLAGGED_SOURCE, row.measure.counts.deadDomains, row.review.verdict, row.outcome.probe, row.outcome.failures.read],
+            ['high', 0.15, 5, launched.readiness.verdict, 'none', 0]);
+          assert.deepEqual(row.review.reasons, (launched.readiness.findings ?? launched.readiness.reasons).map((r: Json) => r.code));
+          assert.ok(!JSON.stringify(row).includes('@'), 'No address in a row.');
+          // The second launch's row carries both rules' bands, where they disagree.
+          await db.query('UPDATE sending_campaigns SET simulated=false WHERE id=$1', [again.id]);
+          const next = ok(await local('GET', '/v1/operator/lists?limit=50')).data.find((r: Json) => r.campaignId === again.id);
+          assert.deepEqual([next.measure.band, next.measure.previous], ['elevated', { flaggedSource: 4 / 21, band: 'high', factors: [{ code: 'FLAGGED_SOURCE', level: 'high' }, { code: 'DEAD_DOMAINS', level: 'elevated' }] }]);
+          await setOperator(db, [AUTH_SUBJECT, 'off', '--reason', 'Synthetic list reviewer done']);
+          await db.query('UPDATE nightmail_sessions SET staff=false WHERE user_id IN (SELECT user_id FROM workspace_members WHERE workspace_id=$1)', [wid]);
+        } finally { runtime.config.multiTenant = hosted; }
       } finally { runtime.config.listRisk = before; }
       // Without the private lines: values, no band.
       assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.5 }, null), { band: null, factors: [] });
