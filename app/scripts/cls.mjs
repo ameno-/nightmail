@@ -264,13 +264,16 @@ const pages = ids => [
   ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The Deliverability board: tiles, the providers' table, groups and VDM's table of fixed rows, filtered in place.
   ['Glass · deliverability', '/glass?view=deliverability', { from: '/glass', click: 'Deliverability' }],
-  // The support inbox (staff): Needs you and All, a conversation's timeline beside
-  // its customer panel, an email conversation (the email as it arrived), and on a phone the panel's sheet.
+  // The support inbox (staff): Needs you and All; a conversation as a chat (its thread scrolls by itself under a header
+  // of one height, loaded or not, with the reply box docked below), an email conversation (the email as it arrived), an
+  // agent's report, and Details: a panel from the right, a sheet on a phone (where the name opens it).
   ['Support', '/support', { from: '/overview' }],
   ['Support · all', '/support?view=all', { from: '/support', click: 'All' }],
   ['Support · conversation', `/support/${ids.supportConversation}`, { from: '/support', row: 'DKIM will not verify' }],
   ['Support · email conversation', `/support/${ids.supportEmail}`, { from: '/support?view=all', row: 'Why did my test email bounce?' }],
-  ['Support · customer sheet', `/support/${ids.supportConversation}`, { dialog: 'Customer', phoneOnly: true }],
+  ['Support · agent report', `/support/${ids.supportFeedback}`, {}],
+  ['Support · details', `/support/${ids.supportConversation}`, { dialog: 'Details' }],
+  ['Support · details sheet', `/support/${ids.supportConversation}`, { dialog: 'Sam Okafor', phoneOnly: true }],
   // A change support proposed, from its emailed link: the dialog over Overview opens once Nightmail's record has loaded.
   ['Support · confirm a change', `/support/actions/${ids.supportAction}`, {}],
   // UI notes mode on (a staff overlay): its pins, tray and lazy code load over the page without moving anything.
@@ -560,7 +563,8 @@ const phonePages = new Set([
   'Support · all',
   'Support · conversation',
   'Support · email conversation',
-  'Support · customer sheet',
+  'Support · agent report',
+  'Support · details sheet',
   'Support · confirm a change',
   'Overview · UI notes mode',
   'Operator · without UI notes',
