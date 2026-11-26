@@ -192,8 +192,9 @@ export const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN ni
  * No reply sent: since the customer's first message owed a reply after the last thing that reached them. Reached: an
  * answer the support platform sent, a notice that answers (system kind 'notice': busy, declined, a chat notice), or a
  * staff reply, queued or sent. Never a held draft or a failed reply (they reach nobody), and never a notice that asks the
- * person to do something before we answer (system kind 'waiting': the sign-in reply, the access-changed reply) or the
- * support platform's record that it won't answer yet (kind 'unanswered'). Over NO_REPLY_AFTER, a conversation (not agent
+ * person to do something before we answer (system kind 'waiting': the sign-in reply, the access-changed reply), a line
+ * that only records their own choice (kind 'status': content access allowed), or the support platform's record that it
+ * won't answer yet (kind 'unanswered'). Over NO_REPLY_AFTER, a conversation (not agent
  * feedback, which has nobody to reply to) needs you for it, and Glass counts it.
  */
 export const reached = sql`(o.kind IS DISTINCT FROM 'note' AND ((o.author = 'system' AND o.kind = 'notice')
