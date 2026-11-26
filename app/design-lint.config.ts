@@ -14,13 +14,14 @@ export type Rule = { level: Level; title: string; why: string; use: string; allo
 const ignore: Allow[] = [
   { files: ['src/styles/tokens.css'], reason: 'where the tokens are defined' },
   { files: ['src/features/home/**'], reason: 'the public homepage, outside the console: its own rules, rings and colours' },
+  { files: ['src/features/home/tv/**'], reason: 'the homepage\'s television, outside the console: a photographed set with its own palette, sizes and edges (it stays when the factory\'s files and the folder-wide entry above go)' },
   { files: ['src/features/pricing/**'], reason: 'the price and compare pages, outside the console: their own rules, rings and colours' },
   { files: ['src/features/legal/**'], reason: 'the legal documents, outside the console: they rule their tables (--color-border)' },
 ]
 
 // The campaign composer's sheet shows the email as it is delivered: mail clients get the email's own literal styles
 // (colours, px, fonts, its divider block), not the dashboard's custom properties.
-const email: Allow = { selector: /\.composer-document\b/, reason: 'the email itself, styled as delivered (mail clients get no tokens)' }
+const email: Allow = { selector: /\.composer-(?:document|static-doc)\b/, reason: 'the email itself, styled as delivered (mail clients get no tokens)' }
 
 
 const config = {

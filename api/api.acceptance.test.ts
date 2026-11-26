@@ -11848,6 +11848,58 @@ describe('Contacts and explicit consent', () => {
     error(await http('POST', '/v1/contacts', key.secret, { email }), 409, 'CONTACT_EXISTS');
   });
 
+  test('topics: owners and admins make and archive them, a contact\u2019s choices about them are its consent with a topic, kept in the consent history and events', async t => {
+    const key = await keyFixture(t), reader = await keyFixture(t, { permissions: ['read'] }), db = await fixtureDatabase(t);
+    const contact = await resource(t, key.secret, '/v1/contacts', { email: address() });
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, body), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const name = unique('Product updates');
+    error(await http('POST', '/v1/topics', reader.secret, { name }), 403, 'PERMISSION_DENIED');
+    const updates = await topic({ name, description: 'What we shipped' }), events = await topic({ name: unique('Events'), subscribedByDefault: false });
+    assert.deepEqual([updates.subscribedByDefault, updates.description, updates.archivedAt, events.subscribedByDefault, events.description], [true, 'What we shipped', null, false, '']);
+    error(await http('POST', '/v1/topics', key.secret, { name: name.toUpperCase() }), 409, 'TOPIC_EXISTS');
+    error(await http('PATCH', `/v1/topics/${updates.id}`, key.secret, { subscribedByDefault: false }), 422);
+    error(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { name }), 409, 'TOPIC_EXISTS');
+    error(await http('PATCH', `/v1/topics/${events.id}`, reader.secret, { description: 'Theirs' }), 403, 'PERMISSION_DENIED');
+    assert.equal(ok(await http('PATCH', `/v1/topics/${updates.id}`, key.secret, { description: 'Releases' })).description, 'Releases');
+    const listed = (await allPages('/v1/topics', reader.secret)).map(row => row.id);
+    assert.deepEqual(listed.filter(id => [updates.id, events.id].includes(id)), [updates.id, events.id], 'Topics list oldest first.');
+    const states = async () => Object.fromEntries(ok(await http('GET', `/v1/contacts/${contact.id}`, reader.secret)).topics.filter((row: Json) => [updates.id, events.id].includes(row.topicId)).map((row: Json) => [row.topicId, [row.subscribed, row.chosen]]));
+    assert.deepEqual(await states(), { [updates.id]: [true, false], [events.id]: [false, false] }, 'Without a choice each topic has its default.');
+    const choose = (topicId: string, status: 'subscribed' | 'unsubscribed', extra: Json = {}, bearer = key.secret) => http('POST', `/v1/contacts/${contact.id}/consent`, bearer, { status, topicId, ...extra });
+    assert.equal(ok(await choose(updates.id, 'unsubscribed', { evidence: 'Preference form' })).marketingConsent, 'unknown', 'A topic choice never changes marketing consent.');
+    ok(await choose(events.id, 'subscribed', { evidence: 'Preference form' }));
+    assert.deepEqual(await states(), { [updates.id]: [false, true], [events.id]: [true, true] });
+    const audit = page(await http('GET', `/v1/contacts/${contact.id}/consent`, reader.secret));
+    assert.deepEqual(audit.map((row: Json) => [row.topicId, row.status, row.source, row.evidence]), [[updates.id, 'unsubscribed', 'api', 'Preference form'], [events.id, 'subscribed', 'api', 'Preference form']]);
+    // The same choice again changes nothing: no consent record, no event.
+    ok(await choose(events.id, 'subscribed'));
+    assert.equal(page(await http('GET', `/v1/contacts/${contact.id}/consent`, reader.secret)).length, 2);
+    error(await choose(updates.id, 'subscribed'), 409, 'RESUBSCRIBE_CONFIRMATION_REQUIRED');
+    error(await choose('top_missing', 'subscribed'), 422, 'TOPIC_NOT_FOUND');
+    error(await choose(events.id, 'unsubscribed', {}, reader.secret), 403, 'PERMISSION_DENIED');
+    ok(await choose(updates.id, 'subscribed', { confirmResubscribe: true }));
+    assert.deepEqual((await states())[updates.id], [true, true]);
+    // A global subscription isn't stale because a topic decision came after the last global one.
+    assert.equal(ok(await consent(key.secret, contact.id, 'subscribed')).marketingConsent, 'subscribed');
+    const published = async () => (await db.query(`SELECT data->>'topicId' AS topic, data->>'status' AS status FROM operation_events WHERE type = 'contact.subscription_changed' AND data->>'contactId' = $1 AND data ? 'topicId' ORDER BY id`, [contact.id])).rows;
+    for (const deadline = Date.now() + 10_000; (await published()).length < 3 && Date.now() < deadline;) await new Promise(resolve => setTimeout(resolve, 100));
+    assert.deepEqual((await published()).map(row => [row.topic, row.status]), [[updates.id, 'unsubscribed'], [events.id, 'subscribed'], [updates.id, 'subscribed']], 'Each change is a contact.subscription_changed event with its topic.');
+    // An archived topic leaves the topic list and a contact's topics, takes no new choice, keeps the ones made, and comes back.
+    const archived = ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: true }));
+    assert.ok(archived.archivedAt);
+    assert.ok(!(await allPages('/v1/topics', reader.secret)).some(row => row.id === events.id));
+    assert.ok((await allPages('/v1/topics?archived=true', reader.secret)).some(row => row.id === events.id));
+    assert.equal((await states())[events.id], undefined);
+    error(await choose(events.id, 'unsubscribed'), 422, 'TOPIC_NOT_FOUND');
+    assert.equal((await db.query('SELECT subscribed FROM audience_contact_topics WHERE contact_id = $1 AND topic_id = $2', [contact.id, events.id])).rows[0]?.subscribed, true);
+    // Its name is free while it is archived; it can't come back while another topic has it.
+    const other = await topic({ name: events.name });
+    error(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: false }), 409, 'TOPIC_EXISTS');
+    ok(await http('PATCH', `/v1/topics/${other.id}`, key.secret, { archived: true }));
+    assert.equal(ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: false })).archivedAt, null);
+    assert.deepEqual((await states())[events.id], [true, true]);
+  });
+
   test('two keys in a workspace share one contact and consent history', async t => {
     const first = await keyFixture(t), second = await keyFixture(t);
     const contact = await resource(t, first.secret, '/v1/contacts', { email: address() });
@@ -13779,7 +13831,7 @@ describe('Transactional sending, idempotency and scoped authorization', () => {
           || (method === 'post' && [...AUTHENTICATED_CREATES, ...MAILBOX_CREATES].some(route => route.test(concrete)))) routes.set(op.operationId, concrete);
       }
       const expires = ['sendEmail', 'sendEmailBatch', 'testCampaign', 'sendDomainTestEmail', 'createInboundThread', 'replyToInboundThread'];
-      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'previewContactImport', 'createCampaignTemplate',
+      const kept = ['createAgentToken', 'createApiKey', 'updateApiKey', 'createContact', 'createContactList', 'createNewsletter', 'createSegment', 'createTopic', 'previewContactImport', 'createCampaignTemplate',
         'uploadTemplateAsset', 'importTemplateImage', 'uploadAttachment', 'uploadAttachmentBytes', 'createCampaign', 'sendCampaign', 'scheduleCampaign', 'cancelCampaign', 'createWebhook',
         'createRoute', 'createEndpoint', 'createInboxConnection', 'createInbox', 'createInboundSubdomain', 'createInboundAddress', 'createInboundWebhook',
         'createBillingTopUp', 'createBillingTopUpLink'];
@@ -20393,7 +20445,8 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.match(first.headers.get('cache-control') ?? '', /no-store/);
     assert.equal(first.headers.get('referrer-policy'), 'no-referrer');
     assert.match(first.headers.get('content-security-policy') ?? '', /form-action 'self'/);
-    assert.ok(/<form method="post">/.test(prompt) && /name="confirm" value="footer"/.test(prompt), 'A footer GET must show a confirmation form.');
+    // The live check's predicate (scripts/e2e.ts unsubscribe): a POST form that carries the confirmation.
+    assert.ok(/<form method="post"[^>]*>(?:(?!<\/form>)[\s\S])*name="confirm" value="footer"/.test(prompt), 'A footer GET must show a confirmation form.');
     assert.ok(!prompt.includes(email), 'Hosted confirmation must not disclose the recipient address.');
     assert.equal(ok(await http('GET', path)), prompt);
     assert.equal(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).marketingConsent, 'subscribed', 'A footer GET (or a link scanner) must not unsubscribe.');
@@ -20463,6 +20516,165 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(audit.length, 2, 'Initial subscription plus first provider POST must remain the only consent decisions after repeated POST and GET.');
     assert.equal(audit.filter(row => row.source === 'rfc8058-post').length, 1);
     assert.equal(audit.filter(row => row.source === 'footer-get').length, 0, 'Later footer navigation must not relabel provider-originated consent.');
+  });
+
+  test('topics on sends and campaigns: a topic\u2019s opt-outs are refused and skipped, its one-click leaves that topic alone, and an unsubscribe from everything wins', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), form = { 'content-type': 'application/x-www-form-urlencoded' };
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, { name: unique('Topic'), ...body }), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const news = await topic({ description: 'Synthetic topic' }), events = await topic({ subscribedByDefault: false });
+    const list = await resource(t, key.secret, '/v1/lists', { name: unique('topic-list') });
+    const [ana, ben, cai, dee] = await Promise.all([0, 1, 2, 3].map(async () => { const c = await resource(t, key.secret, '/v1/contacts', { email: address() }); ok(await consent(key.secret, c.id, 'subscribed')); return c; }));
+    ok(await http('POST', `/v1/lists/${list.id}/members`, key.secret, { contactIds: [ana.id, ben.id, cai.id, dee.id] }));
+    const tokenOf = async (emailId: string) => {
+      const [row] = (await db.query('SELECT snapshot FROM sending_emails WHERE id = $1', [emailId])).rows;
+      const url = row.snapshot.unsubscribeUrl ?? /Unsubscribe:\s*(https?:\/\/\S+)/.exec(ok(await http('GET', `/v1/emails/${emailId}/content`, key.secret)).text)![1];
+      const token = url.slice(url.lastIndexOf('/') + 1); secrets.add(token);
+      return token;
+    };
+    const tokenTopic = async (token: string) => (await db.query("SELECT topic_id FROM operation_unsubscribe_tokens WHERE token_hash = encode(sha256(convert_to($1, 'UTF8')), 'hex')", [token])).rows[0]?.topic_id;
+    const topicsOf = async (contact: Json) => Object.fromEntries(ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).topics.map((row: Json) => [row.topicId, row.subscribed]));
+    const refusedFor = (reply: Reply) => error(reply, 422, 'RECIPIENT_INELIGIBLE').details.map((row: Json) => row.reason);
+
+    // A topic is for marketing, and one the workspace has and hasn't archived: one read for a whole batch.
+    assert.equal(error(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, topicId: news.id })), 422, 'TOPIC_REQUIRES_MARKETING').field, 'topicId');
+    assert.equal(error(await http('POST', '/v1/emails/batch', key.secret, { emails: [mail({ to: ana.email, kind: 'marketing', topicId: news.id }), mail({ to: ben.email, kind: 'marketing', topicId: 'top_missing' })] }), 422, 'TOPIC_NOT_FOUND').field, 'emails.1.topicId');
+    // A send with a topic: its link is about that topic, and one-click opts out of it alone, synchronously and once.
+    const first = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, kind: 'marketing', topicId: news.id })), 202);
+    const anas = await tokenOf(first.id);
+    assert.equal(await tokenTopic(anas), news.id);
+    const prompt = ok(await http('GET', `/unsubscribe/${anas}`));
+    assert.ok(prompt.includes(news.name) && /<form method="post">/.test(prompt) && !prompt.includes(ana.email));
+    assert.equal((await topicsOf(ana))[news.id], true, 'A GET changes nothing.');
+    const clicked = await http('POST', `/unsubscribe/${anas}`, undefined, 'List-Unsubscribe=One-Click', form);
+    assert.match(ok(clicked), /unsubscribed/i);
+    assert.equal(clicked.headers.get('location'), null);
+    ok(await http('POST', `/unsubscribe/${anas}`, undefined, 'List-Unsubscribe=One-Click', form));
+    const anaAfter = ok(await http('GET', `/v1/contacts/${ana.id}`, key.secret));
+    assert.equal(anaAfter.marketingConsent, 'subscribed', 'A topic opt-out leaves the rest of marketing as it was.');
+    const choice = (id: string) => anaAfter.topics.find((row: Json) => row.topicId === id);
+    assert.deepEqual([[choice(news.id).subscribed, choice(news.id).chosen], [choice(events.id).subscribed, choice(events.id).chosen]], [[false, true], [false, false]]);
+    assert.deepEqual(page(await http('GET', `/v1/contacts/${ana.id}/consent`, key.secret)).filter(row => row.topicId).map(row => [row.topicId, row.status, row.source]), [[news.id, 'unsubscribed', 'rfc8058-post']]);
+    // Her next mail about the topic is refused with a plain reason; other marketing still reaches her. A topic nobody gets
+    // by default reaches only those who chose it.
+    assert.deepEqual(refusedFor(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, kind: 'marketing', topicId: news.id }))), ['topic_unsubscribed']);
+    ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: ana.email, kind: 'marketing' })), 202);
+    assert.deepEqual(refusedFor(await http('POST', '/v1/emails/send', key.secret, mail({ to: ben.email, kind: 'marketing', topicId: events.id }))), ['topic_unsubscribed']);
+    ok(await consent(key.secret, ben.id, 'subscribed', { topicId: events.id }));
+    ok(await http('POST', '/v1/emails/send', key.secret, mail({ to: ben.email, kind: 'marketing', topicId: events.id })), 202);
+    // An unsubscribe from everything wins over any topic choice, an explicit one included.
+    ok(await consent(key.secret, cai.id, 'subscribed', { topicId: events.id }));
+    ok(await consent(key.secret, cai.id, 'unsubscribed'));
+    assert.deepEqual(refusedFor(await http('POST', '/v1/emails/send', key.secret, mail({ to: cai.email, kind: 'marketing', topicId: events.id }))), ['unsubscribed']);
+
+    // A campaign with a topic: marketing only, counted and captured without its opt-outs.
+    error(await http('POST', '/v1/campaigns', key.secret, { name: unique('topic'), topicId: 'top_missing' }), 422, 'TOPIC_NOT_FOUND');
+    error(await http('POST', '/v1/campaigns', key.secret, { name: unique('topic'), topicId: news.id, requiredNotice: true }), 422, 'TOPIC_REQUIRES_MARKETING');
+    const campaign = await campaignFixture(t, key.secret, { listId: list.id }, { topicId: news.id });
+    assert.equal(campaign.draft.topicId, news.id);
+    const counted = ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret));
+    assert.deepEqual([counted.matched, counted.eligible, counted.unsubscribed], [4, 2, 2], 'Ana left the topic and Cai everything: Ben and Dee are reached.');
+    assert.equal(ok(await http('GET', `/v1/campaigns/${(await campaignFixture(t, key.secret, { listId: list.id })).id}/audience`, key.secret)).eligible, 3, 'Without the topic, Ana is reached.');
+    assert.equal(ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202).queued, 2);
+    // Ben leaves the topic after the capture, and the topic is archived: the dispatcher still skips him, as unsubscribed from it.
+    ok(await consent(key.secret, ben.id, 'unsubscribed', { topicId: news.id }));
+    ok(await http('PATCH', `/v1/topics/${news.id}`, key.secret, { archived: true }));
+    await db.query('UPDATE sending_campaigns SET scheduled_at = now() WHERE id = $1', [campaign.id]);
+    await db.query('UPDATE jobs SET available_at = now() WHERE id = $1', [`campaign.run:${campaign.id}`]);
+    await poll(`/v1/campaigns/${campaign.id}`, key.secret, row => row.state === 'done' && row.counts.byStatus.delivered === 1 && row.counts.byStatus.suppressed === 1);
+    const sent = page(await http('GET', `/v1/emails?campaignId=${campaign.id}`, key.secret));
+    const skipped = sent.find(row => row.to[0].toLowerCase() === ben.email.toLowerCase()), reached = sent.find(row => row.to[0].toLowerCase() === dee.email.toLowerCase());
+    assert.deepEqual([skipped?.status, skipped?.suppressionReason, reached?.status], ['suppressed', 'topic_unsubscribed', 'delivered']);
+    // Dee's link is about the topic; its one-click works after the topic was archived, and leaves her other choices.
+    const dees = await tokenOf(reached!.id);
+    assert.equal(await tokenTopic(dees), news.id);
+    assert.match(ok(await http('POST', `/unsubscribe/${dees}`, undefined, 'List-Unsubscribe=One-Click', form)), /unsubscribed/i);
+    assert.deepEqual([ok(await http('GET', `/v1/contacts/${dee.id}`, key.secret)).marketingConsent, (await db.query('SELECT subscribed FROM audience_contact_topics WHERE contact_id = $1 AND topic_id = $2', [dee.id, news.id])).rows[0]?.subscribed], ['subscribed', false]);
+    // An archived topic can't be launched with; a draft that has it keeps it until then.
+    const late = await campaignFixture(t, key.secret, { listId: list.id }, { topicId: events.id });
+    ok(await http('PATCH', `/v1/topics/${events.id}`, key.secret, { archived: true }));
+    const kept = ok(await http('PATCH', `/v1/campaigns/${late.id}`, key.secret, { revision: late.revision, draft: { ...late.draft, name: unique('renamed') } }));
+    assert.equal(kept.draft.topicId, events.id);
+    error(await http('POST', `/v1/campaigns/${late.id}/send`, key.secret, { revision: kept.revision }), 422, 'TOPIC_NOT_FOUND');
+  });
+
+  test('the hosted preference page only removes: a GET changes nothing, a topic link\u2019s button and Save turn topics off, turning one on through the link is ignored and recorded nowhere, and everything wins and stays', async t => {
+    const key = await keyFixture(t), db = await fixtureDatabase(t), form = { 'content-type': 'application/x-www-form-urlencoded' };
+    const topic = async (body: Json) => { const made = ok(await http('POST', '/v1/topics', key.secret, { name: unique('Topic'), ...body }), 201); cleanup(t, async () => { ok(await http('PATCH', `/v1/topics/${made.id}`, key.secret, { archived: true })); }); return made; };
+    const news = await topic({ name: unique('News <b>&"'), description: 'Product <i>news</i> & more' }), events = await topic({ subscribedByDefault: false });
+    const person = async () => { const contact = await resource(t, key.secret, '/v1/contacts', { email: address() }); ok(await consent(key.secret, contact.id, 'subscribed')); return contact; };
+    const ana = await person(), ben = await person();
+    const linkOf = async (to: string, extra: Json = {}) => {
+      const sent = ok(await http('POST', '/v1/emails/send', key.secret, mail({ to, kind: 'marketing', ...extra })), 202);
+      const url = new URL(/Unsubscribe:\s*(https?:\/\/\S+)/.exec(ok(await http('GET', `/v1/emails/${sent.id}/content`, key.secret)).text)![1]);
+      secrets.add(url.pathname.split('/').at(-1)!);
+      return url.pathname;
+    };
+    const states = async (contact: Json, ...ids: string[]) => ok(await http('GET', `/v1/contacts/${contact.id}`, key.secret)).topics.filter((row: Json) => ids.includes(row.topicId)).map((row: Json) => [row.topicId, row.subscribed]);
+    // What the link has recorded for a contact: its topic choices and its topic consent records (each record is an event too).
+    const recorded = async (contact: Json) => [(await db.query('SELECT topic_id, subscribed FROM audience_contact_topics WHERE contact_id = $1 ORDER BY topic_id', [contact.id])).rows.map(row => [row.topic_id, row.subscribed]),
+      page(await http('GET', `/v1/contacts/${contact.id}/consent`, key.secret)).filter(row => row.topicId).map(row => [row.topicId, row.status, row.source]).sort()];
+    // The page's forms, posted as a browser without script posts them.
+    const post = async (path: string, body: string) => ok(await http('POST', path, undefined, body, form));
+    const save = (on: string[], shown: string[]) => ['preferences=save', ...shown.map(id => `shown=${id}`), ...on.map(id => `topic=${id}`)].join('&');
+    const escaped = (text: string) => text.replace(/[&<>"']/g, ch => `&#${ch.charCodeAt(0)};`);
+    const checked = (page: string, id: string) => new RegExp(`name="topic" value="${id}" checked`).test(page);
+    const offered = (page: string, id: string) => page.includes(`value="${id}"`);
+    // The live check's predicate (scripts/e2e.ts unsubscribe), kept the same here: a POST form that carries the confirmation.
+    const confirmationForm = (page: string) => /<form method="post"[^>]*>(?:(?!<\/form>)[\s\S])*name="confirm" value="footer"/.test(page);
+
+    // Ana's link from mail about the news topic: the topic's own button, the topics she gets to clear, and no address. The
+    // opt-in topic she never joined isn't offered. No script: every action is a plain POST form.
+    const anas = await linkOf(ana.email, { topicId: news.id });
+    const first = ok(await http('GET', anas));
+    assert.ok(first.includes('Email preferences') && first.includes(`Unsubscribe from ${escaped(news.name)}`) && first.includes(escaped(news.description)) && !first.includes(news.name) && !first.includes('<i>'), 'Topic names and descriptions are text, never markup.');
+    assert.ok(checked(first, news.id) && !offered(first, events.id) && first.includes('name="preferences" value="save"') && first.includes('name="preferences" value="all"') && !first.includes(ana.email));
+    assert.ok(!/<script/i.test(first) && (first.match(/<form\b[^>]*>/g) ?? []).every((tag: string) => /^<form method="post"( style="[^"]*")?>$/.test(tag)), 'Every form is a plain POST: it works without script.');
+    assert.equal(ok(await http('GET', anas)), first);
+    assert.deepEqual([await states(ana, news.id, events.id), await recorded(ana)], [[[news.id, true], [events.id, false]], [[], []]], 'A GET changes nothing.');
+    // Asking the link to turn the opt-in topic on is ignored: nothing changes and nothing is recorded.
+    assert.match(await post(anas, save([news.id, events.id], [news.id, events.id])), /Nothing changed/);
+    assert.deepEqual([await states(ana, news.id, events.id), await recorded(ana)], [[[news.id, true], [events.id, false]], [[], []]]);
+    // The topic's button turns that topic off, as the one-click does.
+    assert.match(await post(anas, 'confirm=footer'), /You’re unsubscribed[\s\S]*Back to your email preferences/);
+    const after = ok(await http('GET', anas));
+    assert.ok(after.includes(`You’ve unsubscribed from ${escaped(news.name)} emails. To get them again, ask the sender.`) && !after.includes('name="confirm"'));
+    // The topic she left is shown as off with no control: a disabled box with no name, so nothing is posted for it.
+    assert.ok(after.includes('You’ve unsubscribed from this. To get it again, ask the sender.') && !checked(after, news.id) && !offered(after, news.id) && /<input type="checkbox" disabled/.test(after) && !after.includes('name="preferences" value="save"'));
+    const left = await recorded(ana);
+    assert.deepEqual(left, [[[news.id, false]], [[news.id, 'unsubscribed', 'footer-confirm']]]);
+    // A crafted Save turning it back on, or turning on the opt-in topic, is ignored and recorded nowhere.
+    assert.match(await post(anas, save([news.id, events.id], [news.id, events.id])), /Nothing changed/);
+    assert.deepEqual([await states(ana, news.id, events.id), await recorded(ana)], [[[news.id, false], [events.id, false]], left]);
+    // A topic made since is one she gets, so it's offered to clear; clearing it turns it off, and only what the page showed.
+    const later = await topic({});
+    const withLater = ok(await http('GET', anas));
+    assert.ok(checked(withLater, later.id) && withLater.includes('name="preferences" value="save"'));
+    const latest = await topic({});
+    assert.match(await post(anas, save([], [news.id, events.id, later.id])), new RegExp(`Preferences saved[\\s\\S]*You’ll no longer receive: ${later.name}\\.`));
+    assert.deepEqual(await states(ana, later.id, latest.id), [[later.id, false], [latest.id, true]], 'A topic the page didn’t show is left alone.');
+    assert.deepEqual((await recorded(ana))[1], [[later.id, 'unsubscribed', 'preferences'], [news.id, 'unsubscribed', 'footer-confirm']].sort());
+    // Unsubscribe from all wins and stays: the page shows it and offers nothing, and Save can't change anything.
+    assert.match(await post(anas, 'preferences=all'), /You’re unsubscribed/);
+    assert.equal(ok(await http('GET', `/v1/contacts/${ana.id}`, key.secret)).marketingConsent, 'unsubscribed');
+    const gone = ok(await http('GET', anas));
+    assert.ok(gone.includes('unsubscribed from all marketing emails') && !/<form\b/.test(gone));
+    const final = await recorded(ana);
+    assert.match(await post(anas, save([news.id, latest.id], [news.id, latest.id])), /Nothing changed/);
+    assert.deepEqual(await recorded(ana), final);
+    // Ben's link from mail without a topic, in a workspace with topics: what the live check proves of every deployment
+    // (scripts/e2e.ts unsubscribe), with its predicate: a GET shows a POST form carrying the confirmation and changes nothing,
+    // then the mailbox's one-click (a POST with no body) records the opt-out. The page shows his own topics, not Ana's, and
+    // no opt-in topic.
+    const bens = await linkOf(ben.email);
+    const his = ok(await http('GET', bens));
+    assert.ok(confirmationForm(his), 'GET must display a confirmation form');
+    assert.equal(ok(await http('GET', `/v1/contacts/${ben.id}`, key.secret)).marketingConsent, 'subscribed', 'A GET changes nothing.');
+    assert.ok(checked(his, news.id) && !offered(his, events.id) && !his.includes('Unsubscribe from ' + escaped(news.name)));
+    assert.match(ok(await http('POST', bens)), /unsubscribed/, 'one-click did not confirm opt-out');
+    assert.deepEqual([ok(await http('GET', `/v1/contacts/${ben.id}`, key.secret)).marketingConsent, await states(ben, news.id, events.id)], ['unsubscribed', [[news.id, true], [events.id, false]]]);
+    // The workspace itself still sets a topic with its own credentials: the API is unchanged.
+    ok(await consent(key.secret, ben.id, 'subscribed', { topicId: events.id }));
+    assert.deepEqual(await states(ben, events.id), [[events.id, true]]);
   });
 
   test('a campaign’s own unsubscribe page changes only the footer link: List-Unsubscribe keeps its one HTTPS one-click address', async () => {
@@ -21851,6 +22063,102 @@ describe('List hygiene', () => {
         runtime.config.hygieneLists = before.lists; runtime.config.hygieneDnsUrl = before.dns;
         hygiene.forgetHygieneLists();
       }
+    });
+  });
+  test('delivery history: finished mail is folded once into per-domain counts by outcome and failure class, the mail history of the contacts campaigns and marketing went to, and blocklist rejections by From domain and link host; recent, simulated, multi-recipient and transactional-to-contact mail are left as the design says; one leased writer', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db }) => {
+      const { deliveryHistoryHourly, bounceClass, blocklistNamed } = await import('./src/delivery-history.js');
+      // The classes, from replies mail servers write.
+      const cls = (diagnostic: string, type = 'bounce', subType = 'General') => bounceClass({ type, subType, diagnostic });
+      assert.deepEqual([cls('550 5.1.1 <x@example.com>: Recipient address rejected: User unknown'), cls('550 5.1.2 Host or domain name not found'),
+        cls('452 4.2.2 Mailbox full', 'non_permanent_bounce'), cls('554 5.7.1 Service unavailable; Client host blocked using zen.spamhaus.org'),
+        cls('550 rejected (URIBL_DBL_SPAM)'), cls('550 5.7.26 Unauthenticated email is not accepted'), cls('421 4.7.28 Rate limited', 'non_permanent_bounce'),
+        cls('554 5.7.1 Message rejected as spam'), bounceClass({ type: 'validation_suppressed' }), cls(''), cls('', 'bounce', 'NoEmail'),
+        // Addresses, host names and queue IDs that happen to hold a zone's letters, and policy replies worded as a rejected recipient.
+        cls('550 5.1.1 <ops@pbl.example>: Recipient address rejected: User unknown'), cls('554 5.7.1 <u@example.com>: Recipient address rejected: Access denied'),
+        cls('452 4.2.2 <dmarc@example.com>: Mailbox full', 'non_permanent_bounce'), cls('550 5.7.1 Rejected as spam (spf=pass dkim=pass dmarc=pass)'), cls('550 5.1.0 Address rejected')],
+      ['user_unknown', 'dead_domain', 'mailbox_full', 'blocklist', 'blocklist', 'auth', 'reputation', 'policy', 'validation', 'other', 'user_unknown',
+        'user_unknown', 'policy', 'mailbox_full', 'policy', 'user_unknown']);
+      assert.deepEqual([blocklistNamed('Host classified as spam by b.barracudacentral.org'), blocklistNamed('listed on a blocklist'), blocklistNamed('5.7.1 content rejected'), blocklistNamed(null),
+        blocklistNamed('250 2.0.0 ok id=4928sbl19 via mail-dbl01.example.net'), blocklistNamed('550 Client host blocked using dbl')], ['barracuda', 'other', null, null, null, 'spamhaus']);
+
+      const ws = unique('ws_history'), tag = unique('dh').toLowerCase().replace(/[^a-z0-9]/g, ''), good = tag + '-good.example', dead = tag + '-dead.example', corp = tag + '-corp.example', relay = tag + '-relay.example';
+      const base = Date.now() - 2 * 86_400_000, at = (i: number) => new Date(base + i * 60_000).toISOString();
+      const contact = async (email: string) => { const id = unique('con'); await db.query('INSERT INTO audience_contacts(id,workspace_id,email) VALUES ($1,$2,$3)', [id, ws, email]); return id; };
+      const [a, b, d, f] = [await contact('a@' + good), await contact('b@' + dead), await contact('d@' + corp), await contact('f@' + good)];
+      type Mail = { to: string[]; i: number; status: string; o: number; campaign?: boolean; simulated?: boolean; provider?: boolean; created?: string; snapshot?: Json; events?: [string, Json][] };
+      const send = async (m: Mail) => {
+        const id = unique('email');
+        await db.query("INSERT INTO sending_emails (id, workspace_id, region, actor_key_id, campaign_id, from_address, to_addresses, cc_addresses, bcc_addresses, subject, snapshot, simulated, status, provider_id, event_outcomes, created_at) VALUES ($1,$2,'us-east-1','fixture',$3,'news@brand.example',$4,'[]','[]','Synthetic',$5,$6,$7,$8,$9,$10)",
+          [id, ws, m.campaign === false ? null : unique('campaign'), JSON.stringify(m.to), JSON.stringify(m.snapshot ?? {}), !!m.simulated, m.status, m.provider === false ? null : unique('provider'), m.o, m.created ?? at(m.i)]);
+        for (const [type, data] of m.events ?? []) await db.query('INSERT INTO sending_email_events (id, workspace_id, email_id, type, data, simulated, created_at) VALUES ($1,$2,$3,$4,$5,false,$6)', [unique('event'), ws, id, type, JSON.stringify(data), at(m.i + 0.5)]);
+      };
+      const unsubscribe = { unsubscribeUrl: 'https://links.example.net/unsubscribe/u_synthetic' };
+      await send({ to: ['a@' + good], i: 1, status: 'delivered', o: 1 | 2 | 16 });
+      await send({ to: ['a@' + good], i: 2, status: 'delayed', o: 1 | 128, events: [['non_permanent_bounce', { bounceType: 'Transient', bounceSubType: 'MailboxFull', diagnosticCode: '452 4.2.2 Mailbox full' }]] });
+      await send({ to: ['b@' + dead], i: 3, status: 'bounced', o: 1 | 4, events: [['bounce', { bounceType: 'Permanent', bounceSubType: 'General', diagnosticCode: '550 5.1.1 User unknown' }]] });
+      await send({ to: ['c@' + dead], i: 4, status: 'bounced', o: 1 | 4, events: [['bounce', { bounceType: 'Permanent', bounceSubType: 'General', diagnosticCode: '550 5.1.1 No such user here' }]] });
+      await send({ to: ['d@' + corp], i: 5, status: 'delayed', o: 1 | 128, snapshot: unsubscribe, events: [['non_permanent_bounce', { bounceType: 'Transient', bounceSubType: 'General', diagnosticCode: '554 An URL in this email is listed by Spamhaus DBL' }]] });
+      await send({ to: ['e@' + corp], i: 6, status: 'suppressed', o: 1, events: [['validation_suppressed', { bounceType: 'Permanent', bounceSubType: 'EmailValidationSuppressed' }]] });
+      await send({ to: ['f@' + good], i: 7, status: 'delivered', o: 1 | 2, campaign: false, snapshot: { kind: 'transactional' } });
+      // A relay accepted it (a delivery event), then returned it: a bounce, not a delivery.
+      await send({ to: ['r@' + relay], i: 7.5, status: 'bounced', o: 1 | 2 | 4, events: [['bounce', { bounceType: 'Permanent', bounceSubType: 'General', diagnosticCode: '550 5.1.1 User unknown' }]] });
+      // Not counted: two recipients, simulated, not accepted, and too recent for its feedback to be in.
+      await send({ to: ['a@' + good, 'b@' + dead], i: 8, status: 'delivered', o: 1 | 2, campaign: false });
+      await send({ to: ['a@' + good], i: 9, status: 'delivered', o: 1 | 2, simulated: true });
+      await send({ to: ['a@' + good], i: 10, status: 'rejected', o: 0, provider: false });
+      await send({ to: ['a@' + good], i: 11, status: 'delivered', o: 1 | 2, created: new Date(Date.now() - 3_600_000).toISOString() });
+
+      // Start the one writer three days back, as a fresh installation would start 30 days back.
+      const rewind = async () => {
+        for (let i = 0; i < 50; i++) {
+          const { rowCount } = await db.query("INSERT INTO delivery_history_state AS s (id, cursor_at, cursor_id) VALUES ('rollup', now() - interval '3 days', '') ON CONFLICT (id) DO UPDATE SET cursor_at=excluded.cursor_at, cursor_id='' WHERE s.lease_until IS NULL OR s.lease_until <= now()");
+          if (rowCount) return;
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        assert.fail('the rollup lease was never free');
+      };
+      await rewind();
+      const run = await deliveryHistoryHourly(runtime, { budgetMs: 60_000 });
+      assert.ok(run && run.counted >= 8, JSON.stringify(run));
+      const stats = async () => Object.fromEntries((await db.query('SELECT * FROM delivery_domain_stats WHERE workspace_id=$1 ORDER BY domain', [ws])).rows.map((r: Json) => [r.domain, r]));
+      const pick = (r: Json) => ({ sent: +r.sent, delivered: +r.delivered, hard: +r.hard_bounced, soft: +r.soft_failed, opened: +r.opened, since: r.failed_since_delivery,
+        classes: Object.fromEntries(['user_unknown', 'dead_domain', 'mailbox_full', 'blocklist', 'validation', 'policy'].map(c => [c, +r[c]]).filter(([, n]) => n)) });
+      const first = await stats();
+      assert.deepEqual(Object.keys(first).sort(), [corp, dead, good, relay].sort());
+      assert.deepEqual(pick(first[relay]), { sent: 1, delivered: 0, hard: 1, soft: 0, opened: 0, since: 1, classes: { user_unknown: 1 } });
+      assert.deepEqual(pick(first[good]), { sent: 3, delivered: 2, hard: 0, soft: 1, opened: 1, since: 0, classes: { mailbox_full: 1 } });
+      assert.deepEqual(pick(first[dead]), { sent: 2, delivered: 0, hard: 2, soft: 0, opened: 0, since: 2, classes: { user_unknown: 2 } });
+      assert.deepEqual(pick(first[corp]), { sent: 2, delivered: 0, hard: 0, soft: 1, opened: 0, since: 1, classes: { blocklist: 1, validation: 1 } });
+      assert.equal(new Date(first[good].last_delivered).toISOString(), at(7));
+      // Blocklist rejections by the workspace, the day it was sent, its From domain, its link host and the list named.
+      assert.deepEqual((await db.query('SELECT day::text, from_domain, link_host, list, rejections FROM delivery_blocklist_daily WHERE workspace_id=$1', [ws])).rows,
+        [{ day: at(5).slice(0, 10), from_domain: 'brand.example', link_host: 'links.example.net', list: 'spamhaus', rejections: 1 }]);
+      // Contacts: campaign and marketing mail only.
+      const history = async () => Object.fromEntries((await db.query('SELECT id, mailed_count, delivered_count, first_mailed_at, last_mailed_at, soft_failures FROM audience_contacts WHERE workspace_id=$1', [ws])).rows
+        .map((r: Json) => [r.id, [r.mailed_count, r.delivered_count, r.soft_failures, r.first_mailed_at && new Date(r.first_mailed_at).toISOString(), r.last_mailed_at && new Date(r.last_mailed_at).toISOString()]]));
+      const contacts = await history();
+      assert.deepEqual(contacts[a], [2, 1, 1, at(1), at(2)]);
+      assert.deepEqual(contacts[b], [1, 0, 0, at(3), at(3)]);
+      assert.deepEqual(contacts[d], [1, 0, 1, at(5), at(5)]);
+      assert.deepEqual(contacts[f], [0, 0, 0, null, null]);
+
+      // Read once: another run adds nothing, and a run while the lease is held does nothing.
+      await deliveryHistoryHourly(runtime, { budgetMs: 60_000 });
+      assert.deepEqual(await stats(), first);
+      assert.deepEqual(await history(), contacts);
+      await db.query("UPDATE delivery_history_state SET lease_until=now() + interval '1 minute' WHERE id='rollup'");
+      try { assert.equal(await deliveryHistoryHourly(runtime), null); } finally { await db.query("UPDATE delivery_history_state SET lease_until=NULL WHERE id='rollup'"); }
+
+      // A later delivery to the dead domain starts its count of failures since a delivery again.
+      await send({ to: ['g@' + dead], i: 12, status: 'delivered', o: 1 | 2 });
+      await send({ to: ['h@' + dead], i: 13, status: 'bounced', o: 1 | 4, events: [['bounce', { bounceType: 'Permanent', bounceSubType: 'General', diagnosticCode: '550 5.1.1 User unknown' }]] });
+      await rewind();
+      await db.query('DELETE FROM delivery_domain_stats WHERE workspace_id=$1', [ws]);
+      await db.query('UPDATE audience_contacts SET mailed_count=0, delivered_count=0, first_mailed_at=NULL, last_mailed_at=NULL, soft_failures=0 WHERE workspace_id=$1', [ws]);
+      await db.query('DELETE FROM delivery_blocklist_daily WHERE workspace_id=$1', [ws]);
+      await deliveryHistoryHourly(runtime, { budgetMs: 60_000 });
+      assert.deepEqual(pick((await stats())[dead]), { sent: 4, delivered: 1, hard: 3, soft: 0, opened: 0, since: 1, classes: { user_unknown: 3 } });
     });
   });
 });
@@ -31108,16 +31416,20 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       admission.mock.restore();
     });
   });
-  test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack card is well-formed and holds no personal data; nothing is posted without a webhook, and with one each card is posted once; operators read the outbox; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
+  test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack message is one line and three bullets with no personal data; only review alerts post, to the abuse webhook or else the operator alerts\' one, never without a webhook, each message once, and a failed post waits longer each time; operators read the outbox and Watch or Dismiss an alert; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const h = await abuseHarness(runtime, db), { payment, signIn, abuse } = h, wid = runtime.config.workspaceId, { loadConfig } = await import('./src/config.js'), alerts = await import('./src/abuse-alerts.js'), { REASON_CODES } = await import('./src/abuse-clusters.js');
-      const outbox = async () => (await db.query('SELECT id,cluster_id,band,score,kind,workspaces,status,attempts,error,payload,sent_at FROM abuse_alerts ORDER BY score,id')).rows as Json[];
-      // The setting: a Slack webhook only, hosted only, off by default.
+      const outbox = async () => (await db.query('SELECT id,cluster_id,band,score,kind,workspaces,status,attempts,error,payload,sent_at,members,reasons FROM abuse_alerts ORDER BY score,id')).rows as Json[];
+      // The setting: a Slack webhook, hosted only, off by default. Without one of its own, alerts go to the operator
+      // alerts' webhook, which production's deploy binds: nothing more to set up.
       const settings = (extra: Json) => loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), MULTI_TENANT: 'true', ACCOUNT_REQUIRED_ACR: 'urn:anomaly:acr:google', ...extra });
-      assert.deepEqual([settings({}).abuseSlackWebhookUrl, settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T0/B0/fixture' }).abuseSlackWebhookUrl, loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ABUSE_SLACK_WEBHOOK_URL: 'https://hooks.slack.com/services/T0/B0/fixture' }).abuseSlackWebhookUrl],
-        [undefined, 'https://hooks.slack.com/services/T0/B0/fixture', undefined]);
+      const hook = 'https://hooks.slack.com/services/T0/B0/fixture', operators = 'https://hooks.slack.com/services/T0/B1/operators';
+      assert.deepEqual([settings({}).abuseSlackWebhookUrl, settings({ ABUSE_SLACK_WEBHOOK_URL: hook }).abuseSlackWebhookUrl, settings({ OPERATOR_SLACK_WEBHOOK_URL: operators }).abuseSlackWebhookUrl,
+        settings({ ABUSE_SLACK_WEBHOOK_URL: hook, OPERATOR_SLACK_WEBHOOK_URL: operators }).abuseSlackWebhookUrl, loadConfig({ PUBLIC_URL: 'https://abuse.example', BANE_ROOT_SECRET: 'local-fixture-'.repeat(4), ABUSE_SLACK_WEBHOOK_URL: hook, OPERATOR_SLACK_WEBHOOK_URL: operators }).abuseSlackWebhookUrl],
+        [undefined, hook, operators, hook, undefined]);
       assert.equal(settings({ ABUSE_SLACK_WEBHOOK_URL: 'https://example.com/hook' }).abuseSlackWebhookUrl, undefined);
-      assert.deepEqual([runtime.config.abuseSlackWebhookUrl, /ABUSE_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8'))], [undefined, false], 'Unset here and in production.');
+      assert.deepEqual([runtime.config.abuseSlackWebhookUrl, /ABUSE_SLACK_WEBHOOK_URL/.test(await readFile(new URL('./wrangler.prod.jsonc', import.meta.url), 'utf8')),
+        /nightmail\/\$STAGE\/OPERATOR_SLACK_WEBHOOK_URL/.test(await readFile(new URL('../.github/scripts/deploy-worker.sh', import.meta.url), 'utf8'))], [undefined, false, true], 'Unset here; production posts to the operator alerts\' webhook its deploy binds.');
 
       // Two accounts on one mailbox: watch, no alert. The same card on both workspaces: review, one alert.
       const a = await h.user('a', 'sub-a'), b = await h.user('b', 'sub-b'), c = await h.user('c', 'sub-c');
@@ -31128,31 +31440,34 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       await signIn('sub-a', 'Abuse.Fixture+one@gmail.com', '198.51.100.7', 'signed_in'); await signIn('sub-b', 'abusefixture+two@googlemail.com', '198.51.100.201', 'signed_in');
       await h.hourly();
       assert.deepEqual(await outbox(), []);
+      // What the two workspaces sent: this week's counts go on the message, last month's don't.
+      const sent = (workspace: string, accepted: number, bounced: number, complained: number, ago = '1 hour') => db.query(`INSERT INTO sending_metrics_hourly(workspace_id,region,kind,hour,emails,accepted,delivered,bounced,complained)
+        VALUES ($1,$2,'transactional',date_trunc('hour',now()-$6::interval),$3::bigint,$3::bigint,$3::bigint-$4::bigint,$4::bigint,$5::bigint)`, [workspace, REGION, accepted, bounced, complained, ago]);
+      await sent(wid, 1000, 12, 1); await sent(wsB, 200, 6, 0); await sent(wsB, 5000, 4000, 900, '8 days');
       await payment(wid, 'fp_abuse_alert'); await payment(wsB, 'fp_abuse_alert');
       await h.hourly();
       const [first] = await outbox(), cluster = first!.cluster_id as string;
       assert.deepEqual([(await outbox()).length, first!.band, first!.score, first!.kind, first!.workspaces, first!.status, first!.attempts], [1, 'review', 55, 'new', 2, 'stored', 0]);
+      assert.deepEqual([[...first!.members].sort(), [...first!.reasons].sort()], [[`user:${a}`, `user:${b}`, `workspace:${wid}`, `workspace:${wsB}`].sort(), ['MULTI_ACCOUNT', 'SHARED_CARD', 'THROWAWAY_SIGNUP']], 'What it was about.');
 
-      // The card: Slack Block Kit, within Slack's limits, built from a level, numbers, reason codes and IDs alone.
+      // The message: Slack Block Kit, one line and three bullets (who, why, what they sent) and a button to the cluster,
+      // within Slack's limits, built from a level, numbers, fixed words and IDs alone.
       const card = first!.payload as { text: string; unfurl_links: boolean; unfurl_media: boolean; blocks: Json[] }, blocks = card.blocks, texts = JSON.stringify(card);
-      assert.deepEqual([Object.keys(card).sort(), card.unfurl_links, card.unfurl_media, blocks.map(block => block.type)], [['blocks', 'text', 'unfurl_links', 'unfurl_media'], false, false, ['header', 'section', 'section', 'section', 'actions', 'context']]);
-      assert.deepEqual([blocks[0]!.text, card.text], [{ type: 'plain_text', text: 'Related accounts: review risk', emoji: false }, 'Related accounts: review risk (score 55, 2 accounts, 2 workspaces)']);
-      assert.deepEqual(blocks[1]!.fields, [{ type: 'mrkdwn', text: '*Risk*\nReview · 55' }, { type: 'mrkdwn', text: '*Change*\nNew' }, { type: 'mrkdwn', text: '*Accounts*\n2' }, { type: 'mrkdwn', text: '*Workspaces*\n2' }]);
-      const codes = [...String(blocks[2]!.text.text).matchAll(/`([A-Z_]+)` \d+/g)].map(match => match[1]!);
-      assert.deepEqual([codes.sort(), codes.every(code => (REASON_CODES as readonly string[]).includes(code))], [['MULTI_ACCOUNT', 'SHARED_CARD', 'THROWAWAY_SIGNUP'], true]);
-      assert.deepEqual(String(blocks[3]!.text.text).split('\n').slice(1).sort(), [`\`${wid}\``, `\`${wsB}\``].sort());
-      const buttons = blocks[4]!.elements as Json[];
-      assert.deepEqual([buttons.map(button => [button.type, button.text.type, button.text.text]), buttons[0]!.url, buttons.slice(1).map(button => button.url).sort(), new Set(buttons.map(button => button.action_id)).size],
-        [[['button', 'plain_text', 'Open in Operator'], ['button', 'plain_text', 'Workspace 1'], ['button', 'plain_text', 'Workspace 2']], `${runtime.config.publicUrl}/operator/abuse/${cluster}`,
-          [wid, wsB].map(id => `${runtime.config.publicUrl}/operator/workspaces/${id}`).sort(), 3]);
-      assert.ok(blocks.length <= 50 && String(blocks[0]!.text.text).length <= 150 && blocks.every(block => !block.text?.text || String(block.text.text).length <= 3000) && buttons.length <= 25 && buttons.every(button => String(button.text.text).length <= 75 && String(button.url).length <= 3000) && texts.length < 16000);
+      assert.deepEqual([Object.keys(card).sort(), card.unfurl_links, card.unfurl_media, blocks.map(block => block.type), card.text], [['blocks', 'text', 'unfurl_links', 'unfurl_media'], false, false, ['section', 'actions'], 'Review risk 55: 2 related accounts']);
+      const [head, who, why, mail, ...rest] = String(blocks[0]!.text.text).split('\n');
+      assert.deepEqual([blocks[0]!.text.type, head, why, mail, rest], ['mrkdwn', '*Review risk 55: 2 related accounts*', '• *Why:* the same payment card; throwaway or look-alike sign-up addresses', '• *Sent in 7 days:* 1,200 emails, 1.5% bounced, 0.08% complaints', []]);
+      assert.deepEqual([who!.startsWith('• *Who:* 2 workspaces: '), [...who!.matchAll(/`([^`]+)`/g)].map(match => match[1]).sort()], [true, [wid, wsB].sort()]);
+      const buttons = blocks[1]!.elements as Json[];
+      assert.deepEqual(buttons, [{ type: 'button', action_id: 'review', style: 'primary', text: { type: 'plain_text', text: 'Review in Operator', emoji: false }, url: `${runtime.config.publicUrl}/operator/abuse/${cluster}` }]);
+      assert.ok(String(blocks[0]!.text.text).length <= 3000 && texts.length < 16000);
       const values = (await db.query('SELECT value FROM abuse_signals WHERE length(value)>=16')).rows.map((row: Json) => row.value as string);
       for (const personal of ['Jordan', 'Fixture', 'abusefixture', 'gmail', '198.51', 'fp_abuse', 'att_', '<@', '<!', a, b, manager!.email])
         assert.ok(!texts.includes(personal), `${personal} is on the card`);
       assert.ok(!values.some(value => texts.includes(value)));
-      // Built from anything else, the card leaves it out: an ID of another shape, a code off the list.
-      const odd = JSON.stringify(alerts.slackCard('https://abuse.example/', { cluster, band: 'high', score: 90, kind: 'grew', accounts: 2, reasons: [{ code: 'jordan@example.com', points: 5 }, { code: 'SHARED_CARD', points: 20 }], workspaces: ['<@U123> Jordan', wid] }));
-      assert.ok(!/Jordan|<@|example\.com\/\/|jordan@/.test(odd) && odd.includes(wid) && odd.includes('SHARED_CARD') && odd.includes('"*Workspaces*\\n1"'));
+      // Built from anything else, the message leaves it out: an ID of another shape, a code off the list.
+      const odd = alerts.slackCard('https://abuse.example/', { cluster, band: 'high', score: 90, kind: 'grew', accounts: 2, reasons: [{ code: 'jordan@example.com', points: 5 }, { code: 'SHARED_CARD', points: 20 }], workspaces: ['<@U123> Jordan', wid], sent: { emails: 0, bounced: 0, complained: 0 } });
+      assert.ok(!/Jordan|<@|example\.com\/\/|jordan@/.test(JSON.stringify(odd)));
+      assert.equal((odd.blocks[0] as { text: { text: string } }).text.text, `*High risk 90: 2 related accounts (new member)*\n• *Who:* 1 workspace: \`${wid}\`\n• *Why:* the same payment card\n• *Sent in 7 days:* nothing`);
 
       // A third account on the same card: high. One more alert, for the new level; a rescore at the same level adds none.
       await signIn('sub-c', 'casey@abuse-c.example.com', '203.0.113.9', 'signed_in'); await payment(wsC, 'fp_abuse_alert');
@@ -31160,8 +31475,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual((await outbox()).map(alert => [alert.band, alert.kind, alert.workspaces]), [['review', 'new', 2], ['high', 'raised', 3]]);
       await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly();
       assert.equal((await outbox()).length, 2);
-      assert.deepEqual([alerts.alertFor({ id: cluster, score: 40, band: 'watch', reasons: [], workspaces: [], accounts: 2, members: 4, previous: null }), alerts.alertFor({ id: cluster, score: 60, band: 'review', reasons: [], workspaces: [], accounts: 2, members: 5, previous: { score: 55, band: 'review', members: 4 } }),
-        alerts.alertFor({ id: cluster, score: 60, band: 'review', reasons: [], workspaces: [], accounts: 2, members: 4, previous: { score: 80, band: 'high', members: 4 } })], [null, 'grew', null]);
+      assert.deepEqual([alerts.alertFor({ id: cluster, score: 40, band: 'watch', reasons: [], workspaces: [], accounts: 2, members: 4, keys: [], previous: null }), alerts.alertFor({ id: cluster, score: 60, band: 'review', reasons: [], workspaces: [], accounts: 2, members: 5, keys: [], previous: { score: 55, band: 'review', members: 4 } }),
+        alerts.alertFor({ id: cluster, score: 60, band: 'review', reasons: [], workspaces: [], accounts: 2, members: 4, keys: [], previous: { score: 80, band: 'high', members: 4 } })], [null, 'grew', null]);
 
       // Delivery. Without a webhook nothing is posted (the fixture forbids any network call) and alerts stay stored.
       const posts: { url: string; init: Parameters<import('./src/abuse-alerts.js').SlackPost>[1] }[] = [];
@@ -31169,19 +31484,28 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const post: import('./src/abuse-alerts.js').SlackPost = async (url, init) => { posts.push({ url, init }); return answer; };
       await abuse.abuseHourly(runtime, { post });
       assert.deepEqual([posts.length, (await outbox()).map(alert => alert.status)], [0, ['stored', 'stored']]);
-      // With one: a refused post is tried again next run; an accepted one is sent once, to that URL alone, without following a redirect.
-      runtime.config.abuseSlackWebhookUrl = 'https://hooks.slack.com/services/T0/B0/fixture';
+      // With one: only the review alert is posted; the high one stays stored. A refused post waits 50 minutes before it
+      // is tried again, then 100; an accepted one is sent once, to that URL alone, without following a redirect.
+      runtime.config.abuseSlackWebhookUrl = hook;
       const warnings = t.mock.method(console, 'warn', () => {});
+      const waits = async () => (await db.query(`SELECT round(extract(epoch FROM retry_at-now())/60)::int AS minutes FROM abuse_alerts ORDER BY score,id`)).rows.map((row: Json) => row.minutes);
       await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.status, alert.attempts, alert.error])], [2, [['stored', 1, 'HTTP_500'], ['stored', 1, 'HTTP_500']]]);
-      assert.ok(warnings.mock.calls.every(call => !/hooks\.slack|T0\/B0|blocks/.test(String(call.arguments[0]))), 'Neither the webhook nor the card is logged.');
+      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error]), await waits()], [1, [['review', 'stored', 1, 'HTTP_500'], ['high', 'stored', 0, null]], [50, null]]);
+      await abuse.abuseHourly(runtime, { post });
+      assert.equal(posts.length, 1, 'Not before its time.');
+      await db.query(`UPDATE abuse_alerts SET retry_at=now() WHERE band='review'`); await abuse.abuseHourly(runtime, { post });
+      assert.deepEqual([posts.length, (await outbox()).map(alert => alert.attempts), await waits()], [2, [2, 0], [100, null]]);
+      assert.ok(warnings.mock.calls.every(call => !/hooks\.slack|T0\/B0|blocks/.test(String(call.arguments[0]))), 'Neither the webhook nor the message is logged.');
       warnings.mock.restore();
-      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours' WHERE band='review'`);
+      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours',retry_at=now() WHERE band='review'`);
       answer = { ok: true, status: 200 };
+      await abuse.abuseHourly(runtime, { post });
+      assert.equal(posts.length, 2, 'An alert more than a day old is not posted late.');
+      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '1 minute' WHERE band='review'`);
       await abuse.abuseHourly(runtime, { post }); await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error, alert.sent_at !== null])], [3, [['review', 'stored', 1, 'HTTP_500', false], ['high', 'sent', 2, null, true]]], 'An alert more than a day old is not posted late.');
+      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error, alert.sent_at !== null]), await waits()], [3, [['review', 'sent', 3, null, true], ['high', 'stored', 0, null, false]], [null, null]], 'The review alert is posted once; the high one never.');
       const last = posts.at(-1)!;
-      assert.deepEqual([last.url, last.init.method, last.init.redirect, last.init.headers, JSON.parse(last.init.body)], ['https://hooks.slack.com/services/T0/B0/fixture', 'POST', 'manual', { 'content-type': 'application/json' }, (await outbox())[1]!.payload]);
+      assert.deepEqual([last.url, last.init.method, last.init.redirect, last.init.headers, JSON.parse(last.init.body)], ['https://hooks.slack.com/services/T0/B0/fixture', 'POST', 'manual', { 'content-type': 'application/json' }, (await outbox())[0]!.payload]);
 
       // Operators read the outbox; nobody else does; the read is recorded.
       const path = '/v1/operator/abuse/alerts';
@@ -31191,10 +31515,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator:read', '--reason', 'Synthetic abuse reviewer']);
       const read = ok(await local('GET', path));
-      assert.deepEqual([read.data.map((alert: Json) => [alert.band, alert.kind, alert.status, alert.clusterId, alert.workspaces]), read.delivery, read.nextCursor, read.data[0].payload], [[['high', 'raised', 'sent', cluster, 3], ['review', 'new', 'stored', cluster, 2]], 'slack', null, (await outbox())[1]!.payload]);
-      const paged = ok(await local('GET', `${path}?limit=1`));
-      assert.deepEqual([paged.data.length, ok(await local('GET', `${path}?limit=1&cursor=${encodeURIComponent(paged.nextCursor)}`)).data[0].band, ok(await local('GET', '/v1/operator/abuse/clusters')).alerts], [1, 'review', 2]);
-      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action='abuse.alerts' AND actor_id=$1 AND internal`, [manager!.userId])).rows[0].n, 3);
+      assert.deepEqual([read.data.map((alert: Json) => [alert.band, alert.kind, alert.status, alert.clusterId, alert.workspaces, alert.review]), read.delivery, read.nextCursor, read.data[0].payload], [[['high', 'raised', 'stored', cluster, 3, null], ['review', 'new', 'sent', cluster, 2, null]], 'slack', null, (await outbox())[1]!.payload]);
+      const paged = ok(await local('GET', `${path}?limit=1`)), latest = ok(await local('GET', `${path}?cluster=${cluster}&limit=1`)).data;
+      assert.deepEqual([paged.data.length, ok(await local('GET', `${path}?limit=1&cursor=${encodeURIComponent(paged.nextCursor)}`)).data[0].band, ok(await local('GET', '/v1/operator/abuse/clusters')).alerts, latest.map((alert: Json) => alert.band), ok(await local('GET', `${path}?cluster=acl_${'0'.repeat(24)}`)).data],
+        [1, 'review', 2, ['high'], []]);
+      assert.equal((await db.query(`SELECT count(*)::int AS n FROM audit_events WHERE action='abuse.alerts' AND actor_id=$1 AND internal`, [manager!.userId])).rows[0].n, 5);
+      // Watch and Dismiss need the operator role.
+      const review = (id: string, body: Json) => local('POST', `${path}/${id}/review`, body);
+      error(await review(latest[0].id, { action: 'watch' }), 403, 'OPERATOR_REQUIRED');
 
       // An action from the abuse view. The operator's note names another customer's workspace: it stays in the staff
       // audit row. What this workspace's own records, its support timeline and its webhooks carry is a fixed reason.
@@ -31218,9 +31546,85 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // An ordinary reason still works as before.
       ok(await local('POST', `${base}/resume`, { reason: 'Customer explained the shared card', restore: 100 }));
 
+      // Watch, then Dismiss: on the alert, who and when, and in the staff audit; deciding again replaces the decision.
+      error(await review(latest[0].id, { action: 'ignore' }), 422, 'VALIDATION_FAILED');
+      error(await review(`aal_${'0'.repeat(24)}`, { action: 'watch' }), 404, 'NOT_FOUND');
+      const watched = ok(await review(latest[0].id, { action: 'watch' }));
+      assert.deepEqual([watched.id, watched.review.action, watched.review.by, Date.parse(watched.review.at) > 0], [latest[0].id, 'watch', manager!.email, true]);
+      const dismissed = ok(await review(latest[0].id, { action: 'dismiss' }));
+      assert.deepEqual([dismissed.review.action, ok(await local('GET', `${path}?cluster=${cluster}&limit=1`)).data[0].review.action], ['dismiss', 'dismiss']);
+      assert.deepEqual((await db.query(`SELECT action,target_type,target_id,internal FROM audit_events WHERE action LIKE 'abuse.alert\\_%' AND actor_id=$1 ORDER BY id`, [manager!.userId])).rows.map((row: Json) => [row.action, row.target_type, row.target_id, row.internal]),
+        [['abuse.alert_watch', 'abuse_alert', latest[0].id, true], ['abuse.alert_dismiss', 'abuse_alert', latest[0].id, true]]);
+
       // An erasure removes the cluster's alerts with it.
       await h.command('--user', b, '--erase');
       assert.deepEqual(await outbox(), []);
+    });
+  });
+  test('abuse monitoring: an alert is not raised again for what operators already have: a watched one only at a higher level, a dismissed one only with a new member or reason, and not for workspaces an alert named this week; Slack gets review alerts only, at most three an hour, oldest first, only while the cluster still needs a look and nobody has reviewed it', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local }) => {
+      const h = await abuseHarness(runtime, db), { payment } = h, { setOperator } = await import('./scripts/set-operator.js');
+      await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic abuse operator']);
+      const alertsOf = async (cluster: string) => (await db.query('SELECT id,band,kind,status,review FROM abuse_alerts WHERE cluster_id=$1 ORDER BY created_at,score,id', [cluster])).rows as { id: string; band: string; kind: string; status: string; review: string | null }[];
+      const clusterOf = async (workspace: string) => (await db.query('SELECT c.id,c.band FROM abuse_clusters c JOIN abuse_cluster_members m ON m.cluster_id=c.id WHERE m.entity_id=$1', [workspace])).rows[0] as { id: string; band: string };
+      const standing = (workspace: string, step: string) => db.query(`INSERT INTO sender_standing(workspace_id,step) VALUES ($1,$2) ON CONFLICT (workspace_id) DO UPDATE SET step=excluded.step`, [workspace, step]);
+      const rescore = async () => { await db.query(`UPDATE abuse_clusters SET scored_at=now()-interval '1 hour'`); await h.hourly(); };
+      const review = async (id: string, action: 'watch' | 'dismiss') => ok(await local('POST', `/v1/operator/abuse/alerts/${id}/review`, { action }));
+      // An account, its workspace and a card: two that share one are watch (25 + 20); one warned sender makes it review (+10).
+      const member = async (name: string, card: string) => { const workspace = await h.workspace(name, [await h.user(name)]); await payment(workspace, card); return workspace; };
+      const group = async (name: string) => { const spaces = [await member(`${name}-1`, `fp_${name}`), await member(`${name}-2`, `fp_${name}`)]; await standing(spaces[0]!, 'warn'); return spaces; };
+
+      // Watched: not raised again at its level, even a week later when the cluster dropped to watch and came back; a
+      // dispute takes it to high, and that is raised.
+      const x = await group('watched'); await h.hourly();
+      const xc = (await clusterOf(x[0]!)).id, [x1] = await alertsOf(xc);
+      assert.deepEqual([x1!.band, x1!.kind, x1!.status], ['review', 'new', 'stored']);
+      await review(x1!.id, 'watch');
+      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '8 days' WHERE cluster_id=$1`, [xc]);
+      await standing(x[0]!, 'ok'); await rescore(); assert.equal((await clusterOf(x[0]!)).band, 'watch');
+      await standing(x[0]!, 'warn'); await rescore(); assert.equal((await clusterOf(x[0]!)).band, 'review');
+      assert.equal((await alertsOf(xc)).length, 1, 'Watched: not again at the same level.');
+      await db.query(`SELECT billing_post($1,'dispute',$2,$3,$4,'{}','stripe')`, [x[1], unique('dispute'), '-1000000', '0']); await rescore();
+      assert.deepEqual((await alertsOf(xc)).map(a => [a.band, a.kind, a.review]), [['review', 'new', 'watch'], ['high', 'raised', null]]);
+
+      // Dismissed: not raised again for the same members and reasons, however its score moves; a new member is raised.
+      const y = await group('dismissed'); await h.hourly();
+      const yc = (await clusterOf(y[0]!)).id, [y1] = await alertsOf(yc);
+      await review(y1!.id, 'dismiss');
+      await standing(y[0]!, 'ok'); await rescore(); await standing(y[0]!, 'warn'); await rescore();
+      assert.deepEqual([(await clusterOf(y[0]!)).band, (await alertsOf(yc)).length], ['review', 1], 'Dismissed: nothing new, not again.');
+      y.push(await member('dismissed-3', 'fp_dismissed')); await h.hourly();
+      assert.deepEqual((await alertsOf(yc)).map(a => [a.band, a.kind, a.review]), [['review', 'new', 'dismiss'], ['review', 'grew', null]]);
+
+      // Workspaces an alert named this week (here under a cluster since gone) are not alerted again; one more is.
+      const z = [await member('named-1', 'fp_named'), await member('named-2', 'fp_named')], gone = `aal_${'0'.repeat(24)}`;
+      await db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,members,status,created_at) VALUES ($1,$2,'review',55,'new',2,'{}',$3,'sent',now()-interval '1 day')`, [gone, `acl_${'0'.repeat(24)}`, z.map(w => `workspace:${w}`)]);
+      await standing(z[0]!, 'warn'); await h.hourly();
+      const zc = (await clusterOf(z[0]!)).id;
+      assert.deepEqual([(await clusterOf(z[0]!)).band, await alertsOf(zc)], ['review', []]);
+      z.push(await member('named-3', 'fp_named')); await h.hourly();
+      assert.deepEqual((await alertsOf(zc)).map(a => [a.band, a.kind]), [['review', 'grew']]);
+
+      // Three more at review; one of them no longer needs a look by the time Slack is told.
+      const w = await group('cleared'), v = await group('extra'), u = await group('later'); await h.hourly();
+      const wc = (await clusterOf(w[0]!)).id, vc = (await clusterOf(v[0]!)).id, uc = (await clusterOf(u[0]!)).id;
+      await standing(w[0]!, 'ok'); await rescore(); assert.equal((await clusterOf(w[0]!)).band, 'watch');
+
+      // Delivery: review alerts only, the oldest first; three in an hour; never a high one, one reviewed, or one whose
+      // cluster dropped below review.
+      const at = (cluster: string, kind: string, minutes: number) => db.query(`UPDATE abuse_alerts SET created_at=now()-make_interval(mins=>$3) WHERE cluster_id=$1 AND kind=$2`, [cluster, kind, minutes]);
+      await at(xc, 'raised', 50); await at(yc, 'grew', 40); await at(zc, 'grew', 30); await at(vc, 'new', 20); await at(uc, 'new', 15); await at(wc, 'new', 5);
+      runtime.config.abuseSlackWebhookUrl = 'https://hooks.slack.com/services/T0/B0/fixture';
+      const posts: string[] = [], post: import('./src/abuse-alerts.js').SlackPost = async (_url, init) => { posts.push(JSON.parse(init.body).text); return { ok: true, status: 200 }; };
+      const sent = async () => (await db.query(`SELECT cluster_id,kind FROM abuse_alerts WHERE status='sent' AND id<>$1`, [gone])).rows.map((row: Json) => `${row.cluster_id}:${row.kind}`).sort();
+      await h.abuse.abuseHourly(runtime, { post });
+      assert.deepEqual([posts, await sent()], [['Review risk 60: 3 related accounts (new member)', 'Review risk 60: 3 related accounts (new member)', 'Review risk 55: 2 related accounts'], [`${yc}:grew`, `${zc}:grew`, `${vc}:new`].sort()]);
+      await h.abuse.abuseHourly(runtime, { post });
+      assert.equal(posts.length, 3, 'Three an hour.');
+      await db.query(`UPDATE abuse_alerts SET sent_at=now()-interval '61 minutes' WHERE sent_at IS NOT NULL`);
+      await h.abuse.abuseHourly(runtime, { post }); await h.abuse.abuseHourly(runtime, { post });
+      assert.deepEqual([posts.length, posts[3], (await alertsOf(uc))[0]!.status, (await alertsOf(wc))[0]!.status, (await alertsOf(xc))[1]!.band, (await alertsOf(xc))[1]!.status, ...(await alertsOf(xc)).concat(await alertsOf(yc)).filter(a => a.review).map(a => a.status)],
+        [4, 'Review risk 55: 2 related accounts', 'sent', 'stored', 'high', 'stored', 'stored', 'stored']);
     });
   });
   test('abuse monitoring: mail that reaches no one outside its workspace (Nightmail\'s own test and setup emails, campaign tests, mail to its own members) is never fingerprinted and the built-in domain is nobody\'s sending domain, so new workspaces do not cluster on onboarding; a value that became common links nobody, even through a link written while it was rare; a waitlist refusal counts only when it repeats', async t => {

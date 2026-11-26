@@ -1,5 +1,9 @@
-import type { Attachment, AttachmentApi } from '../../data/types'
+import type { QueryClient } from '@tanstack/react-query'
+import { currentScope } from '../../data/live'
+import { queries } from '../../data/queries'
+import type { Api, Attachment, AttachmentApi, Campaign, CampaignTemplate } from '../../data/types'
 import { imageTags } from '../../lib/html-scan'
+import { composer } from './composer-chunk'
 import { MAX_ATTACHMENTS } from './copy'
 
 // What the composer saves: inlineAttachmentIds are the inline images the body uses, removedInlineIds the ones it no longer does.
@@ -180,16 +184,131 @@ function rasterBytesMatch(bytes: Uint8Array, type: string): boolean {
   if (type === 'image/webp') return ascii(0, 4) === 'RIFF' && ascii(8, 12) === 'WEBP'
   return type === 'image/avif' && ascii(4, 8) === 'ftyp' && ['avif', 'avis'].includes(ascii(8, 12))
 }
-export async function loadInlineAttachments(attachments: AttachmentApi, attachmentIds: string[], needed: ReadonlySet<string>, signal: AbortSignal): Promise<{sources: Map<string, string>; items: Map<string, Attachment>}> {
+export type AttachmentKind = 'campaigns' | 'templates'
+export const attachmentKind = (api: Api, provided?: AttachmentApi): AttachmentKind =>
+  provided && provided === api.templateAssets ? 'templates' : 'campaigns'
+export const attachmentMetaKey = (kind: AttachmentKind, id: string) => ['nightmail', 'attachment', kind, id] as const
+export const attachmentContentKey = (kind: AttachmentKind, id: string) => ['nightmail', 'attachment-content', kind, id] as const
+
+// Attachments are immutable content-addressed blobs within a workspace. Cache validated inline data URLs
+// synchronously per request-scope epoch (cleared immediately on workspace/account switch) so reopening a
+// campaign or template renders inline images on the first frame with zero network round trips.
+const MAX_CACHED_INLINE = 64
+type CachedInline = { item: Attachment; url: string }
+const inlineCache = new Map<string, CachedInline>()
+let inlineCacheEpoch = -1
+function ensureInlineCacheScope() {
+  const epoch = currentScope().epoch
+  if (epoch !== inlineCacheEpoch) {
+    inlineCache.clear()
+    inlineCacheEpoch = epoch
+  }
+}
+if (typeof window !== 'undefined') {
+  window.addEventListener('nightmail:scope-changed', () => {
+    inlineCache.clear()
+    inlineCacheEpoch = currentScope().epoch
+  })
+}
+const inlineCacheKey = (kind: AttachmentKind, id: string) => `${kind}:${id}`
+export function rememberInlineAttachment(kind: AttachmentKind, item: Attachment, url: string, cache?: QueryClient) {
+  ensureInlineCacheScope()
+  const key = inlineCacheKey(kind, item.id)
+  if (inlineCache.has(key)) inlineCache.delete(key)
+  else if (inlineCache.size >= MAX_CACHED_INLINE) {
+    const oldest = inlineCache.keys().next().value
+    if (oldest !== undefined) inlineCache.delete(oldest)
+  }
+  inlineCache.set(key, { item, url })
+  if (cache) cache.setQueryData(attachmentMetaKey(kind, item.id), item)
+}
+export function cachedInlineAttachments(kind: AttachmentKind, attachmentIds: readonly string[], needed: ReadonlySet<string>): {
+  sources: Map<string, string>
+  items: Map<string, Attachment>
+  missing: Set<string>
+} {
+  ensureInlineCacheScope()
+  const sources = new Map<string, string>(), items = new Map<string, Attachment>(), missing = new Set(needed)
+  if (!needed.size || !attachmentIds.length) return { sources, items, missing }
+  for (const id of new Set(attachmentIds)) {
+    const entry = inlineCache.get(inlineCacheKey(kind, id))
+    if (!entry) continue
+    const { item, url } = entry
+    if (item.disposition === 'inline' && item.contentId && missing.has(item.contentId)) {
+      sources.set(`cid:${item.contentId}`, url)
+      items.set(url, item)
+      missing.delete(item.contentId)
+    }
+  }
+  return { sources, items, missing }
+}
+
+/** Deterministic flat placeholder SVG reserving exact image dimensions while an uncached cid: image loads.
+ *  Uses image/svg+xml so isRasterDataUrl() and safeImageSource() never mistake it for a saved raster image. */
+export function pendingCidPlaceholder(cid: string, width?: unknown, height?: unknown): string {
+  const parsePx = (value: unknown) => {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return Math.min(2000, Math.round(value))
+    if (typeof value === 'string' && /^[1-9][0-9]{0,3}$/.test(value.trim())) return Math.min(2000, Number(value.trim()))
+    return null
+  }
+  const w = parsePx(width) ?? 360
+  const h = parsePx(height) ?? 160
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" data-pending-cid="${encodeURIComponent(cid)}"><rect width="100%" height="100%" rx="4" fill="#EDEDED"/></svg>`
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`
+}
+
+export function fetchAttachmentMetadata(cache: QueryClient | undefined, attachments: AttachmentApi, kind: AttachmentKind, id: string, signal?: AbortSignal): Promise<Attachment> {
+  if (!cache) return attachments.get(id, signal)
+  return cache.fetchQuery({
+    queryKey: attachmentMetaKey(kind, id),
+    queryFn: ({ signal: querySignal }) => attachments.get(id, querySignal),
+    staleTime: Infinity,
+  })
+}
+export function fetchAttachmentContent(cache: QueryClient | undefined, attachments: AttachmentApi, kind: AttachmentKind, id: string, signal?: AbortSignal) {
+  if (!cache) return attachments.content(id, signal)
+  return cache.fetchQuery({
+    queryKey: attachmentContentKey(kind, id),
+    queryFn: ({ signal: querySignal }) => attachments.content(id, querySignal),
+    staleTime: Infinity,
+  })
+}
+
+export async function loadInlineAttachments(
+  attachments: AttachmentApi,
+  attachmentIds: string[],
+  needed: ReadonlySet<string>,
+  signal: AbortSignal,
+  options?: { cache?: QueryClient; kind?: AttachmentKind },
+): Promise<{sources: Map<string, string>; items: Map<string, Attachment>}> {
+  const kind = options?.kind
+  const cache = options?.cache
   const sources = new Map<string, string>(), items = new Map<string, Attachment>()
   if (!needed.size) return {sources, items}
   const ids = [...new Set(attachmentIds)]
   if (ids.length > MAX_ATTACHMENTS) throw new Error('Too many attachments to preview.')
-  const metadata = await Promise.all(ids.map(id => attachments.get(id, signal)))
-  const inline = metadata.filter(item => item.disposition === 'inline' && item.contentId && needed.has(item.contentId) && rasterTypes.has(item.contentType.toLowerCase()))
-  if (inline.reduce((total, item) => total + item.size, 0) > 8 * 1024 * 1024) throw new Error('Inline images exceed the 8 MiB preview limit.')
+  const remaining = new Set(needed)
+  if (kind) {
+    const hit = cachedInlineAttachments(kind, ids, needed)
+    hit.sources.forEach((url, cid) => sources.set(cid, url))
+    hit.items.forEach((item, url) => items.set(url, item))
+    if (!hit.missing.size) return { sources, items }
+    remaining.clear()
+    hit.missing.forEach(cid => remaining.add(cid))
+  }
+  const metadata = await Promise.all(ids.map(id =>
+    kind && cache ? fetchAttachmentMetadata(cache, attachments, kind, id, signal) : attachments.get(id, signal),
+  ))
+  if (signal.aborted) throw new DOMException('Preview canceled.', 'AbortError')
+  const inline = metadata.filter(item => item.disposition === 'inline' && item.contentId && remaining.has(item.contentId) && rasterTypes.has(item.contentType.toLowerCase()))
+  const allInlineBytes = metadata
+    .filter(item => item.disposition === 'inline' && item.contentId && needed.has(item.contentId) && rasterTypes.has(item.contentType.toLowerCase()))
+    .reduce((total, item) => total + item.size, 0)
+  if (allInlineBytes > 8 * 1024 * 1024) throw new Error('Inline images exceed the 8 MiB preview limit.')
   const results = await Promise.allSettled(inline.map(async item => {
-    const result = await attachments.content(item.id, signal)
+    const result = kind && cache
+      ? await fetchAttachmentContent(cache, attachments, kind, item.id, signal)
+      : await attachments.content(item.id, signal)
     const type = result.contentType.toLowerCase()
     if (result.id !== item.id || type !== item.contentType.toLowerCase() || !rasterTypes.has(type) || result.content.length > 11184812) throw new Error('Attachment preview metadata does not match.')
     // A repeated four-character regex group over 8 MiB can exhaust the JavaScript engine's stack.
@@ -197,10 +316,71 @@ export async function loadInlineAttachments(attachments: AttachmentApi, attachme
     const bytes = Uint8Array.from(atob(result.content), character => character.charCodeAt(0))
     if (bytes.length !== item.size || !rasterBytesMatch(bytes, type)) throw new Error('The attachment is not a supported raster image.')
     if (signal.aborted) throw new DOMException('Preview canceled.', 'AbortError')
-    sources.set(`cid:${item.contentId}`, `data:${type};base64,${result.content}`)
-    items.set(`data:${type};base64,${result.content}`, item)
+    const url = `data:${type};base64,${result.content}`
+    if (kind) rememberInlineAttachment(kind, item, url, cache)
+    sources.set(`cid:${item.contentId}`, url)
+    items.set(url, item)
   }))
   const failure = results.find(result => result.status === 'rejected')
   if (failure?.status === 'rejected') throw failure.reason
   return {sources, items}
+}
+
+const WARM_FRESH = 30_000
+/** Preloads the composer chunk, campaign detail, verified domains, and any inline cid: images before the click lands. */
+export async function warmCampaignEditor(cache: QueryClient, api: Api, id: string): Promise<void> {
+  void composer.preload().catch(() => {})
+  const campaignQuery = queries.campaign(id)
+  const domainsPromise = cache.prefetchQuery({
+    queryKey: ['nightmail', 'campaign-options', { pageSize: 100, domains: undefined }],
+    queryFn: async ({ signal }) => {
+      const domainPage = await api.domains.list({ pageSize: 100, cursor: undefined, refresh: false }, signal)
+      return { domains: domainPage.items.filter(domain => domain.status === 'verified' && !domain.builtIn), next: domainPage.nextCursor }
+    },
+    staleTime: WARM_FRESH,
+  }).catch(() => {})
+  const campaign = await cache.fetchQuery<Campaign>({
+    queryKey: ['nightmail', ...campaignQuery.key],
+    queryFn: ({ signal }) => campaignQuery.read(api, signal),
+    staleTime: WARM_FRESH,
+  }).catch(() => null)
+  if (campaign?.attachments?.length) {
+    const needed = cidImageSources(campaign.html)
+    if (needed.size) {
+      const controller = new AbortController()
+      await loadInlineAttachments(api.attachments, campaign.attachments, needed, controller.signal, { cache, kind: 'campaigns' }).catch(() => {})
+    } else {
+      await Promise.allSettled(campaign.attachments.map(attId => fetchAttachmentMetadata(cache, api.attachments, 'campaigns', attId)))
+    }
+  }
+  await domainsPromise
+}
+
+/** Preloads the composer chunk, template detail, and any inline cid: assets before the click lands. */
+export async function warmTemplateEditor(cache: QueryClient, api: Api, id: string): Promise<void> {
+  void composer.preload().catch(() => {})
+  const templateQuery = queries.template(id)
+  const template = await cache.fetchQuery<CampaignTemplate>({
+    queryKey: ['nightmail', ...templateQuery.key],
+    queryFn: ({ signal }) => templateQuery.read(api, signal),
+    staleTime: WARM_FRESH,
+  }).catch(() => null)
+  if (template?.draft.attachments?.length) {
+    const needed = cidImageSources(template.draft.html ?? '')
+    if (needed.size) {
+      const controller = new AbortController()
+      await loadInlineAttachments(api.templateAssets, template.draft.attachments, needed, controller.signal, { cache, kind: 'templates' }).catch(() => {})
+    }
+  }
+}
+
+/** Schedules a non-urgent preload once the browser has painted and gone idle. Returns a cancel function. */
+export function onIdle(run: () => void, timeout = 250): () => void {
+  if (typeof window === 'undefined') return () => {}
+  if (typeof window.requestIdleCallback === 'function') {
+    const handle = window.requestIdleCallback(() => run(), { timeout })
+    return () => window.cancelIdleCallback(handle)
+  }
+  const handle = window.setTimeout(run, 60)
+  return () => window.clearTimeout(handle)
 }
