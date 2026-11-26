@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, isSitePage, movedPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isMissingLegalPage, isPublicPage, isSitePage, movedPage, SITE_INDEX, SITE_ROOT_PAGES, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -371,7 +371,7 @@ export default {
       // Markdown twin: the file,
       // compressed here (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash)
       // go back as they are.
-      if (pathname === '/pricing' || pathname === '/compare' || isSitePage(pathname)) {
+      if (pathname === '/pricing' || pathname === '/compare' || isSitePage(pathname) || SITE_ROOT_PAGES.includes(pathname)) {
         const page = await assets.fetch(request);
         if (page.ok || page.status === 304) return untransformed(page, request);
         if (page.status !== 404) return fastSecure(page);

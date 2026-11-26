@@ -394,6 +394,7 @@ const pages = ids => [
   ['Alternatives · Postmark', '/alternatives/postmark', { user: null }],
   ['Alternatives · Mailchimp', '/alternatives/mailchimp', { user: null }],
   ['Alternatives · Mandrill', '/alternatives/mandrill', { user: null }],
+  ['Email for AI agents', '/email-for-ai-agents', { user: null }],
   ['Alternatives · unknown vendor', '/alternatives/nobody', { user: null, notFound: true }],
   ['Pricing · unknown vendor', '/pricing/nobody', { user: null, notFound: true }],
   // The other comparisons, from the calculator's Compare line.
@@ -645,6 +646,7 @@ const phonePages = new Set([
   'Alternatives · Postmark',
   'Alternatives · Mailchimp',
   'Alternatives · Mandrill',
+  'Email for AI agents',
   'Compare · Mailchimp',
   'Compare · Mailchimp · steel frame',
   'Compare · Resend',

@@ -33,8 +33,8 @@ export function checkedOn(days: string[]) {
   return a[1] === b[1] && a[2] === b[2] ? `${a[0]}–${dayOf(last)}` : a[2] === b[2] ? `${a[0]} ${a[1]} to ${dayOf(last)}` : `${dayOf(first)} to ${dayOf(last)}`
 }
 export const DASH = ' A dash: no price read for that size.'
-const spelled = (n: number) => ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][n] ?? String(n)
-const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
+export const spelled = (n: number) => ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][n] ?? String(n)
+export const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 
 export function vendorAlternatives(c: Comparison): Doc {
   const vendor = c.offer.vendor, m = c.model, sizes = c.sizes.map(u => c.offer.unit === 'contacts' ? u.contacts : u.sent)
