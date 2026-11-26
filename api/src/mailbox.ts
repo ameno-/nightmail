@@ -7,7 +7,7 @@ import { authenticate, chargeCredential, createdInboxes, delegatedInbox, keyExpi
 import { boundRequestBody } from './request-body.js';
 import { auditContext, auditInsert, recordAudit } from './audit.js';
 import { domains } from './db/operations.js';
-import { claimReceivable, claimReceives, claimSends, connectionReady, receivingSetup, setupError, type ReceivingSetup } from './states.js';
+import { claimReceivable, claimSends, connectionReady, hostTakesAddresses, receivingSetup, setupError, type ReceivingSetup } from './states.js';
 import { mailboxAddresses, mailboxDomains, mailboxes, mailboxKeys, mailboxThreads, mailMessages, type MailboxPermission } from './db/mailbox.js';
 import { expectedMx, checkMx, mxBlocksEnable } from './mailbox-dns.js';
 import { eventView, inboundEventTypes, latestCursor, readEvents, recordEvents } from './mailbox-events.js';
@@ -500,7 +500,7 @@ function registerAddresses(app: App) {
     // Hosted, the workspace's live claim is enough, verified or not: routing waits for proven ownership and the MX observation
     // (mailbox-receipts.ts), so an address made the minute its domain was added receives once both are there.
     // A domain may receive on several hosts: the address goes to the row of its own host. A removed host takes no new addresses.
-    const receivingRow = async () => (await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? sql`EXISTS (SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id AND ${connectionReady()} JOIN operation_domains d ON d.workspace_id=dc.workspace_id AND d.name=dc.name WHERE d.id=${mailboxDomains.domainId} AND dc.workspace_id=${value.workspaceId} AND NOT domain_claim_expired(dc) AND (d.region=pc.region OR (pc.kind='shared' AND ${mailboxDomains.region}='us-east-2' AND ${mailboxDomains.status}='active' AND ${claimReceives()})))` : undefined)).orderBy(sql`${mailboxDomains.status} IN ('disabled','disabling')`).limit(1))[0];
+    const receivingRow = async () => (await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? hostTakesAddresses(value.workspaceId, sql`mailbox_domains`) : undefined)).orderBy(sql`${mailboxDomains.status} IN ('disabled','disabling')`).limit(1))[0];
     let domain = await receivingRow(), turnedOn = false;
     // Hosted: on the workspace's own verified domain, an address where nothing receives yet turns receiving on there
     // (receiving-hosts.ts receiveForAddress), and the answer says which MX record to publish.

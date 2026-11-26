@@ -6,7 +6,8 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, and, desc, eq, lt } from 'drizzle-orm';
 import { ApiError, digest, errors, id, isoTime, json, lasting, nextCursor, randomSecret, readCursor, receivingAdmin, response, security, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, wrapModuleLoad, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
-import { claimSends } from './states.js';
+import { claimSends, hostTakesAddresses } from './states.js';
+import { assertBuiltinRecipients, assertBuiltinStillSends } from './builtin-domain.js';
 import { endpoints, mailAttachments, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
 import { ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
@@ -334,41 +335,82 @@ async function ownVerifiedDomain(runtime: Runtime, tx: DbExecutor, w: string, ad
   return !!found.rowCount;
 }
 /**
- * Where a forward's confirmation request could come from when the workspace has no permanent address yet: forward@ (or
- * forward-2@…, the first free) at the receiving host of its oldest verified domain of its own, else of its built-in
- * domain. Null when it has no verified domain at all.
+ * Why the confirmation request from `from` to `to` wouldn't be sent, by the send's own checks of the built-in domain
+ * (assertBuiltinStillSends, assertBuiltinRecipients): it stops sending once a domain of the workspace's own is verified,
+ * and may send only to members' sign-in addresses. The refusal's code, else null. Reads only.
  */
-async function suggestedSender(tx: DbExecutor, w: string, multiTenant: boolean) {
-  // Self-hosted, an address needs a domain that receives: the oldest one that does.
-  const { rows: [domain] } = !multiTenant ? await tx.execute<{ host: string }>(sql`SELECT name AS host FROM mailbox_domains WHERE workspace_id=${w} AND parent_id IS NULL AND status IN ('provisioning','waiting_for_mx','active') ORDER BY created_at LIMIT 1`)
-    : await tx.execute<{ host: string }>(sql`SELECT coalesce((SELECT coalesce(md.receiving_host,md.name) FROM mailbox_domains md WHERE md.workspace_id=d.workspace_id AND md.domain_id=d.id
-      AND md.status NOT IN ('disabled','disabling') ORDER BY md.parent_id NULLS FIRST,md.created_at LIMIT 1),d.name) AS host
-    FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
-    WHERE d.workspace_id=${w} AND ${claimSends()} ORDER BY coalesce(dc.identity ? 'builtin',false),d.created_at LIMIT 1`);
-  if (!domain) return null;
-  const taken = new Set((await tx.execute<{ address: string }>(sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${w} AND address LIKE ${'forward%@' + domain.host}`)).rows.map(r => r.address));
-  for (let n = 1; ; n++) { const address = `${n === 1 ? 'forward' : `forward-${n}`}@${domain.host}`; if (!taken.has(address)) return address; }
+async function cannotAsk(runtime: Runtime, tx: DbExecutor, w: string, from: string, to: string) {
+  try { await assertBuiltinStillSends(runtime, tx, w, [from]); await assertBuiltinRecipients(runtime, tx, w, [{ from, recipients: [to] }]); return null; }
+  catch (error) { if (error instanceof ApiError && (error.code === 'OWN_DOMAIN_VERIFIED' || error.code === 'BUILTIN_DOMAIN_RECIPIENT')) return error.code; throw error; }
 }
+type CannotAsk = NonNullable<Awaited<ReturnType<typeof cannotAsk>>>;
 /**
- * The permanent address a forward's confirmation request is sent from: `from`, else the workspace's oldest. An agent
- * inbox only replies and an expiring address may be gone, so neither sends it. Refused, the answer names the address to
- * create and the exact calls (error.details[0].suggestedFrom; the dashboard offers to create it in one click).
+ * An address the confirmation request to `to` could come from when no address of the workspace can send it: forward@ (or
+ * forward-2@…, the first free) at a host that receives mail now, takes an address as it is, and may send to `to`: one of
+ * its own verified domains first, else its built-in domain. Never a host where creating the address would turn
+ * receiving on (an MX record to publish, and mail moved from wherever it goes today): that is the owner's choice, made
+ * where they see the record. Else null, with why each host that receives can't ask.
  */
-async function senderBox(tx: DbExecutor, w: string, from?: string, multiTenant = true) {
-  const [box] = from
-    ? await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`(${mailboxes.id}=${from} OR ${mailboxes.id}=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address=${from.toLowerCase()}))`))
-    : await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`${mailboxes.kind}<>'inbox' AND ${mailboxes.expiresAt} IS NULL`)).orderBy(mailboxes.id).limit(1);
-  if (box && box.kind !== 'inbox' && !box.expiresAt) return box;
-  const suggested = await suggestedSender(tx, w, multiTenant);
-  const why = !from ? 'Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and this workspace has none yet.'
-    : !box ? `${from} isn’t one of this workspace’s addresses.`
-    : box.kind === 'inbox' ? `${box.address} is an agent inbox, which only replies, so it can’t send the confirmation request.`
-    : `${box.address} expires, so it can’t send the confirmation request.`;
-  const fix = suggested
-    ? ` Create one with POST /v1/inbound/addresses and {"address":"${suggested}"}, then send this again with "from":"${suggested}".`
-    : ' Add and verify a domain with POST /v1/domains, create a permanent address on it with POST /v1/inbound/addresses, then send this again with its address as "from".';
+async function suggestedSender(runtime: Runtime, tx: DbExecutor, w: string, to: string) {
+  const { rows: hosts } = !runtime.config.multiTenant ? await tx.execute<{ host: string }>(sql`SELECT name AS host FROM mailbox_domains WHERE workspace_id=${w} AND parent_id IS NULL AND status='active' ORDER BY created_at LIMIT 1`)
+    : await tx.execute<{ host: string }>(sql`SELECT coalesce(md.receiving_host,md.name) AS host FROM mailbox_domains md
+      JOIN operation_domains d ON d.id=md.domain_id AND d.workspace_id=md.workspace_id JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
+      WHERE md.workspace_id=${w} AND md.status='active' AND ${claimSends()} AND ${hostTakesAddresses(w)}
+      ORDER BY coalesce(dc.identity ? 'builtin',false),d.created_at,md.parent_id NULLS FIRST,md.created_at LIMIT 10`);
+  const refused = new Set<CannotAsk>();
+  for (const { host } of hosts) {
+    const why = await cannotAsk(runtime, tx, w, `forward@${host}`, to);
+    if (why) { refused.add(why); continue; }
+    const taken = new Set((await tx.execute<{ address: string }>(sql`SELECT address FROM mailbox_addresses WHERE workspace_id=${w} AND address LIKE ${'forward%@' + host}`)).rows.map(r => r.address));
+    for (let n = 1; ; n++) { const address = `${n === 1 ? 'forward' : `forward-${n}`}@${host}`; if (!taken.has(address)) return { address, refused }; }
+  }
+  return { address: null, refused };
+}
+/** Hosted: the workspace's own verified domain a confirmation request would come from, where nothing receives yet. */
+async function ownSendingDomain(tx: DbExecutor, w: string) {
+  return (await tx.execute<{ id: string; name: string }>(sql`SELECT d.id,d.name FROM operation_domains d JOIN domain_claims dc ON dc.workspace_id=d.workspace_id AND dc.name=d.name
+    WHERE d.workspace_id=${w} AND ${claimSends()} AND NOT coalesce(dc.identity ? 'builtin',false) ORDER BY dc.sending_state<>'verified',d.created_at LIMIT 1`)).rows[0];
+}
+/** The workspace's permanent addresses (not agent inboxes, not expiring), oldest first, those at a host that receives mail now before any other. */
+const permanentSenders = (tx: DbExecutor, w: string, limit: number) => tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`${mailboxes.kind}<>'inbox' AND ${mailboxes.expiresAt} IS NULL`))
+  .orderBy(sql`(SELECT md.status='active' FROM mailbox_domains md WHERE md.id=${mailboxes.domainId} AND md.workspace_id=${w}) IS NOT TRUE`, mailboxes.createdAt, mailboxes.id).limit(limit);
+/**
+ * The permanent address a forward's confirmation request to `to` is sent from: `from`, else the workspace's oldest that
+ * can send it (one at a host that receives mail now before any other; the built-in domain stops sending once a domain
+ * of the workspace's own is verified, and may send only to members). An agent inbox only replies and an expiring address
+ * may be gone, so neither sends it; a `from` the built-in domain can't send from is refused by the send, as any email
+ * from it is. Refused here (FORWARD_SENDER_REQUIRED), the answer names an address to create and the exact calls
+ * (error.details[0].suggestedFrom; the dashboard offers to create it in one click), or, with none that could ask, what
+ * to do first (error.details[0].reason: domain_not_receiving with the domain and its ID, builtin_members_only, or
+ * no_receiving_domain).
+ */
+async function senderBox(runtime: Runtime, tx: DbExecutor, w: string, to: string, from?: string) {
+  const refused = new Set<CannotAsk>();
+  let box: typeof mailboxes.$inferSelect | undefined, none = false;
+  if (from) {
+    [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`(${mailboxes.id}=${from} OR ${mailboxes.id}=(SELECT mailbox_id FROM mailbox_addresses WHERE workspace_id=${w} AND address=${from.toLowerCase()}))`));
+    if (box && box.kind !== 'inbox' && !box.expiresAt) return box;
+  } else {
+    const boxes = await permanentSenders(tx, w, 20);
+    for (const candidate of boxes) { const why = await cannotAsk(runtime, tx, w, candidate.address, to); if (!why) return candidate; refused.add(why); }
+    none = !boxes.length;
+  }
+  const suggested = await suggestedSender(runtime, tx, w, to);
+  for (const why of suggested.refused) refused.add(why);
+  const own = !suggested.address && runtime.config.multiTenant && !refused.has('BUILTIN_DOMAIN_RECIPIENT') ? await ownSendingDomain(tx, w) : undefined;
+  const reason = suggested.address ? null : own ? 'domain_not_receiving' : refused.has('BUILTIN_DOMAIN_RECIPIENT') ? 'builtin_members_only' : 'no_receiving_domain';
+  const why = from ? (!box ? `${from} isn’t one of this workspace’s addresses.`
+      : box.kind === 'inbox' ? `${box.address} is an agent inbox, which only replies, so it can’t send the confirmation request.`
+      : `${box.address} expires, so it can’t send the confirmation request.`)
+    : none ? 'Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and this workspace has none yet.'
+    : `Forwarding first emails the recipient a confirmation request from one of your permanent addresses, and none of them can send it to ${to}.`;
+  const fix = suggested.address ? ` Create one with POST /v1/inbound/addresses and {"address":"${suggested.address}"}, then send this again with "from":"${suggested.address}".`
+    : reason === 'domain_not_receiving' ? ` It needs an address at ${own!.name}, which doesn’t receive mail yet. Turn receiving on at ${own!.name} or a subdomain of it with POST /v1/inbound/domains/${own!.id}/hosts and publish its MX record, create a permanent address there with POST /v1/inbound/addresses, then send this again with its address as "from".`
+    : reason === 'builtin_members_only' ? ` The built-in domain sends only to members of this workspace at their sign-in addresses: forward to one of those, or verify a domain of your own with POST /v1/domains and create an address there that receives mail.`
+    : runtime.config.multiTenant ? ' No domain of this workspace receives mail yet. Turn receiving on for one with POST /v1/inbound/domains/{id}/hosts and publish its MX record, create a permanent address there with POST /v1/inbound/addresses, then send this again with its address as "from".'
+    : ' No domain receives mail yet. Enable receiving for one with POST /v1/inbound/domains/{id}/enable, create a permanent address on it with POST /v1/inbound/addresses, then send this again with its address as "from".';
   const error = new ApiError(422, 'FORWARD_SENDER_REQUIRED', why + fix, 'from');
-  if (suggested) error.details = [{ suggestedFrom: suggested }];
+  error.details = [suggested.address ? { suggestedFrom: suggested.address } : { reason: reason!, ...(own ? { domain: own.name, domainId: own.id } : {}) }];
   throw error;
 }
 // Forwarding's links are on the receiving address's link host (src/link-domains.ts), as an unsubscribe link is.
@@ -378,7 +420,7 @@ const forwardBase = (origin: string) => origin.replace(/\/$/, '') + '/v1/forward
  * workspace's sent-mail views show it with the link withheld, because the link alone confirms.
  */
 async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId: string, address: string, from?: string) {
-  const box = await senderBox(tx, w, from, !!c.env.config.multiTenant), origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
+  const box = await senderBox(c.env, tx, w, address, from), origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
   const addressHash = await digest(address);
   const declined = (await tx.execute<{ until: string }>(sql`SELECT (declined_at+interval '30 days')::text AS until FROM mail_forward_declines WHERE workspace_id=${w} AND address_hash=${addressHash} AND declined_at>now()-interval '30 days'`)).rows[0];
   if (declined) throw new ApiError(409, 'FORWARD_DECLINED', `${address} declined forwarding from this workspace. You can ask again after ${new Date(declined.until).toISOString()}.`, 'address');
@@ -838,7 +880,11 @@ async function forwardSender(tx: DbExecutor, w: string, recipient: string, reque
   const candidates = sql.param([recipient, plusBase(recipient), ...(requestFrom ? [requestFrom] : [])]);
   const [box] = await tx.select().from(mailboxes).where(and(eq(mailboxes.workspaceId, w), sql`${mailboxes.id}=(SELECT a.mailbox_id FROM mailbox_addresses a JOIN mailboxes b ON b.id=a.mailbox_id AND b.workspace_id=a.workspace_id
     WHERE a.workspace_id=${w} AND a.address=ANY(${candidates}::text[]) AND b.kind<>'inbox' AND b.expires_at IS NULL ORDER BY array_position(${candidates}::text[],a.address) LIMIT 1)`));
-  return box ?? senderBox(tx, w);
+  if (box) return box;
+  // Otherwise its oldest permanent address, as the confirmation request came from one (forwarding doesn't ask again).
+  const [oldest] = await permanentSenders(tx, w, 1);
+  if (oldest) return oldest;
+  throw new ApiError(422, 'FORWARD_SENDER_REQUIRED', 'Forwarding sends from one of the workspace’s permanent addresses, and it has none now.', 'from');
 }
 /**
  * Forwards a received message whole to a confirmed recipient: its text, its HTML through the same allow-list as every

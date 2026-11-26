@@ -176,6 +176,10 @@ export function InboundAddressDetailPage() {
   const overview = useOverview({ q: current?.address ?? '', kind: current?.kind === 'inbox' ? 'inbox' : 'address', limit: 5 }, false, canAdminister && !!current && tab === 'flow' && !deleted)
   // Where its mail goes is the flow panel's diagram; Edit (or ?edit from the panel) opens its steps to change them.
   const entry = overview.data?.routes.data.find(r => r.address?.id === id)
+  // Its host waits for its MX record (as when creating the address turned receiving on): the domain's page shows the record,
+  // with Copy, until it is live.
+  const host = current?.address.split('@')[1]
+  const waitingDomain = overview.data?.domains.find(d => d.name === host && d.status === 'waiting_for_mx')
   // Edit opens the builder when it can draw the flow. ?edit=1 (Edit otherwise, or a builder's "more rules") shows the
   // steps: its route, changed in the route editor, and every rule it runs, to attach or detach. From the URL, so a link
   // to them works on this page too.
@@ -212,7 +216,8 @@ export function InboundAddressDetailPage() {
     <AddressMail addressId={id} hidden={tab !== 'mail'} enabled={!deleted} />
     {tab === 'mail' ? null
       : !current || (tab === 'flow' && overview.data === undefined && !overview.error) ? <LoadingRegion label="Loading address"><div className="addr-skeleton" aria-hidden="true"><span /><span /><span /></div></LoadingRegion>
-      : tab === 'flow' ? <div className="stack addr-page">{editing || !entry || !overview.data
+      : tab === 'flow' ? <div className="stack addr-page">{waitingDomain && <Alert tone="warning" title={`${host} is waiting for its MX record`}>Mail to this address arrives once it’s published.<div className="cluster builder-receiving-actions"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/domains/${waitingDomain.id}`}>See the record</Link></div></Alert>}
+        {editing || !entry || !overview.data
         ? <>{entry && overview.data && entry.rules.filter(key => isSplit(overview.data!.rules.find(r => r.key === key))).length > 1 && <Alert tone="info">It splits its mail with more than one rule. Open a rule to change it.</Alert>}
           <AddressPath address={current} overview={overview} />
           {entry && <div className="cluster"><Button onClick={() => setEditing(false)}>Done</Button></div>}</>
