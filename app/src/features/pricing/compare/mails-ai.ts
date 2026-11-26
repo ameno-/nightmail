@@ -32,8 +32,8 @@ export const mailsAi: Entry = {
   lead: 'Mails.ai sells plans by agents and monthly allowances, unlimited agents on Scale. Nightmail charges for each email, not each inbox.',
   assume: 'Each inbox receives 100 emails and sends 50 a month, one agent each. Mails.ai’s cheapest plan that holds them. List prices before tax.',
   rows: [
-    fact('Receive at your own domain', 'Receive at your own domain.', 'Mails.ai’s custom domains are for sending; mail to them goes wherever the domain’s mail goes today.', read('https://mails.ai/docs/inbound.md', 'The DNS records mails.ai asks for cover sending only: mail written straight to `billing@acme.com` goes wherever that domain’s mail is delivered today')),
-    fact('Campaigns and newsletters too', 'Campaigns and newsletters on the same account.', 'Mails.ai refuses bulk marketing at its API.', read(MAILSAI, 'cold outreach and bulk marketing are refused at the API with a 422 cold_email_prohibited')),
+    fact('Receive at your own domain', 'Receive at your own domain.', 'Mails.ai’s custom domains are for sending; mail to them goes wherever the domain’s mail goes today.', read('https://mails.ai/docs/inbound.md', 'The DNS records mails.ai asks for cover sending only: mail written straight to `billing@acme.com` goes wherever that domain’s mail is delivered today'), { shared: 'domains' }),
+    fact('Campaigns and newsletters too', 'Campaigns and newsletters on the same account.', 'Mails.ai refuses bulk marketing at its API.', read(MAILSAI, 'cold outreach and bulk marketing are refused at the API with a 422 cold_email_prohibited'), { shared: 'campaigns' }),
   ],
   // Mails.ai's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'campaign', 'send', 'route'],

@@ -42,8 +42,8 @@ export const cloudMailin: Entry = {
   lead: 'CloudMailin sells monthly allowances of received email, delivered to your app. Nightmail charges for each email received past its free allowance.',
   assume: 'Emails received, nothing sent, CloudMailin’s cheapest plan for the volume; message size limits not weighed. List prices before tax.',
   rows: [
-    fact('Your own domain on every workspace', 'Receive at your own domains on every workspace.', 'CloudMailin’s custom domains and catch-all receiving come with its paid plans.', read(CLOUDMAILIN, 'All paid plans include Custom Domains Use your own domain Catch-All Receiving *@yourdomain.com')),
-    fact('Campaigns and newsletters too', 'Campaigns and newsletters in the same account.', 'CloudMailin’s sending is for transactional email only.', read('https://docs.cloudmailin.com/outbound/', 'The CloudMailin outbound system only allows you to send transactional email messages. Marketing or bulk messages are not permitted.')),
+    fact('Your own domain on every workspace', 'Receive at your own domains on every workspace.', 'CloudMailin’s custom domains and catch-all receiving come with its paid plans.', read(CLOUDMAILIN, 'All paid plans include Custom Domains Use your own domain Catch-All Receiving *@yourdomain.com'), 'Your own domains on every account, even a free one'),
+    fact('Campaigns and newsletters too', 'Campaigns and newsletters in the same account.', 'CloudMailin’s sending is for transactional email only.', read('https://docs.cloudmailin.com/outbound/', 'The CloudMailin outbound system only allows you to send transactional email messages. Marketing or bulk messages are not permitted.'), { shared: 'campaigns' }),
   ],
   // CloudMailin's readers first see receiving, routing and the allowances.
   panels: ['receive', 'route', 'free', 'agent', 'domain', 'send', 'campaign'],

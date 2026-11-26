@@ -44,8 +44,8 @@ export const smtp2go: Entry = {
   lead: 'SMTP2GO sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, SMTP2GO’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SMTP2GO’s free plan is 1,000 emails a month, 200 a day.', free),
-    fact('Campaigns and contacts', 'Campaigns and newsletters, with no charge for contacts.', 'SMTP2GO doesn’t manage contacts.', read('https://www.smtp2go.com/blog/smtp2go-questions-answered', 'Can I upload contacts? We do not cater to contact management')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SMTP2GO’s free plan is 1,000 emails a month, 200 a day.', free, { shared: 'free' }),
+    fact('Campaigns and contacts', 'Campaigns and newsletters, with no charge for contacts.', 'SMTP2GO doesn’t manage contacts.', read('https://www.smtp2go.com/blog/smtp2go-questions-answered', 'Can I upload contacts? We do not cater to contact management'), [{ shared: 'campaigns' }, { shared: 'contacts' }]),
   ],
   // SMTP2GO's readers first see the API, the allowances and the campaigns it leaves out.
   panels: ['send', 'free', 'campaign', 'contacts', 'receive', 'agent', 'domain'],

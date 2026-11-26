@@ -57,8 +57,8 @@ export const ghost: Entry = {
   assume: 'Four emails a month to each subscriber, 1 teammate, Ghost(Pro)’s cheapest plan that holds them. List prices before tax.',
   rows: [
     fact('Your own sending domain at no charge', 'No charge for your own sending domains.', 'Ghost(Pro)’s custom sending domain starts on Publisher.', read(GHOST, 'Custom sending domain Send emails from your own domain for better deliverability and brand consistency. Includes DKIM and SPF authentication. – No Yes Yes Yes')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'Ghost(Pro) Starter includes 1 staff user, Publisher 3 and Business 15.', read(GHOST, 'Contributors and Suspended users are always free, they won\'t count towards your plan limits. 1 3 15 Unlimited')),
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Ghost(Pro) starts with a 14-day free trial.', read('https://ghost.org/help/what-happens-when-my-ghost-pro-trial-ends/', 'Every Ghost(Pro) site starts with a 14-day free trial, and you won\'t be charged when it ends. To keep publishing, choose a plan')),
+    fact('Teammates at no charge', 'No charge for teammates.', 'Ghost(Pro) Starter includes 1 staff user, Publisher 3 and Business 15.', read(GHOST, 'Contributors and Suspended users are always free, they won\'t count towards your plan limits. 1 3 15 Unlimited'), { shared: 'teammates' }),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Ghost(Pro) starts with a 14-day free trial.', read('https://ghost.org/help/what-happens-when-my-ghost-pro-trial-ends/', 'Every Ghost(Pro) site starts with a 14-day free trial, and you won\'t be charged when it ends. To keep publishing, choose a plan'), { shared: 'free' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'domain', 'team', 'free'],

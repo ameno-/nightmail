@@ -59,7 +59,12 @@
 .pp-verdict::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 30%) 2px 3px); }
 @media (min-resolution: 2dppx) { .pp-verdict::after { background: repeating-linear-gradient(to bottom, transparent 0 1px, rgb(0 0 0 / 30%) 1px 1.5px); } }
 @media (min-resolution: 3dppx) { .pp-verdict::after { background: repeating-linear-gradient(to bottom, transparent 0 .667px, rgb(0 0 0 / 30%) .667px 1px); } }
-.pp-caption { margin: 14px 0 0; color: var(--soft); font: 700 13px / 1.45 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; text-wrap: pretty; }
+.pp-caption { margin: 14px 0 0; color: var(--soft); font: 700 13px / 1.45 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; text-wrap: pretty; overflow-x: clip; }
+/* Its parts, each led by a dot in the gap before it; the line pulled back by that gap and clipped, so a part that starts
+   a line has no dot in front of it: one line with dots, two plain lines where it wraps. */
+.pp-parts { display: flex; flex-wrap: wrap; margin-left: -3ch; }
+.pp-parts > span { position: relative; padding-left: 3ch; }
+.pp-parts > span::before { content: '·'; content: '·' / ''; position: absolute; left: 0; width: 3ch; text-align: center; }
 .pp-way { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 28px; }
 /* The airmail label at an ordinary button's size: 44 px tall in all, a thumb's press, the button itself (its striped
    edge is its own border, so the whole label takes the press), the edge 4 px, thinned with the height (the homepage's

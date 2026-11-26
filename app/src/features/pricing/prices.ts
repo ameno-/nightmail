@@ -183,13 +183,19 @@ export function vendorRows(offers: readonly Offer[], u: Usage): VendorRow[] {
 
 // ---------------------------------------------------------------- the pages' comparisons and disclosures
 
-/** short: the same claim in a few words, for a list that is scanned; note: what stands behind it, in a line. */
-export type Fact = { text: string; short?: string; note?: string; source: Source }
+/** The facts every price page can list, written once in page/facts.ts. */
+export type SharedFact = 'free' | 'domains' | 'contacts' | 'teammates' | 'campaigns' | 'agents'
+/** A row as a line of a page's facts list (page/facts.ts): a plain statement about Nightmail, or one of the shared
+ *  facts the row comes down to. */
+export type Line = string | { shared: SharedFact }
+/** short: the same claim in a few words, for a list that is scanned; note: what stands behind it, in a line; line: the
+ *  row in a page's facts list, where its first sentence alone wouldn't read as plain words (or says a shared fact). */
+export type Fact = { text: string; short?: string; note?: string; line?: Line | Line[]; source: Source }
 /** One of the comparison's rows: what Nightmail has that the competitor charges for or lacks, with the competitor's page
  *  where it says so (a row that names only Nightmail's own terms has no source). */
-export type Row = Fact | { text: string; short?: string; note?: string; source?: undefined }
+export type Row = Fact | { text: string; short?: string; note?: string; line?: Line | Line[]; source?: undefined }
 /** A claim about Nightmail and the competitor's own page for the other half of it: text is the two sentences together. */
-export const fact = (short: string, ours: string, note: string, source: Source): Fact => ({ short, note, text: `${ours} ${note}`, source })
+export const fact = (short: string, ours: string, note: string, source: Source, line?: Line | Line[]): Fact => ({ short, note, text: `${ours} ${note}`, ...line === undefined ? {} : { line }, source })
 
 /** The panels of "Also in the box" (panels.ts, features.tsx), in a comparison's reading order. */
 export type PanelId = 'send' | 'campaign' | 'contacts' | 'team' | 'free' | 'receive' | 'agent' | 'route' | 'domain' | 'ready' | 'hygiene'

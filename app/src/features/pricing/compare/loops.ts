@@ -54,8 +54,8 @@ export const loops: Entry = {
   lead: 'Loops prices by subscribers. Nightmail prices by email.',
   assume: 'Four emails a month to each subscriber, 1 teammate, Loops’s cheapest plan that holds them. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Loops Free is 4,000 sends in any 30 days, to the first 1,000 contacts.', freePlan),
-    fact('Contacts at no charge', 'No charge for contacts.', 'Loops sets its price by subscribed contacts at each renewal.', read('https://loops.so/docs/account/billing.md', 'Your plan tier is always calculated based on the number of subscribed contacts you have **at the time of renewal**.')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Loops Free is 4,000 sends in any 30 days, to the first 1,000 contacts.', freePlan, { shared: 'free' }),
+    fact('Contacts at no charge', 'No charge for contacts.', 'Loops sets its price by subscribed contacts at each renewal.', read('https://loops.so/docs/account/billing.md', 'Your plan tier is always calculated based on the number of subscribed contacts you have **at the time of renewal**.'), { shared: 'contacts' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'free', 'send', 'receive'],

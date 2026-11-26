@@ -36,7 +36,7 @@ export const deadSimpleEmail: Entry = {
   lead: 'Dead Simple Email sells inboxes and emails in plans, with more inboxes at $0.40 each. Nightmail charges for each email, not each inbox.',
   assume: 'Each inbox receives 100 emails and sends 50 a month. Dead Simple Email’s cheapest plan, with more inboxes where that costs less. List prices before tax.',
   rows: [
-    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'Dead Simple Email pools sent and received mail in one allowance.', read(LLMS, 'the monthly allowance is pooled across sends and receives')),
+    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'Dead Simple Email pools sent and received mail in one allowance.', read(LLMS, 'the monthly allowance is pooled across sends and receives'), { shared: 'free' }),
     fact('Inboxes at no charge', 'No charge per inbox.', 'Dead Simple Email charges $0.40 a month for each inbox past its plan’s.', extra.source),
   ],
   // Its readers first see the agents' inboxes, receiving and the allowances.

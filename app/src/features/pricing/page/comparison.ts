@@ -3,7 +3,7 @@ import { productName } from '../../../../../api/src/brand.ts'
 import { COMPARISONS } from '../compare/index.ts'
 import { comparisonQuestions } from '../questions.ts'
 import { dayOf, formatCount, lastChecked, money, nightmail, nightmailBill, sourcesOf, theirPrice, type Comparison, type Usage } from '../prices.ts'
-import { factsSection } from './facts.ts'
+import { factsSection, rowLines } from './facts.ts'
 import type { PageDoc, Table, Text } from './shape.ts'
 import { ownPages } from '../docs/registry.ts'
 
@@ -42,8 +42,9 @@ export function perSize(c: Comparison, size: number) {
  *  pricing page opens on its smallest paid plan, docs/vendor-pricing.ts), and that size with the day read. */
 export function verdictOf(c: Comparison, size = middle(c)) {
   const b = billAt(c, size)
-  // ("· checked 25 Nov 2026" doesn't break apart: when the caption wraps, the dot goes down with the day.)
-  return { ours: b.ours, theirs: b.theirs!, u: b.u, at: `${perSize(c, b.size)} ·\u00a0checked\u00a0${dayOf(c.offer.checked).replaceAll(' ', '\u00a0')}` }
+  // (The day's words don't break apart: "25 Nov 2026" stays on one line. Where the caption wraps, page.tsx breaks it at
+  // the dot, and drops the dot.)
+  return { ours: b.ours, theirs: b.theirs!, u: b.u, at: `${perSize(c, b.size)} · checked ${dayOf(c.offer.checked).replaceAll(' ', '\u00a0')}` }
 }
 const unitHead = (c: Comparison) => c.model.per === 'contact' ? 'Contacts' : c.model.per === 'inbox' ? 'Inboxes' : c.model.per === 'received' ? 'Received a month' : 'Emails a month'
 
@@ -69,9 +70,9 @@ export function comparisonDoc(c: Comparison): PageDoc {
     h1: verdictHeading(c, v),
     answer: [[v.at]],
     sections: [{ id: 'sizes', title: `A month at each size ${vendor} prices`, quiet: true, blocks: [priceTable(c, terms, opening)] },
-    // What Nightmail has that the vendor charges for or lacks, each cut to its fact (its first sentence), then the facts
-    // every page says (facts.ts).
-    factsSection(c.rows.map(row => row.text.split(/(?<=\.) /)[0]!))],
+    // What Nightmail has that the vendor charges for or lacks, each row as one plain line, then the facts every page
+    // says (facts.ts).
+    factsSection(rowLines(c.rows))],
     questions: comparisonQuestions(c),
     sources: sourcesOf(c),
     // The vendor's own pages first (docs/registry.ts: its pricing page), then the other comparisons of its kind.

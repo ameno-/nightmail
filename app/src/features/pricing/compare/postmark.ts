@@ -57,9 +57,9 @@ export const postmark: Entry = {
   lead: 'Postmark sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, Postmark’s cheapest plan, or a smaller one plus its extra emails where that costs less. List prices before tax.',
   rows: [
-    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'Postmark counts each processed inbound message as an email.', read('https://postmarkapp.com/support/article/1107-how-does-monthly-pricing-work', 'A sent Transactional or Broadcast message, a Sandboxed test message, and a processed Inbound message all count as 1 email.')),
-    fact('Receiving on every account', 'Receiving on every account.', 'Postmark lists inbound processing on its Pro and Platform plans.', read(POSTMARK, 'Pro $16.50 /mo … Inbound email processing … Platform $18.00 /mo … Inbound email processing')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'Postmark Basic allows up to 4 users and Pro up to 6.', users(4).source),
+    fact('A free allowance for received email', `Received email has its own ${formatCount(nightmail.freeReceived)} free a month.`, 'Postmark counts each processed inbound message as an email.', read('https://postmarkapp.com/support/article/1107-how-does-monthly-pricing-work', 'A sent Transactional or Broadcast message, a Sandboxed test message, and a processed Inbound message all count as 1 email.'), { shared: 'free' }),
+    fact('Receiving on every account', 'Receiving on every account.', 'Postmark lists inbound processing on its Pro and Platform plans.', read(POSTMARK, 'Pro $16.50 /mo … Inbound email processing … Platform $18.00 /mo … Inbound email processing'), 'Every account can receive email'),
+    fact('Teammates at no charge', 'No charge for teammates.', 'Postmark Basic allows up to 4 users and Pro up to 6.', users(4).source, { shared: 'teammates' }),
   ],
   // Postmark's readers first see the API, receiving and the allowances.
   panels: ['send', 'receive', 'free', 'team', 'agent', 'domain', 'campaign'],

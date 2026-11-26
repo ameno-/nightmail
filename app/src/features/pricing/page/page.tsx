@@ -24,6 +24,13 @@ function Run({ text }: { text: Text }) {
       : <span key={i} data-nightmail-sent={part.sent} data-nightmail-received={part.received}>{part.ours}</span>)}</>
 }
 
+/** A caption in parts ("Per 100,000 emails a month · checked 25 Nov 2026"): on one line the parts are set apart by a
+ *  dot; where they wrap, each wrapped part starts its own line, with no dot (page.css, .pp-parts). */
+function Caption({ text }: { text: Text }) {
+  const parts = text.length === 1 && typeof text[0] === 'string' ? text[0].split(' · ') : []
+  return parts.length < 2 ? <Run text={text} /> : <span className="pp-parts">{parts.map((part, i) => <span key={i}>{part}</span>)}</span>
+}
+
 /** The way in, the price pages' own (board.tsx, Start): the homepage's button in the television's airmail label
  *  (home/tv/tv.css, .chyp) at an ordinary button's size. Painted (page/prerender.tsx) it is a visitor's Get started; the
  *  app's (view.tsx) signs in with the page's focus, says Join the waitlist when no place is open (home/signups-open.ts),
@@ -89,7 +96,7 @@ export function PricePageView({ doc, set, start }: { doc: PageDoc; set?: ReactNo
     <main className="pp-col">
       <section className="pp-hero" aria-labelledby="pp-h1">
         <Heading doc={doc} id="pp-h1" />
-        {doc.answer.map((text, i) => <p key={i} className="pp-caption"><Run text={text} /></p>)}
+        {doc.answer.map((text, i) => <p key={i} className="pp-caption"><Caption text={text} /></p>)}
         <Way start={start} />
       </section>
       {doc.sections.map((section, i) => <section key={section.id} id={section.id} className="pp-section" aria-labelledby={`${section.id}-title`}>

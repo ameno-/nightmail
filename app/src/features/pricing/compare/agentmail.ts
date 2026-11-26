@@ -40,7 +40,7 @@ export const agentmail: Entry = {
   rows: [
     fact('Inboxes at no charge', 'No charge per inbox.', 'AgentMail’s Developer plan includes 10 and charges $2 a month for each one after that.', read(PLANS, '- 10 inboxes … Inboxes: $2/month per inbox')),
     fact('Domains at no charge', 'No charge per domain.', 'AgentMail’s Developer plan includes 10 custom domains and charges $2 a month for each one after that.', read(PLANS, '- 10 custom domains … Domains: $2/month per domain')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'AgentMail’s Developer plan includes 2 seats and charges $5 a month for each one after that.', read(PLANS, '- 2 organization seats … Seats: $5/month per seat')),
+    fact('Teammates at no charge', 'No charge for teammates.', 'AgentMail’s Developer plan includes 2 seats and charges $5 a month for each one after that.', read(PLANS, '- 2 organization seats … Seats: $5/month per seat'), { shared: 'teammates' }),
   ],
   // AgentMail's readers first see the agents' inboxes, receiving and the API.
   panels: ['agent', 'receive', 'send', 'free', 'domain', 'team', 'route'],

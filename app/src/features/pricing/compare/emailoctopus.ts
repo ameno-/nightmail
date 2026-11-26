@@ -82,8 +82,8 @@ export const emailOctopus: Entry = {
   lead: 'EmailOctopus prices by subscribers. Nightmail prices by email.',
   assume: 'Four emails a month to each subscriber, 1 teammate, EmailOctopus’s cheapest plan that holds them. List prices before tax.',
   rows: [
-    fact('No email allowance to outgrow', `Every email is ${nightmail.perThousand} per 1,000, with no tiers.`, 'Each EmailOctopus tier includes a monthly email allowance; past it you need a larger tier.', read(MD, 'Each price includes a monthly email allowance. If you send more emails than a tier allows, you need a larger tier.')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'EmailOctopus’s free Starter plan gives access to 1 user.', read(EMAILOCTOPUS, 'Access for 1 user … Add unlimited users')),
+    fact('No email allowance to outgrow', `Every email is ${nightmail.perThousand} per 1,000, with no tiers.`, 'Each EmailOctopus tier includes a monthly email allowance; past it you need a larger tier.', read(MD, 'Each price includes a monthly email allowance. If you send more emails than a tier allows, you need a larger tier.'), `Every email is ${nightmail.perThousand} per 1,000, with no plan to outgrow`),
+    fact('Teammates at no charge', 'No charge for teammates.', 'EmailOctopus’s free Starter plan gives access to 1 user.', read(EMAILOCTOPUS, 'Access for 1 user … Add unlimited users'), { shared: 'teammates' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'domain', 'receive'],

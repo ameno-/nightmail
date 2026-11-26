@@ -48,8 +48,8 @@ export const buttondown: Entry = {
   assume: 'Four emails a month to each subscriber, 1 teammate, Buttondown’s cheapest plan that holds them. List prices before tax.',
   rows: [
     fact('Send as often as you like', `Every email is ${nightmail.perThousand} per 1,000, however often you send.`, 'Buttondown’s prices assume at most one email a day to the whole list.', read(BUTTONDOWN, 'All of these prices assume that you\'re sending at most one email a day to your entire subscriber base. If you\'re sending more than that, you\'ll need to contact us')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'Buttondown’s Teams adds $70 a month at 1,000 subscribers.', read(BUTTONDOWN, '[calculator at 1,000] Whitelabeling +$70/month Teams +$70/month')),
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Buttondown is free for the first 100 subscribers.', free),
+    fact('Teammates at no charge', 'No charge for teammates.', 'Buttondown’s Teams adds $70 a month at 1,000 subscribers.', read(BUTTONDOWN, '[calculator at 1,000] Whitelabeling +$70/month Teams +$70/month'), { shared: 'teammates' }),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent free every month.`, 'Buttondown is free for the first 100 subscribers.', free, { shared: 'free' }),
   ],
   // A newsletter's readers first see the list, the contacts and what keeps it clean.
   panels: ['campaign', 'contacts', 'hygiene', 'ready', 'team', 'free', 'domain'],

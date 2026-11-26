@@ -45,7 +45,7 @@ export function hubDoc(): PageDoc {
     path: '/compare', title: 'Compare', searchTitle: 'Email API alternatives and pricing compared',
     description: `${productName} beside ${ORDERED.length} email services, developer APIs, newsletters and agent inboxes: a month at three sizes on each, read ${dayOf(modified)}.`,
     h1: [[`${productName} costs less`], [`than each of these ${ORDERED.length}.`]],
-    answer: [[`At every size shown ·\u00a0checked\u00a0${dayOf(modified).replaceAll(' ', '\u00a0')}`]],
+    answer: [[`At every size shown · checked ${dayOf(modified).replaceAll(' ', '\u00a0')}`]],
     sections,
     questions: [], sources: [], related: [],
     crumbs: [{ name: productName, path: '/' }, { name: 'Compare', path: '/compare' }],

@@ -42,7 +42,7 @@ export const socketLabs: Entry = {
   lead: 'SocketLabs sells a monthly allowance of email and charges for each one past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, SocketLabs’ cheapest plan, or a smaller one plus its overage where that costs less. Bandwidth charges not included. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SocketLabs’ trial is a month of Core or a set amount of credits, and sending stops after it unless you upgrade.', read(SOCKETLABS, 'Once you create and verify your account, you have access to a Core plan for one month OR you will receive a set amount of credits to use. … you will lose access to the platform and will no longer be able to send mail at the end of your trial if you do not upgrade')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'SocketLabs’ trial is a month of Core or a set amount of credits, and sending stops after it unless you upgrade.', read(SOCKETLABS, 'Once you create and verify your account, you have access to a Core plan for one month OR you will receive a set amount of credits to use. … you will lose access to the platform and will no longer be able to send mail at the end of your trial if you do not upgrade'), { shared: 'free' }),
   ],
   // SocketLabs' readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'agent', 'campaign', 'domain', 'route'],

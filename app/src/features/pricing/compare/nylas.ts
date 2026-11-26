@@ -39,7 +39,7 @@ export const nylas: Entry = {
   rows: [
     fact('Inboxes at no charge', 'No charge per inbox.', 'Nylas Pro includes 50 agent accounts and charges $0.40 a month for each one after that.', offer.plans[2]!.tiers[0]!.extra!.source),
     fact('No bandwidth charge', 'No charge for bandwidth.', 'Nylas Pro includes 50 GB a month, counting mail in both directions, and charges $0.80 per GB after that.', read(NYLAS, 'Agent bandwidth (GB/month) 3 GB/month 10 GB/month Monthly: 50 GB/month +$0.80/additional GB')),
-    fact('IMAP and SMTP on every inbox', 'IMAP and SMTP for mail apps on every inbox.', 'Nylas includes them from Essentials, not on Free.', read(NYLAS, 'IMAP access & SMTP submission Access mailboxes over IMAP and send via SMTP. Not included Included Monthly: Included')),
+    fact('IMAP and SMTP on every inbox', 'IMAP and SMTP for mail apps on every inbox.', 'Nylas includes them from Essentials, not on Free.', read(NYLAS, 'IMAP access & SMTP submission Access mailboxes over IMAP and send via SMTP. Not included Included Monthly: Included'), 'Every inbox works in mail apps, over IMAP and SMTP'),
   ],
   // Nylas's readers first see the agents' inboxes, receiving and the domain.
   panels: ['agent', 'receive', 'domain', 'free', 'send', 'team', 'route'],

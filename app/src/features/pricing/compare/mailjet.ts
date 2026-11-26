@@ -49,9 +49,9 @@ export const mailjet: Entry = {
   lead: 'Mailjet sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, Mailjet’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
-    fact('Receiving on every account', 'Receiving email on every account.', 'Mailjet’s Parse API starts on Premium 50k.', read('https://dev.mailjet.com/docs/email-api/parse-api/basic-setup', 'Parse API is available only for users on paid Mailjet plans (Premium 50k and above).')),
-    fact('Teammates at no charge', 'No charge for teammates.', 'Mailjet shares an account with other users on Premium and Custom only.', read('https://documentation.mailjet.com/hc/en-us/articles/360043000173-Account-Sharing', 'This feature is included in the following plans. X Free X Starter X Essential ✓ Premium ✓ Custom')),
-    fact('Contacts at no charge', 'No charge for contacts.', 'Mailjet’s free plan holds 1,000 contacts and Starter 2,000.', read(MAILJET, 'Features include: 1,000 contacts … Everything from Free, plus: 2,000 contacts … Everything from Starter, plus: Unlimited contacts')),
+    fact('Receiving on every account', 'Receiving email on every account.', 'Mailjet’s Parse API starts on Premium 50k.', read('https://dev.mailjet.com/docs/email-api/parse-api/basic-setup', 'Parse API is available only for users on paid Mailjet plans (Premium 50k and above).'), 'Every account can receive email'),
+    fact('Teammates at no charge', 'No charge for teammates.', 'Mailjet shares an account with other users on Premium and Custom only.', read('https://documentation.mailjet.com/hc/en-us/articles/360043000173-Account-Sharing', 'This feature is included in the following plans. X Free X Starter X Essential ✓ Premium ✓ Custom'), { shared: 'teammates' }),
+    fact('Contacts at no charge', 'No charge for contacts.', 'Mailjet’s free plan holds 1,000 contacts and Starter 2,000.', read(MAILJET, 'Features include: 1,000 contacts … Everything from Free, plus: 2,000 contacts … Everything from Starter, plus: Unlimited contacts'), { shared: 'contacts' }),
   ],
   // Mailjet's readers first see the API, receiving and the team.
   panels: ['send', 'receive', 'team', 'contacts', 'free', 'agent', 'campaign'],

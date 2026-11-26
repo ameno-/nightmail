@@ -51,8 +51,8 @@ export const mailgun: Entry = {
   lead: 'Mailgun sells a monthly allowance of email and charges for each 1,000 past it. Nightmail charges for each email.',
   assume: 'One recipient each, nothing received, Mailgun’s cheapest plan, or a smaller one plus its overage where that costs less. List prices before tax.',
   rows: [
-    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'Mailgun’s free plan is 100 emails a day.', read(PRICES, '### Free - **Price:** $0 / month - **Included emails:** 100 emails/day')),
-    fact('Receiving and routing on every account', 'Receiving and routing on every account.', 'Mailgun’s free plan has 1 inbound route and Basic 5; full inbound routing starts on Foundation.', read(PRICES, 'Free … - 1 inbound route … Basic … - 5 inbound routes … Foundation … - Full access to inbound routing')),
+    fact('Free every month', `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free every month.`, 'Mailgun’s free plan is 100 emails a day.', read(PRICES, '### Free - **Price:** $0 / month - **Included emails:** 100 emails/day'), { shared: 'free' }),
+    fact('Receiving and routing on every account', 'Receiving and routing on every account.', 'Mailgun’s free plan has 1 inbound route and Basic 5; full inbound routing starts on Foundation.', read(PRICES, 'Free … - 1 inbound route … Basic … - 5 inbound routes … Foundation … - Full access to inbound routing'), 'Every account can receive email and pass it to your app'),
   ],
   // Mailgun's readers first see the API, the allowances and routing.
   panels: ['send', 'free', 'route', 'receive', 'agent', 'domain', 'campaign'],
