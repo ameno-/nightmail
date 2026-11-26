@@ -1,7 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
-import { ArrowRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
-import { Alert, Button, CopyButton, DataTable, DropdownMenu, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
+import { ArrowRight, ChevronRight, Copy, Pencil, Plus, Trash2 } from 'lucide-react'
+import { useEffect, useId, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { Alert, Button, CopyButton, DataTable, DropdownMenu, Icon, StatusBadge, useCopy, type MenuItem, type Tone } from '../../components/ui'
 import { CopyAction, LiveStatus, type LiveState } from '../../components/motion'
 import { useApi, useWorkspaceAccess } from '../../data/context'
 import { queries } from '../../data/queries'
@@ -322,20 +322,41 @@ export function DomainRecords({ domain, actions, guided = false, setup = null, r
   const all = rows.flatMap(row => row.record.id === 'dmarc-policy' ? [] : [row.record])
   const copyAll = () => copy(`${zoneLines(all)}\n`, `Copied ${all.length} records`)
   const policy = domain.dmarc
-  return <section className="section stack domain-records-section">
+  // Once verified (and no required record such as a new custom MAIL FROM is pending), fold the DNS records behind a
+  // phone-only toggle (<640px, decided at first paint in CSS). At 640px and wider, CSS renders the records open with no
+  // toggle exposed. A domain that isn't verified or loses verification renders them open at every width.
+  const foldRecords = domain.status === 'verified' && !domain.records.some(required)
+  const content = <>
     {(summary || actions || all.length > 0) && <div className="domain-records-actions">
       {summary && <p className="domain-check-summary" data-tone={summary.tone} title={summary.text} role="status">{summary.text}</p>}
       {actions}{all.length > 0 && <Button onClick={() => void copyAll()}><Copy size={14} aria-hidden />Copy all</Button>}
     </div>}
     {connect}
     {domain.dnsStatus === 'unavailable' && <p className="muted">{domain.dnsUnavailableReason || NO_RECORDS}</p>}
-    {receivingView && alert}
-    {receivingView && warning && <Alert tone="warning">{warning}</Alert>}
-    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records, then check again.</Alert>}
     {rows.length > 0 && <div className="domain-records-list">
       <DnsRecordTable domain={domain.name} rows={rows} />
       {mailFrom && !domain.mailFromDomain && mailFromRecords.length === 0 && <div className="domain-records-add"><Button variant="ghost" onClick={mailFrom.onEdit}><Plus size={14} aria-hidden />Add custom MAIL FROM</Button></div>}
       {linkNote && <p className="muted">{linkNote}</p>}
     </div>}
+  </>
+  return <section className="section stack domain-records-section">
+    {receivingView && alert}
+    {receivingView && warning && <Alert tone="warning">{warning}</Alert>}
+    {policy && !policy.alignment.dkim && !policy.alignment.spf && <Alert tone="warning">DMARC fails: publish the DKIM records, then check again.</Alert>}
+    {foldRecords ? <VerifiedRecordsFold key={domain.id}>{content}</VerifiedRecordsFold> : content}
   </section>
+}
+
+// Phone-only disclosure (<640px in domain-records.css): at 640px and wider the toggle is display:none (invisible to
+// keyboard and assistive tech) and the wrapper/body are display:contents so desktop renders open identically to before.
+function VerifiedRecordsFold({ children }: { children: ReactNode }) {
+  const [open, setOpen] = useState(false)
+  const bodyId = useId()
+  return <div className="domain-records-fold" data-open={open || undefined}>
+    <button type="button" className="domain-records-fold__toggle" aria-expanded={open} aria-controls={bodyId} onClick={() => setOpen(current => !current)}>
+      <span className="domain-records-fold__title">DNS records · Verified</span>
+      <Icon icon={ChevronRight} size="sm" />
+    </button>
+    <div id={bodyId} className="domain-records-fold__body">{children}</div>
+  </div>
 }
