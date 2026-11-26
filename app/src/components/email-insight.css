@@ -126,6 +126,8 @@ a.ss__fix:focus-visible > svg { color: var(--color-text); }
 .ev[data-fill] .ev-stage { flex: 1 1 0; min-height: 0; border-radius: var(--radius-lg); background: var(--color-layer-2); }
 :root[data-theme='dark'] .ev[data-fill] .ev-stage { background: var(--color-deep); }
 .ev-captions { display: flex; flex: none; justify-content: center; gap: var(--space-16); min-height: var(--control-height); margin-bottom: var(--space-8); }
+.ev[data-fill] .email-held { background: var(--color-surface); }
+.ev[data-compact] .email-held { margin-bottom: var(--space-12); }
 .ev[data-fill] .ev-captions { min-height: calc(var(--control-height) + var(--space-8)); margin: 0; padding: var(--space-8) var(--space-16) 0; }
 .ev-canvas { min-width: 0; }
 .ev[data-fill] .ev-canvas { --fade-pad-y: var(--space-8); flex: 1 1 0; min-height: 0; padding: var(--space-8) var(--space-16) var(--space-16); overflow: auto; }

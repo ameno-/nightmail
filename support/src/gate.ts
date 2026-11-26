@@ -98,11 +98,5 @@ function isExample(email: string) { return /@(?:example\.(?:com|org|net)|your-?d
 /** Links the panel may render; others are shown as text. The panel enforces this too (support/PROTOCOL.md §4.2). */
 export const LINK_ORIGINS = [...hostedHosts.flatMap(host => [`https://${host}`, `https://${supportHost(host)}`]), repositoryUrl];
 
-/** Plain text for email: Markdown emphasis and code fences removed, links kept as bare URLs. */
-export function plainText(markdown: string) {
-  return markdown
-    .replace(/```[a-z]*\n([\s\S]*?)```/g, (_, code: string) => code.trimEnd().split('\n').map(line => `    ${line}`).join('\n'))
-    .replace(/\[([^\]]+)\]\((https?:[^)]+)\)/g, (_, label: string, href: string) => label === href ? href : `${label} (${href})`)
-    .replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1').replace(/`([^`]+)`/g, '$1').replace(/^#{1,6}\s+/gm, '')
-    .replace(/\n{3,}/g, '\n\n').trim();
-}
+/** Plain text for email (one implementation, shared with the support inbox's held answers). */
+export { plainText } from '../../api/src/plain-text.js';

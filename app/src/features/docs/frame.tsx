@@ -1,6 +1,6 @@
 import { skipToken, useQuery } from '@tanstack/react-query'
 import { Link, Outlet, useMatch } from 'react-router'
-import { Skeleton, SkeletonText } from '../../components/ui'
+import { Skeleton, SkeletonText, SubNav } from '../../components/ui'
 import { useOnboardingStage } from '../../data/context'
 import { sessionLikely } from '../../data/live'
 import { ChunkFallback } from '../../lib/preloadable'
@@ -38,9 +38,7 @@ export function DocsArticleSkeleton() {
 
 /** The docs frame while its code loads: the same columns, so nothing moves when the page arrives. */
 export function DocsSkeleton() {
-  return <div className="docs-frame"><div className="docs-layout">
-    <aside className="docs-toc"><div className="ui-control-skeleton"><Skeleton width="50%" /></div><div className="docs-toc-scroll"><div className="docs-nav-group"><SkeletonText width="60%" /><SkeletonText width="80%" /><SkeletonText width="70%" /><SkeletonText width="76%" /></div></div></aside>
-    <div className="docs-picker"><div className="ui-control-skeleton"><Skeleton width="50%" /></div></div>
-    <div className="docs-main"><DocsArticleSkeleton /></div>
-  </div></div>
+  return <SubNav className="docs-frame" title="Docs" titleAs="div" label="Guides and API operations" groups={[]} top={<div className="ui-control-skeleton"><Skeleton width="50%" /></div>}
+    after={<div className="stack docs-nav-loading"><SkeletonText width="60%" /><SkeletonText width="80%" /><SkeletonText width="70%" /><SkeletonText width="76%" /></div>}
+    picker={<div className="ui-control-skeleton"><Skeleton width="50%" /></div>}><DocsArticleSkeleton /></SubNav>
 }
