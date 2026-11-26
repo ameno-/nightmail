@@ -58,11 +58,13 @@ export async function streamedSubmit(c: Ctx, encoded: string, digest: string) {
   });
 }
 
-/** A submitted file, stored when admission reaches it and not before (mailbox-send.ts resolveAttachments). */
-export const submittedFile = (f: SubmittedFile) => ({
-  filename: f.filename ?? 'attachment', contentType: f.mimeType, disposition: f.disposition === 'inline' ? 'inline' as const : 'attachment' as const,
-  contentId: f.contentId?.replace(/^<|>$/g, ''), size: f.size, bytes: () => f.bytes(),
-});
+/** A submitted file, stored when admission reaches it and not before (mailbox-send.ts resolveAttachments). A part an app
+ *  marks inline without a Content-ID (Apple Mail's attached PDF in a plain-text message) is one no HTML can show: an
+ *  ordinary attachment, which is how the app's reader sees it too. */
+export const submittedFile = (f: SubmittedFile) => {
+  const contentId = f.contentId?.replace(/^<|>$/g, '') || undefined;
+  return { filename: f.filename ?? 'attachment', contentType: f.mimeType, disposition: f.disposition === 'inline' && contentId ? 'inline' as const : 'attachment' as const, contentId, size: f.size, bytes: () => f.bytes() };
+};
 
 // Raw delivery preserves the outer fields, so every reader must split them the same way: CRLF only, RFC 5322 field
 // names, no blank folded line and no folded line a lax reader could take for an identity field. From and Sender may fold

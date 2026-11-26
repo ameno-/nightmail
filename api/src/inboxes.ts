@@ -122,8 +122,25 @@ const stored = sql`coalesce(${receiptOf(sql`r.committed_at`)}, m.created_at) AS 
 const randomLocal = () => Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghijklmnopqrstuvwxyz234567'[b & 31]).join('');
 
 type CreateResult = { error?: string; domain?: string; domainId?: string; mx?: string; replay: boolean; inbox: Box };
+/** What already holds an address in the workspace, for ADDRESS_TAKEN: its mailbox, whether that is an agent inbox, and the
+ *  mailbox's own address when this one is an alias or the address it replies as. */
+type Holder = { id: string; kind: 'inbox' | 'address'; address: string; how: 'primary' | 'alias' | 'public' };
+const holderOf = async (db: DbExecutor, workspaceId: string, address: string) => (await db.execute<Holder>(sql`SELECT b.id, b.kind, b.address, a.kind AS how
+  FROM mailbox_addresses a JOIN mailboxes b ON b.workspace_id = a.workspace_id AND b.id = a.mailbox_id WHERE a.workspace_id = ${workspaceId} AND a.address = ${address} LIMIT 1`)).rows[0] ?? null;
+/**
+ * The address asked for is taken: what holds it and the call that frees it. An agent turning a receiving address into an
+ * inbox (for a mail client) created the inbox a second after its delete of the address was refused, and was told only
+ * "already in use".
+ */
+function takenMessage(address: string, holder: Holder | null) {
+  const random = 'Or omit localPart for a random address.';
+  if (!holder) return `${address} is already in use. Omit localPart for a random address, or choose another.`;
+  if (holder.how !== 'primary') return `${address} belongs to ${holder.address} (${holder.id}). Remove it there first (PATCH /v1/inbound/addresses/${holder.id}), then create the inbox. ${random}`;
+  if (holder.kind === 'inbox') return `${address} is already the agent inbox ${holder.id}: use it (GET /v1/inboxes/${holder.id}). ${random}`;
+  return `${address} is already the receiving address ${holder.id}. To make it an inbox, delete that address first (DELETE /v1/inbound/addresses/${holder.id}?detach=true also takes it out of the routes that deliver to it), then create the inbox. ${random}`;
+}
 /** Every create refusal names the next step, so an agent can recover without reading docs. */
-function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
+function createError(r: CreateResult, input: z.infer<typeof create>, holder: Holder | null = null): ApiError {
   const where = r.domain ?? input.domain;
   switch (r.error) {
     case 'BYO_KEPT_POLICY_REQUIRED': return new ApiError(409,r.error,'Update the BYO receiving stack to kept-v1 and have the installation operator verify the binding before creating a persistent inbox.');
@@ -135,7 +152,7 @@ function createError(r: CreateResult, input: z.infer<typeof create>): ApiError {
     case 'ADDRESS_RESERVED': return new ApiError(409,r.error,'This role address cannot be leased to an inbox.');
     case 'INBOX_GONE': return new ApiError(409,r.error,'This lease has ended. Choose a new clientId.');
     case 'ADDRESS_TAKEN': return input.localPart
-      ? new ApiError(409, r.error, `${input.localPart}@${where} is already in use. Omit localPart for a random address, or choose another.`, 'localPart')
+      ? new ApiError(409, r.error, takenMessage(`${input.localPart}@${where}`, holder), 'localPart')
       : new ApiError(409, r.error, 'No free random address was found. Retry the request.', undefined, true);
     case 'ADDRESS_RETIRED': return new ApiError(409, r.error, `${input.localPart}@${where} belonged to a deleted inbox and stays reserved for 30 days. Omit localPart for a random address.`, 'localPart');
     case 'EPHEMERAL_INBOX_LIMIT': return new ApiError(409, r.error, 'This workspace already has 50,000 retained inboxes (including grace and pending erasure). Delete ones you no longer need with DELETE /v1/inboxes/{id}, then retry.');
@@ -219,7 +236,7 @@ export function registerInboxes(app: App, access: (c: Ctx, p?: MailboxPermission
       SELECT r FROM made`)).rows[0]!;
     if (r.error) {
       if (r.error === 'INBOX_CREATE_RATE') c.header('Retry-After', String(60 - new Date().getUTCSeconds()));
-      throw createError(r, input);
+      throw createError(r, input, r.error === 'ADDRESS_TAKEN' && input.localPart && r.domain ? await holderOf(c.env.db, v.workspaceId, `${input.localPart}@${r.domain}`.toLowerCase()) : null);
     }
     if (r.replay) return c.json(r.inbox, 200);
     return c.json({ ...r.inbox, ...(credential && secret ? { credential: { id: credential.id, secret, permissions: input.credential!.permissions, expiresAt: r.inbox.deleteAfter } } : {}) }, 201);

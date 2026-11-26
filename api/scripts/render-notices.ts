@@ -53,8 +53,10 @@ account('domain-setup', 'A new domain’s records are still missing an hour on',
   host: { name: 'Cloudflare', url: 'https://dash.cloudflare.com/?to=/:account/driftwood.example/dns/records' }, releasesAt: date('2026-11-27') });
 account('no-domain', 'A new workspace has no domain an hour on', { kind: 'no_domain', workspace });
 account('limit-reached', 'The daily limit is reached', { kind: 'limit_reached', workspace });
-account('evaluation-passed', 'The new-sender evaluation ends well', { kind: 'evaluation_finished', workspace, limited: false });
-account('evaluation-limited', 'The new-sender evaluation ends with a limit', { kind: 'evaluation_finished', workspace, limited: true });
+// The first grade, with the score card as the job reads it when it sends (account-notices.ts).
+const at = new Date('2026-11-25T14:20:00Z');
+account('evaluation-passed', 'The first grade: a good score, no daily limit', { kind: 'evaluation_finished', workspace, limited: false, score: { score: 86, grade: 'B', daily: null, at } });
+account('evaluation-limited', 'The first grade: a low score and a daily limit', { kind: 'evaluation_finished', workspace, limited: true, score: { score: 68, grade: 'D', daily: 200, at } });
 billing('balance-low', 'Balance is low', 'low_balance', { totalUc: usd(4.2) });
 billing('out-of-credit', 'Balance is empty', 'sends_paused', { unpaidSince: date('2026-11-29') });
 billing('recharge-failed', 'Auto-recharge is declined', 'recharge_failed', { totalUc: usd(3.1), data: { last4: '4242', code: 'card_declined' } });

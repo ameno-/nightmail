@@ -1,5 +1,5 @@
 // Connecting an AI agent over MCP, in one place. Signed in as you (OAuth), each client's one-line setup comes from
-// api/src/mcp-clients.ts (mcpSignIn): the sidebar's Connect an agent, Docs, onboarding and Ask your agent show it. With a
+// api/src/mcp-clients.ts (mcpSignIn): the sidebar's Connect your agent, Docs, onboarding and Ask your agent show it. With a
 // key (an API key shown once, or one agent inbox's), the configs come from the builder createInboxConnection uses too.
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router'
@@ -207,7 +207,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
     </>
     : result ? <Button variant="primary" onClick={close}>Done</Button>
     : <><Button disabled={busy} onClick={() => { setView('agent'); setError('') }}>Back</Button><Button variant="primary" loading={busy} disabled={!chosen} onClick={() => void create()}>Create API key</Button></>
-  return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title={inboxView ? 'Connect an agent to one inbox' : 'Connect an agent'} analytics="Connect an agent" className="connect-agent-dialog" sensitive={!!result} footer={footer}>
+  return <Dialog open={open} onOpenChange={next => { if (!next) close() }} title={inboxView ? 'Connect your agent to one inbox' : 'Connect your agent'} analytics="Connect an agent" className="connect-agent-dialog" sensitive={!!result} footer={footer}>
     {!inboxView ? <div className="stack connect-agent">{canAdminister && identity && <SetupPrompt />}<McpSignInSetup urlLine={false} client={signIn} onClient={setSignIn} /><ConnectedAgents onLeave={close} /></div> : <div className="stack">
       {!result && <>
         {searchable && <SearchField aria-label="Search inboxes" placeholder="Search address or name" value={query} onChange={event => setQuery(event.target.value)} />}
@@ -227,7 +227,7 @@ export function ConnectAgentDialog({ open, onOpenChange, inboxId }: { open: bool
   </Dialog>
 }
 
-/** The shell's one Connect an agent (lib/connect-agent.ts opens it). */
+/** The shell's one Connect your agent (lib/connect-agent.ts opens it). */
 export function ConnectAgentHost() {
   const open = useConnectAgentOpen()
   return <ConnectAgentDialog open={open} onOpenChange={next => { if (!next) closeConnectAgent() }} />
@@ -236,5 +236,5 @@ export function ConnectAgentHost() {
 /** The button that opens it, wherever an agent might be connected from. */
 export function ConnectAgentButton({ inboxId, variant = 'secondary', size = 'md', initiallyOpen = false }: { inboxId?: string; variant?: 'primary' | 'secondary' | 'ghost'; size?: 'sm' | 'md'; initiallyOpen?: boolean }) {
   const [open, setOpen] = useState(initiallyOpen)
-  return <><Button variant={variant} size={size} onClick={() => setOpen(true)}>Connect an agent</Button><ConnectAgentDialog open={open} onOpenChange={setOpen} inboxId={inboxId} /></>
+  return <><Button variant={variant} size={size} onClick={() => setOpen(true)}>Connect your agent</Button><ConnectAgentDialog open={open} onOpenChange={setOpen} inboxId={inboxId} /></>
 }

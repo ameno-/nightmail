@@ -28,14 +28,18 @@ export function sendSnippets({ origin, apiKey, from, to }: { origin: string; api
   }
 }
 
-const languages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'TypeScript' }]
+export const sendLanguages = [{ value: 'curl', label: 'cURL' }, { value: 'sdk', label: 'TypeScript' }]
 
 // Sends a first email from hello@<domain> to the signed-in user's own address. The server picks the
 // recipient and content (POST /v1/domains/{id}/test-send); the dashboard only names the domain.
-/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. */
-export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string) => void) {
-  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: () => request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() }),
-    onSuccess: data => onSent?.(data.id) })
+/** The test send itself, for TestSend and Overview's first-send card. `domain` may still be loading. `ms` is the send's
+ *  round trip through the API, measured in this browser. */
+export function useTestSend(domain: Pick<Domain, 'id'> | null | undefined, onSent?: (id: string, ms: number) => void) {
+  return useGuardedMutation({ target: domain?.id ?? '', mutationFn: async () => {
+    const started = performance.now()
+    const sent = await request<{ id: string; status: string; simulated?: boolean }>(`/v1/domains/${encodeURIComponent(domain!.id)}/test-send`, { method: 'POST', idempotencyKey: crypto.randomUUID() })
+    return { ...sent, ms: performance.now() - started }
+  }, onSuccess: data => onSent?.(data.id, data.ms) })
 }
 /** A just-sent email's status, read alone every 1.5 s while it is on its way and less than two minutes old (a deferral
  *  past that is Logs' to show). `onSettled` runs once it has a final status (delivered, bounced…). */
@@ -90,10 +94,10 @@ export function FirstSend({ domain, apiKey = null, title = 'Send your first emai
   return <section className="section stack developer-section" aria-label={title}>
     <SectionHeader title={title} />
     <div className="developer-client-bar">
-      <Tabs label="Example language" value={language} onValueChange={setLanguage} items={languages} />
+      <Tabs label="Example language" value={language} onValueChange={setLanguage} items={sendLanguages} />
       <CopyAction key={language} value={snippets[language as 'curl' | 'sdk']} label={`Copy ${language === 'curl' ? 'cURL' : 'TypeScript'} example`} variant="ghost" size="sm" compact className="developer-copy-icon" />
     </div>
-    <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{languages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
+    <div className="developer-client-panels developer-client-panels--fit" data-sensitive={apiKey ? true : undefined}>{sendLanguages.map(item => <pre key={item.value} className="developer-code developer-client-panel" tabIndex={0} aria-label={`${item.label} example`} data-active={item.value === language || undefined} inert={item.value !== language}><code><MaskedText text={snippets[item.value as 'curl' | 'sdk']} /></code></pre>)}</div>
     {!compact && <p className="muted developer-copy">To test each outcome without a real inbox, send to {simulator.map((address, index) => <span key={address}>{index > 0 && (index === simulator.length - 1 ? ' or ' : ', ')}<code>{address}</code></span>)}. They use your daily limit like any send, but never count towards your sender score.</p>}
     {testButton && domain && <TestSend domain={domain} />}
   </section>

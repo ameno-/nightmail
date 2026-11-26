@@ -321,7 +321,6 @@ body:has(.campaign-compose-page) .ui-select-item[data-state='checked'] { color: 
   .campaign-compose-page .composer-inspector.composer-skeleton-panel { display: block; }
   .campaign-compose-workspace { padding-inline-end: var(--studio-panel); }
   .campaign-compose-workspace:has(.composer-inspector[data-closed]) { padding-inline-end: 0; }
-  .app-shell--support .composer-inspector[data-docked] { padding-bottom: calc(var(--launcher-size) + 2 * var(--space-16)); }
 }
 /* Review: the same bar, then recipients, the message and delivery with room between them. */
 .campaign-review { display: flex; flex-direction: column; min-height: 100%; }

@@ -2302,9 +2302,26 @@ export type CampaignAudienceCounts = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
-             * A link host of the domain's own for tracked links: not configurable yet.
+             * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
             linkHost: 'not_configured';
+            /**
+             * The domain's own link host, when this workspace has them; null without one.
+             */
+            ownLinkHost: {
+                /**
+                 * links.<domain>.
+                 */
+                hostname: string;
+                /**
+                 * true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile.
+                 */
+                active: boolean;
+            } | null;
+            /**
+             * Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active.
+             */
+            linkOrigin: string | null;
         };
         history: {
             /**
@@ -2555,9 +2572,26 @@ export type CampaignQueued = {
              */
             mailFrom: 'verified' | 'pending' | 'failed' | 'not_configured';
             /**
-             * A link host of the domain's own for tracked links: not configurable yet.
+             * Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.
              */
             linkHost: 'not_configured';
+            /**
+             * The domain's own link host, when this workspace has them; null without one.
+             */
+            ownLinkHost: {
+                /**
+                 * links.<domain>.
+                 */
+                hostname: string;
+                /**
+                 * true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile.
+                 */
+                active: boolean;
+            } | null;
+            /**
+             * Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active.
+             */
+            linkOrigin: string | null;
         };
         history: {
             /**
@@ -6817,8 +6851,6 @@ export type FeedbackReceipt = {
      * The support ticket it was filed as.
      */
     ticketId: string;
-    severity: 'low' | 'medium' | 'high' | 'critical';
-    kind: 'bug' | 'friction' | 'feature' | 'docs' | 'other';
     /**
      * How many values that looked like keys, tokens or passwords were removed from message and context.
      */
@@ -6827,14 +6859,6 @@ export type FeedbackReceipt = {
 };
 
 export type FeedbackRequest = {
-    /**
-     * low: a confusing message or an extra step. medium: needed a workaround. high: a task done only partly or the long way. critical: blocked, wrong data, or a security worry.
-     */
-    severity: 'low' | 'medium' | 'high' | 'critical';
-    /**
-     * bug: something behaved wrongly. friction: it worked but took more than it should. feature: something missing. docs: documentation or an error message was wrong or unclear. other: anything else.
-     */
-    kind: 'bug' | 'friction' | 'feature' | 'docs' | 'other';
     /**
      * What happened and what would have made it easier. Plain text. Anything that looks like a key, token or password is removed before it is stored.
      */

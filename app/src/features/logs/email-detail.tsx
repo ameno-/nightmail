@@ -18,7 +18,7 @@ import { reasonOf, type Reason } from './reason'
 import { productName } from '../../../../api/src/brand'
 import { errorText } from '../../data/types'
 
-// A sent email, in the order people come for: did it arrive (the status and its delivery, and why when it didn't), what it looked like (the
+// A sent email (a received one has the same layout: received-detail.tsx), in the order people come for: did it arrive (the status and its delivery, and why when it didn't), what it looked like (the
 // preview: as sent and in each client, side by side where there is room), and how to do better (Checks: at most three
 // things to fix), and the conversation it is part of. The window decides where each sits (detail-layout.ts). On a
 // desktop it is a console: a 44px bar (back, the kind, the subject, its status and ID), one 36px bar of facts, then the
@@ -30,7 +30,7 @@ export function EmailDetailPage() {
   const { id = '' } = useParams()
   // Moving to another message of its thread keeps this one up until that one arrives (thread.tsx reads it ahead).
   const query = useApiDef(queries.email(id), { interval: email => email && pendingStatuses.includes(email.status) ? 30_000 : false, keepPrevious: true })
-  if (query.isPending) return <EmailDetailSkeleton />
+  if (query.isPending) return <EmailDetailSkeleton kind="sent" />
   if (query.isError) return <><PageHeader title="Email detail" backTo="/logs" /><ErrorState error={query.error} onRetry={() => query.refetch()} /></>
   return query.data ? <EmailDetail key={query.data.id} email={query.data} focus={id} /> : null
 }
@@ -72,8 +72,8 @@ function EmailDetail({ email, focus }: { email: Email; focus: string }) {
   const close = () => { setPanel(false); document.querySelector<HTMLElement>(`[aria-controls="${panelId}"]`)?.focus() }
   const subject = email.subject || '(no subject)'
   return <div className="email-detail" data-mode={mode}>
-    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><StatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<ChecksChip check={check} onOpen={openSheet('checks')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
-      : <><EmailBar title={subject} end={<><StatusCue email={email} /><Identifier value={email.id} copyLabel="Copy email ID" /></>} /><EmailFacts email={email} /></>}
+    {compact ? <PageHeader title={<Subject text={subject} />} backTo="/logs" subtitle={<><SentStatusLine email={email} chip={<>{thread && <ThreadChip count={thread.count} onOpen={openSheet('thread')} />}<ChecksChip check={check} onOpen={openSheet('checks')} /></>} onOpen={openSheet('details')} />{why && <p className="email-why">{why.text}</p>}</>} />
+      : <><EmailBar kind="sent" title={subject} end={<><SentCue email={email} /><Identifier value={email.id} copyLabel="Copy email ID" /></>} /><EmailFacts email={email} /></>}
     {mode === 'panel' && delivery}
     <div className="email-detail__body">
       <section className="email-detail__preview" aria-label="Preview">
@@ -127,30 +127,35 @@ function Clamped({ className, text, children }: { className: string; text: strin
   return <span ref={ref} className={className} data-open={open || undefined} role={toggle ? 'button' : undefined} tabIndex={toggle ? 0 : undefined} aria-expanded={toggle ? open : undefined}
     onClick={toggle ? () => setOpen(!open) : undefined} onKeyDown={toggle ? event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setOpen(!open) } } : undefined}>{children}</span>
 }
-// A phone's subject: two lines at most; a longer one opens in place.
-const Subject = ({ text }: { text: string }) => <Clamped className="email-subject" text={text}>{text}</Clamped>
+/** A phone's subject: two lines at most; a longer one opens in place. */
+export const Subject = ({ text }: { text: string }) => <Clamped className="email-subject" text={text}>{text}</Clamped>
 
-// Where it stands now, as a dot and a word: the cue beside the ID.
-function StatusCue({ email }: { email: Email }) {
-  return <span className="email-bar__status"><span className={`delivery__dot ui-tone--${toneOf(eventKey(email.status))}`} aria-hidden="true" />{label(statusOf(email))}</span>
+/** Where an email stands now, as a dot and a word: the cue beside the ID in a desktop's bar. */
+export function StatusCue({ tone, children }: { tone: Tone; children: ReactNode }) {
+  return <span className="email-bar__status"><span className={`delivery__dot ui-tone--${tone}`} aria-hidden="true" />{children}</span>
 }
+const SentCue = ({ email }: { email: Email }) => <StatusCue tone={toneOf(eventKey(email.status))}>{label(statusOf(email))}</StatusCue>
 
-// A phone's one line under the subject: the status as of its last step (a scheduled email: when it goes), with when and
-// (on a tablet) the stream, opening the delivery and the facts; and the checks' chip. The Details sheet names the stream.
-function StatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; onOpen: (opener: HTMLElement) => void }) {
-  const key = eventKey(email.status), steps = stepsOf(email.events, email), sendsAt = sendTime(email)
-  const at = sendsAt ?? [...steps].reverse().find(step => step.key === key)?.at ?? steps[steps.length - 1]?.at ?? email.sentAt
-  // Today, the time; before that, the day (the Details sheet has both).
-  const when = sameDay(at, new Date().toISOString()) ? date(at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
-    : date(at, { month: 'short', day: 'numeric', ...(at.slice(0, 4) === new Date().toISOString().slice(0, 4) ? {} : { year: 'numeric' }), timeZone: 'UTC' })
+/** When, on a phone's status line: the time today, the day before that (the Details sheet has both). */
+export const shortWhen = (at: string) => sameDay(at, new Date().toISOString()) ? date(at, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone: 'UTC' })
+  : date(at, { month: 'short', day: 'numeric', ...(at.slice(0, 4) === new Date().toISOString().slice(0, 4) ? {} : { year: 'numeric' }), timeZone: 'UTC' })
+/** A phone's one line under the subject: where the email stands, as a dot and words, opening its Details sheet; then its chips. */
+export function StatusLine({ tone, chip, onOpen, children }: { tone: Tone; chip?: ReactNode; onOpen: (opener: HTMLElement) => void; children: ReactNode }) {
   return <div className="email-status">
     <button type="button" className="email-status__facts" aria-haspopup="dialog" onClick={event => onOpen(event.currentTarget)}>
-      <span className={`delivery__dot ui-tone--${toneOf(key)}`} aria-hidden="true" />
-      <span className="email-status__text"><span className="sr-only">Details: </span>{label(statusOf(email))}{sendsAt && ' for'} <time dateTime={at}>{when}</time><span className="email-status__stream"> · {label(email.stream)}</span></span>
+      <span className={`delivery__dot ui-tone--${tone}`} aria-hidden="true" />
+      <span className="email-status__text"><span className="sr-only">Details: </span>{children}</span>
       <ChevronRight size={14} aria-hidden="true" />
     </button>
     {chip}
   </div>
+}
+// A sent email's line: the status as of its last step (a scheduled email: when it goes), with when and (on a tablet) the
+// stream, opening the delivery and the facts; and the checks' chip. The Details sheet names the stream.
+function SentStatusLine({ email, chip, onOpen }: { email: Email; chip: ReactNode; onOpen: (opener: HTMLElement) => void }) {
+  const key = eventKey(email.status), steps = stepsOf(email.events, email), sendsAt = sendTime(email)
+  const at = sendsAt ?? [...steps].reverse().find(step => step.key === key)?.at ?? steps[steps.length - 1]?.at ?? email.sentAt
+  return <StatusLine tone={toneOf(key)} chip={chip} onOpen={onOpen}>{label(statusOf(email))}{sendsAt && ' for'} <time dateTime={at}>{shortWhen(at)}</time><span className="email-status__stream"> · {label(email.stream)}</span></StatusLine>
 }
 
 // A phone's facts, in the Details sheet under the delivery: who, from whom, the stream, when and the ID.
@@ -180,7 +185,7 @@ function EmailFacts({ email }: { email: Email }) {
     Sent: { value: <time dateTime={email.sentAt}>{shortDateTime(email.sentAt)} UTC</time>, mono: true },
     Region: { value: email.regionId, mono: true },
   }
-  return <EmailFactsStrip multiTenant={multiTenant} label="Email details" fact={name => facts[name]} />
+  return <EmailFactsStrip kind="sent" multiTenant={multiTenant} label="Email details" fact={name => facts[name]} />
 }
 
 // ── Delivery: every event, oldest first, with what each means on hover ──

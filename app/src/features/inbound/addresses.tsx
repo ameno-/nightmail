@@ -1,9 +1,9 @@
-import { useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { flushSync } from 'react-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { X } from 'lucide-react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
-import { Alert, Button, ConfirmDialog, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
+import { Alert, Button, ConfirmDialog, EmptyState, ErrorState, Field, IconButton, Input, KeyValues, LoadingRegion, PageHeader, Select, SkeletonText, Tabs, useToast, fieldError, MutationError } from '../../components/ui'
 import { useApiMutation, useApiQuery, useRequestScope, useWorkspaceAccess } from '../../data/context'
 import { addressForget, cancelOwnQueries, forgetResource, invalidate } from '../../data/invalidation'
 import { date, number } from '../../lib/format'
@@ -12,7 +12,7 @@ import { FlowPanel } from './panel'
 import { AddressBuilder, builderFits } from './builder'
 import { isSplit } from './flow'
 import { isAbortError, request } from '../../data/live'
-import { errorText, type InboundAddress, type InboundAddressPatch } from '../../data/types'
+import { ApiError, errorText, type InboundAddress, type InboundAddressPatch, type MailRoute } from '../../data/types'
 import { AliasEditor, aliasState, commitAliases, type AliasState } from './aliases'
 import { steps } from './concepts'
 import { typeLabel, useOverview } from './overview'
@@ -147,6 +147,20 @@ export function InboundAddressDetailPage() {
   }
   const [edited, setInput] = useState<AddressForm | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  // The routes that deliver here, read when Delete is pressed so the confirmation names them before it opens: deleting
+  // takes the address out of them (deleteInboundAddress with detach), and a route left with nothing only keeps its mail.
+  const [delivering, setDelivering] = useState<string[]>([])
+  const [checking, setChecking] = useState(false)
+  const scope = useRequestScope()
+  async function askDelete() {
+    setChecking(true)
+    try { setDelivering((await request<{ routes: MailRoute[] }>('/v1/routing', { scope })).routes.filter(r => Array.isArray(r.to) && r.to.includes(id)).map(r => r.match)) }
+    catch { setDelivering([]) }
+    finally { setChecking(false); setConfirmDelete(true) }
+  }
+  // Deleted elsewhere (an agent, a teammate, another tab): the page says so, and the lists that still show it drop it.
+  const gone = !address.data && address.error instanceof ApiError && address.error.status === 404
+  useEffect(() => { if (gone) void forgetResource(client, id, addressForget).catch(() => {}) }, [gone, client, id])
   const patternInput = useRef<HTMLInputElement>(null)
   const current = address.data
   // Mail first: opening an address shows its mail. Where its mail goes and its settings are for owners and admins.
@@ -170,6 +184,7 @@ export function InboundAddressDetailPage() {
   const [building, setBuilding] = useState(false)
   const input = edited ?? (current ? formOf(current) : null)
   // Only a failed first load replaces the page: a later refetch that fails keeps the Settings form and its edits.
+  if (gone) return <><PageHeader title="Address" backTo="/receiving" /><EmptyState title="This address no longer exists" description="It was deleted, by a teammate, an agent or in another tab. Its mail stays in Logs." action={<Link className="ui-button ui-button--secondary ui-button--md" to="/receiving">Back to addresses</Link>} /></>
   if (address.error && !current) return <><PageHeader title="Address" backTo="/receiving" /><ErrorState error={address.error} onRetry={() => void address.refetch()} /></>
   const base = input?.base
   const dirty = !!base && !!input && (input.displayName.trim() !== (base.displayName ?? '') || !sameList(input.aliases.list, base.aliases) || !!input.aliases.draft.trim())
@@ -219,8 +234,8 @@ export function InboundAddressDetailPage() {
           </>}
           <div className="cluster form-actions"><Button variant="primary" type="submit" loading={save.isPending} disabled={!dirty}>Save changes</Button>{dirty && !save.isPending && <Button onClick={() => { setInput(null); save.reset() }}>Discard</Button>}</div>
         </form>}
-        <div className="addr-danger"><Button variant="danger" onClick={() => setConfirmDelete(true)}>Delete address</Button></div>
+        <div className="addr-danger"><Button variant="danger" loading={checking} onClick={() => void askDelete()}>Delete address</Button></div>
       </div>}
-    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description="Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all, and nothing else delivers here." confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={deleteAddress} />
+    <ConfirmDialog open={confirmDelete} onOpenChange={setConfirmDelete} title="Delete this address?" description={<>Its mail stays in Logs. New mail to it and its aliases follows the domain’s catch-all.{delivering.length > 0 && <> {delivering.length === 1 ? 'The route for ' : 'Routes for '}{delivering.slice(0, 3).map((match, i) => <span key={match}>{i > 0 && (i === Math.min(delivering.length, 3) - 1 && delivering.length <= 3 ? ' and ' : ', ')}<PrivateAddress value={match} /></span>)}{delivering.length > 3 && ` and ${number(delivering.length - 3)} more`} {delivering.length === 1 ? 'delivers' : 'deliver'} here too: deleting takes it out of {delivering.length === 1 ? 'that route' : 'them'}, and a route left with no destination only keeps its mail.</>}</>} confirmLabel="Delete address" danger pending={remove.isPending} onConfirm={deleteAddress} />
   </div>
 }

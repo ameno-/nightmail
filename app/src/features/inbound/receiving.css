@@ -1,4 +1,4 @@
-/* Receiving: Addresses, Rules and Destinations, and an address's page. Nightmail tokens only; addresses and code in OpenTUI Mono. */
+/* Mail routing: Addresses, Rules and Destinations, and an address's page. Nightmail tokens only; addresses and code in OpenTUI Mono. */
 .rcv-icon { flex: none; color: var(--color-faint); }
 .rcv-page { display: flex; flex-direction: column; gap: var(--space-16); min-width: 0; }
 /* Counts hold their width ("0" to "99"), so the tabs after them stay put while a search changes them. */

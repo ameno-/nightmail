@@ -7179,7 +7179,35 @@
                     "enum": [
                       "not_configured"
                     ],
-                    "description": "A link host of the domain's own for tracked links: not configurable yet."
+                    "description": "Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go."
+                  },
+                  "ownLinkHost": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "hostname": {
+                        "type": "string",
+                        "description": "links.<domain>."
+                      },
+                      "active": {
+                        "type": "boolean",
+                        "description": "true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile."
+                      }
+                    },
+                    "required": [
+                      "hostname",
+                      "active"
+                    ],
+                    "description": "The domain's own link host, when this workspace has them; null without one."
+                  },
+                  "linkOrigin": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active."
                   }
                 },
                 "required": [
@@ -7188,7 +7216,9 @@
                   "ageDays",
                   "dmarc",
                   "mailFrom",
-                  "linkHost"
+                  "linkHost",
+                  "ownLinkHost",
+                  "linkOrigin"
                 ]
               },
               "history": {
@@ -7905,7 +7935,35 @@
                     "enum": [
                       "not_configured"
                     ],
-                    "description": "A link host of the domain's own for tracked links: not configurable yet."
+                    "description": "Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go."
+                  },
+                  "ownLinkHost": {
+                    "type": [
+                      "object",
+                      "null"
+                    ],
+                    "properties": {
+                      "hostname": {
+                        "type": "string",
+                        "description": "links.<domain>."
+                      },
+                      "active": {
+                        "type": "boolean",
+                        "description": "true: the links go there. false: it isn’t set up yet, so they go on linkOrigin (the link domain) meanwhile."
+                      }
+                    },
+                    "required": [
+                      "hostname",
+                      "active"
+                    ],
+                    "description": "The domain's own link host, when this workspace has them; null without one."
+                  },
+                  "linkOrigin": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Where this campaign's links (its unsubscribe link, the text part's, List-Unsubscribe and linked images) go if it launches now: the domain's own link host when active, else the link domain (Hosted) or this installation's own origin. Null when the launch would be refused for want of one (the workspace's sending is paused, or no link host for the domain). A launch on the link domain moves to the domain's own host for the copies made once that is active."
                   }
                 },
                 "required": [
@@ -7914,7 +7972,9 @@
                   "ageDays",
                   "dmarc",
                   "mailFrom",
-                  "linkHost"
+                  "linkHost",
+                  "ownLinkHost",
+                  "linkOrigin"
                 ]
               },
               "history": {
@@ -20415,25 +20475,6 @@
             "type": "string",
             "description": "The support ticket it was filed as."
           },
-          "severity": {
-            "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "critical"
-            ]
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "bug",
-              "friction",
-              "feature",
-              "docs",
-              "other"
-            ]
-          },
           "redacted": {
             "type": "integer",
             "description": "How many values that looked like keys, tokens or passwords were removed from message and context."
@@ -20444,8 +20485,6 @@
         },
         "required": [
           "ticketId",
-          "severity",
-          "kind",
           "redacted",
           "createdAt"
         ]
@@ -20453,27 +20492,6 @@
       "FeedbackRequest": {
         "type": "object",
         "properties": {
-          "severity": {
-            "type": "string",
-            "enum": [
-              "low",
-              "medium",
-              "high",
-              "critical"
-            ],
-            "description": "low: a confusing message or an extra step. medium: needed a workaround. high: a task done only partly or the long way. critical: blocked, wrong data, or a security worry."
-          },
-          "kind": {
-            "type": "string",
-            "enum": [
-              "bug",
-              "friction",
-              "feature",
-              "docs",
-              "other"
-            ],
-            "description": "bug: something behaved wrongly. friction: it worked but took more than it should. feature: something missing. docs: documentation or an error message was wrong or unclear. other: anything else."
-          },
           "message": {
             "type": "string",
             "minLength": 1,
@@ -20497,11 +20515,8 @@
           }
         },
         "required": [
-          "severity",
-          "kind",
           "message"
-        ],
-        "additionalProperties": false
+        ]
       }
     },
     "parameters": {}
@@ -74161,7 +74176,7 @@
           }
         ],
         "summary": "Tell Nightmail what got in your way",
-        "description": "Report something in Nightmail that caused friction while doing a task: from low (a confusing message, an extra step) through medium and high to critical (blocked, wrong data, a security worry). Say what would have made it easier, and pass the request ID of a call that went wrong if you have one. It is filed as a support ticket for the Nightmail team, who read every one; nobody is emailed and no reply comes back, so carry on with the task after sending it.\n\nAny credential that can read may send it (API keys, including ones limited to sender domains, agent tokens and MCP sign-ins), for its own workspace: at most 20 reports an hour from one credential and 50 from one workspace (429 FEEDBACK_RATE_LIMITED, with Retry-After). Anything in message or context that looks like a key, token or password is removed before it is stored; redacted says how many. Send one report per distinct problem.",
+        "description": "Tell Nightmail what got in your way while doing a task: what happened and what would have made it easier, with the request ID of a call that went wrong if you have one. Only message is needed; any other field (such as severity or kind, which an earlier version asked for) is ignored. It is filed as a support ticket for the Nightmail team, who read every one, with this credential's workspace and the key, sign-in or token that sent it; nobody is emailed and no reply comes back, so carry on with the task after sending it.\n\nAny credential that can read may send it (API keys, including ones limited to sender domains, agent tokens and MCP sign-ins), for its own workspace: at most 20 reports an hour from one credential and 50 from one workspace (429 FEEDBACK_RATE_LIMITED, with Retry-After). Anything in message or context that looks like a key, token or password is removed before it is stored; redacted says how many. Send one report per distinct problem.",
         "requestBody": {
           "required": true,
           "content": {
@@ -74293,12 +74308,12 @@
           {
             "lang": "TypeScript",
             "label": "TypeScript SDK",
-            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendFeedback } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendFeedback({\n  client,\n  body: {\n    \"severity\": \"low\",\n    \"kind\": \"bug\",\n    \"message\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
+            "source": "import { createClient } from '@nightmail/sdk/client';\nimport { sendFeedback } from '@nightmail/sdk';\n\nconst client = createClient({\n  baseUrl: 'https://nightmail.dev',\n  auth: scheme => scheme.scheme === 'bearer'\n    ? process.env.NIGHTMAIL_API_KEY\n    : undefined,\n});\n\nconst result = await sendFeedback({\n  client,\n  body: {\n    \"message\": \"example\"\n  },\n  throwOnError: true,\n});\n\nconsole.log(result.data);"
           },
           {
             "lang": "Shell",
             "label": "cURL",
-            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/feedback' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"severity\": \"low\",\n  \"kind\": \"bug\",\n  \"message\": \"example\"\n}'"
+            "source": "curl --request POST \\\n  --url 'https://nightmail.dev/v1/feedback' \\\n  --header \"Authorization: Bearer $NIGHTMAIL_API_KEY\" \\\n  --header 'Content-Type: application/json' \\\n  --data '{\n  \"message\": \"example\"\n}'"
           }
         ]
       }

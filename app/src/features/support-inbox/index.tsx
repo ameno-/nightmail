@@ -186,21 +186,33 @@ function agentOf(c: SupportConversation): { text: string; by?: string; tone: Ton
   return { text: 'Paused', by: c.pausedBy?.kind === 'ticket' ? 'the ticket' : c.pausedBy?.name ?? undefined, tone: 'warning' }
 }
 const ChannelIcon = ({ channel }: { channel: SupportConversation['channel'] }) => channel === 'email' ? <Mail size={14} aria-label="Email" /> : channel === 'agent_feedback' ? <Bot size={14} aria-label="Agent feedback" /> : <MessageSquare size={14} aria-label="Chat" />
+/** Who filed agent feedback, short, from its Filed by (api/src/feedback.ts): the API key's name, the MCP sign-in's app and
+ *  person, the agent token's purpose. An address stays behind the blur-addresses setting. */
+function Filer({ text }: { text: string }) {
+  const quoted = /"([^"]+)"/.exec(text)?.[1], email = /\bby (\S+@\S+)$|\bof (\S+@\S+)$/.exec(text), address = email?.[1] ?? email?.[2]
+  const what = text.startsWith('the API key') ? `${quoted ?? 'API key'} (API key)` : text.startsWith('an MCP sign-in') ? `${quoted ?? 'An app'} (MCP)`
+    : text.startsWith('an agent token') ? `${quoted ?? 'An agent'} (agent token)` : text.startsWith('the dashboard') ? 'Dashboard' : text
+  return <>{what}{address && <> · <PrivateAddress value={address} /></>}</>
+}
+// Who a conversation is from: the person, else the address, else the workspace (agent feedback's, with who filed it in
+// the words of its Filed by); "Unknown sender" only when nothing is known.
 function Who({ c }: { c: SupportConversation }) {
   const address = c.customer?.email ?? c.sender
   return <span className="sinbox-who" data-unread={c.unread || undefined}>
     <span className="sinbox-unread" role={c.unread ? 'img' : undefined} aria-label={c.unread ? 'Unread' : undefined} />
     <span className="sinbox-channel"><ChannelIcon channel={c.channel} /></span>
-    <span className="sinbox-who__name">{c.customer?.name ?? (address ? <PrivateAddress value={address} /> : 'Unknown sender')}</span>
+    <span className="sinbox-who__name">{c.customer?.name ?? (address ? <PrivateAddress value={address} /> : c.workspace?.name ?? 'Unknown sender')}</span>
+    {!c.customer?.name && !address && c.workspace && c.filedBy && <span className="sinbox-who__by"><Filer text={c.filedBy} /></span>}
   </span>
 }
 const previewBy = (p: NonNullable<SupportConversation['preview']>) => p.held ? 'AI draft, not sent: ' : p.author === 'agent' ? 'AI: ' : p.author === 'staff' ? 'Staff: ' : ''
 // The subject (or the customer's first line), then the last message itself, muted, on the same line.
 const previewOf = (c: SupportConversation) => c.preview && c.preview.text !== titleOf(c) ? c.preview : null
-const Preview = ({ c }: { c: SupportConversation }) => { const preview = previewOf(c); return preview ? <span className="sinbox-preview"><span className="sinbox-preview__by">{previewBy(preview)}</span>{preview.text}</span> : null }
+// Agent feedback has one message, its subject: its card's second line says what it is instead of repeating it.
+const Preview = ({ c }: { c: SupportConversation }) => { const preview = previewOf(c); return preview ? <span className="sinbox-preview"><span className="sinbox-preview__by">{previewBy(preview)}</span>{preview.text}</span> : c.channel === 'agent_feedback' ? <span className="sinbox-preview">Report from an agent · nobody to reply to</span> : null }
 const Subject = ({ c, preview = true }: { c: SupportConversation; preview?: boolean }) => <span className="sinbox-subject">
   <span className="sinbox-subject__text" data-placeholder={c.subject || c.firstLine ? undefined : ''}>{titleOf(c)}</span>
-  {preview && <Preview c={c} />}
+  {preview && previewOf(c) && <Preview c={c} />}
 </span>
 const priorityTone: Record<string, Tone> = { P1: 'danger', P2: 'warning', P3: 'neutral' }
 const priorityOf = (c: SupportConversation) => c.ticket && !c.ticket.resolvedAt ? c.ticket.severity : null
@@ -283,7 +295,7 @@ export function SupportInboxPage() {
       <InboxTabs view={view} counts={counts} onChange={next => setParams(previous => { const params = new URLSearchParams(previous); if (next === 'needs_you') params.delete('view'); else params.set('view', next); return params }, { replace: true })} />
       <InboxToolbar search={search} onSearch={setSearch} channel={channel} onChannel={setChannel} onShortcuts={() => setKeysOpen(true)} />
       {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <InboxBody rows={rows} everyChannel={channel ? everyChannel.data && flatten(everyChannel.data.pages) : rows} channel={channel} setChannel={setChannel}>
-        <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty}
+        <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty} rowKeys={false}
           rowHref={c => `/support/${c.id}`} rowLabel={titleOf} onRowIntent={c => void prefetchConversation(client, c.id)} onRowFocus={phone ? undefined : c => setSelectedId(c.id)} />
         {list.hasNextPage && <Button className="sinbox-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
       </InboxBody>}
@@ -610,7 +622,7 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const { conversation: c, customer } = detail, user = customer.user, evidence = c.evidence
   const others = customer.conversations
   const facts: [string, ReactNode][] = [
-    ...c.workspace ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
+    ...c.workspace && c.channel !== 'agent_feedback' ? [['Workspace', c.workspace.name] as [string, ReactNode]] : [],
     ...c.page ? [['Opened from', c.page] as [string, ReactNode]] : [],
     ...evidence.dmarc ? [['DMARC', `${evidence.dmarc}${evidence.dkimAligned === null ? '' : evidence.dkimAligned ? ' · DKIM aligned' : ' · DKIM not aligned'}`] as [string, ReactNode]] : [],
     ['Ticket', c.ticket ? <span className="sinbox-ticket"><span>{ticketText(c)}</span><span className="sinbox-faint">{c.ticket.id}</span></span> : 'None'],
@@ -618,13 +630,18 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
     ['Started', when(c.createdAt)],
   ]
   return <div className="sinbox-panel__body">
-    <section><Label>Account</Label>
+    {c.channel === 'agent_feedback' ? <section><Label>Filed by</Label>
+      <KeyValues className="sinbox-kv" items={[
+        ['Workspace', c.workspace ? <span className="sinbox-ticket"><Link to={`/operator/workspaces/${encodeURIComponent(c.workspace.id)}`}>{c.workspace.name}</Link><span className="sinbox-faint">{c.workspace.id}</span></span> : '—'],
+        ['Credential', evidence.filedBy ? <span className="sinbox-ticket"><span>{evidence.filedBy}</span>{evidence.credentialId && <span className="sinbox-faint">{evidence.credentialId}</span>}</span> : '—'],
+      ]} />
+    </section> : <section><Label>Account</Label>
       <KeyValues className="sinbox-kv" items={user ? [
         ['Name', user.name ?? '—'],
         ['Email', user.email ? <span className="sinbox-address"><PrivateAddress value={user.email} />{user.emailVerified ? <StatusBadge status="Verified" tone="success" /> : <StatusBadge status="Unverified" tone="warning" />}</span> : '—'],
         ['Proof', verification[c.verification]], ['Access', mode[c.mode]], ['Signed up', when(user.createdAt)],
       ] : [['Sender', c.sender ? <span className="sinbox-address"><PrivateAddress value={c.sender} /></span> : '—'], ['Proof', verification[c.verification]], ['Access', 'No account linked']]} />
-    </section>
+    </section>}
     <section><Label>Conversation</Label><KeyValues className="sinbox-kv" items={facts} /></section>
     {user && <section><Label>Workspaces</Label>
       {customer.workspaces.length ? <ul className="sinbox-list">{customer.workspaces.map(w => <li key={w.id}>

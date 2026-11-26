@@ -9,7 +9,7 @@ import { useSession } from '../../data/context'
 import { ApiError } from '../../data/types'
 import { usd } from '../../data/billing'
 import { operatorApi, type Glass, type GlassCount, type GlassEvent, type GlassGrade, type GlassRegion } from '../../data/operator'
-import { ago, label, number, percent, time } from '../../lib/format'
+import { ago, number, percent, time } from '../../lib/format'
 import { DeliverabilityView, useDeliverability } from './deliverability'
 import { GLASS_EVENT_HEIGHT, GlassAsOf, GlassBoard, GlassTabs, glassView, StaffOnly, type GlassBoardFill, type GlassFill, type GlassRegionFill, type GlassTileFill } from './skeletons'
 
@@ -184,8 +184,8 @@ function eventText(e: GlassEvent): [ReactNode, ReactNode] {
     case 'breaker': return [<><b>Built-in domains</b> stopped</>, `${e.subject} breaker tripped`]
     case 'alert': return [<b>{e.subject}</b>, e.detail]
     case 'link_fallback': return [<>{who} linked on the link domain</>, [e.subject, e.detail && `${plural(Number(e.detail), 'recipient')} today`].filter(Boolean).join(' · ')]
-    // A critical report an agent filed (api/src/feedback.ts): its kind and operation. The report itself is in Support.
-    case 'agent_feedback': return [<>Critical agent feedback from {who}</>, [e.subject && label(e.subject), e.detail].filter(Boolean).join(' · ')]
+    // A report an agent filed (api/src/feedback.ts): its workspace and the operation it names. The report itself is in Support.
+    case 'agent_feedback': return [<>Agent feedback from {who}</>, e.subject]
   }
 }
 const order = (a: GlassEvent, b: GlassEvent) => a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0

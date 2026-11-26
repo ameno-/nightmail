@@ -6,7 +6,7 @@ const FADES = [
   '.ui-scroll-fade', '.ui-dialog__body', '.ui-sheet__body', '.ui-table-scroll', '.ui-tabs', '.sidebar', '.support-log', 'pre',
   '.limits-table-scroll', '.docs-table-scroll', '.legal-table', '.docs-install > code', '.developer-url > code', '.trace-code',
   '.docs-sidebar', '.legal-toc', '.legal-switcher', '.settings-rail__groups', '.rcv-filters', '.mailbox-threads', '.mailbox-reader',
-  '.delivery-timeline', '.template-picker', '.settings-key-domain-options', '.ritual-diff', '.ui-popover-scroll',
+  '.template-picker', '.settings-key-domain-options', '.ritual-diff', '.ui-popover-scroll',
   '.uin-list', '.uin-body', '.docs-toc-scroll',
 ].join(', ')
 

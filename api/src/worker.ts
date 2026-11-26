@@ -421,8 +421,9 @@ export default {
         const kept = new Response(answer.clone().body, answer);
         kept.headers.delete('x-request-id'); kept.headers.delete('server-timing');
         // Kept here an hour, not the year browsers may: a deleted picture or one taken down stops being served from this colo
-        // within the hour (a Cloudflare purge of its URL ends it at once).
-        kept.headers.set('cache-control', 'public, max-age=3600');
+        // within the hour (a Cloudflare purge of its URL ends it at once). A score card (src/score-card.ts) is never taken
+        // down and its address is its design's version: kept 30 days, so each colo draws each card about once a month.
+        kept.headers.set('cache-control', pathname.startsWith('/i/score-card/') ? 'public, max-age=2592000' : 'public, max-age=3600');
         ctx.waitUntil(images.put(imageKey, kept).catch(() => {}));
       }
       return answer;

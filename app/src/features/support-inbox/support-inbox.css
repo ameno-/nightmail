@@ -26,11 +26,15 @@
 .sinbox-who[data-unread] .sinbox-who__name { font-weight: var(--font-weight-bold); }
 .sinbox-channel { display: inline-flex; flex: none; color: var(--color-faint); }
 .sinbox-channel svg { width: 14px; height: 14px; }
-.sinbox-who__name { display: block; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sinbox-who__name { display: block; flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Who filed agent feedback, quiet after its workspace: it fades out where it runs out of room. */
+.sinbox-who__by { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--color-muted); font-weight: var(--font-weight-regular); white-space: nowrap; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
+.sinbox-who__by::before { content: '·'; margin-right: var(--space-6); color: var(--color-faint); }
 .sinbox-who__name .private-address__value { flex: 0 1 auto; min-width: 0; overflow: hidden; }
 .sinbox-subject { display: flex; align-items: baseline; gap: var(--space-8); min-width: 0; }
 .sinbox-subject__text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sinbox-subject__text { flex: 0 1 auto; max-width: 60%; }
+.sinbox-subject__text:only-child { max-width: none; }
 .sinbox-subject__text[data-placeholder] { color: var(--color-muted); }
 /* The last message itself, after the subject on the same line: it takes what room is left, then fades out. */
 .sinbox-preview { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--color-muted); white-space: nowrap; -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
