@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from 'react'
 import { Link } from 'react-router'
-import { Alert } from '../../../components/ui'
+import { productName, publicOrigin } from '../../../../../api/src/brand'
+import { Alert, useCopy } from '../../../components/ui'
 import { SignInConsent } from '../../../components/LegalLinks'
 import { NightmailWordmark } from '../../../components/NightmailLogo'
 import type { HomeProps, HomeStart } from '..'
@@ -532,6 +533,19 @@ function Dial({ y, label, stops, index, onIndex, onAngle }: { y: number; label: 
 // outside the screen.
 const Label = ({ start, under }: { start: HomeStart; under?: boolean }) => <div className={`chyp${under ? ' chyp-under' : ''}`}><StartButton start={start} className="chyp-go" /></div>
 
+/** What "Copy for your agent" copies: the homepage's Markdown twin, whose steps an agent follows (pricing/readable.ts). */
+const AGENT_INSTRUCTION = `Set up ${productName} to send email from this project. Read ${publicOrigin}/index.md and follow its steps for agents.`
+// In the terms line, set as its links are. Its two words share one cell, so saying Copied moves nothing.
+function CopyForAgent() {
+  const { copy, copied, failed } = useCopy()
+  return <>
+    <button type="button" className="chy-copy" data-copied={copied || undefined} onClick={() => void copy(AGENT_INSTRUCTION)}><span>Copy for your agent</span><span aria-hidden="true">Copied</span></button>
+    <span className="chy-sr" role="status">{copied ? 'Copied to clipboard' : failed ? 'Couldn’t copy to clipboard' : ''}</span>
+  </>
+}
+// After the terms (or alone, for someone signed in): the API's docs and the agent's way in.
+const More = ({ lead }: { lead?: boolean }) => <>{lead && <span aria-hidden="true"> · </span>}<a href="/docs">API docs</a><span aria-hidden="true"> · </span><CopyForAgent /></>
+
 /** The homepage: the television, the price list it plays, and the way in. */
 export function TvHome({ start, notice }: HomeProps) {
   const visitor = !start.signedIn
@@ -580,9 +594,13 @@ export function TvHome({ start, notice }: HomeProps) {
     {TAPE.rows.map(row => <li key={row.name} data-ours={row.ours || undefined}><span>{row.name}</span><span>{row.value}</span></li>)}
   </>
   return <main className="chy">
-    {said && <div className="chy-notice">{said}</div>}
     <div className="chy-col">
+      {said && <div className="chy-notice">{said}</div>}
+      {/* In words, for whoever can't see the picture: the price, what is free, and the tape's opening page (channel 1). */}
       <h1 className="chy-sr">{PER_THOUSAND} per {count(1000)} emails</h1>
+      <p className="chy-sr">The first {count(nightmail.freeSent)} emails sent each month are free.</p>
+      <h2 className="chy-sr">What sending {count(OPENING)} emails a month costs</h2>
+      <ul className="chy-sr">{MONTHS[OPENING].map(line => <li key={line.slug}>{line.name}: {usd(line.dollars)}</li>)}</ul>
       <div className="chy-set" ref={box} onClickCapture={event => { if ((event.target as Element).closest('[data-cta]')) return; fresh.current = !sound.current?.started; sound.current?.start() }}>
         <button type="button" className="chy-screen" aria-label="Television screen" onClick={() => { deck.thumpAt = performance.now(); deck.wake() }}>
           {flat ? <ul className="chy-flat" aria-hidden="true">{list}</ul> : <Tube deck={deck} onLight={light} onFlat={fall} />}
@@ -606,10 +624,9 @@ export function TvHome({ start, notice }: HomeProps) {
         <Remote light={deck} onZap={() => { noise('remote'); tune((deck.channel + 1) % CHANNELS.length) }} />
         <Label start={start} />
       </div>
-      <ul className="chy-sr">{list}</ul>
       <div className="chy-under">
         <Label start={start} under />
-        {visitor && <SignInConsent className="chy-consent" />}
+        {visitor ? <SignInConsent className="chy-consent" after={<More lead />} /> : <p className="chy-consent"><More /></p>}
       </div>
     </div>
   </main>

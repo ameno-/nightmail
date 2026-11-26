@@ -26,10 +26,13 @@
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
 //
-// The homepage's machine, running, takes every core software WebGL can have (12 on a laptop, in SwiftShader): beside
-// other pages on CI's 4-core runner, their page.goto ran past 60 s (Nov 16). Signed out measures it running `alone`,
-// after every other page, one at a time. Pages that only start from the homepage, or show it as Signed out does with
-// another button, see it `still` (reduced motion: the same layout, one frame drawn).
+// The homepage's television (features/home/tv) draws its picture with WebGL every frame while it plays; in software
+// WebGL (SwiftShader) that takes cores the pages beside it need (the factory it replaced ran other pages' page.goto past
+// 60 s on CI's 4-core runner, Nov 16). Signed out measures it playing `alone`, after every other page, one at a time.
+// Pages that only start from the homepage, or show it as Signed out does with another button, see it `still` (reduced
+// motion: the same layout, one frame drawn). Its first screen comes from home.html (app/home-shell.ts) and the app takes
+// over by itself (home/shell/boot.js: once the first picture is in, or after 8 s), with no input: a load waits for that
+// takeover, so it is measured too.
 //
 // Dialogs (`dialog`): once the page has settled, the control whose text starts with `dialog` opens its dialog (a bottom
 // sheet on a phone), and the measurement covers the load and the open dialog together, once its entrance has ended.
@@ -673,6 +676,10 @@ async function measure(browser, job, fx) {
     const missing = !lateFonts ? [] : await page.evaluate(() => Promise.all([...document.fonts].filter(f => f.family.includes('Fallback')).map(f => f.load().then(() => null, () => `${f.family} ${f.weight} ${f.unicodeRange}`))));
     for (const face of missing.filter(Boolean)) problems.push(`no local font for ${face}: install fonts-liberation and fonts-dejavu-core, or measure on a machine with Arial and Menlo`);
     await settle(page, net);
+    if (await page.evaluate(() => !!document.getElementById('home-shell'))) {
+      await page.waitForFunction(() => !document.getElementById('home-shell'), null, { timeout: 30_000 }).catch(() => problems.push('the app never took over from the homepage\'s first screen'));
+      await settle(page, net);
+    }
     // A price page paints from its HTML first and its app takes over at the reader's first key or touch (app/price-pages.ts,
     // features/pricing/index.tsx): wake it, as a reader would, so the painted page and the takeover are both measured and
     // an in-app click lands in the app.

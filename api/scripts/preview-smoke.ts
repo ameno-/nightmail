@@ -51,8 +51,9 @@ for (const [path, own] of [['/pricing', true], ['/compare/mailchimp', true], ['/
   const page = new RegExp(`<meta property="og:url" content="[^"]*${path}" />`).test(html);
   if (response.status !== (own ? 200 : 404) || !html.includes('<div id="root"') || page !== own) failures.push(`GET ${path}: expected ${own ? 'its own page from assets' : 'the dashboard HTML as 404 from the Worker'}, got HTTP ${response.status}.`);
 }
-// Their Markdown twins, and llms.txt with the site's own pages under the API's (src/site-index.ts).
-for (const [path, type, text] of [['/compare/resend.md', 'text/markdown', '# Nightmail vs Resend'], ['/llms-full.txt', 'text/plain', '## Nightmail vs Mailchimp'], ['/llms.txt', 'text/markdown', '/compare/resend.md']] as const) {
+// Their Markdown twins (the homepage's carries the steps its "Copy for your agent" points agents to), and llms.txt with the
+// site's own pages under the API's (src/site-index.ts).
+for (const [path, type, text] of [['/index.md', 'text/markdown', '## For agents: set up sending'], ['/compare/resend.md', 'text/markdown', '# Nightmail vs Resend'], ['/llms-full.txt', 'text/plain', '## Nightmail vs Mailchimp'], ['/llms.txt', 'text/markdown', '/compare/resend.md']] as const) {
   const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
   const body = await response.text();
   if (response.status !== 200 || !response.headers.get('content-type')?.startsWith(type) || !body.includes(text)) failures.push(`GET ${path}: expected ${type} with “${text}”, got HTTP ${response.status} ${response.headers.get('content-type')}.`);

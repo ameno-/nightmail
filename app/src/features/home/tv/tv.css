@@ -103,10 +103,20 @@
    .155 of the set's height below the set). */
 .chy-under { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 12px; margin-top: calc(var(--table) * var(--h) + 12px); }
 /* What a sign-in has to say, or that no place is open: over the page's head, out of the flow, so its coming moves
-   nothing. */
+   nothing. Dark whatever the system's theme, as the page is. */
 .chy-notice { position: absolute; z-index: 6; top: 16px; left: 50%; width: min(520px, 100% - 32px); translate: -50% 0; text-align: left; }
+.chy-notice .ui-alert { background: #202020; color: var(--ink); }
 .chy-consent { margin: 0; color: var(--faint); font-size: 13px; line-height: 18px; }
 .chy-consent a { color: inherit; }
+/* Copy for your agent, after the terms and API docs: a word like theirs, underlined as they are, with its two words in
+   one cell (Copied takes no more room). Its press reaches a little round the words, for a thumb. */
+.chy-copy { position: relative; display: inline-grid; padding: 0; border: 0; background: none; color: inherit; font: inherit; letter-spacing: inherit; cursor: pointer; transition: color .15s; -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+.chy-copy::after { content: ''; position: absolute; inset: -10px -4px; }
+.chy-copy > span { grid-area: 1 / 1; justify-self: start; text-decoration-line: underline; text-decoration-thickness: from-font; text-underline-offset: .18em; transition: opacity .16s ease-out; }
+.chy-copy > span:last-child, .chy-copy[data-copied] > span:first-child { opacity: 0; }
+.chy-copy[data-copied] > span:last-child { opacity: 1; }
+.chy .chy-consent a:focus-visible, .chy-copy:focus-visible, .chy-copy[data-copied] { color: var(--ink); }
+@media (hover: hover) { .chy .chy-consent a:hover, .chy-copy:hover { color: var(--ink); } }
 
 /* A phone: the set is at the top of the screen and the whole of it fits the width, with the same narrow margin
    either side, so nothing of it is cut and it is centred as a whole; the way in and the terms sit under it on the same centre line. */
@@ -115,6 +125,8 @@
   /* the page's foot padding is part of the first screen, so the page does not scroll by it */
   .chy-col { --h: calc((100vw - 20px) / 1.3587); min-height: calc(100dvh - 24px); justify-content: flex-start; padding-top: calc(14px + env(safe-area-inset-top, 0px)); }
   .chy-set { left: 0; }
+  /* the notice: in the dark under the table, above the way in, so it covers nothing of the picture */
+  .chy-notice { top: calc(14px + env(safe-area-inset-top, 0px) + var(--h) * (1 + var(--table)) + 12px); width: 100%; }
   /* The rest of the screen is shared out, so none of it is left empty at the foot: the way in stands in the middle of
      what is under the table (the empty first item balances the terms line), and the terms are at the foot. */
   .chy-under { flex: 1 1 auto; justify-content: space-between; gap: 16px; align-self: stretch; }
