@@ -3037,6 +3037,121 @@ test('an MCP client name is shown as one short line of the characters that are d
   } finally {await db.query('ROLLBACK');}
 });
 
+test('forwards: a recipient’s Stop or Decline is recorded on the forward’s row within a bounded wait, or says plainly that it wasn’t; a send never lets a message out past one',async t=>{
+  // Real connections (the loopback worker's pool), so a lock wait is a lock wait. A second connection holds what a send or
+  // an edit would hold: the sender address's row or the workspace's send admission (a send held at an early step), or the
+  // forward's own row (an edit, or a fault that never lets go).
+  if(!fixtureWorker)return t.skip('requires the loopback worker and real database connections');
+  const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js'),{lockSendScope}=await import('./src/send-scope.js');
+  const {sendToEndpoint,forwardStopUrl}=await import('./src/endpoints.js'),{encrypt}=await import('./src/operations.js'),{createApp}=await import('./src/app.js');
+  const db=await fixtureDatabase(t),pool=new pg.Pool({connectionString:FIXTURE_DATABASE_URL,max:8,connectionTimeoutMillis:2000});t.after(()=>pool.end());
+  const wid=unique('fwdstop'),host=`${wid}.invalid`,box=unique('mbx'),from=`desk@${host}`,rt={...fixtureWorker.runtime,db:drizzle(pool),config:{...fixtureWorker.runtime.config,workspaceId:wid}};
+  const origin=new URL(rt.config.publicUrl).origin,app=createApp();
+  await db.query('INSERT INTO workspaces(id,name,slug) VALUES($1,$1,$1)',[wid]);
+  await ensureRegionSettings(rt.db,rt.config);
+  await db.query("INSERT INTO mailbox_domains(id,workspace_id,domain_id,name,region,status) VALUES($1,$2,$1,$3,$4,'active')",[box,wid,host,REGION]);
+  await db.query("INSERT INTO mailbox_regions(workspace_id,region,bucket,topic_arn) VALUES($1,$2,'local:','fixture')",[wid,REGION]);
+  await db.query("INSERT INTO mailboxes(id,workspace_id,domain_id,address,kind,retention_mode) VALUES($1,$2,$1,$3,'address','forever')",[box,wid,from]);
+  await db.query("INSERT INTO mailbox_addresses(workspace_id,address,mailbox_id,kind) VALUES($1,$2,$3,'primary')",[wid,from,box]);
+  // An allowed forward, or one waiting for its recipient with the token of its emailed link.
+  const forward=async(name:string,{pending=false}={})=>{
+    const id='con_'+randomUUID().replaceAll('-',''),token='fwd_'+createHash('sha256').update(randomUUID()).digest('hex');
+    await db.query(`INSERT INTO mailbox_webhooks(id,workspace_id,type,key,name,event_types,encrypted_target,verified,confirmed_at,request_from,proof_hash,expires_at,requested_at)
+      VALUES($1,$2,'forward',$3,$3,'[]',$4,$5,CASE WHEN $5 THEN now()-interval '1 minute' END,$6,CASE WHEN NOT $5 THEN $7 END,CASE WHEN NOT $5 THEN now()+interval '1 day' END,now())`,
+      [id,wid,name,await encrypt(rt,`${name}@outside.example`,`${wid}:endpoint:${id}`),!pending,from,createHash('sha256').update(token).digest('hex')]);
+    return {id,token};
+  };
+  const message=async(subject:string)=>{
+    const id=unique('msg'),thread=unique('thr');
+    await db.query('INSERT INTO mail_threads(id,workspace_id) VALUES($1,$2)',[thread,wid]);
+    await db.query(`INSERT INTO mail_messages(id,workspace_id,direction,thread_id,region,subject,from_address,"to",envelope_to,verdicts,text,received_at) VALUES($1,$2,'inbound',$3,$4,$5,'ana@example.org',$6,'[]','{"forwardEligible":true}','Hello',now())`,
+      [id,wid,thread,REGION,subject,JSON.stringify([{address:from}])]);
+    await db.query("INSERT INTO mailbox_messages(mailbox_id,message_id,workspace_id,thread_id,direction,received_at) VALUES($1,$2,$3,$4,'inbound',now())",[box,id,wid,thread]);
+    return id;
+  };
+  const deliver=(hook:string,mid:string)=>sendToEndpoint(rt,wid,{type:'forward',webhook_id:hook,payload:{messageId:mid,type:'message.received',data:{recipients:[from],junk:false}}} as never).then(()=>'sent',(e:Json)=>e.code as string);
+  const timed=async(request:Request)=>{const started=performance.now(),res=await app.fetch(request,rt);return {ms:Math.round(performance.now()-started),status:res.status,page:await res.text()};};
+  const form=(choice:string)=>({method:'POST',headers:{'content-type':'application/x-www-form-urlencoded',origin},body:'choice='+choice});
+  const stop=async(hook:string)=>timed(new Request(await forwardStopUrl(rt,hook,origin),form('decline')));
+  const choose=(token:string,choice:'allow'|'decline')=>timed(new Request(`${origin}/v1/forwarding/confirm/${token}`,form(choice)));
+  const state=async(hook:string)=>(await db.query('SELECT verified,declined_at IS NOT NULL AS declined,proof_hash IS NOT NULL AS link FROM mailbox_webhooks WHERE id=$1',[hook])).rows[0];
+  const queued=async(hook:string)=>(await db.query('SELECT count(*)::int AS n FROM mail_forward_once WHERE workspace_id=$1 AND endpoint=$2',[wid,hook])).rows[0].n;
+  const waiting=async()=>{for(let i=0;i<100;i++){if((await db.query("SELECT count(*)::int AS n FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock' AND state='active'")).rows[0].n>0)return;await new Promise(r=>setTimeout(r,20));}assert.fail('Nothing waited on the lock.');};
+  const holding=async(lock:(c:pg.PoolClient)=>Promise<unknown>)=>{const c=await pool.connect();await c.query('BEGIN');await lock(c);return {release:async()=>{await c.query('COMMIT');c.release();}};};
+  const rowOf=(hook:string)=>(c:pg.PoolClient)=>c.query('SELECT FROM mailbox_webhooks WHERE id=$1 FOR UPDATE',[hook]);
+  const measured:Record<string,number>={};
+
+  // 1. A send held at an early step (the sender address's row, then the workspace's send admission): the Stop takes the
+  // forward's row at once, that message is refused with nothing queued, and so is the next.
+  for(const [label,lock] of [['mailbox',(c:pg.PoolClient)=>c.query('SELECT FROM mailboxes WHERE id=$1 FOR UPDATE',[box])],['admission',(c:pg.PoolClient)=>lockSendScope(drizzle(c),wid)]] as const){
+    const {id}=await forward(label),mid=await message(label),held=await holding(lock);
+    const delivery=deliver(id,mid);await waiting();
+    const answered=await stop(id);measured[label]=answered.ms;
+    assert.equal(answered.status,200,label);assert.match(answered.page,/Forwarding stopped/,label);assert.ok(answered.ms<500,`${label}: ${answered.ms} ms`);
+    assert.deepEqual(await state(id),{verified:false,declined:true,link:false},'Recorded on the row.');
+    await held.release();
+    assert.equal(await delivery,'CONNECTOR_UNAVAILABLE',label);assert.equal(await queued(id),0,label);
+    assert.equal(await deliver(id,await message(label+'-next')),'CONNECTOR_UNAVAILABLE',label);
+  }
+  // 2. An edit holding the row for a moment: the Stop waits for it, then records on the row.
+  {
+    const {id}=await forward('edit'),held=await holding(rowOf(id));
+    setTimeout(()=>void held.release(),300);
+    const answered=await stop(id);measured.edit=answered.ms;
+    assert.equal(answered.status,200);assert.match(answered.page,/Forwarding stopped/);assert.ok(answered.ms>=250&&answered.ms<1000,`edit: ${answered.ms} ms`);
+    assert.deepEqual(await state(id),{verified:false,declined:true,link:false});
+    assert.equal(await deliver(id,await message('edit-next')),'CONNECTOR_UNAVAILABLE');
+  }
+  // 3. The row held past the limit (a fault): the page says it couldn't, nothing is recorded, the button is offered again,
+  // and pressing it once the row is free stops it.
+  {
+    const {id}=await forward('fault'),held=await holding(rowOf(id));
+    const refused=await stop(id);measured.fault=refused.ms;
+    assert.equal(refused.status,503);assert.match(refused.page,/Not stopped yet/);assert.match(refused.page,/<button name="choice" value="decline">Stop forwarding<\/button>/);
+    assert.doesNotMatch(refused.page,/Forwarding stopped/);
+    assert.ok(refused.ms>=1900&&refused.ms<3000,`fault: ${refused.ms} ms (two 1 s waits)`);
+    assert.deepEqual(await state(id),{verified:true,declined:false,link:false},'Nothing recorded.');
+    await held.release();
+    const again=await stop(id);assert.equal(again.status,200);assert.match(again.page,/Forwarding stopped/);measured.faultRetry=again.ms;
+    assert.equal(await deliver(id,await message('fault-next')),'CONNECTOR_UNAVAILABLE');
+  }
+  // 4. A Decline makes its link unusable: an Allow on it afterwards is refused, and nothing is forwarded.
+  {
+    const {id,token}=await forward('declined',{pending:true}),held=await holding(rowOf(id));
+    setTimeout(()=>void held.release(),300);
+    const declined=await choose(token,'decline');measured.decline=declined.ms;
+    assert.equal(declined.status,200);assert.match(declined.page,/Request declined/);
+    assert.deepEqual(await state(id),{verified:false,declined:true,link:false});
+    assert.equal((await choose(token,'allow')).status,410);
+    assert.equal(await deliver(id,await message('declined')),'CONNECTOR_UNAVAILABLE');
+  }
+  // 5. Allow and Decline pressed together: one wins, the other is refused, and the row says which.
+  for(let i=0;i<5;i++){
+    const {id,token}=await forward('race'+i,{pending:true});
+    const [allow,decline]=await Promise.all([choose(token,'allow'),choose(token,'decline')]);
+    const after=await state(id);
+    assert.deepEqual([allow.status,decline.status].sort(),[200,410],`race ${i}`);
+    assert.deepEqual(after,allow.status===200?{verified:true,declined:false,link:false}:{verified:false,declined:true,link:false},`race ${i}`);
+  }
+  // 6. The review's sequence can't lose a stop: a Decline that couldn't be recorded says so and leaves the link working, so
+  // the Allow after it is real; a Stop that couldn't be recorded says so too; the Stop that is recorded stops it.
+  {
+    const {id,token}=await forward('sequence',{pending:true});
+    let held=await holding(rowOf(id));
+    const declined=await choose(token,'decline');await held.release();
+    assert.equal(declined.status,503);assert.match(declined.page,/Not declined yet/);assert.doesNotMatch(declined.page,/Nothing will be forwarded/);
+    assert.deepEqual(await state(id),{verified:false,declined:false,link:true},'Nothing recorded; the link still works.');
+    assert.equal((await choose(token,'allow')).status,200);
+    assert.equal(await deliver(id,await message('sequence-allowed')),'sent');
+    held=await holding(rowOf(id));
+    const notStopped=await stop(id);await held.release();
+    assert.equal(notStopped.status,503);assert.doesNotMatch(notStopped.page,/Forwarding stopped/);
+    assert.equal((await stop(id)).status,200);
+    assert.deepEqual(await state(id),{verified:false,declined:true,link:false});
+    assert.equal(await deliver(id,await message('sequence-after')),'CONNECTOR_UNAVAILABLE');
+  }
+  t.diagnostic('Stop and Decline answered in (ms): '+JSON.stringify(measured));
+});
 test('mail gateway: SMTP queues dispatchable content with a single database connection',async t=>{
   if(!fixtureWorker)return t.skip('requires isolated loopback storage and simulated SES');
   const {drizzle}=await import('drizzle-orm/node-postgres'),{ensureRegionSettings}=await import('./src/ses-region-state.js');

@@ -27,6 +27,7 @@ import { endpointPolicy, DEFAULT_POLICY, type EndpointPolicy } from './ritual-re
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
 import { legacyWebhookFormat, loopHeader, productName, webhookFormat } from './brand.js';
 import { linkOrigin, servesWorkspace } from './link-domains.js';
+import { log } from './log.js';
 
 // ── The model ─────────────────────────────────────────────────────────────────────────────
 type HeaderList = z.infer<typeof WebhookHeaders>;
@@ -210,10 +211,18 @@ const defaultJunk = (format: StoredFormat) => format === 'inbound' ? 'include' a
  */
 async function lockEndpoint(tx: DbExecutor, c: Ctx, w: string, where: { id: string } | { name: string }, hold = true) {
   await lockMailboxLane(tx, w, 'address');
-  const [found] = await tx.select({ id: endpoints.id }).from(endpoints).where(and(eq(endpoints.workspaceId, w), 'id' in where ? eq(endpoints.id, where.id) : eq(endpoints.key, where.name)));
+  const [found] = await tx.select({ id: endpoints.id, type: endpoints.type }).from(endpoints).where(and(eq(endpoints.workspaceId, w), 'id' in where ? eq(endpoints.id, where.id) : eq(endpoints.key, where.name)));
   if (!found) return null;
   if (hold) await ownReceiving(tx, c, 'endpoint', found.id);
-  const [row] = await tx.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, found.id))).for('update');
+  // A short wait for the row (a forward's send holds it only from its last check to its commit), so a pause, rename,
+  // resend or delete never queues behind a long one: past it the request is refused as busy (retryable), then the
+  // transaction's own lock wait applies again.
+  const { rows: [wait] } = await tx.execute<{ before: string }>(sql`SELECT current_setting('lock_timeout') AS before, set_config('lock_timeout','1s',true)`);
+  const [row] = await tx.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, found.id))).for('update').catch((e: unknown) => {
+    if (lockTimedOut(e)) throw new ApiError(409, 'ENDPOINT_BUSY', `${found.type === 'forward' ? 'This forward' : 'This endpoint'} is busy: a message to it is being sent or it is being changed. Try again in a moment.`, undefined, true);
+    throw e;
+  });
+  await tx.execute(sql`SELECT set_config('lock_timeout',${wait!.before},true)`);
   return row ?? null;
 }
 
@@ -751,7 +760,7 @@ export function registerInboundWebhooks(app: App, deps: Access) {
 // Public, no login: the emailed link is the proof. GET only shows the request (mail scanners
 // follow links); a same-origin POST from the page records the choice.
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
-function page(c: Ctx, title: string, body: string, status: 200 | 403 | 404 | 410 = 200) {
+function page(c: Ctx, title: string, body: string, status: 200 | 403 | 404 | 410 | 503 = 200) {
   c.header('Cache-Control', 'no-store');
   c.header('Referrer-Policy', 'no-referrer');
   c.header('X-Robots-Tag', 'noindex');
@@ -779,16 +788,37 @@ async function decline(tx: DbExecutor, runtime: Runtime, row: Pending) {
   const hash = await digest(await decrypt(runtime, row.encrypted_target, targetBinding(row.workspace_id, row.id)));
   await tx.execute(sql`INSERT INTO mail_forward_declines(workspace_id,address_hash) VALUES(${row.workspace_id},${hash}) ON CONFLICT(workspace_id,address_hash) DO UPDATE SET declined_at=now()`);
 }
-/** Records the recipient's choice. Single use: the token is cleared by whichever choice comes first. */
+/**
+ * How long a recipient's Stop or Decline waits for the forward's row, twice. A send holds the row only from its last check
+ * to its commit, and an edit for one short write, so it is free within milliseconds in every real case: not getting it
+ * is a fault. Then nothing is recorded, the page says so and offers the same button again, and FORWARD_CHOICE_BUSY is logged.
+ */
+const STOP_WAIT = '1s';
+const BUSY = Symbol('busy');
+const lockTimedOut = (e: unknown) => { for (let x = e as { code?: string; cause?: unknown } | undefined, i = 0; x && i < 5; x = x.cause as typeof x, i++) if (x.code === '55P03') return true; return false; };
+/** A recipient's choice on the forward's row: in its own transaction, waiting up to STOP_WAIT for the row, and once more. */
+async function onTheRow<T>(runtime: Runtime, work: (tx: DbExecutor) => Promise<T>): Promise<T | typeof BUSY> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runtime.db.transaction(async tx => { await tx.execute(sql`SELECT set_config('lock_timeout',${STOP_WAIT},true)`); return work(tx); });
+    } catch (e) { if (!lockTimedOut(e) || attempt === 2) { if (lockTimedOut(e)) return BUSY; throw e; } }
+  }
+}
+/** Records the recipient's choice. Single use: the token is cleared by whichever choice comes first. A Decline that
+ *  couldn't have the row answers FORWARD_BUSY (retryable): nothing changed, and the link still works. */
 export async function answerForward(runtime: Runtime, token: string, choice: 'allow' | 'decline') {
-  return runtime.db.transaction(async tx => {
+  const choose = async (tx: DbExecutor) => {
     const row = (await tx.execute<Pending>(sql`SELECT workspace_id,id,encrypted_target,request_from FROM mailbox_webhooks WHERE ${await pendingWhere(token)} FOR UPDATE`)).rows[0];
     if (!row) throw new ApiError(410, 'CONFIRMATION_UNAVAILABLE', 'This link was already used or has expired.');
     // The moment they chose Allow (the clock, not this transaction's start): mail received from then on is forwarded.
     if (choice === 'allow') await tx.execute(sql`UPDATE mailbox_webhooks SET verified=true,proof_hash=NULL,confirmed_at=clock_timestamp() WHERE workspace_id=${row.workspace_id} AND id=${row.id}`);
     else await decline(tx, runtime, row);
     return { address: await decrypt(runtime, row.encrypted_target, targetBinding(row.workspace_id, row.id)), from: row.request_from };
-  });
+  };
+  if (choice === 'allow') return runtime.db.transaction(choose);
+  const done = await onTheRow(runtime, choose);
+  if (done === BUSY) throw new ApiError(503, 'FORWARD_BUSY', 'The choice couldn’t be recorded just now, so nothing changed. Try again.', undefined, true);
+  return done;
 }
 function registerForwardPages(app: App) {
   const confirm = '/v1/forwarding/confirm/:token', stop = '/v1/forwarding/stop/:token';
@@ -812,6 +842,10 @@ function registerForwardPages(app: App) {
         : page(c, 'Request declined', `<p>Nothing will be forwarded to ${escapeHtml(done.address)}. This sender cannot ask again for 30 days.</p>`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 410) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed.</p>', 410);
+      if (e instanceof ApiError && e.code === 'FORWARD_BUSY') {
+        log('error', { code: 'FORWARD_CHOICE_BUSY', choice, workspaceId: pending?.workspace_id });
+        return page(c, 'Not declined yet', '<p>Your choice couldn’t be recorded just now, so nothing has changed. Press Decline again in a moment.</p><form method="post"><button name="choice" value="decline">Decline</button></form>', 503);
+      }
       throw e;
     }
   });
@@ -831,7 +865,10 @@ function registerForwardPages(app: App) {
     if (!sameOrigin(c)) return page(c, 'Open the link from a forwarded message', '<p>Stop from the page the link opens.</p>', 403);
     const row = await stopRow(c);
     if (!row) return page(c, 'Link not recognized', '<p>This stop link is not valid.</p>', 404);
-    await c.env.db.transaction(tx => decline(tx, c.env, row));
+    if (await onTheRow(c.env, tx => decline(tx, c.env, row)) === BUSY) {
+      log('error', { code: 'FORWARD_CHOICE_BUSY', choice: 'stop', workspaceId: row.workspace_id, endpointId: row.id });
+      return page(c, 'Not stopped yet', '<p>These forwards couldn’t be stopped just now, so nothing has changed yet. Press Stop forwarding again in a moment.</p><form method="post"><button name="choice" value="decline">Stop forwarding</button></form>', 503);
+    }
     return page(c, 'Forwarding stopped', '<p>No more messages will be forwarded to you from this sender.</p>');
   });
 }
@@ -945,10 +982,6 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
   if ((await runtime.db.execute(sql`SELECT FROM mail_forward_once WHERE workspace_id=${w} AND message_id=${first.id} AND endpoint=${endpointId}`)).rowCount) return;
   const { files, left } = await forwardAttachments(runtime, w, first);
   await runtime.db.transaction(async tx => {
-    // Still allowed, read under a lock that a decline or the stop link (answerForward's update) waits for: one that came
-    // while the attachments were fetched stops this message too, and one made now waits until it is sent.
-    if (!(await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} AND verified AND declined_at IS NULL FOR SHARE`)).rowCount)
-      throw new ApiError(422, 'CONNECTOR_UNAVAILABLE', 'Only confirmed endpoints receive routed, non-junk mail.');
     await checkExternal(tx, w, address);
     const m = await received(tx), box = await forwardSender(tx, w, recipient, requestFrom);
     const stopUrl = await forwardStopUrl(runtime, endpointId, await linkOrigin(runtime, tx, w, box.address, 'forward'));
@@ -983,6 +1016,13 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
       attachments: files,
     });
     await tx.execute(sql`UPDATE mail_forward_once SET email_id=${sent.message.sendingEmailId} WHERE workspace_id=${w} AND message_id=${m.id} AND endpoint=${endpointId}`);
+    // Last, once the email is queued: still allowed, under a lock a Stop or Decline (decline) waits for. One that came at
+    // any moment before (the attachments, the screening, the queueing) refuses this message, and the queued email goes
+    // with this transaction; one that comes now waits only for the commit. The lock is held for that long only. The lock
+    // first, then the check in a statement of its own: a locking statement that waited keeps the snapshot it started with.
+    await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} FOR SHARE`);
+    if (!(await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} AND verified AND declined_at IS NULL`)).rowCount)
+      throw new ApiError(422, 'CONNECTOR_UNAVAILABLE', 'Only confirmed endpoints receive routed, non-junk mail.');
   });
 }
 export { DEFAULT_POLICY };
