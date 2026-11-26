@@ -4627,7 +4627,7 @@ export const updateInboundDomain = <ThrowOnError extends boolean = false>(option
 /**
  * Check MX records now
  *
- * Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Never changes DNS or AWS.
+ * Reads public DNS and reports who currently receives mail for the domain. Updates the receiving status when inbound is enabled. Hosted: also checks every receiving host of the domain again in the background within seconds, and keeps checking a host that waits for its MX for a while; read listReceivingHosts for each host’s status. Never changes DNS or AWS.
  */
 export const checkInboundDomain = <ThrowOnError extends boolean = false>(options: Options<CheckInboundDomainData, ThrowOnError>): RequestResult<CheckInboundDomainResponses, CheckInboundDomainErrors, ThrowOnError> => (options.client ?? client).post<CheckInboundDomainResponses, CheckInboundDomainErrors, ThrowOnError>({
     security: [
@@ -4911,7 +4911,7 @@ export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(opt
 /**
  * List receivable addresses
  *
- * An address key sees only addresses it can access. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * An address key sees only addresses it can access. An inbox being deleted isn’t listed, as GET /v1/inboxes doesn’t list it: a real inbox’s address is free to use again at once (a sandbox inbox’s stays reserved). Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  *
  * @deprecated
  */

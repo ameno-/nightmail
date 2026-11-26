@@ -27915,6 +27915,37 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.equal((await deliver(`x@race.${name}`)).routed, 0);
       });
 
+      // A host added before its MX is published (an agent added its domain's root, published the MX, and the root stayed
+      // "MX missing", its check time frozen, for over half an hour; the inbound check looked only at the domain's other host):
+      // adding it, the inbound check and Check now each queue the DNS check of every host, which runs again soon while one waits.
+      await t.test('a receiving host waiting for its MX is checked again soon, by the inbound check and Check now too, then left to the hourly sweep', async () => {
+        const { JobDeferred } = await import('./src/jobs.js');
+        const name = `${unique('rx-follow')}.example`, d = await claim(name, { receivingHost: `reply.${name}` });
+        zone.set(`reply.${name}`, { mx: [ses] }); await recheck(d);
+        const hostsPath = `/v1/inbound/domains/${d.id}/hosts`, states = async () => Object.fromEntries((ok(await local('GET', hostsPath)).data as Json[]).map(h => [h.name, h.status]));
+        const job = async () => (await db.query('SELECT status,payload FROM jobs WHERE id=$1', ['domain.mx:' + d.token])).rows[0];
+        const run = async () => { const j = await job(); return operationJobs['domain.mx']!(runtime, j.payload, { id: 'domain.mx:' + d.token, attempts: 1, workspaceId: wid }); };
+        ok(await local('POST', hostsPath, { name, confirm: true }), 201);
+        assert.deepEqual([(await job()).status, (await job()).payload.follow], ['pending', 0], 'Adding a host queues its DNS check now.');
+        // No MX yet: the check defers itself, sooner than the hourly sweep.
+        await assert.rejects(run(), (e: unknown) => e instanceof JobDeferred && e.payload?.follow === 1 && Date.parse(e.availableAt) - Date.now() <= 60_000);
+        assert.equal((await states())[name], 'pending');
+        // The MX is published: the next run sees it, the host receives, and nothing more is queued.
+        zone.set(name, { mx: [ses] });
+        await db.query(`UPDATE jobs SET payload=payload||'{"follow":1}' WHERE id=$1`, ['domain.mx:' + d.token]);
+        await run();
+        assert.deepEqual(await states(), { [`reply.${name}`]: 'active', [name]: 'active' });
+        // The inbound check and Check now queue the same check of every host.
+        await db.query("UPDATE jobs SET status='completed',payload=payload-'follow' WHERE id=$1", ['domain.mx:' + d.token]);
+        ok(await local('POST', `/v1/inbound/domains/${d.id}/check`));
+        assert.deepEqual([(await job()).status, (await job()).payload.follow], ['pending', 0], 'checkInboundDomain checks every host.');
+        await db.query("UPDATE jobs SET status='completed',payload=payload-'follow' WHERE id=$1", ['domain.mx:' + d.token]);
+        ok(await local('POST', `/v1/domains/${d.id}/verify`));
+        assert.deepEqual([(await job()).status, (await job()).payload.follow], ['pending', 0], 'Check now checks every host.');
+        // With every host receiving, a follow-up ends without deferring; the hourly sweep keeps it from there.
+        await run();
+      });
+
       await t.test('a subdomain on a domain that doesn\u2019t receive yet is refused with the call that turns receiving on', async () => {
         const d = await claim(`${unique('rx-nosub')}.example`);
         const refused = error(await local('POST', `/v1/inbound/domains/${d.id}/subdomains`, { name: 'acme' }), 409, 'MAILBOX_DOMAIN_NOT_ENABLED');
@@ -39165,6 +39196,16 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
         await db.query("INSERT INTO mail_retired_addresses VALUES($1,$2,now()+interval '1 day')",[wid,'reserved@'+host]);const release='/v1/inbound/retired/reserved@'+host;
         error(await request('DELETE',release,provision),403);error(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}),409,'ADDRESS_RETIRED');ok(await local('DELETE',release));ok(await local('PATCH',`/v1/inbound/addresses/${team.id}`,{aliases:['reserved@'+host]}));
         assert.equal(error(await local('POST',root,{localPart:'reserved'}),409,'ADDRESS_TAKEN').message,`reserved@${host} belongs to team@${host} (${team.id}). Remove it there first (PATCH /v1/inbound/addresses/${team.id}), then create the inbox. Or omit localPart for a random address.`);
+      });
+      // An agent deleted an inbox (202, deleting), then still saw its address listed, got 404 deleting it and was told the
+      // address was taken when it made it again: a deleting inbox is no address any more, and a real one frees its address at once.
+      await t.test('a deleting inbox is not listed as an address, and its address can be made again at once',async()=>{
+        const gone=ok(await local('POST',root,{localPart:'reused'}),201);ok(await local('DELETE',`${root}/${gone.id}`),202);
+        assert.ok(!ok(await local('GET',root)).data.some((b:Json)=>b.id===gone.id),'The inbox list already leaves it out.');
+        assert.ok(!ok(await local('GET','/v1/inbound/addresses')).data.some((b:Json)=>b.id===gone.id),'It is no longer listed as an address.');
+        error(await local('DELETE',`/v1/inbound/addresses/${gone.id}`),404,'NOT_FOUND');
+        const again=ok(await local('POST',root,{localPart:'reused'}),201);assert.deepEqual([again.address,again.id===gone.id],[gone.address,false]);
+        ok(await local('DELETE',`${root}/${again.id}`),202);
       });
       await t.test('review M4: DELETE closes inbox and legacy reads immediately, including for admins, and releases real routing',async()=>{
         const oldLink=ok(await request('GET',`${url}/${first.id}`,key)).attachments[0].url;
