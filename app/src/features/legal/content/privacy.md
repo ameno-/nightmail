@@ -35,6 +35,7 @@ Nightmail handles personal data in two different roles.
 | **Usage** | How much each workspace sends, receives and stores, and its sender score and standing | Our systems |
 | **Support** | Your support conversations by chat or email, with the AI support agent or with staff: your messages and screenshots, the page you were on, recent request IDs, notes support keeps about you between conversations, and whether you allowed support to read message content | You and our support agent |
 | **Notices** | Emails we send you about billing, limits, standing and these policies | Our systems |
+| **Product news and service status** | Emails about new features and about incidents or maintenance. Every one has an unsubscribe link. Billing, security and policy notices continue either way. | Our systems |
 | **Website and dashboard usage** | Pages you open, links and sign-in controls you click, the referring host, campaign tags, country, device class and viewport. To count daily visitors, our server combines your IP address and browser user agent with a new random secret each UTC day. We keep the resulting code, not the IP address or user agent, in usage records and discard the old secret. Dashboard dialogs, form errors and error messages may be tied to your account and workspace IDs. Never what you type, email addresses or message content. Nothing is stored on your device, and nothing is recorded when your browser sends Do Not Track or Global Privacy Control. Kept 400 days and used to improve the product. | Your browser |
 | **Technical logs** | Request logs (method, path, status, timing and error codes), and connection logs from the IMAP and SMTP gateway, which may include the connecting IP address. Request logs are kept about 3 days; gateway logs 30 days. | Our systems |
 
@@ -70,6 +71,7 @@ Customers can send their data to places they choose: their webhooks, Slack or Di
 | Security, fraud and abuse prevention: spam screening, sender scores and limits, card-fraud checks, noticing related accounts, investigating abuse reports | Usage data; abuse and fraud signals; screening results; message metadata and content as screened or fingerprinted ([section 5](#automated-screening-and-ai)) | Legitimate interests (protecting recipients, customers and our infrastructure) |
 | Support, including the AI support agent | Account data; support conversations; message content only with your permission | Contract; consent for message content |
 | Service and policy notices | Contact details | Contract; legitimate interests |
+| Product news and service status emails to customers | Contact details | Legitimate interests (telling customers about the service they use). You can unsubscribe at any time. |
 | Improve the dashboard: find where people get stuck or run into errors | Dashboard usage | Legitimate interests (making the product easier to use) |
 | Improve the service and publish aggregate statistics (for example, total mail volume on our homepage) | Aggregated usage | Legitimate interests. Aggregates don't identify anyone. |
 | Comply with the law and respond to valid legal requests | As needed | Legal obligation |
