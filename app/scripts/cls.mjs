@@ -1077,8 +1077,11 @@ async function measure(browser, job, fx) {
         await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
       for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
     }
+    // A page that isn't there can say so a chunk later than the page settles (a lazy route behind the shell, as
+    // /pricing/<unknown> is): wait for it, up to 10 s, and say what was there instead.
+    if (job.notFound) await page.waitForFunction(() => [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found'), null, { timeout: 10_000 }).catch(() => {});
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
-    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
+    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? `expected "Page not found", found ${JSON.stringify(await page.evaluate(() => ({ headings: [...document.querySelectorAll('h1,h2')].map(h => h.textContent.slice(0, 60)), text: document.body.innerText.slice(0, 120) })))}`);
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop', job.user !== null));
     // Overview's latest emails reserve as many 32px rows as reach the page's bottom edge (features/overview/latest.ts):
     // the list must end less than a row above it (Help's taller bottom padding only applies in one column) and never
