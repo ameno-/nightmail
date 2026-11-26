@@ -28,7 +28,6 @@ export function triageOf(c: SupportConversation): Triage {
   const reasons = c.needsYou?.reasons
   if (!reasons) {
     if (c.done || c.status === 'closed' || (c.channel === 'agent_feedback' && Boolean(c.ticket?.resolvedAt))) return { key: 'done', text: 'Done', tone: 'neutral' }
-    if (c.channel === 'agent_feedback') return { key: 'needs_you', text: 'Needs you', tone: 'info' }
     return { key: 'waiting', text: 'Waiting', tone: 'neutral' }
   }
   if (reasons.includes('failed')) return { key: 'failed', text: 'Not sent', tone: 'danger' }
