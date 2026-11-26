@@ -830,6 +830,37 @@ describe('support Worker', () => {
     } finally { await capped.dispose(); }
   }, 180_000);
 
+  test('ticket pools: messages the agent couldn\u2019t answer never use the ticket caps, so with the model failing for many people an escalation of the agent later that day still gets its ticket', async () => {
+    // Two tickets a day for everyone and one per person here (60 and 3 by default).
+    const pools = new Miniflare({ cf: false, telemetry: { enabled: false }, workers: [worker('support', baseEnv({ LIMIT_TICKETS_VERIFIED_PER_DAY: text('2'), LIMIT_TICKETS_PER_PERSON: text('1') })),
+      { config: { name: 'fake-bane', compatibilityDate: '2026-09-08', manifest: { mainModule: 'bane.js', modules: { 'bane.js': { type: 'esm', contents: FAKE_BANE } } }, env: {} } }] } as never);
+    try {
+      await migrate(pools);
+      const db = await pools.getD1Database('DB', 'support');
+      // The model is down: four people's messages each become their conversation's ticket ("The AI failed to answer"),
+      // twice everyone's ticket cap, and the first person's twice over (a second conversation).
+      control.failStatus = 400;
+      try {
+        for (const [user, id] of [['usr_pool_a', 'p1'], ['usr_pool_b', 'p2'], ['usr_pool_c', 'p3'], ['usr_pool_a', 'p4']] as const) {
+          const chat = await chatIn(pools, handoff(user));
+          chat.send({ type: 'user.message', clientMessageId: id, text: 'Why are Gmail bounces up?' });
+          assert.match((await chat.until(f => f.type === 'message.end' && /our team/.test(f.text ?? ''), 60_000)).text, /as a ticket/, user);
+          chat.ws.close();
+        }
+      } finally { control.failStatus = 0; }
+      assert.equal((await db.prepare("SELECT count(*) AS n FROM tickets WHERE title = 'The AI failed to answer'").first<{ n: number }>())!.n, 4);
+      // The model is back: the first person asks for a refund in a new chat, and the agent's escalation is filed.
+      const chat = await chatIn(pools, handoff('usr_pool_a'));
+      chat.send({ type: 'user.message', clientMessageId: 'p5', text: 'refund please' });
+      assert.ok(await chat.until(f => f.type === 'ticket.filed', 60_000), 'The agent\u2019s own ticket is filed.');
+      const refused = chat.frames.find(f => f.type === 'tool.end' && f.label === 'Passed this to the Nightmail team');
+      assert.ok(!refused || refused.ok, 'Not refused by a cap the outage used up.');
+      chat.ws.close();
+      const counters = Object.fromEntries((await db.prepare("SELECT key, n FROM daily_counters WHERE key LIKE '%tickets%'").all<{ key: string; n: number }>()).results.map(r => [r.key, r.n]));
+      assert.deepEqual(counters, { 'global:tickets:verified': 1, 'user:usr_pool_a:tickets': 1 }, 'Only the escalation counts against the caps.');
+    } finally { await pools.dispose(); }
+  }, 180_000);
+
   test('chat ingress limits queued messages before persisting them', async () => {
     const chat = await chatIn(mf, handoff('usr_queue'));
     // Send 8 rapid messages while the first turn is running: messages past the queue bound get RATE_LIMITED and are not stored.
@@ -2010,16 +2041,23 @@ describe('support Worker', () => {
       await one.until(f => f.type === 'message.end' && f.kind !== 'first' && f.text?.length);
       const two = await open();
       await two.until(f => f.type === 'history');
+      const twoId = two.frames.find(f => f.type === 'hello')!.conversationId as string, PASSED_TEAM = 'I can\u2019t answer this one right now, so I\u2019ve passed it to our team. They\u2019ll reply here, or by email when this chat isn\u2019t open.';
+      await fakeHook('/__inbox', { id: twoId, channel: 'chat' }, caps);
+      const passed = () => two.frames.filter(f => f.type === 'message.end' && f.text === PASSED_TEAM).length;
       two.send({ type: 'user.message', clientMessageId: 'r2', text: 'refund please' });                   // turn 2
       const refused = await two.until(f => f.type === 'tool.end' && f.label === 'Passed this to the Nightmail team');
       assert.equal(refused.ok, false, 'A second ticket today for the same person is refused.');
-      await two.until(f => f.type === 'message.end' && f.text?.includes('passed this'));
-      assert.ok(!two.frames.some(f => f.type === 'ticket.filed'));
+      // Past the ticket caps the turn gives no answer (whatever the AI wrote, never "email us" or "we couldn't pass this
+      // on"): its reply ends empty, then the plain notice, recorded as unanswered so No reply sent holds it for staff.
+      assert.ok(await eventually(async () => passed() === 1 || undefined));
+      assert.ok(!two.frames.some(f => f.type === 'ticket.filed' || (f.type === 'message.end' && /passed this|couldn\u2019t pass|@|email (us|support)/i.test(f.text ?? ''))), JSON.stringify(two.frames.filter(f => f.type === 'message.end')));
+      const kinds = async () => ((await (await (await caps.getWorker('fake-bane')).fetch(`http://fake-bane/__inbox?id=${twoId}`)).json()) as any)?.messages.map((m: any) => [m.author, m.kind]) ?? [];
+      assert.deepEqual((await eventually(async () => { const k = await kinds(); return k.length >= 2 ? k : undefined; }))!.slice(-2), [['customer', null], ['system', 'unanswered']]);
       two.send({ type: 'user.message', clientMessageId: 'r3', text: 'hello?' });                         // turn 3 > 2
-      // Past everyone's daily total, with this person's tickets used up today: passed to the team with no ticket (No reply
-      // sent holds it for staff), and told so plainly.
-      const busy = await two.until(f => f.type === 'message.end' && /our team/.test(f.text ?? ''));
-      assert.equal(busy.text, 'I can\u2019t answer this one right now, so I\u2019ve passed it to our team. They\u2019ll reply here, or by email when this chat isn\u2019t open.');
+      // Past everyone's daily total: a message the agent can't answer goes to the team as this conversation's ticket, even
+      // with this person's tickets used up today (it counts against no ticket cap), and they're told so plainly.
+      assert.equal((await two.until(f => f.type === 'message.end' && /as a ticket/.test(f.text ?? '')))?.text, 'I can\u2019t answer this one right now, so I\u2019ve passed it to our team as a ticket. They\u2019ll reply here, or by email when this chat isn\u2019t open.');
+      assert.ok(two.frames.some(f => f.type === 'ticket.filed'));
       assert.ok(!two.frames.some(f => f.type === 'error' && f.code === 'BUDGET_EXHAUSTED'));
       two.send({ type: 'user.message', clientMessageId: 'r4', text: 'hello again?' });
       await new Promise(r => setTimeout(r, 1500));

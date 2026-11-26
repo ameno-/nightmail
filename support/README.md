@@ -183,4 +183,4 @@ Nightmail records a `message.received` event for every message an address receiv
 - **Per person:** 10 chats a day.
 - **Per email thread:** 5 messages in 10 minutes.
 - **Tool steps:** 25 per turn.
-- **Retention:** chats close after 24 hours idle, email threads after 7 days. The DO deletes its storage 7 days after closing. D1 keeps the conversation index and tickets, finished ledger rows for 35 days, and notices for 30. Intake mail blocked for 30 days is given up (it stays in Nightmail's inbox).
+- **Retention:** chats close after 30 days idle, email threads after 7 days. The DO deletes its storage 7 days after closing. D1 keeps the conversation index and tickets, finished ledger rows for 35 days, and notices for 30. Intake mail blocked for 30 days is given up (it stays in Nightmail's inbox).
