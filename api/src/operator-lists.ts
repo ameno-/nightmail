@@ -53,22 +53,24 @@ export function registerOperatorLists(app: App) {
         ${afterMs ? sql`AND (${launched}, c.id) < (to_timestamp(${Number(afterMs)} / 1000.0), ${afterId})` : sql``}
       ORDER BY ${launched} DESC, c.id DESC LIMIT ${q.limit + 1}`);
     const page = rows.slice(0, q.limit);
-    // Each campaign's failed mail (bounced, delayed, dropped by SES), at most LIMITS.failures, with its latest feedback.
+    // Each campaign's failed mail (bounced, delayed, dropped by SES), at most LIMITS.failures read, with its latest feedback where
+    // it has one: the limit is on the messages read, so mail dropped here without feedback (an opt-out) can't make it scan them all.
     const failures = new Map<string, Failures>(page.map(row => [row.id, { read: 0, classes: Object.fromEntries(BOUNCE_CLASSES.map(k => [k, 0])) as Record<BounceClass, number>, blocklistReplies: 0 }]));
     if (page.length) {
-      const { rows: failed } = await c.env.db.execute<{ campaign_id: string; type: string; sub_type: string | null; status: string | null; diagnostic: string | null }>(sql`SELECT u.id AS campaign_id,
+      const { rows: failed } = await c.env.db.execute<{ campaign_id: string; type: string | null; sub_type: string | null; status: string | null; diagnostic: string | null }>(sql`SELECT u.id AS campaign_id,
           f.type, f.sub_type, f.status, f.diagnostic
         FROM unnest(${sql.param(page.map(row => row.id))}::text[], ${sql.param(page.map(row => row.workspace_id))}::text[]) AS u(id, w)
         CROSS JOIN LATERAL (SELECT v.type, v.sub_type, v.status, v.diagnostic FROM sending_emails e
-          CROSS JOIN LATERAL (SELECT v.type, v.data->>'bounceSubType' AS sub_type,
+          LEFT JOIN LATERAL (SELECT v.type, v.data->>'bounceSubType' AS sub_type,
               coalesce(v.data->>'status', v.data #>> '{bounce,bouncedRecipients,0,status}', v.data #>> '{deliveryDelay,delayedRecipients,0,status}') AS status,
               coalesce(v.data->>'diagnosticCode', v.data #>> '{bounce,bouncedRecipients,0,diagnosticCode}', v.data #>> '{deliveryDelay,delayedRecipients,0,diagnosticCode}') AS diagnostic
             FROM sending_email_events v WHERE v.workspace_id = e.workspace_id AND v.email_id = e.id
-              AND v.type IN ('bounce', 'non_permanent_bounce', 'validation_suppressed', 'delivery_delay') ORDER BY v.created_at DESC LIMIT 1) v
+              AND v.type IN ('bounce', 'non_permanent_bounce', 'validation_suppressed', 'delivery_delay') ORDER BY v.created_at DESC LIMIT 1) v ON true
           WHERE e.workspace_id = u.w AND e.campaign_id = u.id AND e.status IN ('bounced', 'delayed', 'suppressed') LIMIT ${LIMITS.failures}) f`);
       for (const row of failed) {
         const sum = failures.get(row.campaign_id)!;
         sum.read++;
+        if (!row.type) continue;
         sum.classes[bounceClass({ type: row.type, subType: row.sub_type, status: row.status, diagnostic: row.diagnostic })]++;
         if (blocklistNamed(row.diagnostic)) sum.blocklistReplies++;
       }
