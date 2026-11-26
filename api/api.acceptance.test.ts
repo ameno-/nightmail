@@ -8586,7 +8586,7 @@ describe('Hosted MCP OAuth and tools', () => {
       const listed = ok(await send('GET', '/v1/operator/support-inbox?channel=agent_feedback', session(operator)));
       const row = (listed.data as Json[]).find(c => c.ticket?.id === filed.ticketId);
       assert.ok(row, 'The ticket is in the support inbox.');
-      assert.deepEqual([row.channel, row.verification, row.customer, row.workspace, row.needsReply, row.needsYou.reasons], ['agent_feedback', 'credential', null, { id: wid, name: workspaceName }, false, ['ticket']]);
+      assert.deepEqual([row.channel, row.verification, row.customer, row.workspace, row.filedBy, row.needsReply, row.needsYou.reasons], ['agent_feedback', 'credential', null, { id: wid, name: workspaceName }, 'the API key "feedback fixture"', false, ['ticket']], 'The list names who filed it, as its Filed by does.');
       const detail = ok(await send('GET', `/v1/operator/support-inbox/${conversation.id}`, session(operator)));
       assert.equal(detail.replyAvailable, false);
       assert.deepEqual([detail.conversation.workspace, detail.conversation.evidence.filedBy, detail.conversation.evidence.credentialId], [{ id: wid, name: workspaceName }, 'the API key "feedback fixture"', full.id]);
