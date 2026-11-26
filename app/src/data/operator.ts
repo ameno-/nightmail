@@ -129,7 +129,7 @@ export interface AbuseClusterPage { items: AbuseCluster[]; nextCursor: string | 
 export interface SlackCard { text: string; blocks: { type: string; text?: { text: string }; fields?: { text: string }[]; elements?: { type: string; text?: { text: string } | string; url?: string }[] }[] }
 /** An operator's decision on an alert. watch: reviewed, raised again only at a higher level. dismiss: not abuse. by: their sign-in address. */
 export interface AbuseReview { action: 'watch' | 'dismiss'; at: string; by: string | null }
-export interface AbuseAlert { id: string; clusterId: string; band: 'review' | 'high'; score: number; kind: 'new' | 'raised' | 'grew'; workspaces: number; status: 'stored' | 'sent' | 'failed'; attempts: number; createdAt: string; sentAt: string | null; payload: SlackCard; review: AbuseReview | null }
+export interface AbuseAlert { id: string; clusterId: string; band: 'review' | 'high'; score: number; kind: 'new' | 'raised' | 'grew'; workspaces: number; status: 'stored' | 'sent' | 'failed' | 'stale'; staleReason: 'cluster_gone' | 'band_dropped' | 'reviewed' | 'expired' | null; attempts: number; createdAt: string; sentAt: string | null; payload: SlackCard; review: AbuseReview | null }
 /** Operator → Lists (GET /v1/operator/lists): a recent marketing campaign to a list, its launch's list-risk measure (shares and counts), what the review said and what happened. */
 export type ListRiskBand = 'low' | 'elevated' | 'high'
 export interface OperatorListRow {

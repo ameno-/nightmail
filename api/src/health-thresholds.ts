@@ -215,3 +215,10 @@ export const DATABASE = {
  * triage agent's reads, at what a turn costs): far above an ordinary day, well before a runaway one.
  */
 export const SUPPORT_AI = { dailyLineUsd: 50, remindMinutes: 24 * 60 } as const;
+/**
+ * Abuse monitoring (src/abuse.ts, src/abuse-alerts.ts). An alert is late when it is still unposted an hour after it was
+ * stored: its job posts it within minutes, or waits for its level's hourly limit (a burst), so an hour means the channel
+ * is behind or refusing. The hourly job is behind when it ran out of time three runs in a row: one slow run is a busy
+ * hour, three is scoring that no longer keeps up.
+ */
+export const ABUSE = { lateMinutes: 60, cutRuns: 3, remindMinutes: 24 * 60 } as const;

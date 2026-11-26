@@ -36,10 +36,11 @@ const clusterColumns: Column<AbuseCluster>[] = [
   { ...def(clusterColumnDefs, 'changed'), render: row => <At value={row.changedAt} />, cardRender: row => `changed ${when(row.changedAt)}` },
 ]
 const kindText: Record<AbuseAlert['kind'], string> = { new: 'New', raised: 'Risk raised', grew: 'New member' }
-// Stored: waiting for a post to Slack for a day, else kept here only (no webhook is set, or its day has passed).
-const statusText: Record<AbuseAlert['status'], string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
-const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger' }
-const deliveryText = (row: AbuseAlert, posting: boolean) => row.status !== 'stored' ? statusText[row.status] : posting && row.band === 'review' && Date.now() - Date.parse(row.createdAt) < 86_400_000 ? 'Queued' : 'Not posted'
+// Stored: its post to Slack is queued (or no webhook is set). Stale: it no longer needed a look before it was posted, so it never was; why stays shown.
+const statusText: Record<Exclude<AbuseAlert['status'], 'stale'>, string> = { stored: 'Queued', sent: 'Sent', failed: 'Failed' }
+const staleText: Record<NonNullable<AbuseAlert['staleReason']>, string> = { cluster_gone: 'Stale: cluster gone', band_dropped: 'Stale: risk dropped', reviewed: 'Stale: reviewed', expired: 'Stale: expired' }
+const statusTones: Record<AbuseAlert['status'], Tone> = { stored: 'neutral', sent: 'success', failed: 'danger', stale: 'neutral' }
+const deliveryText = (row: AbuseAlert, posting: boolean) => row.status === 'stale' ? staleText[row.staleReason ?? 'expired'] : row.status !== 'stored' ? statusText[row.status] : posting ? 'Queued' : 'Not posted'
 const reviewText: Record<AbuseReview['action'], string> = { watch: 'Watched', dismiss: 'Dismissed' }
 // When, in a tooltip; who, as a masked address where it shows (never in a tooltip, which can't mask it).
 const reviewTitle = (review: AbuseReview) => `${reviewText[review.action]} ${when(review.at)}`

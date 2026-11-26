@@ -204,25 +204,31 @@ export async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterC
 /**
  * The hourly job's last stage: groups up to SEEDS_A_RUN entities whose links changed, then rescores up to
  * RESCORED_A_RUN clusters, longest unscored first (usage and standing move without any link changing). Stops at the
- * deadline; what is left waits for the next run. A cluster that fails is skipped.
+ * deadline; what is left waits for the next run (`cut`: it stopped for the time, or at SEEDS_A_RUN or RESCORED_A_RUN with
+ * work still waiting). A cluster that fails is skipped.
  */
 export async function refreshClusters(runtime: Hosted, deadline: number, onChange?: (change: ClusterChange) => Promise<void>) {
-  const result = { grouped: 0, rescored: 0 }, done = new Set<Key>();
+  const result = { grouped: 0, rescored: 0, cut: null as 'time' | 'limit' | null }, done = new Set<Key>();
   const one = async (seed: Entity) => {
     if (done.has(keyOf(seed))) return false;
     try { const change = await recluster(runtime, seed); done.add(keyOf(seed)); if (change) await onChange?.(change); return true; }
     catch { done.add(keyOf(seed)); log('warn', { code: 'ABUSE_STEP_FAILED', step: 'cluster' }); return false; }
   };
-  for (let round = 0; round < SEEDS_A_RUN && Date.now() < deadline; round++) {
+  let round = 0, waiting = false;
+  for (; round < SEEDS_A_RUN && Date.now() < deadline; round++) {
     const { rows: [pending] } = await bounded(runtime, tx => tx.execute<{ a_type: Entity['type']; a_id: string }>(sql`SELECT a_type,a_id FROM identity_links WHERE pending ORDER BY last_at DESC LIMIT 1`));
-    if (!pending) break;
+    if (!pending) { waiting = false; break; }
+    waiting = true;
     const seed = { type: pending.a_type, id: pending.a_id };
     // A seed that failed stays pending; it is not tried twice in one run.
-    if (done.has(keyOf(seed))) break;
+    if (done.has(keyOf(seed))) { waiting = false; break; }
     if (await one(seed)) result.grouped++;
   }
+  if (waiting && (round >= SEEDS_A_RUN || Date.now() >= deadline)) result.cut = Date.now() >= deadline ? 'time' : 'limit';
   const { rows: stale } = Date.now() < deadline ? await bounded(runtime, tx => tx.execute<{ seed: Entity }>(sql`SELECT members->0 AS seed FROM abuse_clusters WHERE scored_at<now()-interval '30 minutes' ORDER BY scored_at LIMIT ${RESCORED_A_RUN}`)) : { rows: [] };
-  for (const { seed } of stale) { if (Date.now() >= deadline) break; if (await one(seed)) result.rescored++; }
+  if (Date.now() >= deadline) result.cut = 'time';
+  for (const { seed } of stale) { if (Date.now() >= deadline) { result.cut = 'time'; break; } if (await one(seed)) result.rescored++; }
+  if (!result.cut && stale.length >= RESCORED_A_RUN) result.cut = 'limit';
   return result;
 }
 

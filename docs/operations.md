@@ -308,6 +308,27 @@ With `DATABASE_DISK_GB` set: 75% of disk is a warning; 90% is critical. PlanetSc
 2. Workers Logs, `RETENTION_*`: is retention running and deleting?
 3. Growth: `GET /v1/operator/health` `database.sizeBytes` now against an hour ago (the Health tab shows it each minute).
 
+### abuse-alerts-undelivered
+An abuse alert (review or high) that should have reached the operators' channel has not: still unposted an hour after it
+was stored, refused by Slack on its last try, or expired unposted (a day went by while it still needed a look). A
+warning; the alert is in Operator → Abuse either way.
+
+**An agent checks first**
+1. Health: the counts and how many are high.
+2. `SELECT band,status,attempts,error,stale_reason,created_at FROM abuse_alerts WHERE created_at>now()-interval '2 days' ORDER BY created_at DESC;`
+3. `error` NO_WEBHOOK: neither `ABUSE_SLACK_WEBHOOK_URL` nor `OPERATOR_SLACK_WEBHOOK_URL` is bound. HTTP_4xx: the webhook was
+   revoked. Unposted with no error: the `abuse.alert` jobs (`SELECT status,attempts,last_error FROM jobs WHERE type='abuse.alert' ORDER BY created_at DESC LIMIT 20;`),
+   or a burst waiting for its level's hourly limit (3 review, 10 high).
+
+### abuse-monitor-behind
+The hourly abuse job ran out of time three runs in a row (`abuse_state.cut_runs`): some of what it reads (sign-ins,
+payments, sampled mail, clusters) waits for the next run, so scores lag. The finding names the stages the last run
+stopped; each run's `ABUSE_HOURLY` log line has every stage's time, and each stop an `ABUSE_STEP_CUT` line.
+
+**An agent checks first**
+1. `SELECT last_run,cut_runs,cursors FROM abuse_state;`: which stage, and how far behind its cursor is.
+2. Workers Logs: `ABUSE_HOURLY` (`stages`, `cuts`) over the last few hours.
+
 ### support-ai-cost
 The support AI's model calls cost more than `SUPPORT_AI.dailyLineUsd` (`api/src/health-thresholds.ts`) since midnight UTC.
 A warning: nothing stops answering (the support platform's daily turn caps, `support/src/limits.ts`, do that). The

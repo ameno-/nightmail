@@ -33263,7 +33263,14 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.equal(await h.hourly(), null);
       await db.query(`UPDATE abuse_state SET lease_until=now()-interval '1 second'`);
       assert.deepEqual(await abuse.abuseHourly(runtime, { budgetMs: -1 }), { signIns: 0, payments: 0, sampled: 0, added: 0 });
+      // Out of time is never silent: the stages it stopped with work left are on its state (and logged), and runs in a row
+      // that ran out of time are counted for Health; a run that finishes its work starts the count again.
+      const ran = async () => (await db.query(`SELECT last_run,cut_runs FROM abuse_state WHERE id='monitor'`)).rows[0] as { last_run: { cuts: string[]; stages: Record<string, number> }; cut_runs: number };
+      const outOfTime = await ran();
+      assert.ok(outOfTime.cut_runs >= 1 && outOfTime.last_run.cuts.includes('sample:time') && outOfTime.last_run.cuts.includes('clusters:time'), JSON.stringify(outOfTime));
       assert.deepEqual(await h.hourly(), { signIns: 0, payments: 0, sampled: 1, added: 3 });
+      const finished = await ran();
+      assert.deepEqual([finished.cut_runs, finished.last_run.cuts, Object.keys(finished.last_run.stages).sort()], [0, [], ['alerts', 'clusters', 'payments', 'sample', 'signIns']]);
       // A writer that cannot get its entity's lock (the privacy command holds it) gives up at the lock timeout and moves on.
       const other = await fixtureDatabase(t);
       await other.query('BEGIN'); await other.query(`SELECT pg_advisory_xact_lock(hashtextextended($1,0))`, [`abuse:subject:${issuer} sub-held`]);
@@ -33535,7 +33542,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       admission.mock.restore();
     });
   });
-  test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack message is one line and three bullets with no personal data; only review alerts post, to the abuse webhook or else the operator alerts\' one, never without a webhook, each message once, and a failed post waits longer each time; operators read the outbox and Watch or Dismiss an alert; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
+  test('abuse monitoring: a cluster that needs a look leaves one alert whose Slack message is one line and three bullets with no personal data; both review and high alerts post through the job queue, to the abuse webhook or else the operator alerts\' one, each once, a refused post retried and given back its place, the last refusal and a missing webhook marked failed; operators read the outbox and Watch or Dismiss an alert; an action from the abuse view gives the workspace a fixed reason and keeps the note in the staff audit', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local, request }) => {
       const h = await abuseHarness(runtime, db), { payment, signIn, abuse } = h, wid = runtime.config.workspaceId, { loadConfig } = await import('./src/config.js'), alerts = await import('./src/abuse-alerts.js'), { REASON_CODES } = await import('./src/abuse-clusters.js');
       const outbox = async () => (await db.query('SELECT id,cluster_id,band,score,kind,workspaces,status,attempts,error,payload,sent_at,members,reasons FROM abuse_alerts ORDER BY score,id')).rows as Json[];
@@ -33574,7 +33581,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const card = first!.payload as { text: string; unfurl_links: boolean; unfurl_media: boolean; blocks: Json[] }, blocks = card.blocks, texts = JSON.stringify(card);
       assert.deepEqual([Object.keys(card).sort(), card.unfurl_links, card.unfurl_media, blocks.map(block => block.type), card.text], [['blocks', 'text', 'unfurl_links', 'unfurl_media'], false, false, ['section', 'actions'], 'Review risk 55: 2 related accounts']);
       const [head, who, why, mail, ...rest] = String(blocks[0]!.text.text).split('\n');
-      assert.deepEqual([blocks[0]!.text.type, head, why, mail, rest], ['mrkdwn', '*Review risk 55: 2 related accounts*', '• *Why:* the same payment card; throwaway or look-alike sign-up addresses', '• *Sent in 7 days:* 1,200 emails, 1.5% bounced, 0.08% complaints', []]);
+      assert.deepEqual([blocks[0]!.text.type, head, why, mail, rest], ['mrkdwn', ':mag: *Review risk 55: 2 related accounts*', '• *Why:* the same payment card; throwaway or look-alike sign-up addresses', '• *Sent in 7 days:* 1,200 emails, 1.5% bounced, 0.08% complaints', []]);
       assert.deepEqual([who!.startsWith('• *Who:* 2 workspaces: '), [...who!.matchAll(/`([^`]+)`/g)].map(match => match[1]).sort()], [true, [wid, wsB].sort()]);
       const buttons = blocks[1]!.elements as Json[];
       assert.deepEqual(buttons, [{ type: 'button', action_id: 'review', style: 'primary', text: { type: 'plain_text', text: 'Review in Operator', emoji: false }, url: `${runtime.config.publicUrl}/operator/abuse/${cluster}` }]);
@@ -33586,7 +33593,9 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // Built from anything else, the message leaves it out: an ID of another shape, a code off the list.
       const odd = alerts.slackCard('https://abuse.example/', { cluster, band: 'high', score: 90, kind: 'grew', accounts: 2, reasons: [{ code: 'jordan@example.com', points: 5 }, { code: 'SHARED_CARD', points: 20 }], workspaces: ['<@U123> Jordan', wid], sent: { emails: 0, bounced: 0, complained: 0 } });
       assert.ok(!/Jordan|<@|example\.com\/\/|jordan@/.test(JSON.stringify(odd)));
-      assert.equal((odd.blocks[0] as { text: { text: string } }).text.text, `*High risk 90: 2 related accounts (new member)*\n• *Who:* 1 workspace: \`${wid}\`\n• *Why:* the same payment card\n• *Sent in 7 days:* nothing`);
+      // A high alert can't be taken for a review one: its own mark, and a red button.
+      assert.equal(((odd.blocks[1] as { elements: Json[] }).elements[0] as Json).style, 'danger');
+      assert.equal((odd.blocks[0] as { text: { text: string } }).text.text, `:rotating_light: *High risk 90: 2 related accounts (new member)*\n• *Who:* 1 workspace: \`${wid}\`\n• *Why:* the same payment card\n• *Sent in 7 days:* nothing`);
 
       // A third account on the same card: high. One more alert, for the new level; a rescore at the same level adds none.
       await signIn('sub-c', 'casey@abuse-c.example.com', '203.0.113.9', 'signed_in'); await payment(wsC, 'fp_abuse_alert');
@@ -33597,36 +33606,52 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual([alerts.alertFor({ id: cluster, score: 40, band: 'watch', reasons: [], workspaces: [], accounts: 2, members: 4, keys: [], previous: null }), alerts.alertFor({ id: cluster, score: 60, band: 'review', reasons: [], workspaces: [], accounts: 2, members: 5, keys: [], previous: { score: 55, band: 'review', members: 4 } }),
         alerts.alertFor({ id: cluster, score: 60, band: 'review', reasons: [], workspaces: [], accounts: 2, members: 4, keys: [], previous: { score: 80, band: 'high', members: 4 } })], [null, 'grew', null]);
 
-      // Delivery. Without a webhook nothing is posted (the fixture forbids any network call) and alerts stay stored.
-      const posts: { url: string; init: Parameters<import('./src/abuse-alerts.js').SlackPost>[1] }[] = [];
-      let answer = { ok: false, status: 500 };
-      const post: import('./src/abuse-alerts.js').SlackPost = async (url, init) => { posts.push({ url, init }); return answer; };
-      await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => alert.status)], [0, ['stored', 'stored']]);
-      // With one: only the review alert is posted; the high one stays stored. A refused post waits 50 minutes before it
-      // is tried again, then 100; an accepted one is sent once, to that URL alone, without following a redirect.
-      runtime.config.abuseSlackWebhookUrl = hook;
+      // Delivery: one abuse.alert job per alert, queued with it in one statement; the hourly job posts nothing itself.
+      const { abuseAlertJobs } = alerts, { JobDeferred, MAX_ATTEMPTS } = await import('./src/jobs.js');
+      const jobsOf = async () => (await db.query("SELECT id,payload->>'alertId' AS alert FROM jobs WHERE type='abuse.alert' ORDER BY id")).rows as { id: string; alert: string }[];
+      assert.deepEqual((await jobsOf()).map(job => job.alert).sort(), (await outbox()).map(alert => alert.id).sort());
+      assert.deepEqual((await jobsOf()).map(job => job.id).sort(), (await outbox()).map(alert => `abuse-alert:${alert.id}`).sort(), 'Keyed by the alert: queued once.');
+      const posts: { url: string; init: RequestInit }[] = [];
+      let answer = 500;
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = (async (url: string, init: RequestInit) => { posts.push({ url: String(url), init }); return new Response(null, { status: answer }); }) as typeof fetch;
+      const run = async (alert: Json, attempts = 1) => { try { await abuseAlertJobs['abuse.alert']!(runtime, { alertId: alert.id }, { id: `abuse-alert:${alert.id}`, workspaceId: 'platform', attempts }); return 'done'; }
+        catch (error) { return error instanceof JobDeferred ? 'deferred' : (error as { code?: string }).code ?? 'error'; } };
       const warnings = t.mock.method(console, 'warn', () => {});
-      const waits = async () => (await db.query(`SELECT round(extract(epoch FROM retry_at-now())/60)::int AS minutes FROM abuse_alerts ORDER BY score,id`)).rows.map((row: Json) => row.minutes);
-      await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error]), await waits()], [1, [['review', 'stored', 1, 'HTTP_500'], ['high', 'stored', 0, null]], [50, null]]);
-      await abuse.abuseHourly(runtime, { post });
-      assert.equal(posts.length, 1, 'Not before its time.');
-      await db.query(`UPDATE abuse_alerts SET retry_at=now() WHERE band='review'`); await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => alert.attempts), await waits()], [2, [2, 0], [100, null]]);
-      assert.ok(warnings.mock.calls.every(call => !/hooks\.slack|T0\/B0|blocks/.test(String(call.arguments[0]))), 'Neither the webhook nor the message is logged.');
-      warnings.mock.restore();
-      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '25 hours',retry_at=now() WHERE band='review'`);
-      answer = { ok: true, status: 200 };
-      await abuse.abuseHourly(runtime, { post });
-      assert.equal(posts.length, 2, 'An alert more than a day old is not posted late.');
-      await db.query(`UPDATE abuse_alerts SET created_at=now()-interval '1 minute' WHERE band='review'`);
-      await abuse.abuseHourly(runtime, { post }); await abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, (await outbox()).map(alert => [alert.band, alert.status, alert.attempts, alert.error, alert.sent_at !== null]), await waits()], [3, [['review', 'sent', 3, null, true], ['high', 'stored', 0, null, false]], [null, null]], 'The review alert is posted once; the high one never.');
-      const last = posts.at(-1)!;
-      assert.deepEqual([last.url, last.init.method, last.init.redirect, last.init.headers, JSON.parse(last.init.body)], ['https://hooks.slack.com/services/T0/B0/fixture', 'POST', 'manual', { 'content-type': 'application/json' }, (await outbox())[0]!.payload]);
+      try {
+        const [review, high] = await outbox();
+        // Without a webhook: nothing is posted, the alert is marked failed (NO_WEBHOOK), which Health counts.
+        assert.deepEqual([await run(review!), posts.length, (await outbox())[0]!.status, (await outbox())[0]!.error], ['done', 0, 'failed', 'NO_WEBHOOK']);
+        await db.query(`UPDATE abuse_alerts SET status='stored',error=NULL WHERE id=$1`, [review!.id]);
+        runtime.config.abuseSlackWebhookUrl = hook;
+        // Refused (a 5xx, then a 429): the job retries, the place is given back, the attempt and its code are kept.
+        assert.deepEqual([await run(review!, 1), posts.length], ['ABUSE_ALERT_FAILED', 1]);
+        answer = 429;
+        assert.deepEqual([await run(review!, 2), posts.length], ['ABUSE_ALERT_FAILED', 2]);
+        assert.deepEqual((await db.query('SELECT status,attempts,error,claimed_at FROM abuse_alerts WHERE id=$1', [review!.id])).rows[0], { status: 'stored', attempts: 2, error: 'HTTP_429', claimed_at: null });
+        // Accepted: sent once, to that URL alone, without following a redirect; a retry or a redeploy's re-run posts nothing.
+        answer = 200;
+        assert.deepEqual([await run(review!, 3), posts.length], ['done', 3]);
+        assert.deepEqual([await run(review!, 1), await run(review!, 4), posts.length], ['done', 'done', 3], 'Sent: never posted again.');
+        const last = posts.at(-1)!;
+        assert.deepEqual([last.url, last.init.method, last.init.redirect, JSON.parse(String(last.init.body))], [hook, 'POST', 'manual', review!.payload]);
+        // High alerts post too, by the same path, with their own mark.
+        assert.deepEqual([await run(high!), posts.length, JSON.parse(String(posts.at(-1)!.init.body)).blocks[0].text.text.startsWith(':rotating_light: *High risk')], ['done', 4, true]);
+        assert.deepEqual((await outbox()).map(alert => [alert.band, alert.status, alert.sent_at !== null]), [['review', 'sent', true], ['high', 'sent', true]]);
+        // The last refusal marks it failed (its job fails too).
+        await db.query(`UPDATE abuse_alerts SET status='stored',sent_at=NULL,claimed_at=NULL WHERE id=$1`, [high!.id]);
+        answer = 503;
+        assert.deepEqual([await run(high!, MAX_ATTEMPTS), (await db.query('SELECT status,error FROM abuse_alerts WHERE id=$1', [high!.id])).rows[0]], ['ABUSE_ALERT_FAILED', { status: 'failed', error: 'HTTP_503' }]);
+        // A post still in flight (claimed under two minutes ago: a run whose lease lapsed mid-post) is never posted beside it.
+        await db.query(`UPDATE abuse_alerts SET status='stored',claimed_at=now() WHERE id=$1`, [high!.id]);
+        assert.deepEqual([await run(high!), posts.length], ['deferred', 5]);
+        assert.ok(warnings.mock.calls.every(call => !/hooks\.slack|T0\/B0|blocks/.test(String(call.arguments[0]))), 'Neither the webhook nor the message is logged.');
+      } finally { globalThis.fetch = realFetch; warnings.mock.restore(); }
 
-      // Operators read the outbox; nobody else does; the read is recorded.
+      // Operators read the outbox; nobody else does; the read is recorded. Its two alerts were stored at one instant (as one
+      // hourly run stores all of its alerts): newest first, then high before review, then by ID, so the order and the
+      // pages are the same on every read, and a page that ends between them neither skips nor repeats one.
+      assert.equal((await db.query('SELECT count(DISTINCT created_at)::int AS n FROM abuse_alerts')).rows[0].n, 1, 'Stored at one instant: only the tiebreak orders them.');
       const path = '/v1/operator/abuse/alerts';
       error(await local('GET', path), 403, 'OPERATOR_REQUIRED');
       const key = ok(await local('POST', '/v1/api-keys', { name: 'Not an operator', permissions: ['manage'] }), 201); secrets.add(key.secret);
@@ -33680,7 +33705,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       assert.deepEqual(await outbox(), []);
     });
   });
-  test('abuse monitoring: an alert is not raised again for what operators already have: a watched one only at a higher level, a dismissed one only with a new member or reason, and not for workspaces an alert named this week; Slack gets review alerts only, at most three an hour, oldest first, only while the cluster still needs a look and nobody has reviewed it', async t => {
+  test('abuse monitoring: an alert is not raised again for what operators already have: a watched one only at a higher level, a dismissed one only with a new member or reason, and not for workspaces an alert named this week; an alert that no longer needs a look is marked stale with why and never posted; review posts are capped per hour without ever holding up a high one; the platform\'s own accounts raise none, a mixed cluster still does', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const h = await abuseHarness(runtime, db), { payment } = h, { setOperator } = await import('./scripts/set-operator.js');
       await setOperator(db, [AUTH_SUBJECT, 'operator', '--reason', 'Synthetic abuse operator']);
@@ -33729,21 +33754,71 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const wc = (await clusterOf(w[0]!)).id, vc = (await clusterOf(v[0]!)).id, uc = (await clusterOf(u[0]!)).id;
       await standing(w[0]!, 'ok'); await rescore(); assert.equal((await clusterOf(w[0]!)).band, 'watch');
 
-      // Delivery: review alerts only, the oldest first; three in an hour; never a high one, one reviewed, or one whose
-      // cluster dropped below review.
+      // The sweep (the hourly job's first stage): what no longer needs a look is marked stale with why, never posted; a
+      // reviewed alert, one whose cluster dropped below its level, one more than a day old.
       const at = (cluster: string, kind: string, minutes: number) => db.query(`UPDATE abuse_alerts SET created_at=now()-make_interval(mins=>$3) WHERE cluster_id=$1 AND kind=$2`, [cluster, kind, minutes]);
-      await at(xc, 'raised', 50); await at(yc, 'grew', 40); await at(zc, 'grew', 30); await at(vc, 'new', 20); await at(uc, 'new', 15); await at(wc, 'new', 5);
+      await at(xc, 'raised', 50); await at(yc, 'grew', 20); await at(zc, 'grew', 20); await at(vc, 'new', 20); await at(uc, 'new', 20); await at(wc, 'new', 5);
+      const old = `aal_${'e'.repeat(24)}`;
+      await db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,members,created_at) VALUES ($1,$2,'review',55,'new',2,'{}','{}',now()-interval '25 hours')`, [old, vc]);
+      const { abuseAlertJobs, sweepAlerts, ALERTS_AN_HOUR } = await import('./src/abuse-alerts.js'), { JobDeferred } = await import('./src/jobs.js');
+      assert.equal((await sweepAlerts(runtime)).queued, 0, 'Every alert that needs a look was queued with its job.');
+      const stale = async (id: string) => (await db.query('SELECT status,stale_reason FROM abuse_alerts WHERE id=$1', [id])).rows[0];
+      const ofKind = async (cluster: string, kind: string) => (await alertsOf(cluster)).find(a => a.kind === kind && a.id !== old)!.id;
+      assert.deepEqual([await stale(await ofKind(xc, 'new')), await stale(await ofKind(yc, 'new')), await stale(await ofKind(wc, 'new')), await stale(old)],
+        [{ status: 'stale', stale_reason: 'reviewed' }, { status: 'stale', stale_reason: 'reviewed' }, { status: 'stale', stale_reason: 'band_dropped' }, { status: 'stale', stale_reason: 'expired' }]);
+
+      // Delivery, each alert by its own job: at most three review posts in an hour, the rest waiting for a place; a high
+      // alert posts whatever review alerts took (its level's own ten), and stale ones never.
       runtime.config.abuseSlackWebhookUrl = 'https://hooks.slack.com/services/T0/B0/fixture';
-      const posts: string[] = [], post: import('./src/abuse-alerts.js').SlackPost = async (_url, init) => { posts.push(JSON.parse(init.body).text); return { ok: true, status: 200 }; };
-      const sent = async () => (await db.query(`SELECT cluster_id,kind FROM abuse_alerts WHERE status='sent' AND id<>$1`, [gone])).rows.map((row: Json) => `${row.cluster_id}:${row.kind}`).sort();
-      await h.abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts, await sent()], [['Review risk 60: 3 related accounts (new member)', 'Review risk 60: 3 related accounts (new member)', 'Review risk 55: 2 related accounts'], [`${yc}:grew`, `${zc}:grew`, `${vc}:new`].sort()]);
-      await h.abuse.abuseHourly(runtime, { post });
-      assert.equal(posts.length, 3, 'Three an hour.');
-      await db.query(`UPDATE abuse_alerts SET sent_at=now()-interval '61 minutes' WHERE sent_at IS NOT NULL`);
-      await h.abuse.abuseHourly(runtime, { post }); await h.abuse.abuseHourly(runtime, { post });
-      assert.deepEqual([posts.length, posts[3], (await alertsOf(uc))[0]!.status, (await alertsOf(wc))[0]!.status, (await alertsOf(xc))[1]!.band, (await alertsOf(xc))[1]!.status, ...(await alertsOf(xc)).concat(await alertsOf(yc)).filter(a => a.review).map(a => a.status)],
-        [4, 'Review risk 55: 2 related accounts', 'sent', 'stored', 'high', 'stored', 'stored', 'stored']);
+      const posts: string[] = [], realFetch = globalThis.fetch;
+      globalThis.fetch = (async (_url: string, init: RequestInit) => { posts.push(JSON.parse(String(init.body)).text); return new Response(null, { status: 200 }); }) as typeof fetch;
+      const run = async (id: string) => { try { await abuseAlertJobs['abuse.alert']!(runtime, { alertId: id }, { id: `abuse-alert:${id}`, workspaceId: 'platform', attempts: 1 }); return 'done'; }
+        catch (error) { if (!(error instanceof JobDeferred)) return String(error); const minutes = (Date.parse(error.availableAt) - Date.now()) / 60_000; return minutes < 5 ? 'in line' : `deferred ${Math.round(minutes / 5) * 5}`; } };
+      const sent = async () => (await db.query(`SELECT id FROM abuse_alerts WHERE status='sent' AND id<>$1`, [gone])).rows.map((row: Json) => row.id).sort();
+      const highX = await ofKind(xc, 'raised'), [yGrew, zGrew, vNew, uNew] = [await ofKind(yc, 'grew'), await ofKind(zc, 'grew'), await ofKind(vc, 'new'), await ofKind(uc, 'new')];
+      try {
+        assert.deepEqual(ALERTS_AN_HOUR, { review: 3, high: 10 });
+        // Four review alerts stored at one instant, as one hourly run stores all of its alerts. The ID breaks the tie, so
+        // the same three post now and the same one waits however their jobs are ordered: here the last in line runs first.
+        const four = [yGrew, zGrew, vNew, uNew];
+        assert.equal((await db.query('SELECT count(DISTINCT created_at)::int AS n FROM abuse_alerts WHERE id=ANY($1)', [four])).rows[0].n, 1, 'Stored at one instant: only the tiebreak orders them.');
+        const [first, second, third, fourth] = (await db.query('SELECT id FROM abuse_alerts WHERE id=ANY($1) ORDER BY id', [four])).rows.map((row: Json) => row.id as string);
+        assert.deepEqual([await run(fourth!), await run(highX), await run(third!), await run(second!), await run(first!), await run(fourth!)], ['in line', 'done', 'done', 'done', 'done', 'deferred 60'],
+          'Three review posts an hour, given in line order; the fourth in line waits its turn, then for the oldest post to be an hour old; a high alert never waits on review ones.');
+        assert.ok(posts[0]!.startsWith('High risk'));
+        for (const id of [await ofKind(xc, 'new'), await ofKind(yc, 'new'), await ofKind(wc, 'new'), old]) assert.equal(await run(id), 'done');
+        assert.deepEqual([posts.length, await sent()], [4, [highX, first!, second!, third!].sort()], 'Stale ones are never posted.');
+        // An hour later the waiting one has a place.
+        await db.query(`UPDATE abuse_alerts SET claimed_at=claimed_at-interval '61 minutes' WHERE claimed_at IS NOT NULL`);
+        assert.deepEqual([await run(fourth!), posts.length, await stale(fourth!)], ['done', 5, { status: 'sent', stale_reason: null }]);
+        // A burst of high alerts stored at one instant, with one high post already this hour: nine more post, and the one
+        // last in line by ID is the one that waits, though its job runs first.
+        const burst = Array.from({ length: ALERTS_AN_HOUR.high }, (_, n) => `aal_${String(n).padStart(24, 'b')}`);
+        for (const id of burst) await db.query(`INSERT INTO abuse_alerts(id,cluster_id,band,score,kind,workspaces,payload,members) VALUES ($1,$2,'high',80,'grew',2,'{"text":"High risk 80: burst"}','{}')`, [id, xc]);
+        await db.query(`UPDATE abuse_alerts SET claimed_at=now()-interval '3 minutes' WHERE id=$1`, [highX]); // The high alert posted this hour.
+        const results = []; for (const id of [...burst].reverse()) results.push(await run(id));
+        assert.deepEqual(results, ['in line', ...Array(ALERTS_AN_HOUR.high - 1).fill('done')]);
+        assert.match(await run(burst.at(-1)!), /^deferred /);
+      } finally { globalThis.fetch = realFetch; runtime.config.abuseSlackWebhookUrl = undefined; }
+
+      // The platform's own accounts raise nothing: a cluster of workspaces billed as exempt (staff, or made free by an
+      // operator) is scored as any other and stays in the Operator area, without an alert; one with any other account in it is raised.
+      const own = [await member('own-1', 'fp_own'), await member('own-2', 'fp_own')];
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=ANY($1)', [own]);
+      await standing(own[0]!, 'warn'); await h.hourly();
+      const ownCluster = (await clusterOf(own[0]!)).id;
+      assert.deepEqual([(await clusterOf(own[0]!)).band, await alertsOf(ownCluster)], ['review', []]);
+      const mixed = [await member('mixed-1', 'fp_mixed'), await member('mixed-2', 'fp_mixed')];
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [mixed[0]]);
+      await standing(mixed[0]!, 'warn'); await h.hourly();
+      const mixedCluster = (await clusterOf(mixed[0]!)).id;
+      assert.deepEqual([(await clusterOf(mixed[0]!)).band, (await alertsOf(mixedCluster)).map(a => a.band)], ['review', ['review']], 'Mixed with an account the platform does not own: raised.');
+      // An operator's own workspace counts as the platform's too.
+      const staffOwned = [await member('staff-1', 'fp_staff'), await member('staff-2', 'fp_staff')];
+      await db.query('UPDATE workspaces SET exempt_hosted_quotas=true WHERE id=$1', [staffOwned[0]]);
+      await db.query(`INSERT INTO platform_operators(user_id,role,reason) SELECT user_id,'operator:read','abuse fixture: staff test account' FROM workspace_members WHERE workspace_id=$1 AND role='owner'`, [staffOwned[1]]);
+      await standing(staffOwned[0]!, 'warn'); await h.hourly();
+      assert.deepEqual(await alertsOf((await clusterOf(staffOwned[0]!)).id), []);
     });
   });
   test('abuse monitoring: mail that reaches no one outside its workspace (Nightmail\'s own test and setup emails, campaign tests, mail to its own members) is never fingerprinted and the built-in domain is nobody\'s sending domain, so new workspaces do not cluster on onboarding; a value that became common links nobody, even through a link written while it was rare; a waitlist refusal counts only when it repeats', async t => {
@@ -44165,6 +44240,10 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
     const { SUPPORT_AI } = await import('./src/health-thresholds.js'), over = SUPPORT_AI.dailyLineUsd + 11.234;
     assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: SUPPORT_AI.dailyLineUsd - 0.01 } }), []);
     assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, supportAiToday: over } }), [`support-ai-cost warning ${over}: $${over.toFixed(2)} since midnight UTC, past the $${SUPPORT_AI.dailyLineUsd.toFixed(2)} daily line.`]);
+    // Abuse alerts that should have gone out and have not, and the hourly abuse job out of time three runs in a row (health-thresholds.ts ABUSE).
+    assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 0, failed: 0, expired: 0, high: 0 }, abuseBehind: { runs: 2, cuts: ['signIns:time'] } } }), []);
+    assert.deepEqual(lines({ ...quiet(), database: { ...quiet().database!, abuseUndelivered: { late: 1, failed: 1, expired: 1, high: 1 }, abuseBehind: { runs: 3, cuts: ['signIns:time', 'clusters:time'] } } }),
+      ['abuse-alerts-undelivered warning 3: 3 not delivered (1 high): 1 unposted over 60 minutes, 1 refused, 1 expired unposted.', 'abuse-monitor-behind warning 3: the hourly job ran out of time 3 runs in a row; last stopped: `signIns:time`, `clusters:time`.']);
   });
 
   test('MX health: warnings stay on Health; critical opens, reminders and long recoveries are single plain Slack lines; short flaps stay quiet across ticks; operator and self-hosted access', async t => {

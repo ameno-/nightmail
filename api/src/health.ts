@@ -1,7 +1,7 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, databaseCodeOf, errors, log, logError, response, security, transientDatabaseError, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, SUPPORT_AI, TICK, WAKE_QUEUES } from './health-thresholds.js';
+import { ABUSE, CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, SUPPORT_AI, TICK, WAKE_QUEUES } from './health-thresholds.js';
 import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
 import { slackCard, supportCostAlert } from './operator-alerts.js';
 import { aiCostToday } from './support-ai-cost.js';
@@ -57,6 +57,9 @@ const KINDS = {
   'database-refusing': { emoji: ':rotating_light:', label: 'Database refusing', severity: 'critical', unit: 'seconds', section: 'database' },
   // Read in the database probe. A warning, so the tick posts no card of its own: operator-alerts.ts posts one a UTC day.
   'support-ai-cost': { emoji: ':money_with_wings:', label: 'Support AI cost', severity: 'warning', unit: 'usd', section: 'database' },
+  // Read in the database probe: abuse alerts that should have gone out and have not, and the hourly abuse job running out of time.
+  'abuse-alerts-undelivered': { emoji: ':mag:', label: 'Abuse alerts not delivered', severity: 'warning', unit: 'alerts', section: 'database' },
+  'abuse-monitor-behind': { emoji: ':mag:', label: 'Abuse monitoring behind', severity: 'warning', unit: 'runs', section: 'database' },
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
 const isKind = (kind: string): kind is Kind => Object.hasOwn(KINDS, kind);
@@ -87,7 +90,10 @@ type CampaignRow = { id: string; workspaceId: string; state: string; total: numb
   /** The provider account's send rate. */ account: number | null; /** The rate the release planner reads, shown beside the others and never compared with. */ planned: number | null;
   accepted: number | null; delivered: number | null; bounced: number | null; complained: number | null };
 type CounterRow = { kind: string; key: string; n: number; errors: number; ms: number; slowest: number; n5: number; errors5: number; slowest5: number; verySlow5: number; stormMinutes: number; stormRate: number; hist: number[] | null };
-type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
+type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number;
+  /** Abuse alerts that should have gone out and have not (late: unposted past ABUSE.lateMinutes; failed; expired unposted), and of them the high ones. */
+  abuseUndelivered?: { late: number; failed: number; expired: number; high: number };
+  /** How many hourly abuse runs in a row ran out of time, and the stages the last one stopped. */ abuseBehind?: { runs: number; cuts: string[] } | null; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
 /**
@@ -290,10 +296,16 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   let database: Rollup['database'] = null;
   if (sample.database) {
-    const { heldDomains, supportAiToday, ...d } = sample.database;
+    const { heldDomains, supportAiToday, abuseUndelivered, abuseBehind, ...d } = sample.database;
     for (const domain of heldDomains ?? []) find('link-domain-held', domain, 1, `Marketing releases using ${id(domain)} are paused after a confirmed DBL listing.`, DATABASE.remindMinutes);
     if (supportAiToday !== undefined && supportAiToday >= SUPPORT_AI.dailyLineUsd)
       find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
+    if (abuseUndelivered) {
+      const { late, failed, expired, high } = abuseUndelivered, n = late + failed + expired;
+      if (n > 0) find('abuse-alerts-undelivered', null, n, `${count(n)} not delivered${high ? ` (${count(high)} high)` : ''}: ${[late && `${count(late)} unposted over ${ABUSE.lateMinutes} minutes`, failed && `${count(failed)} refused`, expired && `${count(expired)} expired unposted`].filter(Boolean).join(', ')}.`, ABUSE.remindMinutes);
+    }
+    if (abuseBehind && abuseBehind.runs >= ABUSE.cutRuns)
+      find('abuse-monitor-behind', null, abuseBehind.runs, `the hourly job ran out of time ${count(abuseBehind.runs)} runs in a row${abuseBehind.cuts.length ? `; last stopped: ${abuseBehind.cuts.map(id).join(', ')}` : ''}.`, ABUSE.remindMinutes);
     if (held('database-connections', d.maxConnections > 0 && d.connections >= d.maxConnections * DATABASE.connectionShare, DATABASE.sustain))
       find('database-connections', null, d.connections, `${count(d.connections)} of ${count(d.maxConnections)}.`, DATABASE.remindMinutes);
     if (d.oldestTransactionSeconds >= DATABASE.transactionSeconds)
@@ -362,7 +374,12 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
       (SELECT hist FROM h WHERE h.kind=m.kind AND h.key=m.key) AS hist
     FROM m GROUP BY m.kind,m.key`)).rows);
   const activity = sql`pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`;
-  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",
+      (SELECT json_build_object('late',count(*) FILTER (WHERE status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})),
+        'failed',count(*) FILTER (WHERE status='failed' AND created_at>now()-interval '1 day'),'expired',count(*) FILTER (WHERE status='stale' AND stale_reason='expired'),
+        'high',count(*) FILTER (WHERE band='high' AND ((status='stored' AND created_at<now()-make_interval(mins=>${ABUSE.lateMinutes})) OR (status='failed' AND created_at>now()-interval '1 day') OR (status='stale' AND stale_reason='expired'))))
+        FROM abuse_alerts WHERE created_at>now()-interval '2 days') AS "abuseUndelivered",
+      (SELECT json_build_object('runs',cut_runs,'cuts',coalesce(last_run->'cuts','[]'::jsonb)) FROM abuse_state WHERE id='monitor') AS "abuseBehind",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",
