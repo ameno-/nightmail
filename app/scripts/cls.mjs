@@ -1081,7 +1081,7 @@ const fx = await start(repo, { dist: television ? 'app/dist-tv' : 'app/dist', se
   throw error;
 });
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => Promise.allSettled([fx.stop(), browserPromise.then(b => b.close())]).finally(() => process.exit(130)));
-let results = [];
+let results = [], inventorySize;
 try {
   const [ids, browser] = await Promise.all([seed(fx), browserPromise]);
   console.log(`${elapsed()} seeded`);
@@ -1100,6 +1100,7 @@ try {
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);
   jobs.forEach((job, index) => { job.index = index; });
   const queue = [...jobs].sort((a, b) => weight(b) - weight(a));
+  inventorySize = jobs.length; // Full production or TV inventory, before assigning a shard.
   const shared = queue.filter(job => !job.alone && !exclusive && (shards === 1 || createHash('sha256').update(job.slug).digest().readUInt32BE(0) % (shards - 1) === shard));
   const alone = queue.filter(job => job.alone && (exclusive || shards === 1));
   console.log(`${elapsed()} shard ${exclusive ? 'alone' : shard}/${shards}: measuring ${shared.length + alone.length} of ${queue.length} page loads, ${workers} at a time`);
@@ -1122,6 +1123,10 @@ try {
   await fx.stop();
 }
 results = results.filter(Boolean);
+if (process.env.SHARD_REPORT) {
+  const id = television ? 'tv' : exclusive ? 'alone' : String(shard);
+  appendFileSync(process.env.SHARD_REPORT, JSON.stringify({ id, ran: results.length, total: inventorySize }) + '\n');
+}
 const { markdown, failed } = summarize(results, ((Date.now() - began) / 1000).toFixed(0));
 writeFileSync(join(out, 'report.json'), JSON.stringify(results, null, 2));
 writeFileSync(join(out, 'summary.md'), markdown);

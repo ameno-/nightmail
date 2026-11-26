@@ -80,7 +80,48 @@ shard() (
   fi
   reporters=(--test-reporter=spec --test-reporter-destination=stdout)
   if [[ -n ${ACCEPTANCE_JUNIT:-} ]]; then reporters+=(--test-reporter=junit "--test-reporter-destination=$ACCEPTANCE_JUNIT/$1.xml"); fi
+  if [[ -n ${SHARD_REPORT:-} ]]; then
+    # Node has no list switch. Collect the very same file on this ready fixture, with Node's
+    # real suite registration, conditional skips and quarantine filter, but no hooks or test bodies.
+    cat > "$HOME/list.mjs" <<'JS'
+import { registerHooks } from 'node:module';
+const declarations = 'data:text/javascript,' + encodeURIComponent(`
+  import { describe, test as register } from "node:test";
+  export { describe };
+  export const before = () => {}, after = () => {};
+  export const test = (name, options) => register(name, typeof options === "object" ? options : {}, () => {});
+`);
+registerHooks({ resolve(id, context, next) {
+  if (id === 'node:test' && context.parentURL?.endsWith('/api.acceptance.test.ts'))
+    return { url: declarations, shortCircuit: true };
+  return next(id, context);
+} });
+JS
+    # Count successful registered tests, not suites, opt-in skips, or the dynamic t.test()
+    # children that can only be discovered by running their parent. Node reports children first.
+    cat > "$HOME/count.mjs" <<'JS'
+export default async function* count(events) {
+  const passed = [];
+  for await (const {type, data} of events) {
+    if (type === 'test:fail') console.error(data.name, data.details.error);
+    if (type !== 'test:pass') continue;
+    const depth = data.nesting, children = passed[depth + 1] ?? 0;
+    passed.length = depth + 1;
+    const n = data.details.type === 'suite' ? children : Number(data.skip === undefined && data.todo === undefined);
+    passed[depth] = (passed[depth] ?? 0) + n;
+  }
+  yield String(passed[0] ?? 0);
+}
+JS
+    node --import tsx --import "$HOME/list.mjs" --test --test-skip-pattern="$flaky" \
+      --test-reporter="$HOME/count.mjs" --test-reporter-destination="$HOME/total" api.acceptance.test.ts
+    reporters+=(--test-reporter="$HOME/count.mjs" --test-reporter-destination="$HOME/ran")
+  fi
   timeout 8m node --import tsx --test "${reporters[@]}" "${@:5}" api.acceptance.test.ts
+  if [[ -n ${SHARD_REPORT:-} ]]; then
+    jq -cn --arg id "$ACCEPTANCE_SHARD" --argjson ran "$(cat "$HOME/ran")" --argjson total "$(cat "$HOME/total")" \
+      '{id:$id,ran:$ran,total:$total}' >> "$SHARD_REPORT"
+  fi
 )
 # Partition whole registered tests, leaving their nested subtests on the same fixture. Keep the original
 # three selectors for nightly and both whole fixtures for local runs. New names fall in a rest shard.
