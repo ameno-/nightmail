@@ -1,7 +1,7 @@
 ---
 title: Acceptable Use Policy
 description: What you may and may not do with Nightmail, the published sending limits and enforcement thresholds, and how to report abuse.
-updated: 22 November 2026
+updated: 26 November 2026
 effective: 22 November 2026
 ---
 
@@ -101,7 +101,7 @@ The [thresholds below](#sending-limits-and-thresholds) say exactly when each ste
 
 **Serious abuse skips the ladder.** For phishing, malware, fraud, illegal content, or when Amazon pauses your sending, we may pause or close the account at once, cancel queued mail, suppress addresses, keep evidence, and report to the authorities where the law requires.
 
-**Appeals.** Use "Ask for review" or "Contact support" in the dashboard, or email [support@nightmail.dev](mailto:support@nightmail.dev). A person reviews every appeal.
+**Appeals.** Use Help in the dashboard, or email [support@nightmail.dev](mailto:support@nightmail.dev). A person reviews every appeal.
 
 ## 10. Sending limits and thresholds
 

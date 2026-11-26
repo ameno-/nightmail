@@ -1,7 +1,7 @@
 ---
 title: Terms of Service
 description: The agreement between you and Anomaly for using Nightmail: accounts, prepaid billing, refunds and credit expiry, sending limits, your data, and how disputes are resolved.
-updated: 24 November 2026
+updated: 26 November 2026
 effective: 20 November 2026
 ---
 
@@ -181,7 +181,7 @@ We'll tell you why and what to do, unless the law or an active investigation pre
 - **Pause caused by transactional bounces:** an owner can resume once every 30 days, at 50% of the previous limit for 48 hours.
 - **Any other pause** needs our review.
 - Each pause leaves a **strike** for 90 days. A second strike limits you to 50% for 7 days; a third means every resume needs our review.
-- **Appeals:** use "Ask for review" or "Contact support" in the dashboard, or email [support@nightmail.dev](mailto:support@nightmail.dev). A person at Anomaly reviews every appeal. We aim to respond within one business day.
+- **Appeals:** use Help in the dashboard, or email [support@nightmail.dev](mailto:support@nightmail.dev). A person at Anomaly reviews every appeal. We aim to respond within one business day.
 
 ## 9. Your data
 
@@ -197,7 +197,7 @@ We'll tell you why and what to do, unless the law or an active investigation pre
 
 - Support email and the dashboard's **Help** chat are answered first by an AI agent. Its answers can be wrong. You can ask for a person at any time, and a person decides every appeal and review.
 - Support reads only the workspaces you belong to, only while your request is open, and changes nothing in them unless you confirm it, signed in. Anomaly staff can read your conversation and answer it themselves; a staff member who looks at your workspace gets read-only access for at most 2 hours.
-- In **Contact support** or the Help chat, you can let support read message content **for that one request**. It's off by default. Without it, support sees settings, delivery events and error codes, but no message bodies. A request made by email never includes message content.
+- In the Help chat, you can let support read message content **for that one conversation**. It's off until you allow it. Without it, support sees settings, delivery events and error codes, but no message bodies. A request made by email never includes message content.
 - Your workspace's **Activity** page shows "Nightmail support viewed this workspace" with the request. Every support read is logged and kept for 90 days.
 
 ## 11. Third-party services you connect
