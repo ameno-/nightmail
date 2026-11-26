@@ -19,7 +19,7 @@ const BoardEnd = lazy(() => boardPage().then(m => ({ default: m.BoardEnd })))
 
 // Prose here uses proportional figures, and the local fallback faces are sized for the tabular ones (tokens.css): text
 // painted before the web fonts arrive rewraps when they do. So the pages wait for them, as long as 3 seconds.
-const fontsReady = Promise.race([
+export const fontsReady = Promise.race([
   Promise.all(['400 16px Inter', '700 16px "OpenTUI Mono"', '400 16px "OpenTUI Mono"'].map(font => document.fonts.load(font, 'a1'))),
   new Promise(resolve => setTimeout(resolve, 3000)),
 ]).catch(() => {})
@@ -31,7 +31,9 @@ const pageLinks = (label: (page: (typeof PRICE_PAGES)[number]) => string) => PRI
  *  nothing moves; the reader's scroll stays, their focus moves to the same control here, what they typed or slid on it
  *  is set here, and a button they pressed while this code loaded (home/shell/boot.js holds it) is pressed here.
  *  Whether there was one. */
-function useShellTakeover() {
+/** The app's page under #root: a scene or plain frame (.price-page), or a page drawn from its data (page/page.tsx, .pp). */
+const APP_PAGE = '#root .price-page, #root .pp'
+export function useShellTakeover() {
   const [painted] = useRef([typeof document !== 'undefined' && document.getElementById('price-shell') !== null]).current
   const carried = useRef<{ typed: (string | null)[]; pressed: Place | null } | null>(null)
   useLayoutEffect(() => {
@@ -43,10 +45,10 @@ function useShellTakeover() {
     delete held.__nightmailShellPress
     shell.remove()
     document.querySelector('style[data-shell-css]')?.remove()
-    atPlace(document.querySelector('#root .price-page'), focused)?.focus({ preventScroll: true })
+    atPlace(document.querySelector(APP_PAGE), focused)?.focus({ preventScroll: true })
   }, [])
   useEffect(() => {
-    const was = carried.current, page = document.querySelector('#root .price-page')
+    const was = carried.current, page = document.querySelector(APP_PAGE)
     if (!was || !page) return
     const inputs = [...page.querySelectorAll('input')], setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')!.set!
     was.typed.forEach((value, i) => { const input = inputs[i]; if (value !== null && input) { setValue.call(input, value); input.dispatchEvent(new Event('input', { bubbles: true })) } })
@@ -100,7 +102,8 @@ export function PricePage() {
   const page = PRICE_PAGES.find(p => p.path === (vendor === null ? '/pricing' : `/compare/${vendor}`))
   // The board's frame in the homepage's steel, while its concrete waits for a yes (board.tsx): ?frame=steel.
   const [search] = useSearchParams()
-  if (vendor !== null && !comparison) return <PriceFrame title={`Page not found · ${productName.toLowerCase()}`}><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
+  // (/compare is a page only with the comparisons drawn from their data: page/pricing.tsx answers it there.)
+  if ((vendor !== null && !comparison) || pathname.replace(/\/+$/, '') === '/compare') return <PriceFrame title={`Page not found · ${productName.toLowerCase()}`}><EmptyState headingAs="h1" title="Page not found" action={<Link to="/pricing">Price calculator</Link>} /></PriceFrame>
   // The tab's title is the one the page's HTML carries (price-pages.ts), so search engines read one title either way.
   return <PriceFrame title={page!.searchTitle} end={<BoardEnd comparison={comparison} />} scene>
     <PriceScene comparison={comparison} frame={search.get('frame')} />

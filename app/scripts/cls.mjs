@@ -61,6 +61,9 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { liveSource, seed, start } from './cls-fixture.mjs';
 
+// The comparisons' look this build has: from their data unless VITE_PRICE_PAGES=board (features/pricing/page/switch.ts
+// reads the same variable).
+const verdictPages = process.env.VITE_PRICE_PAGES !== 'board'
 const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const television = process.env.CLS_HOME === 'tv';
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls', television ? 'tv' : '');
@@ -349,13 +352,29 @@ const pages = ids => [
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   // The price pages (features/pricing), public and linked from the homepage: signed out, cold and from one another
   // (their header's links), the calculator also at its large size and signed in.
-  ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
-  ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
-  ['Pricing · signed in', '/pricing', {}],
-  ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
-  // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
-  ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
-  ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
+  // With the comparisons drawn from their data (every build but VITE_PRICE_PAGES=board: features/pricing/page/switch.ts) a
+  // comparison is a page of its own HTML with no app, so nothing reaches the calculator from it in the app's own
+  // navigation (it is measured cold), the steel frame is the boards' alone, and there is /compare, with and without the
+  // homepage's television over it.
+  ...verdictPages ? [
+    ['Pricing', '/pricing', { user: null }],
+    ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
+    ['Pricing · signed in', '/pricing', {}],
+    ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
+    ['Compare · Resend', '/compare/resend', { user: null, from: '/pricing', click: 'vs Resend' }],
+    // Signed in, the page painted for a visitor gives way to Open dashboard and no terms line.
+    ['Compare · Resend · signed in', '/compare/resend', {}],
+    ['Compare', '/compare', { user: null }],
+    ['Compare · with the set', '/compare/with-set', { user: null }],
+  ] : [
+    ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
+    ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
+    ['Pricing · signed in', '/pricing', {}],
+    ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
+    // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
+    ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
+    ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
+  ],
   // The other comparisons, from the calculator's Compare line.
   ['Compare · AgentMail', '/compare/agentmail', { user: null, from: '/pricing', click: 'AgentMail' }],
   ['Compare · Bird', '/compare/bird', { user: null, from: '/pricing', click: 'Bird' }],

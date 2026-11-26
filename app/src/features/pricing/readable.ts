@@ -131,11 +131,12 @@ export function markdownFiles(): { file: string; source: string }[] {
 }
 
 /** llms.txt's lines for the site's own pages (the API puts them under its title: api/src/site-index.ts). */
-export function llmsSiteIndex(): string {
+/** more: lines for the site's other pages (price-pages.ts: /compare, when the build has it). */
+export function llmsSiteIndex(more: string[] = []): string {
   return [
     `Hosted ${productName} charges ${price}. Contacts and teammates: no charge.`,
     `## Product and pricing`,
-    `- [${productName}](${url('/index.md')}): what it does and what it costs\n- [Price calculator](${url('/pricing.md')}): ${productName} beside ${listOf([...new Set(OFFERS.map(offer => offer.vendor))])} at three sizes, and how to price any other\n- [The website in full](${url('/llms-full.txt')}): these pages and every comparison, in one file`,
+    `- [${productName}](${url('/index.md')}): what it does and what it costs\n- [Price calculator](${url('/pricing.md')}): ${productName} beside ${listOf([...new Set(OFFERS.map(offer => offer.vendor))])} at three sizes, and how to price any other\n- [The website in full](${url('/llms-full.txt')}): these pages and every comparison, in one file${more.map(line => `\n${line}`).join('')}`,
     `## Comparisons`,
     comparisonLinks(),
   ].join('\n\n') + '\n\n'
