@@ -86,9 +86,10 @@ a.fac-cta .srt-cta-label { --fac-ems: 10.2; }
 .fac-consent { margin: 0; color: var(--srt-text-2); font-size: 12px; line-height: 16px; text-align: center; text-wrap: balance; }
 .fac-consent a:hover { color: var(--srt-text); }
 .fac-consent a { white-space: nowrap; }
-/* A phone's: directly under the console's strip of floor, on two lines (three on the narrowest), clear of a home
-   indicator. Its links are tall enough to press. */
+/* A phone's: directly under the console's strip of floor, on three lines (four below 330px wide, so those get a taller
+   strip), clear of a home indicator. Its links are tall enough to press. */
 .fac-page[data-format='phone'] { --fac-under: calc(64px + var(--srt-safe-b)); }
+@media (max-width: 339px) { .fac-page[data-format='phone'] { --fac-under: calc(80px + var(--srt-safe-b)); } }
 .fac-page[data-format='phone'] .fac-under { place-items: start center; padding: 6px var(--space-16) var(--srt-safe-b); }
 .fac-page[data-format='phone'] .fac-consent { max-width: 340px; }
 .fac-page[data-format='phone'] .fac-consent a { position: relative; }
