@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
 import { BadgeCheck, Bot, CirclePause, Globe, Link2, Megaphone, Send, ShieldAlert, ShieldCheck, TriangleAlert, UserPlus, ZapOff, type LucideIcon } from 'lucide-react'
-import { ErrorState, PageHeader, StatusBadge, Tooltip, type Tone } from '../../components/ui'
+import { ErrorState, PageHeader, Tooltip, type Tone } from '../../components/ui'
 import { useTween } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { useSession } from '../../data/context'
@@ -11,7 +11,7 @@ import { usd } from '../../data/billing'
 import { operatorApi, type Glass, type GlassCount, type GlassEvent, type GlassGrade, type GlassRegion } from '../../data/operator'
 import { ago, number, percent, time } from '../../lib/format'
 import { DeliverabilityView, useDeliverability } from './deliverability'
-import { GLASS_EVENT_HEIGHT, GlassAsOf, GlassBoard, GlassTabs, glassView, StaffOnly, type GlassBoardFill, type GlassFill, type GlassRegionFill, type GlassTileFill } from './skeletons'
+import { GLASS_EVENT_HEIGHT, GlassAsOf, GlassBoard, GlassHeaderActions, GlassTabs, glassView, StaffOnly, type GlassBoardFill, type GlassFill, type GlassRegionFill, type GlassTileFill } from './skeletons'
 
 // Glass (/glass): a live board of everything going on in Nightmail, for operators only (anyone else gets the app's "Page
 // not found", and the API the refusal of an operator path that doesn't exist). The figures are one read
@@ -58,60 +58,41 @@ export function points(last: number, previous: number, good: 'up' | 'down', what
 }
 
 function tiles(g: Glass): (key: string) => GlassTileFill {
-  const { signups, sending: s, delivery, receiving, builtin, support, screening, api, system, visitors } = g, week = support.week
+  const { signups, sending: s, support, api, system } = g, week = support.week
   const day = s.hourly.reduce((t, h) => ({ accepted: t.accepted + h.accepted, delivered: t.delivered + h.delivered, bounced: t.bounced + h.bounced, complained: t.complained + h.complained }), { accepted: 0, delivered: 0, bounced: 0, complained: 0 })
   const before = s.previous, rate = (part: number, whole: number) => share(part, whole)
   const delivered = rate(day.delivered, day.accepted), bounced = rate(day.bounced, day.accepted), complained = rate(day.complained, day.accepted)
-  const requests = sum(api.hourly.map(h => h.requests)), refused = sum(api.hourly.map(h => h.errors4xx)), failed = sum(api.hourly.map(h => h.errors5xx))
-  const failedRate = rate(failed, requests), alerts = system.alerts.critical + system.alerts.warning, tripped = builtin.parent?.trippedAt && (!builtin.parent.resetAt || builtin.parent.resetAt < builtin.parent.trippedAt)
-  const steps = delivery.steps, places = signups.places, ms = (n: number | null) => n === null ? '—' : `≤ ${number(n)} ms`
+  const requests = sum(api.hourly.map(h => h.requests)), failed = sum(api.hourly.map(h => h.errors5xx))
+  const failedRate = rate(failed, requests), alerts = system.alerts.critical + system.alerts.warning
+  const places = signups.places, ms = (n: number | null) => n === null ? '—' : `≤${number(n)} ms`
   const pct = (digits: number) => (n: number) => percent(n, digits)
+  const topAlert = system.alerts.top[0]
   const rows: Record<string, GlassTileFill> = {
-    sent: { value: <Tick value={day.accepted} />, hint: `${percent(share(sum(s.hourly.map(h => h.marketing)), day.accepted), 0)} marketing · ${compact(s.today.transactional + s.today.marketing)} today`, spark: s.hourly.map(h => h.accepted), delta: delta(day.accepted, before.accepted, null, 'Accepted') },
-    minute: { value: <Tick value={s.perMinute} />, hint: `≈ ${(s.perMinute / 60).toFixed(s.perMinute < 600 ? 1 : 0)}/s · hour’s peak ${number(Math.max(0, ...s.minutes))}`, spark: s.minutes },
+    health: { value: health[system.status][0], tone: health[system.status][1],
+      hint: alerts ? plural(alerts, 'open alert') : system.measuredAt ? `measured ${since(system.measuredAt)}` : 'never measured',
+      note: topAlert ? <span className={topAlert.severity === 'critical' ? 'ui-tone--danger' : 'ui-tone--warning'} title={topAlert.words}>{topAlert.label}</span>
+        : system.measuredAt ? 'All checks OK' : 'Waiting for check' },
+    errors: { value: requests ? <Tick value={failedRate} format={rateText} /> : '—',
+      tone: failedRate >= 0.01 ? 'danger' : failed || (api.p95Ms !== null && api.p95Ms > 2_500) ? 'warning' : undefined,
+      hint: `${compact(requests)} req · p50 ${ms(api.p50Ms)} · p95 ${ms(api.p95Ms)}`, spark: api.hourly.map(h => h.errors5xx),
+      delta: points(failedRate, share(api.previous.errors5xx, api.previous.requests), 'down', 'Failed', requests > 0 && api.previous.requests > 0) },
     delivered: { value: day.accepted ? <Tick value={delivered} format={pct(1)} /> : '—', hint: `${number(day.delivered)} delivered`, spark: s.hourly.map(h => h.delivered),
       delta: points(delivered, rate(before.delivered, before.accepted), 'up', 'Delivered', day.accepted > 0 && before.accepted > 0) },
     bounced: { value: day.accepted ? <Tick value={bounced} format={rateText} /> : '—', tone: zone(bounced, BOUNCE_LINE), hint: `${number(day.bounced)} · line at ${percent(BOUNCE_LINE, 0)}`, spark: s.hourly.map(h => h.bounced),
       delta: points(bounced, rate(before.bounced, before.accepted), 'down', 'Bounced', day.accepted > 0 && before.accepted > 0) },
     complained: { value: day.accepted ? <Tick value={complained} format={rateText} /> : '—', tone: zone(complained, COMPLAINT_LINE), hint: `${number(day.complained)} · line at ${percent(COMPLAINT_LINE, 1)}`, spark: s.hourly.map(h => h.complained),
       delta: points(complained, rate(before.complained, before.accepted), 'down', 'Complained', day.accepted > 0 && before.accepted > 0) },
-    signups: { value: <Tick value={signups.day.last} />, hint: `${number(signups.today.open + signups.today.waitlist)} today · ${number(signups.week.open + signups.week.waitlist)} in 7 d`, spark: signups.hourly, delta: delta(signups.day.last, signups.day.previous, 'up', 'Sign-ups') },
-    places: { value: <Tick value={places.open} />, hint: `of ${number(places.limit)} · ${number(places.waiting)} waiting${places.held ? ` · ${number(places.held)} held` : ''}`,
-      meter: { value: places.signedUp, max: Math.max(1, places.limit), tone: places.open ? 'neutral' : 'warning', label: `${number(places.signedUp)} of ${number(places.limit)} places taken` } },
-    received: { value: receiving.atLeast ? count({ n: receiving.day.last, atLeast: true }, 'counting stops at 10,000 a workspace') : <Tick value={receiving.day.last} />, hint: `${plural(receiving.spam, 'spam-flagged', 'spam-flagged')} today`, spark: receiving.hourly, delta: delta(receiving.day.last, receiving.day.previous, null, 'Received') },
-    queued: { value: s.queued.atLeast ? count(s.queued, 'counting stops there') : <Tick value={s.queued.n} />, hint: s.held.n ? `${number(s.held.n)}${s.held.atLeast ? '+' : ''} held for screening` : 'none held for screening' },
-    ramp: { value: <Tick value={delivery.ramping} />, hint: delivery.rampWaiting ? `${number(delivery.rampWaiting)} waiting for a step` : 'campaigns sent in steps' },
-    standing: { value: <Tick value={delivery.paused} />, tone: delivery.paused ? 'danger' : undefined, hint: `${number(steps.notice + steps.warn + steps.restrict)} on notice · ${number(delivery.held)} held`,
-      parts: [{ value: steps.ok, tone: 'success', label: 'OK' }, { value: steps.notice, tone: 'info', label: 'Notice' }, { value: steps.warn, tone: 'warning', label: 'Warn' }, { value: steps.restrict, tone: 'warning', label: 'Restrict' }, { value: steps.pause, tone: 'danger', label: 'Pause' }] },
-    builtin: { value: <Tick value={builtin.ready} />, tone: tripped || builtin.parent?.ok === false ? 'danger' : undefined,
-      hint: tripped ? `breaker tripped ${since(builtin.parent!.trippedAt)}` : builtin.parent && !builtin.parent.ok ? `parent down: ${builtin.parent.problem ?? 'unknown'}` : `of ${number(builtin.active)} · breaker closed`,
-      meter: { value: builtin.ready, max: Math.max(1, builtin.active), tone: tripped ? 'danger' : 'neutral', label: `${number(builtin.ready)} of ${number(builtin.active)} built-in domains ready` } },
-    visitors: { value: visitors.visitors.atLeast ? count(visitors.visitors, 'told apart among the first 50,000 visitor codes') : <Tick value={visitors.visitors.n} />, hint: `${number(visitors.views)} page views today`, spark: visitors.hourly, delta: delta(visitors.day.last, visitors.day.previous, 'up', 'Page views') },
+    sent: { value: <Tick value={day.accepted} />, hint: `${number(s.perMinute)}/min · ${compact(s.today.transactional + s.today.marketing)} today`, spark: s.hourly.map(h => h.accepted), delta: delta(day.accepted, before.accepted, null, 'Accepted') },
     // The support AI's week (api/src/support-inbox.ts supportWeek): of the conversations it could answer, how many ended
-    // with no person stepping in, beside anyone who got no reply and any email to the team that couldn't be sent (both
-    // should always be none: the tile turns red) and the ones a person handles by design. Whether the answers were right
-    // isn't measured, so the tile never says so. A support channel that isn't set up is said too (its registrations
-    // answer 404 SUPPORT_NOT_CONFIGURED).
+    // with no person stepping in, beside anyone who got no reply and any email to the team that couldn't be sent.
     support: { value: <><Tick value={week.withoutHuman} /><span className="glass-tile__share">of {number(week.answerable)}{week.atLeast ? '+' : ''}{week.answerable ? ` (${percent(share(week.withoutHuman, week.answerable), 0)})` : ''}</span></>,
       tone: support.noReply || support.staffMailFailed ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
       hint: !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? 'Email not configured' : !support.configured.chat ? 'Chat not configured' : 'answered without a human',
-      // The foot says what's waiting now, in words that fit one row on a phone at two-digit counts: the open conversations,
-      // then anyone who got no reply, or emails to the team that couldn't be sent (in red, the tile too; when both, the
-      // two counts alone), or, when nothing is wrong, the bug, billing and abuse conversations the share leaves out. The
-      // title has everything, with the emails of the week that passed the sender checks but got only the sign-in reply
-      // because the answering limits refused their general answer (nobody is told of them: a count to watch, never red).
       note: <span title={`${plural(support.open, 'conversation')} open now · ${plural(support.noReply, 'person', 'people')} waiting with no reply sent · ${plural(support.overLimit, 'email')} in 7 days got only the sign-in reply: over the answering limits · ${plural(support.staffMailFailed, 'email')} to the team not sent after 3 tries · ${plural(week.apart, 'conversation')} with a bug, billing, abuse, privacy or legal ticket: a person decides those, so the share counts them separately`}>
         {support.noReply && support.staffMailFailed ? <span className="ui-tone--danger">{number(support.noReply)} no reply · {number(support.staffMailFailed)} not sent</span>
           : support.staffMailFailed ? <span className="ui-tone--danger">{plural(support.staffMailFailed, 'email')} to team not sent</span>
           : <>{number(support.open)} open · {support.noReply ? <span className="ui-tone--danger">{number(support.noReply)} with no reply</span> : <>{number(week.apart)} bug or billing</>}</>}</span> },
-    screened: { value: <Tick value={screening.screened} />, hint: `${number(screening.rejected)} rejected`, spark: screening.hourly },
-    classifiers: { value: screening.agree === null ? '—' : <Tick value={screening.agree} format={pct(1)} />, hint: `flagged: Jev ${number(screening.jevFlagged)} · JevF ${number(screening.jevfFlagged)}`,
-      meter: { value: screening.agree ?? 0, max: 1, tone: screening.agree !== null && screening.agree < 0.95 ? 'warning' : 'neutral', label: 'Verdicts both classifiers agree on' } },
-    api: { value: <Tick value={requests} />, hint: `${requests ? percent(share(refused, requests), 1) : '0%'} refused (4xx)`, spark: api.hourly.map(h => h.requests), delta: delta(requests, api.previous.requests, null, 'Requests') },
-    errors: { value: requests ? <Tick value={failedRate} format={rateText} /> : '—', tone: failedRate >= 0.01 ? 'danger' : failed ? 'warning' : undefined, hint: `${number(failed)} failed (5xx)`, spark: api.hourly.map(h => h.errors5xx),
-      delta: points(failedRate, share(api.previous.errors5xx, api.previous.requests), 'down', 'Failed', requests > 0 && api.previous.requests > 0) },
-    latency: { value: ms(api.p50Ms), hint: `p50 · p95 ${ms(api.p95Ms)} · 15 min`, tone: api.p95Ms !== null && api.p95Ms > 2_500 ? 'warning' : undefined },
-    health: { value: health[system.status][0], tone: health[system.status][1], hint: alerts ? plural(alerts, 'open alert') : system.measuredAt ? `measured ${since(system.measuredAt)}` : 'never measured' },
+    signups: { value: <Tick value={signups.day.last} />, hint: `${number(places.open)} of ${number(places.limit)} open · ${number(places.waiting)} waiting`, spark: signups.hourly, delta: delta(signups.day.last, signups.day.previous, 'up', 'Sign-ups') },
   }
   return key => rows[key] ?? { value: '—' }
 }
@@ -128,30 +109,34 @@ const regionFill = (r: GlassRegion): GlassRegionFill => {
 }
 
 function board(g: Glass): GlassBoardFill {
-  const { signups, sending: s, delivery, builtin, money, screening, system, visitors } = g
+  const { signups, sending: s, delivery, receiving, builtin, money, screening, system, visitors } = g
   const f = signups.funnel, ses = system.ses, used = share(ses.total.sentLast24Hours, ses.total.max24HourSend)
+  const tripped = builtin.parent?.trippedAt && (!builtin.parent.resetAt || builtin.parent.resetAt < builtin.parent.trippedAt)
   const rows: Record<string, Record<string, GlassFill>> = {
     sending: {
       transactional: { hint: 'today', spark: s.hourly.map(h => h.accepted - h.marketing), value: number(s.today.transactional) },
       marketing: { hint: 'today', spark: s.hourly.map(h => h.marketing), value: number(s.today.marketing) },
-      held: { value: count(s.held, 'counting stops there'), tone: s.held.n ? 'warning' : undefined },
-      api: s.sendApi ? { hint: `p95 ≤ ${number(s.sendApi.p95Ms)}`, value: `≤ ${number(s.sendApi.p50Ms)}`, unit: 'ms' } : { hint: 'idle', value: '—' },
+      received: { hint: `${plural(receiving.spam, 'spam-flagged', 'spam-flagged')} today`, spark: receiving.hourly,
+        value: receiving.atLeast ? count({ n: receiving.day.last, atLeast: true }, 'counting stops at 10,000 a workspace') : number(receiving.day.last) },
+      queued: { hint: s.held.n ? `${number(s.held.n)}${s.held.atLeast ? '+' : ''} held for screening` : 'none held',
+        value: s.queued.atLeast ? count(s.queued, 'counting stops there') : number(s.queued.n), tone: s.held.n ? 'warning' : undefined },
+      ramp: { hint: delivery.rampWaiting ? `${number(delivery.rampWaiting)} waiting for a step` : 'campaigns in steps', value: number(delivery.ramping) },
       ...Object.fromEntries([0, 1].map(i => { const c = s.campaigns[i]; return [`campaign:${i}`, c ? { label: c.name, hint: c.workspace, value: percent(share(c.released, c.total), 0),
         meter: { value: c.released, max: Math.max(1, c.total), label: `${c.name}: ${number(c.released)} of ${number(c.total)} released` } } : empty(i === 0, 'No campaign sending')] })),
     },
     standing: {
       grades: { value: null, cells: [...grades.map(grade => number(delivery.grades[grade])), number(delivery.calibrating)] },
       steps: { value: null, cells: [delivery.steps.ok, delivery.steps.notice, delivery.steps.warn, delivery.steps.restrict, delivery.steps.pause].map(number) },
-      paused: { value: number(delivery.paused), tone: delivery.paused ? 'danger' : undefined },
-      held: { value: number(delivery.held), tone: delivery.held ? 'warning' : undefined },
+      paused: { hint: delivery.held ? `${number(delivery.held)} marketing held` : undefined, value: number(delivery.paused), tone: delivery.paused ? 'danger' : delivery.held ? 'warning' : undefined },
+      builtin: { hint: tripped ? `breaker tripped ${since(builtin.parent!.trippedAt)}` : builtin.parent && !builtin.parent.ok ? `parent down: ${builtin.parent.problem ?? 'unknown'}` : builtin.parent ? `${builtin.parent.name} · breaker closed` : 'no parent',
+        value: `${number(builtin.ready)} / ${number(builtin.active)}`, tone: tripped || builtin.parent?.ok === false ? 'danger' : undefined },
       revoked: { value: number(builtin.revoked) },
-      parent: builtin.parent ? { hint: builtin.parent.name, value: <StatusBadge status={builtin.parent.ok ? 'OK' : 'Down'} tone={builtin.parent.ok ? 'success' : 'danger'} /> } : { hint: 'none', value: '—' },
     },
     system: {
-      health: { hint: system.measuredAt ? `measured ${since(system.measuredAt)}` : 'never measured', value: <StatusBadge status={health[system.status][0]} tone={health[system.status][1]} /> },
       ...Object.fromEntries([0, 1, 2].map(i => { const a = system.alerts.top[i]; return [`alert:${i}`, a ? { label: a.label, hint: a.words, value: ago(a.since), tone: a.severity === 'critical' ? 'danger' : 'warning' } : empty(i === 0, 'No open alerts')] })),
+      screening: { hint: [`${number(screening.rejected)} rejected`, screening.agree !== null ? `${percent(screening.agree, 1)} agree` : null, screening.jevFailed + screening.jevfFailed ? `${number(screening.jevFailed + screening.jevfFailed)} err` : null].filter(Boolean).join(' · '),
+        value: number(screening.screened), tone: (screening.agree !== null && screening.agree < 0.95) || screening.jevFailed + screening.jevfFailed ? 'warning' : undefined },
       deploy: { hint: system.deploy.at ? since(system.deploy.at) : undefined, value: system.deploy.sha?.slice(0, 7) ?? '—' },
-      classifiers: { hint: `Jev · JevF, of ${number(screening.compared.n)}${screening.compared.atLeast ? '+' : ''} in 24 h`, value: `${number(screening.jevFailed)} · ${number(screening.jevfFailed)}`, tone: screening.jevFailed + screening.jevfFailed ? 'warning' : undefined },
     },
     money: {
       creditToday: { value: usd(money.creditToday) },
@@ -160,7 +145,8 @@ function board(g: Glass): GlassBoardFill {
       usage: { value: usd(money.usageMonth) },
     },
     visitors: {
-      views: { hint: visitors.through ? `through ${time(visitors.through).slice(0, 5)} UTC` : undefined, spark: visitors.hourly, value: number(visitors.views) },
+      views: { hint: `${number(visitors.views)} views${visitors.through ? ` · through ${time(visitors.through).slice(0, 5)} UTC` : ''}`, spark: visitors.hourly,
+        value: visitors.visitors.atLeast ? count(visitors.visitors, 'told apart among the first 50,000 visitor codes') : number(visitors.visitors.n) },
       ...Object.fromEntries([0, 1, 2].map(i => { const r = visitors.referrers[i]; return [`referrer:${i}`, r ? { label: r.host, value: number(r.views) } : empty(i === 0, 'No referrers yet')] })),
     },
   }
@@ -249,7 +235,7 @@ function GlassView() {
   const asOf = view === 'live' ? <GlassAsOf at={glass && <span title={stalled ? 'The last refresh failed: trying again' : 'Refreshed every 5 seconds'}>{time(glass.generatedAt)} UTC</span>} state={stalled ? 'stalled' : 'live'} />
     : <GlassAsOf at={dlv && <span title="Refreshed every minute">{time(dlv.generatedAt)} UTC</span>} state={deliverability.isError ? 'stalled' : 'live'} />
   return <>
-    <PageHeader title="Glass" actions={asOf} />
+    <PageHeader title="Glass" actions={<GlassHeaderActions asOf={asOf} />} />
     <GlassTabs value={view} onValueChange={next => navigate(next === 'live' ? '/glass' : '/glass?view=deliverability')} />
     {view === 'deliverability' ? <DeliverabilityView />
       : query.isError && !glass ? <ErrorState error={query.error} onRetry={() => void query.refetch()} />

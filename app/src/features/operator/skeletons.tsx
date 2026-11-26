@@ -291,11 +291,10 @@ export type GlassRegionFill = { region: ReactNode; place: ReactNode; sending: Re
   meter?: { value: number; max: number; tone?: Tone; label: string }; checked: ReactNode; empty?: boolean }
 export type GlassBoardFill = { tile: (key: string) => GlassTileFill; funnel: (key: string) => { value: ReactNode; share?: ReactNode; meter: { value: number; max: number } }
   regions: GlassRegionFill[]; total: GlassRegionFill; row: (group: string, row: string) => GlassFill }
+// Eight health-first tiles (2×4 desktop, 4×2 phone): Health leads so an operator on a phone sees platform status at once.
 export const glassTiles = [
-  ['sent', 'Sent · 24 h'], ['minute', 'Per minute'], ['delivered', 'Delivered'], ['bounced', 'Bounced'], ['complained', 'Complained'],
-  ['signups', 'Sign-ups · 24 h'], ['places', 'Open places'], ['received', 'Received · 24 h'], ['queued', 'Queued'], ['ramp', 'On the ramp'],
-  ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support · 7 d'], ['screened', 'Screened · 24 h'],
-  ['classifiers', 'Classifiers agree'], ['api', 'API · 24 h'], ['errors', 'API errors'], ['latency', 'API latency'], ['health', 'Health'],
+  ['health', 'Health'], ['errors', 'API errors'], ['delivered', 'Delivered'], ['bounced', 'Bounced'],
+  ['complained', 'Complained'], ['sent', 'Sent · 24 h'], ['support', 'Support · 7 d'], ['signups', 'Sign-ups'],
 ] as const
 export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
 /** Region rows are kept for at least this many regions, so a page with fewer draws the same height. */
@@ -304,13 +303,13 @@ const STEP_SLOTS = ['OK', 'Notice', 'Warn', 'Restrict', 'Pause']
 const GRADE_SLOTS = ['A+', 'A', 'B', 'C', 'D', 'F', 'Warmup']
 const slots = (prefix: string, n: number, extra: Omit<GlassRowDef, 'key'> = {}) => Array.from({ length: n }, (_, i): GlassRowDef => ({ key: `${prefix}:${i}`, ...extra }))
 export const glassGroups: GlassGroupDef[] = [
-  { key: 'sending', title: 'Sending now', to: ['/operator?view=health', 'Health'], rows: [{ key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
-    { key: 'held', label: 'Held for screening' }, { key: 'api', label: 'Send API' }, ...slots('campaign', 2, { meter: true })] },
-  { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }, { key: 'paused', label: 'Paused' },
-    { key: 'held', label: 'Marketing held' }, { key: 'revoked', label: 'Built-in domains revoked' }, { key: 'parent', label: 'Built-in parent' }] },
-  { key: 'system', title: 'System', to: ['/operator?view=health', 'Health'], rows: [{ key: 'health', label: 'Health' }, ...slots('alert', 3), { key: 'deploy', label: 'Deploy' }, { key: 'classifiers', label: 'Classifier errors' }] },
+  { key: 'sending', title: 'Sending & receiving', to: ['/operator?view=health', 'Health'], rows: [{ key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
+    { key: 'received', label: 'Received · 24 h', spark: true }, { key: 'queued', label: 'Queued' }, { key: 'ramp', label: 'On the ramp' }, ...slots('campaign', 2, { meter: true })] },
+  { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }, { key: 'paused', label: 'Paused senders' },
+    { key: 'builtin', label: 'Built-in domains' }, { key: 'revoked', label: 'Built-in revoked' }] },
+  { key: 'system', title: 'System', to: ['/operator?view=health', 'Health'], rows: [...slots('alert', 3), { key: 'screening', label: 'Screened · 24 h' }, { key: 'deploy', label: 'Deploy' }] },
   { key: 'money', title: 'Money', rows: [{ key: 'creditToday', label: 'Credit today' }, { key: 'creditMonth', label: 'Credit this month', spark: true }, { key: 'owed', label: 'Owed' }, { key: 'usage', label: 'Usage this month' }] },
-  { key: 'visitors', title: 'Visitors', rows: [{ key: 'views', label: 'Page views today', spark: true }, ...slots('referrer', 3)] },
+  { key: 'visitors', title: 'Visitors', rows: [{ key: 'views', label: 'Visitors today', spark: true }, ...slots('referrer', 3)] },
 ]
 
 function GlassTile({ label, fill }: { label: string; fill?: GlassTileFill }) {
@@ -400,9 +399,12 @@ export const glassView = (search: string): GlassView => new URLSearchParams(sear
 const glassViews = [{ value: 'live', label: 'Live' }, { value: 'deliverability', label: 'Deliverability' }]
 export const GlassTabs = ({ value, onValueChange }: { value: GlassView; onValueChange?: (view: GlassView) => void }) =>
   <div className="glass-views"><Tabs value={value} onValueChange={view => onValueChange?.(view as GlassView)} items={glassViews} label="Glass views" disabled={!onValueChange} /></div>
+export function GlassHeaderActions({ asOf }: { asOf: ReactNode }) {
+  return <div className="cluster">{asOf}<Link className="ui-button ui-button--ghost ui-button--sm" to="/operator">Operator <ArrowUpRight size={16} aria-hidden="true" /></Link></div>
+}
 export function GlassSkeleton() {
   const view = glassView(useLocation().search)
-  return <><PageHeader title="Glass" actions={<GlassAsOf />} /><GlassTabs value={view} />
+  return <><PageHeader title="Glass" actions={<GlassHeaderActions asOf={<GlassAsOf />} />} /><GlassTabs value={view} />
     <LoadingRegion label={view === 'live' ? 'Loading glass' : 'Loading deliverability'}>{view === 'live' ? <GlassBoard /> : <DeliverabilityBoard controls={<DeliverabilityControls {...deliverabilitySettings(useLocation().search)} />} />}</LoadingRegion></>
 }
 
