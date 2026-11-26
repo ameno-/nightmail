@@ -1086,6 +1086,13 @@ export type Topic = {
     archivedAt: string | null;
     createdAt: string;
     updatedAt: string;
+    /**
+     * With counts=true on listTopics: how many contacts have opted in to the topic and out of it (each recorded choice, a deleted contact’s included), as of the read. null when counting took longer than its time limit.
+     */
+    counts?: {
+        optedIn: number;
+        optedOut: number;
+    } | null;
 };
 
 export type AudienceQueryResult = {
@@ -2345,6 +2352,14 @@ export type CampaignAudienceCounts = {
         dead: number;
         no_mail_domain: number;
     };
+    /**
+     * With a topic: the subscribed contacts it leaves out (who opted out of it, or for a topic only people who opt in get, who didn’t). Counted in unsubscribed, not in eligible.
+     */
+    topicExcluded?: number;
+    /**
+     * The topic’s effect on this list couldn’t be counted in time: eligible and topicExcluded are estimated from the workspace’s choices about the topic. Sending counts it exactly.
+     */
+    approximate?: true;
     /**
      * With readiness=true: the send review of a marketing campaign with a sender; null for a required notice or a draft without a sender.
      */
@@ -10148,6 +10163,10 @@ export type ListTopicsData = {
          * true lists the archived topics instead.
          */
         archived?: 'true' | 'false';
+        /**
+         * true adds each topic’s counts (counts).
+         */
+        counts?: 'true' | 'false';
     };
     url: '/v1/topics';
 };

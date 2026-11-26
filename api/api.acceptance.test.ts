@@ -13714,8 +13714,9 @@ describe('Import property boundaries', () => {
   test('consent unsub index exists, committed imports keep opaque sample IDs for support, and retention scrubs rows/errors honestly', async t => {
     await simulatedSesFixture(t, async ({ runtime, db, local }) => {
       const wid = runtime.config.workspaceId;
-      const [{ valid }] = (await db.query(`SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass('audience_consent_unsub_occurred')`)).rows;
+      const [{ valid }] = (await db.query(`SELECT indisvalid AS valid FROM pg_index WHERE indexrelid = to_regclass('audience_consent_unsub_people')`)).rows;
       assert.equal(valid, true, 'Partial unsubscribe index must be valid.');
+      assert.equal((await db.query(`SELECT to_regclass('audience_consent_unsub_occurred') AS old`)).rows[0].old, null, 'It replaced the index without the contact.');
 
       const list = ok(await local('POST', '/v1/lists', { name: 'Retention List' }), 201);
       const preview = ok(await local('POST', '/v1/contact-imports', {
@@ -20998,6 +20999,10 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     assert.equal(campaign.draft.topicId, news.id);
     const counted = ok(await http('GET', `/v1/campaigns/${campaign.id}/audience`, key.secret));
     assert.deepEqual([counted.matched, counted.eligible, counted.unsubscribed], [4, 2, 2], 'Ana left the topic and Cai everything: Ben and Dee are reached.');
+    assert.deepEqual([counted.topicExcluded, counted.approximate], [1, undefined], 'The topic itself leaves out Ana alone; Cai is unsubscribed from everything.');
+    const topicCounts = async () => Object.fromEntries((await allPages('/v1/topics?counts=true', key.secret)).filter(row => [news.id, events.id].includes(row.id)).map(row => [row.id === news.id ? 'news' : 'events', row.counts]));
+    assert.deepEqual(await topicCounts(), { news: { optedIn: 0, optedOut: 1 }, events: { optedIn: 2, optedOut: 0 } }, 'Each topic counts its choices: Ana left news; Ben and Cai joined events.');
+    assert.equal((await allPages('/v1/topics', key.secret)).find(row => row.id === news.id)?.counts, undefined, 'Counts only when asked for.');
     assert.equal(ok(await http('GET', `/v1/campaigns/${(await campaignFixture(t, key.secret, { listId: list.id })).id}/audience`, key.secret)).eligible, 3, 'Without the topic, Ana is reached.');
     assert.equal(ok(await http('POST', `/v1/campaigns/${campaign.id}/schedule`, key.secret, { revision: campaign.revision, scheduledAt: new Date(Date.now() + 3_600_000).toISOString() }), 202).queued, 2);
     // Ben leaves the topic after the capture, and the topic is archived: the dispatcher still skips him, as unsubscribed from it.
@@ -21062,7 +21067,7 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // The topic's button turns that topic off, as the one-click does.
     assert.match(await post(anas, 'confirm=footer'), /You’re unsubscribed[\s\S]*Back to your email preferences/);
     const after = ok(await http('GET', anas));
-    assert.ok(after.includes(`You’ve unsubscribed from ${escaped(news.name)} emails. To get them again, ask the sender.`) && !after.includes('name="confirm"'));
+    assert.ok(!after.includes(`Unsubscribe from ${escaped(news.name)}`) && !after.includes('name="confirm"'), 'Left, the topic has no button; its own row says so.');
     // The topic she left is shown as off with no control: a disabled box with no name, so nothing is posted for it.
     assert.ok(after.includes('You’ve unsubscribed from this. To get it again, ask the sender.') && !checked(after, news.id) && !offered(after, news.id) && /<input type="checkbox" disabled/.test(after) && !after.includes('name="preferences" value="save"'));
     const left = await recorded(ana);
@@ -21100,6 +21105,14 @@ describe('Hosted unsubscribe and dispatch-time consent', () => {
     // The workspace itself still sets a topic with its own credentials: the API is unchanged.
     ok(await consent(key.secret, ben.id, 'subscribed', { topicId: events.id }));
     assert.deepEqual(await states(ben, events.id), [[events.id, true]]);
+    // One link saves preferences at most 10 times a minute: past that the page says so, with Retry-After, and nothing more is
+    // done. Its opt-outs still go through: the mailbox's one-click and the confirmation are never refused.
+    const replies = [];
+    for (let i = 0; i < 25; i++) replies.push(await http('POST', bens, undefined, `preferences=save&shown=${news.id}&topic=${news.id}`, form));
+    const limited = replies.find(reply => reply.status === 429);
+    assert.ok(limited && limited.headers.get('retry-after') === '60' && /Too many requests/.test(String(limited.body)) && replies.filter(reply => reply.status === 200).length >= 9, replies.map(reply => reply.status).join());
+    assert.match(ok(await http('POST', bens)), /unsubscribed/, 'A one-click POST is never refused by the link’s limit.');
+    assert.match(ok(await http('POST', bens, undefined, 'confirm=footer', form)), /unsubscribed/, 'Nor is the confirmation.');
   });
 
   test('a campaign’s own unsubscribe page changes only the footer link: List-Unsubscribe keeps its one HTTPS one-click address', async () => {

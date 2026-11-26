@@ -3450,6 +3450,25 @@
           },
           "updatedAt": {
             "type": "string"
+          },
+          "counts": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "optedIn": {
+                "type": "integer"
+              },
+              "optedOut": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "optedIn",
+              "optedOut"
+            ],
+            "description": "With counts=true on listTopics: how many contacts have opted in to the topic and out of it (each recorded choice, a deleted contact’s included), as of the read. null when counting took longer than its time limit."
           }
         },
         "required": [
@@ -7322,6 +7341,17 @@
               "dead",
               "no_mail_domain"
             ]
+          },
+          "topicExcluded": {
+            "type": "integer",
+            "description": "With a topic: the subscribed contacts it leaves out (who opted out of it, or for a topic only people who opt in get, who didn’t). Counted in unsubscribed, not in eligible."
+          },
+          "approximate": {
+            "type": "boolean",
+            "enum": [
+              true
+            ],
+            "description": "The topic’s effect on this list couldn’t be counted in time: eligible and topicExcluded are estimated from the workspace’s choices about the topic. Sending counts it exactly."
           },
           "readiness": {
             "type": [
@@ -29552,6 +29582,21 @@
             "required": false,
             "description": "true lists the archived topics instead.",
             "name": "archived",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ],
+              "default": "false",
+              "description": "true adds each topic’s counts (counts)."
+            },
+            "required": false,
+            "description": "true adds each topic’s counts (counts).",
+            "name": "counts",
             "in": "query"
           }
         ],
