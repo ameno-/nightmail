@@ -226,8 +226,6 @@ export type Entry = {
   /** What the vendor's buyer may count on that Nightmail doesn't do ("signup forms", "a web archive"): said on the page
    *  and in its twin as "Not in the box", so a comparison on price doesn't stand in for one on features. */
   without?: string[]
-  /** Questions the page answers, shown on it and given to search engines as an FAQ (FAQPage). */
-  faq?: { question: string; answer: string }[]
 }
 /** An entry as the pages use it: with its three sizes and each fader size as the usage both prices are for, and its
  *  search result's title and description (searchWords). */
@@ -364,6 +362,5 @@ export function entryProblems(entry: Entry, today: string, panels: readonly stri
   if (entry.sizes.length !== 3 || entry.sizes.some(size => !(size > 0))) at('sizes', 'must be three sizes above zero.')
   if (entry.steps.length < 2 || entry.steps.some((size, i) => i > 0 && size <= entry.steps[i - 1]!)) at('steps', 'must be at least two sizes, smallest first.')
   if (entry.panels.length !== PANEL_SLOTS || new Set(entry.panels).size !== PANEL_SLOTS || entry.panels.some(id => !panels.includes(id))) at('panels', `must be ${PANEL_SLOTS} different panels of ${panels.join(', ')}.`)
-  for (const [i, item] of (entry.faq ?? []).entries()) if (!item.question.trim() || !item.answer.trim()) at(`faq[${i}]`, 'needs a question and its answer.')
   return problems
 }
