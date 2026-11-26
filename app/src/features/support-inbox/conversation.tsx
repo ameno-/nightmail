@@ -531,7 +531,7 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const others = customer.conversations
   const target = detail.replyTarget
   const replies: ReactNode = c.channel === 'email' ? target.address ? <span className="sinbox-address"><PrivateAddress value={target.address} />{!target.verified && <StatusBadge status="Didn’t pass DMARC" tone="warning" />}</span> : '—'
-    : target.address ? 'Their chat, or by email once it’s closed' : 'Their chat'
+    : target.address ? <>Their chat, or <PrivateAddress value={target.address} /> once it’s closed</> : 'Their chat'
   const extra: [string, ReactNode][] = [
     ...c.channel !== 'agent_feedback' && c.status !== 'closed' ? [['Replies go to', replies] as [string, ReactNode]] : [],
     ...c.ticket ? [['Ticket', <span title={c.ticket.id}>{ticketText(c)}</span>] as [string, ReactNode]] : [],
