@@ -8,6 +8,8 @@ import { vendorAlternatives } from './alternatives.ts'
 import { ALTERNATIVES_VENDORS, PRICING_VENDORS } from './registry.ts'
 import { vendorPricing } from './vendor-pricing.ts'
 import { hubCard, hubDoc } from '../page/hub.ts'
+import { factsFor, rowLines, SHARED_FACTS } from '../page/facts.ts'
+import { PANELS } from '../panels.ts'
 
 // The pages that answer a question about email prices (docs/doc.ts), every one the registry names (registry.ts). pages.ts
 // lists them among the price pages, so each gets what a price page gets (app/price-pages.ts): its own HTML with the words
@@ -58,6 +60,14 @@ export function docProblems(): string[] {
   for (const { path, card, answer } of [...DOCS.map(doc => ({ path: doc.path, card: doc.cardWords.caption, answer: doc.answer })), { path: '/compare', card: hubCard().caption, answer: hubDoc().answer }]) {
     const day = card.match(/checked ([^.]+)\./)?.[1]
     if (day && !pageText(answer).includes(`checked ${day}`)) problems.push(`${path}'s card says "checked ${day}", which its page's caption doesn't.`)
+  }
+  // What a vendor has that Nightmail doesn't can't be something Nightmail's own lists say it has: the facts every page
+  // says, the product's panels, and the comparison's own lines (its "With Nightmail" list).
+  for (const c of Object.values(comparisons)) for (const item of c.gaps ?? []) {
+    const ours = [...Object.values(SHARED_FACTS).map(fact => fact.text), ...Object.values(PANELS).flatMap(panel => [panel.title, panel.line]), ...factsFor(rowLines(c.rows)),
+      ...c.rows.map(row => row.source ? row.text.replace(row.note ?? '', '') : row.text)]
+    const says = ours.find(line => item.subject.test(line))
+    if (says) problems.push(`/compare/${c.slug} lists "${item.what}" as something ${c.offer.vendor} has that Nightmail doesn't, and Nightmail's own facts say "${says}".`)
   }
   if (new Set(DOCS.map(doc => doc.path)).size !== DOCS.length) problems.push('Two pages have the same address (docs/registry.ts).')
   return problems

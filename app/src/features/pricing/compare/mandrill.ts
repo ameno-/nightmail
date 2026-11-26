@@ -1,4 +1,4 @@
-import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Plan } from '../prices.ts'
+import { LANGUAGES, fact, formatCount, gap, nightmail, readOn, type Entry, type Offer, type Plan } from '../prices.ts'
 
 // Nightmail vs Mandrill (/compare/mandrill): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailchimp's own pages on CHECKED. Mandrill is Mailchimp's transactional email (renamed Mailchimp Transactional in
@@ -6,6 +6,7 @@ import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Plan
 // Mailchimp Standard or Premium plan, which these prices leave out.
 const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
+const GAPS_READ = readOn('2026-11-26')
 
 const MANDRILL = 'https://mailchimp.com/pricing/transactional-email/'
 const BLOCK = 25_000
@@ -48,4 +49,10 @@ export const mandrill: Entry = {
   ],
   // Mandrill's readers first see the API, the allowances and the campaigns it leaves to Mailchimp.
   panels: ['send', 'free', 'campaign', 'receive', 'agent', 'domain', 'route'],
+  // What Mandrill offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
+  gaps: [
+    gap('a dedicated IP', 'Mandrill sells a dedicated IP for $29.95 a month.', /\bdedicated IPs?\b/i, GAPS_READ(MANDRILL, 'Add dedicated IP for $29.95 / month (Optional)')),
+    gap('transactional SMS', 'Mailchimp Transactional sends SMS messages from the same API as its email.', /\bSMS\b|\btext messages?\b/i, GAPS_READ('https://mailchimp.com/features/transactional-email/', 'Transactional SMS Trigger both transactional email and SMS messages from a single, reliable API')),
+    gap('client libraries for PHP, Ruby and Python', 'Mandrill has client libraries for Node, PHP, Ruby and Python.', LANGUAGES, GAPS_READ('https://mailchimp.com/developer/transactional/guides/quick-start/', 'To install the client library for your preferred language: cURL Node PHP Ruby Python')),
+  ],
 }

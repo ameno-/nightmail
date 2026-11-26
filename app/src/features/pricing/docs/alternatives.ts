@@ -1,10 +1,10 @@
 // (With extensions: the build's config imports this file, through pages.ts.)
 import { productName, publicOrigin } from '../../../../../api/src/brand.ts'
-import { dayOf, fitWords, formatCount, money, nightmail, quote, shownSources, type Comparison, type Source } from '../prices.ts'
+import { dayOf, fitWords, formatCount, listOf, money, nightmail, quote, shownSources, type Comparison, type Source } from '../prices.ts'
 import { billAt, groupOf, ORDERED, perSize } from '../page/comparison.ts'
 import { factsSection, rowLines } from '../page/facts.ts'
 import { comparisonQuestions } from '../questions.ts'
-import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
+import { pageName, plain, type Doc, type Section, type Table, type Text } from './doc.ts'
 
 // A vendor's alternatives page (/alternatives/<slug>, "SendGrid alternatives"): Nightmail's price and the others' at the
 // vendor's own three sizes, Get started, and one table (Ryan: "headline, button, comparison underneath"): Nightmail's row
@@ -33,6 +33,19 @@ export function checkedOn(days: string[]) {
   return a[1] === b[1] && a[2] === b[2] ? `${a[0]}–${dayOf(last)}` : a[2] === b[2] ? `${a[0]} ${a[1]} to ${dayOf(last)}` : `${dayOf(first)} to ${dayOf(last)}`
 }
 export const DASH = ' A dash: no price read for that size.'
+
+/** What a vendor offers that Nightmail doesn't (its entry's gaps), as a section of a page's Markdown copy: each line in the
+ *  vendor's own terms, linked to the page it was read on, under the days they were read. One generator, so the copy,
+ *  its twin and llms-full.txt say the same. */
+export function gapsSection(c: Comparison): Section {
+  const vendor = c.offer.vendor, gaps = c.gaps ?? []
+  return { id: 'gaps', title: `What ${vendor} has that ${productName} does not`, blocks: [
+    { kind: 'p', text: [`Read on ${vendor}’s own pages, ${checkedOn(gaps.map(item => item.source.checked))}. ${productName} offers none of these.`] },
+    { kind: 'list', items: gaps.map(item => [`${item.text} (`, { text: pageName(item.source.url), href: item.source.url }, ')']) },
+  ] }
+}
+/** The same, as one line: "Not in Nightmail: dedicated IPs, …". */
+export const gapsLine = (c: Comparison) => `Not in ${productName}: ${listOf((c.gaps ?? []).map(item => item.what))}.`
 export const spelled = (n: number) => ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][n] ?? String(n)
 export const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 
@@ -84,14 +97,15 @@ export function vendorAlternatives(c: Comparison): Doc {
 
   // The pages each priced cell was read on, a script or data file as the pricing page it belongs to (prices.ts).
   const read = (rows: (typeof group)[number][]) => rows.flatMap(({ o, bills }) => shownSources(bills.flatMap(b => { const q = quote(o.offer, b.u); return q.kind === 'price' ? [q.tier.source, ...q.payg?.tier.overageSource ? [q.payg.tier.overageSource] : []] : [] }), o.offer))
-  const cited = read([self, ...shown]), all: Source[] = [...new Map(read(group).map(source => [source.url, source])).values()]
   const lacks = comparisonQuestions(c).find(item => item.id === 'lacks')
+  const cited = read([self, ...shown]), all: Source[] = [...new Map([...read(group), ...(c.gaps ?? []).map(item => item.source)].map(source => [source.url, source])).values()]
   const copySections: Section[] = [
     { id: 'every', title: `${groupOf(c).title}: every one compared, at the same sizes`, blocks: [table([self, ...group.filter(row => row !== self)], [
       `${assume}, each service’s least expensive plan that holds it. Monthly list prices before tax, no promotions, read ${when} on each service’s pricing page (its comparison names the page and quotes it). ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${claim}${dash(group)}`,
     ])] },
     ...left.length ? [{ id: 'left', title: 'Not on the page’s table', blocks: [{ kind: 'p' as const, text: [`The page lists the ${shown.length} lowest of those with a price read at ${formatCount(sizes[1]!)}${m.per === 'contact' ? ' contacts' : ' emails a month'}, besides ${vendor}, so it stays one table on a phone. The others here: ${left.map(r => r.o.offer.vendor).join(', ')}. Every comparison is on `, { text: 'the comparisons page', href: '/compare' }, '.'] }] }] : [],
     ...lacks ? [{ id: 'lacks', title: lacks.question, blocks: [{ kind: 'p' as const, text: [lacks.answer] }] }] : [],
+    ...c.gaps?.length ? [gapsSection(c)] : [],
   ]
 
   // ---------------------------------------------------------------- its title, description, links and card

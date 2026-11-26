@@ -234,7 +234,31 @@ export type Entry = {
   /** What the vendor's buyer may count on that Nightmail doesn't do ("signup forms", "a web archive"): said on the page
    *  and in its twin as "Not in the box", so a comparison on price doesn't stand in for one on features. */
   without?: string[]
+  /** What the vendor offers that Nightmail doesn't (up to five), each read on the vendor's own page: an alternatives
+   *  page's Markdown copy says them (docs/alternatives.ts, gapsSection). */
+  gaps?: Gap[]
 }
+/** Something a vendor offers that Nightmail doesn't, in the vendor's own terms. Each is two claims: the vendor's page says
+ *  it has it (source), and Nightmail doesn't, checked against its API reference, dashboard and billing code (the pull
+ *  request that adds it says where). The build stops on one without its source (entryProblems) and on one whose subject a
+ *  "With Nightmail" fact, an "Also in the box" panel or the comparison's own lines name (docs/index.ts, docProblems). */
+export type Gap = {
+  /** A few words for a list: "dedicated IPs". */
+  what: string
+  /** The line, as the vendor's page puts it: what it is, and on which plans or at what price where the page says. */
+  text: string
+  /** The words a Nightmail fact naming the same thing would use. */
+  subject: RegExp
+  source: Source
+}
+export const gap = (what: string, text: string, subject: RegExp, source: Source): Gap => ({ what, text, subject, source })
+/** Subjects several vendors' gaps share. */
+export const LANGUAGES = /\b(?:Python|Ruby|PHP|Java|Rust|C#|Golang)\b|\.NET\b|\b(?:libraries|SDKs) for\b/
+export const AUTOMATION = /\bautomat(?:ion|ions|ed|es|e)\b|\bworkflows?\b|\bdrip\b/i
+/** Words that judge rather than describe; a gap says what a thing is (Ryan: no "better", "more mature", "enterprise-grade"). */
+export const JUDGEMENT = /\b(?:better|best|more mature|mature|enterprise-grade|leading|superior|powerful|robust|reliable|world-class|advanced|premium|seamless)\b/i
+/** At most this many gaps a vendor. */
+export const MAX_GAPS = 5
 /** An entry as the pages use it: with its three sizes and each fader size as the usage both prices are for, and its
  *  search result's title and description (searchWords). */
 export type Comparison = Omit<Entry, 'sizes'> & {
@@ -396,6 +420,12 @@ export function entryProblems(entry: Entry, today: string, panels: readonly stri
     if (row.source || row.text.includes(entry.vendor)) checkSource(`rows[${r}] (${row.short ?? row.text.slice(0, 40)})`, row.source)
   })
   if (!entry.rows.length) at('rows', 'is empty: the page lists what Nightmail has that the competitor charges for or lacks.')
+  if ((entry.gaps?.length ?? 0) > MAX_GAPS) at('gaps', `lists ${entry.gaps!.length}: at most ${MAX_GAPS}.`)
+  entry.gaps?.forEach((item, i) => {
+    checkSource(`gaps[${i}] (${item.what})`, item.source)
+    if (!item.what.trim() || !item.text.trim()) at(`gaps[${i}]`, 'needs a few words and a line.')
+    if (JUDGEMENT.test(item.what) || JUDGEMENT.test(item.text)) at(`gaps[${i}] (${item.what})`, `judges ("${(item.what + ' ' + item.text).match(JUDGEMENT)![0]}"): say what it is, in the vendor's terms.`)
+  })
   if (entry.sizes.length !== 3 || entry.sizes.some(size => !(size > 0))) at('sizes', 'must be three sizes above zero.')
   if (entry.steps.length < 2 || entry.steps.some((size, i) => i > 0 && size <= entry.steps[i - 1]!)) at('steps', 'must be at least two sizes, smallest first.')
   if (entry.panels.length !== PANEL_SLOTS || new Set(entry.panels).size !== PANEL_SLOTS || entry.panels.some(id => !panels.includes(id))) at('panels', `must be ${PANEL_SLOTS} different panels of ${panels.join(', ')}.`)

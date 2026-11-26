@@ -1,10 +1,11 @@
-import { fact, formatCount, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { LANGUAGES, fact, formatCount, gap, nightmail, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs Mailgun (/compare/mailgun): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Mailgun's own pages on CHECKED: the plans on its pricing page (pricing.md is its text), and each plan's overage in its
 // help centre.
 const CHECKED = '2026-11-25'
 const read = readOn(CHECKED)
+const GAPS_READ = readOn('2026-11-26')
 
 const MAILGUN = 'https://www.mailgun.com/pricing/'
 const PRICES = 'https://www.mailgun.com/pricing.md'
@@ -56,4 +57,11 @@ export const mailgun: Entry = {
   ],
   // Mailgun's readers first see the API, the allowances and routing.
   panels: ['send', 'free', 'route', 'receive', 'agent', 'domain', 'campaign'],
+  // What it offers that Nightmail doesn't, read on its own pages on 26 Nov 2026 (prices.ts, Gap).
+  gaps: [
+    gap('dedicated IPs', 'Mailgun includes one dedicated IP with its Foundation 100k, Growth and Scale plans.', /\bdedicated IPs?\b/i, GAPS_READ(MAILGUN, 'One dedicated IP is included with Foundation 100k, Growth and Scale plans.')),
+    gap('send time optimization', 'Mailgun’s Scale plan includes send time optimization.', /\bsend[- ]time\b/i, GAPS_READ(MAILGUN, 'Everything on Foundation plus... SAML SSO 5,000 email validations Dedicated IP pools Send time optimization')),
+    gap('inbox placement tests', 'Mailgun’s Optimize product tests inbox placement: which folder an email will land in.', /\binbox placement\b|\bseed (?:list|test)/i, GAPS_READ('https://www.mailgun.com/features/email-inbox-placement/', 'Inbox placement tools give you proactive insight into which folder your email will land in')),
+    gap('SDKs for Go, PHP, Java, Ruby and Python', 'Mailgun has SDKs for Go, Node.js, PHP, Java, Ruby and Python.', LANGUAGES, GAPS_READ('https://documentation.mailgun.com/docs/mailgun/sdk/introduction', 'Our SDKs support multiple programming languages, allowing you to seamlessly send, receive, and track emails within your applications. Go Node.js PHP Java Ruby Python')),
+  ],
 }
