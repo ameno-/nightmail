@@ -15,7 +15,7 @@ class StartError extends Error { constructor(readonly status: number, readonly c
 // its token expires. Keyed by user and workspace in sessionStorage; cleared on sign-out or account change.
 type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string }
 const storageKey = (userId: string, workspaceId: string) => `bane.support.conversation.${userId}.${workspaceId}`
-// `parked`: the words in the box Nightmail couldn't take yet (store.ts), sent again while the box still holds exactly them.
+// `parked`: words not yet with the chat or filed (store.ts), sent on their own while the box still holds exactly them.
 const draftKey = (mode: 'demo' | 'live', userId: string, workspaceId: string, slot: 'draft' | 'parked' = 'draft') => `bane.support.${slot}.${mode}.${userId}.${workspaceId}`
 /** Forgets saved conversations and drafts: every account's (a sign-out), or only legacy slots from earlier releases. */
 export function forgetSaved(all: boolean) {

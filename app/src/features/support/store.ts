@@ -139,7 +139,8 @@ function actionError(error: unknown) {
   return error instanceof Error && error.message ? error.message : `Couldn’t reach ${productName}. Try again.`
 }
 
-/** Where the message box survives a reload; `parked` there marks words Nightmail couldn't take yet. */
+/** Where the message box survives a reload; `parked` there marks words not yet with the chat or filed, which go on their
+ *  own after a reload while the box holds exactly them. */
 export type DraftStore = { read: () => string; write: (draft: string) => void; parked?: { read: () => string; write: (text: string) => void } }
 
 export class SupportStore {
@@ -157,6 +158,8 @@ export class SupportStore {
   private unanswered: { clientMessageId: string; text: string } | null = null
   private fileTimer: ReturnType<typeof setTimeout> | null = null
   private filingNow = false
+  /** The outbox message being filed, until Nightmail answers: saved with the outbox meanwhile. */
+  private inFiling: { clientMessageId: string; text: string } | null = null
   /** The words put back in the box because Nightmail couldn't be reached: sent again while the box still holds exactly them. */
   private parked: string | null = null
   private readonly online = () => { if (this.parked) this.retryParked() }
@@ -206,12 +209,24 @@ export class SupportStore {
   reconnect() { this.transport.connect({ create: this.outbox.length > 0 || this.pendingHumanRequest }) }
   setDraft(draft: string) {
     const next = draft.slice(0, MAX_MESSAGE)
-    this.draftStore?.write(next)
     // Changed by the person: no longer sent on its own, and no longer what "kept and goes as soon as it can" promised.
-    if (this.parked !== null && next.trim() !== this.parked) { this.park(null); this.set({ draft: next, fileProblem: this.state.fileProblem === 'waiting' ? null : this.state.fileProblem }); return }
-    this.set({ draft: next })
+    if (this.parked !== null && next.trim() !== this.parked) { this.parked = null; this.set({ draft: next, fileProblem: this.state.fileProblem === 'waiting' ? null : this.state.fileProblem }) }
+    else this.set({ draft: next })
+    this.save()
   }
-  private park(text: string | null) { this.parked = text; this.draftStore?.parked?.write(text ?? '') }
+  private park(text: string | null) { this.parked = text; this.save() }
+  /**
+   * Saves what a reload must keep: the message box and, ahead of it, the words sent but not yet with the chat or filed
+   * (the outbox, waiting out a reconnect or a filing under way). Those are saved as parked, so after a reload they are
+   * back in the box and go on their own, as words Nightmail couldn't take do; once the chat takes them or they are
+   * filed, only the box is left. A message already handed to the socket is with the chat: saving it could send it twice.
+   */
+  private save() {
+    if (this.disposed) return
+    const held = [...this.inFiling ? [this.inFiling] : [], ...this.outbox].map(item => item.text).filter(Boolean).join('\n\n').trim()
+    this.draftStore?.write([held, this.state.draft].filter(Boolean).join('\n\n'))
+    this.draftStore?.parked?.write(held || (this.parked ?? ''))
+  }
   /** Sends the words Nightmail couldn't take, while the box still holds exactly them: through the chat when it is back, else filed. */
   private retryParked() {
     this.cancelFiling()
@@ -242,10 +257,11 @@ export class SupportStore {
       if (!fileNow && this.state.connection === 'offline') this.scheduleFiling(FILE_AFTER_MS)
     } else { this.lastUserMessage = message; this.unanswered = message }
     attached.forEach(item => this.previews.set(item.attachmentId!, item.url))
-    this.draftStore?.write('')
-    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + ids.length,
+    // Kept words that go now are no longer waiting: the line saying so goes with them (filing again says it again).
+    this.set(state => ({ draft: '', attachments: [], attachError: null, imagesSent: state.imagesSent + ids.length, fileProblem: state.fileProblem === 'waiting' ? null : state.fileProblem,
       messages: [...state.messages, { id: clientMessageId, role: 'user', kind: 'reply', parts: text ? [{ kind: 'text', text }] : [], images: attached.map(({ url, name }) => ({ url, name })), streaming: false, restored: false, local: !sent },
         ...fileNow || state.messages.some(item => item.local && item.role === 'assistant') ? [] : [placeholder(clientMessageId)]] }))
+    this.save()
     if (fileNow) void this.fileAll()
     return true
   }
@@ -277,14 +293,18 @@ export class SupportStore {
         if (!fromOutbox) this.unanswered = null
         this.settle()
         if (!next.text) { forChat.push(next); continue }
+        if (fromOutbox) this.inFiling = next
         this.update(next.clientMessageId, item => ({ ...item, filing: true }))
         try {
           const ticket = await this.transport.file(next.text)
           if (this.disposed) return
+          this.inFiling = null
+          this.save()
           this.update(next.clientMessageId, item => ({ ...item, local: false, filing: false, failed: undefined, filed: true, filedId: ticket.messageId }))
           this.set({ ticket: { replyTo: ticket.replyTo }, fileProblem: null, announcement: `Filed as a ticket for the ${productName} team.${ticket.replyTo ? ` They’ll reply to ${ticket.replyTo}.` : ''}` })
         } catch (error) {
           if (this.disposed) return
+          this.inFiling = null
           if (error instanceof FileError && error.reason === 'capped') {
             const back = [next, ...this.outbox.splice(0)], ids = new Set(back.map(item => item.clientMessageId))
             this.set(state => ({ messages: state.messages.filter(item => !ids.has(item.id)), fileProblem: state.ticket ? 'capped' : 'capped_first' }))
@@ -302,7 +322,7 @@ export class SupportStore {
           break
         }
       }
-    } finally { this.outbox.push(...forChat); this.filingNow = false }
+    } finally { this.inFiling = null; this.outbox.push(...forChat); this.filingNow = false; this.save() }
   }
   /** The outbox, once the conversation is connected (after its history). */
   private flush() {
@@ -310,6 +330,7 @@ export class SupportStore {
       const next = this.outbox[0]
       if (!this.transport.send({ type: 'user.message', ...next })) return
       this.outbox.shift()
+      this.save()
       this.lastUserMessage = next
       this.unanswered = next
       this.set(state => ({ messages: [...state.messages.map(message => message.id === next.clientMessageId ? { ...message, local: false, failed: undefined } : message),
@@ -439,7 +460,7 @@ export class SupportStore {
     if (this.state.connection === 'ready') { this.pendingHumanRequest = true; this.set({ humanRequested: true }); this.transport.connect({ create: true }) }
   }
   end() { this.transport.send({ type: 'end' }) }
-  restart() { this.lastUserMessage = null; this.unanswered = null; this.cancelFiling(); this.outbox = []; this.pendingHumanRequest = false; this.socketSynced = false; this.set({ ...initial(), draft: this.state.draft }); this.transport.restart() }
+  restart() { this.lastUserMessage = null; this.unanswered = null; this.cancelFiling(); this.outbox = []; this.pendingHumanRequest = false; this.socketSynced = false; this.set({ ...initial(), draft: this.state.draft }); this.save(); this.transport.restart() }
   dispose() { this.disposed = true; this.cancelFiling(); window.removeEventListener('online', this.online); for (const controller of this.uploads.values()) controller.abort(); this.unsubscribe(); this.transport.dispose(); this.listeners.clear() }
 
   private handle(event: TransportEvent) {
@@ -470,7 +491,7 @@ export class SupportStore {
         // A message sent just before the connection dropped that never reached the server goes out again, first; one that
         // did and has an answer since needs nothing more.
         const unanswered = this.unanswered, lost = unanswered && !raw.some(item => item.role === 'user' && item.text === unanswered.text) ? unanswered : null
-        if (lost) this.outbox.unshift(lost)
+        if (lost) { this.outbox.unshift(lost); this.save() }
         if (lost || messages.at(-1)?.role === 'assistant') this.unanswered = null
         // What the server doesn't have yet stays after its history: messages waiting to go out, and the reply placeholder
         // (one is made for an answer already under way on a reconnect).

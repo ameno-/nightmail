@@ -12519,6 +12519,34 @@ describe('Hosted MCP OAuth and tools', () => {
     reachable = true; t.mock.timers.tick(15_000); await settle();
     assert.deepEqual([edited.filed, editedDrafts.slots.parked, editedStore.getSnapshot().fileProblem], [['First words.'], '', null]);
     reloaded.dispose(); editedStore.dispose();
+
+    // Review of #960: sent while the chat reconnects, then the panel rebuilt from its saved state 3 s into the wait (a
+    // reload, a workspace switch). The words were saved from the moment of sending: back in the box, and they go once,
+    // through the chat when it is back, filed when it isn't. The panel taken down sends and files nothing.
+    for (const back of [true, false]) {
+      const first = transport(async () => ticket), slots = saved(), before = <Store>new SupportStore(first as never, slots.store);
+      first.emit({ type: 'connection', state: 'offline' });
+      say(before, 'Did my import finish?');
+      assert.deepEqual([slots.slots.draft, slots.slots.parked, working(before)], ['Did my import finish?', 'Did my import finish?', true], 'Saved while it waits.');
+      t.mock.timers.tick(3000); await settle();
+      before.dispose();
+      const next = transport(async () => ticket), after = <Store>new SupportStore(next as never, slots.store);
+      assert.deepEqual([after.getSnapshot().draft, after.getSnapshot().fileProblem], ['Did my import finish?', 'waiting'], 'Still in the box after the rebuild.');
+      if (back) { next.reconnected(); await settle(); }
+      else { next.emit({ type: 'connection', state: 'offline' }); t.mock.timers.tick(15_000); await settle(); t.mock.timers.tick(8000); await settle(); }
+      t.mock.timers.tick(40_000); await settle();
+      assert.deepEqual([first.sent, first.filed], [[], []], 'Nothing from the panel taken down.');
+      assert.deepEqual([next.sent.map(m => m.text), next.filed], back ? [['Did my import finish?'], []] : [[], ['Did my import finish?']], back ? 'Through the chat, once.' : 'Filed, once.');
+      assert.deepEqual([after.getSnapshot().draft, slots.slots.draft, slots.slots.parked, after.getSnapshot().fileProblem], ['', '', '', null], 'Nothing left to send, and no line saying it waits.');
+      after.dispose();
+    }
+    // The same while the chat comes back within the wait: through the chat, and no longer saved.
+    const quick = transport(async () => ticket), quickSlots = saved(), quickStore = <Store>new SupportStore(quick as never, quickSlots.store);
+    quick.emit({ type: 'connection', state: 'offline' });
+    say(quickStore, 'Is the queue moving?');
+    quick.reconnected(); t.mock.timers.tick(10_000); await settle();
+    assert.deepEqual([quick.sent.map(m => m.text), quick.filed, quickSlots.slots.draft, quickSlots.slots.parked], [['Is the queue moving?'], [], '', '']);
+    quickStore.dispose();
   });
 
   test('Support request logs: Workers Logs lines of the conversation’s workspaces only, allow-listed, grouped, weighted, and unavailable without Cloudflare', async t => {
