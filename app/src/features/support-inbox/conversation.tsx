@@ -174,7 +174,8 @@ const Mark = ({ name, agent }: { name: string; agent: boolean }) => <span classN
 const toCustomer = (m: SupportMessage) => m.author === 'system' && (m.kind === 'notice' || m.kind === 'waiting')
 function describe(m: SupportMessage, c: SupportConversation) {
   const note = m.kind === 'note' && (m.author === 'staff' || m.author === 'agent')
-  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer')
+  // An agent's report that asks something (verification agent, api/src/feedback-triage.ts): its first message is the agent's words, not the person's.
+  const author = m.author === 'customer' && m.kind === 'agent_report' ? 'Their agent' : m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer')
     : m.author === 'agent' ? note ? 'Triage agent' : 'Nightmail AI' : m.author === 'system' ? productName : m.staff?.name ?? m.emailFrom ?? 'Staff'
   const role: Role = note ? 'note' : held(m) ? 'draft' : m.author === 'customer' ? 'customer' : m.author === 'staff' ? 'staff' : 'agent'
   return { author, role }
@@ -385,7 +386,7 @@ const actionWords: Record<string, string> = { verify_domain: 'The agent re-check
 function eventText(e: SupportEvent, c: SupportConversation): string {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
-    case 'opened': return c.channel === 'agent_feedback' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
+    case 'opened': return c.channel === 'agent_feedback' || c.verification === 'agent' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
     // reason chat_unavailable: the dashboard filed a message the support chat couldn't take (api/src/support-conversations.ts fileChatTicket).
     case 'ticket': return d.by === 'nightmail' ? `${d.reason === 'chat_unavailable' ? 'Filed: the chat couldn’t answer' : 'Ticket opened: this needs a person'}${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
@@ -525,6 +526,7 @@ function verifiedRow(c: SupportDetail['conversation'], hasUser: boolean): ReactN
   if (c.verification === 'none') return <StatusBadge status={c.mode === 'pending_signin' ? 'Waiting for sign-in' : 'Not verified'} tone="warning" />
   if (c.verification === 'handoff') return c.mode === 'non_member' ? 'Signed in (chat) · no workspace' : 'Signed in (chat)'
   if (c.verification === 'signin') return 'Signed in to claim · read only'
+  if (c.verification === 'agent') return 'Asked by their agent · answered by email · read only'
   if (c.verification === 'dmarc') {
     const dkim = c.evidence.dkimAligned === false ? ', DKIM unaligned' : ''
     return hasUser ? `Email (DMARC${dkim}) · read only` : `Email (DMARC${dkim}) · no account`

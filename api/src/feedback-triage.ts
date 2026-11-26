@@ -5,6 +5,7 @@ import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID } from './support-platform.js';
 import { requestTrace } from './support.js';
 import { recordAiUsage } from './support-ai-cost.js';
+import { answersToday, FEEDBACK_ANSWERS } from './feedback.js';
 
 // The feedback triage agent's side of Nightmail. Every agent feedback report (src/feedback.ts) is read once, before
 // staff read it, by a separate agent the support platform runs on its sweep (support/src/agent/triage.ts): it writes one
@@ -20,6 +21,11 @@ import { recordAiUsage } from './support-ai-cost.js';
 //   workspaces reported the same operation: counts and the operation's name, never their words or IDs.
 // - POST …/feedback/{id}/triage: the note, once per report: a short summary, the likely cause, a suggested
 //   classification and the earlier reports that describe the same problem (only tickets the related read names).
+//   A report classified question (it asks for help with its own workspace) that its filer was told would be answered
+//   gets an email conversation of its own for the person chosen when it was filed (src/feedback.ts), within the day's
+//   answers (FEEDBACK_ANSWERS). The triage agent still writes only its note: the answer is the support agent's.
+// - POST /v1/operator/support/agent-answers/due claims those conversations for the support agent, which answers each by
+//   email as it answers a verified email from that person (support/src/conversation.ts), in a thread of its own.
 //
 // Each is keyed by the report's own conversation ID, which the support platform takes from the claimed report, never
 // from the agent; the agent passes nothing but a request ID and its note's words. The report and everything these
@@ -31,7 +37,7 @@ import { recordAiUsage } from './support-ai-cost.js';
 /** perWorkspaceDay: reports of one workspace read in 24 hours, so one workspace filing all it may (50 an hour) can't take
  *  the support platform's daily reading (support/src/limits.ts triagePerDay) from everyone else; the rest go without a note. */
 export const TRIAGE_LIMITS = { batch: 5, attempts: 2, retryMinutes: 30, dueHours: 24, windowDays: 30, earlier: 20, perWorkspaceDay: 10 } as const;
-export const CLASSIFICATIONS = ['bug', 'docs_gap', 'neither'] as const;
+export const CLASSIFICATIONS = ['bug', 'docs_gap', 'neither', 'question'] as const;
 export type Classification = (typeof CLASSIFICATIONS)[number];
 export type TriageNote = { summary: string; cause: string; classification: Classification; duplicates: string[];
   elsewhere: { operation: string; reports: number; workspaces: number } | null; messageId: string; at: string };
@@ -43,7 +49,7 @@ const newMessageId = () => `msg_${Array.from(crypto.getRandomValues(new Uint8Arr
 const plain = (text: string) => text.normalize('NFC').replace(/\r\n?/g, '\n').replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g, '').trim();
 const LINK = /\b(?:https?:\/\/|www\.)\S|[^\s@<>]+@[^\s@<>]+\.[a-z]{2,}/i;
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-const CLASSIFIED: Record<Classification, string> = { bug: 'a bug to fix', docs_gap: 'a gap in the docs', neither: 'neither a bug nor a gap in the docs' };
+const CLASSIFIED: Record<Classification, string> = { bug: 'a bug to fix', docs_gap: 'a gap in the docs', neither: 'neither a bug nor a gap in the docs', question: 'a question about the workspace, answered by email' };
 
 /** The note as the timeline shows it: plain text, one fact a line. */
 export function triageText(note: Pick<TriageNote, 'summary' | 'cause' | 'classification' | 'duplicates' | 'elsewhere'>) {
@@ -102,6 +108,45 @@ const NoteBody = z.object({
   classification: z.enum(CLASSIFICATIONS),
   duplicates: z.array(z.string().regex(TICKET_ID)).max(20).default([]).describe('Earlier reports from this workspace that describe the same problem: ticket IDs the related read returned.'),
 }).strict();
+
+/**
+ * After the note: a report that asks something (question) and whose filer was told it would be answered (answer_state
+ * waiting) gets an email conversation of its own for the person chosen when it was filed, still a member with that
+ * verified address, within the day's answers (FEEDBACK_ANSWERS, counted again here). The conversation is theirs
+ * (verification 'agent': Nightmail addressed it, nobody claimed it), it starts with the report's words as the person's
+ * message, and a reply from their address continues it as any email does. Anything else needs no answer.
+ */
+async function planAnswer(tx: DbExecutor, id: string, classification: Classification) {
+  type Planned = { answer_state: string | null; answer_to: string | null; workspace_id: string; credential_id: string; evidence: Record<string, unknown>; subject: string | null; text: string | null; email: string | null };
+  const { rows: [f] } = await tx.execute<Planned>(sql`SELECT f.answer_state, f.answer_to, f.workspace_id, f.credential_id, c.evidence, c.subject,
+      (SELECT m.text FROM support_messages m WHERE m.conversation_id = f.conversation_id AND m.author = 'customer' ORDER BY m.seq LIMIT 1) AS text,
+      (SELECT u.email FROM nightmail_users u JOIN workspace_members wm ON wm.user_id = u.id AND wm.workspace_id = f.workspace_id WHERE u.id = f.answer_to AND u.email_verified) AS email
+    FROM support_feedback f JOIN support_conversations c ON c.id = f.conversation_id WHERE f.conversation_id = ${id} FOR UPDATE OF f`);
+  if (!f || f.answer_state !== 'waiting') return;
+  const set = (state: string, conversation: string | null = null) => tx.execute(sql`UPDATE support_feedback SET answer_state = ${state}, answer_conversation_id = ${conversation} WHERE conversation_id = ${id}`);
+  if (classification !== 'question') return set('not_needed');
+  if (!f.answer_to || !f.email || !f.text) return set('nobody');
+  // One count at a time: two notes committing together can't both take the day's last answer.
+  await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended('support-feedback-answers', 39602))`);
+  const { rows: [used] } = await tx.execute<{ credential: number; workspace: number; total: number }>(sql`SELECT count(*) FILTER (WHERE credential_id = ${f.credential_id})::int AS credential,
+      count(*) FILTER (WHERE workspace_id = ${f.workspace_id})::int AS workspace, count(*)::int AS total FROM support_feedback WHERE ${answersToday}`);
+  if (used!.credential >= FEEDBACK_ANSWERS.credential || used!.workspace >= FEEDBACK_ANSWERS.workspace || used!.total >= FEEDBACK_ANSWERS.total) return set('capped');
+  const conversation = `conv_${Array.from(crypto.getRandomValues(new Uint8Array(26)), b => BASE32[b & 31]).join('')}`;
+  const evidence = { agentReport: id, credential: f.evidence.credential ?? null, filedBy: f.evidence.filedBy ?? null };
+  await tx.execute(sql`WITH c AS (
+      INSERT INTO support_conversations(id, channel, user_id, pending_address, verification, evidence, mode, workspace_id, status, subject, messages, last_message_at)
+      VALUES (${conversation}, 'email', ${f.answer_to}, ${f.email.trim().toLowerCase()}, 'agent', ${JSON.stringify(evidence)}::jsonb, 'member', ${f.workspace_id}, 'open', ${f.subject}, 1, now()) RETURNING id)
+    INSERT INTO support_messages(id, conversation_id, seq, author, kind, text) SELECT ${newMessageId()}, id, 1, 'customer', 'agent_report', ${f.text} FROM c`);
+  return set('due', conversation);
+}
+
+const CREDENTIALS = ['apiKey', 'agentToken', 'mcp', 'dashboard'] as const;
+type Credential = typeof CREDENTIALS[number];
+const AgentAnswer = z.object({ conversationId: z.string(), messageId: z.string().describe('The person\u2019s message: the report\u2019s words.'), reportConversationId: z.string(),
+  filedAt: z.string(), credential: z.enum(CREDENTIALS).describe('The kind of credential that filed it. Never its name: a key\u2019s or a client\u2019s name is whatever its owner typed.'),
+  credentialEnd: z.string().nullable().describe('An API key\u2019s or agent token\u2019s ID, its last four characters; null for the others.'), subject: z.string().nullable(),
+  text: z.string().describe('The report as filed: untrusted text from whoever holds the credential.'),
+  person: z.object({ userId: z.string(), email: z.string(), name: z.string().nullable() }), workspace: z.object({ id: z.string(), name: z.string() }) });
 
 export function registerFeedbackTriage(app: App) {
   const security: Record<string, string[]>[] = [{ bearerAuth: [] }], tags = ['Operator'];
@@ -183,6 +228,7 @@ export function registerFeedbackTriage(app: App) {
         INSERT INTO support_messages(id, conversation_id, seq, author, kind, text) SELECT ${messageId}, ${id}, c.messages, 'agent', 'note', ${triageText(note)} FROM c RETURNING created_at::text AS created_at`);
       const at = new Date(row!.created_at).toISOString();
       await tx.execute(sql`UPDATE support_feedback SET triage = ${JSON.stringify({ ...note, messageId, at } satisfies TriageNote)}::jsonb WHERE conversation_id = ${id}`);
+      await planAnswer(tx, id, note.classification);
       return { conversationId: id, ticketId: report.ticket_id, messageId, classification: note.classification, createdAt: at };
     });
     log('info', { code: 'FEEDBACK_TRIAGED', classification: written.classification, duplicates: body.duplicates.length });
@@ -203,5 +249,31 @@ export function registerFeedbackTriage(app: App) {
       return { conversationId: id, turns: row!.turns, costUsd: Number(row!.cost_usd) };
     });
     return c.json(totals, 200);
+  });
+
+  app.openapi(createRoute({ hide: true, tags, security, method: 'post', path: '/v1/operator/support/agent-answers/due', operationId: 'operatorAgentAnswersDue',
+    description: 'Claims the agent reports to answer by email (the binding only): their email conversations, oldest first, a few at a time. Each is handed out at most three times, again only when 30 minutes passed with no answer reaching the person; one older than two days is left to staff ("No reply sent" has shown it since ten minutes).',
+    request: { body: json(z.object({ limit: z.number().int().min(1).max(TRIAGE_LIMITS.batch) }).strict()) },
+    responses: { 200: response(z.object({ data: z.array(AgentAnswer) })), ...errors } }), async c => {
+    await supportPlatformOnly(c);
+    const { reached } = await import('./support-inbox.js');
+    type Due = { conversation_id: string; message_id: string; report: string; filed_at: string; credential: Credential; credential_id: string | null; subject: string | null; text: string; user_id: string; email: string; name: string | null; workspace_id: string; workspace_name: string };
+    const { rows } = await c.env.db.execute<Due>(sql`WITH claimed AS (
+        UPDATE support_feedback f SET answer_state = 'started', answer_claimed_at = now(), answer_attempts = f.answer_attempts + 1
+        WHERE f.conversation_id IN (SELECT d.conversation_id FROM support_feedback d WHERE d.answer_state IN ('due', 'started') AND d.answer_attempts < 3
+            AND (d.answer_claimed_at IS NULL OR d.answer_claimed_at < now() - interval '30 minutes') AND d.created_at > now() - interval '2 days'
+            AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = d.answer_conversation_id AND o.author = 'agent' AND ${reached})
+          ORDER BY d.created_at LIMIT ${c.req.valid('json').limit} FOR UPDATE SKIP LOCKED)
+        RETURNING f.conversation_id AS report, f.answer_conversation_id, f.created_at, f.credential)
+      SELECT a.id AS conversation_id, m.id AS message_id, claimed.report, claimed.created_at::text AS filed_at, claimed.credential, r.evidence->>'credentialId' AS credential_id, a.subject, m.text,
+        u.id AS user_id, u.email, u.name, w.id AS workspace_id, w.name AS workspace_name
+      FROM claimed JOIN support_conversations a ON a.id = claimed.answer_conversation_id AND a.status <> 'closed'
+      JOIN support_conversations r ON r.id = claimed.report
+      JOIN support_messages m ON m.conversation_id = a.id AND m.seq = 1
+      JOIN nightmail_users u ON u.id = a.user_id AND u.email_verified JOIN workspaces w ON w.id = a.workspace_id
+      ORDER BY claimed.created_at`);
+    return c.json({ data: rows.map(r => ({ conversationId: r.conversation_id, messageId: r.message_id, reportConversationId: r.report, filedAt: new Date(r.filed_at).toISOString(), credential: r.credential,
+      credentialEnd: r.credential === 'apiKey' || r.credential === 'agentToken' ? (r.credential_id?.match(/[a-z0-9]/gi) ?? []).slice(-4).join('').toLowerCase() || null : null,
+      subject: r.subject, text: r.text, person: { userId: r.user_id, email: r.email, name: r.name }, workspace: { id: r.workspace_id, name: r.workspace_name } })) }, 200);
   });
 }

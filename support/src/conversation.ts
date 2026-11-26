@@ -1,5 +1,5 @@
 import { DurableObject } from 'cloudflare:workers';
-import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction, type FiledConversation } from './nightmail.js';
+import { nightmailApi, NightmailError, platformBody, senderOf, type Handoff, type InboundMessage, type MirroredMessage, type MirroredState, type Mode, type OutboxReply, type PlatformReply, type RegisteredConversation, type Scope, type SupportAction, type AgentAnswer, type FiledConversation } from './nightmail.js';
 import type { Env } from './env.js';
 import { gate, LINK_ORIGINS, namedIn, plainText } from './gate.js';
 import { addTicketNote, expectation, fileTicket, masked, openFollowUp, ticketEmail, type FiledTicket, type TicketContext, type TicketMessage } from './tickets.js';
@@ -194,6 +194,8 @@ type Meta = {
   modelRetired?: boolean;
   /** A conversation from before the stamp that handed its thread to a fresh one, and was retired. */
   successor?: string | null; retired?: boolean;
+  /** An agent's report: the email that answered it (or a staff reply that started its thread), which a staff reply answers until the person writes. */
+  agentSent?: { messageId: string; threadId: string } | null;
 };
 /**
  * A transcript entry. Kinds of the support platform's own lines (the inbox shows them as what happened, author system):
@@ -245,7 +247,11 @@ type Route = { addressId: string | null; key: string };
  * needed it (`earlier`: the general answer that went), under a key of its own, and never a fixed sign-in reply.
  * `linkedTicket`: a chat ticket's follow-up (linkedTicket on Incoming).
  */
-type Answer = { messageId: string; threadId: string; sender: string; dmarc: string; route: Route; fixed?: 'help'; member?: true; signin?: true; general?: true; followup?: true; earlier?: string; linkedTicket?: string };
+type Answer = { messageId: string; threadId: string; sender: string; dmarc: string; route: Route; fixed?: 'help'; member?: true; signin?: true; general?: true; followup?: true; earlier?: string; linkedTicket?: string;
+  /** An agent's report Nightmail opened this conversation for (startAgentAnswer): no email came in; the answer starts a thread. */
+  agent?: AgentReport };
+/** The report an agent filed, as the answer to it quotes it: its words are the agent's, untrusted. */
+type AgentReport = { report: string; credential: AgentAnswer['credential']; credentialEnd: string | null; filedAt: string; subject: string | null; text: string };
 /** An answer imported from the earlier inbox: its sender and route are settled when it first runs. */
 type Imported = { messageId: string; threadId: string; legacy: 1 };
 type Composed = {
@@ -537,7 +543,7 @@ export class SupportConversation extends DurableObject<Env> {
       const workspace = scope.workspace ?? (scope.workspaces.length === 1 ? scope.workspaces[0]! : null);
       m.mode = scope.conversation.mode;
       // An email conversation's person is whoever Nightmail stamps (never an address), and how it bound them.
-      if (m.channel === 'email' && scope.user.id) { m.userId = scope.user.id; m.verified = scope.conversation.verification === 'signin' ? 'signin' : 'dmarc'; }
+      if (m.channel === 'email' && scope.user.id) { m.userId = scope.user.id; m.verified = scope.conversation.verification === 'signin' ? 'signin' : scope.conversation.verification === 'agent' ? 'agent' : 'dmarc'; }
       m.name = scope.user.name ?? m.name;
       m.workspaces = scope.workspaces.map(w => ({ id: w.id, name: w.name, role: w.role }));
       m.workspace = workspace ? { id: workspace.id, name: workspace.name } : null;
@@ -639,6 +645,41 @@ export class SupportConversation extends DurableObject<Env> {
    * A message for this conversation. `linkedTicket`: a reply in a chat ticket's follow-up thread, handed on by that chat;
    * it is added to that ticket only when Nightmail binds this conversation to the chat's own person.
    */
+  /**
+   * An agent's report that asks something (api/src/feedback-triage.ts planAnswer): Nightmail opened this conversation for
+   * the person it chose (the one behind the credential, or an API key's workspace's longest-standing owner) and bound it
+   * to them; its first message is the report. It is answered as a verified email from that person would be, read-only,
+   * by email to their account's address in a thread of its own (send), and a reply from that address continues it as any
+   * email does. The turn counts against the agents' own pool (turnAllowed). Once: a repeat changes nothing.
+   */
+  async startAgentAnswer(p: AgentAnswer): Promise<{ ok: true; started: boolean }> {
+    if (this.meta()) return { ok: true, started: false };
+    const meta = this.fresh(p.conversationId, 'email'), email = p.person.email.trim().toLowerCase();
+    Object.assign(meta, { userId: p.person.userId, email, name: p.person.name, workspace: p.workspace, registered: true, mode: 'member', verified: 'agent', subject: p.subject?.slice(0, 200) ?? null });
+    this.save(meta);
+    // The same message ID as Nightmail's, so the mirror adds nothing twice.
+    this.record({ id: p.messageId, role: 'user', kind: null, text: p.text, at: p.filedAt, tools: [], channel: 'email' }, false);
+    this.work.insert({ id: `answer:${p.messageId}`, kind: 'answer', payload: { messageId: p.messageId, threadId: '', sender: email, dmarc: 'AGENT', route: { addressId: this.env.SUPPORT_ADDRESS_ID ?? null, key: `agent:${p.conversationId}` },
+      member: true, agent: { report: p.reportConversationId, credential: p.credential, credentialEnd: p.credentialEnd, filedAt: p.filedAt, subject: p.subject, text: p.text } } satisfies Answer });
+    await this.arm();
+    return { ok: true, started: true };
+  }
+
+  /**
+   * An email to the person this answer is for: a reply in its thread, or for an agent's report, the thread it starts (from
+   * the support address, saying who asked and what), whose ID later mail follows. A retry sends the same request under
+   * the same key, so Nightmail replays it (the same thread) instead of sending twice.
+   */
+  private async send(answer: Answer, input: { text: string; to: string; subject?: string }, key: string) {
+    if (!answer.agent) return external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: input.text, to: input.to, addressId: answer.route.addressId, ...input.subject ? { subject: input.subject } : {} }, key));
+    const sent = await external(nightmailApi(this.env).startThread({ to: [input.to], subject: AGENT_SUBJECT, text: agentEmail(answer.agent, input.text) }, key));
+    if (this.meta()!.threadId !== sent.threadId || !this.meta()!.agentSent) {
+      this.update(m => { m.threadId = sent.threadId; m.agentSent = { messageId: sent.id, threadId: sent.threadId }; });
+      await external(this.env.DB.prepare('UPDATE conversations SET thread_id = ?, updated_at = ? WHERE id = ?').bind(sent.threadId, Date.now(), this.meta()!.conversationId).run());
+    }
+    return sent;
+  }
+
   async enqueueInbound(input: { conversationId: string; threadId: string; messageId: string; deliveryId: string; linkedTicket?: string }) {
     if (!this.meta()) { const meta = this.fresh(input.conversationId, 'email'); meta.threadId = input.threadId; this.save(meta); }
     this.work.insert({ id: `msg:${input.messageId}`, kind: 'message', payload: { messageId: input.messageId, threadId: input.threadId, deliveryId: input.deliveryId, ...input.linkedTicket ? { linkedTicket: input.linkedTicket } : {} } satisfies Incoming });
@@ -1100,10 +1141,18 @@ export class SupportConversation extends DurableObject<Env> {
     const settle = async (status: 'sent' | 'failed') => { platformBody(await external(this.env.BANE.markDelivery(meta.conversationId, reply.id, status))); return { result: progress }; };
     try {
       if (meta.channel === 'email') {
-        const last = meta.lastInbound;
-        if (!recipient || !last) { progress.failed = recipient ? 'no message to reply to' : 'sender not verified'; save(); return settle('failed'); }
+        const last = meta.lastInbound, agent = meta.verified === 'agent';
+        // An agent's report its person hasn't written back on: the reply goes in the thread of the email that answered it,
+        // or starts that thread when none went yet (the answer was held, capped or never came).
+        if (!recipient || (!last && !agent)) { progress.failed = recipient ? 'no message to reply to' : 'sender not verified'; save(); return settle('failed'); }
         if (!progress.emailed) {
-          await external(nightmailApi(this.env).reply(last.threadId, { replyToMessageId: last.messageId, text: reply.text, to: recipient, addressId: this.route({ addressIds: last.addressIds } as Snapshot, last.messageId, 'reply').addressId }, `staff-${reply.id}`));
+          if (last) await external(nightmailApi(this.env).reply(last.threadId, { replyToMessageId: last.messageId, text: reply.text, to: recipient, addressId: this.route({ addressIds: last.addressIds } as Snapshot, last.messageId, 'reply').addressId }, `staff-${reply.id}`));
+          else if (meta.agentSent) await external(nightmailApi(this.env).reply(meta.agentSent.threadId, { replyToMessageId: meta.agentSent.messageId, text: reply.text, to: recipient, addressId: this.env.SUPPORT_ADDRESS_ID ?? null }, `staff-${reply.id}`));
+          else {
+            const sent = await external(nightmailApi(this.env).startThread({ to: [recipient], subject: AGENT_SUBJECT, text: [reply.text, '', '—', 'Reply to this email to continue.'].join('\n') }, `staff-${reply.id}`));
+            this.update(m => { m.threadId = sent.threadId; m.agentSent = { messageId: sent.id, threadId: sent.threadId }; });
+            await external(this.env.DB.prepare('UPDATE conversations SET thread_id = ?, updated_at = ? WHERE id = ?').bind(sent.threadId, Date.now(), meta.conversationId).run());
+          }
           progress.emailed = true; save();
         }
       } else {
@@ -1693,8 +1742,10 @@ export class SupportConversation extends DurableObject<Env> {
    * reserve (`global:turns`), within their person's cap and their workspace's. General (non-member) emails draw from their
    * own per-domain and daily budget so they can never exhaust the customer reserve.
    */
-  private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false): Promise<{ ok: boolean; global: boolean; workspace?: true }> {
+  private async turnAllowed(meta: Meta, count = countToday, verifiedEmail = false, agent = false): Promise<{ ok: boolean; global: boolean; workspace?: true }> {
     const cap = limits(this.env), email = meta.channel === 'email';
+    // An agent's report: the agents' own pool (Nightmail caps it per credential and workspace), never people's turns.
+    if (agent) return (await count(this.env, 'global:turns:agents', cap.turnsAgentsPerDay)).ok ? { ok: true, global: false } : { ok: false, global: true };
     if (!(await count(this.env, `${await this.person(meta)}:${email ? 'email_turns' : 'turns'}`, email ? cap.turnsPerEmailSender : cap.turnsPerPerson)).ok) return { ok: false, global: false };
     if (email && !verifiedEmail) {
       const domain = registrableDomain(meta.email ?? meta.conversationId);
@@ -2000,7 +2051,7 @@ export class SupportConversation extends DurableObject<Env> {
     // Queued before this release (imported from the earlier inbox, or for a conversation never registered): never
     // answered, with model text or otherwise. Held; a conversation bound to a person then retires (H1), telling the team.
     if (!('route' in queued) || !meta.registered) { if (this.beforeStamp(meta)) await this.retireLegacy(); return { state: 'held', result: progress }; }
-    const message = await this.snapshot(queued.messageId, progress, save), answer = queued;
+    const message = queued.agent ? agentSnapshot(queued as Answer) : await this.snapshot(queued.messageId, progress, save), answer = queued;
     // A passing message from the same sender while one of theirs waits on its claim, or after its general answer went
     // (ANSWERING_RULE): no sign-in reply of its own. Decided once.
     if (answer.signin && answer.general && !answer.followup && !progress.challenged && progress.joinedTo === undefined) {
@@ -2070,7 +2121,7 @@ export class SupportConversation extends DurableObject<Env> {
       }
     }
     // Only ever to the address that wrote (a verified answer: to that address as the account stores it); Reply-To and Cc are ignored.
-    await external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: progress.text, to: progress.mode === 'verified' ? progress.recipient! : answer.sender, addressId: answer.route.addressId, ...(progress.fixed ? { subject: FIXED_SUBJECT } : {}) }, answer.route.key));
+    await this.send(answer, { text: progress.text, to: progress.mode === 'verified' ? progress.recipient! : answer.sender, ...(progress.fixed ? { subject: FIXED_SUBJECT } : {}) }, answer.route.key);
     const at = new Date().toISOString();
     // The earlier build's sign-in-and-Help reply asks them to act first: no reply to what they asked.
     // The busy reply of an email no ticket could be filed for isn't an answer: No reply sent holds it for staff.
@@ -2143,6 +2194,8 @@ export class SupportConversation extends DurableObject<Env> {
       if (!progress.held) { progress.held = newId('msg'); save(); }
       this.record({ id: progress.held, role: 'assistant', kind: 'held', text: draft, at: new Date().toISOString(), tools: [], channel: 'email', reason: progress.withheld === 'closed' ? 'closed' : 'access' });
     }
+    // An agent's report: its person didn't write, so nothing tells them it went unanswered (staff see it under No reply sent).
+    if (progress.noticed === false && answer.agent) { progress.noticed = true; save(); }
     if (progress.noticed === false) {
       const origin = new URL(this.env.NIGHTMAIL_ORIGIN).origin;
       await external(nightmailApi(this.env).reply(answer.threadId, { replyToMessageId: answer.messageId, text: FIXED.access(origin), to: answer.sender, subject: FIXED_SUBJECT, addressId: answer.route.addressId }, `${answer.route.key}:ended`));
@@ -2207,9 +2260,11 @@ export class SupportConversation extends DurableObject<Env> {
           if (scope.status >= 500 || scope.status === 429) throw platformError(scope, 'SCOPE_READ_FAILED');
           // Never answered from an account Nightmail doesn't stamp now, or for a sign-in it doesn't list.
           if (scope.status !== 200 || (answer.signin && !(scope.body.conversation.signedIn ?? []).includes(answer.messageId))) { progress.withheld = 'closed'; save(); return; }
-          if (this.reduced(meta, scope.body) || !recipientOf(scope.body, answer.sender)) { progress.withheld = 'reduced'; progress.noticed = false; save(); return; }
+          if (this.reduced(meta, scope.body) || (!answer.agent && !recipientOf(scope.body, answer.sender))) { progress.withheld = 'reduced'; progress.noticed = false; save(); return; }
           meta = this.applyScope(scope.body);
-          progress.verified = scope.body.conversation.mode === 'member' && !!scope.body.user.id && scope.body.workspaces.length > 0;
+          // An agent's report is answered from the account only to a mailbox its person proved (recipientOf), as any verified
+          // email is; otherwise in general, with no account data, to the same address.
+          progress.verified = scope.body.conversation.mode === 'member' && !!scope.body.user.id && scope.body.workspaces.length > 0 && (!answer.agent || recipientOf(scope.body, answer.sender));
         } else progress.verified = false;
         save();
       }
@@ -2228,7 +2283,7 @@ export class SupportConversation extends DurableObject<Env> {
       // The conversation's limits and the daily turn caps, charged once per answer (the nudge included).
       if (progress.allowed === undefined) {
         progress.refused = this.admit(meta);
-        progress.allowed = !progress.refused && (await this.turnAllowed(meta, charged(progress, save), verified)).ok;
+        progress.allowed = !progress.refused && (await this.turnAllowed(meta, charged(progress, save), verified, !!answer.agent)).ok;
         save();
       }
       if (!progress.allowed) {
@@ -2262,7 +2317,9 @@ export class SupportConversation extends DurableObject<Env> {
       const later = await Promise.all((progress.also ?? []).map(id => this.snapshot(id, {}, () => {})));
       const also = later.length ? `\n[They wrote again, from the same address, before this answer:]\n${later.map(m => untrusted(`\n${bodyOf(m)}\n`, 'email')).join('\n')}` : '';
       // The email's own text can't close the fence or fake the harness's tags: its < and > are escaped.
-      const text = `[A support email arrived]\nSubject: ${untrusted((message.subject ?? '').slice(0, 200))}\n${untrusted(`\n${body}\n`, 'email')}${extras ? `\n[${extras}]` : ''}${also}${situation}`;
+      const text = answer.agent
+        ? `[Their agent asked support for them, through ${credentialOf(answer.agent)}. Your reply is emailed to them, not to the agent.]\nSubject: ${untrusted((message.subject ?? '').slice(0, 200))}\n${untrusted(`\n${body}\n`, 'agent')}`
+        : `[A support email arrived]\nSubject: ${untrusted((message.subject ?? '').slice(0, 200))}\n${untrusted(`\n${body}\n`, 'email')}${extras ? `\n[${extras}]` : ''}${also}${situation}`;
       const [agent, account] = await Promise.all([external(this.agent()), verified ? this.account(meta, true) : Promise.resolve(null)]);
       const tools = verified ? toolNames({ channel: 'email', verified: true, manager: this.manager(meta) }) : toolNames({ channel: 'email' });
       const context = [customerBlock(verified ? this.customer(meta) : { ...this.customer(meta), verified: null }), account].filter(Boolean).join('\n');
@@ -2360,7 +2417,7 @@ export class SupportConversation extends DurableObject<Env> {
     // A chat's ticket is its person's (the handoff Nightmail registered it from), and a bound email conversation's the
     // person Nightmail stamps (its scope: never an address). Any other email ticket names no account, only the address that
     // wrote (M3), whatever an older conversation stored.
-    const verified = ticketPerson(meta) ? meta.verified as 'handoff' | 'dmarc' | 'signin' : null;
+    const verified = ticketPerson(meta) ? meta.verified as 'handoff' | 'dmarc' | 'signin' | 'agent' : null;
     return { conversationId: meta.conversationId, channel: meta.channel, threadId: meta.threadId, costUsd: spentUsd(meta), model: MODEL_LABEL, attachments, verified, dmarc, sender: verified ? null : meta.email,
       customer: verified ? { userId: meta.userId, email: meta.email, name: meta.name, role: meta.role, workspaces: meta.workspace ? [meta.workspace] : meta.workspaces.map(w => ({ id: w.id, name: w.name })) }
         : { userId: null, email: null, name: null, role: null, workspaces: [] } };
@@ -2594,6 +2651,25 @@ function internal(title: string, summary: string, ask: string, recommendation: s
 }
 
 /** What the decision and the answer use of a received message, bounded (no full headers or unbounded bodies). */
+/** An agent's report as the email the answer is to: the person's own words would be an email; these are the agent's. */
+function agentSnapshot(answer: Answer): Snapshot {
+  const a = answer.agent!;
+  return { id: answer.messageId, threadId: null, subject: a.subject, from: answer.sender, text: a.text, replyText: a.text, messageId: null, attachments: [], receivedAt: a.filedAt };
+}
+/**
+ * The answer email's subject: fixed. Nothing in the email around the answer is text the agent (or what it read) wrote:
+ * the answer, which passed the output gate, restates the question in its own words.
+ */
+const AGENT_SUBJECT = `${productName} support answered your agent's question`;
+/** The credential that asked, by its kind and its ID's last characters: never its name, which its owner typed. */
+const credentialOf = (a: Pick<AgentReport, 'credential' | 'credentialEnd'>) => a.credential === 'apiKey' ? `an API key${a.credentialEnd ? ` ending ${a.credentialEnd}` : ''}`
+  : a.credential === 'agentToken' ? `an agent token${a.credentialEnd ? ` ending ${a.credentialEnd}` : ''}` : a.credential === 'mcp' ? 'your MCP sign-in' : 'your dashboard session';
+/** The answer as the person reads it: who asked and when (ours), the answer (gated), and one line saying a reply continues it. */
+function agentEmail(a: AgentReport, answer: string) {
+  const when = new Date(a.filedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
+  return [`Your agent asked ${productName} support a question for you on ${when}, through ${credentialOf(a)}.`, '', answer, '', '—', 'Reply to this email to continue.'].join('\n');
+}
+
 function snapshotOf(m: InboundMessage): Snapshot {
   return { id: m.id, threadId: m.threadId, subject: m.subject?.slice(0, 200) ?? null, from: senderOf(m), text: m.text?.slice(0, 6000) ?? null, replyText: m.replyText?.slice(0, 6000) ?? null,
     messageId: m.messageId ?? null, authentication: m.authentication, automated: m.automated, attachments: m.attachments ?? [], addressIds: (m as InboundMessage & { addressIds?: string[] }).addressIds,

@@ -26,6 +26,8 @@ const DAY = 86_400_000, MINUTES_10 = 600_000, MINUTES_5 = 300_000;
 const SIGNIN_WAKES = 50;
 /** Agent feedback reports the triage agent starts reading per sweep, and the daily counter they count against. */
 const TRIAGE_PER_SWEEP = 5, TRIAGE_KEY = 'global:triage';
+/** Agent reports a sweep starts answering by email. */
+const AGENT_ANSWERS_PER_SWEEP = 5;
 
 /** Whether the flow already accepted or kept this message: a later delivery of it changes nothing. */
 export async function ledgered(env: Env, flow: Flow, messageId: string) {
@@ -110,7 +112,7 @@ export async function blockUnconfigured(env: Env, input: { messageId: string; th
 /** Every five minutes: each step on its own, so one failing never stops the others. */
 export async function sweep(env: Env, now = Date.now()) {
   const result: Record<string, number> = {};
-  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)], ['releases', () => releaseWakes(env)],
+  const steps: [string, () => Promise<number>][] = [['notices', () => resendNotices(env, now)], ['intake', () => acceptConfigured(env, now)], ['tickets', () => ticketMail(env, now)], ['triage', () => triageFeedback(env, now)], ['agentAnswers', () => agentAnswers(env)], ['staffMail', () => staffMail(env)], ['staff', () => staffReplies(env)], ['signins', () => signinWakes(env, now)], ['releases', () => releaseWakes(env)],
     ['replaySupport', () => replay(env, 'support', now)], ['replayIntake', () => replay(env, 'intake', now)]];
   for (const [name, step] of steps) {
     try { result[name] = await step(); }
@@ -198,6 +200,26 @@ async function triageFeedback(env: Env, now: number) {
     if (!(await countToday(env, TRIAGE_KEY, cap, now)).ok) { log('warn', { event: 'triage', code: 'TRIAGE_DAILY_CAP_REACHED', limit: cap }); break; }
     try { if (await env.TRIAGE.get(env.TRIAGE.idFromName(report.conversationId)).start(report)) n++; }
     catch (error) { logError(error, { event: 'triage', code: 'TRIAGE_START_FAILED' }, 'warn'); }
+  }
+  return n;
+}
+
+/**
+ * Agent reports that ask something (api/src/feedback-triage.ts planAnswer), each answered by email to its person by the
+ * conversation Nightmail opened for it (conversation.ts startAgentAnswer), in a thread of its own. Claimed a few at a
+ * time (Nightmail hands each out at most three times); the answer's turn counts against the agents' own daily pool.
+ */
+async function agentAnswers(env: Env) {
+  if (!env.CONSOLE_GATEWAY_KEY) return 0;
+  const due = platformBody(await env.BANE.agentAnswersDue(AGENT_ANSWERS_PER_SWEEP)).data;
+  let n = 0;
+  for (const answer of due) {
+    try {
+      const now = Date.now();
+      await env.DB.prepare("INSERT INTO conversations (id, channel, user_id, email, workspace_id, workspace_name, created_at, updated_at) VALUES (?, 'email', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING")
+        .bind(answer.conversationId, answer.person.userId, answer.person.email, answer.workspace.id, answer.workspace.name, now, now).run();
+      if ((await env.CONVERSATION.get(env.CONVERSATION.idFromName(answer.conversationId)).startAgentAnswer(answer)).started) n++;
+    } catch (error) { logError(error, { event: 'email', code: 'AGENT_ANSWER_START_FAILED' }, 'warn'); }
   }
   return n;
 }

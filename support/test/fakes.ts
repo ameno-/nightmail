@@ -64,7 +64,7 @@ const handoff = token => {
 };
 // Registered conversations (api/src/support-conversations.ts): Nightmail decides whom each is for, and every stamped
 // request answers for that person only, whatever the request says.
-const conversations = new Map();
+const conversations = new Map(), agentAnswers = [];
 // Chats as Nightmail holds them with what the dashboard filed while the chat couldn't take a message (/__filed).
 const filed = new Map();
 const view = (c, created, generalAnswer) => ({ id: c.id, channel: c.channel, mode: c.mode, verification: c.verification, status: c.closed ? 'closed' : 'open', workspaceId: c.workspaceId, contentShared: !!c.content, created, ...generalAnswer === undefined ? {} : { generalAnswer } });
@@ -351,6 +351,14 @@ export class SupportPlatform extends WorkerEntrypoint {
     staffThreads.set(mail.group, sent);
     return ok({ key, sentAt: new Date().toISOString() });
   }
+  // Agent reports that ask something (api/src/feedback-triage.ts): the conversation Nightmail opened for each, bound to its
+  // person (verification agent), handed out once (/__agentAnswer adds one).
+  async agentAnswersDue(limit) {
+    calls.push(['agentAnswersDue', limit]);
+    const due = agentAnswers.filter(a => !a.claimed).slice(0, Math.min(limit, 5));
+    for (const a of due) a.claimed = true;
+    return ok({ data: due.map(({ claimed, ...a }) => a) });
+  }
   async feedbackDue(limit) {
     calls.push(['feedbackDue', limit]);
     const due = [...reports.values()].filter(r => !r.note && !r.claimed).slice(0, Math.min(limit, 5));
@@ -461,6 +469,14 @@ export default {
     if (url.pathname === '/__release') { const { conversationId, messageId } = await request.json(); calls.push(['release', conversationId, messageId]); releases.push({ conversationId, messageId, requestedAt: new Date().toISOString() }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__session') { const { userId, activeSession, sessionSince } = await request.json(); known(userId, userId.slice(4) + '@other.test'); Object.assign(people.get(userId), { activeSession, sessionSince: sessionSince ?? null }); return new Response(null, { status: 204 }); }
     if (url.pathname === '/__workspaceName') { const { id, name } = await request.json(); WORKSPACES[id] = name; return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__message') { const { id, fields } = await request.json(); MESSAGES[id] = fields; return new Response(null, { status: 204 }); }
+    if (url.pathname === '/__agentAnswer') {
+      const a = await request.json();
+      conversations.set(a.conversationId, { id: a.conversationId, channel: 'email', userId: a.person.userId, sender: a.person.email.toLowerCase(), mode: 'member', verification: 'agent', workspaceId: a.workspace.id,
+        content: null, closed: false, read: new Set(), page: null, challenges: new Set(), signedIn: [] });
+      agentAnswers.push({ claimed: false, ...a });
+      return new Response(null, { status: 204 });
+    }
     // The dashboard filed messages into a chat while the chat couldn't take them (api/src/support-conversations.ts
     // fileChatTicket): into an existing one, or opening one (filed) for this person and workspace, with a staff ticket
     // and the agent paused for it. Nightmail's inbox holds the messages.
@@ -965,6 +981,10 @@ export async function fakeGateway(request: Request): Promise<Response> {
     const next = ['account_context', 'list_domains', 'get_billing', 'bounce_reasons'].find(name => !used.includes(name));
     return next ? toolUse(`toolu_rel_${next}_${body?.messages?.length ?? 0}`, next, next === 'bounce_reasons' ? { provider: 'gmail' } : {}) : say(body, [GENERAL_ANSWER]);
   }
+  // An agent's report that asks something (conversation.ts startAgentAnswer): answered for its person, from the account
+  // when the mailbox is proven (bounce_reasons offered), in general otherwise.
+  if (said.includes('Their agent asked support')) return !offered(body).has('bounce_reasons') ? say(body, [GENERAL_ANSWER])
+    : answered ? say(body, ['Hi Agq,\n\nYour agent asked why Gmail bounces are up: Gmail hard-bounced 61 of 1,000 sends this week.\n\nNightmail support (AI)']) : toolUse(`toolu_ag${body?.messages?.length ?? 0}`, 'bounce_reasons', { provider: 'gmail' });
   // A general email turn offers no account tool, so its answer is a general one; a verified one (bounce_reasons offered)
   // reads the bounces and answers from them.
   if (said.includes('A support email arrived')) return !offered(body).has('bounce_reasons') ? say(body, [GENERAL_ANSWER])

@@ -20,6 +20,8 @@ export const DEFAULT_LIMITS = {
   turnsPerDay: 1500,
   turnsPerPerson: 40,
   turnsPerWorkspace: 80,
+  /** Answers to agents' reports (api/src/feedback.ts FEEDBACK_ANSWERS caps them per credential and workspace): their own daily pool. */
+  turnsAgentsPerDay: 200,
   /** Separate daily budget for general (non-member) email answers, in total and per sender domain. */
   turnsGeneralPerDay: 100,
   turnsPerEmailDomain: 10,

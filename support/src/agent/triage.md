@@ -31,4 +31,5 @@ The note:
   - `bug`: Nightmail misbehaved: an error it should not give, a wrong result, a 500, data that doesn't match what the docs promise.
   - `docs_gap`: Nightmail worked as designed, but the docs or the error message didn't say how, so the agent couldn't have known.
   - `neither`: the agent's own mistake that the docs already cover, a feature request, or too little to tell.
+  - `question`: it asks for help with its own workspace (how to do something, or why something happened to its mail, domains or setup) more than it reports a problem. Only these get an answer: support's answering agent emails one to a person in that workspace. You still write only your note. When Nightmail misbehaved, it is a `bug`, even if the report also asks.
 - **duplicates**: the ticket IDs of earlier reports from `earlier_reports` that describe the same problem. Only IDs it returned, only when it is clearly the same problem; leave it empty when unsure. When other workspaces reported the same operation, say so in the cause with the counts.

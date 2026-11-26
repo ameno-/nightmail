@@ -7187,11 +7187,30 @@ export type FeedbackReceipt = {
      * The support ticket it was filed as.
      */
     ticketId: string;
+    answer: FeedbackAnswer;
     /**
      * How many values that looked like keys, tokens or passwords were removed from message and context.
      */
     redacted: number;
     createdAt: string;
+};
+
+/**
+ * Whether support answers it, and to whom: always by email to a person, never through this tool.
+ */
+export type FeedbackAnswer = {
+    /**
+     * Who an answer is emailed to: the person behind this credential, their address masked (r•••@e•••.com), or for an API key "an owner of this workspace". Null: no answer will be sent.
+     */
+    to: string | null;
+    /**
+     * Why none will be: nobody in the workspace can get support email, or today’s answers are used up.
+     */
+    reason: 'nobody' | 'capped' | null;
+    /**
+     * What happens now, in one sentence. Nothing more ever comes back through this call or tool.
+     */
+    next: string;
 };
 
 export type FeedbackRequest = {

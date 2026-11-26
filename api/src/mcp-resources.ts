@@ -95,7 +95,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     list: 'listRegions', configure: 'configureRegion', discover: 'discoverRegion', provision: 'provisionRegion', autoValidation: 'configureRegionAutoValidation',
   } },
   // One action: listed as that action's own arguments, with no action argument (resolveAction in mcp.ts takes the one).
-  sendFeedback: { label: 'Tell Nightmail what got in your way (nobody replies)', actions: { send: 'sendFeedback' } },
+  sendFeedback: { label: 'Tell Nightmail what got in your way, or ask support (answered by email to a person)', actions: { send: 'sendFeedback' } },
   webhooks: { label: 'Outbound webhooks', actions: {
     list: 'listWebhooks', get: 'getWebhook', create: 'createWebhook', update: 'updateWebhook', delete: 'deleteWebhook', rotateSecret: 'rotateWebhookSecret', test: 'testWebhook', deliveries: 'listWebhookDeliveries', delivery: 'getWebhookDelivery', retry: 'retryWebhookDelivery',
   } },
