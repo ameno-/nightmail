@@ -171,21 +171,33 @@ function agentOf(c: SupportConversation): { text: string; by?: string; tone: Ton
   return { text: 'Paused', by: c.pausedBy?.kind === 'ticket' ? 'the ticket' : c.pausedBy?.name ?? undefined, tone: 'warning' }
 }
 const ChannelIcon = ({ channel }: { channel: SupportConversation['channel'] }) => channel === 'email' ? <Mail size={14} aria-label="Email" /> : channel === 'agent_feedback' ? <Bot size={14} aria-label="Agent feedback" /> : <MessageSquare size={14} aria-label="Chat" />
+/** Who filed agent feedback, short, from its Filed by (api/src/feedback.ts): the API key's name, the MCP sign-in's app and
+ *  person, the agent token's purpose. An address stays behind the blur-addresses setting. */
+function Filer({ text }: { text: string }) {
+  const quoted = /"([^"]+)"/.exec(text)?.[1], email = /\bby (\S+@\S+)$|\bof (\S+@\S+)$/.exec(text), address = email?.[1] ?? email?.[2]
+  const what = text.startsWith('the API key') ? `${quoted ?? 'API key'} (API key)` : text.startsWith('an MCP sign-in') ? `${quoted ?? 'An app'} (MCP)`
+    : text.startsWith('an agent token') ? `${quoted ?? 'An agent'} (agent token)` : text.startsWith('the dashboard') ? 'Dashboard' : text
+  return <>{what}{address && <> · <PrivateAddress value={address} /></>}</>
+}
+// Who a conversation is from: the person, else the address, else the workspace (agent feedback's, with who filed it in
+// the words of its Filed by); "Unknown sender" only when nothing is known.
 function Who({ c }: { c: SupportConversation }) {
   const address = c.customer?.email ?? c.sender
   return <span className="sinbox-who" data-unread={c.unread || undefined}>
     <span className="sinbox-unread" role={c.unread ? 'img' : undefined} aria-label={c.unread ? 'Unread' : undefined} />
     <span className="sinbox-channel"><ChannelIcon channel={c.channel} /></span>
-    <span className="sinbox-who__name">{c.customer?.name ?? (address ? <PrivateAddress value={address} /> : 'Unknown sender')}</span>
+    <span className="sinbox-who__name">{c.customer?.name ?? (address ? <PrivateAddress value={address} /> : c.workspace?.name ?? 'Unknown sender')}</span>
+    {!c.customer?.name && !address && c.workspace && c.filedBy && <span className="sinbox-who__by"><Filer text={c.filedBy} /></span>}
   </span>
 }
 const previewBy = (p: NonNullable<SupportConversation['preview']>) => p.held ? 'AI draft, not sent: ' : p.author === 'agent' ? 'AI: ' : p.author === 'staff' ? 'Staff: ' : ''
 // The subject (or the customer's first line), then the last message itself, muted, on the same line.
 const previewOf = (c: SupportConversation) => c.preview && c.preview.text !== titleOf(c) ? c.preview : null
-const Preview = ({ c }: { c: SupportConversation }) => { const preview = previewOf(c); return preview ? <span className="sinbox-preview"><span className="sinbox-preview__by">{previewBy(preview)}</span>{preview.text}</span> : null }
+// Agent feedback has one message, its subject: its card's second line says what it is instead of repeating it.
+const Preview = ({ c }: { c: SupportConversation }) => { const preview = previewOf(c); return preview ? <span className="sinbox-preview"><span className="sinbox-preview__by">{previewBy(preview)}</span>{preview.text}</span> : c.channel === 'agent_feedback' ? <span className="sinbox-preview">Report from an agent · nobody to reply to</span> : null }
 const Subject = ({ c, preview = true }: { c: SupportConversation; preview?: boolean }) => <span className="sinbox-subject">
   <span className="sinbox-subject__text" data-placeholder={c.subject || c.firstLine ? undefined : ''}>{titleOf(c)}</span>
-  {preview && <Preview c={c} />}
+  {preview && previewOf(c) && <Preview c={c} />}
 </span>
 const priorityTone: Record<string, Tone> = { P1: 'danger', P2: 'warning', P3: 'neutral' }
 const priorityOf = (c: SupportConversation) => c.ticket && !c.ticket.resolvedAt ? c.ticket.severity : null

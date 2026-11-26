@@ -10,7 +10,7 @@ import './support-inbox.css'
 // phone's card: the customer and last activity, the conversation (its subject, then the last message itself), then its
 // status and priority on one line.
 export const inboxColumnDefs: SkeletonColumn[] = [
-  { key: 'customer', label: 'Customer', width: 'var(--sinbox-customer, 18%)', card: 'title' },
+  { key: 'customer', label: 'Customer', width: 'var(--sinbox-customer, 22%)', card: 'title' },
   { key: 'subject', label: 'Conversation', card: 'line' },
   { key: 'preview', label: 'Last message', card: 'line', table: false },
   { key: 'status', label: 'Status', width: 'var(--sinbox-status, 168px)', card: 'line' },

@@ -97,7 +97,8 @@ const Item = z.object({
   status: z.enum(['open', 'ticketed', 'closed']), subject: z.string().nullable(),
   customer: z.object({ userId: z.string(), name: z.string().nullable(), email: z.string().nullable() }).nullable().describe('The person Nightmail bound the conversation to, or null.'),
   sender: z.string().nullable().describe('An email conversation’s sender address, whether or not it proved who it is.'),
-  workspace: z.object({ id: z.string(), name: z.string() }).nullable().describe('The one workspace in scope (a chat’s, or the one an email narrowed to).'),
+  workspace: z.object({ id: z.string(), name: z.string() }).nullable().describe('The one workspace in scope (a chat’s, or the one an email narrowed to; agent feedback’s, the credential’s).'),
+  filedBy: z.string().nullable().describe('Agent feedback: the key, sign-in or token that filed it, in the words of the conversation’s Filed by (src/feedback.ts); null otherwise.'),
   ticket: Ticket.nullable(),
   agentState: z.enum(['active', 'paused']),
   pausedBy: z.object({ kind: z.enum(['staff', 'ticket']), userId: z.string().nullable(), name: z.string().nullable() }).nullable(), pausedAt: z.string().nullable(),
@@ -151,8 +152,8 @@ type ItemRow = { id: string; channel: z.infer<typeof Item>['channel']; mode: z.i
   ticket_id: string | null; ticket_type: string | null; ticket_severity: string | null; ticket_resolved_at: string | null; agent_state: 'active' | 'paused'; paused_by: string | null;
   paused_by_name: string | null; paused_at: string | null; messages: number; turns: number; cost_usd: number | string; blocked_work: number; created_at: string; last_message_at: string | null;
   closed_at: string | null; activity_at: string; last_author: z.infer<typeof Author> | null; last_text: string | null; last_held: boolean | null; queued: number; opening: string | null; done_at: string | null; done_by: string | null; done_by_name: string | null;
-  unread: boolean; needs_you: boolean; urgency: number; since: string | null } & Record<`why_${(typeof TRIAGE_REASONS)[number]}`, boolean>;
-const itemColumns = sql`c.id, c.channel, c.mode, c.verification, c.status, c.subject, c.pending_address, c.user_id, u.name AS user_name, u.email AS user_email,
+  unread: boolean; needs_you: boolean; urgency: number; since: string | null; filed_by: string | null } & Record<`why_${(typeof TRIAGE_REASONS)[number]}`, boolean>;
+const itemColumns = sql`c.id, c.channel, CASE WHEN c.channel = 'agent_feedback' THEN left(c.evidence->>'filedBy', 300) END AS filed_by, c.mode, c.verification, c.status, c.subject, c.pending_address, c.user_id, u.name AS user_name, u.email AS user_email,
   c.workspace_id, w.name AS workspace_name, c.ticket_id, c.ticket_type, c.ticket_severity, c.ticket_resolved_at::text AS ticket_resolved_at,
   c.agent_state, c.paused_by, p.name AS paused_by_name, c.paused_at::text AS paused_at, c.messages, c.turns, c.cost_usd, c.blocked_work,
   c.created_at::text AS created_at, c.last_message_at::text AS last_message_at, c.closed_at::text AS closed_at, coalesce(c.last_message_at, c.created_at)::text AS activity_at,
@@ -194,7 +195,7 @@ const ticketOf = (r: { ticket_id: string | null; ticket_type: string | null; tic
 const item = (r: ItemRow): z.infer<typeof Item> => ({
   id: r.id, channel: r.channel, mode: r.mode, verification: r.verification, status: r.status, subject: r.subject,
   customer: r.user_id ? { userId: r.user_id, name: r.user_name, email: r.user_email } : null, sender: r.pending_address,
-  workspace: r.workspace_id ? { id: r.workspace_id, name: r.workspace_name ?? r.workspace_id } : null, ticket: ticketOf(r),
+  workspace: r.workspace_id ? { id: r.workspace_id, name: r.workspace_name ?? r.workspace_id } : null, filedBy: r.filed_by ?? null, ticket: ticketOf(r),
   agentState: r.agent_state, pausedAt: isoTime(r.paused_at),
   pausedBy: r.agent_state !== 'paused' ? null : r.paused_by === 'ticket' ? { kind: 'ticket', userId: null, name: null } : { kind: 'staff', userId: r.paused_by, name: r.paused_by_name },
   lastAuthor: r.last_author, needsReply: r.status !== 'closed' && r.channel !== 'agent_feedback' && r.last_author === 'customer',

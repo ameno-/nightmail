@@ -15,7 +15,7 @@ export interface SupportTicket { id: string; type: string | null; severity: stri
 export interface SupportConversation {
   id: string; channel: Channel; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none' | 'credential'
   status: 'open' | 'ticketed' | 'closed'; subject: string | null; customer: { userId: string; name: string | null; email: string | null } | null; sender: string | null
-  workspace: { id: string; name: string } | null; ticket: SupportTicket | null; agentState: 'active' | 'paused'
+  workspace: { id: string; name: string } | null; filedBy?: string | null; ticket: SupportTicket | null; agentState: 'active' | 'paused'
   pausedBy: { kind: 'staff' | 'ticket'; userId: string | null; name: string | null } | null; pausedAt: string | null
   lastAuthor: SupportAuthor | null; needsReply: boolean; preview: { author: SupportAuthor; text: string; held: boolean } | null; messageCount: number; queuedReplies: number; turns: number; costUsd: number; blockedWork: number
   firstLine: string | null; needsYou: { reasons: TriageReason[]; urgent: boolean; since: string } | null; done: { at: string; userId: string; name: string | null } | null; unread: boolean
