@@ -17795,6 +17795,8 @@ describe('Private attachment assets and campaign revisions', () => {
     cleanup(t, async () => { for (const file of [big, small]) ok(await http('DELETE', `/v1/attachments/${file.id}`, key.secret), [200, 404, 409]); });
     assert.equal(big.size, max);
     assert.match(error(await upload('over.txt', max + 1), 413, 'ATTACHMENT_LIMIT_EXCEEDED').message, /^Attachment "over\.txt" is 25\.0 MiB \(26,214,401 bytes\) decoded\. No file may be larger than 25 MiB: link to it from the email instead\./);
+    // The refused file is never stored.
+    assert.equal((await (await fixtureDatabase(t)).query("SELECT count(*)::int AS n FROM sending_attachments WHERE filename = 'over.txt'")).rows[0].n, 0);
     const content = ok(await http('GET', `/v1/attachments/${big.id}/content`, key.secret, undefined, {}, 30_000)).content as string;
     assert.ok(content.length === Math.ceil(max / 3) * 4 && Buffer.from(content, 'base64').equals(Buffer.alloc(max, 0x61)), 'The download is the whole file as canonical base64.');
     // One message may carry 25 MiB of files; one byte more is refused before anything is queued.

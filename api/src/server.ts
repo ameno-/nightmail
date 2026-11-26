@@ -3,6 +3,7 @@ import { serve } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { getPath } from 'hono/utils/url';
 import { existsSync, readFileSync } from 'node:fs';
+import type { Socket } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import { createApp } from './app.js';
 import { flushCounters } from './health-counters.js';
@@ -57,6 +58,32 @@ async function encode(request: Request, path: string, response: Response, header
   const bytes = await body;
   headers.set('content-encoding', encoding); headers.set('content-length', String(bytes.length));
   return new Response(request.method === 'HEAD' ? null : new Uint8Array(bytes), { status: 200, headers });
+}
+
+// A client whose upload is refused for its size may still be sending the body. Closing the socket with those bytes unread
+// makes the kernel reset the connection, and a client that writes again before it reads gets a broken pipe instead of the
+// 413 (RFC 9112 section 9.6). Close in stages instead: send the answer and a FIN, read and discard at most 64 KiB more,
+// then stop reading, and close once the client hangs up or 2 seconds after the answer.
+const REFUSED_BODY_DISCARD_BYTES = 64 * 1024, REFUSED_BODY_LINGER_MS = 2000;
+function closeAfterRefusal(socket: Socket & { _paused?: boolean }) {
+  let closing = false;
+  // Node calls this once the answer is written to a socket it won't reuse (Hono's adapter may call it again later).
+  socket.destroySoon = () => {
+    if (closing || socket.destroyed) return;
+    closing = true;
+    const timer = setTimeout(() => socket.destroy(), REFUSED_BODY_LINGER_MS);
+    timer.unref();
+    socket.once('close', () => clearTimeout(timer));
+    socket.once('end', () => socket.destroy());
+    let left = REFUSED_BODY_DISCARD_BYTES;
+    socket.on('data', (chunk: Buffer) => {
+      if ((left -= chunk.length) > 0) return;
+      // Node's HTTP server never resumes a socket it marked _paused, whatever goes on reading the request.
+      socket._paused = true;
+      socket.pause();
+    });
+    socket.end();
+  };
 }
 
 setLogContext({ service: 'api', deploy: process.env.DEPLOY_SHA });
@@ -115,8 +142,11 @@ try {
     let answer = await guardPublicRequest(path, headers, await digest(address), async () => app.fetch(new Request(request, { headers }), path === '/internal/v1/analytics' ? { ...runtime, analyticsPeer: { ip: connection.incoming.socket.remoteAddress ?? '' } } : runtime));
     if (path === '/llms.txt' && request.method === 'GET' && answer.ok && siteIndex) { const head = new Headers(answer.headers); head.delete('content-length'); answer = new Response(withSiteIndex(await answer.text(), siteIndex), { status: answer.status, headers: head }); }
     const response = await dashboardFile(request, path, answer);
-    // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse.
-    if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) connection.outgoing.shouldKeepAlive = false;
+    // A size rejection can leave upload bytes unread. Do not offer that HTTP/1 socket for reuse, and close it in stages.
+    if (response.status === 413 && !connection.incoming.readableEnded && 'shouldKeepAlive' in connection.outgoing) {
+      connection.outgoing.shouldKeepAlive = false;
+      closeAfterRefusal(connection.incoming.socket);
+    }
     return response;
   }, port: Number(process.env.PORT ?? 8787), hostname: process.env.HOST ?? '0.0.0.0' }, info => {
     log('info', { code: 'API_READY', port: info.port, liveSesEnabled: runtime.config.liveEnabled });
