@@ -26421,11 +26421,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
       {
         runtime.config.builtinScope='members';runtime.config.builtinReplies={perDay:4,perRecipientPerDay:2};
         // To the default inbox (an agent inbox, which replies only to authenticated authors already), or to support@ (an address).
-        const fresh=async(o:{from?:string;verified?:boolean;automated?:boolean;replyTo?:string[];address?:boolean}={})=>{const {n,mid}=await receive([o.address?`support@${host}`:`order-${randomUUID().slice(0,6)}@${host}`]);assert.equal(n,1);
+        const fresh=async(o:{from?:string;verified?:boolean;automated?:boolean;replyTo?:string[];address?:boolean;to?:string[]}={})=>{const {n,mid}=await receive([o.address?`support@${host}`:`order-${randomUUID().slice(0,6)}@${host}`]);assert.equal(n,1);
           const id=unique('msg'),sender=o.from??'someone@sender.example',input=(await runtime.db.execute<{i:Json}>(sql`SELECT ${ingestInput(runtime.config,wid,mid)} AS i`)).rows[0]!.i;
           const plan=matchRouting(input.routing,input.recipients,false,'PASS',new Date().toISOString());
           await storeIncoming(runtime.db,{id,workspaceId:wid,direction:'inbound',region:oh,sesMessageId:mid,messageId:`<${mid}@sender.example>`,inReplyTo:null,references:[],subject:'Question',
-            fromAddress:sender,fromName:null,to:input.recipients,cc:[],bcc:[],replyTo:(o.replyTo??[]).map(address=>({name:null,address})),envelopeFrom:sender,envelopeTo:input.recipients,sentAt:null,receivedAt:new Date().toISOString(),
+            fromAddress:sender,fromName:null,to:o.to?o.to.map(address=>({name:null,address})):input.recipients,cc:[],bcc:[],replyTo:(o.replyTo??[]).map(address=>({name:null,address})),envelopeFrom:sender,envelopeTo:input.recipients,sentAt:null,receivedAt:new Date().toISOString(),
             text:'Hi.',html:null,bodyTruncated:false,snippet:'Hi.',headers:[],attachmentCount:0,sizeBytes:100,rawBucket:bucket,rawKey:`workspaces/${wid}/raw/${mid}.eml`,verdicts:{spam:'PASS',virus:'PASS',dmarc:o.verified===false?'FAIL':'PASS'},spam:false,automated:!!o.automated,status:'received',
             lifecycle:plan.recipients.some(r=>r.inboxes.some(id=>input.routing.boxes?.[id]?.kept))?'kept':undefined} as any,[],true,true,o.verified!==false,plan,undefined,null);
           const row=(await db.query('SELECT thread_id,mailbox_id FROM mailbox_messages WHERE message_id=$1',[id])).rows[0];
@@ -26450,6 +26450,11 @@ describe('SIMULATED SES: real SDK transport and direct event fanout', () => {
         assert.match(await refusedFor(answer(await fresh({replyTo:['help@elsewhere.example'],address:true}),{to:['someone@sender.example']})),/Reply-To/);
         // Automated mail: refused even when the caller asks to answer automated mail anyway.
         assert.match(await refusedFor(answer(await fresh({automated:true,address:true}),{allowAutomated:true})),/automated/);
+        // A signed message the sender wrote to someone else, replayed here (this domain isn't in its To or Cc): never answered.
+        assert.match(await refusedFor(answer(await fresh({from:'replayed@sender.example',to:['friend@elsewhere.example'],address:true}))),/wasn’t sent to this domain/);
+        // Per recipient across every workspace: two replies to this person from other built-in workspaces today use theirs.
+        for (const other of ['ws_other_a','ws_other_b']) await db.query("INSERT INTO builtin_replies(workspace_id,message_id,recipient) VALUES($1,$2,'shared@sender.example')",[other,unique('msg')]);
+        assert.match(await refusedFor(answer(await fresh({from:'shared@sender.example',address:true}))),/daily allowance/);
         // A suppressed address is never mailed.
         await db.query("INSERT INTO audience_contacts(id,workspace_id,email,suppressed,suppression_reason) VALUES($1,$2,'blocked@sender.example',true,'bounce')",[unique('con'),wid]);
         assert.match(await refusedFor(answer(await fresh({from:'blocked@sender.example',address:true}))),/suppressed/);

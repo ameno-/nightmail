@@ -621,7 +621,7 @@ export async function assertBuiltinRecipients(runtime: Runtime, db: DbExecutor, 
   const found = sent.map(m => ({ index: m.index, host: m.host, notMembers: [...new Set(m.recipients.filter(r => !members.has(r.toLowerCase())))] })).filter(m => m.notMembers.length);
   if (!found.length) return none;
   // The one exception (off unless NIGHTMAIL_BUILTIN_REPLIES): a thread reply to the sender of the message it answers.
-  const refused = reply && runtime.config.builtinReplies && !batch && mails.length === 1 ? await builtinReplyException(runtime, db, workspaceId, mails[0]!.recipients, reply) : null;
+  const refused = reply && runtime.config.builtinReplies && !batch && mails.length === 1 ? await builtinReplyException(runtime, db, workspaceId, mails[0]!.recipients, reply, sent[0]!.host) : null;
   if (refused === true) return { replyGranted: true };
   const first = found[0]!, error = builtinRefusal(runtime.config, { code: 'BUILTIN_DOMAIN_RECIPIENT', host: first.host, notMembers: first.notMembers });
   if (batch) error.field = `emails.${first.index}.to`;
@@ -635,21 +635,26 @@ export type BuiltinReply = { messageId: string; mailboxId: string };
  * address that sent the received message it answers, and only when that sender passed authentication as inbound records
  * it (reply_author_verified: DMARC, or an aligned SPF or DKIM pass), so a forged From can't make it mail a victim. Never
  * to anyone else, a Reply-To at another domain, cc or bcc; never to automated mail, junk, mail from a built-in or platform
- * address, or a suppressed address; at most one reply per received message, and NIGHTMAIL_BUILTIN_REPLIES's daily counts
- * per workspace and per recipient. Everything else a send meets (screening, standing, limits, suppression) still applies.
+ * address, or a suppressed address; only to a message that was sent to this built-in domain (in its To or Cc: a signed
+ * message the sender wrote to someone else, replayed here, can't make it mail them); at most one reply per received
+ * message, and NIGHTMAIL_BUILTIN_REPLIES's daily counts: per workspace, and per recipient across every workspace (sign-ups
+ * are cheap: many workspaces must not each get their own allowance to the same person). Everything else a send meets (screening, standing, limits, suppression) still applies.
  * Runs under the workspace's send locks, so the counts can't race. True when allowed (and recorded in builtin_replies,
  * in the send's transaction), else the condition that failed, in plain words, never the numbers.
  */
-export async function builtinReplyException(runtime: Runtime, db: DbExecutor, workspaceId: string, recipients: string[], reply: BuiltinReply): Promise<true | string> {
+export async function builtinReplyException(runtime: Runtime, db: DbExecutor, workspaceId: string, recipients: string[], reply: BuiltinReply, host: string): Promise<true | string> {
   const caps = runtime.config.builtinReplies!;
   if (recipients.length !== 1) return 'A reply to someone outside the workspace may go only to the sender of the message it answers, alone: no other recipients, cc or bcc.';
   const to = recipients[0]!.toLowerCase();
+  // Replies to one person from every workspace take turns, so the count across workspaces holds (the send locks are per workspace).
+  await db.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${to}, 57501))`);
   const { rows: [m] } = await db.execute<{ from_address: string; automated: boolean; spam: boolean; verified: boolean; unverified: boolean; reply_to: { address: string }[];
-    answered: boolean; today: number; recipient_today: number; suppressed: boolean }>(sql`SELECT lower(m.from_address) AS from_address, m.automated, m.spam,
+    answered: boolean; addressed: boolean; today: number; recipient_today: number; suppressed: boolean }>(sql`SELECT lower(m.from_address) AS from_address, m.automated, m.spam,
       l.reply_author_verified AS verified, 'unverified'=ANY(l.labels) AS unverified, m.reply_to,
       EXISTS(SELECT FROM builtin_replies r WHERE r.workspace_id=${workspaceId} AND r.message_id=m.id) AS answered,
       (SELECT count(*)::int FROM builtin_replies r WHERE r.workspace_id=${workspaceId} AND r.created_at>now()-interval '1 day') AS today,
-      (SELECT count(*)::int FROM builtin_replies r WHERE r.workspace_id=${workspaceId} AND r.recipient=lower(m.from_address) AND r.created_at>now()-interval '1 day') AS recipient_today,
+      EXISTS(SELECT FROM jsonb_array_elements(coalesce(m."to",'[]'::jsonb)||coalesce(m.cc,'[]'::jsonb)) a WHERE lower(split_part(coalesce(a->>'address',a#>>'{}'),'@',2))=${host}) AS addressed,
+      (SELECT count(*)::int FROM builtin_replies r WHERE r.recipient=lower(m.from_address) AND r.created_at>now()-interval '1 day') AS recipient_today,
       EXISTS(SELECT FROM audience_contacts c WHERE c.workspace_id=${workspaceId} AND lower(c.email)=lower(m.from_address) AND c.suppressed AND c.deleted_at IS NULL) AS suppressed
     FROM mail_messages m JOIN mailbox_messages l ON l.message_id=m.id AND l.workspace_id=m.workspace_id AND l.mailbox_id=${reply.mailboxId}
     WHERE m.workspace_id=${workspaceId} AND m.id=${reply.messageId} AND m.direction='inbound' LIMIT 1`);
@@ -661,6 +666,7 @@ export async function builtinReplyException(runtime: Runtime, db: DbExecutor, wo
   if (m.automated || m.spam || NO_REPLY.test(m.from_address) || isBuiltinHost(runtime.config, domain) || platformHosts(runtime.config).some(h => domain === h || domain.endsWith(`.${h}`)))
     return 'The message is automated (an auto-reply, bounce or list mail), junk or one of our own, so it can’t be answered from the built-in domain.';
   if (!m.verified || m.unverified) return 'Its sender didn’t pass authentication (DMARC, or an aligned SPF or DKIM pass), so the built-in domain can’t answer it: the From address may not be the real sender.';
+  if (!m.addressed) return 'The message wasn’t sent to this domain (it isn’t in its To or Cc), so the built-in domain can’t answer it.';
   if (m.suppressed) return 'That address is suppressed (it bounced or complained earlier), so it is never mailed.';
   if (m.answered) return 'This message was already answered once from the built-in domain.';
   if (m.today >= caps.perDay || m.recipient_today >= caps.perRecipientPerDay) return 'The built-in domain’s daily allowance for replies outside the workspace is used (for the workspace or for this address). Try again tomorrow, or add a domain of your own.';
