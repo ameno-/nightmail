@@ -58,6 +58,7 @@
 .pp-line[data-lead] { text-shadow: .04em 0 .04em rgb(157 174 255 / 45%), .09em 0 .09em rgb(157 174 255 / 18%), 0 0 .3em rgb(170 190 255 / 34%); }
 .pp-verdict::after { content: ''; position: absolute; inset: 0; pointer-events: none; background: repeating-linear-gradient(to bottom, transparent 0 2px, rgb(0 0 0 / 30%) 2px 3px); }
 @media (min-resolution: 2dppx) { .pp-verdict::after { background: repeating-linear-gradient(to bottom, transparent 0 1px, rgb(0 0 0 / 30%) 1px 1.5px); } }
+@media (min-resolution: 3dppx) { .pp-verdict::after { background: repeating-linear-gradient(to bottom, transparent 0 .667px, rgb(0 0 0 / 30%) .667px 1px); } }
 .pp-caption { margin: 14px 0 0; color: var(--soft); font: 700 13px / 1.45 var(--font-mono); letter-spacing: .05em; text-transform: uppercase; text-wrap: pretty; }
 .pp-way { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 28px; }
 /* The airmail label at an ordinary button's size: 44 px tall in all, a thumb's press, the button itself (its striped
