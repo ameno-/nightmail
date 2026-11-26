@@ -13,7 +13,7 @@ import { lists, mergeSuppression, segments } from './db/audience.js';
 import { literalSearch, SuppressionReason, EmailEventData, readCursor, encodeCursor, nextCursor, budgetedRead, readLimit, readLimitNote } from './core.js';
 import type { AnyPgColumn } from 'drizzle-orm/pg-core';
 import type { Attachment } from '@aws-sdk/client-sesv2';
-import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage } from './core.js';
+import { actor, actorMailAccess, ApiError, apiFailureBody, describeApiFailure, AudienceSpec, denied, unrestrictedRequired, uploadKey, chargeRenderBudget, digest, errors, getSes, isSimulatedSes, id, rowId, IdParams, json, lazyModule, log, logError, ModuleLoadError, notFound, PageQuery, page, redactCapabilityData, redactCapabilityText, region, response, security, senderDomainAllowed, simulatedTopic, taggedEmailId, timed, withoutVerdict, wrapModuleLoad, type Actor, type App, type Ctx, type DbExecutor, type JobHandler, type Runtime, type Storage, type AttachmentTypes } from './core.js';
 import { enqueue, JobDeferred, MAX_ATTEMPTS, retryDatabaseFailures, wakeWebhooks } from './jobs.js';
 import { countScreened, failScheduledRelease, CAMPAIGN_ACTIVE, CAMPAIGN_RUNNING, CAMPAIGN_STATES, campaignEditable, campaignReserved, campaignResumable, cancelCampaign, failCampaign, finishCampaigns, holdCampaign, launchCampaign, noteHealthChecked, pauseCampaign, quarantineCampaign, clearProbe, skipProbe, waitProbe, queueCampaignRun, recordExpanded, recordPrepared, rescheduleCampaign, restartRampWindow, restrictToDelivered, resumeCampaign, retireCampaignRun, reviseCampaign, runningState, setCampaignPacing, setRamp, startSending, unscheduleCampaign, terminalColumns, terminalEvents, wakeCampaignRun, type CampaignState } from './states.js';
 import { productName } from './brand.js';
@@ -31,7 +31,7 @@ import { CustomHeaders } from './custom-headers.js';
 import { EmailThread, joinReplies, mailboxMail, sentThreadId, threadBlock, threadView, type RawThread } from './thread-view.js';
 import { attachmentLinks, attachments, campaignReviews, campaigns, emailEvents, emails, type CampaignStatsGroup, type StoredCampaignStats, type CampaignDraft, type EmailSnapshot, type EmailStatus, type ReviewedRecipient } from './db/sending.js';
 import { decodedDisplayName, AttachmentMetadata, AttachmentUpload, decodeBase64, fileTooLarge, invalidMetadataFields, mailAddress, MAX_ATTACHMENT_BYTES, MAX_JSON_ATTACHMENT_BYTES, metadataInvalid, mib, quoted, sizeText, postalAddressOf, postalAddressRequired, senderDisplayName, unsubscribePageLink, unsubscribePageUrl, validateAttachment, validMailAddressSql, type AttachmentMetadataInput } from './outbound-content.js';
-import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, recordLinkUse } from './link-domains.js';
+import { foundLinkOrigin, linkChoice, linkChoices, linkOrigin, linkReview, recordLinkUse } from './link-domains.js';
 import { clients, type Client } from './email-preview/support.js';
 import { CheckInput, CheckResult, splitMailbox, type CheckMail } from './sendability-schema.js';
 import { withRedactedReply } from './deliverability.js';
@@ -503,7 +503,10 @@ const CampaignReadiness = z.object({
   domain: z.object({ name: z.string(), firstSeenAt: z.string().nullable().describe('When the From domain (or the domain it is under) was added to this workspace.'), ageDays: z.number().int().nullable(),
     dmarc: z.enum(['reject', 'quarantine', 'none', 'missing', 'invalid']).nullable().describe('The DMARC policy last observed; null when not checked yet.'),
     mailFrom: z.enum(['verified', 'pending', 'failed', 'not_configured']).describe('The custom MAIL FROM domain (aligned SPF).'),
-    linkHost: z.enum(['not_configured']).describe('A link host of the domain\'s own for tracked links: not configurable yet.') }),
+    linkHost: z.enum(['not_configured']).describe('Kept for compatibility, always not_configured: ownLinkHost and linkOrigin say where the links go.'),
+    ownLinkHost: z.object({ hostname: z.string().describe('links.<domain>.'), active: z.boolean().describe('true: the links go there. false: it isn\u2019t set up yet, so they go on linkOrigin (the link domain) meanwhile.') }).nullable()
+      .describe('The domain\'s own link host, when this workspace has them; null without one.'),
+    linkOrigin: z.string().nullable().describe('Where this campaign\'s links (its unsubscribe link, the text part\'s, List-Unsubscribe and linked images) go if it launches now: the domain\'s own link host when active, else the link domain (Hosted) or this installation\'s own origin. Null when the launch would be refused for want of one (the workspace\'s sending is paused, or no link host for the domain). A launch on the link domain moves to the domain\'s own host for the copies made once that is active.') }),
   history: z.object({ workspace: HistoryFigures.describe('Every kind of mail the workspace sent; largestSend counts campaigns.'), domain: HistoryFigures.describe('Campaigns from this From domain.') }),
   list: z.object({ recipients: z.number().int(), risky: z.number().int().describe('Risky contacts the send skips.'),
     neverMailed: z.number().int().nullable().describe('Recipients who joined the list since it was last sent to (or ever, when it never was) and have no open or click on record; null when counting took too long.'),
@@ -687,6 +690,7 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
       coalesce((SELECT max_send_rate FROM ${limitsTable(runtime)} WHERE workspace_id=${a.workspaceId} AND region=${row.draft.region}),0)::float8 AS rate,
       ${runtime.config.multiTenant ? sharedConnection(a.workspaceId) : sql`false`} AS hosted`)).rows;
   const live = !!f!.hosted && !isSimulatedSes(runtime), ageDays = f!.first_seen ? Math.floor((Date.now() - Date.parse(f!.first_seen)) / DAY_MS) : null;
+  const links = await linkReview(runtime, db, a.workspaceId, row.draft.from);
   const dmarc = f!.dmarc && ['reject', 'quarantine', 'none', 'missing', 'invalid'].includes(f!.dmarc) ? f!.dmarc as 'reject' | 'quarantine' | 'none' | 'missing' | 'invalid' : null;
   const n = audience.recipients, wsAccepted = Number(f!.ws_accepted ?? 0);
   const judged = judgeReadiness({ recipients: n, matched: audience.matched, risky: audience.risky, neverMailed: audience.neverMailed, domainAgeDays: ageDays,
@@ -711,7 +715,8 @@ async function sendReadiness(runtime: Runtime, db: DbExecutor, a: Actor, row: { 
   const rate = (part: number, whole: number) => whole > 0 ? part / whole : null;
   return CampaignReadiness.parse({ verdict: judged.verdict, summary, reasons: judged.reasons.map(code => ({ code, message: messages[code]() })),
     domain: { name: domain, firstSeenAt: f!.first_seen ? new Date(f!.first_seen).toISOString() : null, ageDays, dmarc,
-      mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured', linkHost: 'not_configured' },
+      mailFrom: f!.mail_from === 'SUCCESS' ? 'verified' : f!.mail_from === 'PENDING' ? 'pending' : f!.mail_from === 'FAILED' || f!.mail_from === 'TEMPORARY_FAILURE' ? 'failed' : 'not_configured',
+      linkHost: 'not_configured', ownLinkHost: links.own, linkOrigin: links.origin },
     history: { workspace: { largestSend: f!.ws_largest, sent: wsAccepted, bounceRate: rate(Number(f!.ws_bounced ?? 0), wsAccepted), complaintRate: rate(Number(f!.ws_complained ?? 0), wsAccepted) },
       domain: { largestSend: f!.dom_largest, sent: f!.dom_accepted, bounceRate: rate(f!.dom_bounced, f!.dom_accepted), complaintRate: rate(f!.dom_complained, f!.dom_accepted) } },
     list: { recipients: n, risky: audience.risky, neverMailed: audience.neverMailed, createdAt: f!.list_created ? new Date(f!.list_created).toISOString() : null,
@@ -891,7 +896,7 @@ function sesAttachment(metadata: { filename?: string; contentId?: string | null;
   const problems = sesProblems(metadata), fields = Object.keys(problems) as (keyof typeof problems)[];
   if (fields.length) throw metadataInvalid(metadata, fields, false, problems);
 }
-type AttachmentProblem = { index: number; attachment?: number; id?: string; filename?: string; code: string; status: number; message: string };
+type AttachmentProblem = { index: number; attachment?: number; id?: string; filename?: string; code: string; status: number; message: string; types?: AttachmentTypes; mailApp?: boolean };
 /**
  * Every problem with the attachments of each email in a send, email by email and file by file, so a caller learns every
  * rule it broke in one try (a production agent found them one refusal at a time): a file missing or listed twice, a
@@ -921,12 +926,17 @@ function attachmentProblems(lists: string[][], byId: Map<string, AttachmentFacts
   }
   return problems;
 }
-/** One refusal naming every problem: the first one's status, code and field, and each in the message and error.details. */
+/** One refusal naming every problem: the first one's status, code, field and types, and each in the message and
+ *  error.details. A mail app's message is the SMTP reply its user reads (gateway remote.rs): plain words naming each
+ *  file once, the same in every part of a large envelope. */
 function attachmentRefusal(problems: AttachmentProblem[], batch: boolean) {
   const path = (p: AttachmentProblem) => `${batch ? `emails.${p.index}.` : ''}attachments${p.attachment === undefined ? '' : `.${p.attachment}`}`;
   const line = (p: AttachmentProblem) => `${path(p)}: ${p.message.replace(/\.$/, '')}`, first = problems[0]!;
   const limits = problems.some(p => p.code === 'ATTACHMENT_LIMIT_EXCEEDED') ? ` ${ATTACHMENT_LIMITS_TEXT}` : '';
-  const error = new ApiError(first.status, first.code, `${problems.length > 1 ? `${problems.length} attachment problems: ` : ''}${problems.map(line).join('; ')}.${limits}`, path(first));
+  const message = problems.every(p => p.mailApp) ? `Message not sent: ${[...new Set(problems.map(p => p.message))].join('; ')}.`
+    : `${problems.length > 1 ? `${problems.length} attachment problems: ` : ''}${problems.map(line).join('; ')}.${limits}`;
+  const error = new ApiError(first.status, first.code, message, path(first));
+  error.attachmentTypes = first.types;
   error.details = problems.map(p => ({ ...(batch ? { index: p.index } : {}), ...(p.attachment === undefined ? {} : { attachment: p.attachment }), ...(p.id ? { id: p.id } : {}),
     ...(p.filename ? { filename: p.filename } : {}), code: p.code, message: line(p) }));
   return error;
@@ -1589,12 +1599,9 @@ async function screenOutgoingAtAccept(runtime: Runtime, a: Actor, out: Outgoing[
           const attRow = loadedAttachments.get(attId);
           if (!attRow) continue;
           const body = await verifiedAttachment(runtime, attRow);
-          try {
-            if (rules === 'standard') delivery.shownAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
-            else delivery.screenedAttachment(attRow.filename, attRow.contentType, body, attRow.disposition === 'inline');
-          } catch (error) {
+          try { delivery.hostedAttachment(attRow, body, rules === 'probation', !!m.snapshot.mailApp); } catch (error) {
             if (!(error instanceof ApiError)) throw error;
-            unsendable.push({ index: i, attachment: k, id: attId, filename: attRow.filename, code: error.code, status: error.status, message: error.message });
+            unsendable.push({ index: i, attachment: k, id: attId, filename: attRow.filename, code: error.code, status: error.status, message: error.message, types: error.attachmentTypes, mailApp: m.snapshot.mailApp });
           }
         }
       }
@@ -1886,7 +1893,7 @@ async function relayedMessage(runtime: Runtime, input: RelayedMessage) {
   const out = await directMessages(runtime, [parsed.data], false), message = out[0]!;
   if (message.invalid) throw message.invalid;
   if (mime) passThrough(message.snapshot, mime, message.marketing);
-  Object.assign(message.snapshot, { to: input.to, cc: input.cc, bcc: input.bcc });
+  Object.assign(message.snapshot, { to: input.to, cc: input.cc, bcc: input.bcc, mailApp: true });
   return { parsed: parsed.data, out };
 }
 /** Before a relayed message's attachments are uploaded: the message and its sender's admission, checked without
@@ -2044,7 +2051,7 @@ export async function queueMailboxEmail(runtime: Runtime, db: DbExecutor, held: 
     a.dispatchAccount = { aws_account_id: route.connection.aws_account_id, kind: route.connection.kind, ...(typeof lim?.rate === 'number' && lim.rate > 0 ? { maxSendRate: lim.rate } : {}) };
   }
   if (isBulk) snapshot.bulk = true;
-  if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;}
+  if(request.protocolEnvelope){snapshot.to=request.to;snapshot.cc=request.cc;snapshot.bcc=request.bcc;snapshot.mailApp=true;}
   snapshot.headers = [...snapshot.headers, ...request.headers];
   snapshot.untrustedContent = replyAuthors !== null || snapshot.headers.some(h => h.Name.toLowerCase() === 'in-reply-to');
   if (replyAuthors !== null) snapshot.replyAuthors = replyAuthors;
@@ -2163,11 +2170,11 @@ async function reviewPart<T>(c: Ctx, read: Promise<T>) {
 
 /** A campaign's preview: its rendered draft with the footer its emails get, the link a placeholder on the link host
  *  its launch would use. A draft that couldn't launch for want of one shows this installation's own: it is never sent. */
-async function previewParts(runtime: Runtime, draft: CampaignDraft, footer: Footer) {
+async function previewParts(runtime: Runtime, workspaceId: string, draft: CampaignDraft, footer: Footer) {
   const rendered = await renderCampaignContent(runtime, draft, false);
   if (!rendered.html && !rendered.text) return rendered;
   let origin = runtime.config.publicUrl;
-  if (!footer.requiredNotice) try { origin = foundLinkOrigin(runtime.config, draft.from, footer.linkOrigin); } catch { /* Never sent: shown as this installation's own. */ }
+  if (!footer.requiredNotice) try { origin = foundLinkOrigin(runtime.config, workspaceId, draft.from, footer.linkOrigin); } catch { /* Never sent: shown as this installation's own. */ }
   footerParts(rendered, unsubscribePlaceholder(origin), footer);
   return rendered;
 }
@@ -2619,7 +2626,7 @@ export function registerSending(app: App) {
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/preview', operationId: 'previewCampaign', description: 'Renders the saved draft’s block HTML as the styled email and its plain-text alternative, with the footer every email gets (the Unsubscribe link, a placeholder here, and the workspace’s postal address) and without personalization. Placeholders remain visible as {{name}}.', tags: ['Campaigns'], security, request: { params: IdParams }, responses: { 200: response(CampaignPreview), ...errors } }), async c => {
     const a = actor(c), { row, footer } = await campaignWithFooter(c.env, a, c.req.valid('param').id);
-    const rendered = await previewParts(c.env, row.draft, footer);
+    const rendered = await previewParts(c.env, a.workspaceId, row.draft, footer);
     return c.json({ html: rendered.html ?? '', text: rendered.text ?? '' }, 200);
   });
   app.openapi(createRoute({ method: 'get', path: '/v1/campaigns/{id}/audience', operationId: 'previewCampaignAudience', description: 'Counts the saved audience right now: matched contacts and how many are eligible, suppressed or unsubscribed. With readiness=true it also reviews the send (CampaignReadiness): whether it is ready to go out as it is, why, and the daily batches it recommends; send it with pacing.plan "recommended" to follow them. Read-only and never frozen; send or schedule takes its own snapshot and consent is rechecked at dispatch.', tags: ['Campaigns'], security, request: { params: IdParams, query: z.object({ readiness: z.enum(['true', 'false']).optional().describe('Also review the send (readiness).') }) }, responses: { 200: response(AudienceCounts), ...errors } }), async c => {
@@ -2650,7 +2657,7 @@ export function registerSending(app: App) {
     await chargeRenderBudget(c, a.workspaceId);
     const inline = (await attachmentRows(c.env.db, a, row.draft.attachments)).filter(item => item.disposition === 'inline' && item.contentId), render = c.env.renderHtmlImage;
     // The page is passed on, not kept here: renderPreview drops it once it is rendered.
-    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, row.draft, footer)).html ?? '', inline, async item => {
+    const link = await renderPreview(c.env, a.workspaceId, (await previewParts(c.env, a.workspaceId, row.draft, footer)).html ?? '', inline, async item => {
       const asset = await c.env.storage.get(item.storageKey);
       if (!asset || asset.body.length !== item.size || await bytesDigest(asset.body) !== item.checksum) throw new ApiError(503, 'ATTACHMENT_STORAGE_UNAVAILABLE', 'An inline campaign image is missing or changed.', undefined, true);
       return asset.body;
@@ -2716,7 +2723,7 @@ export function registerSending(app: App) {
       // The footer as recipients get it, its link the placeholder on the link host they get: a test is transactional,
       // without List-Unsubscribe, and refused as the launch would be when there is no link host.
       // Its pictures are linked from that host too, as recipients' are (src/linked-images.ts); a required notice's stay attached.
-      const origin = footer.requiredNotice ? undefined : foundLinkOrigin(c.env.config, row.draft.from, footer.linkOrigin);
+      const origin = footer.requiredNotice ? undefined : foundLinkOrigin(c.env.config, a.workspaceId, row.draft.from, footer.linkOrigin);
       const snapshot = { ...message, testCampaignId: campaignId, ...origin ? { linkOrigin: origin } : {} };
       footerParts(snapshot, unsubscribePlaceholder(origin ?? c.env.config.publicUrl), footer);
       const out: Outgoing[] = [{ snapshot, recipients: hostedCost(input.to), marketing: false }];

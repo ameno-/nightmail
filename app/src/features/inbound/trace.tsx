@@ -208,7 +208,7 @@ export function useDryRun() {
   return { result, error, pending, runId, run, clear: () => { setResult(null); setError(null) } }
 }
 
-/** /receiving/trace, from before Test moved into the flow panel: Receiving, the panel open on the address it was handed. */
+/** /receiving/trace, from before Test moved into the flow panel: Mail routing, the panel open on the address it was handed. */
 export function TracePage() {
   const to = (useLocation().state as { to?: string } | null)?.to
   return <Navigate replace to={to ? `/receiving?q=${encodeURIComponent(to)}` : '/receiving'} />

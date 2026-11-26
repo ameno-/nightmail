@@ -73,7 +73,7 @@ export interface Glass {
   delivery: { grades: Record<GlassGrade, number>; calibrating: number; paused: number; held: number; steps: Record<StandingStep, number>; ramping: number; rampWaiting: number }
   receiving: { today: number; spam: number; atLeast: boolean; hourly: number[]; day: GlassDay }
   builtin: { active: number; ready: number; revoked: number; parent: { name: string; ok: boolean; problem: string | null; trippedAt: string | null; resetAt: string | null; checkedAt: string } | null }
-  support: { open: number; ticketed: number; hourly: number[]; day: GlassDay; configured: { chat: boolean; email: boolean } }
+  support: { open: number; ticketed: number; noReply: number; hourly: number[]; day: GlassDay; configured: { chat: boolean; email: boolean } }
   screening: { compared: GlassCount; agree: number | null; jevFlagged: number; jevfFlagged: number; jevFailed: number; jevfFailed: number; screened: number; rejected: number; hourly: number[] }
   api: { hourly: GlassRequests[]; previous: GlassRequests; p50Ms: number | null; p95Ms: number | null }
   money: { creditToday: string; creditMonth: string; creditDaily: number[]; owed: string; owing: number; usageMonth: string }
@@ -106,7 +106,7 @@ export interface Deliverability {
   top: Record<'complaints' | 'bounces', { workspaceId: string; accepted: number; bounced: number; complained: number }[]>
 }
 /** Glass's activity feed (GET /v1/operator/glass/activity): the newest 50 events, newest first, each once by its id. */
-export type GlassEventKind = 'signup' | 'first_send' | 'domain_verified' | 'builtin_ready' | 'campaign_launched' | 'campaign_paused' | 'standing' | 'breaker' | 'alert' | 'link_fallback'
+export type GlassEventKind = 'signup' | 'first_send' | 'domain_verified' | 'builtin_ready' | 'campaign_launched' | 'campaign_paused' | 'standing' | 'breaker' | 'alert' | 'link_fallback' | 'agent_feedback'
 export interface GlassEvent { id: string; at: string; kind: GlassEventKind; workspace: { id: string; name: string } | null; subject: string | null; detail: string | null
   place: 'open' | 'waitlist' | null; email: string | null; tone: 'neutral' | 'success' | 'warning' | 'danger' }
 export interface GlassActivity { events: GlassEvent[]; generatedAt: string }

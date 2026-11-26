@@ -32,6 +32,28 @@ import { RuleLine } from './recipes'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
 const FULL = 'Enter a full email address.'
+const HOST_LABEL = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+// The names the API suggests for receiving (receiving-host.ts receivingLabels), in its order.
+const RECEIVING_LABELS = ['reply', 'inbound', 'mail', 'inbox']
+type HostIssue = { code: 'invalid_host' | 'mail_from'; message: string; suggestions: string[]; domainId?: string }
+/**
+ * Why an address at a host where nothing receives yet can't turn receiving on there, as the API would refuse it
+ * (receiving-hosts.ts hostName, receiving-host.ts baneRecordUse): a host is letters, digits and hyphens, and never the
+ * domain's custom MAIL FROM subdomain, whose MX carries its bounces. With the same name at hosts that would work: the
+ * domain's receiving hosts first (they receive already), then the usual receiving names.
+ */
+function hostIssueOf(address: string, root: { id: string; name: string }, mailFrom: string | null | undefined, hosts: string[]): HostIssue | null {
+  const [local, host] = address.split('@') as [string, string]
+  const labels = host === root.name ? [] : host.slice(0, -(root.name.length + 1)).split('.')
+  const from = mailFrom?.toLowerCase()
+  const others = [...hosts.filter(h => h === root.name || h.endsWith(`.${root.name}`)), ...RECEIVING_LABELS.map(label => `${label}.${root.name}`)]
+  const suggestions = [...new Set(others)].filter(h => h !== host && h !== from).slice(0, 2).map(h => `${local}@${h}`)
+  if (host.length > 253 || labels.some(label => !HOST_LABEL.test(label))) return { code: 'invalid_host', message: `${host} can’t receive mail: use letters, digits and hyphens in the part after @.`, suggestions }
+  if (from && host === from) return { code: 'mail_from', message: `${host} is ${root.name}’s MAIL FROM subdomain. It receives your bounces, so it can’t receive mail too.`, suggestions, domainId: root.id }
+  return null
+}
+/** Refusals of a new address's own address or host (not its flow): Save takes them back to the address, where they're fixed. */
+const ADDRESS_REFUSALS = new Set(['RECEIVING_HOST_RESERVED', 'RECEIVING_HOST_CNAME', 'RECEIVING_HOST_TAKEN', 'RECEIVING_HOST_CLAIMED', 'RECEIVING_HOST_DELEGATED', 'RECEIVING_HOST_INVALID', 'RECEIVING_HOST_LIMIT', 'RECEIVING_UNAVAILABLE', 'MAILBOX_DOMAIN_NOT_ENABLED', 'ADDRESS_TAKEN', 'ADDRESS_RETIRED', 'ADDRESS_DOMAIN_MISMATCH'])
 const onDomains = (names: string[], typed?: string) => `${typed ? `${typed} isn’t one of your domains. ` : ''}Use an address on ${names.length === 1 ? names[0] : `one of your domains: ${names.join(', ')}`}.`
 // A name alone (support): the address it most likely means, at the workspace's first host, for the message and its button.
 const LOCAL = /^[^\s@<>,;*]+$/
@@ -221,6 +243,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [form, setForm] = useState({ address: initial, displayName: '', lifetime: '', publicAddress: '' })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [codes, setCodes] = useState<Record<string, string>>({})
+  // The address a Save refusal suggested instead ("Use reply.example.com for receiving instead"), one press away.
+  const [refused, setRefused] = useState<string[]>([])
   const [pulse, setPulse] = useState(0)
   const [problem, setProblem] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
@@ -253,7 +277,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [opened, setOpened] = useState<{ entry: RouteEntry; overview: Overview } | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   // Opening starts afresh. Before the effects below, so the flow they capture from cached data isn't cleared after.
-  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setCodes({}); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setCodes({}); setRefused([]); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (open && editing && !opened && entry && overview.data && !boxes.isPending && !resolvedBoxes.pending) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.isPending, resolvedBoxes.pending])
   // A rule given by key changes that rule only (its fork and its sides), on an address with any number of rules:
   // the address's route and its other rules stay.
@@ -283,15 +307,26 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   // The * the address step turned away, for its button to the catch-all's or wildcard's route editor.
   const typed = form.address.trim().toLowerCase()
   const pattern = errors.address && EMAIL.test(typed) && typed.split('@')[0]!.includes('*') && hosts.includes(typed.split('@')[1]!) ? typed : null
-  const existing = errors.address ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
+  // Checked as it's typed, once it's a whole address: a host that can't receive (its domain's MAIL FROM subdomain, which
+  // the domain's own record names), or an address that exists. Next checks the same, and Save's refusals land here too.
+  const typedHost = EMAIL.test(typed) ? typed.split('@')[1]! : ''
+  const owner = typedHost && turnsOn(typedHost) ? domainOf(typedHost) : undefined
+  const ownerRecord = useApiDef(queries.domain(owner?.id ?? ''), { enabled: open && step === 'address' && !!owner })
+  const hostIssue = owner ? hostIssueOf(typed, owner, ownerRecord.data?.mailFromDomain, hosts) : null
+  const existing = typedHost && !typed.split('@')[0]!.includes('*') ? allBoxes.find(b => b.address === typed || b.aliases.includes(typed)) : undefined
+  const live = hostIssue ?? (existing ? { code: 'exists', message: `${typed} already exists.`, suggestions: [] as string[] } : null)
+  const addressError = errors.address ?? live?.message, addressCode = codes.address ?? live?.code
+  const mailFromDomainId = addressCode === 'mail_from' ? owner?.id : codes.address === 'receiving_host_reserved' && /MAIL FROM/.test(errors.address ?? '') ? domainOf(typedHost)?.id : undefined
   // The name typed without its domain: offered back with the first host, one press away.
   // A rejected address that one of the workspace's hosts would fix (a name alone, or another domain): one button per host.
   const fixLocal = codes.address === 'missing_domain' ? typed : codes.address === 'not_your_domain' ? typed.split('@')[0]! : ''
-  const fixes = fixLocal ? hosts.slice(0, 4).map(host => `${fixLocal}@${host}`) : []
+  const fixes = fixLocal ? hosts.slice(0, 4).map(host => `${fixLocal}@${host}`) : refused.length ? refused : hostIssue?.suggestions ?? []
   async function next(event: FormEvent) {
     event.preventDefault()
     if (boxes.isPending || checkingAddress) return
     const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
+    // Next pressed before the domain's record arrived reads it now: the check never waits for Save to refuse.
+    const issue = owner ? ownerRecord.data ? hostIssue : hostIssueOf(value, owner, (await api.domains.get(owner.id).catch(() => null))?.mailFromDomain, hosts) : null
     // Said exactly: an empty field, a name without its domain (the common slip), or something else that isn't an address.
     const example = `support@${hosts[0] ?? 'example.com'}`
     // Each rejection has a code for analytics (never the value): empty, missing_domain, invalid, not_your_domain, exists.
@@ -302,6 +337,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
     else if (value.split('@')[0]!.includes('*')) { found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'; code.address = 'invalid' }
     else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) { found.address = onDomains([...new Set([...hosts, ...roots])], value.split('@')[1]); code.address = 'not_your_domain' }
+    else if (issue) { found.address = issue.message; code.address = issue.code }
     else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) { found.address = `${value} already exists.`; code.address = 'exists' }
     else if (boxes.hasMore) {
       setCheckingAddress(true)
@@ -316,7 +352,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     // The API takes a public sender only as the same local part on a parent domain.
     else if (sender && EMAIL.test(value) && (sender.split('@')[0] !== value.split('@')[0] || !value.split('@')[1]!.endsWith(`.${sender.split('@')[1]}`))) found.publicAddress = `Use ${value.split('@')[0]}@ on a parent domain of ${value.split('@')[1]}.`
     // Pressed again on the same refusal: back to the field, and the message flashes, so the press isn't silent.
-    if (found.address && found.address === errors.address) { setPulse(p => p + 1); document.getElementById('builder-address-input')?.focus() }
+    if (found.address && found.address === addressError) { setPulse(p => p + 1); document.getElementById('builder-address-input')?.focus() }
     setErrors(found); setCodes(code)
     if (!Object.keys(found).length) setStep('flow')
   }
@@ -417,6 +453,8 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     setErrors(found)
     if (Object.keys(found).length) return
     setBusy(true); setProblem(null); setWaiting(null); setConflict(false)
+    // Which write failed: a new destination's, or the new address's own (whose refusals go back to the address step).
+    let stage: 'destinations' | 'address' = 'destinations'
     try {
       const sides: Side[] = draft.split ? ['then', 'otherwise'] : ['then']
       // A rule names its own inbox by key; one destination reaches it with no route at all.
@@ -432,6 +470,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         const flow = { ...(endpoints.length ? { endpoints } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) }
         const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase()
         const body = { address: value, displayName: form.displayName.trim() || null, ...(ownKey ? { key: ownKey } : {}), ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}), ...(Object.keys(flow).length ? { flow } : {}) }
+        stage = 'address'
         const { receiving: setup, ...self } = await request<InboundAddress & { receiving?: CreatedReceiving }>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
         setSaved(self); setEditing(true); setReceivingSetup(setup ?? null)
         await refresh()
@@ -464,6 +503,11 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
       else if (error instanceof ApiError && error.code === 'RECEIVING_HOST_IN_USE' && !editing && domainOf(form.address.trim().toLowerCase().split('@')[1]!)) {
         const host = form.address.trim().toLowerCase().split('@')[1]!, why = /another provider\. (.*?) To move it here anyway/.exec(error.detail)?.[1] ?? ''
         setMoveHost({ host, domainId: domainOf(host)!.id, message: moveReason(why, hosts) })
+      }
+      else if (!editing && stage === 'address' && error instanceof ApiError && ADDRESS_REFUSALS.has(error.code)) {
+        // The address can't be made as typed: back to it, the reason on its field and the API's suggestion one press away.
+        const local = form.address.trim().toLowerCase().split('@')[0]!, instead = /Use (\S+?) for receiving instead/.exec(error.detail)?.[1]
+        setStep('address'); setErrors({ address: error.message }); setCodes({ address: error.code.toLowerCase() }); setRefused(instead ? [`${local}@${instead}`] : [])
       }
       else if (error instanceof ApiError && error.fields['params.value']) setErrors({ value: error.fields['params.value'] })
       else setProblem(error)
@@ -502,12 +546,13 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   </div>
   let body: ReactNode
   if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
-    <Field label="Address" htmlFor="builder-address-input" error={errors.address} errorCode={codes.address} pulse={pulse}>
-      <Input id="builder-address-input" type="email" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
+    <Field label="Address" htmlFor="builder-address-input" error={addressError} errorCode={addressCode} pulse={pulse}>
+      <Input id="builder-address-input" type="email" value={form.address} onChange={e => { setForm({ ...form, address: e.target.value }); setErrors(({ address: _, ...rest }) => rest); setCodes(({ address: _, ...rest }) => rest); setRefused([]) }} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
-    {!errors.address && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) && domainOf(typed.split('@')[1]!) && <TurnOnReceiving host={typed.split('@')[1]!} domainId={domainOf(typed.split('@')[1]!)!.id} />}
+    {!addressError && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) && domainOf(typed.split('@')[1]!) && <TurnOnReceiving host={typed.split('@')[1]!} domainId={domainOf(typed.split('@')[1]!)!.id} />}
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
-    {fixes.length > 0 && <div className="cluster">{fixes.map(fix => <Button key={fix} size="sm" onClick={() => { setForm({ ...form, address: fix }); setErrors({}); setCodes({}) }}>Use {fix}</Button>)}</div>}
+    {(fixes.length > 0 || mailFromDomainId) && <div className="cluster">{fixes.map(fix => <Button key={fix} size="sm" onClick={() => { setForm({ ...form, address: fix }); setErrors({}); setCodes({}); setRefused([]) }}>Use {fix}</Button>)}
+      {mailFromDomainId && <Link className="ui-button ui-button--ghost ui-button--sm" to={`/domains/${mailFromDomainId}`} onClick={leaveTo(`/domains/${mailFromDomainId}`)}>Change the MAIL FROM subdomain</Link>}</div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
     <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Name" /></Field>
     <details className="inbound-advanced" open={!!form.lifetime || !!form.publicAddress || !!errors.publicAddress || undefined}>

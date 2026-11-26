@@ -22,7 +22,7 @@
 // (`conflict`: the card offering their version or yours opens over the editor's corner). The pages' long poll on
 // /v1/rules/version is always open by design, so it is left out of the network-idle wait.
 //
-// Support chat: the page loads, then the Help button opens the chat (the scripted demo conversation) and the agent's
+// Support chat: the page loads, then Help (the sidebar's row; the top bar's button on a phone) opens the chat (the scripted demo conversation) and the agent's
 // greeting streams in to its end; in-app, the chat stays open on Overview while the sidebar link goes to Logs (on a
 // phone, where the chat is a sheet over the page, the tab bar's link closes it).
 //
@@ -36,8 +36,10 @@
 //
 // Every measurement also checks the masked addresses on its page (lib/private-address.ts): nothing of a seeded address
 // beyond its first two characters is in the page's text, a title, a label or a link before it is revealed, and on a
-// cold desktop load, hovering the first few reveals them without anything moving, and so does turning privacy mode off
-// with ⇧P (then on again, which masks them as before). Privacy mode is off by default; every page here starts with it on.
+// cold desktop load, pointing at the first few reveals nothing until ⇧ is held, which reveals them without anything
+// moving; on a list with row keys, J's highlight reveals none of its row's addresses until ⇧ is held, and releasing ⇧
+// masks them again; and turning privacy mode off with ⇧P reveals them all (then on again, which masks them as before). Privacy mode is off
+// by default; every page here starts with it on.
 //
 // CLS sums every layout-shift entry without recent input: stricter than the browser's largest session window. In-app
 // navigation clicks with an untrusted event, so no shift is excused as following user input. Measurement ends when
@@ -61,27 +63,34 @@ if (!Number.isSafeInteger(shards) || shards < 1 || !Number.isSafeInteger(shard) 
 const began = Date.now();
 const elapsed = () => `${((Date.now() - began) / 1000).toFixed(1)}s`;
 
-// [name, path, { user, from, click, row, switchTo, support, notes, panel, dialog, still, alone, phoneOnly, notFound, waitlist }]. The in-app navigation starts on `from` and clicks the
+// [name, path, { user, from, click, row, switchTo, support, notes, panel, dialog, tab, still, alone, phoneOnly, notFound, waitlist }]. The in-app navigation starts on `from` and clicks the
 // control whose text starts with `click`, the table row containing `row`, picks the workspace `switchTo` in the account
 // switcher, or else a link to `path`; with none of those (pages reached from a dropdown menu) it pushes `path` through
 // the router's history. It must land on `path`. `support` opens the support chat first, `dialog` a dialog (see above);
+// `tab` clicks the tab whose text starts with it once the page has settled, and the measurement covers both;
 // `phoneOnly` measures a page in the phone pass alone (a control only a phone shows); `notFound` is a page that must say "Page not found";
 // `waitlist` is the address the refused sign-in's cookie names; `panel` is Overview's saved detail-column choice;
-// `skipped` is a workspace whose onboarding domain step this browser skipped (data/onboarding.ts).
+// `skipped` is a workspace whose onboarding domain step this browser skipped (data/onboarding.ts); `start` is
+// [workspace, how this browser left Overview's get-started strip for it] (features/overview/first-run.tsx).
 // dana owns an established hosted workspace (and is a Nightmail operator), nia a brand-new one with a verified domain, ona one
 // still onboarding, rae a restricted one that also owes $12.40 (the standing and billing banners on every page).
 // A list of users is one browser signed in to each of them (one session cookie per account, the first the default).
 const pages = ids => [
   ['Overview', '/overview', { from: '/logs' }],
+  // A verified domain, nothing sent and records missing on others: the get-started strip (domain done) and the domain banner.
   ['Overview · setup', '/overview', { user: 'nia' }],
-  // No domain yet, onboarding's domain step skipped: Overview's first card asks for one.
-  ['Overview · no domain', '/overview', { user: 'pia', skipped: 'ws_skipped' }],
-  // A verified domain, nothing sent: the same card slot offers a test to yourself, an API key and the cURL example.
-  ['Overview · first send', '/overview', { user: 'ren' }],
-  // Overview's first card and Get started steps for each focus but developer emails.
-  ['Overview · focus agent inbox', '/overview', { user: 'abe', step: ['ws_focus_agents_new', 'done'] }],
-  ['Overview · focus marketing', '/overview', { user: 'mae', step: ['ws_focus_marketing', 'done'] }],
-  ['Overview · focus newsletter', '/overview', { user: 'noa', step: ['ws_focus_newsletter', 'done'] }],
+  // Overview's get-started strip (features/overview/first-run.tsx). Brand new: the built-in domain, nothing sent, no agent,
+  // onboarding's domain step skipped; the strip decides once the setup and the score land, and quiet panels under it.
+  ['Overview · first run', '/overview', { user: 'pia', skipped: 'ws_skipped', from: '/domains' }],
+  // Its own domain verified and nothing else: one step done.
+  ['Overview · first run · one step', '/overview', { user: 'ren', from: '/logs' }],
+  // All three done (its own domain, a test email, an agent's key): no strip for a browser that never showed it. (One that
+  // did shows it done for a beat, then it leaves by transform; that moves the rows the privacy checks reveal, so it isn't
+  // measured here.)
+  ['Overview · first run · all done', '/overview', { user: 'ash', from: '/logs' }],
+  // Already showing for this browser: the route skeleton reserves the strip too.
+  ['Overview · first run · remembered', '/overview', { user: 'pia', skipped: 'ws_skipped', start: ['ws_skipped', 'on'], from: '/logs' }],
+  ['Overview · first run · dismissed', '/overview', { user: 'pia', skipped: 'ws_skipped', start: ['ws_skipped', 'dismissed'], from: '/logs' }],
   // Switching the time range keeps the old figures up while the new ones load, then tweens, morphs and crossfades them.
   ['Overview · range', '/overview', { from: '/overview', click: '30d' }],
   // A stream scopes the figures and Latest emails; a figure's tile opens Logs on that status, over the same range.
@@ -106,40 +115,45 @@ const pages = ids => [
   ['Sent email · delayed', `/logs/${ids.delayedEmail}`, { from: '/logs?view=sent', row: 'Your sign-in code' }],
   ['Sent email · bounced details', `/logs/${ids.bouncedEmail}`, { dialog: 'Details', phoneOnly: true }],
   ['Received email', `/logs/${ids.receivedEmail}`, { from: '/logs?view=received', row: 'Invoice for October' }],
+  // A received message in a sent email's layout (features/logs/received-detail.tsx): on a phone its checks and facts open
+  // in the Details sheet from the status line.
+  ['Received email · details sheet', `/logs/${ids.receivedEmail}`, { dialog: 'Details', phoneOnly: true }],
   // A conversation (cls-fixture.mjs): the reply that joined it by its In-Reply-To and Jordan's answer, each with its Thread
   // section; the section's link from one to the other; and on a phone, the thread's sheet from the status line.
   ['Sent email · thread', `/logs/${ids.threadEmail}`, { from: '/logs?view=sent', row: 'Re: What happened' }],
   ['Received email · thread', `/logs/${ids.threadReceived}`, { from: '/logs?view=received', row: 'Re: What happened' }],
   ['Received email · from its thread', `/logs/${ids.threadReceived}`, { from: `/logs/${ids.threadEmail}` }],
   ['Sent email · thread sheet', `/logs/${ids.threadEmail}`, { dialog: '5 messages', phoneOnly: true }],
-  ['Receiving', '/receiving', { from: '/overview' }],
+  ['Mail routing', '/receiving', { from: '/overview' }],
   // A workspace with no receiving domain yet: the three steps that start it.
-  ['Receiving · new workspace', '/receiving', { user: 'nia' }],
-  ['Receiving · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
+  ['Mail routing · new workspace', '/receiving', { user: 'nia' }],
+  ['Mail routing · destinations', '/receiving?tab=destinations', { from: '/receiving', click: 'Destinations' }],
   // The flow panel: an address chosen in the list (a full-height sheet on a phone), and an address typed in the search
   // that has none of its own, whose panel says where its mail would go once its test answers.
   // guard: Edit on the panel opens the address's route editor (never the builder, which only creates) and writes nothing.
-  ['Receiving · flow panel', `/receiving?open=${ids.address}`, { from: '/receiving?tab=rules', guard: 'receiving-edit' }],
-  ['Receiving · typed address', '/receiving?q=orders%40northwind.example', {}],
+  ['Mail routing · flow panel', `/receiving?open=${ids.address}`, { from: '/receiving?tab=rules', guard: 'receiving-edit' }],
+  ['Mail routing · typed address', '/receiving?q=orders%40northwind.example', {}],
   // An address's page opens on its mail; Where mail goes and Settings are its other tabs.
-  ['Receiving · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
-  ['Receiving · address · where mail goes', `/receiving/addresses/${ids.address}?tab=flow`, { from: `/receiving/addresses/${ids.address}`, click: 'Where mail goes' }],
+  ['Mail routing · address', `/receiving/addresses/${ids.address}`, { from: '/receiving' }],
+  // An address deleted elsewhere (an agent, another tab): its page says so, with the way back.
+  ['Mail routing · address · deleted', '/receiving/addresses/mbx_deleted_elsewhere', { from: '/receiving' }],
+  ['Mail routing · address · where mail goes', `/receiving/addresses/${ids.address}?tab=flow`, { from: `/receiving/addresses/${ids.address}`, click: 'Where mail goes' }],
   // Its Settings tab shares its name with the sidebar's Settings, so the in-app pass opens it through the router.
-  ['Receiving · address · settings', `/receiving/addresses/${ids.address}?tab=settings`, { from: `/receiving/addresses/${ids.address}` }],
-  // Rules: the list (the Receiving tab), New rule's recipes, a recipe's form, and a rule's page, its code: a rule made
+  ['Mail routing · address · settings', `/receiving/addresses/${ids.address}?tab=settings`, { from: `/receiving/addresses/${ids.address}` }],
+  // Rules: the list (Mail routing's tab), New rule's recipes, a recipe's form, and a rule's page, its code: a rule made
   // from a recipe, a script, and a new one.
-  ['Receiving · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
-  ['Receiving · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
-  ['Receiving · new rule · new workspace', '/receiving/rules/new', { user: 'nia' }],
-  ['Receiving · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
-  ['Receiving · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
-  ['Receiving · rule editor', '/receiving/rules/triage', { from: '/receiving?tab=rules', row: 'triage' }],
-  ['Receiving · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write code' }],
-  ['Receiving · rules · live update', '/receiving/rules/triage', { user: 'kai', live: 'apply' }],
-  ['Receiving · rules · live conflict', '/receiving/rules/triage', { user: 'kai', live: 'conflict' }],
-  ['Receiving · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
-  ['Receiving · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
-  ['Receiving · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=destinations' }],
+  ['Mail routing · rules', '/receiving?tab=rules', { from: '/receiving', click: 'Rules' }],
+  ['Mail routing · new rule', '/receiving/rules/new', { from: '/receiving?tab=rules', click: 'New rule' }],
+  ['Mail routing · new rule · new workspace', '/receiving/rules/new', { user: 'nia' }],
+  ['Mail routing · recipe form', '/receiving/rules/new/slack', { from: '/receiving/rules/new', click: 'Post to Slack' }],
+  ['Mail routing · recipe rule', '/receiving/rules/label-by-meaning-support', { from: '/receiving?tab=rules', row: 'a refund request' }],
+  ['Mail routing · rule editor', '/receiving/rules/triage', { from: '/receiving?tab=rules', row: 'triage' }],
+  ['Mail routing · rule editor · new script', '/receiving/rules/new/script', { user: 'nia', from: '/receiving/rules/new', click: 'Write code' }],
+  ['Mail routing · rules · live update', '/receiving/rules/triage', { user: 'kai', live: 'apply' }],
+  ['Mail routing · rules · live conflict', '/receiving/rules/triage', { user: 'kai', live: 'conflict' }],
+  ['Mail routing · agent inboxes', '/receiving/inboxes', { from: '/receiving' }],
+  ['Mail routing · agent inbox', `/receiving/inboxes/${ids.inbox}`, { from: '/receiving/inboxes' }],
+  ['Mail routing · webhook', `/receiving/webhooks/${ids.inboundWebhook}`, { from: '/receiving?tab=destinations' }],
   ['Campaigns', '/campaigns', { from: '/overview' }],
   ['Campaign editor', `/campaigns/${ids.campaign}/edit`, { from: '/campaigns' }],
   ['New campaign', '/campaigns/new', { from: '/campaigns', click: 'Create campaign' }],
@@ -230,11 +244,13 @@ const pages = ids => [
   ['Glass · not an operator', '/glass', { user: 'nia', notFound: true }],
   // The Deliverability board: tiles, the providers' table, groups and VDM's table of fixed rows, filtered in place.
   ['Glass · deliverability', '/glass?view=deliverability', { from: '/glass', click: 'Deliverability' }],
-  // The support inbox (staff): Needs you and its counts, Agent handling, a conversation beside its customer panel, and
-  // on a phone the panel's sheet.
+  // The support inbox (staff): Needs you and its counts, AI handling, Waiting on customer, a conversation's timeline beside
+  // its customer panel, an email conversation (the email as it arrived), and on a phone the panel's sheet.
   ['Support', '/support', { from: '/overview' }],
-  ['Support · agent handling', '/support?view=agent', { from: '/support', click: 'Agent handling' }],
+  ['Support · AI handling', '/support?view=agent', { from: '/support', click: 'AI handling' }],
+  ['Support · waiting on customer', '/support?view=waiting', { from: '/support', click: 'Waiting on customer' }],
   ['Support · conversation', `/support/${ids.supportConversation}`, { from: '/support', row: 'DKIM will not verify' }],
+  ['Support · email conversation', `/support/${ids.supportEmail}`, { from: '/support?view=waiting', row: 'Why did my test email bounce?' }],
   ['Support · customer sheet', `/support/${ids.supportConversation}`, { dialog: 'Customer', phoneOnly: true }],
   // A change support proposed, from its emailed link: the dialog over Overview opens once Nightmail's record has loaded.
   ['Support · confirm a change', `/support/actions/${ids.supportAction}`, {}],
@@ -254,20 +270,15 @@ const pages = ids => [
   ['Docs · signed out', '/docs', { user: null }],
   ['Docs · signed out guide', '/docs/receiving', { user: null, from: '/docs', click: 'Receiving' }],
   ['Docs · signed out operation', '/docs/api/sendEmail', { user: null }],
-  // No connection yet: the first email is up at once, with the provisioning bar along the top until Hosted mail is ready.
+  // No connection yet: Get started is up at once, whole, while onboarding starts Hosted mail.
   ['Onboarding', '/onboarding', { user: 'ona' }],
-  // The first email with the built-in domain ready: Send is on (onboarding/email-step.tsx).
-  ['Onboarding · first email', '/onboarding', { user: 'uma' }],
-  // The same while the built-in domain is still being set up: the bar runs and Send waits, reading /v1/me again until it is ready.
-  ['Onboarding · first email provisioning', '/onboarding', { user: 'ula' }],
-  // "What do you want to do?", then the screen each pick leads to (onboarding/focus-steps.tsx); developer emails' is the agent
-  // prompt and an API key, with no code or key on screen.
-  ['Onboarding · focus', '/onboarding', { user: 'uma', step: ['ws_builtin', 'focus:dom_builtin_ws_builtin'] }],
-  ['Onboarding · developer', '/onboarding', { user: 'uma', step: ['ws_builtin', 'agent:dom_builtin_ws_builtin'] }],
-  ['Onboarding · personal', '/onboarding', { user: 'pam', step: ['ws_focus_personal', 'agent:dom_builtin_ws_focus_personal'] }],
-  ['Onboarding · agent inbox', '/onboarding', { user: 'ada', step: ['ws_focus_agents', 'agent:dom_builtin_ws_focus_agents'] }],
-  ['Onboarding · marketing', '/onboarding', { user: 'mae', step: ['ws_focus_marketing', 'agent:dom_builtin_ws_focus_marketing'] }],
-  ['Onboarding · newsletter', '/onboarding', { user: 'noa', step: ['ws_focus_newsletter', 'agent:dom_builtin_ws_focus_newsletter'] }],
+  // Get started on the built-in domain, ready (onboarding/get-started.tsx): the Agent tab, and By hand's key and send example.
+  ['Onboarding · get started', '/onboarding', { user: 'uma' }],
+  ['Onboarding · get started by hand', '/onboarding', { user: 'uma', tab: 'By hand' }],
+  // The same while the built-in domain is still being set up: the same screen (a test email pressed now waits for it).
+  ['Onboarding · get started provisioning', '/onboarding', { user: 'ula' }],
+  // On a domain of the workspace's own, just verified (the step after its records): no built-in domain line.
+  ['Onboarding · get started own domain', '/onboarding', { user: 'ren', step: ['ws_verified', 'agent:dom_rowanbakery_example'] }],
   // Connecting their own AWS account (cls-fixture.mjs connectedAccount): the stack link, a refused stack, the account
   // being checked, domains to choose, a region in the SES sandbox and its production access request, and a region being set up.
   ['Onboarding · AWS stack', '/onboarding', { user: 'bea' }],
@@ -353,10 +364,16 @@ const pages = ids => [
   ['Support chat', '/logs', { from: '/overview', support: true }],
   ['Overview · sending limits dialog', '/overview', { user: 'rae', dialog: 'Daily limit' }],
   ['Overview · sender score dialog', '/overview', { dialog: 'Sender score' }],
-  // Connect an agent: the sidebar's item on a desktop, the account sheet's on a phone. The agents list loads (and polls)
-  // inside a dialog of fixed height.
-  ['Overview · connect agent dialog', '/overview', { dialog: 'Connect an agent' }],
-  ['Overview · connect agent sheet', '/overview', { menu: ['Dana Rivera, Northwind. Switch account or workspace', 'Connect an agent…', 'Connect an agent'], phoneOnly: true }],
+  // Before the first grade: the card's sentence, the explainer's progress, and the evaluation as the daily limit.
+  ['Overview · sender score dialog · not graded', '/overview', { user: 'nia', dialog: 'Sender score' }],
+  ['Overview · daily limit dialog · evaluation', '/overview', { user: 'nia', dialog: 'Daily limit' }],
+  // Connect your agent: the sidebar's row on a desktop, More's on a phone. The agents list loads (and polls) inside a
+  // dialog of fixed height. More itself: the rest of the pages, Connect your agent, Help and Sign out, and the footer.
+  ['Overview · connect agent dialog', '/overview', { dialog: 'Connect your agent' }],
+  ['Overview · connect agent sheet', '/overview', { menu: ['More', 'Connect your agent', 'Connect your agent'], phoneOnly: true }],
+  ['Overview · More sheet', '/overview', { dialog: 'More', phoneOnly: true }],
+  // ⌘K, from the command bar's field: the command menu over Logs, its whole list (pages, then actions) at a fixed height.
+  ['Logs · command menu', '/logs', { dialog: 'Search or jump' }],
   ['Domains · add domain dialog', '/domains', { dialog: 'Add domain' }],
   ['Domain · add custom MAIL FROM dialog', `/domains/${ids.domain}`, { dialog: 'Add custom MAIL FROM' }],
   ['Domain · change custom MAIL FROM dialog', `/domains/${ids.sendingDomain}`, { menu: ['Actions for MAIL FROM MX record', 'Change custom MAIL FROM', 'Change custom MAIL FROM'] }],
@@ -366,20 +383,20 @@ const pages = ids => [
   ['API keys · SMTP login dialog', '/api-keys?create=smtp', {}],
   // Edit key: a row's menu, then Edit; the dialog opens once the key's domains have loaded.
   ['API keys · edit key dialog', '/api-keys', { menu: ['Actions for Production', 'Edit', 'Edit key'] }],
-  ['Receiving · new address dialog', '/receiving', { dialog: 'New address' }],
+  ['Mail routing · new address dialog', '/receiving', { dialog: 'New address' }],
   // The address builder over the list for the chosen address (one it can draw): its flow, read back from its route and rules.
-  ['Receiving · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
+  ['Mail routing · address builder dialog', `/receiving?open=${ids.address}`, { dialog: 'Edit' }],
   // New rule's Split by words with no address yet asks which address, then opens the builder on it, split on that check.
-  ['Receiving · split chooser dialog', '/receiving/rules/new', { dialog: 'Split by words' }],
+  ['Mail routing · split chooser dialog', '/receiving/rules/new', { dialog: 'Split by words' }],
   // guard: two splits, New rule on a split address, Test's AI answer, a failed create. Alone: it adds addresses and rules.
-  ['Receiving · split edits', `/receiving/addresses/${ids.address}?tab=flow`, { alone: true, guard: 'receiving-splits' }],
-  ['Receiving · address builder from New rule', `/receiving?tab=rules&build=${ids.address}&split=ai`, {}],
+  ['Mail routing · split edits', `/receiving/addresses/${ids.address}?tab=flow`, { alone: true, guard: 'receiving-splits' }],
+  ['Mail routing · address builder from New rule', `/receiving?tab=rules&build=${ids.address}&split=ai`, {}],
   // Where its mail goes (the route editor) opens once its inboxes, webhooks and forwards have loaded.
   // Why a received message went where it did, from its conversation on the address's Mail tab.
-  ['Receiving · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],
-  ['Receiving · route editor dialog', `/receiving/addresses/${ids.address}?tab=flow&edit=1`, { dialog: 'Change' }],
-  ['Receiving · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
-  ['Receiving · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
+  ['Mail routing · why it went here dialog', `/receiving/addresses/${ids.address}?thread=${ids.supportThread}`, { dialog: 'Why it went here' }],
+  ['Mail routing · route editor dialog', `/receiving/addresses/${ids.address}?tab=flow&edit=1`, { dialog: 'Change' }],
+  ['Mail routing · new agent inbox dialog', '/receiving/inboxes', { dialog: 'New agent inbox' }],
+  ['Mail routing · ask your agent dialog', '/receiving/rules/new', { dialog: 'Ask your agent' }],
   ['Audience · import dialog', '/audience', { dialog: 'Import contacts' }],
   // A member imports without a list: the list picker is off and says who can add to one.
   ['Audience · import dialog · member', '/audience', { user: 'max', dialog: 'Import contacts' }],
@@ -395,7 +412,7 @@ const pages = ids => [
 ];
 
 // The phone pass: the pages someone opens on a phone (every list as cards, the details they open, Settings), light only.
-const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · no domain', 'Overview · first send', 'Overview · focus agent inbox', 'Overview · focus marketing', 'Overview · focus newsletter', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Receiving', 'Receiving · rules', 'Receiving · new rule', 'Receiving · recipe form', 'Receiving · recipe rule', 'Receiving · rule editor', 'Receiving · rule editor · new script', 'Receiving · flow panel', 'Receiving · typed address', 'Receiving · why it went here dialog', 'Receiving · address', 'Receiving · address · where mail goes', 'Receiving · address · settings', 'Receiving · agent inboxes', 'Receiving · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · first email', 'Onboarding · first email provisioning', 'Onboarding · focus', 'Onboarding · developer', 'Onboarding · personal', 'Onboarding · agent inbox', 'Onboarding · marketing', 'Onboarding · newsletter', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Receiving · inbox', 'Receiving · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Glass · deliverability', 'Support', 'Support · agent handling', 'Support · conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Compare · Nylas', 'Compare · Robotomail', 'Compare · Postfleet', 'Compare · Lumbox', 'Compare · Mails.ai', 'Compare · Dead Simple Email', 'Compare · Agent Identity', 'Compare · Inkbox', 'Compare · beehiiv', 'Compare · MailerLite', 'Compare · Buttondown', 'Compare · EmailOctopus', 'Compare · Ghost(Pro)', 'Compare · AWeber', 'Compare · Loops', 'Compare · Brevo', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · connect agent sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Receiving · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email', 'Compare · MailerSend', 'Compare · Mailtrap', 'Compare · SMTP2GO', 'Compare · AhaSend', 'Compare · CloudMailin', 'Compare · SocketLabs', 'Compare · MailPace', 'Compare · UniOne', 'Compare · MailChannels']);
+const phonePages = new Set(['Segment · property rules', 'Newsletter', 'Newsletter · one draft', 'Newsletter · new', 'New newsletter', 'New issue', 'Campaigns · with newsletters', 'Overview', 'Overview · setup', 'Overview · first run', 'Overview · first run · one step', 'Overview · first run · all done', 'Overview · first run · remembered', 'Overview · first run · dismissed', 'Overview · range', 'Overview · stream', 'Overview · panel hidden', 'Logs · from an Overview tile', 'Homepage · signed in', 'Overview · from the homepage', 'Logs', 'Logs · range', 'Sent email', 'Sent email · junk-like', 'Sent email · bounced', 'Sent email · delayed', 'Sent email · bounced details', 'Sent email · checks sheet', 'Received email', 'Received email · details sheet', 'Sent email · thread', 'Received email · thread', 'Received email · from its thread', 'Sent email · thread sheet', 'Mail routing', 'Mail routing · rules', 'Mail routing · new rule', 'Mail routing · recipe form', 'Mail routing · recipe rule', 'Mail routing · rule editor', 'Mail routing · rule editor · new script', 'Mail routing · flow panel', 'Mail routing · typed address', 'Mail routing · why it went here dialog', 'Mail routing · address', 'Mail routing · address · deleted', 'Mail routing · address · where mail goes', 'Mail routing · address · settings', 'Mail routing · agent inboxes', 'Mail routing · destinations', 'Campaigns', 'Campaign review', 'Campaign review · send', 'Campaign review · ramp', 'Templates', 'Audience', 'Lists', 'Domains', 'Domain', 'Domain · custom MAIL FROM', 'Domain · records missing', 'Domain · records correct', 'Domains · built-in', 'Domain · built-in', 'Onboarding · get started', 'Onboarding · get started by hand', 'Onboarding · get started provisioning', 'Onboarding · get started own domain', 'API keys', 'Settings', 'Settings · members', 'Settings · activity', 'Settings · billing', 'Settings · billing · owed', 'Settings · billing · free', 'Settings · billing · member', 'Settings · billing · old usage link', 'Settings · balance dialog', 'Settings · webhook', 'Settings · MCP connection', 'Onboarding', 'Onboarding · AWS stack', 'Onboarding · AWS refused', 'Onboarding · AWS choose', 'Onboarding · AWS sandbox', 'Onboarding · AWS production access', 'Onboarding · AWS setting up', 'Mail routing · inbox', 'Mail routing · endpoints', 'Onboarding · AWS disconnecting', 'Connect · agent code', 'Connect · type a code', 'Settings · sending · AWS', 'Two accounts · switch', 'Operator', 'Operator · workspace', 'Operator · UI notes', 'Operator · waitlist', 'Operator · health', 'Operator · sign-ups', 'Operator · sign-up limit dialog', 'Operator · abuse', 'Operator · abuse · cluster', 'Operator · abuse · alerts', 'Operator · abuse · Slack card', 'Glass', 'Glass · not an operator', 'Glass · deliverability', 'Support', 'Support · AI handling', 'Support · waiting on customer', 'Support · conversation', 'Support · email conversation', 'Support · customer sheet', 'Support · confirm a change', 'Overview · UI notes mode', 'Operator · without UI notes', 'Overview · restricted', 'Campaigns · restricted', 'Signed out', 'Signed out · deep link', 'Signed out · page not found', 'Signed out · waitlist', 'Signed out · waitlist, place ready', 'Signed out · waitlist, place held', 'Signed out · waitlist, link expired', 'Signed out · sign-in link', 'Legal', 'Legal · terms', 'Legal · privacy', 'Pricing', 'Pricing · large', 'Compare · Mailchimp', 'Compare · Mailchimp · steel frame', 'Compare · Resend', 'Compare · AgentMail', 'Compare · Bird', 'Compare · Mailgun', 'Compare · Mailjet', 'Compare · Mandrill', 'Compare · Postmark', 'Compare · SendGrid', 'Compare · Nylas', 'Compare · Robotomail', 'Compare · Postfleet', 'Compare · Lumbox', 'Compare · Mails.ai', 'Compare · Dead Simple Email', 'Compare · Agent Identity', 'Compare · Inkbox', 'Compare · beehiiv', 'Compare · MailerLite', 'Compare · Buttondown', 'Compare · EmailOctopus', 'Compare · Ghost(Pro)', 'Compare · AWeber', 'Compare · Loops', 'Compare · Brevo', 'Docs', 'Docs · MCP guide', 'Docs · section', 'Docs · signed out', 'Signed out', 'Support chat', 'Overview · sending limits dialog', 'Overview · sender score dialog', 'Overview · sender score dialog · not graded', 'Overview · daily limit dialog · evaluation', 'Overview · connect agent sheet', 'Overview · More sheet', 'API keys · create key dialog', 'API keys · SMTP login dialog', 'API keys · edit key dialog', 'Mail routing · new address dialog', 'Settings · invite dialog', 'Settings · postal address dialog', 'Settings · add credit dialog', 'Domain · add custom MAIL FROM dialog', 'Domain · change custom MAIL FROM dialog', 'Support · continue email', 'Compare · MailerSend', 'Compare · Mailtrap', 'Compare · SMTP2GO', 'Compare · AhaSend', 'Compare · CloudMailin', 'Compare · SocketLabs', 'Compare · MailPace', 'Compare · UniOne', 'Compare · MailChannels']);
 const devices = {
   desktop: { viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 },
   phone: { viewport: { width: 390, height: 844 }, deviceScaleFactor: 1, isMobile: true, hasTouch: true },
@@ -510,7 +527,7 @@ const maskedLeaks = () => {
   }
   return found;
 };
-// Where to hover the first few masked addresses in view that the pointer can reach, and what must stay where it is.
+// Where to point at the first few masked addresses in view that the pointer can reach, and what must stay where it is.
 const maskedTargets = () => [...document.querySelectorAll('.private-address:not([data-revealed])')].map((el, index) => {
   const r = el.getBoundingClientRect(), x = r.left + 3, y = r.top + r.height / 2;
   return r.width > 0 && r.top >= 0 && r.bottom <= innerHeight && el.contains(document.elementFromPoint(x, y)) ? { index, x, y } : null;
@@ -519,23 +536,54 @@ const maskedState = index => {
   const el = document.querySelectorAll('.private-address')[index], rect = node => { const r = node.getBoundingClientRect(); return [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' '); };
   return { revealed: el.hasAttribute('data-revealed'), text: el.querySelector('.private-address__value').textContent, own: rect(el), around: rect(el.closest('tr, li, dd, h1, p, section') ?? el.parentElement) };
 };
+// The row J highlighted (lib/row-keys.ts): how many of its addresses are still masked, and where it is.
+const highlightedRow = () => {
+  const row = document.activeElement?.closest('[data-row-keys] [data-row-key]'), all = row ? [...row.querySelectorAll('.private-address')] : [];
+  if (!all.length) return null;
+  const r = row.getBoundingClientRect();
+  return { masked: all.filter(el => !el.hasAttribute('data-revealed')).length, total: all.length, at: [r.x, r.y, r.width, r.height].map(n => Math.round(n * 100) / 100).join(' ') };
+};
 async function masking(page, hover, shell) {
   const problems = await page.evaluate(maskedLeaks);
   if (!hover) return problems;
   const frame = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(done))));
+  // ⇧ is ignored while typing in a field, so leave whatever field has focus first.
+  await page.evaluate(() => document.activeElement?.blur());
   for (const { index, x, y } of await page.evaluate(maskedTargets)) {
     const before = await page.evaluate(maskedState, index);
     await page.mouse.move(x, y); await frame();
+    const pointed = await page.evaluate(maskedState, index);
+    await page.keyboard.down('Shift'); await frame();
     const shown = await page.evaluate(maskedState, index);
+    await page.keyboard.up('Shift'); await frame();
+    const released = await page.evaluate(maskedState, index);
     await page.mouse.move(1, 1); await frame();
-    const after = await page.evaluate(maskedState, index);
-    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`hovering ${before.text}… did not reveal it`);
+    if (pointed.revealed || pointed.text !== before.text) problems.push(`pointing at ${before.text}… without ⇧ revealed it`);
+    if (!shown.revealed || [...shown.text].length <= 2) problems.push(`⇧ over ${before.text}… did not reveal it`);
     else if (shown.own !== before.own || shown.around !== before.around) problems.push(`revealing ${before.text}… moved it: ${before.own} → ${shown.own}`);
-    if (after.revealed || after.text !== before.text || after.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after the pointer left`);
+    if (released.revealed || released.text !== before.text || released.own !== before.own) problems.push(`${before.text}… stayed revealed or moved after ⇧ was released`);
+  }
+  // J highlights a row without revealing its addresses, as pointing doesn't; ⇧ held while it is highlighted reveals that
+  // row's without moving anything, and releasing ⇧ masks them again. J stops at the first row (of the first six) that holds one.
+  if (await page.evaluate(() => !!document.querySelector('[data-row-keys] [data-row-key][data-clickable] .private-address'))) {
+    await page.evaluate(() => document.activeElement?.blur());
+    let row = null;
+    for (let i = 0; i < 6 && !row; i++) { await page.keyboard.press('j'); await frame(); await frame(); row = await page.evaluate(highlightedRow); }
+    if (row) {
+      await page.keyboard.down('Shift'); await frame(); await frame();
+      const shown = await page.evaluate(highlightedRow);
+      await page.keyboard.up('Shift'); await frame(); await frame();
+      const released = await page.evaluate(highlightedRow);
+      if (row.masked !== row.total) problems.push(`J's highlight revealed ${row.total - row.masked} of its row's addresses`);
+      if (!shown || shown.masked) problems.push('⇧ on the highlighted row did not reveal its addresses');
+      else if (shown.at !== row.at) problems.push(`revealing the highlighted row moved it: ${row.at} → ${shown.at}`);
+      if (!released || released.masked !== released.total) problems.push('the highlighted row stayed revealed after ⇧ was released');
+    }
+    await page.evaluate(() => document.activeElement?.blur());
   }
   // Privacy mode off (⇧P, lib/privacy.ts) reveals every address at once without moving anything; on again masks them.
   // ⇧P is the dashboard shell's shortcut (components/AppShell.tsx): a page without the shell (the signed-out waitlist,
-  // onboarding) reveals by hover only.
+  // onboarding) reveals one address at a time only.
   const count = await page.evaluate(() => document.querySelectorAll('.private-address').length);
   if (!count || !shell || !await page.evaluate(() => !!document.querySelector('.privacy-toggle'))) return problems;
   const states = async () => { const all = []; for (let i = 0; i < Math.min(count, 5); i++) all.push(await page.evaluate(maskedState, i)); return all; };
@@ -587,6 +635,8 @@ async function measure(browser, job, fx) {
     if (job.skipped) await context.addInitScript(workspace => { try { localStorage.setItem(`nightmail.onboarding.domain.${workspace}`, 'done'); } catch {} }, job.skipped);
     // `step`: [workspace, the onboarding step this browser is on] (data/onboarding.ts).
     if (job.step) await context.addInitScript(([workspace, value]) => { try { localStorage.setItem(`nightmail.onboarding.domain.${workspace}`, value); } catch {} }, job.step);
+    // How this browser left Overview's get-started strip for a workspace (features/overview/first-run.tsx).
+    if (job.start) await context.addInitScript(([workspace, value]) => { try { localStorage.setItem(`nightmail.overview.start.${workspace}`, value); } catch {} }, job.start);
     // Overview's detail column hidden, as its toggle leaves it (features/overview/panel.ts).
     if (job.panel) await context.addInitScript(panel => { try { localStorage.setItem('nightmail.overview-panel', panel); } catch {} }, job.panel);
     page = await context.newPage();
@@ -643,12 +693,19 @@ async function measure(browser, job, fx) {
       }
       await settle(page, net);
     }
+    if (job.tab) {
+      const clicked = await page.evaluate(label => { const el = [...document.querySelectorAll('[role=tab]')].find(el => el.getClientRects().length && el.textContent.trim().startsWith(label)); el?.click(); return Boolean(el); }, job.tab);
+      if (!clicked) problems.push(`no tab “${job.tab}”`);
+      // The panel's entrance can outlast the idle wait; the masked address check then sees it still sliding.
+      else await page.evaluate(() => Promise.race([Promise.all(document.getAnimations().filter(a => a.effect?.getTiming().iterations !== Infinity).map(a => a.finished.catch(() => {}))), new Promise(done => setTimeout(done, 5000))]));
+      await settle(page, net);
+    }
     if (job.menu) {
       // A row's menu, then one of its items: a dropdown opens on pointer down, a phone's action sheet on click. The
       // dialog the item opens is found by its title.
       const [trigger, item, title] = job.menu;
       const opened = await page.evaluate(label => { const el = [...document.querySelectorAll('button')].find(el => el.getClientRects().length && el.getAttribute('aria-label') === label); el?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0, pointerType: 'mouse' })); el?.click(); return Boolean(el); }, trigger);
-      const choice = opened && await page.waitForFunction(text => [...document.querySelectorAll('[role=menuitem], .ui-action-sheet__item')].find(el => el.getClientRects().length && el.textContent.trim() === text), item, { timeout: 10_000 }).catch(() => null);
+      const choice = opened && await page.waitForFunction(text => [...document.querySelectorAll('[role=menuitem], .ui-action-sheet__item, .more-sheet__link')].find(el => el.getClientRects().length && el.textContent.trim() === text), item, { timeout: 10_000 }).catch(() => null);
       if (!choice) problems.push(opened ? `no “${item}” in “${trigger}”` : `no control “${trigger}”`);
       else {
         await choice.evaluate(el => el.click());
@@ -990,12 +1047,12 @@ try {
   console.log(`${elapsed()} seeded`);
   const jobs = [];
   const passes = [['desktop', 'light'], ['desktop', 'dark'], ...process.env.CLS_PHONE === '0' ? [] : [['phone', 'light']]];
-  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step }] of pages(ids)) {
+  for (const [device, scheme] of passes) for (const [name, path, { user = 'dana', from, click, row, switchTo, support, live, leave, notes, dialog, tab, menu, still, alone, phoneOnly, notFound, waitlist, guard, panel, skipped, step, start }] of pages(ids)) {
     if (only && !only.test(name) || device === 'phone' && !phonePages.has(name) || phoneOnly && device !== 'phone') continue;
     const slug = `${name}-${device === 'phone' ? 'phone' : scheme}`.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, dialog, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
+    const load = { name, path, user, scheme, device, support, live, leave: leave && device === 'desktop' && scheme === 'light', notes, panel, skipped, step, start, dialog, tab, menu, still, alone, notFound, waitlist, guard: guard && device === 'desktop' && scheme === 'light' ? guard : undefined, mode: 'load', slug: slug + '-load' };
     jobs.push(load);
-    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
+    if (from) jobs.push({ name, path, user, from, click, row, switchTo, support, notes, panel, skipped, step, start, still, alone, scheme, device, mode: 'in-app', slug: slug + '-in-app' });
   }
   // Multi-step jobs (Support chat, live rules, Overview's full warm-up) start first so none trails alone at the end.
   const weight = job => (job.support ? 4 : 0) + (job.live ? 2 : 0) + (job.name === 'Overview' && job.mode === 'load' ? 3 : 0);

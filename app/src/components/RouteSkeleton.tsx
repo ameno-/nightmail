@@ -1,6 +1,6 @@
 import { useLocation } from 'react-router'
 import { OverviewRouteSkeleton } from '../features/overview/skeletons'
-import { EmailDetailSkeleton, LogsRouteSkeleton, ReceivedEmailSkeleton } from '../features/logs/skeletons'
+import { EmailDetailSkeleton, LogsRouteSkeleton } from '../features/logs/skeletons'
 import { isReceivedId } from '../features/logs/rows'
 import { CampaignRouteSkeleton } from '../features/campaigns/skeletons'
 import { NewsletterRouteSkeleton } from '../features/newsletters/skeletons'
@@ -19,7 +19,7 @@ export function RouteSkeleton() {
   const phone = usePhone()
   const [section, id, view] = pathname.split('/').filter(Boolean)
   if (!section || section === 'overview') return <OverviewRouteSkeleton />
-  if (section === 'logs') return !id ? <LogsRouteSkeleton /> : isReceivedId(id) ? <ReceivedEmailSkeleton /> : <EmailDetailSkeleton />
+  if (section === 'logs') return !id ? <LogsRouteSkeleton /> : <EmailDetailSkeleton kind={isReceivedId(id) ? 'received' : 'sent'} />
   if (section === 'campaigns') return id === 'templates' ? <CampaignRouteSkeleton kind={view ? 'template' : 'templates'} /> : <CampaignRouteSkeleton kind={!id ? 'list' : view === 'review' ? 'review' : 'editor'} isNew={id === 'new'} />
   if (section === 'newsletters') return <NewsletterRouteSkeleton id={id} />
   if (section === 'audience') return id === 'lists' ? <AudienceRouteSkeleton kind={view ? 'list' : 'lists'} /> : id === 'segments' ? <AudienceRouteSkeleton kind={view ? 'segment' : 'segments'} isNew={view === 'new'} /> : <AudienceRouteSkeleton kind={view ? 'contact' : 'contacts'} />
@@ -34,11 +34,11 @@ export function RouteSkeleton() {
   return null
 }
 
-// Receiving's header as the page draws it before its overview arrives, over the page's own loading block.
+// Mail routing's header as the page draws it before its overview arrives, over the page's own loading block.
 function ReceivingRouteSkeleton() {
   const { canAdminister } = useWorkspaceAccess()
   return <div className="stack inbound-stack receiving-page">
-    <PageHeader title="Receiving" actions={canAdminister && <Button variant="primary" disabled>New address</Button>} />
+    <PageHeader title="Mail routing" actions={canAdminister && <Button variant="primary" disabled>New address</Button>} />
     <LoadingRegion label="Loading receiving"><div className="rcv-skeleton" aria-hidden="true"><span /><span /><span /><span /></div></LoadingRegion>
   </div>
 }

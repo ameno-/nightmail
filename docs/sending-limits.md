@@ -89,7 +89,7 @@ Owners and admins get one short email for each of these, and at most one a day o
 A workspace in its evaluation, in the growth pace, or below good standing (a daily limit set by the score, a freeze or a strike, or a step from warn up) is on **probation**: `standing.probation` in `GET /v1/sender-score` is `evaluation`, `growth` or `standing`. Until then Hosted adds these checks; they end by themselves on good standing, with nothing to request:
 
 - **Delivered as screened.** Each message goes out as the copy the content screen read: style sheet rules are inlined, `@media`, dark-mode and other rules a client applies only sometimes are left out, and blocks the light, desktop rendering hides are dropped. Responsive emails arrive in their desktop layout.
-- **Attachments of a standard type** whose name, declared type and bytes agree (422 `ATTACHMENT_TYPE_UNSCREENABLE` or `ATTACHMENT_CONTENT_MISMATCH`).
+- **Attachments of a standard type** whose name, declared type and bytes agree (422 `ATTACHMENT_TYPE_UNSCREENABLE` or `ATTACHMENT_CONTENT_MISMATCH`). A mail app can't choose how it labels a file, so over SMTP the bytes decide instead: each file goes out as the type they are, under its own name, and only markup, attached emails, programs, unrecognized files and names outside the standard extensions are refused, in an SMTP reply that names the file.
 - **The list probe** below, on every campaign over 100 recipients.
 
 Every message is screened either way. In good standing it goes out as written, and the screen reads all of it: text that CSS hides or that only a media query, dark mode or Outlook shows, what style sheets draw (generated content, with its `var()` and `attr()` values, however escaped), and elements that CSS displays though clients hide them by default. CSS too complex to read within the screen's budget is refused (422 `CONTENT_TOO_LARGE_TO_SCREEN`).
@@ -97,7 +97,7 @@ Every message is screened either way. In good standing it goes out as written, a
 The screen reads no picture, so every sender keeps the picture rules, in good standing too:
 
 - **Words beside images.** A 200 × 200 logo needs none; every further 600 × 300 px of images needs 25 words (422 `CONTENT_IMAGE_ONLY`). For a message delivered as written, every picture it can show counts, including images that are hidden, only some clients show, backgrounds and images its style sheets draw; an image whose size its CSS could change (its own `style`, or any style sheet rule, media queries included, that could select it) counts at full size, at least 600 × 400.
-- **No SVG**, and inline images only as PNG, JPEG, GIF, WebP or BMP whose bytes match (422 `ATTACHMENT_TYPE_UNSCREENABLE`).
+- **No SVG**, and inline images only as PNG, JPEG, GIF, WebP or BMP whose bytes match (422 `ATTACHMENT_TYPE_UNSCREENABLE`). A mail app's other inline parts go out as ordinary attachments.
 
 ## Campaign list probe
 

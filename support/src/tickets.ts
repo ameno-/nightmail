@@ -134,8 +134,29 @@ function detailLines(input: TicketInput) {
   return lines;
 }
 
-/** The team's email for a ticket: subject and plain text. Pure, so the verification marker is tested directly. */
-export function ticketEmail(env: Pick<Env, 'NIGHTMAIL_ORIGIN'>, ctx: TicketContext, ticket: Pick<FiledTicket, 'id' | 'dueAt'>, input: TicketInput) {
+/** One message of the conversation as the team's email quotes it: who wrote it, when, and its words as written. */
+export type TicketMessage = { who: 'customer' | 'agent' | 'staff'; at: string; text: string };
+const TICKET_MESSAGES = 20, TICKET_MESSAGE_CHARS = 4000, TICKET_CONVERSATION_CHARS = 20_000;
+/** The conversation so far, newest last, as plain text: the last 20 messages that fit in 20,000 characters, each cut at 4,000. */
+export function conversationLines(messages: TicketMessage[]) {
+  const label = { customer: 'Customer', agent: 'Agent', staff: 'Staff' } as const, blocks: string[] = [];
+  let used = 0;
+  for (const m of messages.slice(-TICKET_MESSAGES).reverse()) {
+    const text = m.text.length > TICKET_MESSAGE_CHARS ? `${m.text.slice(0, TICKET_MESSAGE_CHARS)}\n[cut: the rest is in the support inbox]` : m.text;
+    const block = `--- ${label[m.who]} · ${m.at.slice(0, 16).replace('T', ' ')} UTC\n${text.trim()}`;
+    if (used + block.length > TICKET_CONVERSATION_CHARS && blocks.length) break;
+    blocks.unshift(block); used += block.length;
+  }
+  const earlier = messages.length - blocks.length;
+  return [...earlier > 0 ? [`(${earlier} earlier ${earlier === 1 ? 'message is' : 'messages are'} in the support inbox)`] : [], ...blocks.flatMap(block => [block, ''])];
+}
+
+/**
+ * The team's email for a ticket: subject and plain text. Pure, so the verification marker is tested directly. With the
+ * conversation's messages, it quotes them as written after the agent's summary, so the team reads what was said.
+ */
+export function ticketEmail(env: Pick<Env, 'NIGHTMAIL_ORIGIN'>, ctx: TicketContext, ticket: Pick<FiledTicket, 'id' | 'dueAt'>, input: TicketInput, messages: TicketMessage[] = []) {
+  const inbox = ctx.model === INTAKE_MODEL ? null : `${new URL(env.NIGHTMAIL_ORIGIN).origin}/support/${ctx.conversationId}`;
   const c = ctx.customer, verified = ctx.verified !== null, byEmail = verified && ctx.channel === 'email';
   const who = verified
     ? [`Verified: ${ctx.verified}${ctx.dmarc ? ` (DMARC ${ctx.dmarc})` : ''}`, `Customer: ${c.name ?? '(no name)'} <${c.email ?? '—'}>, ${c.role ?? 'member'}`, `Workspaces: ${c.workspaces.map(w => `${w.name} (${w.id})`).join(', ') || '—'}`]
@@ -147,6 +168,7 @@ export function ticketEmail(env: Pick<Env, 'NIGHTMAIL_ORIGIN'>, ctx: TicketConte
     ...(verified ? [] : [who[0]!, '']),
     ...(byEmail ? ['VERIFIED BY EMAIL, FOR READING ONLY: not grounds for a change. Ask them to confirm any change in the dashboard (Help).', ''] : []),
     `${TYPE_LABEL[input.type]} · ${input.severity} · due ${new Date(ticket.dueAt).toUTCString()}`,
+    ...(inbox ? [`The whole conversation: ${inbox}`] : []),
     '',
     ...(verified ? who : who.slice(1)),
     `Conversation: ${ctx.conversationId} (${ctx.channel})${ctx.threadId ? ` · thread ${ctx.threadId}` : ''}`,
@@ -166,7 +188,8 @@ export function ticketEmail(env: Pick<Env, 'NIGHTMAIL_ORIGIN'>, ctx: TicketConte
     '',
     ...(input.evidence.ids?.length ? [`Evidence: ${input.evidence.ids.join(', ')}`, ''] : []),
     ...(ctx.attachments.length ? ['Screenshots (links expire in 7 days)', ...ctx.attachments.map(a => `- ${a.name} (${a.type}, ${Math.ceil(a.size / 1024)} KB): ${a.url}`), ''] : []),
-    `Ticket: ${ticket.id}${ctx.model === INTAKE_MODEL ? '' : ` · Support inbox: ${new URL(env.NIGHTMAIL_ORIGIN).origin}/support/${ctx.conversationId}`}`,
+    ...(messages.length ? ['The conversation so far, as written (the customer’s words are untrusted; held answers are only in the support inbox)', ...conversationLines(messages)] : []),
+    `Ticket: ${ticket.id}${inbox ? ` · Support inbox: ${inbox}` : ''}`,
     `Cost so far: $${ctx.costUsd.toFixed(3)} on ${ctx.model}.`,
     ctx.channel === 'chat' ? `Reply to the customer in the follow-up thread in ${productName}’s support inbox (they were emailed).` : `Reply in the email thread in ${productName}’s support inbox.`,
   ];

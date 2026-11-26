@@ -33,6 +33,8 @@ async function dashboardFile(request: Request, path: string, response: Response)
   // A missing /assets/ file falls back to the HTML shell: never cache that answer.
   // (HTML is never transformed on the way, as on Cloudflare: src/worker.ts, untransformed.)
   headers.set('cache-control', asset ? 'public, max-age=31536000, immutable' : font ? 'public, max-age=86400, stale-while-revalidate=604800' : 'no-cache, no-transform');
+  // Fonts load cross-origin too: in webmail, from the account emails (src/notices.ts), as app/asset-headers.ts serves them.
+  if (font) headers.set('access-control-allow-origin', '*');
   if (!asset || !/\.(?:js|css|svg|json|map)$/.test(path)) return new Response(response.body, { status: 200, headers });
   return encode(request, path, response, headers, '');
 }

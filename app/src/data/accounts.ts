@@ -21,6 +21,11 @@ export const accountApi = {
   // A sign-in link to an address a raise let in. The answer is the same whether or not one was sent.
   signInLink: (email: string) => request<{ requested: true }>('/api/auth/sign-in/link', { method: 'POST', body: { email } }),
 }
+// The tab's own account comes with the session (GET /v1/me), so a list of accounts is complete before the list arrives;
+// its workspaces are always the session's, which a rename has already updated.
+export function withOwnAccount(self: ConnectedAccount, list: AccountList | undefined): ConnectedAccount[] {
+  return list?.accounts.some(account => account.id === self.id) ? list.accounts.map(account => account.id === self.id ? { ...account, workspaces: self.workspaces } : account) : [self]
+}
 export function useAccounts(enabled = true) {
   return useQuery({ queryKey: accountsKey, queryFn: ({ signal }) => accountApi.list(signal), enabled, staleTime: 30_000, gcTime: Infinity })
 }

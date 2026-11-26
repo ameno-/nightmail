@@ -565,10 +565,12 @@ async function prepareMail(leased: Leased & { owner: Owner }, loadAttachments: (
     const body = await verifiedAttachment(runtime, row);
     files.push({ row, bytes: body });
     // A probation attachment goes out under a name a client shows as is, as a type its extension and bytes agree with;
-    // any other sender's is checked only for pictures (no SVG, inline parts as raster images).
-    if (rules==='standard') delivery!.shownAttachment(row.filename, row.contentType, body, row.disposition === 'inline');
-    const { filename, contentType } = rules==='probation' ? delivery!.screenedAttachment(row.filename, row.contentType, body, row.disposition === 'inline') : row;
-    parts.push({ FileName: filename, RawContent: body, ContentType: contentType, ContentDisposition: row.disposition === 'inline' ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(row.contentId ? { ContentId: row.contentId } : {}) });
+    // any other sender's is checked only for pictures (no SVG, inline parts as raster images); a mail app's goes out as
+    // what its bytes are (screened-html.ts hostedAttachment). A part that can't be inline goes out as an ordinary
+    // attachment, without the Content-ID its HTML could show it by.
+    const shown = delivery ? delivery.hostedAttachment(row, body, rules==='probation', !!s.mailApp) : { filename: row.filename, contentType: row.contentType, inline: row.disposition === 'inline' };
+    const contentId = row.contentId && (shown.inline || row.disposition !== 'inline') ? row.contentId : undefined;
+    parts.push({ FileName: shown.filename, RawContent: body, ContentType: shown.contentType, ContentDisposition: shown.inline ? 'INLINE' : 'ATTACHMENT', ContentTransferEncoding: 'BASE64', ...(contentId ? { ContentId: contentId } : {}) });
   }
   // A campaign's mail, and its test, links its inline pictures from the host of its links (s.linkOrigin: the link domain on
   // Hosted, PUBLIC_URL without link hosts) rather than carrying them, after the checks above (src/linked-images.ts). Never

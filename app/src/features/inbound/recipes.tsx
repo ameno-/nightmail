@@ -1,4 +1,4 @@
-// Rules as most people use them: the list (the Receiving page's Rules tab), the add screen with ready-made rules
+// Rules as most people use them: the list (the Mail routing page's Rules tab), the add screen with ready-made rules
 // (recipes) grouped by what they do, and the short form a recipe opens to make its rule. Every write goes through the
 // public API (createRuleFromRecipe, updateRule, deleteRule, createEndpoint). A recipe's rule is an ordinary script the
 // API wrote: like every rule it opens as its code (rituals.tsx), and saving a hand edit there makes it a script.
@@ -157,7 +157,7 @@ export function NewRulePage() {
   const catalog = useRecipes(canAdminister)
   const [splitSearch, setSplitSearch] = useState('')
   const options = useAddressOptions({ enabled: canAdminister, search: useDebounced(splitSearch) })
-  // The Receiving page's first read (usually cached by now): the prompts name the address rules run on most.
+  // The Mail routing page's first read (usually cached by now): the prompts name the address rules run on most.
   const overview = useOverview(firstOverview, false, canAdminister)
   const [params] = useSearchParams()
   const [choosing, setChoosing] = useState<Condition | null>(null)

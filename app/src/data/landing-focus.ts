@@ -3,7 +3,7 @@ import { WORKSPACE_FOCUS, type WorkspaceFocus } from '../../../api/src/workspace
 // Why a visitor came, from a landing link: a comparison page's Get started opens /overview?focus=<focus> (WORKSPACE_FOCUS;
 // a public page's own ?focus= works too, as a sign-in from it returns to /overview with its query). Noted from whatever
 // address it lands on, on boot and as the app moves (no request), and kept in this browser so it outlives the sign-in page,
-// the account service, the callback and a stay on the waitlist, until onboarding answers its focus question with it or the
+// the account service, the callback and a stay on the waitlist, until onboarding saves it as the workspace's focus or the
 // workspace turns out to need none. The address keeps ?focus= until then, so a sign-in started there returns with it.
 const key = 'nightmail.landing-focus', LIFETIME_MS = 30 * 24 * 60 * 60_000
 /** focus: what the link asked for; from: the comparison page it came from (its slug), if known. */

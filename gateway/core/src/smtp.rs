@@ -35,6 +35,9 @@ pub enum SubmitError {
     /// A signed or encrypted message goes out as written, which a new sender can do once its first messages are evaluated.
     #[error("550 5.7.1 Signed or encrypted mail is not available for this sender yet")]
     SealedUnavailable,
+    /// The API refused an attachment: its words name the file and say why (printable ASCII, one line).
+    #[error("550 5.6.1 {0}")]
+    Attachment(String),
     #[error("550 5.7.1 Rejected")]
     Rejected,
 }
@@ -706,6 +709,9 @@ mod tests {
                 SubmitError::TooLarge,
                 SubmitError::SealedTooLarge,
                 SubmitError::SealedUnavailable,
+                SubmitError::Attachment(
+                    "Message not sent: attachment \"a.pdf\" is a Windows program".into(),
+                ),
                 SubmitError::Rejected,
             ]
             .iter()

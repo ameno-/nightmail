@@ -43,7 +43,7 @@ const imageOnly = () => new ApiError(422, 'CONTENT_IMAGE_ONLY', 'Add body text b
 
 // What a probation sender may attach: a standard extension whose declared type and bytes agree with it. Inline
 // attachments must be raster images. Anything a client renders as a document of text the screen never read (markup,
-// mail) is refused whatever it is called.
+// mail) is refused whatever it is called. A mail app's files are judged by their bytes instead (mailAppAttachment).
 type Family = 'png' | 'jpeg' | 'gif' | 'webp' | 'bmp' | 'tiff' | 'pdf' | 'zip' | 'ole' | 'gzip' | '7z' | 'rar' | 'mp3' | 'mp4' | 'wav' | 'ogg' | 'webm' | 'rtf';
 const ATTACHMENT_TYPES: Record<string, { types: string[]; family?: Family }> = {
   png: { types: ['image/png'], family: 'png' }, jpg: { types: ['image/jpeg'], family: 'jpeg' }, jpeg: { types: ['image/jpeg'], family: 'jpeg' }, gif: { types: ['image/gif'], family: 'gif' },
@@ -56,14 +56,22 @@ const ATTACHMENT_TYPES: Record<string, { types: string[]; family?: Family }> = {
   doc: { types: ['application/msword'], family: 'ole' }, xls: { types: ['application/vnd.ms-excel'], family: 'ole' }, ppt: { types: ['application/vnd.ms-powerpoint'], family: 'ole' },
   mp3: { types: ['audio/mpeg'], family: 'mp3' }, mp4: { types: ['video/mp4'], family: 'mp4' }, m4a: { types: ['audio/mp4', 'audio/x-m4a'], family: 'mp4' }, wav: { types: ['audio/wav', 'audio/x-wav', 'audio/wave'], family: 'wav' },
   ogg: { types: ['audio/ogg', 'video/ogg', 'application/ogg'], family: 'ogg' }, webm: { types: ['video/webm', 'audio/webm'], family: 'webm' }, rtf: { types: ['application/rtf', 'text/rtf'], family: 'rtf' },
-  txt: { types: ['text/plain'] }, csv: { types: ['text/csv'] }, tsv: { types: ['text/tab-separated-values'] }, json: { types: ['application/json'] }, ics: { types: ['text/calendar'] }, vcf: { types: ['text/vcard', 'text/x-vcard'] }, md: { types: ['text/markdown'] },
+  txt: { types: ['text/plain'] }, log: { types: ['text/plain'] }, csv: { types: ['text/csv'] }, tsv: { types: ['text/tab-separated-values'] }, json: { types: ['application/json'] }, ics: { types: ['text/calendar'] }, vcf: { types: ['text/vcard', 'text/x-vcard'] }, md: { types: ['text/markdown'] },
 };
 const RASTER = new Set<Family>(['png', 'jpeg', 'gif', 'webp', 'bmp']);
 /** What a family's bytes are, for a refusal that says what a file's content looks like. */
 const FAMILY_NAMES: Record<Family, string> = { png: 'a PNG image', jpeg: 'a JPEG image', gif: 'a GIF image', webp: 'a WebP image', bmp: 'a BMP image', tiff: 'a TIFF image', pdf: 'a PDF',
   zip: 'a ZIP archive (as DOCX, XLSX, PPTX and OpenDocument files are)', ole: 'an older Office document (DOC, XLS, PPT)', gzip: 'a gzip archive', '7z': 'a 7z archive', rar: 'a RAR archive',
   mp3: 'an MP3', mp4: 'an MP4 or M4A', wav: 'a WAV', ogg: 'an Ogg file', webm: 'a WebM', rtf: 'an RTF document' };
+/** The type a family's bytes are sent as when nothing names one of its types; none where the bytes can't tell which
+ *  (an OLE file is a Word, Excel or PowerPoint file or an installer, ISO media an MP4, M4A, MOV or HEIC file, EBML a
+ *  WebM or Matroska file), so application/octet-stream. */
+const FAMILY_TYPES: Record<Family, string | undefined> = { png: 'image/png', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', bmp: 'image/bmp', tiff: 'image/tiff', pdf: 'application/pdf',
+  zip: 'application/zip', ole: undefined, gzip: 'application/gzip', '7z': 'application/x-7z-compressed', rar: 'application/vnd.rar', mp3: 'audio/mpeg', mp4: undefined, wav: 'audio/wav',
+  ogg: 'application/ogg', webm: undefined, rtf: 'application/rtf' };
 const PROBATION = 'while the sender is on probation';
+/** The kinds of file the standard extensions are, for a person reading a refusal. */
+const STANDARD_KINDS = 'images, PDFs, office documents, archives, audio, video and text files';
 /** Bytes that are themselves base64 text: a file encoded twice, the commonest way an upload's content goes wrong. */
 const base64Text = (bytes: Uint8Array) => bytes.length >= 16 && bytes.subarray(0, 4096).every(b => (b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (b >= 0x30 && b <= 0x39) || b === 0x2b || b === 0x2f || b === 0x3d || b === 0x2d || b === 0x5f || b === 0x0a || b === 0x0d);
 /** What a file's content is, without any of it: its size and what its first bytes announce, and a fix when it shows one. */
@@ -74,16 +82,24 @@ function contentOf(bytes: Uint8Array) {
 }
 const DOCUMENT_TYPES = new Set(['image/svg+xml', 'text/html', 'application/xhtml+xml', 'text/xml', 'application/xml', 'message/rfc822', 'multipart/related', 'application/x-mimearchive']);
 const DOCUMENT_EXTENSIONS = new Set(['svg', 'svgz', 'html', 'htm', 'xhtml', 'xht', 'xml', 'mht', 'mhtml', 'eml']);
+/** Readers of a file's first bytes: hex bytes or ASCII text at an offset, and a little-endian 32-bit number. */
+function reader(bytes: Uint8Array) {
+  return {
+    at: (offset: number, hex: string) => hex.split(' ').every((byte, i) => bytes[offset + i] === parseInt(byte, 16)),
+    ascii: (offset: number, text: string) => [...text].every((c, i) => bytes[offset + i] === c.charCodeAt(0)),
+    u32: (offset: number) => ((bytes[offset] ?? 0) | (bytes[offset + 1] ?? 0) << 8 | (bytes[offset + 2] ?? 0) << 16) + (bytes[offset + 3] ?? 0) * 2 ** 24,
+  };
+}
 /** The family the first bytes announce, if this reader knows it. */
 function signature(bytes: Uint8Array): Family | undefined {
-  const at = (offset: number, hex: string) => hex.split(' ').every((byte, i) => bytes[offset + i] === parseInt(byte, 16));
-  const ascii = (offset: number, text: string) => [...text].every((c, i) => bytes[offset + i] === c.charCodeAt(0));
+  const { at, ascii, u32 } = reader(bytes);
   if (at(0, '89 50 4e 47 0d 0a 1a 0a')) return 'png';
   if (at(0, 'ff d8 ff')) return 'jpeg';
   if (ascii(0, 'GIF87a') || ascii(0, 'GIF89a')) return 'gif';
   if (ascii(0, 'RIFF') && ascii(8, 'WEBP')) return 'webp';
   if (ascii(0, 'RIFF') && ascii(8, 'WAVE')) return 'wav';
-  if (ascii(0, 'BM')) return 'bmp';
+  // BM and a bitmap header's size: text that starts with "BM" is not a bitmap.
+  if (ascii(0, 'BM') && [12, 16, 40, 52, 56, 64, 108, 124].includes(u32(14))) return 'bmp';
   if (at(0, '49 49 2a 00') || at(0, '4d 4d 00 2a')) return 'tiff';
   if (ascii(0, '%PDF-')) return 'pdf';
   if (at(0, '50 4b 03 04') || at(0, '50 4b 05 06')) return 'zip';
@@ -98,19 +114,55 @@ function signature(bytes: Uint8Array): Family | undefined {
   if (ascii(0, '{\\rtf')) return 'rtf';
   return undefined;
 }
-/** Bytes a client would render as markup or as a mail message. */
-function document(bytes: Uint8Array) {
+/** Bytes a client would render as markup or as a mail message, and which. */
+function document(bytes: Uint8Array): 'markup' | 'mail' | undefined {
   let head = ''; for (const byte of bytes.subarray(0, 4096)) head += String.fromCharCode(byte);
   const text = head.replace(/^(?:\xef\xbb\xbf|\xff\xfe|\xfe\xff)?\s*/, '').toLowerCase();
-  return text.startsWith('<') || (/^[a-z][\w-]*:\s/.test(text) && /\n(?:mime-version|content-type):/.test(text));
+  return text.startsWith('<') ? 'markup' : /^[a-z][\w-]*:\s/.test(text) && /\n(?:mime-version|content-type):/.test(text) ? 'mail' : undefined;
+}
+/** A program, whatever the file is called: what a recipient's system would run. */
+function program(bytes: Uint8Array) {
+  const { at, ascii, u32 } = reader(bytes);
+  if (ascii(0, 'MZ') && at(u32(0x3c), '50 45 00 00')) return 'a Windows program';
+  if (at(0, '7f 45 4c 46')) return 'a Linux program';
+  if (['fe ed fa ce', 'fe ed fa cf', 'ce fa ed fe', 'cf fa ed fe', 'ca fe ba be'].some(hex => at(0, hex))) return 'a Mac or Java program';
+  if (ascii(0, '#!/') || ascii(0, '#! /')) return 'a script';
+  if (at(0, '4c 00 00 00 01 14 02 00')) return 'a Windows shortcut';
+  if (ascii(0, 'ITSF')) return 'a Windows help file';
+  if (ascii(0, 'MSCF')) return 'a Windows installer cabinet';
+  return undefined;
+}
+/** Bytes that read as text: UTF-16 after its byte-order mark, or an 8-bit charset with no control characters but tab,
+ *  line breaks, form feed and escape, over the first 64 KiB. */
+function textBytes(bytes: Uint8Array) {
+  const head = bytes.subarray(0, 65536), utf16 = head[0] === 0xff && head[1] === 0xfe ? 'utf-16le' : head[0] === 0xfe && head[1] === 0xff ? 'utf-16be' : undefined;
+  if (utf16) return !/[\x00-\x08\x0b\x0e-\x1a\x1c-\x1f]/.test(new TextDecoder(utf16).decode(head.subarray(2, head.length - (head.length % 2))));
+  return head.every(b => b >= 0x20 || b === 0x09 || b === 0x0a || b === 0x0c || b === 0x0d || b === 0x1b);
+}
+/** A refused attachment's types, for the request log: what its declared type and name's extension say and what its
+ *  bytes are, as MIME type shapes and fixed words, never its name or content. */
+function attachmentTypes(type: string, extension: string, bytes: Uint8Array) {
+  const detectedType = program(bytes) ? 'program' : svgBytes(bytes) ? 'svg' : document(bytes) ?? signature(bytes) ?? (textBytes(bytes) ? 'text' : 'unknown');
+  return { declaredType: /^[a-z0-9][\w.+-]{0,63}\/[a-z0-9][\w.+-]{0,63}$/.test(type) ? type : 'other', detectedType, extension: !extension ? 'none' : /^[a-z0-9]{1,10}$/.test(extension) ? extension : 'other' };
+}
+/** A file's name with format characters removed, the extension a system opens it by (after trailing dots and spaces,
+ *  which Windows ignores), and its declared type without parameters. */
+function labels(filename: string, contentType: string) {
+  const name = screenedName(filename).replace(/[. ]+$/, '');
+  return { name, shown: JSON.stringify(name), extension: name.includes('.') ? name.split('.').pop()!.toLowerCase() : '', type: contentType.split(';')[0]!.trim().toLowerCase() };
+}
+/** An attachment refusal that the request log can describe by its types (attachmentTypes). */
+function refusal(code: string, message: string, types: ReturnType<typeof attachmentTypes>) {
+  const error = new ApiError(422, code, message);
+  error.attachmentTypes = types;
+  return error;
 }
 /** The name and type a probation sender's attachment is delivered under, or the reason it is not: its declared type
  *  (application/octet-stream meaning unspecified), normalized extension and bytes must agree. */
 export function screenedAttachment(filename: string, contentType: string, bytes: Uint8Array, inline: boolean): { filename: string; contentType: string } {
-  const name = screenedName(filename).replace(/[. ]+$/, ''), extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '', type = contentType.split(';')[0]!.trim().toLowerCase();
-  const shown = JSON.stringify(name);
-  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${shown}: ${why} ${PROBATION}.`);
-  const mismatch = (why: string) => new ApiError(422, 'ATTACHMENT_CONTENT_MISMATCH', `Hosted sending cannot deliver ${shown}: ${why}. Its name, declared type and content must agree ${PROBATION}.`);
+  const { shown, extension, type } = labels(filename, contentType), types = () => attachmentTypes(type, extension, bytes);
+  const unscreenable = (why: string) => refusal('ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${shown}: ${why} ${PROBATION}.`, types());
+  const mismatch = (why: string) => refusal('ATTACHMENT_CONTENT_MISMATCH', `Hosted sending cannot deliver ${shown}: ${why}. Its name, declared type and content must agree ${PROBATION}.`, types());
   const markup = DOCUMENT_TYPES.has(type) ? `its type is ${type}` : DOCUMENT_EXTENSIONS.has(extension) ? `its name ends in .${extension}`
     : svgBytes(bytes) ? 'its content is SVG markup' : document(bytes) ? 'its content is markup or a mail message' : null;
   if (markup) throw unscreenable(`${markup}, and markup, SVG and mail archives are not delivered`);
@@ -134,14 +186,80 @@ const svgBytes = (bytes: Uint8Array) => { let head = ''; for (const byte of byte
  * the allowlist (screenedAttachment) is for probation.
  */
 export function shownAttachment(filename: string, contentType: string, bytes: Uint8Array, inline: boolean) {
-  const name = screenedName(filename).replace(/[. ]+$/, ''), extension = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '', type = contentType.split(';')[0]!.trim().toLowerCase();
-  const unscreenable = (why: string) => new ApiError(422, 'ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${JSON.stringify(name)}: ${why}.`);
+  const { shown, extension, type } = labels(filename, contentType);
+  const unscreenable = (why: string) => refusal('ATTACHMENT_TYPE_UNSCREENABLE', `Hosted sending cannot screen ${shown}: ${why}.`, attachmentTypes(type, extension, bytes));
   const svg = type === 'image/svg+xml' ? `its type is ${type}` : extension === 'svg' || extension === 'svgz' ? `its name ends in .${extension}` : svgBytes(bytes) ? 'its content is SVG markup' : null;
   if (svg) throw unscreenable(`${svg}, and SVG images are not delivered: convert it to PNG`);
   if (!inline) return;
   const expected = own(ATTACHMENT_TYPES, extension), found = signature(bytes);
   if (!expected?.family || !RASTER.has(expected.family) || found !== expected.family || (type !== 'application/octet-stream' && !expected.types.includes(type)))
     throw unscreenable(`it is inline (disposition inline), and an inline attachment must be a PNG, JPEG, GIF, WebP or BMP image whose name, declared type and content agree; its name is .${extension || '(none)'}, its declared type ${type}, and its content ${contentOf(bytes).what}. Send it with disposition attachment, or as one of those images`);
+}
+/**
+ * A mail app's file (EmailSnapshot.mailApp) on a Hosted sender's rules: the name, type and disposition it goes out
+ * under, or why it doesn't. A mail app labels a file as its system does (application/octet-stream for anything,
+ * text/plain for a CSV, image/jpg, no name for a pasted picture, inline for a PDF) and its user can't change that, so a
+ * label is never refused here: the bytes say what the file is and it goes out as that, under the type they show
+ * (application/octet-stream where they can't tell which of a family's types), with its name kept, and inline only as a
+ * raster image (anything else as an ordinary attachment). What a label can't make safe is still refused whatever the file
+ * is called: SVG, which a client draws with text the screen never read; and on probation, as screenedAttachment does,
+ * markup and mail, a name whose extension isn't a standard one (the extension is what a recipient's system opens it by),
+ * and bytes that are a program, or that are no type this reader knows under a name that isn't a text type.
+ */
+export function mailAppAttachment(filename: string, contentType: string, bytes: Uint8Array, inline: boolean, probation: boolean): DeliveredAttachment {
+  const { shown, extension, type } = labels(filename, contentType);
+  const refuse = (code: string, why: string) => refusal(code, `attachment ${shown} ${why}`, attachmentTypes(type, extension, bytes));
+  if (type === 'image/svg+xml' || extension === 'svg' || extension === 'svgz' || svgBytes(bytes)) throw refuse('ATTACHMENT_TYPE_UNSCREENABLE', 'is an SVG image, and SVG images are never sent: send it as a PNG or JPEG instead');
+  const found = signature(bytes), raster = !!found && RASTER.has(found);
+  if (!probation) return { filename, contentType: raster && inline ? sameType(contentType, familyType(found!, extension, type)) : contentType, inline: inline && raster };
+  const archive = DOCUMENT_TYPES.has(type) && !/html|xml/.test(type) || ['mht', 'mhtml', 'eml'].includes(extension) || document(bytes) === 'mail';
+  if (archive || DOCUMENT_TYPES.has(type) || DOCUMENT_EXTENSIONS.has(extension) || document(bytes))
+    throw refuse('ATTACHMENT_TYPE_UNSCREENABLE', archive ? `is an attached email or web archive, which can't be sent ${PROBATION}: forward the email inline instead` : `is a web page or XML file, which can't be sent ${PROBATION}: send it as a PDF instead`);
+  const runs = program(bytes);
+  if (runs) throw refuse('ATTACHMENT_CONTENT_MISMATCH', `is ${runs}, whatever it is called, and programs are never sent`);
+  const named = extension ? own(ATTACHMENT_TYPES, extension) : undefined;
+  if (extension && !named) throw refuse('ATTACHMENT_CONTENT_MISMATCH', `has a name ending in .${extension}, and ${PROBATION} only ${STANDARD_KINDS} can be sent`);
+  // Bytes of no type this reader knows go out only under a text type's name, as screenedAttachment lets them.
+  const unknown = !found && !textBytes(bytes), textName = named && !named.family;
+  // Text under an office or other binary format's name opens in the app that name picks, and Word and Excel render the
+  // markup they find anywhere in it, past whatever text comes first.
+  if (!found && !unknown && named?.family && tagged(bytes))
+    throw refuse('ATTACHMENT_TYPE_UNSCREENABLE', `is a web page or XML file, which can't be sent ${PROBATION}: send it as a PDF instead`);
+  if (unknown && !textName) throw refuse('ATTACHMENT_CONTENT_MISMATCH', `isn't ${named?.family ? `${FAMILY_NAMES[named.family]} or any other` : 'any'} file type Nightmail recognizes, and ${PROBATION} only files it recognizes can be sent`);
+  const delivered = found ? familyType(found, extension, type) : unknown ? 'application/octet-stream' : textName ? named.types.includes(type) ? type : named.types[0]! : 'text/plain';
+  return { filename: screenedName(filename), contentType: sameType(contentType, delivered), inline: inline && raster };
+}
+export type DeliveredAttachment = { filename: string; contentType: string; inline: boolean };
+/** Bytes with a markup tag anywhere: '<' then a letter, '/', '!' or '?'. */
+function tagged(bytes: Uint8Array) {
+  for (let i = bytes.indexOf(0x3c); i >= 0 && i < bytes.length - 1; i = bytes.indexOf(0x3c, i + 1)) {
+    const next = bytes[i + 1]! | 0x20;
+    if ((next >= 0x61 && next <= 0x7a) || bytes[i + 1] === 0x2f || bytes[i + 1] === 0x21 || bytes[i + 1] === 0x3f) return true;
+  }
+  return false;
+}
+/** The type a family's bytes go out as: the declared one when it is one of the family's types, else the one the name's
+ *  extension gives the family, else the family's own (FAMILY_TYPES). */
+function familyType(found: Family, extension: string, type: string) {
+  if (Object.values(ATTACHMENT_TYPES).some(t => t.family === found && t.types.includes(type))) return type;
+  const named = own(ATTACHMENT_TYPES, extension);
+  return named?.family === found ? named.types[0]! : FAMILY_TYPES[found] ?? 'application/octet-stream';
+}
+/** The delivered type with the declared one's parameters when it is the declared type, and its charset when text. */
+function sameType(contentType: string, delivered: string) {
+  if (contentType.split(';')[0]!.trim().toLowerCase() === delivered) return contentType;
+  const charset = delivered.startsWith('text/') ? /;\s*charset\s*=\s*"?([\w.:-]{1,40})"?/i.exec(contentType)?.[1] : undefined;
+  return charset ? `${delivered}; charset=${charset}` : delivered;
+}
+/** The name, type and disposition a Hosted sender's file goes out under, or why it doesn't: a mail app's by its bytes
+ *  (mailAppAttachment), others' on probation by the allowlist (screenedAttachment), otherwise by the picture checks
+ *  (shownAttachment). Accepting a send and dispatching it both ask. */
+export function hostedAttachment(file: { filename: string; contentType: string; disposition: string }, bytes: Uint8Array, probation: boolean, mailApp: boolean): DeliveredAttachment {
+  const inline = file.disposition === 'inline';
+  if (mailApp) return mailAppAttachment(file.filename, file.contentType, bytes, inline, probation);
+  if (probation) return { ...screenedAttachment(file.filename, file.contentType, bytes, inline), inline };
+  shownAttachment(file.filename, file.contentType, bytes, inline);
+  return { filename: file.filename, contentType: file.contentType, inline };
 }
 /** A record's own entry, never an inherited one: tag, attribute and property names come from the message. */
 const own = <T>(record: Record<string, T>, key: string): T | undefined => Object.hasOwn(record, key) ? record[key] : undefined;

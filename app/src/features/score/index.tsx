@@ -8,7 +8,7 @@ import { number, shortDateTime } from '../../lib/format'
 import { openScoreAbout } from '../../lib/score-about'
 import { standingTitle, standingTone, stepAtLeast, type RaisedStep } from '../../lib/standing'
 import { useTween } from '../../components/motion'
-import { evaluationLeft, ScoreAbout, scoreMove } from './about'
+import { ScoreAbout, scoreMove, untilGraded } from './about'
 import { productName } from '../../../../api/src/brand'
 export { factorFormats } from './about'
 import './score.css'
@@ -19,13 +19,6 @@ export { StandingCard } from './standing'
 // explainer (./about.tsx): the breakdown, the trend, the limit the score sets and how it is graded.
 export function useSenderScore() { return useApiDef(queries.senderScore(), { interval: 60_000 }) }
 const whole = (value: number) => Math.round(value)
-// Before the first grade there is no score to show: a dash and the progress to it, never a 0 that reads as a bad grade.
-const progressLabel = (report: SenderScore) => `${number(report.emails.firstEmails)} of ${number(report.needed)} real emails. ${evaluationLeft(report)}`
-// The card counts down to the first grade, so its number never reads as a cap on sending (the daily limit is Overview's).
-function toGrade(report: SenderScore) {
-  const left = report.needed - report.emails.firstEmails
-  return left > 0 ? `${number(left)} ${left === 1 ? 'email' : 'emails'} to a grade` : 'Grading soon'
-}
 
 export function SidebarScore() {
   const { data: report, isError } = useSenderScore()
@@ -36,20 +29,22 @@ export function SidebarScore() {
   const graded = report.state === 'graded'
   // A dot from Warn up, and the card then goes to Overview's standing card; otherwise it opens the explainer.
   const raised = stepAtLeast(report.standing?.step, 'warn') ? report.standing!.step as RaisedStep : null
-  const label = (graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}` : `Sender score not graded yet: ${progressLabel(report)}`) + (raised ? `. ${standingTitle[raised]}` : '. About the sender score')
-  const note = graded ? scoreMove(report) : toGrade(report)
+  // Before the first grade there is no score to show, never a 0 that reads as a bad grade: a sentence says when it comes.
+  const pending = graded ? null : untilGraded(report)
+  const label = (graded ? `Sender score ${whole(report.score!)}, grade ${report.grade}.` : `Sender score. ${pending}`) + (raised ? ` ${standingTitle[raised]}` : ' About the sender score')
+  const note = graded ? scoreMove(report) : null
   // The tile takes the score's colour as the number moves (score.css): the tweened value, not the final one.
   const props = { className: 'score-card', 'data-scored': graded || undefined, style: graded ? { '--score': shown } as CSSProperties : undefined, 'aria-label': label }
   const inner = <>
     {raised && <span className={`score-card__alert ui-tone--${standingTone(raised)}`} aria-hidden="true" />}
     <span className="score-card__label">Sender score</span>
-    <span className="score-card__row">
-      <span className="score-card__figure">{graded ? <><b>{whole(shown)}</b><span className="score-card__grade">{report.grade}</span></> : <b>—</b>}</span>
+    {graded ? <span className="score-card__row">
+      <span className="score-card__figure"><b>{whole(shown)}</b><span className="score-card__grade">{report.grade}</span></span>
       {note && <span className="score-card__note">{note}</span>}
-    </span>
+    </span> : <span className="score-card__pending">{pending}</span>}
   </>
   return raised ? <Link to="/overview#standing" {...props}>{inner}</Link>
-    : <button type="button" onClick={() => openScoreAbout()} {...props} title={graded ? undefined : `Not graded yet: ${progressLabel(report)}`}>{inner}</button>
+    : <button type="button" onClick={() => openScoreAbout()} {...props}>{inner}</button>
 }
 /** The explainer, mounted once by the shell: the same cached score as every other view of it. */
 export function ScoreAboutHost() {
@@ -105,7 +100,7 @@ export function useNextSteps(report: SenderScore | undefined): { items: NextItem
   const candidate = list.find(d => d.status === 'verified')
   if (candidate && !receiving) items.push({ key: 'receive', text: `Receive replies on ${candidate.name}`, to: `/domains/${candidate.id}` })
   else if (receiving && inbound.data && !inbound.data.some(domain => domain.addressCount > 0)) items.push({ key: 'address', text: `Create an address on ${(inbound.data.find(domain => domain.status === 'active') ?? receiving).name}`, to: '/receiving' })
-  items.push({ key: 'agent', text: 'Connect an AI agent over MCP', to: '/api-keys?connect=1' })
+  if (!setup.data?.progress?.agent) items.push({ key: 'agent', text: 'Connect your agent', to: '/api-keys?connect=1' })
   if (setup.data?.webhooks?.total === 0) items.push({ key: 'webhook', text: 'Get bounce events by webhook', to: '/settings/webhooks/new' })
   const pending = setup.data?.invitations?.pending ?? 0
   if (pending) items.push({ key: 'invite', text: pending === 1 ? 'Share your pending invitation link' : `Share ${number(pending)} pending invitation links`, to: '/settings#members' })

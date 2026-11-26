@@ -309,6 +309,9 @@ async function route(request: Request, env: Env, url: URL, at: { route: string }
   const file = path.match(/^\/attachments\/(conv_[a-z2-7]{26})\/(att_[a-z2-7]{16})$/);
   if (file && request.method === 'GET') {
     name('/attachments/:conversationId/:attachmentId');
+    // Staff open a screenshot from Nightmail's inbox with a short-lived token Nightmail signed for it, and Nightmail checks it.
+    const staff = url.searchParams.get('staff');
+    if (staff !== null) return staff && staff.length <= 4096 && await env.BANE.verifyFile(staff, file[1]!, file[2]!) ? serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 404 });
     return await readAttachmentLink(env, file[1]!, file[2]!, url.searchParams.get('exp'), url.searchParams.get('sig')) ? serveAttachment(env, file[1]!, file[2]!) : new Response(null, { status: 403 });
   }
   if (request.method === 'POST' && path === '/hooks/bane-inbound') { name('/hooks/bane-inbound'); return inbound(request, env); }

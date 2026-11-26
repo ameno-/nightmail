@@ -3,30 +3,45 @@ import { request } from './live'
 
 // The support inbox (/v1/operator/support-inbox, api/src/support-inbox.ts): every support conversation, for Nightmail
 // staff. Like the rest of the operator API it is left out of the public SDK, so the inbox calls it with the dashboard's
-// own request helper. Its views: Needs you (what only a person can move forward, most urgent first), Agent handling and All.
-export type InboxView = 'needs_you' | 'agent' | 'all'
-export type Channel = 'chat' | 'email'
+// own request helper. Its views: Needs you (what only a person can move forward, most urgent first), AI handling (the agent
+// owes the next message), Waiting on customer, Done and All.
+export type InboxView = 'needs_you' | 'agent' | 'waiting' | 'done' | 'all'
+/** agent_feedback: a report an agent filed with sendFeedback (api/src/feedback.ts); nobody to reply to. */
+export type Channel = 'chat' | 'email' | 'agent_feedback'
+export const channelLabels: Record<Channel, string> = { chat: 'Chat', email: 'Email', agent_feedback: 'Agent feedback' }
 export type SupportAuthor = 'customer' | 'agent' | 'staff' | 'system'
-export type TriageReason = 'ticket' | 'blocked' | 'failed' | 'paused'
+export type TriageReason = 'ticket' | 'blocked' | 'failed' | 'paused' | 'no_reply'
 export interface SupportTicket { id: string; type: string | null; severity: string | null; resolvedAt: string | null }
 export interface SupportConversation {
-  id: string; channel: 'chat' | 'email'; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none'
+  id: string; channel: Channel; mode: 'member' | 'non_member' | 'pending_signin' | 'unverified'; verification: 'handoff' | 'dmarc' | 'signin' | 'none' | 'credential'
   status: 'open' | 'ticketed' | 'closed'; subject: string | null; customer: { userId: string; name: string | null; email: string | null } | null; sender: string | null
-  workspace: { id: string; name: string } | null; ticket: SupportTicket | null; agentState: 'active' | 'paused'
+  workspace: { id: string; name: string } | null; filedBy?: string | null; ticket: SupportTicket | null; agentState: 'active' | 'paused'
   pausedBy: { kind: 'staff' | 'ticket'; userId: string | null; name: string | null } | null; pausedAt: string | null
-  lastAuthor: SupportAuthor | null; needsReply: boolean; messageCount: number; queuedReplies: number; turns: number; costUsd: number; blockedWork: number
+  lastAuthor: SupportAuthor | null; needsReply: boolean; preview: { author: SupportAuthor; text: string; held: boolean } | null; messageCount: number; queuedReplies: number; turns: number; costUsd: number; blockedWork: number
   firstLine: string | null; needsYou: { reasons: TriageReason[]; urgent: boolean; since: string } | null; done: { at: string; userId: string; name: string | null } | null; unread: boolean
   createdAt: string; lastMessageAt: string | null; closedAt: string | null
 }
+export type HeldReason = 'paused' | 'gate' | 'access' | 'closed' | 'earlier'
+export interface SupportEmail {
+  id: string; subject: string; from: { name: string | null; address: string }; to: { name: string | null; address: string }[]; cc: { name: string | null; address: string }[]; receivedAt: string
+  text: string; replyText: string; textTruncated: boolean; hasHtml: boolean
+  attachments: { id: string; filename: string; contentType: string; size: number; inline: boolean; available: boolean }[]
+}
 export interface SupportMessage {
   id: string; seq: number; author: SupportAuthor; kind: string | null; text: string; tools: { label: string; ok: boolean }[]; attachments: string[]
-  staff: { userId: string; name: string | null } | null; delivery: 'queued' | 'sent' | 'failed' | 'held' | null; deliveredAt: string | null; at: string
+  staff: { userId: string; name: string | null } | null; delivery: 'queued' | 'sent' | 'failed' | 'held' | null; heldReason: HeldReason | null
+  files: { id: string; name: string | null; type: string | null; size: number | null }[]; email: SupportEmail | null; deliveredAt: string | null; at: string
 }
+export type SupportEventKind = 'opened' | 'ticket' | 'priority' | 'paused' | 'resumed' | 'resolved' | 'done' | 'undone' | 'closed'
+export interface SupportEvent { id: string; kind: SupportEventKind; by: { userId: string; name: string | null } | null; details: Record<string, unknown>; at: string }
+export interface SupportBrief { title: string; summary: string; ask: string; recommendation: string }
 export interface SupportWorkspace { id: string; name: string; role: string; joinedAt: string; createdAt: string; members: number; inScope: boolean; contentShared: boolean; sending: { kind: string; region: string | null; paused: boolean } | null; standing: string | null }
 export interface SupportDetail {
   conversation: SupportConversation & { threadId: string | null; page: string | null; contentWorkspaceId: string | null
-    evidence: { handoff: string | null; message: string | null; dmarc: string | null; dkimAligned: boolean | null; claimedAt: string | null } }
-  messages: SupportMessage[]; earlierMessages: number
+    evidence: { handoff: string | null; message: string | null; dmarc: string | null; dkimAligned: boolean | null; claimedAt: string | null
+      /** Agent feedback: the key, sign-in or token that filed it (api/src/feedback.ts), and its ID. */
+      filedBy?: string | null; credentialId?: string | null } }
+  messages: SupportMessage[]; earlierMessages: number; events: SupportEvent[]; brief: SupportBrief | null; replyTarget: { address: string | null; verified: boolean }
   customer: {
     user: { id: string; name: string | null; email: string | null; emailVerified: boolean; createdAt: string } | null
     workspaces: SupportWorkspace[]
@@ -36,7 +51,8 @@ export interface SupportDetail {
   }
   replyAvailable: boolean
 }
-export interface SupportInboxPage { data: SupportConversation[]; nextCursor: string | null; replyAvailable: boolean; counts: { needsYou: number; agent: number } }
+export type InboxCounts = { needsYou: number; agent: number; waiting: number }
+export interface SupportInboxPage { data: SupportConversation[]; nextCursor: string | null; replyAvailable: boolean; counts: InboxCounts }
 export type SupportAction = 'pause' | 'resume' | 'resolve'
 
 const base = '/v1/operator/support-inbox', id = encodeURIComponent
@@ -50,6 +66,13 @@ export const supportInboxApi = {
   },
   detail: (conversationId: string, signal?: AbortSignal) => request<SupportDetail>(`${base}/${id(conversationId)}`, { signal }),
   reply: (conversationId: string, text: string, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/replies`, { method: 'POST', body: { text }, idempotencyKey }),
+  /** An internal note: staff see it in the timeline; the customer and the agent never do. */
+  note: (conversationId: string, text: string, idempotencyKey: string) => request<SupportMessage>(`${base}/${id(conversationId)}/notes`, { method: 'POST', body: { text }, idempotencyKey }),
+  /** A customer email in full: all of its text and its HTML as stored (render it sandboxed, images off until asked). */
+  email: (conversationId: string, messageId: string, signal?: AbortSignal) => request<{ id: string; text: string; replyText: string; html: string | null; htmlTooComplex: boolean; bodyTruncated: boolean }>(`${base}/${id(conversationId)}/emails/${id(messageId)}`, { signal }),
+  emailAttachment: (conversationId: string, messageId: string, attachmentId: string) => request<{ url: string; expiresAt: string }>(`${base}/${id(conversationId)}/emails/${id(messageId)}/attachments/${id(attachmentId)}`),
+  /** A chat screenshot, held by the support service: a link for five minutes. */
+  file: (conversationId: string, attachmentId: string) => request<{ url: string; expiresAt: string }>(`${base}/${id(conversationId)}/files/${id(attachmentId)}`),
   act: (conversationId: string, action: SupportAction, idempotencyKey: string) => request<SupportConversation>(`${base}/${id(conversationId)}/${action}`, { method: 'POST', idempotencyKey }),
   /** Mark done, for the ticket on screen (null for none): one filed since refuses it (409 SUPPORT_TICKET_CHANGED). */
   done: (conversationId: string, ticketId: string | null, idempotencyKey: string) => request<SupportConversation>(`${base}/${id(conversationId)}/done`, { method: 'POST', body: { ticketId }, idempotencyKey }),
@@ -82,11 +105,23 @@ export function triage(c: SupportConversation): SupportConversation['needsYou'] 
   if (c.done) return null
   const ticket = Boolean(c.ticket && !c.ticket.resolvedAt), blocked = c.blockedWork > 0, failed = c.needsYou?.reasons.includes('failed') ?? false
   const paused = c.agentState === 'paused' && c.status !== 'closed' && c.lastAuthor !== 'staff'
-  const reasons = ([['ticket', ticket], ['blocked', blocked], ['failed', failed], ['paused', paused]] as const).filter(([, on]) => on).map(([reason]) => reason)
+  // Only the API knows how long the customer has waited; a reply from staff answers it.
+  const noReply = (c.needsYou?.reasons.includes('no_reply') ?? false) && c.lastAuthor === 'customer'
+  const reasons = ([['ticket', ticket], ['blocked', blocked], ['failed', failed], ['paused', paused], ['no_reply', noReply]] as const).filter(([, on]) => on).map(([reason]) => reason)
   if (!reasons.length) return null
-  return { reasons, urgent: (ticket && c.ticket?.severity === 'P1') || failed || (c.lastAuthor === 'customer' && (paused || blocked)), since: c.needsYou?.since ?? new Date().toISOString() }
+  return { reasons, urgent: (ticket && c.ticket?.severity === 'P1') || failed || noReply || (c.lastAuthor === 'customer' && (paused || blocked)), since: c.needsYou?.since ?? new Date().toISOString() }
 }
-export const inView = (c: SupportConversation, view: InboxView) => view === 'all' ? true : view === 'needs_you' ? c.needsYou !== null : c.status !== 'closed' && c.agentState === 'active' && c.needsYou === null
+/** The agent or staff wrote last (a held draft wasn't sent), so the customer has the next word. */
+const answered = (c: SupportConversation) => (c.lastAuthor === 'agent' || c.lastAuthor === 'staff') && !c.preview?.held
+export function inView(c: SupportConversation, view: InboxView) {
+  switch (view) {
+    case 'all': return true
+    case 'needs_you': return c.needsYou !== null
+    case 'agent': return c.status !== 'closed' && c.channel !== 'agent_feedback' && c.agentState === 'active' && c.needsYou === null && !c.done && !answered(c)
+    case 'waiting': return c.status !== 'closed' && c.channel !== 'agent_feedback' && c.needsYou === null && !c.done && answered(c)
+    case 'done': return c.needsYou === null && (c.done !== null || c.status === 'closed' || (c.channel === 'agent_feedback' && Boolean(c.ticket?.resolvedAt)))
+  }
+}
 const inList = (c: SupportConversation, key: readonly unknown[]) => inView(c, key[2] as InboxView) && (!key[4] || c.channel === key[4])
 
 type ListData = InfiniteData<SupportInboxPage, string | undefined>
@@ -98,13 +133,14 @@ export function patchConversation(client: QueryClient, conversationId: string, c
   before ??= detail?.conversation
   if (!before) return
   const predicted = change(before), changed = { ...predicted, needsYou: triage(predicted) }
-  const delta = { needsYou: Number(inView(changed, 'needs_you')) - Number(inView(before, 'needs_you')), agent: Number(inView(changed, 'agent')) - Number(inView(before, 'agent')) }
+  const moved = (view: InboxView) => Number(inView(changed, view)) - Number(inView(before, view))
+  const delta = { needsYou: moved('needs_you'), agent: moved('agent'), waiting: moved('waiting') }
   for (const [key, data] of client.getQueriesData<ListData>({ queryKey: inboxKeys.lists })) {
     if (!data) continue
     client.setQueryData<ListData>(key, {
       ...data,
       pages: data.pages.map(page => ({
-        ...page, counts: { needsYou: Math.max(0, page.counts.needsYou + delta.needsYou), agent: Math.max(0, page.counts.agent + delta.agent) },
+        ...page, counts: { needsYou: Math.max(0, page.counts.needsYou + delta.needsYou), agent: Math.max(0, page.counts.agent + delta.agent), waiting: Math.max(0, (page.counts.waiting ?? 0) + delta.waiting) },
         data: page.data.flatMap(c => c.id !== conversationId ? [c] : inList(changed, key) ? [changed] : []),
       })),
     })
@@ -122,7 +158,7 @@ export function snapshotInbox(client: QueryClient) {
 // A reply staff are writing, per staff member and conversation, kept in this tab (sessionStorage) until it is sent or
 // discarded: it survives moving between conversations and a reload, and a reply that fails comes back into its box with
 // why, wherever staff are when it fails. `key` is its Idempotency-Key: sent again unedited, it is never sent twice.
-export type InboxDraft = { text: string; key: string; failed: string | null; sending: { text: string; key: string } | null }
+export type InboxDraft = { text: string; key: string; failed: string | null; sending: { text: string; key: string } | null; mode?: 'reply' | 'note' }
 const DRAFTS = 'nightmail.support-inbox.drafts'
 const draftListeners = new Set<() => void>()
 let drafts: { user: string; map: Record<string, InboxDraft> } | null = null
@@ -142,7 +178,8 @@ export const subscribeInboxDrafts = (listener: () => void) => { draftListeners.a
 export function updateInboxDraft(user: string, conversationId: string, change: (draft: InboxDraft) => Partial<InboxDraft> | null) {
   const map = { ...draftsOf(user) }, current = map[conversationId] ?? { text: '', key: crypto.randomUUID(), failed: null, sending: null }
   const patch = change(current), next = patch && { ...current, ...patch }
-  if (next && (next.text || next.failed || next.sending)) map[conversationId] = next
+  // A note chosen with nothing typed yet is kept too, so the box stays a note.
+  if (next && (next.text || next.failed || next.sending || next.mode === 'note')) map[conversationId] = next
   else delete map[conversationId]
   drafts = { user, map }
   try { if (Object.keys(map).length) sessionStorage.setItem(`${DRAFTS}:${user}`, JSON.stringify(map)); else sessionStorage.removeItem(`${DRAFTS}:${user}`) } catch { /* Kept for this page only. */ }

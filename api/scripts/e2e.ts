@@ -66,6 +66,7 @@ Object.assign(SKIP, {
   contactSupport: 'Google dashboard only; creates a support handoff; covered by isolated acceptance.',
 });
 SKIP.retryInboundWebhookDelivery='Requires an exhausted run-owned inbound delivery; retries and leases are exercised offline.';
+SKIP.sendFeedback='Files a ticket in the support inbox that staff read; covered by isolated acceptance.';
 // The receiving MVP (routing, rules, endpoints, agent inboxes) is exercised end to end by the isolated acceptance
 // suite. Live steps need a run-owned receiving host and the R2 mail store on dev; until then each operation is
 // listed here by ID so the report shows it as skipped, never silently covered.

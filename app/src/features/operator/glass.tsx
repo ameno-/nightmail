@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate } from 'react-router'
-import { BadgeCheck, CirclePause, Globe, Link2, Megaphone, Send, ShieldAlert, ShieldCheck, TriangleAlert, UserPlus, ZapOff, type LucideIcon } from 'lucide-react'
+import { BadgeCheck, Bot, CirclePause, Globe, Link2, Megaphone, Send, ShieldAlert, ShieldCheck, TriangleAlert, UserPlus, ZapOff, type LucideIcon } from 'lucide-react'
 import { ErrorState, PageHeader, StatusBadge, Tooltip, type Tone } from '../../components/ui'
 import { useTween } from '../../components/motion'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -88,8 +88,9 @@ function tiles(g: Glass): (key: string) => GlassTileFill {
       meter: { value: builtin.ready, max: Math.max(1, builtin.active), tone: tripped ? 'danger' : 'neutral', label: `${number(builtin.ready)} of ${number(builtin.active)} built-in domains ready` } },
     visitors: { value: visitors.visitors.atLeast ? count(visitors.visitors, 'told apart among the first 50,000 visitor codes') : <Tick value={visitors.visitors.n} />, hint: `${number(visitors.views)} page views today`, spark: visitors.hourly, delta: delta(visitors.day.last, visitors.day.previous, 'up', 'Page views') },
     // A support channel that isn't set up is said here (its registrations answer 404 SUPPORT_NOT_CONFIGURED).
-    support: { value: <Tick value={support.open} />, tone: support.configured.chat && support.configured.email ? undefined : 'warning',
-      hint: !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? `${number(support.day.last)} new · email not configured`
+    // Someone who wrote and got nothing back is said first: it should always be none.
+    support: { value: <Tick value={support.open} />, tone: support.noReply ? 'danger' : support.configured.chat && support.configured.email ? undefined : 'warning',
+      hint: support.noReply ? `${number(support.noReply)} with no reply sent` : !support.configured.chat && !support.configured.email ? 'Support not configured' : !support.configured.email ? `${number(support.day.last)} new · email not configured`
         : !support.configured.chat ? `${number(support.day.last)} new · chat not configured` : `${number(support.day.last)} new · ${number(support.ticketed)} ticketed`, spark: support.hourly, delta: delta(support.day.last, support.day.previous, null, 'New conversations') },
     screened: { value: <Tick value={screening.screened} />, hint: `${number(screening.rejected)} rejected`, spark: screening.hourly },
     classifiers: { value: screening.agree === null ? '—' : <Tick value={screening.agree} format={pct(1)} />, hint: `flagged: Jev ${number(screening.jevFlagged)} · JevF ${number(screening.jevfFlagged)}`,
@@ -167,7 +168,7 @@ function board(g: Glass): GlassBoardFill {
 const FEED = 50
 const methods: Record<string, string> = { google: 'Google', github: 'GitHub', email: 'Email link', password: 'Password' }
 const icons: Record<GlassEvent['kind'], LucideIcon> = { signup: UserPlus, first_send: Send, domain_verified: BadgeCheck, builtin_ready: Globe, campaign_launched: Megaphone, campaign_paused: CirclePause,
-  standing: ShieldAlert, breaker: ZapOff, alert: TriangleAlert, link_fallback: Link2 }
+  standing: ShieldAlert, breaker: ZapOff, alert: TriangleAlert, link_fallback: Link2, agent_feedback: Bot }
 const stepNames: Record<string, string> = { ok: 'back to OK', notice: 'on notice', warn: 'warned', restrict: 'restricted', pause: 'paused' }
 function eventText(e: GlassEvent): [ReactNode, ReactNode] {
   const who = <b>{e.workspace?.name ?? 'A new account'}</b>
@@ -184,6 +185,8 @@ function eventText(e: GlassEvent): [ReactNode, ReactNode] {
     case 'breaker': return [<><b>Built-in domains</b> stopped</>, `${e.subject} breaker tripped`]
     case 'alert': return [<b>{e.subject}</b>, e.detail]
     case 'link_fallback': return [<>{who} linked on the link domain</>, [e.subject, e.detail && `${plural(Number(e.detail), 'recipient')} today`].filter(Boolean).join(' · ')]
+    // A report an agent filed (api/src/feedback.ts): its workspace and the operation it names. The report itself is in Support.
+    case 'agent_feedback': return [<>Agent feedback from {who}</>, e.subject]
   }
 }
 const order = (a: GlassEvent, b: GlassEvent) => a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : a.id > b.id ? -1 : 0

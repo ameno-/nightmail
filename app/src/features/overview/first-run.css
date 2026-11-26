@@ -1,0 +1,63 @@
+/* Overview's get-started strip (first-run.tsx): one calm well over the figures, its three steps side by side, each a
+   mark, a title, one line and its action, and a dismiss button in the top-right corner. One fixed height per width
+   (STRIP_SPACE), so its arrival and its leaving move nothing; ticking a step changes what is in its cells, never their
+   size. Inside it, controls take the raised steps, as on every well. */
+.ov-start {
+  --color-hover: var(--color-raised-hover); --color-control: var(--color-raised-control); --color-control-hover: var(--color-raised-control-hover); --color-control-focus: var(--color-raised-control-focus); --color-control-pressed: var(--color-raised-control-pressed);
+  position: relative; display: flex; flex-direction: column; box-sizing: border-box; height: calc(80px + var(--control-height)); padding: var(--space-16) var(--space-40) var(--space-16) var(--space-16);
+  border-radius: var(--radius-sm); background: var(--color-well); transform-origin: 50% 0;
+}
+.ov-start__dismiss { position: absolute; top: var(--space-8); right: var(--space-8); }
+
+.ov-start__steps { display: grid; flex: 1; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-24); min-height: 0; margin: 0; padding: 0; list-style: none; }
+.ov-step { display: grid; grid-template-columns: 20px minmax(0, 1fr); grid-template-rows: 20px 16px auto; align-content: start; gap: var(--space-2) var(--space-12); min-width: 0; }
+.ov-step > :not(.ov-step__mark) { grid-column: 2; min-width: 0; }
+/* The mark: the step's number on a solid dot; done, the dot fills with the text colour and a check draws itself in. */
+.ov-step__mark { display: inline-grid; grid-row: 1; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--color-raised-control); color: var(--color-muted); font-family: var(--font-mono); font-size: var(--text-label); line-height: 1; font-variant-numeric: tabular-nums; }
+.ov-step__mark > * { grid-area: 1 / 1; }
+.ov-step__mark svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; }
+.ov-step[data-done] .ov-step__mark { background: var(--color-contrast); color: var(--color-on-contrast); }
+.ov-step[data-done] .ov-step__mark > span { opacity: 0; transform: scale(.5); filter: blur(2px); }
+.ov-step[data-done] .ov-step__mark svg { stroke-dashoffset: 0; }
+.ov-step__title { overflow: hidden; color: var(--color-text); font-size: var(--text-heading); line-height: 20px; font-weight: var(--font-weight-medium); white-space: nowrap; mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
+.ov-step[data-done] .ov-step__title { color: var(--color-muted); }
+/* The line and what got done share one cell; text that runs out fades rather than ending in an ellipsis. */
+.ov-step__line { display: grid; color: var(--color-muted); font-size: var(--text-xs); line-height: 16px; }
+.ov-step__line > span { grid-area: 1 / 1; display: block; overflow: hidden; white-space: nowrap; mask-image: linear-gradient(to right, #000 calc(100% - 1.5em), transparent); }
+.ov-step__line > span:not([data-active]) { opacity: 0; transform: translateY(4px); filter: blur(2px); visibility: hidden; }
+.ov-step__line a { color: var(--color-text); text-decoration: underline; text-decoration-color: var(--color-border-strong); text-underline-offset: 2px; transition: text-decoration-color var(--motion-duration); }
+@media (hover: hover) and (pointer: fine) { .ov-step__line a:hover { text-decoration-color: currentColor; } }
+.ov-step__line a:focus-visible { text-decoration-color: currentColor; }
+.ov-step__error { color: var(--color-danger); }
+.ov-step__error .ui-error-reference { display: none; }
+.ov-step__do { display: flex; align-items: center; margin-top: var(--space-8); }
+.ov-step[data-done] .ov-step__do, .ov-step:not([data-known]) .ov-step__do { opacity: 0; transform: scale(.96); visibility: hidden; }
+.ov-start__action { transform-origin: 0 50%; }
+
+/* Motion once the steps are known (data-live): a tick fills the dot, the number gives way and the check draws, the title
+   quietens and the line rolls to what got done, while the action fades. Keyboard-free and rare, so it can take a beat. */
+.ov-start[data-live] .ov-step__mark { transition: background-color 200ms ease, color 200ms ease; }
+.ov-start[data-live] .ov-step__mark > span { transition: opacity 120ms ease-out, transform 200ms var(--ease-out-strong), filter 200ms var(--ease-out-strong); }
+.ov-start[data-live] .ov-step__mark svg { transition: stroke-dashoffset 300ms var(--ease-out-strong) 120ms; }
+.ov-start[data-live] .ov-step__title { transition: color 200ms ease; }
+.ov-start[data-live] .ov-step__line > span { transition: opacity 180ms ease-out, transform 260ms var(--ease-out-strong), filter 260ms var(--ease-out-strong), visibility 0s; }
+.ov-start[data-live] .ov-step__line > span:not([data-active]) { transition: opacity 140ms ease-out, transform 200ms var(--ease-out-strong), filter 200ms var(--ease-out-strong), visibility 0s 200ms; }
+.ov-start[data-live] .ov-step__do { transition: opacity 160ms ease-out, transform 200ms var(--ease-out-strong), visibility 0s; }
+.ov-start[data-live] .ov-step[data-done] .ov-step__do { transition: opacity 160ms ease-out, transform 200ms var(--ease-out-strong), visibility 0s 200ms; }
+
+/* A phone: each step is one row of its mark, its title and its action (a 44px target), the dismiss button in a narrow
+   column beside the first, and the line stays out (a failed test says why in a notice instead). */
+@media (max-width: 639px) {
+  .ov-start { height: calc(var(--space-16) + 3 * (var(--control-height-sm) + var(--space-12))); padding: var(--space-8) var(--space-28) var(--space-8) var(--space-12); }
+  .ov-start__dismiss { top: calc(var(--space-8) + (var(--control-height-sm) + var(--space-12) - 44px) / 2); right: 0; width: var(--space-28); height: 44px; }
+  .ov-start__steps { grid-template-columns: minmax(0, 1fr); grid-auto-rows: calc(var(--control-height-sm) + var(--space-12)); gap: 0; }
+  .ov-step { grid-template-columns: 20px minmax(0, 1fr) auto; grid-template-rows: auto; align-items: center; align-content: center; column-gap: var(--space-8); }
+  /* The title reads whole: the row is laid out so it fits a 375px phone, with no fade at its end. */
+  .ov-step__title { overflow: visible; mask-image: none; }
+  .ov-step > :not(.ov-step__mark) { grid-column: auto; }
+  .ov-step__line { display: none; }
+  .ov-step__do { margin: 0; }
+  .ov-start__action { position: relative; height: var(--control-height-sm); padding-inline: var(--space-8); font-size: var(--text-sm); }
+  .ov-start__action > svg { display: none; }
+  .ov-start__action::after { content: ''; position: absolute; inset: -4px 0; }
+}
