@@ -190,9 +190,10 @@ export const itemFrom = (me: string) => sql`support_conversations c LEFT JOIN ni
  * support platform sent, or a staff reply, queued or sent; a held draft or a failed reply reaches nobody). Over
  * NO_REPLY_AFTER, a conversation (not agent feedback, which has nobody to reply to) needs you for it, and Glass counts it.
  */
+const reached = sql`(o.kind IS DISTINCT FROM 'note' AND (o.author = 'system'
+  OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed') OR (o.author = 'staff' AND o.delivery IN ('queued','sent'))))`;
 const unansweredSince = sql`(SELECT min(m.created_at) FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer'
-  AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND o.kind IS DISTINCT FROM 'note' AND (o.author = 'system'
-    OR (o.author = 'agent' AND o.kind IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'held' AND o.delivery IS DISTINCT FROM 'failed') OR (o.author = 'staff' AND o.delivery IN ('queued','sent')))), 0))`;
+  AND m.seq > coalesce((SELECT max(o.seq) FROM support_messages o WHERE o.conversation_id = c.id AND ${reached}), 0))`;
 const NO_REPLY_AFTER = sql`interval '10 minutes'`;
 const noReply = (since: SQL) => sql`(c.channel <> 'agent_feedback' AND coalesce(${since} < now() - ${NO_REPLY_AFTER}, false))`;
 /** The conversations Needs you and Agent handling can hold: open ones, and closed ones with an open ticket, blocked work or a transcript (failed deliveries). */
@@ -204,6 +205,32 @@ const handling = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND 
 const waitingOnCustomer = sql`c.status <> 'closed' AND c.channel <> 'agent_feedback' AND NOT triage.needs_you AND c.done_at IS NULL AND ${answered}`;
 /** Glass's count of conversations that need you because no reply was sent (the same rule as Needs you). */
 export const noReplyCount = sql`(SELECT count(*) FROM support_conversations c WHERE c.done_at IS NULL AND ${triageCandidates} AND ${noReply(unansweredSince)})`;
+/** The ticket types a person handles by design, so the support AI's week counts them apart. */
+export const TICKETS_APART = ['bug', 'billing', 'abuse_report', 'privacy', 'legal'] as const;
+/**
+ * The support AI's week, for Glass: the conversations that started in the last 7 days (the newest `cap`, through
+ * support_conversations_created; agent feedback left out, nobody answers it), as
+ * - apart: those with a ticket a person handles by design (TICKETS_APART);
+ * - answerable: the rest;
+ * - without_human: of the answerable, those that ended (closed, marked done, or quiet for 24 hours after a sent agent
+ *   answer) with no staff reply, no ticket Nightmail opened for staff (type staff, now or on the timeline), no held
+ *   answer, no failed send and never "no reply sent" (a customer message nothing reached within NO_REPLY_AFTER).
+ * Nothing here says an answer was right: only that no person had to step in.
+ */
+export const supportWeek = (cap: number) => sql`(SELECT json_build_object('answerable',count(*) FILTER (WHERE x.n <= ${cap} AND NOT x.apart),
+    'without_human',count(*) FILTER (WHERE x.n <= ${cap} AND NOT x.apart AND x.ended AND NOT x.human),'apart',count(*) FILTER (WHERE x.n <= ${cap} AND x.apart),'capped',count(*) > ${cap})
+  FROM (SELECT row_number() OVER (ORDER BY c.created_at DESC) AS n, coalesce(c.ticket_type = ANY(${sql.param([...TICKETS_APART])}::text[]), false) AS apart,
+      c.status = 'closed' OR c.done_at IS NOT NULL OR coalesce(last.author = 'agent' AND last.kind IS DISTINCT FROM 'held' AND last.delivery IS DISTINCT FROM 'held'
+        AND last.delivery IS DISTINCT FROM 'failed' AND last.created_at <= now() - interval '24 hours', false) AS ended,
+      c.ticket_type IS NOT DISTINCT FROM 'staff'
+        OR EXISTS (SELECT FROM support_events e WHERE e.conversation_id = c.id AND e.kind = 'ticket' AND e.details->>'type' = 'staff')
+        OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND ((m.author = 'staff' AND m.kind IS DISTINCT FROM 'note')
+          OR (m.author = 'agent' AND (m.kind = 'held' OR m.delivery = 'held')) OR m.delivery = 'failed'))
+        OR EXISTS (SELECT FROM support_messages m WHERE m.conversation_id = c.id AND m.author = 'customer' AND m.created_at < now() - ${NO_REPLY_AFTER}
+          AND NOT EXISTS (SELECT FROM support_messages o WHERE o.conversation_id = c.id AND o.seq > m.seq AND o.created_at <= m.created_at + ${NO_REPLY_AFTER} AND ${reached})) AS human
+    FROM (SELECT * FROM support_conversations c WHERE c.created_at >= now() - interval '7 days' AND c.channel <> 'agent_feedback' ORDER BY c.created_at DESC LIMIT ${cap + 1}) c
+    LEFT JOIN LATERAL (SELECT m.author, m.kind, m.delivery, m.created_at FROM support_messages m
+      WHERE m.conversation_id = c.id AND m.author <> 'system' AND m.kind IS DISTINCT FROM 'note' ORDER BY m.seq DESC LIMIT 1) last ON true) x)`;
 const finished = sql`NOT triage.needs_you AND (c.done_at IS NOT NULL OR c.status = 'closed' OR (c.channel = 'agent_feedback' AND c.ticket_resolved_at IS NOT NULL))`;
 const firstLine = (text: string | null) => text?.split('\n').map(line => line.trim()).find(Boolean)?.slice(0, 200) ?? null;
 /** A message as one line for the list: its own words, white space folded, the first 200 characters. */

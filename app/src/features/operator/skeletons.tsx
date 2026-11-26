@@ -271,9 +271,9 @@ export function OperatorWorkspaceSkeleton({ actions }: { actions: boolean }) {
 export type GlassRowDef = { key: string; label?: string; spark?: true; meter?: true; cells?: readonly string[]; note?: string }
 export type GlassFill = { label?: ReactNode; hint?: ReactNode; spark?: readonly number[]; value: ReactNode; unit?: ReactNode; tone?: Tone; empty?: boolean
   meter?: { value: number; max: number; mark?: number; tone?: Tone; label?: string }; cells?: ReactNode[] }
-/** A tile: its figure, a hint under it, and in its foot a trend (`spark`, oldest first), parts of a whole (`parts`) or a share (`meter`). */
+/** A tile: its figure, a hint under it, and in its foot a trend (`spark`, oldest first), parts of a whole (`parts`), a share (`meter`) or a line of text (`note`). */
 export type GlassTileFill = { value: ReactNode; hint?: ReactNode; tone?: Tone; delta?: { text: string; tone?: Tone; title: string }
-  spark?: readonly number[]; parts?: { value: number; tone: Tone; label: string }[]; meter?: { value: number; max: number; tone?: Tone; label: string } }
+  spark?: readonly number[]; note?: ReactNode; parts?: { value: number; tone: Tone; label: string }[]; meter?: { value: number; max: number; tone?: Tone; label: string } }
 export type GlassRegionFill = { region: ReactNode; place: ReactNode; sending: ReactNode; receiving: ReactNode; rate: ReactNode; quota: ReactNode; share: ReactNode
   meter?: { value: number; max: number; tone?: Tone; label: string }; checked: ReactNode; empty?: boolean }
 export type GlassBoardFill = { tile: (key: string) => GlassTileFill; funnel: (key: string) => { value: ReactNode; share?: ReactNode; meter: { value: number; max: number } }
@@ -281,7 +281,7 @@ export type GlassBoardFill = { tile: (key: string) => GlassTileFill; funnel: (ke
 export const glassTiles = [
   ['sent', 'Sent · 24 h'], ['minute', 'Per minute'], ['delivered', 'Delivered'], ['bounced', 'Bounced'], ['complained', 'Complained'],
   ['signups', 'Sign-ups · 24 h'], ['places', 'Open places'], ['received', 'Received · 24 h'], ['queued', 'Queued'], ['ramp', 'On the ramp'],
-  ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support open'], ['screened', 'Screened · 24 h'],
+  ['standing', 'Paused senders'], ['builtin', 'Built-in domains'], ['visitors', 'Visitors today'], ['support', 'Support AI · 7 d'], ['screened', 'Screened · 24 h'],
   ['classifiers', 'Classifiers agree'], ['api', 'API · 24 h'], ['errors', 'API errors'], ['latency', 'API latency'], ['health', 'Health'],
 ] as const
 export const glassFunnel = [['signedUp', 'Signed up'], ['domainAdded', 'Added a domain'], ['domainVerified', 'Verified it'], ['builtinReady', 'Built-in ready'], ['keyCreated', 'Created a key'], ['firstSend', 'Sent mail']] as const
@@ -309,6 +309,7 @@ function GlassTile({ label, fill }: { label: string; fill?: GlassTileFill }) {
     <div className="glass-tile__hint">{fill ? fill.hint : <Skeleton width={128} height={10} />}</div>
     <div className="glass-tile__foot">{fill?.parts ? <span className="glass-parts" role="img" aria-label={fill.parts.map(p => `${p.label} ${p.value}`).join(', ')}>{fill.parts.map(p => <i key={p.label} className={`ui-tone--${p.tone}`} style={{ flexGrow: p.value }} />)}</span>
       : fill?.meter ? <Meter value={fill.meter.value} max={fill.meter.max} tone={fill.meter.tone} label={fill.meter.label} />
+      : fill?.note ? <span className="glass-tile__note">{fill.note}</span>
       : <Sparkline values={fill?.spark ?? []} />}</div>
   </div>
 }

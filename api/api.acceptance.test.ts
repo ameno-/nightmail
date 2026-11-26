@@ -10475,6 +10475,43 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.deepEqual(await staffReplies(overtaken.id), ['Checking now.']);
           assert.equal((await db.query('SELECT draft_outcome FROM support_messages WHERE id = $1', [overtaken.draft])).rows[0].draft_outcome, null, 'Still held: staff edit or discard it.');
         });
+
+        await t.test('15 the support AI\u2019s week on Glass: of the answerable conversations started in the last 7 days, those that ended with no person stepping in, beside the ones counted apart and anyone with no reply', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString(), hour = 60, day = 24 * hour;
+          const { readGlass } = await import('./src/glass.js'), week = async () => { const { week: w, noReply } = (await readGlass(runtime)).support; return { ...w, noReply }; }, before = await week();
+          type Later = Omit<Parameters<typeof platform.mirrorMessages>[1][number], 'id'>;
+          /** An email conversation that started `minutes` ago: the customer asked then, and `then` followed. */
+          const started = async (minutes: number, then: Later[] = []) => {
+            const id = await stranger();
+            await db.query(`UPDATE support_conversations SET created_at = now() - make_interval(mins => $2) WHERE id = $1`, [id, minutes]);
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'How do I add a domain?', at: at(minutes) }, ...then.map(m => ({ id: msg(), ...m }))])));
+            return id;
+          };
+          const answer = (minutes: number): Later => ({ author: 'agent', kind: 'reply', text: 'Open Domains and press Add domain.', delivery: 'sent', at: at(minutes) });
+          const close = (id: string) => db.query(`UPDATE support_conversations SET status = 'closed', closed_at = now() WHERE id = $1`, [id]);
+          // Answered without a human: quiet for a day after the agent's answer, and closed after one.
+          await started(30 * hour, [answer(30 * hour - 1)]);
+          await close(await started(20, [answer(19)]));
+          // Answerable, but a person stepped in: a staff reply, a ticket Nightmail opened for staff, a held answer, an
+          // answer an hour late (no reply sent meanwhile), and a customer still waiting with no reply.
+          const staffed = await started(30, [answer(29)]);
+          ok(await send('POST', `${inbox}/${staffed}/replies`, keyed(operator), { text: 'Here is a little more.' }), 201);
+          await close(staffed);
+          const ticketed = await started(30 * hour, [answer(30 * hour - 1)]);
+          await db.query(`UPDATE support_conversations SET ticket_id = $2, ticket_type = 'staff', ticket_severity = 'P3', ticket_at = now(), status = 'ticketed' WHERE id = $1`, [ticketed, ticketId()]);
+          await close(await started(30, [{ author: 'agent', kind: 'held', text: 'Thanks, we are on it.', delivery: 'held', reason: 'gate', at: at(29) }]));
+          await started(30 * hour, [answer(29 * hour)]);
+          await started(30);
+          // Counted apart: a bug ticket and a billing ticket, however the conversation went.
+          for (const type of ['bug', 'billing']) ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type, severity: 'P2' } })));
+          // Not counted at all: agent feedback (nobody to answer) and a conversation older than 7 days.
+          await db.query(`INSERT INTO support_conversations(id, channel, verification, mode, workspace_id) VALUES ($1, 'agent_feedback', 'credential', 'unverified', $2)`, [conversation(), acme]);
+          await started(8 * day, [answer(8 * day - 1)]);
+          const after = await week();
+          assert.deepEqual({ answerable: after.answerable - before.answerable, withoutHuman: after.withoutHuman - before.withoutHuman, apart: after.apart - before.apart, noReply: after.noReply - before.noReply, atLeast: after.atLeast },
+            { answerable: 7, withoutHuman: 2, apart: 2, noReply: 2, atLeast: false }, 'Answered without a human: 2 of 7; 2 counted apart; no reply sent to the customer still waiting, nor to the one whose answer was held.');
+        });
       } finally { globalThis.fetch = previous; }
     });
   });
