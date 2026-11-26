@@ -10770,22 +10770,26 @@ describe('Hosted MCP OAuth and tools', () => {
           } finally { runtime.config.support!.addressIds = configured; }
         });
 
-        await t.test('11 no reply sent: a customer who wrote and got nothing back for 10 minutes needs you for it, urgently, and Glass counts it; a held draft or a failed reply reaches nobody, an answer, a notice or a staff reply does', async () => {
+        await t.test('11 no reply sent: a customer who wrote and got nothing back for 10 minutes needs you for it, urgently, and Glass counts it; a held draft, a failed reply or a status line (content access allowed) reaches nobody, an answer, a notice or a staff reply does', async () => {
           ok(reply(await platform.pullOutbox()));
           const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
           const row = async (id: string) => ok(await send('GET', `${inbox}?view=all&limit=1&q=${id}`, session(reader))).data[0];
           const { readGlass } = await import('./src/glass.js'), counted = async () => (await readGlass(runtime)).support.noReply, before = await counted();
-          const held = await stranger(), recent = await stranger(), answered = await stranger(), noticed = await stranger(), staffed = await chat(member);
+          const held = await stranger(), recent = await stranger(), answered = await stranger(), noticed = await stranger(), staffed = await chat(member), allowed = await chat(owner);
           // As in production: the agent wrote an answer, and it was held instead of sent.
           ok(reply(await platform.mirrorMessages(held, [{ id: msg(), author: 'customer', text: 'The contact form fails.', at: at(30) }, { id: msg(), author: 'agent', kind: 'held', text: 'Thanks, we are on it.', delivery: 'held', reason: 'paused', at: at(29) }])));
           ok(reply(await platform.mirrorMessages(recent, [{ id: msg(), author: 'customer', text: 'Hello?', at: at(5) }])));
           ok(reply(await platform.mirrorMessages(answered, [{ id: msg(), author: 'customer', text: 'How do I add a domain?', at: at(30) }, { id: msg(), author: 'agent', kind: 'reply', text: 'Open Domains.', delivery: 'sent', at: at(29) }])));
           ok(reply(await platform.mirrorMessages(noticed, [{ id: msg(), author: 'customer', text: 'Why are bounces up?', at: at(30) }, { id: msg(), author: 'system', kind: 'notice', text: 'Sent the busy reply', at: at(29) }])));
           ok(reply(await platform.mirrorMessages(staffed, [{ id: msg(), author: 'customer', text: 'Is my domain verified?', at: at(20) }])));
+          // The chat's record that they allowed content access answers nothing: they still wait for the answer.
+          ok(reply(await platform.mirrorMessages(allowed, [{ id: msg(), author: 'customer', text: 'Why was my promo rejected?', at: at(25) }, { id: msg(), author: 'system', kind: 'status', text: 'Content access allowed for this conversation.', at: at(24) }])));
           const waiting = await row(held);
           assert.deepEqual([waiting.needsYou?.reasons, waiting.needsYou?.urgent, Math.round((Date.now() - Date.parse(waiting.needsYou?.since)) / 60_000)], [['no_reply'], true, 30], 'Waiting since the customer wrote.');
           assert.deepEqual([(await row(recent)).needsYou, (await row(answered)).needsYou, (await row(noticed)).needsYou, (await row(staffed)).needsYou?.reasons], [null, null, null, ['no_reply']], 'Under 10 minutes, answered or told: not yet, or not at all.');
-          assert.equal(await counted() - before, 2, 'Glass counts the two.');
+          const waitingAllowed = await row(allowed);
+          assert.deepEqual([waitingAllowed.needsYou?.reasons, Math.round((Date.now() - Date.parse(waitingAllowed.needsYou?.since)) / 60_000)], [['no_reply'], 25], 'Allowing content access is no reply.');
+          assert.equal(await counted() - before, 3, 'Glass counts the three.');
           // A staff reply answers it; one that fails reaches nobody, so it is back.
           ok(await send('POST', `${inbox}/${staffed}/replies`, keyed(operator), { text: 'Yes, since this morning.' }), 201);
           assert.equal((await row(staffed)).needsYou, null);
@@ -10793,8 +10797,8 @@ describe('Hosted MCP OAuth and tools', () => {
           ok(reply(await platform.markDelivery(staffed, queued.id, 'failed')));
           assert.deepEqual((await row(staffed)).needsYou?.reasons, ['failed', 'no_reply']);
           // Done takes it out, and off Glass.
-          ok(await send('POST', `${inbox}/${held}/done`, keyed(operator)));
-          assert.deepEqual([(await row(held)).needsYou, await counted() - before], [null, 1]);
+          for (const done of [held, allowed]) ok(await send('POST', `${inbox}/${done}/done`, keyed(operator)));
+          assert.deepEqual([(await row(held)).needsYou, (await row(allowed)).needsYou, await counted() - before], [null, null, 1]);
         });
 
         await t.test('12 held answers: staff send one as the agent wrote it (plain text by email, as written in chat) or edited, as their own queued reply, or discard it; one held for shrunk access or written by an earlier build is never sent, only replaced by a fresh reply; each is decided once, on the trail', async () => {
@@ -11681,6 +11685,41 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.equal(await failed(), before, 'Sent: off Glass.');
           assert.deepEqual(ok(reply(await platform.staffMailFailed(mail.key, { code: 'HTTP_503' }))), { key: mail.key, attempts: 3, failed: false, sent: true });
           assert.equal(await failed(), before);
+        });
+
+        await t.test('17b Glass counts the emails of the week that passed the sender checks but got only the sign-in reply because the answering limits refused their 8-minute answer; an answered one, failing mail and older ones are not counted', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+          const { readGlass } = await import('./src/glass.js'), overLimit = async () => (await readGlass(runtime)).support.overLimit;
+          const { box, store } = await supportAddress();
+          // An account whose address no sign-in proved a mailbox: a DMARC pass from it binds nobody but passes the sender checks.
+          const owner = await sessionFixture(t), address = `ula-${hex().slice(0, 8)}@example.invalid`;
+          await db.query('UPDATE nightmail_users SET email = $2, email_verified = true, mailbox_proved = NULL, mailbox_proved_at = NULL WHERE id = $1', [owner.userId, address]);
+          const configured = runtime.config.support!.addressIds;
+          runtime.config.support!.addressIds = [box];
+          try {
+            /** An email as the support platform takes one, its sign-in reply sent, then what came of it at the end of the claim wait. */
+            const waited = async (dmarc: string, after: Json[]) => {
+              const messageId = await store(address, dmarc), id = conversation();
+              ok(reply(await platform.registerConversation({ conversationId: id, evidence: { kind: 'email', messageId } })), 201);
+              ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'Why are my bounces up?', source: messageId, at: at(20) },
+                { id: msg(), author: 'system', kind: 'waiting', text: 'Sent the sign-in reply', at: at(20) }, ...after.map(m => ({ ...m, id: msg(), source: m.source === null ? messageId : m.source }) as Parameters<typeof platform.mirrorMessages>[1][number])])));
+              return { id, messageId };
+            };
+            const refusal = { author: 'system', kind: 'unanswered', text: 'No general answer: over the answering limits. It waits for them to confirm it signed in.', source: null, at: at(12) };
+            let before = await overLimit();
+            const refused = await waited('PASS', [refusal]);
+            assert.equal(await overLimit() - before, 1, 'Refused at 8 minutes: counted.');
+            before = await overLimit();
+            const answered = await waited('PASS', [{ author: 'agent', kind: 'reply', text: 'Bounces come from old lists.', delivery: 'sent', at: at(12) }]);
+            const forged = await waited('FAIL', [refusal]);
+            assert.equal(await overLimit() - before, 0, 'Answered, or failing the sender checks (its refusal after a release reaches staff as No reply sent): not counted.');
+            // Out of the 7 days: no longer counted.
+            before = await overLimit();
+            await db.query("UPDATE support_email_signins SET created_at = now() - interval '8 days' WHERE conversation_id = $1", [refused.id]);
+            assert.equal(await overLimit() - before, -1);
+            for (const done of [refused.id, answered.id, forged.id]) ok(await send('POST', `${inbox}/${done}/done`, keyed(operator)));
+          } finally { runtime.config.support!.addressIds = configured; }
         });
       } finally { globalThis.fetch = previous; }
     });
