@@ -338,6 +338,11 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
 .op-agent-grants li > svg { flex-shrink: 0; height: 1lh; }
 .op-agent-grants li[data-can] > svg { color: var(--color-success); }
 .op-agent-note { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+/* Narrower than 360 px the header keeps one row: Copy for your agent becomes its icon, its name still its label. */
+@media (max-width: 359px) {
+  .ui-button.op-agents-copy { width: var(--control-height); padding: 0; }
+  .op-agents-copy .copy-action__text { display: none; }
+}
 
 @media (max-width: 1200px) { .op-facts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 960px) { .op-grid { grid-template-columns: minmax(0, 1fr); gap: var(--page-gap); } }

@@ -11872,7 +11872,7 @@ describe('Hosted MCP OAuth and tools', () => {
           } finally { runtime.config.support!.addressIds = configured; }
         });
         await t.test('18 agents: an operator’s own agent works the inbox once they approve that connection from a staff session, and every call checks the switch, the role and the approval; it replies only to the conversation’s customer, at most an hourly allowance, on the record as via agent; nobody else’s tool list changes', async () => {
-          const [{ mintResourceToken }, { dispatchAsActor }, { SUPPORT_NOTICE }, { SUPPORT_AGENT_REPLIES_PER_HOUR }] = await Promise.all([import('./scripts/fixture-issuer.js'), import('./src/auth.js'), import('./src/mcp-support.js'), import('./src/support-agents.js')]);
+          const [{ mintResourceToken }, { dispatchAsActor }, { SUPPORT_NOTICE }, { SUPPORT_AGENT_REPLIES_PER_HOUR, SUPPORT_AGENT_CLOSES_PER_HOUR }] = await Promise.all([import('./scripts/fixture-issuer.js'), import('./src/auth.js'), import('./src/mcp-support.js'), import('./src/support-agents.js')]);
           const rpcHeaders = { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' };
           // Each sign-in is its own connection: a client, and the account service's consent behind its tokens.
           const signIn = (userId: string, o: { clientId?: string; consent?: string } = {}) => mintResourceToken(`${PUBLIC_ORIGIN}/mcp`, userId, 'bane:read bane:send bane:manage offline_access', o);
@@ -11989,6 +11989,17 @@ describe('Hosted MCP OAuth and tools', () => {
             refused(await act(mine.token, { conversationId: capped, action: 'reply', text: 'Hello.' }), 'SUPPORT_AGENT_REPLY_LIMIT');
             assert.deepEqual((await messages(capped)).map(m => m.author), ['customer']);
             ok(await send('POST', `${inbox}/${capped}/replies`, keyed(operator), { text: 'Hello from the dashboard.' }), 201);
+            // Marking done (which resolves the ticket) and discarding held answers share an hourly allowance of their own, from
+            // the trail too: past it, refused, nothing changed; the person's own Done still works.
+            const closed = (await db.query("SELECT count(*)::int AS n FROM audit_events WHERE actor_id = $1 AND via = 'mcp' AND action IN ('support.done', 'support.draft_discard')", [operator.userId])).rows[0].n;
+            assert.equal(closed, 2, 'One conversation marked done and one held answer discarded so far.');
+            await db.query("INSERT INTO audit_events(user_id, actor_type, actor_id, via, action, internal, retain_until) SELECT $1, 'operator', $1, 'mcp', 'support.done', true, now() + interval '1 day' FROM generate_series(1, $2)", [operator.userId, SUPPORT_AGENT_CLOSES_PER_HOUR - closed]);
+            const lastHeld = msg();
+            ok(reply(await platform.mirrorMessages(capped, [{ id: lastHeld, author: 'agent', kind: 'held', text: 'Maybe later.', delivery: 'held', reason: 'gate' }])));
+            assert.match(refused(await act(mine.token, { conversationId: capped, action: 'done' }), 'SUPPORT_AGENT_CLOSE_LIMIT').message, new RegExp(`${SUPPORT_AGENT_CLOSES_PER_HOUR} times for you in the last hour.*Nothing was changed`));
+            refused(await act(mine.token, { conversationId: capped, action: 'discardHeld', messageId: lastHeld }), 'SUPPORT_AGENT_CLOSE_LIMIT');
+            assert.deepEqual((await db.query('SELECT c.done_at, m.draft_outcome FROM support_conversations c JOIN support_messages m ON m.conversation_id = c.id WHERE c.id = $1 AND m.id = $2', [capped, lastHeld])).rows, [{ done_at: null, draft_outcome: null }]);
+            ok(await send('POST', `${inbox}/${capped}/done`, keyed(operator)));
 
             // Another sign-in of the same client is another connection: it asks for itself.
             const second = signIn(operator.userId, { clientId: 'opencode' });

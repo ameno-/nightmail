@@ -260,7 +260,7 @@ export const agentColumnDefs: SkeletonColumn[] = [
   { key: 'actions', label: '', width: 56, card: 'end' },
 ]
 /** The page's header, the same loading and loaded: Copy for your agent copies the prompt that sets an agent up. */
-export const AgentsHeader = () => <PageHeader title="Your agents" backTo="/support" actions={<CopyAction value={supportAgentPrompt(window.location.origin)} label="Copy for your agent" text="Copy for your agent" />} />
+export const AgentsHeader = () => <PageHeader title="Your agents" backTo="/support" actions={<CopyAction className="op-agents-copy" value={supportAgentPrompt(window.location.origin)} label="Copy for your agent" text="Copy for your agent" />} />
 export const AgentsLead = () => <p className="op-agents-lead muted">Agents you approved to work the support inbox as you.</p>
 export function OperatorAgentsSkeleton() {
   return <>

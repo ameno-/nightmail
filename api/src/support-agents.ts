@@ -28,13 +28,20 @@ import { newUserCode, shownCode, typedCode } from './user-code.js';
 // What an agent may do is what the tools offer: read the inbox and one conversation, reply to that conversation's
 // customer, add a note, mark done, hand back to the support AI, and send or discard a held answer. Never a recipient,
 // never an approval, a pause, a refund or a limit. A reply goes through the dashboard's own path (support-inbox.ts
-// queueReply), at most SUPPORT_AGENT_REPLIES_PER_HOUR an hour per person; the message, the conversation's events and
+// queueReply), at most SUPPORT_AGENT_REPLIES_PER_HOUR an hour per person, and marking done or discarding a held answer
+// at most SUPPORT_AGENT_CLOSES_PER_HOUR; the message, the conversation's events and
 // the audit trail (via mcp, "via agent") record the agent, and the customer sees a staff reply.
 
 export const SUPPORT_AGENT_DAYS = 30;
 export const SUPPORT_AGENT_REQUEST_MINUTES = 15;
 /** Replies (and held answers sent) through an agent, per staff member, in any hour. */
 export const SUPPORT_AGENT_REPLIES_PER_HOUR = 20;
+/**
+ * Conversations marked done (which resolves their tickets) and held answers discarded through an agent, per staff member,
+ * in any hour. The same as replies: an agent closes no more than it could have answered in that hour, which a real pass
+ * through Needs you stays under, and a message that talks it into closing everything stops at 20, each on the trail.
+ */
+export const SUPPORT_AGENT_CLOSES_PER_HOUR = 20;
 
 const CONVERSATION = 'conv_[a-z2-7]{26}', MESSAGE = 'msg_[a-z2-7]{16}';
 const AGENT_READS = new RegExp(`^/v1/operator/support-inbox(?:/${CONVERSATION})?$`);

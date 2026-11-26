@@ -12,7 +12,7 @@ import type { OperatorRole } from './operator-identity.js';
 import { supportPlatformOnly } from './support-conversations.js';
 import { CONVERSATION_ID, FILE_AUDIENCE, signSupportToken, type InboxState, type OutboxReply } from './support-platform.js';
 import { EXPIRES_MS, heldWhy, isKind, KINDS, validToken } from './support-approvals.js';
-import { agentOperator, SUPPORT_AGENT_REPLIES_PER_HOUR } from './support-agents.js';
+import { agentOperator, SUPPORT_AGENT_CLOSES_PER_HOUR, SUPPORT_AGENT_REPLIES_PER_HOUR } from './support-agents.js';
 
 // The support inbox (api/README.md "Support integration"): every support conversation, its transcript and the staff
 // replies to it. Internal, in two halves:
@@ -668,7 +668,7 @@ export function registerSupportInbox(app: App) {
     if (conversation.channel === 'agent_feedback') throw noAgent();
     if (!(await tx.execute<{ available: boolean }>(sql`SELECT ${replyAvailable} AS available`)).rows[0]!.available)
       throw new ApiError(409, 'SUPPORT_REPLY_UNAVAILABLE', 'The support platform has not collected replies in the last 10 minutes, so this reply could not be delivered. Try again once it is back.');
-    if (operator.agent) await agentReplyAllowed(tx, operator.userId);
+    if (operator.agent) await agentAllowed(tx, operator.userId, 'replies');
     const messageId = newMessageId();
     if (conversation.agent_state === 'active') await tx.execute(event(id, 'paused', operator.userId, { by: 'staff', reply: true, ...via(operator) }));
     const { rows: [row] } = await tx.execute<MessageRow>(sql`WITH c AS (
@@ -681,15 +681,22 @@ export function registerSupportInbox(app: App) {
     return message(row!);
   }
   /**
-   * An agent's reply within its person's hourly allowance, counted from the audit trail (each reply and held answer sent
-   * through an agent is a support.reply or support.draft_send row, via mcp), one at a time per person.
+   * What an agent does for its person within their hourly allowances, counted from the audit trail (each action an
+   * agent takes is a row via mcp), one at a time per person and allowance: replies (a reply or a held answer sent) and
+   * closes (marking done, which also resolves the ticket, or discarding a held answer: the quiet ones nobody would notice).
    */
-  async function agentReplyAllowed(tx: DbExecutor, userId: string) {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${'support-agent-replies:' + userId}, 0))`);
-    const { rows: [sent] } = await tx.execute<{ count: number; wait: number | null }>(sql`SELECT count(*)::int AS count, ceil(extract(epoch FROM min(at) + interval '1 hour' - now()))::int AS wait
-      FROM audit_events WHERE actor_type = 'operator' AND actor_id = ${userId} AND via = 'mcp' AND action IN ('support.reply', 'support.draft_send') AND at > now() - interval '1 hour'`);
-    if (sent!.count >= SUPPORT_AGENT_REPLIES_PER_HOUR) throw Object.assign(new ApiError(429, 'SUPPORT_AGENT_REPLY_LIMIT',
-      `Your agent has sent ${SUPPORT_AGENT_REPLIES_PER_HOUR} replies for you in the last hour, the most it may. Nothing was sent. Reply from the dashboard, or try again later.`), { retryAfterSeconds: Math.max(1, sent!.wait ?? 60) });
+  const ALLOWANCES = {
+    replies: { actions: ['support.reply', 'support.draft_send'], limit: SUPPORT_AGENT_REPLIES_PER_HOUR, code: 'SUPPORT_AGENT_REPLY_LIMIT',
+      message: `Your agent has sent ${SUPPORT_AGENT_REPLIES_PER_HOUR} replies for you in the last hour, the most it may. Nothing was sent. Reply from the dashboard, or try again later.` },
+    closes: { actions: ['support.done', 'support.draft_discard'], limit: SUPPORT_AGENT_CLOSES_PER_HOUR, code: 'SUPPORT_AGENT_CLOSE_LIMIT',
+      message: `Your agent has marked conversations done or discarded held answers ${SUPPORT_AGENT_CLOSES_PER_HOUR} times for you in the last hour, the most it may. Nothing was changed. Do it from the dashboard, or try again later.` },
+  } as const;
+  async function agentAllowed(tx: DbExecutor, userId: string, kind: keyof typeof ALLOWANCES) {
+    const allowance = ALLOWANCES[kind];
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`support-agent-${kind}:${userId}`}, 0))`);
+    const { rows: [used] } = await tx.execute<{ count: number; wait: number | null }>(sql`SELECT count(*)::int AS count, ceil(extract(epoch FROM min(at) + interval '1 hour' - now()))::int AS wait
+      FROM audit_events WHERE actor_type = 'operator' AND actor_id = ${userId} AND via = 'mcp' AND action = ANY(${sql.param([...allowance.actions])}::text[]) AND at > now() - interval '1 hour'`);
+    if (used!.count >= allowance.limit) throw Object.assign(new ApiError(429, allowance.code, allowance.message), { retryAfterSeconds: Math.max(1, used!.wait ?? 60) });
   }
   const wakeAfter = (c: Ctx, id: string) => c.env.deferNudge ? c.env.deferNudge(async () => { await wakeSupport(c.env.config, id); }) : wakeSupport(c.env.config, id);
 
@@ -773,6 +780,7 @@ export function registerSupportInbox(app: App) {
     const { id, messageId } = c.req.valid('param');
     return c.json(await change(c, id, 'support.draft_discard', async (tx, operator) => {
       await heldDraft(tx, id, messageId);
+      if (operator.agent) await agentAllowed(tx, operator.userId, 'closes');
       const { rows: [row] } = await tx.execute<MessageRow>(sql`UPDATE support_messages SET draft_outcome = 'discarded', draft_by = ${operator.userId}, draft_at = now() WHERE id = ${messageId} RETURNING ${messageColumns}`);
       return { result: message(row!), message: messageId };
     }, undefined, true), 200);
@@ -826,6 +834,7 @@ export function registerSupportInbox(app: App) {
       const open = conversation.ticket_id && !conversation.ticket_resolved_at ? conversation.ticket_id : null;
       if (body.ticketId !== undefined && body.ticketId !== open)
         throw new ApiError(409, 'SUPPORT_TICKET_CHANGED', 'This conversation’s ticket changed since it was shown. Open it again before marking it done.');
+      if (operator.agent) await agentAllowed(tx, operator.userId, 'closes');
       await tx.execute(sql`UPDATE support_conversations SET done_at = now(), done_by = ${operator.userId},
           done_ticket_id = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ticket_id END,
           ticket_resolved_by = CASE WHEN ticket_id IS NOT NULL AND ticket_resolved_at IS NULL THEN ${operator.userId} ELSE ticket_resolved_by END,
