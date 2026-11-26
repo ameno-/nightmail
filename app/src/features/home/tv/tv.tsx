@@ -13,6 +13,7 @@ import { Remote, type RoomLight } from './crt/remote'
 import type { Broadcast } from './crt/commercial/play'
 import scene from './crt/scene.webp'
 import knob from './crt/knob.webp'
+import someone from './crt/someone.mp4'
 import newAge from './crt/sound/newage.mp3'
 import channelClunk from './crt/sound/channel.mp3'
 import knobClick from './crt/sound/knob.mp3'
@@ -168,9 +169,9 @@ void main() { vec2 p = vec2(gl_VertexID == 1 ? 3. : -1., gl_VertexID == 2 ? 3. :
 
 const FRAG = `#version 300 es
 precision highp float;
-uniform sampler2D uTape;
+uniform sampler2D uTape, uSomeone;
 uniform vec2 uRes;
-uniform float uTime, uPower, uStatic, uRoll, uTrack, uBad, uJump, uStill, uAir, uOsd, uTilt;
+uniform float uTime, uPower, uStatic, uRoll, uTrack, uBad, uJump, uStill, uAir, uOsd, uTilt, uGone;
 out vec4 o;
 
 // ---------------------------------------------------------------- tuning: the tube
@@ -182,6 +183,7 @@ const float BLOOM = .50;        // glow around bright text
 const float BLACK = .040;       // how far "black" is from black (a tube glows)
 const float VIGNETTE = .26;     // darkening toward the corners
 const float GLASS = 1.;         // the room reflected in the glass
+const float SOMEONE = .17;      // how plainly someone stands in it once the set has been off a while (0: nobody)
 // ---------------------------------------------------------------- tuning: the tape
 const float BLEED = .016;       // colour smeared to the right, in screen widths
 const float SOFT = .0019;       // softness of the picture
@@ -278,6 +280,17 @@ void main() {
   col += GLASS * vec3(.030, .032, .038) * smoothstep(.62, .05, length((uv - vec2(.2, .13)) * vec2(1., 2.4)));
   col += GLASS * vec3(.010, .011, .014) * smoothstep(.16, 0., abs(uv.x - .13 - uv.y * .05)) * smoothstep(1., .2, uv.y);
 
+  // someone in the glass. With the set off (uGone: for how many seconds), the dark screen is a mirror of the room, and
+  // after a while there is a man in it, behind whoever is looking (uSomeone: crt/someone.mp4, filmed on black and kept
+  // brighter in the file than it is shown, so only its light is added and the glass shows through him). He comes out
+  // of the dark over half a minute, standing still; then he moves (the tube plays the film). He is gone the moment
+  // the set comes on.
+  if (uGone > 0. && uPower < .05) {
+    // (his darks lifted a little, so the clothes are there to be made out, not only the face and hands)
+    vec3 he = pow(texture(uSomeone, uv).rgb, vec3(.82));
+    he *= .86 + .28 * hash(gl_FragCoord.xy * .37 + frame * 3.);
+    col += GLASS * SOMEONE * he * smoothstep(5., 32., uGone);
+  }
   o = vec4(pow(max(col, 0.), vec3(.92)), 1.);
 }`
 
@@ -303,10 +316,34 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     gl.attachShader(program, shader(gl.VERTEX_SHADER, VERT)); gl.attachShader(program, shader(gl.FRAGMENT_SHADER, FRAG)); gl.linkProgram(program)
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(program)); onFlat(); return }
     gl.useProgram(program)
-    const u = Object.fromEntries(['uTape', 'uRes', 'uTime', 'uPower', 'uStatic', 'uRoll', 'uTrack', 'uBad', 'uJump', 'uStill', 'uAir', 'uOsd', 'uTilt'].map(name => [name, gl.getUniformLocation(program, name)]))
+    const u = Object.fromEntries(['uTape', 'uRes', 'uTime', 'uPower', 'uStatic', 'uRoll', 'uTrack', 'uBad', 'uJump', 'uStill', 'uAir', 'uOsd', 'uTilt', 'uGone', 'uSomeone'].map(name => [name, gl.getUniformLocation(program, name)]))
     const texture = gl.createTexture()
     gl.bindTexture(gl.TEXTURE_2D, texture)
     for (const [key, value] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_2D, key, value)
+    // Who is in the glass once the set is off (the shader's uSomeone, on the second texture unit): nobody, a black
+    // pixel, until the set is first switched off. His film is fetched then, and not before: its first frame is him
+    // standing still, which is what the glass shows until MOVES seconds have gone; then it plays, once, and its last
+    // frame stays. Switching on rewinds it.
+    const glass = gl.createTexture(), MOVES = 38
+    let alive = true, clip: HTMLVideoElement | null = null, stands = false, moving = false
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, glass)
+    for (const [key, value] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]] as const) gl.texParameteri(gl.TEXTURE_2D, key, value)
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]))
+    gl.activeTexture(gl.TEXTURE0); gl.uniform1i(u.uSomeone!, 1)
+    const look = () => {
+      if (!alive || !clip || clip.readyState < 2) return
+      gl.activeTexture(gl.TEXTURE1); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, clip); gl.activeTexture(gl.TEXTURE0)
+      stands = true
+    }
+    const summon = () => {
+      if (clip) return
+      clip = document.createElement('video')
+      clip.muted = true; clip.playsInline = true; clip.preload = 'auto'
+      for (const name of ['loadeddata', 'seeked', 'ended']) clip.addEventListener(name, look)
+      clip.src = someone; clip.load()
+    }
+    const leave = () => { if (!clip) return; clip.pause(); moving = false; if (clip.currentTime > 0) clip.currentTime = 0 }
+
     // The picture's light in the room. On the table: the picture, upside down and very small (the tabletop's two
     // canvases stretch and blur it), so what is at the foot of the screen lies nearest the set and each colour falls
     // under where it is on screen. "shade" is what the photograph's own pool of light is multiplied by: a dark
@@ -364,7 +401,7 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     // Taking over from home.html's still of this picture (takeOver, below): on and settled from the first frame, without
     // switching on or the tape's first run-up.
     const handoff = !!document.getElementById('home-shell')
-    let shown = '', raf = 0, last = 0, seen = true, track = 0, trackTo = 0, level = handoff ? 1 : 0, bootAt = performance.now() - (handoff ? 2100 : 0), wasOn = true, bad = 0
+    let shown = '', raf = 0, last = 0, seen = true, track = 0, trackTo = 0, level = handoff ? 1 : 0, bootAt = performance.now() - (handoff ? 2100 : 0), wasOn = true, bad = 0, offAt = 0
     const began = performance.now()
     const size = () => {
       const scale = Math.min(devicePixelRatio || 1, 2), w = Math.round(el.clientWidth * scale), h = Math.round(el.clientHeight * scale)
@@ -374,6 +411,8 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
     const draw = (now: number) => {
       const still = calm.matches, dt = Math.min(100, now - (last || now))
       if (deck.power && !wasOn) bootAt = now
+      if (!deck.power && wasOn) { offAt = now; summon() }
+      if (deck.power && !wasOn) leave()
       wasOn = deck.power
       level = still ? Number(deck.power) : clamp(level + (deck.power ? dt / 450 : -dt / 300) * Number(now - began > 150))
       const boot = now - bootAt, thump = now - deck.thumpAt, flick = now - deck.switchAt
@@ -402,7 +441,10 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
       size()
       gl.uniform1i(u.uTape!, 0); gl.uniform2f(u.uRes!, el.width, el.height); gl.uniform1f(u.uTime!, (now - began) / 1000)
       gl.uniform1f(u.uPower!, power); gl.uniform1f(u.uStatic!, Math.max(snow, hiccup)); gl.uniform1f(u.uRoll!, roll >= 1 ? 0 : roll); gl.uniform1f(u.uJump!, jump)
-      gl.uniform1f(u.uTrack!, track); gl.uniform1f(u.uBad!, bad); gl.uniform1f(u.uStill!, still ? 1 : 0); gl.uniform1f(u.uAir!, air ? 1 : 0); gl.uniform1f(u.uOsd!, nothing ? 1 : 0); gl.uniform1f(u.uTilt!, aired?.tilt ?? 0)
+      gl.uniform1f(u.uTrack!, track); gl.uniform1f(u.uBad!, bad); gl.uniform1f(u.uStill!, still ? 1 : 0); gl.uniform1f(u.uAir!, air ? 1 : 0); gl.uniform1f(u.uOsd!, nothing ? 1 : 0); gl.uniform1f(u.uTilt!, aired?.tilt ?? 0); const gone = deck.power || still || !stands ? 0 : (now - offAt) / 1000
+      if (clip && gone > MOVES && !moving) { moving = true; void clip.play().catch(() => {}) }
+      if (moving && !clip!.ended) look()
+      gl.uniform1f(u.uGone!, gone)
       gl.drawArrays(gl.TRIANGLES, 0, 3)
       reflect(power, Math.max(snow, hiccup))
       deck.hear(snow, bad, deck.power)
@@ -432,7 +474,9 @@ function Tube({ deck, onLight, onFlat }: { deck: Deck; onLight: (level: number) 
       cancelAnimationFrame(raf); watch.disconnect(); resized.disconnect()
       el.removeEventListener('pointermove', move); calm.removeEventListener('change', start)
       deck.wake = () => {}
-      gl.deleteTexture(texture); gl.deleteProgram(program)
+      alive = false
+      if (clip) { clip.pause(); clip.removeAttribute('src'); clip.load() }
+      gl.deleteTexture(texture); gl.deleteTexture(glass); gl.deleteProgram(program)
     }
   }, [deck, onLight, onFlat])
   return <canvas ref={canvas} aria-hidden="true" />
