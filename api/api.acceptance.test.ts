@@ -38402,7 +38402,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // address was taken when it made it again: a deleting inbox is no address any more, and a real one frees its address at once.
       await t.test('a deleting inbox is not listed as an address, and its address can be made again at once',async()=>{
         const gone=ok(await local('POST',root,{localPart:'reused'}),201);ok(await local('DELETE',`${root}/${gone.id}`),202);
-        assert.ok(ok(await local('GET',`${root}?status=deleting`)).data.some((b:Json)=>b.id===gone.id),'The inbox itself says deleting.');
+        assert.ok(!ok(await local('GET',root)).data.some((b:Json)=>b.id===gone.id),'The inbox list already leaves it out.');
         assert.ok(!ok(await local('GET','/v1/inbound/addresses')).data.some((b:Json)=>b.id===gone.id),'It is no longer listed as an address.');
         error(await local('DELETE',`/v1/inbound/addresses/${gone.id}`),404,'NOT_FOUND');
         const again=ok(await local('POST',root,{localPart:'reused'}),201);assert.deepEqual([again.address,again.id===gone.id],[gone.address,false]);

@@ -4911,7 +4911,7 @@ export const updateInboundSubdomain = <ThrowOnError extends boolean = false>(opt
 /**
  * List receivable addresses
  *
- * An address key sees only addresses it can access. An inbox being deleted isn’t listed: its address is free to use again at once (a sandbox inbox’s stays reserved), and GET /v1/inboxes?status=deleting lists it until it is erased. Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
+ * An address key sees only addresses it can access. An inbox being deleted isn’t listed, as GET /v1/inboxes doesn’t list it: a real inbox’s address is free to use again at once (a sandbox inbox’s stays reserved). Pages are also bounded by response size and may return fewer than limit addresses; pass nextCursor as cursor to continue. Each statement stops after 5 seconds: a request that needs longer is refused with 422 READ_TOO_LARGE. Narrow the dates or filters.
  *
  * @deprecated
  */
