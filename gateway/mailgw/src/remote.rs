@@ -430,7 +430,8 @@ fn store_error(status: u16, code: &str) -> store::Error {
     }
 }
 /// The SMTP answer to a refused submission. A refused attachment's answer is the API's own words, which name the file
-/// and say why, so the mail app shows its user something to act on.
+/// and say why, so the mail app shows its user something to act on. The API records the same answer for support
+/// (`api/src/smtp-refusals.ts` smtpReply mirrors this mapping): change both together.
 fn submit_error(status: u16, error: &Value) -> SubmitError {
     let code = error["code"].as_str().unwrap_or_default();
     match (status, code) {
