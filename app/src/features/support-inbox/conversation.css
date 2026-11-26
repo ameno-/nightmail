@@ -13,7 +13,7 @@
    in the margin, so who lines up with the thread. On a phone who is two lines with a chevron, and Details is that tap. */
 .sinbox-chat__header { display: flex; flex: none; align-items: center; gap: var(--space-12); min-width: 0; padding-block: var(--space-12); }
 @media (min-width: 1080px) { .app-shell:not(.app-shell--compact) .sinbox-chat__header > :first-child { margin-left: calc(-1 * (var(--control-height) + var(--space-12))); } }
-.sinbox-chat__who { display: flex; flex: 1 1 auto; align-items: baseline; gap: var(--space-12); min-width: 0; padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; }
+.sinbox-chat__who { display: flex; flex: 1 1 auto; align-items: center; gap: var(--space-12); min-width: 0; padding: 0; border: 0; background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; }
 .sinbox-chat__who:disabled { cursor: default; }
 /* One line's height, loaded or not (the skeleton's bar is shorter than the name). */
 .sinbox-chat__name { display: flex; align-items: center; gap: var(--space-4); min-width: 0; height: var(--leading-heading); font-size: var(--text-heading); line-height: var(--leading-heading); font-weight: var(--font-weight-semibold); }
@@ -23,7 +23,7 @@
 .sinbox-chat__who:focus-visible .sinbox-chat__name-text { text-decoration: underline; text-underline-offset: 3px; }
 .sinbox-chat__chevron { display: none; flex: none; color: var(--color-faint); }
 .sinbox-chat__channel { display: inline-flex; flex: none; width: 14px; color: var(--color-faint); }
-.sinbox-chat__state { flex: none; min-width: 0; }
+.sinbox-chat__state { display: flex; flex: none; align-items: center; min-width: 0; }
 .sinbox-chat__state .ui-status { font-family: var(--font-mono); font-size: var(--text-xs); }
 .sinbox-chat__actions { flex: none; flex-wrap: nowrap; }
 .app-shell--compact .sinbox-chat__header { gap: var(--space-8); padding-block: var(--space-8); }
@@ -144,6 +144,11 @@
 .sinbox-composer__mark { display: inline-flex; align-items: center; gap: var(--space-4); height: var(--control-height-sm); padding: 0 var(--space-8); font-size: var(--text-xs); font-weight: var(--font-weight-medium); cursor: default; }
 @media (hover: hover) and (pointer: fine) { .sinbox-composer__modes button[aria-pressed='false']:hover { color: var(--color-muted); } }
 .sinbox-composer__buttons { flex: none; flex-wrap: nowrap; margin-left: auto; }
+.sinbox-composer__mark[data-reply] { color: var(--color-faint); }
+/* A reply stranded by the conversation closing: one line over the box, and the choice to keep it as a note. */
+.sinbox-composer__stranded { display: flex; align-items: center; gap: var(--space-8); min-height: var(--control-height-sm); margin: 0; padding: 0 var(--space-8) 0 var(--space-16); color: var(--color-danger); font-size: var(--text-xs); line-height: var(--leading-xs); font-weight: var(--font-weight-medium); }
+.sinbox-composer__stranded > svg { flex: none; }
+.sinbox-composer__stranded > .ui-button { margin-left: auto; }
 
 /* Details: a panel that slides over from the right edge (a sheet on a phone): the agent's summary, then the customer. */
 .ui-dialog.sinbox-details:not(.ui-dialog--sheet) { inset: var(--space-8) var(--space-8) var(--space-8) auto; width: 400px; height: auto; max-height: none; transform: none; animation: sinbox-details-in 200ms var(--ease-out-strong); }

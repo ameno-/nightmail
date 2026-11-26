@@ -422,8 +422,14 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
   const c = detail.conversation, identity = useSession()?.identity, user = identity?.id ?? ''
   const draft = useSyncExternalStore(subscribeInboxDrafts, () => inboxDraft(user, c.id)), text = draft?.text ?? ''
   // Closed, or agent feedback (api/src/feedback.ts, filed by an agent's credential): nobody to reply to, so notes only.
-  const feedback = c.channel === 'agent_feedback', closed = c.status === 'closed' || feedback, mode: ComposeMode = closed ? 'note' : draft?.mode ?? 'reply'
-  const field = useRef<HTMLTextAreaElement>(null), composing = useRef(false), touch = useTouch()
+  // A reply being written when the conversation closed is stranded: it stays a reply that can't be sent (Send and Enter
+  // do nothing) until staff choose to keep it as a note. The mode never changes by itself, in either direction.
+  const feedback = c.channel === 'agent_feedback', closed = c.status === 'closed' || feedback
+  const stranded = closed && Boolean(text.trim()) && draft?.mode !== 'note'
+  const mode: ComposeMode = stranded ? 'reply' : closed ? 'note' : draft?.mode ?? 'reply'
+  // One send at a time, decided at once: two Enters in the same instant would otherwise both start (the draft's own
+  // sending flag only lands with the next render) and the second, refused for its reused key, would read as Not sent.
+  const field = useRef<HTMLTextAreaElement>(null), composing = useRef(false), inFlight = useRef(false), touch = useTouch()
   const setMode = (next: ComposeMode) => updateInboxDraft(user, c.id, () => ({ mode: next }))
   const focus = (next: ComposeMode = 'reply') => { if (next !== mode && !closed) setMode(next); requestAnimationFrame(() => field.current?.focus()) }
   useImperativeHandle(ref, () => ({ focus }), [mode, closed])
@@ -434,7 +440,8 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
   function send(event?: FormEvent) {
     event?.preventDefault()
     const body = text.trim()
-    if (!body || offline || !draft || draft.sending) return
+    if (!body || offline || stranded || !draft || draft.sending || inFlight.current) return
+    inFlight.current = true
     const sent = { text: body, key: draft.key }
     updateInboxDraft(user, c.id, () => ({ text: '', key: crypto.randomUUID(), failed: null, sending: sent }))
     // Sent: the keys are the inbox's again (e marks it done, j moves on).
@@ -445,12 +452,15 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
     ;(note ? actions.note(c, body, sent.key) : draftOf ? actions.sendDraft(c, draftOf, body, sent.key) : actions.reply(c, body, sent.key)).then(() => updateInboxDraft(user, c.id, () => ({ sending: null })),
       error => updateInboxDraft(user, c.id, now => ({ sending: null, mode, draftOf, failed: error instanceof ApiError ? error.message : failedText,
         ...now.text ? { text: `${sent.text}\n\n${now.text}`, key: crypto.randomUUID() } : { text: sent.text, key: sent.key } })))
+      .finally(() => { inFlight.current = false })
   }
   const name = c.customer?.name ?? 'the customer', target = detail.replyTarget
   const editing = !note && draft?.draftOf ? detail.messages.find(m => m.id === draft.draftOf && !m.draft) : undefined
   const keys = touch ? '' : ` · Enter ${note ? 'adds it' : 'sends'}, Shift+Enter makes a new line`
   const title = note ? `Only staff see notes${keys}` : `To ${name}${c.channel === 'email' ? ' by email' : ' in their chat'}${c.channel === 'email' && !target.verified ? ' (their email didn’t pass DMARC, so it may not arrive)' : ''}${handling ? '. Sending pauses the AI' : ''}${keys}`
-  return <form className="sinbox-composer" data-mode={mode} data-unavailable={offline || undefined} onSubmit={send}>
+  return <form className="sinbox-composer" data-mode={mode} data-unavailable={offline || stranded || undefined} onSubmit={send}>
+    {stranded && <p className="sinbox-composer__stranded" role="alert"><AlertCircle size={14} aria-hidden="true" /><span>Closed: this reply can’t be sent</span>
+      <Button size="sm" variant="ghost" onClick={() => { updateInboxDraft(user, c.id, () => ({ mode: 'note', draftOf: null })); requestAnimationFrame(() => field.current?.focus()) }}>Keep as a note</Button></p>}
     <div className="sinbox-composer__box sinbox-raised">
       {draft?.failed && <p className="sinbox-composer__failed" role="alert">Not sent: {draft.failed}</p>}
       {editing && <p className="sinbox-composer__editing">{editing.heldReason && freshOnly[editing.heldReason] ? 'A fresh reply in place of the AI’s draft' : 'Editing the AI’s draft'} · <button type="button" onClick={() => updateInboxDraft(user, c.id, () => ({ draftOf: null }))}>Keep it separate</button></p>}
@@ -459,13 +469,14 @@ const Composer = forwardRef<ComposerHandle, { detail: SupportDetail; actions: Ac
         onCompositionStart={() => { composing.current = true }} onCompositionEnd={() => { composing.current = false }}
         onKeyDown={event => { if (!composing.current && isSendKey(event, touch)) { event.preventDefault(); send() } else if (event.key === 'Escape') { event.preventDefault(); event.currentTarget.blur() } }} />
       <div className="sinbox-composer__bar">
-        {closed ? <span className="sinbox-composer__mark" title="Only staff see notes"><Lock size={12} aria-hidden="true" />Note</span>
+        {stranded ? <span className="sinbox-composer__mark" data-reply="">Reply</span>
+          : closed ? <span className="sinbox-composer__mark" title="Only staff see notes"><Lock size={12} aria-hidden="true" />Note</span>
           : <div className="sinbox-composer__modes" role="group" aria-label="Write">
             <button type="button" aria-pressed={!note} onClick={() => focus('reply')}>Reply</button>
             <button type="button" aria-pressed={note} title="Only staff see notes" onClick={() => focus('note')}>{note && <Lock size={12} aria-hidden="true" />}Note</button>
           </div>}
         <span className="cluster sinbox-composer__buttons">{draft?.failed && <Button variant="ghost" onClick={() => updateInboxDraft(user, c.id, () => null)}>Discard</Button>}
-          <Button type="submit" variant="primary" title={title} disabled={!text.trim() || offline || Boolean(draft?.sending)}>{note ? 'Add note' : 'Send'}</Button></span>
+          <Button type="submit" variant="primary" title={title} disabled={!text.trim() || offline || stranded || Boolean(draft?.sending)}>{note ? 'Add note' : 'Send'}</Button></span>
       </div>
     </div>
   </form>
