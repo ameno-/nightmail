@@ -32438,7 +32438,7 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       const c = await create('Big first send'), path = `/v1/campaigns/${c.id}`;
       assert.equal(ok(await local('GET', `${path}/audience`)).readiness, undefined, 'Only when asked for.');
       const review = ok(await local('GET', `${path}/audience?readiness=true`)).readiness;
-      assert.deepEqual([review.verdict, review.required, review.plan.batches], ['ramp_required', { by: 'NEW_DOMAIN', maxPerDay: 10_000 }, [10_000, 40_000, 10_000]]);
+      assert.deepEqual([review.verdict, review.required, review.plan.batches], ['ramp_required', { by: 'NEW_DOMAIN', reason: 'NEW_DOMAIN', maxPerDay: 10_000 }, [10_000, 40_000, 10_000]]);
       assert.equal(review.summary, "This domain is new and this list is much larger than anything it has sent. Mailbox providers block new senders who send to huge lists at once, so we'll send 10,000 today and grow from there. The first day starts with 2,000, then waits 60 minutes for their bounces and rejections before the rest.");
       assert.deepEqual(review.reasons.map((r: Json) => r.code), ['NEW_DOMAIN', 'NO_HISTORY', 'NEVER_MAILED']);
       assert.deepEqual([review.domain.name, review.domain.ageDays, review.domain.dmarc, review.domain.mailFrom, review.domain.linkHost, review.list.neverMailed, review.list.lastSentAt, review.sizeJump],
@@ -32447,10 +32447,12 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // With its registration known (src/domain-age.ts fills domain_registrations hourly): an old domain new here, then a new one.
       const registered = async (days: number) => { await db.query("INSERT INTO domain_registrations(root, registered_at, status) VALUES ($1, now() - make_interval(days => $2), 'known') ON CONFLICT (root) DO UPDATE SET registered_at=excluded.registered_at", [domain, days]); return ok(await local('GET', `${path}/audience?readiness=true`)).readiness; };
       const old = await registered(1_500);
-      assert.deepEqual([old.verdict, old.required.by, old.reasons.map((r: Json) => r.code).slice(0, 1), old.domain.registeredDays], ['ramp_required', 'SIZE_JUMP', ['NEW_HERE'], 1_500]);
-      assert.match(old.reasons[0].message, /^fresh\.example was registered in [A-Z][a-z]+ \d{4}; it was added here today\.$/);
+      assert.deepEqual([old.verdict, old.required.by, old.findings.map((r: Json) => r.code).slice(0, 1), old.domain.registeredDays], ['ramp_required', 'SIZE_JUMP', ['NEW_HERE'], 1_500]);
+      // The original list keeps its codes: NEW_HERE reads NEW_DOMAIN there, with the new sentence.
+      assert.deepEqual(old.reasons[0], { code: 'NEW_DOMAIN', message: old.findings[0].message });
+      assert.match(old.findings[0].message, /^fresh\.example was registered in [A-Z][a-z]+ \d{4}; it was added here today\.$/);
       const young = await registered(10);
-      assert.deepEqual([young.verdict, young.required.by, young.reasons[0].code], ['ramp_required', 'NEW_REGISTRATION', 'NEW_REGISTRATION']);
+      assert.deepEqual([young.verdict, young.required.by, young.required.reason, young.findings[0].code], ['ramp_required', 'NEW_DOMAIN', 'NEW_REGISTRATION', 'NEW_REGISTRATION']);
       assert.match(young.summary, /^This domain was registered recently/);
       await db.query('DELETE FROM domain_registrations WHERE root=$1', [domain]);
       // The hourly pass looks registrations up (here with a stand-in for RDAP): unknown stays unknown, and the review judges by when it was added.
@@ -32482,8 +32484,8 @@ ${Array.from({length:6},(_,i)=>`<tr><td id="templateSection${i+2}" style="paddin
       // After replies named a blocklist (src/delivery-history.ts counts them): the ramp is required, and a consent confirmation doesn't waive it.
       await db.query("INSERT INTO delivery_blocklist_daily (workspace_id, day, from_domain, link_host, list, rejections) VALUES ($1, current_date - 2, $2, '', 'spamhaus', 3)", [wid, domain]);
       const blocked = await create('After a blocklist'), listed = ok(await local('GET', `/v1/campaigns/${blocked.id}/audience?readiness=true`)).readiness;
-      assert.deepEqual([listed.required.by, listed.reasons[0].code], ['BLOCKLISTED', 'BLOCKLISTED_BEFORE']);
-      assert.match(listed.reasons[0].message, /named a blocklist on \d{4}-\d{2}-\d{2}, and no send has finished without one since\.$/);
+      assert.deepEqual([listed.required.by, listed.required.reason, listed.findings[0].code, listed.reasons.some((r: Json) => r.code.startsWith('BLOCKLIST'))], ['SIZE_JUMP', 'BLOCKLISTED', 'BLOCKLISTED_BEFORE', false]);
+      assert.match(listed.findings[0].message, /named a blocklist on \d{4}-\d{2}-\d{2}, and no send has finished without one since\.$/);
       error(await local('POST', `/v1/campaigns/${blocked.id}/send`, { revision: blocked.revision, consent: { confirmed: true, source: 'Signed up on our site since 2023.' } }), 422, 'RAMP_REQUIRED');
       await db.query('DELETE FROM delivery_blocklist_daily WHERE workspace_id=$1', [wid]);
       // Or a consent source the sender confirms: stored with the campaign and in Activity.

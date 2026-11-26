@@ -66,6 +66,6 @@ export function ReadinessPanel({ readiness, start, choice, onChoice, consent, on
       {readiness.sizeJump !== null && readiness.sizeJump > 1 && <><dt>Size</dt><dd>{number(Math.round(readiness.sizeJump))}× this domain’s largest campaign</dd></>}
     </dl>
     {domain.ownLinkHost && !domain.ownLinkHost.active && domain.linkOrigin && <p className="campaign-note" data-tone="warning"><span>Links in this campaign go on {hostOf(domain.linkOrigin)}, not {domain.ownLinkHost.hostname}: that link host isn’t set up yet. Copies made once it is go there.</span></p>}
-    {readiness.reasons.length > 0 && <ul className="campaign-notes" aria-label="What the review found">{readiness.reasons.map(reason => <li key={reason.code} className="campaign-note"><span>{reason.message}</span></li>)}</ul>}
+    {(readiness.findings ?? readiness.reasons).length > 0 && <ul className="campaign-notes" aria-label="What the review found">{(readiness.findings ?? readiness.reasons).map(reason => <li key={reason.code} className="campaign-note"><span>{reason.message}</span></li>)}</ul>}
   </section>
 }
