@@ -327,7 +327,8 @@ A sign-in, payment, pending link or cluster due for scoring has waited over two 
 
 **An agent checks first**
 1. Check the named stage’s job: `SELECT type,status,available_at,last_error FROM jobs WHERE starts_with(type,'abuse.stage.');`.
-2. Compare its `ABUSE_STAGE` duration, `ABUSE_STEP_CUT` reason and (for sign-ins) `ABUSE_SIGNIN_BATCH` time per item. A time cut makes another job due immediately.
+2. Compare its `ABUSE_STAGE` duration, `ABUSE_STEP_CUT` reason and (for sign-ins) `ABUSE_SIGNIN_BATCH` time per item. A cut after progress requeues immediately. With no progress the stage waits 30 s, 1, 2, 4, 8, then 15 minutes between tries (`ABUSE_STAGE_BACKOFF`).
+3. `SELECT stage,source_key,version_at,version_count,reason FROM abuse_work_versions WHERE failures>=3;` shows versions set aside after three isolated failures. The reason is a SQLSTATE or a fixed error code. These versions still count toward lag while outstanding. After correcting the cause, remove only that exact failure record to retry; a new source version is eligible without operator action.
 
 ### support-ai-cost
 The support AI's model calls cost more than `SUPPORT_AI.dailyLineUsd` (`api/src/health-thresholds.ts`) since midnight UTC.

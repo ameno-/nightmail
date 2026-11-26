@@ -322,7 +322,14 @@ async function retentionDrains(runtime: Runtime): Promise<Drain[]> {
     expiredTogether('content_screen_calls', [{ table: 'content_screen_calls', by: at('created_at'), where: sql`created_at < ${cutoff}` },
       { table: 'screen_comparisons', by: at('created_at'), where: sql`created_at < now() - interval '90 days'` }]),
     // Abuse-monitoring signals past their retention (src/abuse.ts abuseExpired). Expiry runs whether monitoring is on or off.
-    expired('abuse_signals', 'abuse_signals', at('last_at'), abuseExpired),
+    // Drop obsolete receipts with source retention. Never age out the marker of a
+    // still-readable payment or sign-in: doing so would count its last version again.
+    expiredTogether('abuse_signals', [{table:'abuse_signals',by:at('last_at'),where:abuseExpired},
+      {table:'abuse_work_versions',by:at('version_at'),where:sql`version_at < ${cutoff}
+      AND NOT (stage='signIns' AND EXISTS (SELECT FROM nightmail_signin_attempts a WHERE a.last_at=version_at AND a.attempts=version_count AND abuse_key(a.issuer,a.subject)=source_key))
+      AND NOT (stage='payments' AND EXISTS (SELECT FROM billing_payment_attempts p WHERE p.updated_at=version_at AND abuse_key(p.id)=source_key))
+      AND NOT (stage='links' AND EXISTS (SELECT FROM identity_links l WHERE l.pending AND l.pending_since=version_at AND abuse_key(l.a_type,l.a_id)=source_key))
+      AND NOT (stage='scores' AND EXISTS (SELECT FROM abuse_clusters c WHERE least(c.score_requested_at,c.scored_at+interval '30 minutes')=version_at AND abuse_key(c.id)=source_key))`}]),
     expired('abuse_sampling', 'abuse_sampling', at('sampled_through'), sql`sampled_through < now()-interval '30 days'`, unordered),
     // Links leave with the signals they came from; a cluster nothing has rescored for 30 days (monitoring off, or its links gone) leaves too.
     expired('identity_links', 'identity_links', at('last_at'), linkExpired),

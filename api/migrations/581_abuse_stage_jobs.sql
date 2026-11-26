@@ -1,11 +1,20 @@
 SET LOCAL lock_timeout='2s';
--- The observation stays with the source row. A changed version becomes eligible without
--- moving a global cursor, including an update that commits behind a batch already folded.
-ALTER TABLE nightmail_signin_attempts ADD COLUMN abuse_folded_at timestamptz, ADD COLUMN abuse_folded_attempts integer;
-ALTER TABLE billing_payment_attempts ADD COLUMN abuse_folded_at timestamptz;
+-- Monitor-owned: no trigger, FK, lock, index or receipt write on a request table.
+-- The timestamp and count are from the exact MVCC snapshot that produced the signals.
+CREATE TABLE abuse_work_versions (
+  stage text NOT NULL, source_key text NOT NULL, version_at timestamptz NOT NULL, version_count integer NOT NULL DEFAULT 0,
+  failures integer NOT NULL DEFAULT 0, reason text,
+  PRIMARY KEY (stage,source_key,version_at,version_count)
+);
+CREATE INDEX abuse_work_retention ON abuse_work_versions(version_at);
+CREATE FUNCTION abuse_key(VARIADIC parts text[]) RETURNS text LANGUAGE sql STABLE PARALLEL SAFE AS $$
+  SELECT encode(sha256(convert_to(array_to_json(parts)::text,'UTF8')),'hex')
+$$;
 -- last_at dates the evidence. pending_since dates the work, including an old link made pending again.
 ALTER TABLE abuse_clusters ADD COLUMN score_requested_at timestamptz;
-ALTER TABLE identity_links ADD COLUMN pending_since timestamptz NOT NULL DEFAULT now();
+ALTER TABLE identity_links ADD COLUMN pending_since timestamptz;
+UPDATE identity_links SET pending_since=last_at WHERE pending;
+ALTER TABLE identity_links ALTER COLUMN pending_since SET DEFAULT now();
 CREATE FUNCTION abuse_link_pending() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF NEW.pending AND NOT OLD.pending THEN NEW.pending_since := statement_timestamp(); END IF;
@@ -39,7 +48,7 @@ CREATE FUNCTION abuse_link_holder(holder_type text, holder_id text, touched_valu
       last_at=greatest(identity_links.last_at,excluded.last_at),pending=identity_links.pending OR identity_links.shared<>excluded.shared
 $$;
 
--- Inputs have been re-read under the subject/user locks and source-row lock and validated
+-- Inputs have been re-read under the subject/user locks and validated
 -- against the closed signal schema. The receipt and all derived writes commit together.
 CREATE FUNCTION abuse_fold_signins(batch jsonb) RETURNS integer LANGUAGE plpgsql AS $$
 DECLARE r record; holder_type text; holder_id text; g_subject text; floor_at timestamptz; blocked boolean; added integer := 0; n integer;
@@ -73,8 +82,9 @@ BEGIN
       PERFORM abuse_link_holder(holder_type,holder_id,CASE WHEN r.user_id IS NULL THEN r.signals END);
     END IF;
   END LOOP;
-  UPDATE nightmail_signin_attempts a SET abuse_folded_at=a.last_at,abuse_folded_attempts=a.attempts
-    FROM jsonb_to_recordset(batch) x(issuer text,subject text) WHERE (a.issuer,a.subject)=(x.issuer,x.subject);
+  INSERT INTO abuse_work_versions(stage,source_key,version_at,version_count)
+    SELECT 'signIns',source_key,at,attempts FROM jsonb_to_recordset(batch) x(source_key text,at timestamptz,attempts int)
+    ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=0,reason=NULL;
   RETURN added;
 END $$;
 

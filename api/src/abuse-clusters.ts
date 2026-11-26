@@ -1,6 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql } from 'drizzle-orm';
-import { bounded, graphLock, lockClusterMembers, type AbuseTx, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
+import { bounded, graphLock, isolateItem, runnableSeed, lockClusterMembers, type WorkVersion, type AbuseTx, monitoring, rare, utc, workspaceExcluded, type Entity, type Hosted } from './abuse.js';
 import { operatorContext, recordAudit } from './audit.js';
 import { RATES } from './billing/rates.js';
 import { errors, notFound, response, security, type App, type Ctx } from './core.js';
@@ -208,33 +208,35 @@ async function recluster(runtime: Hosted, seed: Entity): Promise<ClusterChange |
  * deadline; what is left waits for the next run (`cut`: it stopped for the time, or at SEEDS_A_RUN or RESCORED_A_RUN with
  * work still waiting). Uncommitted work remains outstanding for another turn.
  */
-export async function refreshClusters(runtime: Hosted, deadline: number) {
-  const result = { grouped: 0, rescored: 0, cut: null as 'time' | 'limit' | null }, done = new Set<Key>();
-  const one = async (seed: Entity) => {
-    if (done.has(keyOf(seed))) return false;
-    await bounded(runtime, async tx => {
-      await graphLock(tx,true);
-      const scoped = { ...runtime, tx };
-      const change = await recluster(scoped,seed);
-      if (change) await (await import('./abuse-alerts.js')).noteAlert(scoped,change);
-    });
-    done.add(keyOf(seed)); return true;
-  };
-  let round = 0, waiting = false;
-  for (; round < SEEDS_A_RUN && Date.now() < deadline; round++) {
-    const { rows: [pending] } = await bounded(runtime, tx => tx.execute<{ a_type: Entity['type']; a_id: string }>(sql`SELECT a_type,a_id FROM identity_links WHERE pending ORDER BY pending_since LIMIT 1`));
-    if (!pending) { waiting = false; break; }
-    waiting = true;
-    const seed = { type: pending.a_type, id: pending.a_id };
-    // A seed that failed stays pending; it is not tried twice in one run.
-    if (done.has(keyOf(seed))) { result.cut = 'limit'; break; }
-    if (await one(seed)) result.grouped++;
+export async function refreshClusters(runtime: Hosted, deadline: number, advanced: () => void = () => {}) {
+  const result = { grouped: 0, rescored: 0, cut: null as 'time' | 'limit' | null };
+  const pending = sql`WITH seeds AS (SELECT a_type,a_id,min(pending_since) AS due FROM identity_links WHERE pending GROUP BY a_type,a_id)
+    SELECT json_build_object('type',a_type,'id',a_id) AS seed,abuse_key(a_type,a_id) AS source_key,${utc(sql`due`)} AS at
+    FROM seeds WHERE ${runnableSeed('links',sql`abuse_key(a_type,a_id)`,sql`due`)} ORDER BY due,a_type,a_id LIMIT 1`;
+  const due = sql`least(score_requested_at,scored_at+interval '30 minutes')`;
+  const stale = sql`SELECT members->0 AS seed,abuse_key(id) AS source_key,${utc(due)} AS at FROM abuse_clusters
+    WHERE ${due}<=now() AND ${runnableSeed('scores',sql`abuse_key(id)`,due)} ORDER BY ${due},id LIMIT 1`;
+  for (const [stage,query,limit] of [['links',pending,SEEDS_A_RUN],['scores',stale,RESCORED_A_RUN]] as const) {
+    for (let n=0; n<limit; n++) {
+      if (Date.now()>=deadline) { result.cut='time'; return result; }
+      const outcome = await bounded(runtime,async tx => {
+        await graphLock(tx,true);
+        const { rows: [row] } = await tx.execute<WorkVersion & { seed: Entity }>(query);
+        if (!row) return null;
+        const scoped = { ...runtime, tx };
+        return isolateItem(tx,stage,row,async () => {
+          const change = await recluster(scoped,row.seed);
+          if (change) await (await import('./abuse-alerts.js')).noteAlert(scoped,change);
+        });
+      });
+      if (outcome === null) break;
+      if (outcome) {
+        if (stage==='links') result.grouped++; else result.rescored++;
+        advanced();
+      }
+      if (n+1===limit) result.cut='limit';
+    }
   }
-  if (waiting && (round >= SEEDS_A_RUN || Date.now() >= deadline)) result.cut = Date.now() >= deadline ? 'time' : 'limit';
-  const { rows: stale } = Date.now() < deadline ? await bounded(runtime, tx => tx.execute<{ seed: Entity }>(sql`SELECT members->0 AS seed FROM abuse_clusters WHERE score_requested_at IS NOT NULL OR scored_at<now()-interval '30 minutes' ORDER BY least(score_requested_at,scored_at+interval '30 minutes') LIMIT ${RESCORED_A_RUN}`)) : { rows: [] };
-  if (Date.now() >= deadline) result.cut = 'time';
-  for (const { seed } of stale) { if (Date.now() >= deadline) { result.cut = 'time'; break; } if (await one(seed)) result.rescored++; }
-  if (!result.cut && stale.length >= RESCORED_A_RUN) result.cut = 'limit';
   return result;
 }
 

@@ -7,7 +7,7 @@ import { clientIpHeader, clientNetworkHeader } from './brand.js';
 import { isBuiltinHost } from './builtin-domain.js';
 import type { Client, Pool, PoolClient, QueryResult, QueryResultRow } from 'pg';
 import { JobDeferred } from './jobs.js';
-import { databaseCodeOf, log, type JobHandler, type Runtime } from './core.js';
+import { databaseCodeOf, databaseConflict, transientDatabaseError, log, type JobHandler, type Runtime } from './core.js';
 import { placementRoot } from './domain-registry.js';
 import { isKnownDisposable, PUBLIC_MAILBOXES } from './list-hygiene.js';
 
@@ -117,6 +117,7 @@ export type Guard = { type: 'user' | 'workspace' | 'subject'; id: string };
 const subjectGuard = (issuer: string, subject: string): Guard => ({ type: 'subject', id: `${issuer} ${subject}` });
 /** One short transaction with the module's statement and lock timeouts: a slow or blocked statement ends, it never waits. */
 class StageDeadline extends Error {}
+const rollbackItem = sql`ROLLBACK TO SAVEPOINT abuse_item`;
 // Leave room for the configuration round trip and COMMIT/ROLLBACK. Never send a data
 // statement with a timeout larger than the time left. Near the deadline halve it,
 // so setting the shorter limit doesn't itself spend the remaining window.
@@ -138,6 +139,8 @@ export function bounded<T>(runtime: Hosted, work: (tx: AbuseTx) => Promise<T>): 
     if (claim?.owns === false) throw new StageDeadline();
     if (!runtime.deadline) return work(tx);
     const timed: AbuseTx = { async execute<T extends QueryResultRow>(statement: SQL) {
+      // An aborted subtransaction accepts only ROLLBACK; SET would fail with 25P02.
+      if (statement === rollbackItem) { limit(); return tx.execute<T>(statement); }
       if (timeout > remaining()) {
         timeout = limit();
         await tx.execute(sql`SELECT set_config('statement_timeout',${String(timeout)},true)`);
@@ -348,11 +351,11 @@ export async function linkDomains(html?: string | null, text?: string | null): P
 // Work limits of one run. Each stage stops at its limit or its own wall-time budget and continues from committed receipts or its cursor.
 const SIGN_INS_A_RUN = 200, PAYMENTS_A_RUN = 200, WORKSPACE_PAGE = 200, WORKSPACE_PAGES = 10, SAMPLED_A_RUN = 100, MESSAGES_A_WORKSPACE = 6, NEW_ROWS_A_RUN = 5000;
 type Cursors = { signIns?: { at: string; key: string }; payments?: { at: string; id: string }; workspaces?: string };
-type Run = { since: string; cursors: Cursors; items: number; added: number; deadline: number; cuts: Record<string, Cut> };
+type Run = { batchSize: number; advanced: boolean; since: string; cursors: Cursors; items: number; added: number; deadline: number; cuts: Record<string, Cut> };
 /** Why a stage stopped with work left: its share of the time ran out, or it reached a per-run limit. */
-export type Cut = 'time' | 'limit';
+export type Cut = 'time' | 'limit' | 'retry';
 const spent = (run: Run) => Date.now() >= run.deadline || run.added >= NEW_ROWS_A_RUN;
-/** Unfinished slices requeue immediately; Health independently measures their oldest outstanding work. */
+/** Productive slices continue immediately; stalled slices back off. Health measures the oldest outstanding work. */
 const cut = (run: Run, stage: AbuseStage, why?: Cut) => { if (run.cuts[stage] !== 'time') run.cuts[stage] = why ?? (Date.now() >= run.deadline ? 'time' : 'limit'); };
 export const utc = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 
@@ -362,37 +365,77 @@ export const utc = (column: SQL) => sql`to_char(${column} AT TIME ZONE 'UTC','YY
  * sign-ins left. Only sign-ins since monitoring started; each version of a row is read once.
  */
 const BATCH_SIZE = 16;
-const pendingSignIn = sql`a.observed IS NOT NULL AND (a.last_at IS DISTINCT FROM a.abuse_folded_at OR a.attempts IS DISTINCT FROM a.abuse_folded_attempts)`;
-const pendingPayment = sql`p.updated_at IS DISTINCT FROM p.abuse_folded_at`;
-// The old global cursors are immutable upgrade floors. New receipts live on individual
-// source rows: no advancing timestamp can jump over a locked row or a late commit.
-const eligibleSignIn = (since: SQL, at: SQL, key: SQL) => sql`${pendingSignIn} AND a.last_at>${since} AND
-  (a.last_at,md5(a.issuer||' '||a.subject))>(coalesce(${at},${since}),coalesce(${key},''))`;
-const eligiblePayment = (since: SQL, at: SQL, id: SQL) => sql`${pendingPayment} AND p.created_at>=${since} AND
-  (p.updated_at,p.id)>(coalesce(${at},${since}),coalesce(${id},''))`;
+// No source lock or write. A receipt names the version actually read, not whatever
+// version happens to be current when we commit. Health includes quarantined versions.
+const FAILURE_LIMIT = 3;
+const outstanding = (stage: string, key: SQL, at: SQL, count = sql`0`, health = false) => sql`NOT EXISTS (
+  SELECT FROM abuse_work_versions v WHERE (v.stage,v.source_key,v.version_at,v.version_count)=
+    (${stage},${key},${at},${count}) AND (v.failures=0 ${health ? sql`` : sql`OR v.failures>=${FAILURE_LIMIT}`}))`;
+const signInKey = sql`abuse_key(a.issuer,a.subject)`, paymentKey = sql`abuse_key(p.id)`;
+const eligibleSignIn = (since: SQL, at: SQL, key: SQL, health = false) => sql`a.observed IS NOT NULL AND a.last_at>${since} AND
+  (a.last_at,md5(a.issuer||' '||a.subject))>(coalesce(${at},${since}),coalesce(${key},'')) AND ${outstanding('signIns',signInKey,sql`a.last_at`,sql`a.attempts`,health)}`;
+const eligiblePayment = (since: SQL, at: SQL, id: SQL, health = false) => sql`p.created_at>=${since} AND NOT EXISTS (SELECT FROM abuse_floors f WHERE f.entity_type='workspace' AND f.entity_id=p.workspace_id AND f.ignore_through>=p.updated_at) AND
+  (p.updated_at,p.id)>(coalesce(${at},${since}),coalesce(${id},'')) AND ${outstanding('payments',paymentKey,sql`p.updated_at`,sql`0`,health)}`;
+
+export type WorkVersion = { source_key: string; at: string; attempts?: number };
+export const runnableSeed = (stage: string, key: SQL, at: SQL) => outstanding(stage,key,at);
+function itemReason(error: unknown) {
+  const code = databaseCodeOf(error);
+  // Connection loss, lock contention, schema and platform failures are stage
+  // failures, never grounds to set aside evidence.
+  if (error instanceof StageDeadline || databaseConflict(error) || (code !== '57014' && transientDatabaseError(error))) return null;
+  if (code && !/^(22|23|54|P0)/.test(code) && code !== '57014') return null;
+  // Never store exception messages: they can contain input, SQL or personal data.
+  return code ?? 'ITEM_ERROR';
+}
+// Set the savepoint *after* the guards and version read. On an item failure roll back
+// all derived writes, keep the guards, and record only the SQLSTATE for that version.
+export async function isolateItem(tx: AbuseTx, stage: string, version: WorkVersion, work: () => Promise<void>) {
+  await tx.execute(sql`SAVEPOINT abuse_item`);
+  try { await work(); return true; }
+  catch (error) {
+    const reason = itemReason(error);
+    if (!reason) throw error;
+    await tx.execute(rollbackItem);
+    const { rows: [row] } = await tx.execute<{ failures: number }>(sql`INSERT INTO abuse_work_versions AS v(stage,source_key,version_at,version_count,failures,reason)
+      VALUES (${stage},${version.source_key},${version.at}::timestamptz,${version.attempts ?? 0},1,${reason})
+      ON CONFLICT (stage,source_key,version_at,version_count) DO UPDATE SET failures=v.failures+1,reason=excluded.reason
+      WHERE v.failures BETWEEN 1 AND ${FAILURE_LIMIT-1} RETURNING failures`);
+    log('warn',{code: row?.failures === FAILURE_LIMIT ? 'ABUSE_ITEM_QUARANTINED' : 'ABUSE_ITEM_RETRY', stage, reason});
+    return false;
+  }
+}
 type Candidate = { issuer: string; subject: string; user_id: string | null };
 async function foldSignIns(runtime: Hosted, run: Run) {
   const legacy = run.cursors.signIns, where = eligibleSignIn(sql`${run.since}::timestamptz`,sql`${legacy?.at ?? null}::timestamptz`,sql`${legacy?.key ?? null}::text`);
   let items = 0;
   // Within this pass move on from busy guards; every new job starts at the earliest unacknowledged version.
   const skipped: string[] = [];
+  let after: {at:string;key:string} | undefined, retrySingles = false;
+  // This seek lasts only this pass. The next job always starts before every
+  // outstanding version, including replacements that committed behind the seek.
   while (!spent(run) && items < SIGN_INS_A_RUN) {
     const started = Date.now();
+    const size = Math.min(run.batchSize,SIGN_INS_A_RUN-items);
+    let folding = false, next = after;
     const batch = await bounded(runtime, async tx => {
-      const { rows: page } = await tx.execute<Candidate>(sql`SELECT a.issuer,a.subject,i.user_id FROM nightmail_signin_attempts a
-        LEFT JOIN nightmail_oidc_identities i USING(issuer,subject) WHERE ${where} AND NOT ((a.issuer||' '||a.subject)=ANY(${sql.param(skipped)}::text[]))
-        ORDER BY a.last_at,md5(a.issuer||' '||a.subject) LIMIT ${Math.min(BATCH_SIZE, SIGN_INS_A_RUN-items)}`);
+      const { rows: page } = await tx.execute<Candidate & { at:string; key:string }>(sql`SELECT a.issuer,a.subject,i.user_id,${utc(sql`a.last_at`)} AS at,md5(a.issuer||' '||a.subject) AS key FROM nightmail_signin_attempts a
+        LEFT JOIN nightmail_oidc_identities i USING(issuer,subject) WHERE ${where}
+          ${after ? sql`AND (a.last_at,md5(a.issuer||' '||a.subject))>(${after.at}::timestamptz,${after.key})` : sql``}
+          AND NOT ((a.issuer||' '||a.subject)=ANY(${sql.param(skipped)}::text[]))
+        ORDER BY a.last_at,md5(a.issuer||' '||a.subject) LIMIT ${size}`);
       if (!page.length) return { read: 0, folded: 0, added: 0 };
+      next = page.at(-1);
       const keys = (r: Candidate) => [guardKey(subjectGuard(r.issuer,r.subject)),guardKey({type:'attempt',id:attemptEntity(runtime.config,r.issuer,r.subject)}),
         ...(r.user_id ? [guardKey({type:'user',id:r.user_id})] : [])];
       const held = await tryGuards(tx,page.flatMap(keys));
       const ready = page.filter(r => keys(r).every(k => held.has(k)));
       // A fresh READ COMMITTED statement after taking the locks: erasures, exclusions,
       // admissions and replacements committed since discovery are visible here.
-      const { rows } = ready.length ? await tx.execute<Candidate & { observed: unknown; at: string }>(sql`SELECT a.issuer,a.subject,i.user_id,a.observed,${utc(sql`a.last_at`)} AS at
+      const { rows } = ready.length ? await tx.execute<Candidate & WorkVersion & { observed: unknown }>(sql`SELECT a.issuer,a.subject,i.user_id,a.observed,a.attempts,${signInKey} AS source_key,${utc(sql`a.last_at`)} AS at
         FROM jsonb_to_recordset(${JSON.stringify(ready)}::jsonb) r(issuer text,subject text,user_id text)
         JOIN nightmail_signin_attempts a USING(issuer,subject) LEFT JOIN nightmail_oidc_identities i ON (i.issuer,i.subject)=(a.issuer,a.subject)
-        WHERE ${where} AND i.user_id IS NOT DISTINCT FROM r.user_id ORDER BY a.last_at,md5(a.issuer||' '||a.subject) FOR UPDATE OF a SKIP LOCKED`) : { rows: [] };
+        WHERE ${where} AND i.user_id IS NOT DISTINCT FROM r.user_id ORDER BY a.last_at,md5(a.issuer||' '||a.subject)`) : { rows: [] };
       const current = new Set(rows.map(r => r.issuer+' '+r.subject));
       skipped.push(...page.map(r => r.issuer+' '+r.subject).filter(k => !current.has(k)));
       if (!rows.length) return { read: page.length, folded: 0, added: 0 };
@@ -402,13 +445,34 @@ async function foldSignIns(runtime: Hosted, run: Run) {
         return { ...r, signals, attempt: attemptEntity(runtime.config,r.issuer,r.subject) };
       });
       await graphLock(tx);
-      const result = await tx.execute<{ added: number }>(sql`SELECT abuse_fold_signins(${JSON.stringify(validated)}::jsonb) AS added`);
-      await wakeClusters(tx, validated.map(r => r.user_id ? { type: 'user', id: r.user_id } : { type: 'attempt', id: r.attempt }));
-      return { read: page.length, folded: rows.length, added: result.rows[0]!.added };
+      let added = 0;
+      const fold = async () => {
+        const result = await tx.execute<{ added: number }>(sql`SELECT abuse_fold_signins(${JSON.stringify(validated)}::jsonb) AS added`);
+        await wakeClusters(tx, validated.map(r => r.user_id ? { type: 'user', id: r.user_id } : { type: 'attempt', id: r.attempt }));
+        added = result.rows[0]!.added;
+      };
+      folding = true;
+      if (rows.length === 1) {
+        if (!await isolateItem(tx,'signIns',rows[0]!,fold)) return {read: page.length,folded: 0,added: 0,singleFailed: true};
+      } else await fold();
+      return { read: page.length, folded: rows.length, added };
+    }).catch(error => {
+      // A failed batch has no committed writes. Isolate errors one at a time;
+      // halve timed-out batches. No row is blamed for a shared lock or connection failure.
+      if (!folding || size === 1 || !itemReason(error)) throw error;
+      run.batchSize = databaseCodeOf(error)==='57014' ? Math.max(1,Math.floor(size/2)) : 1;
+      return {read: 0,folded: 0,added: 0,retry: true};
     });
+    if ('retry' in batch) continue;
+    after = next;
+    retrySingles ||= 'singleFailed' in batch;
     items += batch.folded; run.items = items; run.added += batch.added;
     if (batch.folded) log('info', { code: 'ABUSE_SIGNIN_BATCH', items: batch.folded, msPerItem: (Date.now()-started)/batch.folded });
-    if (items < SIGN_INS_A_RUN && batch.read < BATCH_SIZE) { if (skipped.length) cut(run,'signIns','limit'); return items; }
+    if (items < SIGN_INS_A_RUN && batch.read < size) {
+      if (retrySingles) { after=undefined; retrySingles=false; continue; }
+      if (skipped.length) cut(run,'signIns','limit');
+      return items;
+    }
     if (skipped.length >= SIGN_INS_A_RUN) break;
   }
   cut(run,'signIns'); return items;
@@ -425,25 +489,29 @@ async function foldPayments(runtime: Hosted, run: Run) {
       if (!row) return null;
       const workspace: Guard & Entity = { type: 'workspace', id: row.workspace_id };
       if (!(await tryGuards(tx,[guardKey(workspace)])).size) return { busy: row.id, added: 0 };
-      const { rows: [current] } = await tx.execute<{ fingerprint: string | null; at: string }>(sql`SELECT
-        CASE WHEN NOT ${workspaceExcluded(sql`p.workspace_id`)} THEN p.card_fingerprint END AS fingerprint,${utc(sql`p.updated_at`)} AS at
-        FROM billing_payment_attempts p WHERE p.id=${row.id} AND p.workspace_id=${workspace.id} AND ${where} FOR UPDATE SKIP LOCKED`);
+      const { rows: [current] } = await tx.execute<{ fingerprint: string | null; at: string; source_key: string }>(sql`SELECT
+        CASE WHEN NOT ${workspaceExcluded(sql`p.workspace_id`)} THEN p.card_fingerprint END AS fingerprint,${paymentKey} AS source_key,${utc(sql`p.updated_at`)} AS at
+        FROM billing_payment_attempts p WHERE p.id=${row.id} AND p.workspace_id=${workspace.id} AND ${where}`);
       if (!current) return { busy: row.id, added: 0 };
       let added = 0;
-      if (current.fingerprint) {
-        await graphLock(tx);
-        const card = [{ kind: 'card', value: signalHash(runtime.config,'card',current.fingerprint), at: current.at }];
-        added = await writeSignals(tx,workspace,[workspace],card,false);
-        await trimSignals(tx,workspace); await linkEntity(tx,workspace,card);
-        await wakeClusters(tx,[workspace]);
-      }
-      await tx.execute(sql`UPDATE billing_payment_attempts SET abuse_folded_at=updated_at WHERE id=${row.id}`);
-      return { busy: null, added };
+      if (current.fingerprint) await graphLock(tx);
+      const ok = await isolateItem(tx,'payments',current,async () => {
+        if (current.fingerprint) {
+          const card = [{ kind: 'card', value: signalHash(runtime.config,'card',current.fingerprint), at: current.at }];
+          added = await writeSignals(tx,workspace,[workspace],card,false);
+          await trimSignals(tx,workspace); await linkEntity(tx,workspace,card);
+          await wakeClusters(tx,[workspace]);
+        }
+        await tx.execute(sql`INSERT INTO abuse_work_versions(stage,source_key,version_at) VALUES('payments',${current.source_key},${current.at}::timestamptz)
+          ON CONFLICT(stage,source_key,version_at,version_count) DO UPDATE SET failures=0,reason=NULL`);
+      });
+      return { busy: null, added, retry: !ok };
     });
     if (folded === null) {
       if (skipped.length) cut(run,'payments','limit');
       return items;
     }
+    if ('retry' in folded && folded.retry) continue;
     if (folded.busy !== null) skipped.push(folded.busy);
     else { run.added += folded.added; run.items = ++items; }
   }
@@ -490,6 +558,7 @@ async function sampleSends(runtime: Hosted, run: Run) {
       // A workspace whose sample fails or times out is skipped until the cursor comes round again.
       try {
         const added = await bounded(runtime, tx => sampleWorkspace(runtime, tx, run, workspace.id, floor(sql`${workspace.id}`)));
+        run.advanced = true; // The workspace cursor committed even if no mail qualified.
         if (added !== null) { run.added += added; run.items = ++sampled; }
       } catch (error) {
         if (timeError(error)) throw error;
@@ -498,6 +567,7 @@ async function sampleSends(runtime: Hosted, run: Run) {
     }
     run.cursors.workspaces = ids.length < WORKSPACE_PAGE ? '' : ids.at(-1)!.id;
     await bounded(runtime, tx => tx.execute(samplePosition(run.cursors.workspaces!)));
+    run.advanced ||= ids.length === WORKSPACE_PAGE;
     if (ids.length < WORKSPACE_PAGE) break;
     // The next page waits for the next run: out of time, work or pages.
     if (page + 1 >= WORKSPACE_PAGES || sampled >= SAMPLED_A_RUN || spent(run)) cut(run, 'sample', sampled >= SAMPLED_A_RUN || page + 1 >= WORKSPACE_PAGES ? 'limit' : undefined);
@@ -551,16 +621,18 @@ async function wakeClusters(tx: AbuseTx, members: Entity[]) {
     WHERE score_requested_at IS NULL AND id IN (SELECT m.cluster_id FROM abuse_cluster_members m
       JOIN jsonb_to_recordset(${JSON.stringify(members)}::jsonb) e(type text,id text) ON (m.entity_type,m.entity_id)=(e.type,e.id)) RETURNING id)
     UPDATE jobs SET status=CASE WHEN status='running' THEN status ELSE 'pending' END,
-      payload=jsonb_build_object('revision',coalesce((payload->>'revision')::bigint,0)+1),available_at=now(),
+      payload=payload||jsonb_build_object('revision',coalesce((payload->>'revision')::bigint,0)+1),
+      available_at=CASE WHEN status='pending' THEN available_at ELSE now() END,
       attempts=CASE WHEN status='running' THEN attempts ELSE 0 END
     WHERE id='abuse.stage.clusters' AND (EXISTS (SELECT FROM dirty) OR EXISTS (SELECT FROM identity_links WHERE pending))`);
 }
 
 /** The tick only seeds durable jobs and sweeps alert delivery. An infinite legacy lease
  * prevents an old hourly worker from folding concurrently during a rolling upgrade. */
-export async function abuseHourly(runtime: Hosted) {
+export async function seedAbuseStages(runtime: Hosted, hourly = false) {
   if (!runtime.config.multiTenant) return null;
   if (!monitoring(runtime.config)) {
+    if (!hourly) return null;
     await bounded(runtime, async tx => {
       await tx.execute(sql`SELECT pg_advisory_xact_lock(327461638,0)`);
       await tx.execute(sql`DELETE FROM abuse_state WHERE lease_until IS NULL OR lease_until<=now() OR lease_until='infinity'`);
@@ -582,11 +654,15 @@ export async function abuseHourly(runtime: Hosted) {
     }
     await tx.execute(sql`INSERT INTO jobs(id,type,workspace_id,payload) SELECT t,t,'platform','{}'::jsonb
       FROM unnest(${sql.param(STAGES.map(s => 'abuse.stage.'+s))}::text[]) t ORDER BY t
-      ON CONFLICT(id) DO UPDATE SET status='pending',available_at=now(),attempts=0,last_error=NULL,lease_until=NULL
-      WHERE jobs.status IN ('completed','failed')`);
+      ON CONFLICT(id) ${hourly ? sql`DO UPDATE SET status='pending',available_at=now(),attempts=0,last_error=NULL,lease_until=NULL,
+        payload=jobs.payload-'stalls'-'batchSize' WHERE jobs.status IN ('completed','failed')` : sql`DO NOTHING`}`);
     return true;
   });
-  if (!ready) return null;
+  return ready || null;
+}
+
+export async function abuseHourly(runtime: Hosted) {
+  if (!await seedAbuseStages(runtime,true)) return null;
   await (await import('./abuse-alerts.js')).sweepAlerts(runtime);
   return true;
 }
@@ -611,7 +687,7 @@ async function withStageConnection<T>(host: Hosted, deadline: number, work: (db:
   } finally { clearTimeout(timer); }
 }
 
-export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = budgets[stage]) {
+export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = budgets[stage], batchSize = BATCH_SIZE) {
   const started = Date.now(), runtime = { ...host, stage, deadline: Math.min(started+budget,host.deadline ?? Infinity,host.lease ? Date.parse(host.lease) : Infinity) };
   let items = 0, added = 0, stopped: Cut | undefined;
   let active: Run | undefined;
@@ -623,13 +699,13 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
         ${runtime.lease ? sql`AND EXISTS (SELECT FROM jobs WHERE id=${'abuse.stage.'+stage} AND status='running' AND lease_until=${runtime.lease}::timestamptz)` : sql``}`));
       if (state) {
         runtime.epoch = state.since;
-        const run: Run = active = { ...state, deadline: runtime.deadline, items: 0, added: 0, cuts: {} };
+        const run: Run = active = { ...state, batchSize, advanced: false, deadline: runtime.deadline, items: 0, added: 0, cuts: {} };
         if (stage === 'signIns') items = await foldSignIns(runtime,run);
         if (stage === 'payments') items = await foldPayments(runtime,run);
         if (stage === 'sample') items = await sampleSends(runtime,run);
         if (stage === 'clusters') {
           const { refreshClusters } = await import('./abuse-clusters.js');
-          const r = await refreshClusters(runtime,runtime.deadline);
+          const r = await refreshClusters(runtime,runtime.deadline,() => { run.items++; });
           items = r.grouped+r.rescored;
           if (r.cut) cut(run,stage,r.cut);
         }
@@ -637,12 +713,15 @@ export async function runAbuseStage(host: Hosted, stage: AbuseStage, budget = bu
       }
     });
   } catch (error) {
-    if (!timeError(error)) throw error;
-    stopped = 'time'; items = active?.items ?? 0; added = active?.added ?? 0;
+    if (!timeError(error)) {
+      if (!host.lease) throw error;
+      log('error',{code:'ABUSE_STAGE_FAILED',stage,reason:databaseCodeOf(error) ?? 'STAGE_ERROR'});
+    }
+    stopped = timeError(error) ? 'time' : 'retry'; items = active?.items ?? 0; added = active?.added ?? 0;
   }
   if (stopped) log(stopped === 'time' ? 'warn' : 'info', { code: 'ABUSE_STEP_CUT', step: stage, reason: stopped });
   log('info', { code: 'ABUSE_STAGE', step: stage, items, added, ms: Date.now()-started, cut: stopped });
-  return { items, added, cut: stopped };
+  return { items, added, cut: stopped, advanced: items > 0 || !!active?.advanced, batchSize: active?.batchSize ?? batchSize };
 }
 
 // A cut needs time to make its singleton due again. Bound the queue's status write as
@@ -657,25 +736,32 @@ export const abuseStageJob: JobHandler = async (runtime,payload,job) => {
   const stage = STAGES.find(s => job.id==='abuse.stage.'+s);
   if (!stage) throw new Error('Unknown abuse stage');
   const scoped = { ...runtime, lease: job.leaseFence, deadline: (job.startedAt ?? Date.now())+budgets[stage] };
-  const result = await runAbuseStage(scoped,stage);
-  if (result.cut) throw new JobDeferred(new Date().toISOString());
-  // Do not lose a wake between the last empty read and generic job settlement.
-  // The source either bumped the revision already, or sees a completed job and revives it.
+  const batchSize = Math.max(1,Math.min(BATCH_SIZE,Number(payload.batchSize) || BATCH_SIZE));
+  const result = await runAbuseStage(scoped,stage,budgets[stage],batchSize);
+  const defer = () => {
+    const stalls = result.advanced ? 0 : Math.min(6,(Number(payload.stalls) || 0)+1);
+    const delay = stalls ? Math.min(900,30*2**(stalls-1)) : 0;
+    const size = result.cut==='time' && !result.advanced ? Math.max(1,Math.floor(result.batchSize/2)) : result.batchSize;
+    if (delay) log('warn',{code:'ABUSE_STAGE_BACKOFF',stage,delay,batchSize:size});
+    throw new JobDeferred(new Date(Date.now()+1000*delay).toISOString(),{...payload,stalls,batchSize:size});
+  };
+  if (result.cut) defer();
+  // Don't lose a writer's wake between the last empty read and settlement.
   if (stage==='clusters' && job.leaseFence) {
-    if (scoped.deadline-Date.now()<2*WIRE_RESERVE_MS) throw new JobDeferred(new Date().toISOString());
-    const settled = await withStageConnection(scoped,scoped.deadline,db => bounded({ ...scoped, db }, tx => tx.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL
+    if (scoped.deadline-Date.now()<2*WIRE_RESERVE_MS) defer();
+    const settled = await withStageConnection(scoped,scoped.deadline,db => bounded({ ...scoped, db }, tx => tx.execute(sql`UPDATE jobs SET status='completed',lease_until=NULL,last_error=NULL,payload=payload-'stalls'-'batchSize'
       WHERE id=${job.id} AND status='running' AND lease_until=${job.leaseFence}::timestamptz AND
       coalesce((payload->>'revision')::bigint,0)=${Number(payload.revision ?? 0)} RETURNING id`))).catch(error => {
-      if (timeError(error)) throw new JobDeferred(new Date().toISOString());
+      if (timeError(error)) defer();
       throw error;
     });
-    if (!settled.rowCount) throw new JobDeferred(new Date().toISOString());
+    if (!settled.rowCount) defer();
   }
 };
 
 export const abuseLag = sql`(SELECT json_build_object(
-  'sign-ins',extract(epoch FROM now()-(SELECT a.last_at FROM nightmail_signin_attempts a WHERE ${eligibleSignIn(sql`s.active_since`,sql`(s.cursors#>>'{signIns,at}')::timestamptz`,sql`s.cursors#>>'{signIns,key}'`)} ORDER BY a.last_at LIMIT 1)),
-  'payments',extract(epoch FROM now()-(SELECT p.updated_at FROM billing_payment_attempts p WHERE ${eligiblePayment(sql`s.active_since`,sql`(s.cursors#>>'{payments,at}')::timestamptz`,sql`s.cursors#>>'{payments,id}'`)} ORDER BY p.updated_at LIMIT 1)),
+  'sign-ins',extract(epoch FROM now()-(SELECT a.last_at FROM nightmail_signin_attempts a WHERE ${eligibleSignIn(sql`s.active_since`,sql`(s.cursors#>>'{signIns,at}')::timestamptz`,sql`s.cursors#>>'{signIns,key}'`,true)} ORDER BY a.last_at LIMIT 1)),
+  'payments',extract(epoch FROM now()-(SELECT p.updated_at FROM billing_payment_attempts p WHERE ${eligiblePayment(sql`s.active_since`,sql`(s.cursors#>>'{payments,at}')::timestamptz`,sql`s.cursors#>>'{payments,id}'`,true)} ORDER BY p.updated_at LIMIT 1)),
   'pending links',extract(epoch FROM now()-(SELECT min(pending_since) FROM identity_links WHERE pending)),
   'cluster scoring',extract(epoch FROM now()-least((SELECT min(scored_at) FROM abuse_clusters WHERE scored_at<=now()-interval '30 minutes')+interval '30 minutes',(SELECT min(score_requested_at) FROM abuse_clusters))))
   FROM abuse_state s WHERE id='monitor')`;
@@ -716,6 +802,13 @@ export async function abuseSubject(runtime: Hosted, target: SubjectTarget, actio
     if (action !== 'show') for (const guard of guards) await tx.execute(sql`INSERT INTO abuse_floors(entity_type,entity_id,ignore_through) VALUES(${guard.type},${guard.id},clock_timestamp())
       ON CONFLICT (entity_type,entity_id) DO UPDATE SET ignore_through=excluded.ignore_through`);
     if (action === 'erase' || action === 'exclude') {
+      // Delete monitor receipts under the same guards as folding. A payment still
+      // in its source log is covered by the erasure floor; no signal can return.
+      for (const s of subjects) await tx.execute(sql`DELETE FROM abuse_work_versions WHERE stage='signIns' AND source_key=abuse_key(${s.issuer},${s.subject})`);
+      await tx.execute(sql`DELETE FROM abuse_work_versions WHERE
+        (stage='payments' AND source_key IN (SELECT abuse_key(id) FROM billing_payment_attempts WHERE workspace_id=ANY(${sql.param(owned)}::text[])))
+        OR (stage='scores' AND source_key IN (SELECT abuse_key(cluster_id) FROM abuse_cluster_members WHERE (entity_type,entity_id) IN (${pairs})))
+        OR (stage='links' AND source_key IN (SELECT abuse_key(a_type,a_id) FROM identity_links WHERE (a_type,a_id) IN (${pairs}) OR (b_type,b_id) IN (${pairs})))`);
       await tx.execute(sql`DELETE FROM abuse_signals WHERE (entity_type,entity_id) IN (${pairs})`);
       // What was derived from them: their links, every alert about them, and the clusters they were in (the other members are grouped again).
       await tx.execute(sql`DELETE FROM identity_links WHERE (a_type,a_id) IN (${pairs}) OR (b_type,b_id) IN (${pairs})`);

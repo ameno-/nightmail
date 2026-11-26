@@ -628,6 +628,8 @@ export default {
           await flushCounters(health.db); await healthTick(health, { queues: queues.sort((a,b)=>a.name<b.name?-1:1) });
         });
       }
+      if (runtime.config.abuseMonitoring) try { await (await import('./abuse.js')).seedAbuseStages(runtime); }
+      catch { core.log('warn',{code:'ABUSE_STAGE_SEED_FAILED'}); }
       // Minute cron: recover orchestration jobs whose wake was lost.
       await followDueJobs(runtime, () => drainJobs(runtime, 100, concurrency, 10000,'work'), delaySeconds => env.WAKE_QUEUE.send({ kind: 'wake' }, { delaySeconds }),0,'work');
       if (runtime.config.abuseMonitoring) await followDueJobs(runtime, async()=>{}, delaySeconds=>env.WAKE_QUEUE.send({kind:'abuse-sample'},{delaySeconds}),0,'abuseSample');

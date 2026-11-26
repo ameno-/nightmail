@@ -110,8 +110,8 @@ const ingestSlots=36;
 let ingestReserved=0;
 let hookCursor='';
 export type JobHandlerResolver = Record<string, JobHandler> | ((type: string) => Promise<JobHandler | undefined> | JobHandler | undefined);
-export type JobPool = 'all' | 'work' | 'webhooks' | 'ingest' | 'abuseSample';
-const classes = (pool: JobPool) => pool === 'abuseSample' ? ['abuse_sample'] : pool === 'ingest' ? [] : pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish','abuse', ...(pool === 'all' ? ['hook'] : [])];
+export type JobPool = 'all' | 'work' | 'webhooks' | 'ingest' | 'abuseSample' | 'customerWork';
+const classes = (pool: JobPool) => pool === 'abuseSample' ? ['abuse_sample'] : pool === 'ingest' ? [] : pool === 'webhooks' ? ['hook'] : ['feedback','campaign','other','publish', ...(pool==='customerWork' ? [] : ['abuse']), ...(pool === 'all' ? ['hook'] : [])];
 const jobDue = sql`CASE WHEN j.status='running' THEN j.lease_until ELSE j.available_at END`;
 export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver, limit = 1, concurrency = 1, maxDurationMs = 20000, pool: JobPool = 'all') {
   const started = Date.now(); let processed = 0, claims = 0, claimRequests = 0, activeJobs = 0, peakActiveJobs = 0;
@@ -151,7 +151,7 @@ export async function processJobs(runtime: Runtime, handlers: JobHandlerResolver
     if (error instanceof JobDeferred) {
       // A successful polling turn breaks a streak of failures/evictions.
       const nextPayload = error.payload ?? (handlerPayload !== job.payload ? handlerPayload : undefined);
-      await writeJob(job,jobStarted,runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: nextPayload } : {}) }).where(fence).getSQL());
+      await writeJob(job,jobStarted,runtime.db.update(jobs).set({ status: 'pending', attempts: error.keepAttempts ? Math.max(0, job.attempts - 1) : 0, leaseUntil: null, lastError: null, availableAt: error.availableAt, ...(nextPayload ? { payload: job.type==='abuse.stage.clusters' ? sql`${JSON.stringify(nextPayload)}::jsonb || jsonb_build_object('revision',coalesce((payload->>'revision')::bigint,0))` : nextPayload } : {}) }).where(fence).getSQL());
       log('info', { ...context, code: 'JOB_DEFERRED', availableAt: error.availableAt, claimMs, claimBatchSize, jobMs: Date.now() - jobStarted });
       return;
     }
