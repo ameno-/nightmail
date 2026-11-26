@@ -10690,6 +10690,46 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.equal(await claimedToday(), Math.max(before, TRIAGE_LIMITS.perWorkspaceDay));
           assert.equal((await db.query('SELECT count(*)::int AS n FROM support_feedback WHERE conversation_id = ANY($1) AND triage_claimed_at IS NULL', [burst])).rows[0].n, burst.length - Math.max(0, TRIAGE_LIMITS.perWorkspaceDay - before), 'The rest of its day goes without a note.');
         });
+
+        await t.test('15 the support AI\u2019s week on Glass: of the answerable conversations started in the last 7 days, those that ended with no person stepping in, beside the ones counted apart and anyone with no reply', async () => {
+          ok(reply(await platform.pullOutbox()));
+          const at = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString(), hour = 60, day = 24 * hour;
+          const { readGlass } = await import('./src/glass.js'), week = async () => { const { week: w, noReply } = (await readGlass(runtime)).support; return { ...w, noReply }; }, before = await week();
+          type Later = Omit<Parameters<typeof platform.mirrorMessages>[1][number], 'id'>;
+          /** An email conversation that started `minutes` ago: the customer asked then, and `then` followed. */
+          const started = async (minutes: number, then: Later[] = []) => {
+            const id = await stranger();
+            await db.query(`UPDATE support_conversations SET created_at = now() - make_interval(mins => $2) WHERE id = $1`, [id, minutes]);
+            ok(reply(await platform.mirrorMessages(id, [{ id: msg(), author: 'customer', text: 'How do I add a domain?', at: at(minutes) }, ...then.map(m => ({ id: msg(), ...m }))])));
+            return id;
+          };
+          const answer = (minutes: number): Later => ({ author: 'agent', kind: 'reply', text: 'Open Domains and press Add domain.', delivery: 'sent', at: at(minutes) });
+          const close = (id: string) => db.query(`UPDATE support_conversations SET status = 'closed', closed_at = now() WHERE id = $1`, [id]);
+          // Answered without a human: quiet for a day after the agent's answer, and closed after one.
+          await started(30 * hour, [answer(30 * hour - 1)]);
+          await close(await started(20, [answer(19)]));
+          // Answerable, but a person stepped in: a staff reply, a ticket Nightmail opened for staff, a held answer, an
+          // answer an hour late (no reply sent meanwhile), and a customer still waiting with no reply.
+          const staffed = await started(30, [answer(29)]);
+          ok(await send('POST', `${inbox}/${staffed}/replies`, keyed(operator), { text: 'Here is a little more.' }), 201);
+          await close(staffed);
+          const ticketed = await started(30 * hour, [answer(30 * hour - 1)]);
+          await db.query(`UPDATE support_conversations SET ticket_id = $2, ticket_type = 'staff', ticket_severity = 'P3', ticket_at = now(), status = 'ticketed' WHERE id = $1`, [ticketed, ticketId()]);
+          await close(await started(30, [{ author: 'agent', kind: 'held', text: 'Thanks, we are on it.', delivery: 'held', reason: 'gate', at: at(29) }]));
+          await started(30 * hour, [answer(29 * hour)]);
+          await started(30);
+          // A ticket the agent filed for a person counts as a person stepping in; a feature request it only logged doesn't.
+          ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type: 'account', severity: 'P3' } })));
+          ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type: 'feature_request', severity: 'P3' } })));
+          // Counted apart: a bug ticket and a billing ticket, however the conversation went.
+          for (const type of ['bug', 'billing']) ok(reply(await platform.mirrorState(await started(30 * hour, [answer(30 * hour - 1)]), { ticket: { id: ticketId(), type, severity: 'P2' } })));
+          // Not counted at all: agent feedback (nobody to answer) and a conversation older than 7 days.
+          await db.query(`INSERT INTO support_conversations(id, channel, verification, mode, workspace_id) VALUES ($1, 'agent_feedback', 'credential', 'unverified', $2)`, [conversation(), acme]);
+          await started(8 * day, [answer(8 * day - 1)]);
+          const after = await week();
+          assert.deepEqual({ answerable: after.answerable - before.answerable, withoutHuman: after.withoutHuman - before.withoutHuman, apart: after.apart - before.apart, noReply: after.noReply - before.noReply, atLeast: after.atLeast },
+            { answerable: 9, withoutHuman: 3, apart: 2, noReply: 2, atLeast: false }, 'Answered without a human: 3 of 9; 2 counted apart; no reply sent to the customer still waiting, nor to the one whose answer was held.');
+        });
       } finally { globalThis.fetch = previous; }
     });
   });
@@ -22361,6 +22401,46 @@ describe('List hygiene', () => {
       await db.query('DELETE FROM delivery_blocklist_daily WHERE workspace_id=$1', [ws]);
       await deliveryHistoryHourly(runtime, { budgetMs: 60_000 });
       assert.deepEqual(pick((await stats())[dead]), { sent: 4, delivered: 1, hard: 3, soft: 0, opened: 0, since: 1, classes: { user_unknown: 3 } });
+    });
+  });
+  test('list risk: a marketing campaign\'s launch records the measure of its list on its review (flagged contacts, contacts at domains this workspace\'s mail failed at, never mailed), banded only with the private lines, and the send review\'s verdict is unchanged', async t => {
+    await simulatedSesFixture(t, async ({ runtime, db, local, jobs }) => {
+      const { bandListRisk, listRiskJob } = await import('./src/list-risk.js');
+      // The job the launch queued (the dispatcher's map names it: scripts/check-premerge.ts checks that).
+      const runListRisk = async () => { for (const job of (await jobs('audience.listRisk')).filter(j => j.status === 'pending')) { await listRiskJob(runtime, job.payload, { id: job.id, attempts: 1, workspaceId: job.workspace_id } as never); await db.query("UPDATE jobs SET status = 'done' WHERE id = $1", [job.id]); } };
+      const wid = runtime.config.workspaceId, tag = unique('lr').toLowerCase().replace(/[^a-z0-9]/g, ''), dead = tag + '-dead.example';
+      const list = ok(await local('POST', '/v1/lists', { name: unique('risk') }), 201);
+      const emails = [...[1, 2, 3].map(i => 'temp' + i + '-' + tag + '@fexpost.com'), ...[1, 2, 3, 4, 5].map(i => 'p' + i + '@' + dead), ...Array.from({ length: 12 }, (_, i) => 'fine' + i + '-' + tag + '@example.net')];
+      const imported = ok(await local('POST', '/v1/contact-imports', { csv: ['Email', ...emails].join('\n'), listId: list.id, mapping: { email: 'Email' } }), 201);
+      ok(await local('POST', '/v1/contact-imports/' + imported.id + '/commit', { consent: { status: 'subscribed', evidence: 'Synthetic opt-in.' } }));
+      // This workspace's mail to the dead domain mostly failed for good (src/delivery-history.ts writes this row).
+      await db.query('INSERT INTO delivery_domain_stats (workspace_id, domain, sent, hard_bounced, user_unknown, first_seen, last_seen) VALUES ($1, $2, 20, 15, 15, now(), now())', [wid, dead]);
+      const before = runtime.config.listRisk;
+      runtime.config.listRisk = { FLAGGED_SOURCE: { elevated: 0.05, high: 0.12 }, DEAD_DOMAINS: { elevated: 0.2, high: 0.4 }, NEVER_MAILED: { elevated: 0.7, high: 0.9 } };
+      try {
+        const campaign = ok(await local('POST', '/v1/campaigns', { name: 'Risk', from: 'sender@example.com', subject: 'News', html: '<p>Hello there.</p>', audience: { listId: list.id } }), 201);
+        const preview = ok(await local('GET', '/v1/campaigns/' + campaign.id + '/audience?readiness=true'));
+        const launched = ok(await local('POST', '/v1/campaigns/' + campaign.id + '/send', { revision: campaign.revision }), 202);
+        // The review's verdict is what it was before the measure existed: it reads nothing of it.
+        assert.equal(launched.readiness.verdict, preview.readiness.verdict);
+        await runListRisk();
+        const { rows: [review] } = await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [campaign.id]);
+        const risk = review.list_risk;
+        assert.deepEqual([risk.sampled, risk.exact, risk.counts.flagged, risk.counts.byReason.disposable, risk.counts.deadDomains, risk.counts.neverMailed, risk.counts.proven, risk.lastSend], [20, true, 3, 3, 5, 20, 0, null]);
+        assert.deepEqual([risk.values.FLAGGED_SOURCE, risk.values.DEAD_DOMAINS, risk.values.NEVER_MAILED, risk.values.UNENGAGED], [0.15, 0.25, 1, undefined]);
+        // FLAGGED_SOURCE over its high line; NEVER_MAILED over its high line counts only as elevated.
+        assert.equal(risk.band, 'high');
+        assert.deepEqual(risk.factors, [{ code: 'FLAGGED_SOURCE', level: 'high' }, { code: 'DEAD_DOMAINS', level: 'elevated' }, { code: 'NEVER_MAILED', level: 'elevated' }]);
+        // Recorded once: the review keeps the measure as the list stood at launch.
+        const reviewId = (await db.query('SELECT review_id FROM sending_campaigns WHERE id = $1', [campaign.id])).rows[0].review_id;
+        await db.query("INSERT INTO jobs (id, workspace_id, type, payload) VALUES ($1, $2, 'audience.listRisk', $3)", [unique('job'), wid, JSON.stringify({ workspaceId: wid, campaignId: campaign.id, reviewId, listId: list.id })]);
+        await runListRisk();
+        assert.deepEqual((await db.query('SELECT r.list_risk FROM sending_campaign_reviews r JOIN sending_campaigns c ON c.review_id = r.id WHERE c.id = $1', [campaign.id])).rows[0].list_risk.at, risk.at);
+      } finally { runtime.config.listRisk = before; }
+      // Without the private lines: values, no band.
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.5 }, null), { band: null, factors: [] });
+      assert.deepEqual(bandListRisk({ NEVER_MAILED: 1 }, { NEVER_MAILED: { elevated: 0.7, high: 0.9 } }), { band: 'elevated', factors: [{ code: 'NEVER_MAILED', level: 'elevated' }] });
+      assert.deepEqual(bandListRisk({ FLAGGED_SOURCE: 0.001 }, { FLAGGED_SOURCE: { elevated: 0.05 } }), { band: 'low', factors: [] });
     });
   });
 });
