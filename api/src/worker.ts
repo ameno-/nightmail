@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, isPublicPage, isSitePage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isPublicPage, isSitePage, renamedDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -377,6 +377,9 @@ export default {
         if (page.status !== 404) return fastSecure(page);
       }
       const shell = await assets.fetch(new Request(new URL('/', url), request));
+      // An operation's reference page under its old name moves to the new one (site-index.ts, RENAMED_OPERATIONS).
+      const renamed = renamedDocsPage(pathname);
+      if (renamed) return fastSecure(new Response(null, { status: 301, headers: { location: renamed + url.search, 'cache-control': 'public, max-age=3600' } }));
       // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
       // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
       // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
