@@ -1,6 +1,6 @@
 import { supportActionsApi, supportApi, type CurrentSupportConversation } from '../../data/support'
 import { ApiError } from '../../data/types'
-import { parseServerMessage, sniff, type ClientMessage, type Connection, type SupportTransport, type TransportEvent } from './protocol'
+import { FileError, parseServerMessage, sniff, type ClientMessage, type Connection, type FiledTicket, type SupportTransport, type TransportEvent } from './protocol'
 import { hostedHosts, productName, supportHost } from '../../../../api/src/brand'
 
 // The live transport (support/PROTOCOL.md §1–2, §5): one continuous conversation per person and workspace.
@@ -15,22 +15,23 @@ class StartError extends Error { constructor(readonly status: number, readonly c
 // its token expires. Keyed by user and workspace in sessionStorage; cleared on sign-out or account change.
 type Saved = { conversationId: string; socketUrl?: string; expiresAt?: string }
 const storageKey = (userId: string, workspaceId: string) => `bane.support.conversation.${userId}.${workspaceId}`
-const draftKey = (mode: 'demo' | 'live', userId: string, workspaceId: string) => `bane.support.draft.${mode}.${userId}.${workspaceId}`
+// `parked`: words not yet with the chat or filed (store.ts), sent on their own while the box still holds exactly them.
+const draftKey = (mode: 'demo' | 'live', userId: string, workspaceId: string, slot: 'draft' | 'parked' = 'draft') => `bane.support.${slot}.${mode}.${userId}.${workspaceId}`
 /** Forgets saved conversations and drafts: every account's (a sign-out), or only legacy slots from earlier releases. */
 export function forgetSaved(all: boolean) {
   try {
     for (const key of Object.keys(sessionStorage)) {
-      if (all && /^bane\.support\.(conversation|last|draft)\./.test(key)) sessionStorage.removeItem(key)
+      if (all && /^bane\.support\.(conversation|last|draft|parked)\./.test(key)) sessionStorage.removeItem(key)
       else if (!all && (/^bane\.support\.last\./.test(key) || (/^bane\.support\.conversation\./.test(key) && !/^bane\.support\.conversation\.[^.]+\.[^.]+$/.test(key)))) sessionStorage.removeItem(key)
     }
   } catch { /* Session-only. */ }
 }
-export function loadDraft(mode: 'demo' | 'live', userId: string, workspaceId: string): string {
-  try { return sessionStorage.getItem(draftKey(mode, userId, workspaceId)) ?? '' } catch { return '' }
+export function loadDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, slot: 'draft' | 'parked' = 'draft'): string {
+  try { return sessionStorage.getItem(draftKey(mode, userId, workspaceId, slot)) ?? '' } catch { return '' }
 }
-export function saveDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, draft: string) {
+export function saveDraft(mode: 'demo' | 'live', userId: string, workspaceId: string, draft: string, slot: 'draft' | 'parked' = 'draft') {
   try {
-    const key = draftKey(mode, userId, workspaceId)
+    const key = draftKey(mode, userId, workspaceId, slot)
     if (draft) sessionStorage.setItem(key, draft)
     else sessionStorage.removeItem(key)
   } catch { /* Session-only. */ }
@@ -95,6 +96,19 @@ const handoff = async (shareContent: boolean) => {
   return token
 }
 
+/** Files a message the chat can't take as a ticket for the team (POST /v1/contact-support with ticket): Nightmail's own
+ *  API, so it works while the support Worker is down. 429 is the person's hourly limit; anything else is kept and retried. */
+async function fileTicket(text: string): Promise<FiledTicket> {
+  try {
+    const { ticket } = await supportApi.contact({ shareContent: false, ticket: text })
+    if (!ticket) throw new FileError('unreachable')
+    return ticket
+  } catch (error) {
+    if (error instanceof FileError) throw error
+    throw new FileError(error instanceof ApiError && error.status === 429 ? 'capped' : 'unreachable')
+  }
+}
+
 export function createSocketTransport({ origin, userId, workspaceId, resume }: { origin: string; userId: string; workspaceId: string; resume?: string | null }): SupportTransport {
   forgetSaved(false)
   const key = storageKey(userId, workspaceId)
@@ -107,6 +121,24 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
   let socket: WebSocket | null = null, state: Connection = 'idle'
   let started: Started | null = saved?.socketUrl && fresh(saved.expiresAt) ? { conversationId: saved.conversationId, chatToken: '', socketUrl: saved.socketUrl, expiresAt: saved.expiresAt! } : null
   let wantCreate = false, connecting: Promise<void> | null = null
+  // A handoff not spent yet (its token lasts 10 minutes): retrying after the support service failed reuses it rather than
+  // signing another, so an outage doesn't use up the person's handoffs for the hour (10, api/src/support.ts) and keep the
+  // chat refused after the service is back.
+  let unspent: { token: string; at: number } | null = null
+  // The support Worker couldn't be reached last time: a new handoff (each counts against that same hourly limit, as every
+  // filed ticket does) waits until it answers again, asked with a request that spends nothing (an empty resume: 400).
+  let unreachable = false
+  const answers = async () => {
+    try { return (await fetch(`${origin}/chat/resume`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status < 500 }
+    catch { return false }
+  }
+  const nextHandoff = async () => {
+    if (unspent && Date.now() - unspent.at < 8 * 60_000) return unspent.token
+    if (unreachable && !await answers()) throw new StartError(0, 'NETWORK')
+    const token = await handoff(false)
+    unspent = { token, at: Date.now() }
+    return token
+  }
   let attempt = 0, retry: ReturnType<typeof setTimeout> | undefined, ping: ReturnType<typeof setInterval> | undefined
   let disposed = false, generation = 0
   const setState = (next: Connection, extra: Omit<Extract<TransportEvent, { type: 'connection' }>, 'type' | 'state'> = {}) => { state = next; emit({ type: 'connection', state: next, ...extra }) }
@@ -122,10 +154,12 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
           conversationId = found?.id ?? null
           if (!conversationId && !wantCreate) return null
         }
-        const token = await handoff(false)
-        return conversationId
+        const token = await nextHandoff()
+        const result = conversationId
           ? await post(origin, '/chat/resume', { conversationId, handoff: token })
           : await post(origin, '/chat/start', { handoff: token, resume: true })
+        unspent = null
+        return result
       } catch (error) {
         if (!(error instanceof StartError)) throw error
         // Stale or closed conversation, or an email conversation: forget it, then stay ready or start fresh if sending.
@@ -135,6 +169,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
           if (!wantCreate) return null
           continue
         }
+        if (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED') unspent = null
         if (tries === 0 && (error.code === 'HANDOFF_INVALID' || error.code === 'HANDOFF_USED')) continue
         throw error
       }
@@ -178,6 +213,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
         if (current !== generation) return
         if (error instanceof StartError && error.code === 'RATE_LIMITED') { setState('unavailable', { reason: 'RATE_LIMITED', retryAt: Date.now() + (error.retryAfter ?? 60) * 1000 }); return }
         if (error instanceof StartError && (error.code === 'NO_HANDOFF' || error.status >= 400 && error.status < 500 && error.status !== 408)) { setState('unavailable', { reason: error.code }); return }
+        unreachable = true
         schedule()
         return
       }
@@ -186,7 +222,7 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
       let opened = false
       const ws = socket = new WebSocket(started.socketUrl)
       ws.onopen = () => {
-        opened = true; attempt = 0
+        opened = true; attempt = 0; unreachable = false
         setState('open')
         ping = setInterval(() => send({ type: 'ping' }), 30_000)
       }
@@ -258,8 +294,30 @@ export function createSocketTransport({ origin, userId, workspaceId, resume }: {
       }
     },
     restart() { save(key, null); started = null; wantCreate = false; generation++; teardown(); attempt = 0; setState('ready') },
+    // The ticket's conversation is this person's chat now (Nightmail put the message in their open chat, or opened one):
+    // reconnecting resumes it, never starts another.
+    async file(text) {
+      const ticket = await fileTicket(text)
+      wantCreate = false
+      if (started?.conversationId !== ticket.conversationId) { started = null; save(key, { conversationId: ticket.conversationId }) }
+      return ticket
+    },
     dispose() { disposed = true; generation++; clearTimeout(retry); teardown(); window.removeEventListener('online', online); listeners.clear() },
     subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener) } },
+  }
+}
+
+/** No support Worker for this dashboard (supportOrigin() is null): refused from the start (a listener hears it as it
+ *  subscribes, so the panel never shows a loading state first), so every message is filed as a ticket for the team. */
+export function createUnavailableTransport(): SupportTransport {
+  const listeners = new Set<(event: TransportEvent) => void>()
+  const refused: TransportEvent = { type: 'connection', state: 'unavailable', reason: 'NOT_CONFIGURED' }
+  const refuse = () => { for (const listener of listeners) listener(refused) }
+  const unavailable = () => Promise.reject(new Error(`${productName} support isn’t available here.`))
+  return {
+    kind: 'live', connect: refuse, send: () => false, allowContent: async () => {}, readAction: unavailable, decideAction: unavailable, restart: refuse, file: fileTicket,
+    uploads: false, upload: unavailable, dispose: () => listeners.clear(),
+    subscribe(listener) { listeners.add(listener); listener(refused); return () => { listeners.delete(listener) } },
   }
 }
 

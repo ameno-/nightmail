@@ -1,57 +1,36 @@
 import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { useLocation } from 'react-router'
-import { MessageCircleQuestionMark, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import { chunk } from '../lib/preloadable'
 import { usePhone } from '../lib/media'
 import { Button, IconButton } from './ui'
 import { NightmailMark } from './NightmailLogo'
 import { productName } from '../../../api/src/brand'
 
-// The support chat's Help controls and the panel's host, in the dashboard shell (AppShell). The panel's code loads once the
-// page is idle (hover, focus or press warms it sooner); the conversation and its transport start when Help opens.
+// The support chat's Help controls and the panel's host, in the dashboard shell (AppShell) and on Get started, which has no
+// shell (onboarding). The panel's code loads once the page is idle (hover, focus or press warms it sooner); the
+// conversation and its transport start when Help opens.
 //
-// Where it runs: ?support=demo (kept for the browser session; ?support=off clears it) get the
-// scripted demo conversation. Hosted workspaces get the live support Worker by the build's VITE_SUPPORT_CHAT: "true" for
-// everyone (dev deploys), "staff" for Nightmail staff (the operator role) and workspaces Anomaly made free, unset for no one
-// (production until it is rolled out). ?support=<conversationId> opens the panel on that chat conversation; an email
-// conversation continues by email, so Help opens a conversation of its own instead.
+// Where it runs: every hosted workspace talks to the live support Worker; a self-hosted installation has no Help. Help is
+// the only way to reach support from the dashboard: what the chat can't take goes to the team as a ticket.
+// ?support=demo (kept for the browser session; ?support=off clears it) gets the scripted demo conversation, in development
+// and for Nightmail staff only. ?support=<conversationId> opens the panel on that chat conversation; an email conversation
+// continues by email, so Help opens a conversation of its own instead.
 const panel = chunk(() => import('../features/support'))
 const Panel = panel.page(module => module.SupportPanel)
 const modeKey = 'nightmail.support'
 export type SupportMode = 'demo' | 'live'
-export type PendingSupportOpen = { message?: string; shareContent?: boolean }
-
-let pendingOpen: PendingSupportOpen | null = null
-let activeOpener: (() => void) | null = null
-
-/** Opens the in-dashboard Help panel when support chat is enabled for this session; returns false otherwise. */
-export function openSupportChat(detail?: PendingSupportOpen): boolean {
-  if (!activeOpener) return false
-  if (detail?.message || detail?.shareContent) pendingOpen = detail
-  activeOpener()
-  window.dispatchEvent(new CustomEvent('nightmail:support-handoff'))
-  return true
-}
-
-/** Consumes any message/content-sharing request queued by openSupportChat(). */
-export function consumePendingSupportOpen(): PendingSupportOpen | null {
-  const next = pendingOpen
-  pendingOpen = null
-  return next
-}
 
 function readMode(hosted: boolean, staff: boolean) {
   const param = new URLSearchParams(window.location.search).get('support')
-  const flag = import.meta.env.VITE_SUPPORT_CHAT as string | undefined
-  const demoAllowed = import.meta.env.DEV || flag === 'true' || staff
+  const demoAllowed = import.meta.env.DEV || staff
   try {
     if (param === 'demo' && demoAllowed) sessionStorage.setItem(modeKey, 'demo')
     if (param === 'off' || !demoAllowed) sessionStorage.removeItem(modeKey)
   } catch { /* Session storage is unavailable: the parameter still applies to this load. */ }
   let stored: string | null = null
   try { stored = demoAllowed ? sessionStorage.getItem(modeKey) : null } catch { stored = demoAllowed && param === 'demo' ? 'demo' : null }
-  const live = hosted && (flag === 'true' || flag === 'staff' && staff)
-  const mode: SupportMode | null = stored === 'demo' ? 'demo' : live ? 'live' : null
+  const mode: SupportMode | null = stored === 'demo' ? 'demo' : hosted ? 'live' : null
   return { mode, resume: mode === 'live' && param?.startsWith('conv_') ? param : null }
 }
 
@@ -61,12 +40,6 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
   const [open, setOpen] = useState(Boolean(resume))
   const [used, setUsed] = useState(Boolean(resume))
   const [unread, setUnread] = useState(false)
-  useEffect(() => {
-    if (!mode) return
-    const openPanel = () => { setUsed(true); setOpen(true) }
-    activeOpener = openPanel
-    return () => { if (activeOpener === openPanel) activeOpener = null }
-  }, [mode])
   // The panel's code loads when the page is idle, so Help opens at once even on a first tap (a touch has no hover).
   useEffect(() => {
     if (!mode) return
@@ -80,15 +53,11 @@ export function useSupportChat({ hosted, staff }: { hosted: boolean; staff: bool
 }
 
 // What makes a control the chat's Help: it toggles the panel, warms its code first, and a dot marks a reply that arrived
-// while the chat was closed. The sidebar's Help row (AppShell) on a desktop; the top bar's button on a phone or tablet.
+// while the chat was closed. The sidebar's Help row (AppShell); a phone or tablet opens the chat from More, and ⌘K finds it.
 export function supportTriggerProps(chat: SupportChat) {
   return { id: 'support-trigger', className: 'support-trigger', 'aria-haspopup': 'dialog' as const, 'aria-expanded': chat.open, 'aria-controls': chat.used ? 'support-panel' : undefined,
     'aria-description': chat.unread && !chat.open ? 'New reply' : undefined, 'data-unread': chat.unread || undefined,
     onPointerEnter: chat.preload, onFocus: chat.preload, onPointerDown: chat.preload, onClick: () => chat.setOpen(!chat.open) }
-}
-export function SupportTrigger({ chat }: { chat: SupportChat }) {
-  const label = chat.open ? 'Close help' : chat.unread ? 'Help (new reply)' : 'Help'
-  return <IconButton {...supportTriggerProps(chat)} aria-description={undefined} variant="ghost" size="sm" label={label}><MessageCircleQuestionMark size={16} /></IconButton>
 }
 
 export function SupportHost({ chat }: { chat: SupportChat }) {

@@ -130,10 +130,11 @@ async function takeEarly(path: string, signal?: AbortSignal) {
     return response
   } finally { signal?.removeEventListener('abort', restore) }
 }
-// The request IDs of the last few failed API calls, newest first: Contact support sends them so support can find the errors.
+// The request IDs of the last few failed API calls, newest first: the support chat's handoff sends them so support can find
+// the errors. Only the API's own IDs: the handoff refuses anything else, and with it the chat.
 const failedRequests: string[] = []
 function rememberFailedRequest(id: string) {
-  if (!/^[\w.:-]{1,64}$/.test(id) || failedRequests[0] === id) return
+  if (!/^req_[0-9a-f]{32}$/.test(id) || failedRequests[0] === id) return
   failedRequests.unshift(id)
   failedRequests.length = Math.min(failedRequests.length, 5)
 }

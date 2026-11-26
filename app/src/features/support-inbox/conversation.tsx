@@ -1,7 +1,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode, type RefObject } from 'react'
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/react-query'
-import { AlertCircle, Bot, Check, ChevronRight, Clock, Hand, Image as ImageIcon, Lock, Paperclip, X } from 'lucide-react'
+import { AlertCircle, Bot, Check, ChevronRight, Clock, Hand, Image as ImageIcon, Lock, Paperclip, Ticket, X } from 'lucide-react'
 import { Button, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, StatusBadge, Textarea, useToast } from '../../components/ui'
 import { useKeyboardInset } from '../../components/ui/sheet'
 import { PrivateAddress } from '../../components/PrivateAddress'
@@ -149,7 +149,8 @@ function ApprovalPrompt({ conversationId, canAct }: { conversationId: string; ca
 /** Who wrote a message, as the chat shows them: the customer's words, the agent's or staff's, a note (staff's, or the
  *  triage agent's on an agent report), or the agent's held answer, a draft until someone decides. */
 type Role = 'customer' | 'agent' | 'staff' | 'note' | 'draft'
-type ChatMessage = { type: 'message'; key: string; m: SupportMessage; role: Role; author: string; first: boolean; last: boolean }
+/** `filedNext`: the next message of its run was filed too, and carries the run's one Filed mark. */
+type ChatMessage = { type: 'message'; key: string; m: SupportMessage; role: Role; author: string; first: boolean; last: boolean; filedNext?: boolean }
 type ChatRow = { type: 'day'; key: string; label: string } | { type: 'proposal'; key: string; at: string; text: string } | ChatMessage
 
 const day = (iso: string) => new Date(iso).toISOString().slice(0, 10)
@@ -205,7 +206,7 @@ function chatRows(detail: SupportDetail): ChatRow[] {
     if (entry.event) { rows.push({ type: 'proposal', key: entry.key, at: entry.at, text: `Waiting for approval: ${sentenceCase(String(entry.event.details.label ?? 'a change'))}` }); previous = null; continue }
     const m = entry.message!, { author, role } = describe(m, c)
     const row: ChatMessage = { type: 'message', key: entry.key, m, role, author, first: true, last: true }
-    if (previous && previous.author === author && previous.role === role && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false }
+    if (previous && previous.author === author && previous.role === role && role !== 'draft' && !m.email && !previous.m.email && Date.parse(m.at) - Date.parse(previous.m.at) < GROUP_MS) { previous.last = false; row.first = false; previous.filedNext = m.kind === 'filed' && previous.m.kind === 'filed' }
     rows.push(row)
     previous = row
   }
@@ -270,10 +271,14 @@ function Thread({ detail, canAct, actions, composer, onConfirm }: { detail: Supp
 }
 
 /** One message: its sender and time (the first of a run), then the customer's words in a bubble, ours as text under the
- *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent. */
+ *  mark, a note or a held answer as a card. Delivery shows only when it isn't plain: Queued, or Not sent; customer
+ *  messages filed while the chat couldn't answer are marked Filed, once under the last of a run. */
 function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: SupportConversation; canAct: boolean; actions: Actions; onEdit: (m: SupportMessage, fresh: boolean) => void }) {
   const { m, role } = row, customer = role === 'customer', pending = m.id.startsWith('pending:')
   const queued = m.author === 'staff' && m.kind !== 'note' && (m.delivery === 'queued' || pending)
+  // A message the support chat couldn't take, filed by the dashboard (kind filed), one mark for a run of them: why and
+  // when are in Activity.
+  const filed = customer && m.kind === 'filed' && !row.filedNext
   return <div className="sinbox-msg" data-role={role} data-first={row.first || undefined} data-last={row.last || undefined} data-email={m.email ? '' : undefined} data-pending={pending || undefined}>
     {row.first && <p className="sinbox-msg__meta">
       {!customer && <Mark name={row.author} agent={m.author === 'agent'} />}
@@ -285,9 +290,10 @@ function Message({ row, c, canAct, actions, onEdit }: { row: ChatMessage; c: Sup
       : role === 'draft' ? <div className="sinbox-msg__card sinbox-raised" data-draft=""><DraftLabel m={m} /><Body m={m} c={c} /><DraftFoot m={m} c={c} canAct={canAct} actions={actions} onEdit={onEdit} /></div>
       : role === 'note' ? <div className="sinbox-msg__card sinbox-raised"><Body m={m} c={c} /></div>
       : <div className="sinbox-msg__prose"><Body m={m} c={c} /></div>}
-    {(m.delivery === 'failed' || queued) && <div className="sinbox-msg__below">
+    {(m.delivery === 'failed' || queued || filed) && <div className="sinbox-msg__below">
       {m.delivery === 'failed' ? <span className="sinbox-delivery" data-state="failed"><AlertCircle size={12} aria-hidden="true" />Not sent</span>
-        : queued && <span className="sinbox-delivery"><Clock size={12} aria-hidden="true" />Queued</span>}
+        : queued ? <span className="sinbox-delivery"><Clock size={12} aria-hidden="true" />Queued</span>
+        : <span className="sinbox-delivery" title="Filed as a ticket: the chat couldn’t answer"><Ticket size={12} aria-hidden="true" />Filed</span>}
     </div>}
   </div>
 }
@@ -381,7 +387,8 @@ function eventText(e: SupportEvent, c: SupportConversation): string {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
     case 'opened': return c.channel === 'agent_feedback' || c.verification === 'agent' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
-    case 'ticket': return d.by === 'nightmail' ? `Ticket opened: this needs a person${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
+    // reason chat_unavailable: the dashboard filed a message the support chat couldn't take (api/src/support-conversations.ts fileChatTicket).
+    case 'ticket': return d.by === 'nightmail' ? `${d.reason === 'chat_unavailable' ? 'Filed: the chat couldn’t answer' : 'Ticket opened: this needs a person'}${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
     case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? `${who ?? 'Staff'} replied and took over from the agent` : `${who ?? 'Staff'} paused the agent`
     case 'resumed': return `${who ?? 'Staff'} handed back to the agent`
@@ -533,7 +540,7 @@ function CustomerPanel({ detail }: { detail: SupportDetail }) {
   const others = customer.conversations
   const target = detail.replyTarget
   const replies: ReactNode = c.channel === 'email' ? target.address ? <span className="sinbox-address"><PrivateAddress value={target.address} />{!target.verified && <StatusBadge status="Didn’t pass DMARC" tone="warning" />}</span> : '—'
-    : target.address ? 'Their chat, or by email once it’s closed' : 'Their chat'
+    : target.address ? <>Their chat, or <PrivateAddress value={target.address} /> once it’s closed</> : 'Their chat'
   const extra: [string, ReactNode][] = [
     ...c.channel !== 'agent_feedback' && c.status !== 'closed' ? [['Replies go to', replies] as [string, ReactNode]] : [],
     ...c.ticket ? [['Ticket', <span title={c.ticket.id}>{ticketText(c)}</span>] as [string, ReactNode]] : [],

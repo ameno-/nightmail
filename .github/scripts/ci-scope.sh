@@ -3,7 +3,9 @@
 set -euo pipefail
 all=false
 case "$GITHUB_EVENT_NAME" in
-  pull_request) base=$(git rev-parse HEAD^1) ;;
+  pull_request)
+    base=$(git rev-parse HEAD^1)
+    if [[ ${PR_FULL_CI:-} == true ]]; then all=true; fi ;;
   merge_group)
     tip=$(git ls-remote --exit-code origin refs/heads/dev | cut -f1)
     [[ $tip =~ ^[0-9a-f]{40}$ ]]
@@ -62,8 +64,8 @@ if $api || $dashboard || $sdk; then build=true; fi
 if $api || $dashboard; then preview=true; fi
 # The CLS fixture runs this API (migrations, server, read limits) and seeds its tables with raw SQL.
 if $api || $dashboard; then cls=true; fi
-# A landing batch builds on the PR; the queue classifies the combined diff normally.
-if [[ $GITHUB_EVENT_NAME == pull_request && ${GITHUB_HEAD_REF:-} == land/batch-* &&
+# Same-repository PRs build here; the queue classifies its combined diff independently.
+if [[ $GITHUB_EVENT_NAME == pull_request && ${PR_FULL_CI:-} != true &&
       -n ${PR_HEAD_REPO_ID:-} && $PR_HEAD_REPO_ID == "${GITHUB_REPOSITORY_ID:-}" ]]; then
   api=true sdk=true dashboard=true build=true
   acceptance=false cls=false preview=false support=false gateway=false
