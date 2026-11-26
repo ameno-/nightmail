@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useImperativeHandle, useRef, useState, useSyncEx
 import { Link, useLocation, useNavigate, useNavigationType, useParams, useSearchParams } from 'react-router'
 import { useInfiniteQuery, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { Archive, Bot, Check, CheckCheck, ChevronRight, CircleCheck, CircleX, Flag, Hand, Image as ImageIcon, Inbox, Info, Mail, MessageSquare, Paperclip, RefreshCw, Send, Ticket, Undo2, X } from 'lucide-react'
-import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, StatusBadge, StatusDot, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
+import { Button, ConfirmDialog, DataTable, Dialog, DropdownMenu, EmptyState, ErrorState, KeyValues, PageHeader, StatusBadge, Textarea, useToast, type Column, type MenuItem, type Tone } from '../../components/ui'
 import { PrivateAddress } from '../../components/PrivateAddress'
 import { ReceivedEmailPreview } from '../../components/EmailPreview'
 import { productName } from '../../../../api/src/brand'
@@ -14,7 +14,7 @@ import { useSearchDraft } from '../../lib/pagination'
 import { usePhone } from '../../lib/media'
 import { Markdown } from '../support/markdown'
 import { ActionsTrigger, StaffOnly } from '../operator/skeletons'
-import { channelOf, ConversationActions, ConversationBodySkeleton, InboxBody, InboxTabs, InboxToolbar, inboxColumnDefs, SupportConversationSkeleton, SupportInboxSkeleton, triageOf, viewOf } from './skeletons'
+import { channelOf, ConversationActions, ConversationBodySkeleton, InboxTabs, InboxToolbar, inboxColumnDefs, SupportConversationSkeleton, SupportInboxSkeleton, triageOf, viewOf } from './skeletons'
 
 // The support inbox (lazy, /support): Nightmail staff triage every support conversation. Needs you (the default) is
 // what only a person can move forward, most urgent first (api/src/support-inbox.ts); AI handling is what the agent owes
@@ -254,8 +254,6 @@ const Subject = ({ c, preview = true }: { c: SupportConversation; preview?: bool
   <span className="sinbox-subject__text" data-placeholder={c.subject || c.firstLine ? undefined : ''}>{titleOf(c)}</span>
   {preview && previewOf(c) && <Preview c={c} />}
 </span>
-const priorityTone: Record<string, Tone> = { P1: 'danger', P2: 'warning', P3: 'neutral' }
-const priorityOf = (c: SupportConversation) => c.ticket && !c.ticket.resolvedAt ? c.ticket.severity : null
 
 // ---------------------------------------------------------------- the list
 
@@ -270,8 +268,6 @@ export function SupportInboxPage() {
   // A search keeps the rows it replaces until its answer arrives; another tab never shows this one's.
   const list = useInfiniteQuery({ ...listQuery(view, q, channel), enabled: Boolean(role), staleTime: 5_000, refetchInterval: query => query.state.status === 'error' ? false : 30_000,
     placeholderData: (previous, query) => query?.queryKey[2] === view ? previous : undefined })
-  // The rail counts each channel before the channel filter (this view and search, every channel).
-  const everyChannel = useInfiniteQuery({ ...listQuery(view, q, ''), enabled: Boolean(role && channel), staleTime: 5_000 })
   const rows = flatten(list.data?.pages), counts = list.data?.pages[0]?.counts ?? null
   // Each view keeps its own selected row.
   const [selection, setSelection] = useState(() => ({ ...memory.selected }))
@@ -280,10 +276,11 @@ export function SupportInboxPage() {
   useEffect(() => { if (selected) memory.selected[view] = selected.id }, [view, selected?.id])
   const [confirming, setConfirming] = useState<Confirming | null>(null), [keysOpen, setKeysOpen] = useState(false)
   const actions = useInboxActions()
-  // The other views' first pages load once this one has, so switching tabs never waits.
+  // The other view's first page loads once this one has, so switching tabs never waits.
   useEffect(() => {
     if (!list.data || !role) return
-    for (const other of ['needs_you', 'agent', 'waiting', 'done', 'all'] as const) if (other !== view) void client.prefetchInfiniteQuery({ ...listQuery(other, ''), staleTime: 5_000 })
+    const other: InboxView = view === 'needs_you' ? 'all' : 'needs_you'
+    void client.prefetchInfiniteQuery({ ...listQuery(other, ''), staleTime: 5_000 })
   }, [Boolean(list.data), role])
   // The selected row is read ahead (once it has stayed selected a moment), and kept in view.
   useEffect(() => {
@@ -323,22 +320,21 @@ export function SupportInboxPage() {
     { ...def('subject'), render: c => <Subject c={c} />, cardRender: c => <Subject c={c} preview={false} /> },
     { ...def('preview'), render: c => <Preview c={c} /> },
     { ...def('status'), render: c => { const s = triageOf(c); return <StatusBadge status={s.text} tone={s.tone} /> }, cardRender: c => triageOf(c).text },
-    { ...def('priority'), render: c => { const p = priorityOf(c); return p ? <StatusDot tone={priorityTone[p] ?? 'neutral'}>{p}</StatusDot> : <span className="sinbox-faint">—</span> }, cardRender: c => priorityOf(c) },
     { ...def('activity'), render: c => <time className="nowrap" dateTime={lastActivity(c)} title={when(lastActivity(c))}>{ago(lastActivity(c))}</time> },
     { ...def('actions'), render: c => <DropdownMenu label="Conversation actions" title={titleOf(c)} items={menuItems(c, { canAct, actions, onConfirm: setConfirming, open: () => open(c) })} /> },
   ]
   const empty = q || channel ? <EmptyState title="No conversation matches" action={<Button onClick={() => { setSearch(''); setChannel('') }}>Clear filters</Button>} />
-    : <EmptyState title={{ needs_you: 'Nothing needs you', agent: 'The agent isn’t handling anything right now', waiting: 'Nobody is waiting on a customer', done: 'Nothing is done yet', all: 'No support conversations yet' }[view]} />
+    : <EmptyState title={view === 'needs_you' ? 'Nothing needs you' : 'No support conversations yet'} />
   return <>
     <PageHeader title="Support" />
     <div className="sinbox-page">
       <InboxTabs view={view} counts={counts} onChange={next => setParams(previous => { const params = new URLSearchParams(previous); if (next === 'needs_you') params.delete('view'); else params.set('view', next); return params }, { replace: true })} />
-      <InboxToolbar search={search} onSearch={setSearch} channel={channel} onChannel={setChannel} onShortcuts={() => setKeysOpen(true)} />
-      {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <InboxBody rows={rows} everyChannel={channel ? everyChannel.data && flatten(everyChannel.data.pages) : rows} channel={channel} setChannel={setChannel}>
-        <DataTable className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty} rowKeys={false}
+      <InboxToolbar search={search} onSearch={setSearch} channel={channel} onChannel={setChannel} />
+      {list.isError && !list.data ? <ErrorState error={list.error} onRetry={() => void list.refetch()} /> : <>
+        <DataTable key={view} className="sinbox-table" rows={rows} rowKey={c => c.id} columns={columns} selectedId={phone ? undefined : selected?.id} empty={empty} rowKeys={false}
           rowHref={c => `/support/${c.id}`} rowLabel={titleOf} onRowIntent={c => void prefetchConversation(client, c.id)} onRowFocus={phone ? undefined : c => setSelectedId(c.id)} />
         {list.hasNextPage && <Button className="sinbox-more" loading={list.isFetchingNextPage} onClick={() => void list.fetchNextPage()}>Load more</Button>}
-      </InboxBody>}
+      </>}
     </div>
     <ConfirmAction confirming={confirming} onClose={() => setConfirming(null)} actions={actions} />
     <ShortcutsDialog open={keysOpen} onClose={() => setKeysOpen(false)} />
