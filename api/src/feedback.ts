@@ -75,7 +75,7 @@ const Feedback = z.object({
   context: z.string().trim().max(1000).optional().describe('What you were trying to do, in a sentence or two.'),
 }).openapi('FeedbackRequest');
 const Answer = z.object({
-  to: z.string().nullable().describe('Who an answer is emailed to, masked (r•••@e•••.com): the person behind this credential, or for an API key the workspace\u2019s longest-standing owner. Null: no answer will be sent.'),
+  to: z.string().nullable().describe('Who an answer is emailed to: the person behind this credential, their address masked (r•••@e•••.com), or for an API key "an owner of this workspace". Null: no answer will be sent.'),
   reason: z.enum(['nobody', 'capped']).nullable().describe('Why none will be: nobody in the workspace can get support email, or today\u2019s answers are used up.'),
   next: z.string().describe('What happens now, in one sentence. Nothing more ever comes back through this call or tool.'),
 }).openapi('FeedbackAnswer');
@@ -103,8 +103,10 @@ function filedBy(a: Actor, row: Filer | undefined) {
 }
 
 /** What the filer is told: an answer by email to someone (masked), or why none will come. Never anything through the tool. */
-function answerOf(answer: 'email' | 'nobody' | 'capped', to: string | null): z.infer<typeof Answer> {
-  if (answer === 'email' && to) return { to: maskedAddress(to), reason: null, next: `If this needs an answer, ${productName} support emails it to ${maskedAddress(to)}, usually within 15 minutes. It never comes back through this tool: don't wait or call again for it; carry on with your task.` };
+function answerOf(answer: 'email' | 'nobody' | 'capped', to: string | null, owner: boolean): z.infer<typeof Answer> {
+  // An API key's answer goes to an owner: its holder learns no part of their address.
+  const whom = owner ? 'an owner of this workspace' : to ? maskedAddress(to) : null;
+  if (answer === 'email' && whom) return { to: whom, reason: null, next: `If this needs an answer, ${productName} support emails it to ${whom}, usually within 15 minutes. It never comes back through this tool: don't wait or call again for it; carry on with your task.` };
   return { to: null, reason: answer === 'capped' ? 'capped' : 'nobody', next: answer === 'capped'
     ? `Filed for the ${productName} team. Today's answers are used up, so it won't be answered today. Nothing comes back through this tool: carry on with your task.`
     : `Filed for the ${productName} team. Nobody in this workspace can get support email, so no answer will be sent. Nothing comes back through this tool: carry on with your task.` };
@@ -167,7 +169,7 @@ export async function fileFeedback(db: Runtime['db'], a: Actor, body: z.infer<ty
       INSERT INTO support_feedback(conversation_id, workspace_id, credential, credential_id, operation, request_id, redacted, answer_to, answer, answer_state)
         SELECT id, ${a.workspaceId}, ${credential}, ${a.keyId}, ${body.operation ?? null}, ${body.requestId ?? null}, ${redacted}, ${to?.id ?? null}, ${answer}, ${answer === 'email' ? 'waiting' : null} FROM conversation
       RETURNING created_at::text AS created_at`);
-    return { ticketId, answer: answerOf(answer, to?.email ?? null), redacted, createdAt: new Date(row!.created_at).toISOString() };
+    return { ticketId, answer: answerOf(answer, to?.email ?? null, person === null), redacted, createdAt: new Date(row!.created_at).toISOString() };
   });
 }
 

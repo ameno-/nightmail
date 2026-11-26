@@ -1,9 +1,10 @@
 import { createRoute, z } from '@hono/zod-openapi';
 import { sql, type SQL } from 'drizzle-orm';
 import { ApiError, databaseCodeOf, errors, log, logError, response, security, transientDatabaseError, type App, type Ctx, type DbExecutor, type Runtime } from './core.js';
-import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, TICK, WAKE_QUEUES } from './health-thresholds.js';
+import { CAMPAIGNS, DATABASE, DLQ, JOBS, JOBS_LATE, QUEUE, QUEUES, REQUESTS, SQLSTATES, SUPPORT_AI, TICK, WAKE_QUEUES } from './health-thresholds.js';
 import { countDatabaseError, LATENCY_BUCKETS, WRITE_LIMITS } from './health-counters.js';
-import { slackCard } from './operator-alerts.js';
+import { slackCard, supportCostAlert } from './operator-alerts.js';
+import { aiCostToday } from './support-ai-cost.js';
 import { disabledSettings } from './config.js';
 import { postSlack } from './reputation-alerts.js';
 
@@ -54,6 +55,8 @@ const KINDS = {
   'database-lock-waits': { emoji: ':card_file_box:', label: 'Lock waits', severity: 'warning', unit: 'sessions', section: 'database' },
   'database-disk': { emoji: ':minidisc:', label: 'Database disk', severity: 'critical', unit: 'share', section: 'database' },
   'database-refusing': { emoji: ':rotating_light:', label: 'Database refusing', severity: 'critical', unit: 'seconds', section: 'database' },
+  // Read in the database probe. A warning, so the tick posts no card of its own: operator-alerts.ts posts one a UTC day.
+  'support-ai-cost': { emoji: ':money_with_wings:', label: 'Support AI cost', severity: 'warning', unit: 'usd', section: 'database' },
 } as const satisfies Record<string, { emoji: string; label: string; severity: Severity; unit: string; section: Section }>;
 type Kind = keyof typeof KINDS;
 const isKind = (kind: string): kind is Kind => Object.hasOwn(KINDS, kind);
@@ -68,6 +71,7 @@ const count = (n: number) => Math.round(n).toLocaleString('en-US');
 export const span = (seconds: number) => seconds < 90 ? `${Math.round(seconds)} s` : seconds < 5_400 ? `${Math.round(seconds / 60)} min` : `${Math.round(seconds / 360) / 10} h`;
 const took = (ms: number) => ms < 1_000 ? `${Math.round(ms)} ms` : span(ms / 1000);
 const percent = (share: number) => `${Math.round(share * 1000) / 10}%`;
+const dollars = (usd: number) => `$${usd.toFixed(2)}`;
 const perSecond = (rate: number) => `${rate >= 10 ? Math.round(rate) : Math.round(rate * 10) / 10}/s`;
 // Identifiers pass only as letters, digits and the punctuation of job types, error codes, IDs and route templates;
 // anything else is "other". In a card they are shown as code, so Slack reads no emphasis or emoji into them.
@@ -83,7 +87,7 @@ type CampaignRow = { id: string; workspaceId: string; state: string; total: numb
   /** The provider account's send rate. */ account: number | null; /** The rate the release planner reads, shown beside the others and never compared with. */ planned: number | null;
   accepted: number | null; delivered: number | null; bounced: number | null; complained: number | null };
 type CounterRow = { kind: string; key: string; n: number; errors: number; ms: number; slowest: number; n5: number; errors5: number; slowest5: number; verySlow5: number; stormMinutes: number; stormRate: number; hist: number[] | null };
-type Database = { heldDomains?: string[]; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
+type Database = { heldDomains?: string[]; /** What the support AI cost since UTC midnight, in US dollars. */ supportAiToday?: number; connections: number; maxConnections: number; longTransactions: number; oldestTransactionSeconds: number; slowQueries: number; lockWaits: number; sizeBytes: number };
 /** What one tick measured. A probe that failed is null: unknown, which is not the same as fine. */
 export type Sample = { queues: QueueSample[]; late: Late[] | null; failed: Failed[] | null; campaigns: CampaignRow[] | null; counters: CounterRow[] | null; database: Database | null };
 /**
@@ -286,8 +290,10 @@ export function evaluate(sample: Sample, memory: Memory, now: number, diskBytes:
 
   let database: Rollup['database'] = null;
   if (sample.database) {
-    const { heldDomains, ...d } = sample.database;
+    const { heldDomains, supportAiToday, ...d } = sample.database;
     for (const domain of heldDomains ?? []) find('link-domain-held', domain, 1, `Marketing releases using ${id(domain)} are paused after a confirmed DBL listing.`, DATABASE.remindMinutes);
+    if (supportAiToday !== undefined && supportAiToday >= SUPPORT_AI.dailyLineUsd)
+      find('support-ai-cost', null, supportAiToday, `${dollars(supportAiToday)} since midnight UTC, past the ${dollars(SUPPORT_AI.dailyLineUsd)} daily line.`, SUPPORT_AI.remindMinutes);
     if (held('database-connections', d.maxConnections > 0 && d.connections >= d.maxConnections * DATABASE.connectionShare, DATABASE.sustain))
       find('database-connections', null, d.connections, `${count(d.connections)} of ${count(d.maxConnections)}.`, DATABASE.remindMinutes);
     if (d.oldestTransactionSeconds >= DATABASE.transactionSeconds)
@@ -356,7 +362,7 @@ async function measure(runtime: Pick<Runtime, 'db' | 'config'>, queues: QueueSam
       (SELECT hist FROM h WHERE h.kind=m.kind AND h.key=m.key) AS hist
     FROM m GROUP BY m.kind,m.key`)).rows);
   const activity = sql`pg_stat_activity WHERE datname=current_database() AND pid<>pg_backend_pid()`;
-  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
+  const database = await probe(db, 'database', async tx => (await tx.execute<Database>(sql`SELECT ARRAY(SELECT subject FROM deliverability_checks WHERE held_at IS NOT NULL) AS "heldDomains",${aiCostToday} AS "supportAiToday",(SELECT count(*) FROM pg_stat_activity WHERE datname=current_database())::int AS connections,
       current_setting('max_connections')::int AS "maxConnections",(SELECT count(*) FROM ${activity} AND xact_start<now()-interval '1 minute')::int AS "longTransactions",
       coalesce((SELECT extract(epoch FROM now()-min(xact_start)) FROM ${activity}),0)::int AS "oldestTransactionSeconds",
       (SELECT count(*) FROM ${activity} AND state='active' AND query_start<now()-interval '30 seconds')::int AS "slowQueries",
@@ -487,6 +493,10 @@ export async function healthTick(runtime: Pick<Runtime, 'db' | 'config'>, input:
           sent_at=CASE WHEN a.severity='warning' AND NOT (a.key=ANY(${sql.param([...previousCritical])}::text[])) THEN NULL ELSE a.sent_at END`);
       return { rows, recovered };
     });
+    // The support AI past its daily line: one card to the operators' Slack that UTC day (operator-alerts.ts), however
+    // many ticks find it. Health lists the warning itself.
+    const spend = findings.find(f => f.kind === 'support-ai-cost');
+    if (spend && url) await run(1, tx => supportCostAlert(tx, spend.value, SUPPORT_AI.dailyLineUsd));
     const known = new Map(held.map(a => [a.key, a]));
     const critical = findings.filter(f => f.severity === 'critical');
     const canClear = (a: Held) => wasPaged(a) && a.age - a.unseen >= TICK.longMinutes * 60;

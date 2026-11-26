@@ -102,13 +102,15 @@ export interface SupportPlatform {
   feedbackRequest(conversationId: string, requestId: string): Promise<PlatformReply>;
   feedbackRelated(conversationId: string): Promise<PlatformReply>;
   feedbackTriage(conversationId: string, note: TriageNoteInput): Promise<PlatformReply<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>>;
+  /** What one reading of a report cost (its model turns and US dollars): sent once, after it ends. */
+  feedbackUsage(conversationId: string, usage: { turns: number; costUsd: number }): Promise<PlatformReply<{ conversationId: string; turns: number; costUsd: number }>>;
   /** Agent reports to answer by email (api/src/feedback-triage.ts): each one's email conversation, claimed (at most three times). */
   agentAnswersDue(limit: number): Promise<PlatformReply<{ data: AgentAnswer[] }>>;
 }
 /** What Nightmail made of a reply to a staff email (api/src/support-staff-mail.ts staffReply). */
 export type StaffReply = { reply: false } | { reply: true; notes: number; ignored: 'unverified' | 'not_staff' | 'no_conversation' | 'empty' | 'automated' | 'limited' | null };
 /** An agent's report that asks something, to answer by email: the person's own conversation, its first message the report (untrusted). */
-export type AgentAnswer = { conversationId: string; messageId: string; reportConversationId: string; filedAt: string; filedBy: string | null; subject: string | null; text: string;
+export type AgentAnswer = { conversationId: string; messageId: string; reportConversationId: string; filedAt: string; credential: 'apiKey' | 'agentToken' | 'mcp' | 'dashboard'; credentialEnd: string | null; subject: string | null; text: string;
   person: { userId: string; email: string; name: string | null }; workspace: { id: string; name: string } };
 /** An agent feedback report to triage: Nightmail's facts, and its text as its filer wrote it (untrusted). */
 export type FeedbackReport = { conversationId: string; ticketId: string; filedAt: string; operation: string | null; requestId: string | null; text: string };

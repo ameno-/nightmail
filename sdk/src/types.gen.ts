@@ -7183,7 +7183,7 @@ export type FeedbackReceipt = {
  */
 export type FeedbackAnswer = {
     /**
-     * Who an answer is emailed to, masked (r•••@e•••.com): the person behind this credential, or for an API key the workspace’s longest-standing owner. Null: no answer will be sent.
+     * Who an answer is emailed to: the person behind this credential, their address masked (r•••@e•••.com), or for an API key "an owner of this workspace". Null: no answer will be sent.
      */
     to: string | null;
     /**

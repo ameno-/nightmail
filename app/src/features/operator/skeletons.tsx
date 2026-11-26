@@ -318,6 +318,10 @@ const STEP_SLOTS = ['OK', 'Notice', 'Warn', 'Restrict', 'Pause']
 const GRADE_SLOTS = ['A+', 'A', 'B', 'C', 'D', 'F', 'Warmup']
 const slots = (prefix: string, n: number, extra: Omit<GlassRowDef, 'key'> = {}) => Array.from({ length: n }, (_, i): GlassRowDef => ({ key: `${prefix}:${i}`, ...extra }))
 export const glassGroups: GlassGroupDef[] = [
+  // What the support AI costs (api/src/support-ai-cost.ts): its own group under the tiles, not inside Support's tile, the
+  // board's full width so every figure reads whole (operator.css .glass-ai).
+  { key: 'ai', title: 'Support AI cost', to: ['/support', 'Support'], className: 'glass-ai', rows: [{ key: 'today', label: 'Today (UTC)' }, { key: 'week', label: '7 days' }, { key: 'month', label: '30 days', spark: true },
+    { key: 'answered', label: 'Average per conversation' }, { key: 'top', note: 'Most expensive · 30 days' }, ...slots('top', 3)] },
   { key: 'sending', title: 'Sending & receiving', to: ['/operator?view=health', 'Health'], rows: [{ key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
     { key: 'received', label: 'Received · 24 h', spark: true }, { key: 'queued', label: 'Queued' }, { key: 'ramp', label: 'On the ramp' }, ...slots('campaign', 2, { meter: true })] },
   { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }, { key: 'paused', label: 'Paused senders' },
@@ -358,10 +362,10 @@ function GlassRegionRow({ row, total = false }: { row: GlassRegionFill; total?: 
 }
 /** A placeholder one line of text tall, so the text that replaces it takes the same box. */
 const SkeletonLine = ({ width }: { width: number }) => <span className="glass-skel-line"><Skeleton width={width} height={12} /></span>
-type GlassGroupDef = { key: string; title: string; to?: [href: string, label: string]; rows: GlassRowDef[] }
+type GlassGroupDef = { key: string; title: string; to?: [href: string, label: string]; rows: GlassRowDef[]; className?: string }
 /** Groups of 40px rows in as many columns as fit: a metric row each, a row of labelled cells, or a fixed note. */
 function GlassGroupList({ groups, row: fillRow }: { groups: GlassGroupDef[]; row?: (group: string, row: string) => GlassFill }) {
-  return <div className="glass">{groups.map(group => <section key={group.key} className="glass-group" aria-label={group.title}>
+  return <div className="glass">{groups.map(group => <section key={group.key} className={group.className ? `glass-group ${group.className}` : 'glass-group'} aria-label={group.title}>
     <SectionHeader title={group.title} actions={groupLink(group.to)} />
     {group.rows.map(def => {
       if (def.note) return <p key={def.key} className="glass-note">{def.note}</p>

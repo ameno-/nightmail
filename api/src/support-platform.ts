@@ -41,11 +41,13 @@ const OPERATOR_ROUTES: [method: string, path: RegExp][] = [
   ['POST', /^\/v1\/operator\/support\/staff-mail\/staff-[0-9a-f]{24}-[0-9]{1,6}\/failed$/],
   ['POST', /^\/v1\/operator\/support\/staff-mail\/replies$/],
   // The feedback triage agent (src/feedback-triage.ts): the reports due, and for one report its request trace, the
-  // reports beside it and its one note. Nothing else: no route that sends, replies, resolves or changes an account.
+  // reports beside it, its one note and what reading it cost. Nothing else: no route that sends, replies, resolves or
+  // changes an account.
   ['POST', /^\/v1\/operator\/support\/feedback\/due$/],
   ['GET', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/requests\/req_[0-9a-f]{32}$/],
   ['GET', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/related$/],
   ['POST', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/triage$/],
+  ['POST', /^\/v1\/operator\/support\/feedback\/conv_[a-z2-7]{26}\/usage$/],
   // Agent reports that ask something (src/feedback-triage.ts): their email conversations, claimed for the support agent.
   ['POST', /^\/v1\/operator\/support\/agent-answers\/due$/],
 ];
@@ -81,7 +83,7 @@ export type FeedbackReport = { conversationId: string; ticketId: string; filedAt
 /** The triage agent's note on a report: its words, a suggested classification, and earlier reports from the same workspace. */
 export type TriageNoteInput = { summary: string; cause: string; classification: 'bug' | 'docs_gap' | 'neither' | 'question'; duplicates: string[] };
 /** An agent's report that asks something, to answer by email: the person's own conversation, its first message the report (untrusted). */
-export type AgentAnswer = { conversationId: string; messageId: string; reportConversationId: string; filedAt: string; filedBy: string | null; subject: string | null; text: string;
+export type AgentAnswer = { conversationId: string; messageId: string; reportConversationId: string; filedAt: string; credential: 'apiKey' | 'agentToken' | 'mcp' | 'dashboard'; credentialEnd: string | null; subject: string | null; text: string;
   person: { userId: string; email: string; name: string | null }; workspace: { id: string; name: string } };
 /** A staff email the support platform sends (src/support-staff-mail.ts): a new thread, or a reply in threadId under replyToMessageId. */
 export type StaffEmail = { key: string; threadId: string | null; replyToMessageId: string | null; subject: string; text: string; html: string };
@@ -267,6 +269,9 @@ export function supportPlatform(dispatch: (request: Request, conversation?: stri
     /** The triage agent's one note on a report: 201 once, 409 after. */
     feedbackTriage: (conversationId: string, note: TriageNoteInput) =>
       call<{ conversationId: string; ticketId: string | null; messageId: string; classification: string; createdAt: string }>('POST', `/v1/operator/support/feedback/${encodeURIComponent(String(conversationId))}/triage`, note),
+    /** What one reading of a report cost: its model turns and US dollars, added to the support AI's spend. */
+    feedbackUsage: (conversationId: string, usage: { turns: number; costUsd: number }) =>
+      call<{ conversationId: string; turns: number; costUsd: number }>('POST', `/v1/operator/support/feedback/${encodeURIComponent(String(conversationId))}/usage`, usage),
     /**
      * A /v1/support request for one registered conversation: a GET, or a write (POST /v1/support/scope or notes). The
      * conversation rides on the runtime, never in the request; Nightmail derives the customer from its row and answers

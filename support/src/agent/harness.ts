@@ -10,6 +10,14 @@ export type HarnessEvent =
   | { type: 'tool.end'; callId: string; tool: string; ok: boolean };
 /** inputTokens: uncached input plus cache writes; cacheReadTokens: cached input, billed at a tenth. */
 export type Usage = { inputTokens: number; outputTokens: number; cacheReadTokens: number; costUsd: number };
+const SPENT = Symbol('spent');
+/** Marks an error a turn threw with what its model calls had already spent, so the caller still counts it. */
+export function withSpent(error: unknown, usage: Usage) {
+  if ((usage.costUsd > 0 || usage.inputTokens > 0 || usage.outputTokens > 0) && error !== null && typeof error === 'object' && Object.isExtensible(error)) Object.defineProperty(error, SPENT, { value: { ...usage } });
+  return error;
+}
+/** What a turn that threw had spent (withSpent), or null. */
+export const spentBy = (error: unknown): Usage | null => error !== null && typeof error === 'object' ? (error as { [SPENT]?: Usage })[SPENT] ?? null : null;
 export type TurnInput = {
   /** What the agent reads as the next user message (the customer's words, or a harness note in brackets). */
   text: string;
