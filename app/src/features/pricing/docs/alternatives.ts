@@ -16,12 +16,15 @@ import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
 // doesn't are in the Markdown copy. Made from the comparisons' data alone (compare/<slug>.ts), so a vendor in the registry
 // (registry.ts, ALTERNATIVES_VENDORS) is a page.
 
-/** Services on the page's table besides Nightmail and the vendor: the lowest priced at the middle size, so the table stays
+/** Services on the page's table besides Nightmail and the vendor: the lowest of those with a price read at the middle size, so the table stays
  *  one calm table on a phone (eight rows, four columns). The rest are in the Markdown copy. */
 export const SHOWN_OTHERS = 6
 
 /** "Nov 2026", for a title. */
 /** A small count in words, as a caption says it: "six alternatives". */
+/** Under a table, what a dash means: no price was read for that size (a service may still sell one: Bird's deposit plan at
+ *  10,000). One sentence for every page of several services, so they can't drift. */
+export const DASH = ' A dash: no price read for that size.'
 const spelled = (n: number) => ['no', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten'][n] ?? String(n)
 const month = (iso: string) => new Date(`${iso}T00:00:00Z`).toLocaleDateString('en-GB', { month: 'short', year: 'numeric', timeZone: 'UTC' })
 
@@ -62,7 +65,7 @@ export function vendorAlternatives(c: Comparison): Doc {
   const claim = `${productName} costs less than each service here at every size shown.`
   // Priced by contacts, the columns are contacts, and Nightmail's bill follows the emails they're sent: said per column.
   const perColumn = m.per === 'contact' ? ` ${productName}’s figures are for ${ours.slice(0, -1).map(b => formatCount(b.u.sent)).join(', ')} and ${formatCount(ours.at(-1)!.u.sent)} emails a month (${m.sendsPerContact} to each contact); the others are priced by contacts, with ${m.seats === 1 ? '1 teammate' : `${m.seats} teammates`}.` : ''
-  const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? ' A dash: no plan priced at that size.' : ''
+  const dash = (rows: (typeof group)[number][]) => rows.some(r => r.bills.some(b => b.theirsCents === null)) ? DASH : ''
   const visible: Section = {
     id: 'alternatives', title: `${vendor} alternatives, a month at three sizes`, quiet: true,
     blocks: [table([self, ...shown], [`${claim} ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month.${perColumn} The others: monthly list prices before tax, each one’s least expensive plan for the size, checked ${when}; each name links to its comparison and the page it was read on.${dash([self, ...shown])}`])],
@@ -79,7 +82,7 @@ export function vendorAlternatives(c: Comparison): Doc {
     { id: 'every', title: `${groupOf(c).title}: every one compared, at the same sizes`, blocks: [table([self, ...group.filter(row => row !== self)], [
       `${assume}, each service’s least expensive plan that holds it. Monthly list prices before tax, no promotions, read ${when} on each service’s pricing page (its comparison names the page and quotes it). ${productName}: ${nightmail.perThousand} per 1,000 emails, sent or received, after ${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month. ${claim}${dash(group)}`,
     ])] },
-    ...left.length ? [{ id: 'left', title: 'Not on the page’s table', blocks: [{ kind: 'p' as const, text: [`The page lists the ${shown.length} lowest priced at ${formatCount(sizes[1]!)}${m.per === 'contact' ? ' contacts' : ' emails a month'} besides ${vendor}, so it stays one table on a phone. The others here: ${left.map(r => r.o.offer.vendor).join(', ')}. Every comparison is on `, { text: 'the comparisons page', href: '/compare' }, '.'] }] }] : [],
+    ...left.length ? [{ id: 'left', title: 'Not on the page’s table', blocks: [{ kind: 'p' as const, text: [`The page lists the ${shown.length} lowest of those with a price read at ${formatCount(sizes[1]!)}${m.per === 'contact' ? ' contacts' : ' emails a month'}, besides ${vendor}, so it stays one table on a phone. The others here: ${left.map(r => r.o.offer.vendor).join(', ')}. Every comparison is on `, { text: 'the comparisons page', href: '/compare' }, '.'] }] }] : [],
     ...lacks ? [{ id: 'lacks', title: lacks.question, blocks: [{ kind: 'p' as const, text: [lacks.answer] }] }] : [],
   ]
 

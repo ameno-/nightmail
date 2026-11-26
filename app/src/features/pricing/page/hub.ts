@@ -4,6 +4,7 @@ import { dayOf, formatCount, type Comparison } from '../prices.ts'
 import { billAt, GROUPS, ORDERED } from './comparison.ts'
 import { START } from '../start.ts'
 import { ALTERNATIVES_VENDORS } from '../docs/registry.ts'
+import { DASH } from '../docs/alternatives.ts'
 import { factsSection } from './facts.ts'
 import type { CardWords } from '../../../../link-card.ts'
 import { plain, type PageDoc, type Table, type Text } from './shape.ts'
@@ -33,7 +34,7 @@ function table(spec: (typeof TABLES)[number]): Table {
   const ours: Text[] = priced[0]!.bills.map(b => [{ ours: b.ours, sent: b.u.sent, received: b.u.received }])
   return {
     kind: 'table', numeric: [1, 2, 3],
-    caption: [`By the price at ${formatCount(spec.sizes[1]!)}. A dash: no plan priced at that size.`],
+    caption: [`By the price at ${formatCount(spec.sizes[1]!)}.${DASH}`],
     head: [spec.unit, ...spec.sizes.map(formatCount)],
     rows: [{ cells: [[productName], ...ours] }, ...priced.map(({ c, bills }) => ({ cells: [[{ text: c.offer.vendor, href: c.path }], ...bills.map(b => [b.theirs ?? '—'])] }))],
   }

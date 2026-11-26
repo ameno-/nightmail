@@ -46,6 +46,10 @@ export const renamedDocsPage = (pathname: string) => {
   return Object.hasOwn(RENAMED_OPERATIONS, id) ? `/docs/api/${RENAMED_OPERATIONS[id]}` : null;
 };
 
+/** Where an address the site moved goes, or null: an operation's reference page under its old name, and the alternatives
+ *  pages' directory itself (/alternatives, with or without its slash), which is /compare, the page that lists them. */
+export const movedPage = (pathname: string) => renamedDocsPage(pathname) ?? (pathname === '/alternatives' || pathname === '/alternatives/' ? '/compare' : null);
+
 export function withSiteIndex(llms: string, site: string): string {
   const lines = site.trim();
   if (!lines) return llms;
