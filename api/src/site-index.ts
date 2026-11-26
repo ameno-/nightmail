@@ -12,14 +12,19 @@ export const SITE_INDEX = '/llms-site.txt';
  *  /health: the docs page reads the installation's address from it before it shows anything, and a search engine
  *  rendering the page fetches only what robots.txt allows. (/v1/me, refused the same way, leaves the docs signed out.) */
 export const CRAWL_DISALLOW = ['/v1/', '/api/', '/mcp', '/internal/', '/unsubscribe/', '/i/'];
-/** The pages search engines may index: the homepage, the price pages, the docs and the legal pages. Every other address
- *  the dashboard's shell answers is a signed-in screen (Overview, Domains, Connect …), which a crawler sees only as the
- *  sign-in, so the Worker and the Node server send it with X-Robots-Tag: noindex. */
-export const isPublicPage = (pathname: string) => pathname === '/' || /^\/(?:pricing|compare|docs|legal)(?:\/|$)|^\/alternatives\//.test(pathname) || SITE_ROOT_PAGES.includes(pathname);
-
 /** The site's own pages at the top level that the build writes (app/price-pages.ts: the use-case pages, docs/agents.ts).
- *  The Worker serves them from the build's files, as it does the pages under isSitePage's directories. */
+ *  The Worker serves them from the build's files, as it does the pages under isSitePage's directories. The build stops
+ *  when this list and the pages it writes differ (price-pages.ts). */
 export const SITE_ROOT_PAGES = ['/email-for-ai-agents', '/cheapest-email-api', '/free-email-api'];
+/** The public pages, as one pattern: the homepage, the price calculator and every page under /pricing, /compare,
+ *  /alternatives, /docs and /legal, and the top-level pages above. Search engines may index them; every other address
+ *  the dashboard's shell answers is a signed-in screen (Overview, Domains, Connect …), which a crawler sees only as the
+ *  sign-in, so the Worker and the Node server send it with X-Robots-Tag: noindex. A visitor with no trace of a session
+ *  isn't asked for one on them: public/theme.js's early check (vite.config.ts fills this pattern in at build) and the
+ *  app's (data/live.ts, asksOnlyIfLikely) both read it, and the layout gate (app/scripts/cls.mjs) fails a page it matches
+ *  that asks. The build stops if a page it writes isn't matched (price-pages.ts, site-pages.ts). */
+export const PUBLIC_PAGE = new RegExp(`^/$|^/(?:pricing|compare|alternatives|docs|legal)(?:/|$)|^(?:${SITE_ROOT_PAGES.map(page => page.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})$`);
+export const isPublicPage = (pathname: string) => PUBLIC_PAGE.test(pathname);
 /** One of those, or its address with a trailing slash (which the build's files answer with a redirect). */
 export const isSiteRootPage = (pathname: string) => SITE_ROOT_PAGES.some(page => pathname === page || pathname === `${page}/`);
 /** An address under the directories the build writes the site's own pages into (app/price-pages.ts): a comparison

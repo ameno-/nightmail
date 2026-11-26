@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin } from 'vite'
 import { productName, publicOrigin } from '../api/src/brand.ts'
-import { RENAMED_OPERATIONS } from '../api/src/site-index.ts'
+import { isPublicPage, RENAMED_OPERATIONS } from '../api/src/site-index.ts'
 import { legalMarkdown, renderLegal } from './legal-markdown.ts'
 import { linkCard, maxLine, shareTitle, withCard, type CardWords } from './link-card.ts'
 import { appFiles, pageCss, paint, paintedCss } from './painted-page.ts'
@@ -109,6 +109,9 @@ export function sitePages({ address }: { address: string | null }): Plugin {
           card: { name: `legal-${doc.slug}`, lines: titleLines(doc.title), caption: `Updated ${doc.updated}.` }, painted: { html: doc.html },
           twin: [`# ${doc.title}`, `Canonical page: ${publicOrigin}/legal/${doc.slug}`, `Updated ${doc.updated}. Effective ${doc.effective}.`, doc.body].join('\n\n') + '\n' })),
       ]
+      // Each is a public page, where a visitor isn't asked for a session (api/src/site-index.ts, PUBLIC_PAGE).
+      const unlisted = pages.filter(page => !isPublicPage(page.path)).map(page => page.path)
+      if (unlisted.length) return this.error(`api/src/site-index.ts's PUBLIC_PAGE leaves out ${unlisted.join(', ')}: a visitor would be asked for a session there.`)
       // The painted pages: the app's files out of them (the boot script starts them), the CSS the legal page loads in the
       // app, and the page drawn by the app's own components (prerender.tsx, with the same Markdown plugin as the app's build).
       const files = appFiles(source)

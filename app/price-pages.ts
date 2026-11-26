@@ -3,7 +3,7 @@ import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { runnerImport, type Plugin } from 'vite'
 import { productName, publicOrigin as canonicalOrigin } from '../api/src/brand.ts'
-import { CRAWL_DISALLOW } from '../api/src/site-index.ts'
+import { CRAWL_DISALLOW, isPublicPage, SITE_ROOT_PAGES } from '../api/src/site-index.ts'
 import { linkCard, shareTitle, withCard } from './link-card.ts'
 import { appFiles, FIRST_FONTS, pageCss, paint } from './painted-page.ts'
 import { ENTRIES } from './src/features/pricing/compare/index.ts'
@@ -57,7 +57,13 @@ export function pricePages(words: Pick<typeof readable, 'llmsFull' | 'markdownFi
       const problems = [...ENTRIES.flatMap(entry => entryProblems(entry, today, PANEL_IDS)), ...docProblems()]
       if (new Set(ENTRIES.map(entry => entry.slug)).size !== ENTRIES.length) problems.push('Two comparisons have the same slug.')
       for (const [path] of PRICE_LINKS) if (!PRICE_PAGES.some(page => page.path === path)) problems.push(`live.ts links ${path}, which is no price page.`)
+      // Every page written here is a public page, where a visitor isn't asked for a session (public/theme.js, data/live.ts),
+      // and the top-level ones are the API's list of them (site-index.ts, SITE_ROOT_PAGES), which the Worker serves.
+      const roots = PRICE_PAGES.map(page => page.path).filter(path => /^\/[^/]+$/.test(path) && path !== '/pricing' && path !== '/compare')
+      for (const path of roots) if (!SITE_ROOT_PAGES.includes(path)) problems.push(`${path} is a page at the top level that api/src/site-index.ts's SITE_ROOT_PAGES leaves out.`)
+      for (const path of SITE_ROOT_PAGES) if (!roots.includes(path)) problems.push(`api/src/site-index.ts's SITE_ROOT_PAGES names ${path}, which the build doesn't write.`)
       for (const page of PRICE_PAGES) {
+        if (!isPublicPage(page.path)) problems.push(`${page.path} isn't a public page to api/src/site-index.ts (PUBLIC_PAGE): a visitor would be asked for a session there.`)
         if (!(page.searchTitle?.length <= 60)) problems.push(`${page.path}'s title is over 60 characters: ${page.searchTitle}`)
         if (!(page.description?.length <= 160)) problems.push(`${page.path}'s description is over 160 characters: ${page.description}`)
       }
