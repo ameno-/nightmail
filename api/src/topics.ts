@@ -60,16 +60,26 @@ export async function topicRule(db: DbExecutor, workspaceId: string, topicId: st
   if (!row) throw new ApiError(422, 'TOPIC_NOT_FOUND', `Topic ${topicId} was not found${active ? ' or is archived' : ''}.`, 'topicId');
   return row;
 }
-/** Whether a topic's sends reach a contact, as far as the topic goes, for one topic known in advance: written as EXISTS or
- *  NOT EXISTS so a whole audience is read with one join (a contact without a choice gets the topic's default). */
-export const topicReaches = (topic: TopicRule, workspace: SQL, contact: SQL) => topic.subscribedByDefault
-  ? sql`NOT EXISTS (SELECT 1 FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.contact_id = ${contact} AND ct.topic_id = ${topic.id} AND NOT ct.subscribed)`
-  : sql`EXISTS (SELECT 1 FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.contact_id = ${contact} AND ct.topic_id = ${topic.id} AND ct.subscribed)`;
-/** The same for a topic each row names (`topic`, an ID or NULL for none): accept and dispatch, a few rows at a time. Archived
- *  topics count; an unknown one reaches nobody. */
+/** Each contact's recorded choice about one topic known in advance, beside it as `topic_choice` (at most one row: the
+ *  table's key), for a whole audience read by one join; nothing without a topic. Read it with topicChoiceReaches. */
+export const topicChoiceJoin = (topic: TopicRule | null | undefined, workspace: SQL, contact: SQL) => topic
+  ? sql`LEFT JOIN audience_contact_topics topic_choice ON topic_choice.workspace_id = ${workspace} AND topic_choice.topic_id = ${topic.id} AND topic_choice.contact_id = ${contact}` : sql``;
+/** Whether the topic's sends reach a contact, as far as the topic goes: its choice, or the topic's default without one. */
+export const topicChoiceReaches = (topic: TopicRule) => sql`coalesce(topic_choice.subscribed, ${topic.subscribedByDefault})`;
+/** The same for a topic each row names (`topic`, an ID or NULL for none): accept and dispatch, a few rows at a time, each
+ *  read by key. Archived topics count; an unknown one reaches nobody. */
 export const topicAllows = (workspace: SQL, contact: SQL, topic: SQL) => sql`(${topic} IS NULL OR coalesce(
-  (SELECT ct.subscribed FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.contact_id = ${contact} AND ct.topic_id = ${topic}),
+  (SELECT ct.subscribed FROM audience_contact_topics ct WHERE ct.workspace_id = ${workspace} AND ct.topic_id = ${topic} AND ct.contact_id = ${contact}),
   (SELECT t.subscribed_by_default FROM audience_topics t WHERE t.workspace_id = ${workspace} AND t.id = ${topic}), false))`;
+/** The topics a send names (`ids`, distinct): TOPIC_NOT_FOUND, at `field(i)` of the first, unless the workspace has each
+ *  and none is archived. One read per request, never per recipient. */
+export async function assertTopics(db: DbExecutor, workspaceId: string, ids: (string | undefined)[], field: (index: number) => string) {
+  const named = [...new Set(ids.filter((id): id is string => !!id))];
+  if (!named.length) return;
+  const { rows } = await db.execute<{ id: string }>(sql`SELECT id FROM audience_topics WHERE workspace_id = ${workspaceId} AND id = ANY(${sql.param(named)}::text[]) AND archived_at IS NULL`);
+  const found = new Set(rows.map(row => row.id)), index = ids.findIndex(id => id && !found.has(id));
+  if (index >= 0) throw new ApiError(422, 'TOPIC_NOT_FOUND', `Topic ${ids[index]} was not found or is archived.`, field(index));
+}
 
 /**
  * Records choices about topics for a contact its caller holds FOR UPDATE: each choice is stored, and each one that

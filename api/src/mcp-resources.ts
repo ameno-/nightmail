@@ -55,7 +55,7 @@ const resources: Record<string, { label: string; actions: Record<string, string>
     list: 'listContactLists', get: 'getContactList', create: 'createContactList', update: 'updateContactList', delete: 'deleteContactList', members: 'listListMembers', addMembers: 'addListMembers', removeMember: 'removeListMember',
     topics: 'listTopics', createTopic: 'createTopic', updateTopic: 'updateTopic',
   } },
-  newsletters: { label: 'Newsletters: a contact list with a sender. Its issues are ordinary campaigns to that list (campaigns create with audience.listId); there are no issue actions', actions: {
+  newsletters: { label: 'Newsletters: lists with a sender. An issue is a campaign to the list (audience.listId), not an action here', actions: {
     list: 'listNewsletters', get: 'getNewsletter', create: 'createNewsletter', update: 'updateNewsletter', delete: 'deleteNewsletter',
   } },
   segments: { label: 'Dynamic contact segments', actions: {
@@ -146,7 +146,7 @@ function fieldSummary(field: Schema, defs: Schema, depth = 0): Schema {
 }
 
 export const describeTool: Tool = {
-  name: 'describe_tool', description: 'Get the full input and output schemas for a resource action, including optional filters and body fields, and the permission it needs. Pass these directly to the resource tool.',
+  name: 'describe_tool', description: 'The full input and output schemas of a resource action, optional fields included, and the permission it needs.',
   inputSchema: { type: 'object', properties: { resource: { type: 'string' }, action: { type: 'string' } }, required: ['resource', 'action'], additionalProperties: false },
   annotations: { readOnlyHint: true, openWorldHint: false },
 };
@@ -173,8 +173,8 @@ export function resourceTools(operations: ReadonlyMap<string, McpOperation>): To
       return { properties: { action: { const: action }, ...Object.fromEntries(fields.map(([k, v]) => [k, fieldSummary(v as Schema, $defs as Schema)])) }, ...(required.length ? { required } : {}) };
     });
     // The optional retry key and the write confirmation, like pagination, are uniform. List them once per resource instead
-    // of on every write; each write's branch still requires confirm.
-    const shared=Object.fromEntries(['cursor','limit','idempotencyKey','confirm'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,k==='idempotencyKey'?{type:'string'}:k==='confirm'?{const:true}:{}]]:[]}));
+    // of on every write, each by name alone (describe_tool has their schemas); each write's branch still requires confirm.
+    const shared=Object.fromEntries(['cursor','limit','idempotencyKey','confirm'].flatMap(k=>{const op=visible.find(x=>x.op.tool.inputSchema.properties?.[k])?.op;return op?[[k,k==='confirm'?{const:true}:{}]]:[]}));
     // A resource with one action (sendFeedback) takes that action's arguments, summarized the same way, and no action.
     if (Object.keys(actions).length === 1) {
       const { properties: { action: _action, ...fields }, required } = oneOf[0]! as { properties: Schema; required?: string[] };

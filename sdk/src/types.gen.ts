@@ -1460,6 +1460,10 @@ export type SendEmailInput = {
         value: string;
     }>;
     /**
+     * kind marketing only (422 TOPIC_REQUIRES_MARKETING otherwise): the topic it is about (listTopics). A recipient who opted out of the topic is refused (reason topic_unsubscribed), and its one-click unsubscribe opts out of this topic only.
+     */
+    topicId?: string;
+    /**
      * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
     screen?: boolean;
@@ -1546,6 +1550,10 @@ export type BatchSendEmailItem = {
         name: string;
         value: string;
     }>;
+    /**
+     * kind marketing only (422 TOPIC_REQUIRES_MARKETING otherwise): the topic it is about (listTopics). A recipient who opted out of the topic is refused (reason topic_unsubscribed), and its one-click unsubscribe opts out of this topic only.
+     */
+    topicId?: string;
     /**
      * Request outbound harm screening at accept time for live transactional mail. Hosted live screening is operator-controlled and cannot be disabled by setting this field to false. Simulated mail is not screened. A positive reject verdict fails the request synchronously with 422 CONTENT_REJECTED_SPAM (nothing queued); during a temporary outage of both classifiers, the message is accepted (202) and held unscreened until a classifier answers. Mandatory Hosted screening with no classifier configured returns retryable 503 CONTENT_SCREEN_UNAVAILABLE with Retry-After.
      */
@@ -1875,6 +1883,10 @@ export type CampaignDraft = {
      */
     unsubscribePageUrl?: string;
     /**
+     * The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.
+     */
+    topicId?: string;
+    /**
      * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).
      */
     requiredNotice?: boolean;
@@ -2066,6 +2078,10 @@ export type CreateCampaignInput = {
      * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
      */
     unsubscribePageUrl?: string;
+    /**
+     * The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.
+     */
+    topicId?: string;
     /**
      * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).
      */
@@ -2524,6 +2540,10 @@ export type CampaignUpdateInput = {
          * Your own unsubscribe or preference page: HTTPS, no user name, password, whitespace or unsubscribe_token parameter, at most 1,000 characters. The footer's Unsubscribe link opens it with unsubscribe_token=<token> added; your page records the opt-out by POSTing that token to /unsubscribe/<token> on this API (idempotent). List-Unsubscribe keeps this API's one-click address, which records the opt-out itself and, opened in a browser, confirms it and then continues to your page. Omit to use the hosted page.
          */
         unsubscribePageUrl?: string;
+        /**
+         * The topic the campaign is about (listTopics): it skips contacts who opted out of it, and its one-click unsubscribe opts out of this topic only. Not on a required notice.
+         */
+        topicId?: string;
         /**
          * A required notice: a message every recipient must get whatever their marketing choice, such as a change to terms, prices or taxes, never a promotion. It goes to everyone in the audience who is not suppressed, people who unsubscribed from marketing included, without an Unsubscribe link or List-Unsubscribe header, and is paced, limited and paused like any campaign. Only where an operator turned required notices on for the workspace (requiredNotices in getWorkspaceSettings); 403 REQUIRED_NOTICES_OFF otherwise. Sending or scheduling one needs confirmRequiredNotice. Turned off later, a launched notice pauses before releasing anyone more (pause reason REQUIRED_NOTICES_OFF) and is resumed or rescheduled only once they are on again. Resumed after a list-probe quarantine, it goes on to everyone captured for it (never deliveredOnly).
          */
@@ -15915,7 +15935,7 @@ export type UnsubscribeOneClickError = UnsubscribeOneClickErrors[keyof Unsubscri
 
 export type UnsubscribeOneClickResponses = {
     /**
-     * Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form).
+     * Marketing consent is now unsubscribed (RFC 8058 one-click or the confirmation form); for a link from mail with a topic, the contact is unsubscribed from that topic only.
      */
     200: UnsubscribeConfirmationHtml;
 };

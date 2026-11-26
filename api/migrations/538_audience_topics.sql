@@ -3,7 +3,9 @@
 -- marketing_consent stays the switch for everything ("Unsubscribe from all").
 -- - audience_topics: subscribed_by_default is what a contact who never chose gets, fixed when the topic is made. A topic is
 --   archived (archived_at), never deleted, so sends launched with it keep honoring its opt-outs and it can come back.
--- - audience_contact_topics: one row per choice a contact made or was given; no row means the topic's default.
+-- - audience_contact_topics: one row per choice a contact made or was given; no row means the topic's default. Keyed by
+--   topic before contact, so one contact's choices are found by the whole key and one topic's by its prefix (a campaign's
+--   audience reads a topic's choices whole, src/audience.ts).
 -- - audience_consent_audit.topic_id: the topic a consent decision was about; NULL is all marketing, as every row so far.
 -- - operation_unsubscribe_tokens.topic_id: the topic of the mail an unsubscribe link came in; NULL is all marketing.
 --
@@ -29,7 +31,7 @@ CREATE TABLE audience_contact_topics (
   topic_id text NOT NULL,
   subscribed boolean NOT NULL,
   updated_at timestamptz NOT NULL DEFAULT now(),
-  PRIMARY KEY (workspace_id, contact_id, topic_id)
+  PRIMARY KEY (workspace_id, topic_id, contact_id)
 );
 ALTER TABLE audience_consent_audit ADD COLUMN topic_id text;
 ALTER TABLE operation_unsubscribe_tokens ADD COLUMN topic_id text;
