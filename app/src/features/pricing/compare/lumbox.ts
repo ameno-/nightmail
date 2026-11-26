@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, nightmail, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs Lumbox (/compare/lumbox): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // Lumbox's own pages on CHECKED.
@@ -40,5 +40,4 @@ export const lumbox: Entry = {
   ],
   // Lumbox's readers first see the agents' inboxes, receiving and the allowances.
   panels: ['agent', 'receive', 'free', 'domain', 'send', 'route', 'team'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

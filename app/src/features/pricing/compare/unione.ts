@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, readOn, tierSizes, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs UniOne (/compare/unione): a comparison's whole entry (prices.ts, Entry). Every figure was read on UniOne's
 // own pricing page on CHECKED: the Standard plan's sizes, and the rate for each 1,000 past each one.
@@ -49,5 +49,4 @@ export const uniOne: Entry = {
   ],
   // UniOne's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'agent', 'campaign', 'domain', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

@@ -10,7 +10,7 @@ import { closeAfterRefusal, nodeLogFacetLane, nodeRuntime } from './adapters/nod
 import { sql } from 'drizzle-orm';
 import { dispatchWakeKey } from './dispatcher.js';
 import { clientIpHeader, clientNetworkHeader, legacyClientIpHeaders } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isPublicPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { admissionDenied, admissionPeer, ApiError, digest, log, logError, guardPublicRequest, setLogContext, snsIngress } from './core.js';
 import { brotliCompress, constants, gzip } from 'node:zlib';
 import { promisify } from 'node:util';
@@ -87,8 +87,10 @@ try {
     return assets(c, async () => {
       const response = await pages(c, async () => {
         const shell = await dashboard(c, next);
-        // A comparison or an operation with no page of its own is not found, as on the Worker (src/worker.ts).
+        // A comparison or an operation with no page of its own is not found, and a signed-in screen stays out of search, as
+        // on the Worker (src/worker.ts, site-index.ts).
         if (shell) c.res = isMissingComparePage(c.req.path) || isMissingDocsPage(c.req.path) ? new Response(shell.body, { status: 404, headers: shell.headers }) : shell;
+        if (shell && !isPublicPage(c.req.path)) c.res.headers.set('x-robots-tag', 'noindex');
       });
       if (response) c.res = response;
     });

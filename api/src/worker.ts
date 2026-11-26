@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isPublicPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -311,6 +311,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async inboxState(conversationId: string) { return (await this.platform()).inboxState(conversationId); }
   async pullOutbox(conversationId?: string) { return (await this.platform()).pullOutbox(conversationId); }
   async generalAnswers(conversationId?: string) { return (await this.platform()).generalAnswers(conversationId); }
+  async filedConversation(conversationId: string) { return (await this.platform()).filedConversation(conversationId); }
   async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
   async staffMail() { return (await this.platform()).staffMail(); }
   async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
@@ -376,7 +377,10 @@ export default {
       // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
       // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
       if (isMissingComparePage(pathname) || isMissingDocsPage(pathname)) return untransformed(shell, request, 404);
-      return untransformed(shell, request);
+      // A signed-in screen (site-index.ts): a crawler sees the sign-in under its address, so it stays out of search.
+      const page = untransformed(shell, request);
+      if (!isPublicPage(pathname)) page.headers.set('x-robots-tag', 'noindex');
+      return page;
     }
     // A linked campaign image (src/linked-images.ts) is the same bytes for every reader: once answered, this colo keeps it
     // and answers it again before admission, the database or storage.

@@ -54,8 +54,9 @@ function rooms(c: Comparison) {
 
 /** Nightmail's wordmark, read as the word. */
 export const Mark = ({ className }: { className: string }) => <NightmailWordmark className={`cb-mark ${className}`} title="Nightmail" />
-/** The headline, with the wordmark in the place of the word. */
-export const Claim = ({ text }: { text: string }) => <>{text.split('Nightmail').map((part, i) => <span key={i}>{i > 0 && <Mark className="cb-mark-title" />}{part}</span>)}</>
+/** The headline, with the wordmark in the place of the word: the word is there as text too, unseen, so a crawler and a
+ *  screen reader read the heading whole (an image's name isn't the heading's text), and the wordmark is hidden from them. */
+export const Claim = ({ text }: { text: string }) => <>{text.split('Nightmail').map((part, i) => <span key={i}>{i > 0 && <><span className="sr-only">Nightmail</span><NightmailWordmark className="cb-mark cb-mark-title" /></>}{part}</span>)}</>
 
 /** A price as a row of pigeonholes on one scale: the competitor's fills every one, Nightmail's its share. They fill and
  *  empty a pigeonhole at a time, at the tiles' cadence, from where the bar ends (each one's --k: its place in the

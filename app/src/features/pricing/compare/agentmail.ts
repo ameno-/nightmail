@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, readOn, type Entry, type Offer } from '../prices.ts'
+import { fact, readOn, type Entry, type Offer } from '../prices.ts'
 
 // Nightmail vs AgentMail (/compare/agentmail): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // AgentMail's own pages (pricing.md is its pricing page's text) on CHECKED.
@@ -44,5 +44,4 @@ export const agentmail: Entry = {
   ],
   // AgentMail's readers first see the agents' inboxes, receiving and the API.
   panels: ['agent', 'receive', 'send', 'free', 'domain', 'team', 'route'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} agent inboxes, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

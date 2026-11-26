@@ -1,4 +1,4 @@
-import { dayOf, fact, formatCount, listOf, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
+import { fact, formatCount, nightmail, readOn, type Entry, type Offer, type Tier } from '../prices.ts'
 
 // Nightmail vs AhaSend (/compare/ahasend): a comparison's whole entry (prices.ts, Entry). Every figure was read on
 // AhaSend's own pages on CHECKED (pricing.md is its pricing page's text). Pro is $10 a month with 25,000 emails, then
@@ -41,5 +41,4 @@ export const ahasend: Entry = {
   ],
   // AhaSend's readers first see the API, the allowances and receiving.
   panels: ['send', 'free', 'receive', 'route', 'agent', 'campaign', 'domain'],
-  description: `Monthly prices at ${listOf(sizes.map(formatCount))} emails, checked ${dayOf(CHECKED)}, and what each one includes.`,
 }

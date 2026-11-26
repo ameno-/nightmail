@@ -1,6 +1,6 @@
 // (With extensions: the build's config imports this file, price-pages.ts.)
 import { COMPARISONS, OFFERS } from './compare/index.ts'
-import { claim, formatCount, listOf, money, nightmail, nightmailBill, quote, theirPrice, type Comparison } from './prices.ts'
+import { claim, formatCount, lastChecked, listOf, money, nightmail, nightmailBill, quote, theirPrice, type Comparison } from './prices.ts'
 
 /** A page's link-preview card: a picture of the page as it opens (scripts/price-cards.mjs makes it), named by a hash of
  *  every figure and claim on it, so when a price changes the build asks for a new card (price-pages.ts) rather than
@@ -15,13 +15,19 @@ function boardCard(c: Comparison) {
   return card(`compare-${c.slug}`, `The Nightmail vs ${c.offer.vendor} board under the headline “${claim(c).replaceAll('\u00a0', ' ')}”: a month at ${at}, Nightmail ${ours} and ${c.offer.vendor} ${theirs}.`, [ours, theirs])
 }
 
-export type PricePage = { path: string; file: string; title: string; description: string; card: { file: string; alt: string }; comparison: Comparison | null }
+export type PricePage = { path: string; file: string; title: string; searchTitle: string; description: string; card: { file: string; alt: string }; comparison: Comparison | null; modified: string }
+const vendors = listOf([...new Set(OFFERS.map(offer => offer.vendor))])
+const free = `${formatCount(nightmail.freeSent)} sent and ${formatCount(nightmail.freeReceived)} received free a month`
 /** Each page's address, the HTML file the build writes for it (served at that address by Workers Assets and by
- *  api/src/server.ts) and its title, description and card: the browser tab, search results and link previews. The
- *  calculator, then a page for every comparison (compare/index.ts). */
+ *  api/src/server.ts), its name on the site (title), and its title, description and card in the browser tab, search
+ *  results and link previews (searchTitle, at most 60 characters, and description, at most 160: price-pages.ts checks
+ *  both), and the last day any figure on it was read (modified: the sitemap's lastmod and the page's dateModified). The
+ *  calculator, then a page for every comparison (compare/index.ts; prices.ts, searchWords). */
 export const PRICE_PAGES: PricePage[] = [
-  { path: '/pricing', file: 'pricing.html', title: 'Price calculator', comparison: null,
-    description: `What your email costs on Nightmail, beside Mailchimp and Resend. ${nightmail.perThousand} per 1,000 emails; contacts and teammates are free.`,
+  { path: '/pricing', file: 'pricing.html', title: 'Price calculator', comparison: null, modified: OFFERS.map(offer => offer.checked).sort().at(-1)!,
+    searchTitle: `Nightmail pricing: ${nightmail.perThousand} per 1,000 emails, sent or received`,
+    description: [`${nightmail.perThousand} per 1,000 emails, sent or received, after ${free}. Contacts and teammates are free. Compare ${vendors}.`,
+      `${nightmail.perThousand} per 1,000 emails, sent or received, after ${free}. Contacts and teammates are free.`].find(text => text.length <= 160)!,
     card: card('pricing', `The Nightmail price board under the headline “What Nightmail costs at your size”: a month at ${formatCount(opening.sent)} emails to ${formatCount(opening.contacts)} contacts, Nightmail ${bill}, ${listOf(OFFERS.flatMap(offer => { const q = quote(offer, opening); return q.kind === 'price' ? [`${offer.name} ${money(q.payg?.cents ?? q.cents)}`] : [] }))}.`, []) },
-  ...COMPARISONS.map(c => ({ path: c.path, file: `compare/${c.slug}.html`, title: c.title, description: c.description, card: boardCard(c), comparison: c })),
+  ...COMPARISONS.map(c => ({ path: c.path, file: `compare/${c.slug}.html`, title: c.title, searchTitle: c.searchTitle, description: c.description, card: boardCard(c), comparison: c, modified: lastChecked(c) })),
 ]

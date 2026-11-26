@@ -67,6 +67,13 @@ export type SupportAction = {
 };
 
 /** The methods of Nightmail's SupportPlatform entrypoint, as this Worker calls them over RPC. */
+/**
+ * A chat as Nightmail holds it (GET /v1/operator/support/conversations/{id}/filed): `filed` when Nightmail opened it
+ * from a message the dashboard filed and this Worker never registered it; `messages` the customer's filed messages,
+ * oldest first, already with staff.
+ */
+export type FiledConversation = { id: string; status: 'open' | 'ticketed' | 'closed'; filed: boolean; user: { id: string; name: string | null; email: string | null };
+  workspace: { id: string; name: string; role: 'owner' | 'admin' | 'member' } | null; page: string | null; requestIds: string[]; messages: { id: string; text: string; at: string }[] };
 export interface SupportPlatform {
   verifyWake(token: string, conversationId: string): Promise<boolean>;
   /** A staff download of one screenshot: Nightmail's short-lived token for this conversation and attachment. */
@@ -85,6 +92,8 @@ export interface SupportPlatform {
   pullOutbox(conversationId?: string): Promise<PlatformReply<{ data: OutboxReply[] }>>;
   /** Conversations whose sender asked, from the sign-in link, to be answered by email instead (one conversation's, after its wake). */
   generalAnswers(conversationId?: string): Promise<PlatformReply<{ data: { conversationId: string; messageId: string; requestedAt: string }[] }>>;
+  /** A chat as Nightmail holds it, with the messages the dashboard filed while the chat couldn't take them (api/src/support-conversations.ts). */
+  filedConversation(conversationId: string): Promise<PlatformReply<FiledConversation>>;
   markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed'): Promise<PlatformReply<{ id: string; delivery: 'sent' | 'failed'; deliveredAt: string | null }>>;
   // One path to a human (api/src/support-staff-mail.ts): the staff emails Nightmail wrote, and each one sent.
   staffMail(): Promise<PlatformReply<{ data: StaffEmail[] }>>;
