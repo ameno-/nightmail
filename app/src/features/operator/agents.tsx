@@ -39,7 +39,7 @@ export function OperatorAgentsPage() {
     // The client's name is the connection's own claim; the approval dialog says so.
     { ...def('agent'), render: row => <span className="op-cell" title={`${agentName(row.agent)} (as the connection names itself)`}><bdi>{agentName(row.agent)}</bdi></span>, cardRender: row => agentName(row.agent) },
     { ...def('approved'), render: row => <span className="nowrap" title={when(row.approvedAt)}>{relativeTime(row.approvedAt)}</span>, cardRender: row => `Approved ${relativeTime(row.approvedAt)}` },
-    { ...def('expires'), render: row => <span className="nowrap" title={when(row.expiresAt)}>{relativeTime(row.expiresAt)}</span>, cardRender: row => `expires ${relativeTime(row.expiresAt)}` },
+    { ...def('expires'), render: row => <span className="nowrap" title={when(row.expiresAt)}>{relativeTime(row.expiresAt)}</span>, cardRender: row => `Expires ${relativeTime(row.expiresAt)}` },
     { ...def('used'), render: row => row.lastUsedAt ? <span className="nowrap" title={when(row.lastUsedAt)}>{relativeTime(row.lastUsedAt)}</span> : <span className="muted">Not yet</span>,
       cardRender: row => row.lastUsedAt ? `Last used ${relativeTime(row.lastUsedAt)}` : 'Not used yet' },
     { ...def('actions'), render: row => <DropdownMenu label="Agent actions" title={agentName(row.agent)} items={[{ label: 'Revoke…', destructive: true, onSelect: () => { menu.current = document.activeElement as HTMLElement | null; setRevoking(row) } }]} /> },
@@ -107,6 +107,6 @@ function Review({ agent, confirmed, onConfirmed, disabled }: { agent: SupportAge
       <li><X size={14} strokeWidth={2.5} aria-hidden /><span>Never: {agent.never.charAt(0).toLowerCase() + agent.never.slice(1)}</span></li>
     </ul>
     <p className="op-agent-note muted">Recorded as yours, via agent. Lasts {agent.days} days.</p>
-    <Checkbox checked={confirmed} onCheckedChange={onConfirmed} disabled={disabled} label={`This is my agent, and it shows ${agent.userCode}`} />
+    <Checkbox checked={confirmed} onCheckedChange={onConfirmed} disabled={disabled} label={<span>This is my agent, and it shows <span className="nowrap">{agent.userCode}</span></span>} />
   </div>
 }

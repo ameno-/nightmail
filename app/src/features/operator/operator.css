@@ -338,6 +338,8 @@ a.glass-event__link:focus-visible { background: var(--color-well-hover); text-de
 .op-agent-grants li > svg { flex-shrink: 0; height: 1lh; }
 .op-agent-grants li[data-can] > svg { color: var(--color-success); }
 .op-agent-note { margin: 0; font-size: var(--text-sm); line-height: var(--leading-sm); }
+/* The checkbox's label fills its row (44 px on a touch screen), so the whole row beside the box ticks it. */
+.op-agent-review .ui-check-field > label { align-self: stretch; display: flex; align-items: center; }
 /* Narrower than 360 px the header keeps one row: Copy for your agent becomes its icon, its name still its label. */
 @media (max-width: 359px) {
   .ui-button.op-agents-copy { width: var(--control-height); padding: 0; }

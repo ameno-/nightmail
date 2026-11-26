@@ -250,12 +250,12 @@ const notesTabs = [...baseTabs, { value: 'notes', label: 'UI notes' }]
 export const useOperatorTabs = () => useSession()?.identity?.uiNotes === true ? notesTabs : baseTabs
 
 // Your agents (/operator/agents, ./agents, reached from the support inbox's menu): your own agents approved for the
-// support inbox (api/src/support-agents.ts). A phone's card shows the agent, when it was approved and when it expires,
-// its last use, and its menu at the end.
+// support inbox (api/src/support-agents.ts). A phone's card shows the agent, then when it was approved, when it expires
+// and its last use, a line each (two on one line cut each other short at 320 px), and its menu at the end.
 export const agentColumnDefs: SkeletonColumn[] = [
   { key: 'agent', label: 'Agent', card: 'title' },
   { key: 'approved', label: 'Approved', width: 168, card: 'line' },
-  { key: 'expires', label: 'Expires', width: 168, card: 'inline' },
+  { key: 'expires', label: 'Expires', width: 168, card: 'line' },
   { key: 'used', label: 'Last used', width: 144, card: 'line' },
   { key: 'actions', label: '', width: 56, card: 'end' },
 ]
