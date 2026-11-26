@@ -310,6 +310,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async mirrorState(conversationId: string, state: Parameters<SupportPlatformApi['mirrorState']>[1]) { return (await this.platform()).mirrorState(conversationId, state); }
   async inboxState(conversationId: string) { return (await this.platform()).inboxState(conversationId); }
   async pullOutbox(conversationId?: string) { return (await this.platform()).pullOutbox(conversationId); }
+  async generalAnswers(conversationId?: string) { return (await this.platform()).generalAnswers(conversationId); }
   async markDelivery(conversationId: string, messageId: string, status: 'sent' | 'failed') { return (await this.platform()).markDelivery(conversationId, messageId, status); }
   async staffMail() { return (await this.platform()).staffMail(); }
   async staffMailSent(key: string, sent: { threadId: string; messageId: string }) { return (await this.platform()).staffMailSent(key, sent); }
