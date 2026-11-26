@@ -60,6 +60,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { liveSource, seed, start } from './cls-fixture.mjs';
+import { isPublicPage } from '../../api/src/site-index.ts';
 
 // The comparisons' look this build has: from their data unless VITE_PRICE_PAGES=board (features/pricing/page/switch.ts
 // reads the same variable).
@@ -968,7 +969,8 @@ async function measure(browser, job, fx) {
     page.on('request', request => {
       const url = request.url();
       if (/^https?:\/\//i.test(url) && !url.startsWith(origin)) problems.push(`external request ${url}`);
-      if (!job.user && url === origin + '/v1/me' && /^\/(?:$|docs(?:\/|$)|pricing\/?$|compare\/)/.test(new URL(page.url()).pathname))
+      // Every public page, as public/theme.js and data/live.ts read them (api/src/site-index.ts, PUBLIC_PAGE).
+      if (!job.user && url === origin + '/v1/me' && isPublicPage(new URL(page.url()).pathname))
         problems.push('Public page asked for /v1/me without a sign-in hint');
     });
     // A guard that makes a write fail on purpose expects its one 500 (expected500), and says so itself if it doesn't come.

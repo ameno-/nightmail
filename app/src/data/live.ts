@@ -3,6 +3,7 @@ import { ApiError, type MailRoute, type RoutingTestResult, type Api, type PageRe
 import type { Agent, ApiKey, AppPassword, AuditEntry, CreatedAppPassword, DomainQuota, Topic, WorkspaceSettings } from './types'
 import type { CreatedInbox, Inbox, InboxMessageDetail, InboxMessagePage, LogDirection, LogEntry, SenderScore } from './types'
 import { headerPrefix, productName } from '../../../api/src/brand'
+import { isPublicPage } from '../../../api/src/site-index'
 import { analytics } from '../lib/analytics'
 import { webhookPatchBody } from '../features/settings/webhook-patch'
 import { countPending, decodeLogFacets, foldableFacetView } from './log-facets'
@@ -100,8 +101,9 @@ export function sessionLikely() {
     return hint === 'in' || (hint === null && (localStorage.getItem('nightmail.dashboard-ready') !== null || sessionStorage.getItem(accountStorageKey) !== null))
   } catch { return selectedAccount() !== null }
 }
-/** Pages a visitor can read without an account. A query string isn't evidence of a session. */
-export const asksOnlyIfLikely = (path: string) => path === '/' || /^\/(?:docs|compare|legal|pricing)(?:\/|$)|^\/alternatives\/|^\/(?:email-for-ai-agents|cheapest-email-api|free-email-api)$/.test(path)
+/** Pages a visitor can read without an account (api/src/site-index.ts, PUBLIC_PAGE: public/theme.js's early check reads
+ *  the same pattern). A query string isn't evidence of a session. */
+export const asksOnlyIfLikely = isPublicPage
 
 /** A WebSocket URL on this origin for this tab's account and workspace. A browser's WebSocket can't send the headers every
  *  other request carries, so the API reads them from the query for its sockets (the campaign room). */

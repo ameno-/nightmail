@@ -73,8 +73,9 @@ try { if (localStorage.getItem('nightmail.overview-panel') === 'hidden') documen
   if (path === '/docs' || path.startsWith('/docs/') || query.get('invitation') || query.get('account')) return
   let account = null, workspace = null, ready = null, session = null
   try { account = sessionStorage.getItem('nightmail.account'); workspace = account && localStorage.getItem('nightmail.workspace:' + account); ready = localStorage.getItem('nightmail.dashboard-ready'); session = localStorage.getItem('nightmail.session') } catch {}
-  // A visitor on a marketing page with no trace of a session here isn't asked about one (data/live.ts, sessionLikely).
-  const marketing = path === '/' || /^\/pricing\/?$/.test(path) || /^\/(?:compare|legal)(?:\/|$)/.test(path)
+  // A visitor on a public page with no trace of a session here isn't asked about one (data/live.ts, sessionLikely). The
+  // pages are api/src/site-index.ts's PUBLIC_PAGE, filled in by vite.config.ts, as data/live.ts's asksOnlyIfLikely reads them.
+  const marketing = new RegExp('%PUBLIC_PAGE%').test(path)
   const visitor = marketing && session !== 'in' && (session === 'out' || (ready === null && account === null))
   const header = '%HEADER_PREFIX%' // api/src/brand.ts's headerPrefix, filled in by vite.config.ts
   const start = url => {

@@ -15,6 +15,7 @@ import { sitePages } from './site-pages.ts'
 import { VERDICT_PAGES } from './src/features/pricing/page/switch.ts'
 import * as televisionWords from './src/features/home/tv/readable.ts'
 import { headerPrefix, publicOrigin as hostedOrigin } from '../api/src/brand.ts'
+import { PUBLIC_PAGE } from '../api/src/site-index.ts'
 
 // @react-email/editor's own "react-email" imports resolve to a slim shim (src/features/campaigns/react-email-shim.ts
 // explains why); everything else, the shim included, gets the real package.
@@ -74,12 +75,18 @@ const publicOrigin: Plugin = {
   },
 }
 
-// public/theme.js runs before the app's modules and is served as written, so the request header names it shares with the
-// app and the API come from brand.ts here: %HEADER_PREFIX% becomes X-Nightmail-, in the dev server and in the build.
+// public/theme.js runs before the app's modules and is served as written, so what it shares with the app and the API is
+// filled in here, in the dev server and in the build: %HEADER_PREFIX% becomes brand.ts's X-Nightmail-, and '%PUBLIC_PAGE%'
+// site-index.ts's PUBLIC_PAGE (the public pages, where a visitor isn't asked for a session), so its list and the app's
+// (data/live.ts) are one. The build stops if either mark is gone.
 const brandedBootScript = (): Plugin => {
   const file = 'theme.js'
   let publicDir = '', outDir = ''
-  const filled = () => readFileSync(resolve(publicDir, file), 'utf8').replaceAll('%HEADER_PREFIX%', headerPrefix)
+  const filled = () => {
+    const source = readFileSync(resolve(publicDir, file), 'utf8')
+    for (const mark of ['%HEADER_PREFIX%', "'%PUBLIC_PAGE%'"]) if (!source.includes(mark)) throw new Error(`public/${file} has no ${mark} to fill in.`)
+    return source.replaceAll('%HEADER_PREFIX%', headerPrefix).replaceAll("'%PUBLIC_PAGE%'", JSON.stringify(PUBLIC_PAGE.source))
+  }
   return {
     name: 'nightmail:branded-boot-script',
     configResolved(config) { publicDir = config.publicDir; outDir = resolve(config.root, config.build.outDir) },
