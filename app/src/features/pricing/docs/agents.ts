@@ -4,7 +4,7 @@ import { dayOf, fitWords, formatCount, money, nightmail, quote, shownSources, ty
 import { billAt, ORDERED } from '../page/comparison.ts'
 import { factsSection } from '../page/facts.ts'
 import { plain, type Doc, type Section, type Table, type Text } from './doc.ts'
-import { DASH, month, spelled } from './alternatives.ts'
+import { checkedOn, DASH, month, spelled } from './alternatives.ts'
 
 // /email-for-ai-agents: what a month of email costs for agents, on Nightmail and on every agent-inbox service the
 // comparisons price (compare/<slug>.ts, the agents group), in the shape of the other price pages (Ryan: "headline, button,
@@ -34,7 +34,7 @@ export function emailForAgents(): Doc {
   const lowest = Math.min(...shown.map(mid))
   if (!(ours[1]!.oursUc < BigInt(lowest) * 1_000_000n)) throw new Error('/email-for-ai-agents: the headline\'s "from" price must be above Nightmail\'s.')
   const checked = [...new Set(shown.map(row => row.c.offer.checked))].sort()
-  const when = checked.length === 1 ? dayOf(checked[0]!) : `${dayOf(checked[0]!)} to ${dayOf(checked.at(-1)!)}`
+  const when = checkedOn(checked)
   const each = `${m.receivedPerInbox} in and ${m.sentPerInbox} out each a month`
   // Nightmail's bill is $0 at every size here when they fit its free allowance: said beside it, as the reason.
   const allFree = ours.every(b => b.oursUc === 0n)
