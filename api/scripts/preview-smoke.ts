@@ -44,18 +44,33 @@ for (const path of ['/', '/overview', '/logs', '/settings']) {
 }
 // Each price page is its own HTML file (app/price-pages.ts): assets answer its address with it (its own og:url and title,
 // and noindex until it is published). A comparison that doesn't exist is the Worker's: the dashboard's HTML, as 404
-// (src/site-index.ts, isMissingComparePage), so it isn't indexed.
-for (const [path, own] of [['/pricing', true], ['/compare/mailchimp', true], ['/compare/resend', true], ['/compare/does-not-exist', false]] as const) {
+// (src/site-index.ts, isMissingComparePage), so it isn't indexed. /compare is every comparison on one page (compare.html).
+for (const [path, own] of [['/pricing', true], ['/compare', true], ['/compare/mailchimp', true], ['/compare/resend', true], ['/compare/does-not-exist', false], ['/pricing/does-not-exist', false]] as const) {
   const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
   const html = await response.text();
   const page = new RegExp(`<meta property="og:url" content="[^"]*${path}" />`).test(html);
   if (response.status !== (own ? 200 : 404) || !html.includes('<div id="root"') || page !== own) failures.push(`GET ${path}: expected ${own ? 'its own page from assets' : 'the dashboard HTML as 404 from the Worker'}, got HTTP ${response.status}.`);
 }
 // Their Markdown twins, and llms.txt with the site's own pages under the API's (src/site-index.ts).
-for (const [path, type, text] of [['/compare/resend.md', 'text/markdown', '# Nightmail vs Resend'], ['/llms-full.txt', 'text/plain', '## Nightmail vs Mailchimp'], ['/llms.txt', 'text/markdown', '/compare/resend.md']] as const) {
+for (const [path, type, text] of [['/compare/resend.md', 'text/markdown', '# Nightmail vs Resend'], ['/compare.md', 'text/markdown', '# Nightmail costs less than each of these'], ['/llms-full.txt', 'text/plain', '## Nightmail vs Mailchimp'], ['/llms.txt', 'text/markdown', '/compare/resend.md']] as const) {
   const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
   const body = await response.text();
   if (response.status !== 200 || !response.headers.get('content-type')?.startsWith(type) || !body.includes(text)) failures.push(`GET ${path}: expected ${type} with “${text}”, got HTTP ${response.status} ${response.headers.get('content-type')}.`);
+}
+// Every address the sitemap lists is a page search engines may index: 200, its own og:url, and no noindex in an
+// X-Robots-Tag or a robots meta (a signed-in screen's header must never reach a public page). Its Markdown twin, for each
+// price page, is Markdown.
+const sitemap = await (await fetch(origin + '/sitemap.xml', { signal: AbortSignal.timeout(20_000) })).text();
+const listed = [...sitemap.matchAll(/<loc>https?:\/\/[^/<]+([^<]*)<\/loc>/g)].map(match => match[1] || '/');
+for (const path of listed) {
+  const response = await fetch(origin + path, { signal: AbortSignal.timeout(20_000) });
+  const html = await response.text(), robots = response.headers.get('x-robots-tag') ?? '';
+  if (response.status !== 200 || /noindex/i.test(robots) || /<meta name="robots" content="[^"]*noindex/i.test(html)) failures.push(`GET ${path} (in sitemap.xml): expected an indexable 200, got HTTP ${response.status}${robots ? `, X-Robots-Tag: ${robots}` : ''}${/<meta name="robots"/.test(html) ? ', a robots meta' : ''}.`);
+  if (path !== '/' && !new RegExp(`<meta property="og:url" content="[^"]*${path}" />`).test(html)) failures.push(`GET ${path} (in sitemap.xml): its HTML doesn't name it as its og:url.`);
+  if (path.startsWith('/pricing/') || path.startsWith('/compare/')) {
+    const twin = await fetch(origin + path + '.md', { signal: AbortSignal.timeout(20_000) });
+    if (twin.status !== 200 || !twin.headers.get('content-type')?.startsWith('text/markdown')) failures.push(`GET ${path}.md: expected its Markdown twin, got HTTP ${twin.status} ${twin.headers.get('content-type')}.`);
+  }
 }
 const missing = await fetch(origin + '/assets/does-not-exist.js');
 if (missing.status !== 404) failures.push(`Missing chunk: expected 404, got ${missing.status}.`);

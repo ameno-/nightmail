@@ -1,6 +1,8 @@
 // (With extensions: the build's config imports this file, price-pages.ts.)
 import { productName, publicOrigin } from '../../../../api/src/brand.ts'
 import { COMPARISONS, OFFERS } from './compare/index.ts'
+import { docGraph, docMarkdown } from './docs/doc.ts'
+import { ownPages } from './docs/registry.ts'
 import { PRICE_PAGES, type PricePage } from './pages.ts'
 import { comparisonQuestions, faqPage } from './questions.ts'
 import { FIRST_STEP, PANEL_IDS, PANELS } from './panels.ts'
@@ -70,7 +72,7 @@ export function comparisonMarkdown(c: Comparison): string {
     pagesRead(c).map(source => `- [${host(source.url)}${new URL(source.url).pathname.replace(/\/$/, '')}](${source.url}), checked ${dayOf(source.checked)}`).join('\n'),
     trademarks,
     `## More`,
-    `- [Price calculator](${url('/pricing.md')}): ${productName} and the other vendors at your own numbers\n${comparisonLinks(c.slug)}`,
+    `${ownPages(c.slug).map(path => { const own = PRICE_PAGES.find(page => page.path === path)!.doc!; return `- [${own.title}](${url(markdownPath(path))}): ${own.llms}\n` }).join('')}- [Price calculator](${url('/pricing.md')}): ${productName} and the other vendors at your own numbers\n${comparisonLinks(c.slug)}`,
   ].join('\n\n') + '\n'
 }
 
@@ -122,20 +124,22 @@ export function homeMarkdown(lead = `${productName} is an email API on Amazon SE
   ].join('\n\n') + '\n'
 }
 
-/** Each public page's Markdown twin, by its file in the build. */
+/** Each public page's Markdown twin, by its file in the build: a pricing page's is its data's (docs/doc.ts). */
 export function markdownFiles(): { file: string; source: string }[] {
   return [
     { file: 'index.md', source: homeMarkdown() },
-    ...PRICE_PAGES.map(page => ({ file: markdownPath(page.path).slice(1), source: page.comparison ? comparisonMarkdown(page.comparison) : pricingMarkdown() })),
+    ...PRICE_PAGES.map(page => ({ file: markdownPath(page.path).slice(1), source: page.doc ? docMarkdown(page.doc) : page.comparison ? comparisonMarkdown(page.comparison) : pricingMarkdown() })),
   ]
 }
 
 /** llms.txt's lines for the site's own pages (the API puts them under its title: api/src/site-index.ts). */
-export function llmsSiteIndex(): string {
+/** more: lines for the site's other pages (price-pages.ts: /compare, when the build has it). */
+export function llmsSiteIndex(more: string[] = []): string {
   return [
     `Hosted ${productName} charges ${price}. Contacts and teammates: no charge.`,
     `## Product and pricing`,
-    `- [${productName}](${url('/index.md')}): what it does and what it costs\n- [Price calculator](${url('/pricing.md')}): ${productName} beside ${listOf([...new Set(OFFERS.map(offer => offer.vendor))])} at three sizes, and how to price any other\n- [The website in full](${url('/llms-full.txt')}): these pages and every comparison, in one file`,
+    `- [${productName}](${url('/index.md')}): what it does and what it costs\n- [Price calculator](${url('/pricing.md')}): ${productName} beside ${listOf([...new Set(OFFERS.map(offer => offer.vendor))])} at three sizes, and how to price any other\n- [The website in full](${url('/llms-full.txt')}): these pages and every comparison, in one file${more.map(line => `\n${line}`).join('')}`,
+    ...PRICE_PAGES.some(page => page.doc) ? [`## What other email services cost`, PRICE_PAGES.flatMap(page => page.doc ? [`- [${page.doc.title}](${url(markdownPath(page.path))}): ${page.doc.llms}`] : []).join('\n')] : [],
     `## Comparisons`,
     comparisonLinks(),
   ].join('\n\n') + '\n\n'
@@ -161,8 +165,9 @@ const app = () => ({
 })
 const site = () => ({ '@type': 'WebSite', '@id': url('/#website'), name: productName, url: url('/') })
 /** A page's JSON-LD: the page, the product it's about with its price, and the questions it answers. */
-export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'description' | 'comparison' | 'modified'> | 'home'): object {
+export function structuredData(page: Pick<PricePage, 'path' | 'searchTitle' | 'description' | 'comparison' | 'doc' | 'modified'> | 'home'): object {
   if (page === 'home') return { '@context': 'https://schema.org', '@graph': [site(), app()] }
+  if (page.doc) return { '@context': 'https://schema.org', '@graph': [...docGraph(page.doc), site(), app()] }
   const c = page.comparison
   return {
     '@context': 'https://schema.org',

@@ -9,7 +9,7 @@ import { ROOM_PEER_HEADER } from './campaign-room-protocol.js';
 import type { SupportPlatformApi } from './support-platform.js';
 import { SECURITY_HEADERS } from './security-headers.js';
 import { clientIpHeader, clientNetworkHeader, healthService, legacyClientIpHeaders, requestHeaderNames, setting } from './brand.js';
-import { isMissingComparePage, isMissingDocsPage, isPublicPage, renamedDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
+import { isMissingComparePage, isMissingDocsPage, isPublicPage, isSitePage, renamedDocsPage, SITE_INDEX, withSiteIndex } from './site-index.js';
 import { linkHostRequest, sharedLinkPage } from './link-hosts.js';
 export { DispatcherShard, CampaignRoom };
 
@@ -367,20 +367,22 @@ export default {
       if (pathname.startsWith('/assets/') || pathname.startsWith('/og/')) return fastSecure(new Response(null, { status: 404, headers: { 'cache-control': 'no-store' } }));
       const home = pathname === '/' && ('MULTI_TENANT' in env ? env.MULTI_TENANT : undefined) === 'true';
       if (home) { const page = await assets.fetch(new Request(new URL('/home', url), request)); if (page.ok || page.status === 304) return untransformed(page, request); }
-      // A price page (app/price-pages.ts writes one per comparison), or its Markdown twin: the file, compressed here
-      // (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash) go back as they are.
-      if (pathname === '/pricing' || pathname.startsWith('/compare/')) {
+      // A price page (app/price-pages.ts writes one per comparison, /compare's and the vendors' pricing pages), or its
+      // Markdown twin: the file,
+      // compressed here (untransformed), and its 304 with the same validator. The assets' own redirects (a trailing slash)
+      // go back as they are.
+      if (pathname === '/pricing' || pathname === '/compare' || isSitePage(pathname)) {
         const page = await assets.fetch(request);
         if (page.ok || page.status === 304) return untransformed(page, request);
         if (page.status !== 404) return fastSecure(page);
       }
       const shell = await assets.fetch(new Request(new URL('/', url), request));
-      // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
-      // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
-      // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
       // An operation's reference page under its old name moves to the new one (site-index.ts, RENAMED_OPERATIONS).
       const renamed = renamedDocsPage(pathname);
       if (renamed) return fastSecure(new Response(null, { status: 301, headers: { location: renamed + url.search, 'cache-control': 'public, max-age=3600' } }));
+      // A comparison the build has no page for (app/price-pages.ts writes one per entry, served before the Worker): not
+      // found, so search engines drop it rather than index the dashboard's shell under its address (a soft 404). The
+      // shell still says so to a person: its price pages show "Page not found" for an unknown comparison.
       if (isMissingComparePage(pathname) || isMissingDocsPage(pathname)) return untransformed(shell, request, 404);
       // A signed-in screen (site-index.ts): a crawler sees the sign-in under its address, so it stays out of search.
       const page = untransformed(shell, request);

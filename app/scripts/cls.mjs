@@ -61,6 +61,9 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright-core';
 import { liveSource, seed, start } from './cls-fixture.mjs';
 
+// The comparisons' look this build has: from their data unless VITE_PRICE_PAGES=board (features/pricing/page/switch.ts
+// reads the same variable).
+const verdictPages = process.env.VITE_PRICE_PAGES !== 'board'
 const LIMIT = 0.001, JOB_TIMEOUT_MS = 90_000;
 const television = process.env.CLS_HOME === 'tv';
 const app = resolve(dirname(fileURLToPath(import.meta.url)), '..'), repo = resolve(app, '..'), out = join(app, '.cls', television ? 'tv' : '');
@@ -349,13 +352,35 @@ const pages = ids => [
   ['Legal · subprocessors', '/legal/subprocessors', { user: null, from: '/legal/privacy' }],
   // The price pages (features/pricing), public and linked from the homepage: signed out, cold and from one another
   // (their header's links), the calculator also at its large size and signed in.
-  ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
-  ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
-  ['Pricing · signed in', '/pricing', {}],
-  ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
-  // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
-  ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
-  ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
+  // With the comparisons drawn from their data (every build but VITE_PRICE_PAGES=board: features/pricing/page/switch.ts) a
+  // comparison is a page of its own HTML with no app, so nothing reaches the calculator from it in the app's own
+  // navigation (it is measured cold), the steel frame is the boards' alone, and there is /compare, with and without the
+  // homepage's television over it.
+  ...verdictPages ? [
+    ['Pricing', '/pricing', { user: null }],
+    ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
+    ['Pricing · signed in', '/pricing', {}],
+    ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
+    ['Compare · Resend', '/compare/resend', { user: null, from: '/pricing', click: 'vs Resend' }],
+    // Signed in, the page painted for a visitor gives way to Open dashboard and no terms line.
+    ['Compare · Resend · signed in', '/compare/resend', {}],
+    ['Compare', '/compare', { user: null }],
+    ['Compare · with the set', '/compare/with-set', { user: null }],
+  ] : [
+    ['Pricing', '/pricing', { user: null, from: '/compare/mailchimp', click: 'Pricing' }],
+    ['Pricing · large', '/pricing?sent=400000&received=0&contacts=100000&teammates=3', { user: null }],
+    ['Pricing · signed in', '/pricing', {}],
+    ['Compare · Mailchimp', '/compare/mailchimp', { user: null, from: '/pricing', click: 'vs Mailchimp' }],
+    // The board's frame in the homepage's steel, while its concrete waits for a yes (features/pricing/board.tsx).
+    ['Compare · Mailchimp · steel frame', '/compare/mailchimp?frame=steel', { user: null }],
+    ['Compare · Resend', '/compare/resend', { user: null, from: '/compare/mailchimp', click: 'vs Resend' }],
+  ],
+  // The vendors' pricing pages (features/pricing/docs/), each its own HTML drawn from its data (page/), measured cold; an
+  // unknown vendor's is not found.
+  ['Pricing · SendGrid', '/pricing/sendgrid', { user: null }],
+  ['Pricing · Resend', '/pricing/resend', { user: null }],
+  ['Pricing · Mailchimp', '/pricing/mailchimp', { user: null }],
+  ['Pricing · unknown vendor', '/pricing/nobody', { user: null, notFound: true }],
   // The other comparisons, from the calculator's Compare line.
   ['Compare · AgentMail', '/compare/agentmail', { user: null, from: '/pricing', click: 'AgentMail' }],
   ['Compare · Bird', '/compare/bird', { user: null, from: '/pricing', click: 'Bird' }],
@@ -589,6 +614,9 @@ const phonePages = new Set([
   'Legal · privacy',
   'Pricing',
   'Pricing · large',
+  'Pricing · SendGrid',
+  'Pricing · Resend',
+  'Pricing · Mailchimp',
   'Compare · Mailchimp',
   'Compare · Mailchimp · steel frame',
   'Compare · Resend',
@@ -1049,8 +1077,11 @@ async function measure(browser, job, fx) {
         await fetch('/v1/operator/ui-notes').then(r => r.status !== 404 && `GET /v1/operator/ui-notes answered ${r.status}`)].filter(Boolean));
       for (const what of leak) problems.push(`${what} for an operator outside UI_NOTES_SUBJECTS`);
     }
+    // A page that isn't there can say so a chunk later than the page settles (a lazy route behind the shell, as
+    // /pricing/<unknown> is): wait for it, up to 10 s, and say what was there instead.
+    if (job.notFound) await page.waitForFunction(() => [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found'), null, { timeout: 10_000 }).catch(() => {});
     const broken = await page.evaluate(() => document.querySelector('.fatal-error') ? 'the error boundary rendered' : [...document.querySelectorAll('h1,h2')].some(h => h.textContent === 'Page not found') ? 'Page not found' : null);
-    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? 'expected "Page not found"');
+    if (job.notFound ? broken !== 'Page not found' : broken) problems.push(broken ?? `expected "Page not found", found ${JSON.stringify(await page.evaluate(() => ({ headings: [...document.querySelectorAll('h1,h2')].map(h => h.textContent.slice(0, 60)), text: document.body.innerText.slice(0, 120) })))}`);
     problems.push(...await masking(page, job.mode === 'load' && job.device === 'desktop', job.user !== null));
     // Overview's latest emails reserve as many 32px rows as reach the page's bottom edge (features/overview/latest.ts):
     // the list must end less than a row above it (Help's taller bottom padding only applies in one column) and never
