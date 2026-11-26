@@ -44,7 +44,8 @@ export function takeExpectedAccount() {
 export type AccountEvent = { type: 'signed-in'; tab: string | null; account: string | null; auth: string | null } | { type: 'add-started'; tab: string | null } | { type: 'signed-out'; accounts: string[] | 'all' }
 // Still named bane.accounts: tabs on the build before the rename listen there, and the sign-in popup they open is always
 // the deployed one (public/signed-in/signed-in.js, which must use the same name). Rename after rename cleanup.
-const channel = typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('bane.accounts')
+// (None where the docs are drawn at build time, in Node: an open channel there would keep the build from ending.)
+const channel = typeof window === 'undefined' || typeof BroadcastChannel === 'undefined' ? null : new BroadcastChannel('bane.accounts')
 export const announce = (event: AccountEvent) => channel?.postMessage(event)
 export function onAccountEvent(listener: (event: AccountEvent) => void) {
   const handle = (message: MessageEvent<AccountEvent>) => listener(message.data)
