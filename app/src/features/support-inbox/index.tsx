@@ -319,7 +319,7 @@ export function SupportInboxPage() {
     { ...def('customer'), render: c => <Who c={c} /> },
     { ...def('subject'), render: c => <Subject c={c} />, cardRender: c => <Subject c={c} preview={false} /> },
     { ...def('preview'), render: c => <Preview c={c} /> },
-    { ...def('status'), render: c => { const s = triageOf(c); return <StatusBadge status={s.text} tone={s.tone} /> }, cardRender: c => triageOf(c).text },
+    { ...def('status'), render: c => { const s = triageOf(c); return <StatusBadge status={s.text} tone={s.tone} /> } },
     { ...def('activity'), render: c => <time className="nowrap" dateTime={lastActivity(c)} title={when(lastActivity(c))}>{ago(lastActivity(c))}</time> },
     { ...def('actions'), render: c => <DropdownMenu label="Conversation actions" title={titleOf(c)} items={menuItems(c, { canAct, actions, onConfirm: setConfirming, open: () => open(c) })} /> },
   ]
