@@ -101,7 +101,7 @@ const Event = z.object({ id: z.string(), kind: z.enum(EVENT_KINDS), by: z.object
   details: z.record(z.string(), z.unknown()), at: z.string() }).openapi('SupportInboxEvent');
 const Item = z.object({
   id: z.string(), channel: z.enum(['chat', 'email', 'agent_feedback']).describe('agent_feedback: a report an agent filed with sendFeedback (src/feedback.ts), bound to its credential\u2019s workspace; nobody to reply to.'),
-  mode: z.enum(['member', 'non_member', 'pending_signin', 'unverified']), verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'credential']),
+  mode: z.enum(['member', 'non_member', 'pending_signin', 'unverified']), verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'credential', 'agent']).describe('agent: an email conversation Nightmail opened for an agent\u2019s report that asks something, bound to the person it emails the answer to.'),
   status: z.enum(['open', 'ticketed', 'closed']), subject: z.string().nullable(),
   customer: z.object({ userId: z.string(), name: z.string().nullable(), email: z.string().nullable() }).nullable().describe('The person Nightmail bound the conversation to, or null.'),
   sender: z.string().nullable().describe('An email conversation’s sender address, whether or not it proved who it is.'),

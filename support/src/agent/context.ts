@@ -7,7 +7,7 @@ import { fenced, scrubIds, toolResult } from './projection.js';
 export type Customer = {
   channel: 'chat' | 'email'; userId: string | null; name: string | null; email: string | null; role: string | null;
   workspace: { id: string; name: string } | null; workspaces: { id: string; name: string; role: string }[];
-  verified: 'handoff' | 'dmarc' | 'signin' | 'magic_link' | null; contentAccess: boolean; page: string | null;
+  verified: 'handoff' | 'dmarc' | 'signin' | 'magic_link' | 'agent' | null; contentAccess: boolean; page: string | null;
 };
 
 /** A name (a person's, a workspace's) on one line: line breaks, other white space and control characters become one space. */
@@ -21,7 +21,7 @@ export function customerBlock(c: Customer) {
   const email = c.channel === 'email';
   const lines = [
     `channel: ${c.channel}`,
-    email ? `verified: ${c.verified === 'signin' ? 'signin (they confirmed this email signed in to Nightmail)' : 'dmarc (their own account address, authenticated)'}` : `verified: ${c.verified ?? 'no — answer general questions only; no account data'}`,
+    email ? `verified: ${c.verified === 'signin' ? 'signin (they confirmed this email signed in to Nightmail)' : c.verified === 'agent' ? 'agent (their own agent asked support for them, with their workspace\u2019s credential; Nightmail emails the answer to their own account address)' : 'dmarc (their own account address, authenticated)'}` : `verified: ${c.verified ?? 'no — answer general questions only; no account data'}`,
     email ? 'access: their own account, read-only, as their role sees it; by email you change nothing, keep no notes and read no message content' : null,
     c.name ? `name: ${esc(c.name)} (call them ${esc(firstName(c.name))})` : 'name: unknown',
     c.email ? `account email: ${esc(c.email)}` : null,

@@ -16,6 +16,8 @@ export const DEFAULT_LIMITS = {
   /** Daily model turns reserved for signed-in chats and verified customer emails, and per person. */
   turnsPerDay: 1500,
   turnsPerPerson: 100,
+  /** Answers to agents' reports (api/src/feedback.ts FEEDBACK_ANSWERS caps them per credential and workspace): their own daily pool. */
+  turnsAgentsPerDay: 200,
   /** Separate daily budget for general (non-member) email answers, in total and per sender domain. */
   turnsGeneralPerDay: 100,
   turnsPerEmailDomain: 10,

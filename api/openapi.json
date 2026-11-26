@@ -21205,6 +21205,9 @@
             "type": "string",
             "description": "The support ticket it was filed as."
           },
+          "answer": {
+            "$ref": "#/components/schemas/FeedbackAnswer"
+          },
           "redacted": {
             "type": "integer",
             "description": "How many values that looked like keys, tokens or passwords were removed from message and context."
@@ -21215,9 +21218,44 @@
         },
         "required": [
           "ticketId",
+          "answer",
           "redacted",
           "createdAt"
         ]
+      },
+      "FeedbackAnswer": {
+        "type": "object",
+        "properties": {
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who an answer is emailed to, masked (r•••@e•••.com): the person behind this credential, or for an API key the workspace’s longest-standing owner. Null: no answer will be sent."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "nobody",
+              "capped",
+              null
+            ],
+            "description": "Why none will be: nobody in the workspace can get support email, or today’s answers are used up."
+          },
+          "next": {
+            "type": "string",
+            "description": "What happens now, in one sentence. Nothing more ever comes back through this call or tool."
+          }
+        },
+        "required": [
+          "to",
+          "reason",
+          "next"
+        ],
+        "description": "Whether support answers it, and to whom: always by email to a person, never through this tool."
       },
       "FeedbackRequest": {
         "type": "object",
@@ -75665,7 +75703,7 @@
           }
         ],
         "summary": "Tell Nightmail what got in your way",
-        "description": "Tell Nightmail what got in your way while doing a task: what happened and what would have made it easier, with the request ID of a call that went wrong if you have one. Only message is needed; any other field (such as severity or kind, which an earlier version asked for) is ignored. It is filed as a support ticket for the Nightmail team, who read every one, with this credential's workspace and the key, sign-in or token that sent it; no reply comes back, so carry on with the task after sending it.\n\nAny credential that can read may send it (API keys, including ones limited to sender domains, agent tokens and MCP sign-ins), for its own workspace: at most 20 reports an hour from one credential and 50 from one workspace (429 FEEDBACK_RATE_LIMITED, with Retry-After). Anything in message or context that looks like a key, token or password is removed before it is stored; redacted says how many. Send one report per distinct problem.",
+        "description": "Tell Nightmail what got in your way while doing a task: what happened and what would have made it easier, with the request ID of a call that went wrong if you have one. Only message is needed; any other field (such as severity or kind, which an earlier version asked for) is ignored. It is filed as a support ticket for the Nightmail team, who read every one, with this credential's workspace and the key, sign-in or token that sent it. If it asks something, support answers by email to a person (whoever is behind this credential; for an API key, the workspace's owner): the answer never comes back through this call or tool, so don't wait or poll; carry on with the task.\n\nAny credential that can read may send it (API keys, including ones limited to sender domains, agent tokens and MCP sign-ins), for its own workspace: at most 20 reports an hour from one credential and 50 from one workspace (429 FEEDBACK_RATE_LIMITED, with Retry-After). Anything in message or context that looks like a key, token or password is removed before it is stored; redacted says how many. Send one report per distinct problem.",
         "requestBody": {
           "required": true,
           "content": {

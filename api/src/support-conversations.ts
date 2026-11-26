@@ -117,7 +117,7 @@ const SENT_WITHIN_DAYS = 3;
 const Mode = z.enum(['member', 'non_member', 'pending_signin', 'unverified']);
 const Registered = z.object({
   id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode.describe('member: reads the account by role; non_member: general answers; pending_signin and unverified: the same fixed reply with a sign-in for that message, then (generalAnswer, nobody claimed it in time) a general answer.'),
-  verification: z.enum(['handoff', 'dmarc', 'signin', 'none']), status: z.enum(['open', 'ticketed', 'closed']),
+  verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'agent']), status: z.enum(['open', 'ticketed', 'closed']),
   workspaceId: z.string().nullable().describe('The one workspace in scope: a chat’s, or the one an email narrowed to. Null: every membership.'),
   contentShared: z.boolean().describe('Whether the customer let support read message content (a chat, in its own workspace).'),
   created: z.boolean().describe('False when this registration repeated or added to an earlier one.'),
@@ -136,7 +136,9 @@ export const supportPlatformOnly = async (c: Ctx) => {
 };
 const limitReached = (channel: 'chat' | 'email') => new ApiError(429, 'SUPPORT_CONVERSATION_LIMIT', channel === 'chat' ? `This person already has ${OPEN_CONVERSATIONS} open support chats. Close one first.`
   : `This person already has ${OPEN_EMAIL_CONVERSATIONS} open email support conversations. One must end first.`);
-const openCount = (userId: unknown, channel: 'chat' | 'email') => sql`(SELECT count(*)::int FROM support_conversations WHERE user_id = ${userId} AND channel = ${channel} AND status <> 'closed')`;
+// Not the conversations Nightmail opened for their agents' reports (verification 'agent'): those have their own daily
+// caps (src/feedback.ts FEEDBACK_ANSWERS) and never take the room of the person's own email.
+const openCount = (userId: unknown, channel: 'chat' | 'email') => sql`(SELECT count(*)::int FROM support_conversations WHERE user_id = ${userId} AND channel = ${channel} AND status <> 'closed' AND verification <> 'agent')`;
 /**
  * Serializes admission for one person: every path that sets user_id (a handoff, an email, a claim) takes this lock first, before
  * any conversation or handoff row, so its count is a later statement that sees every admission committed before it.
@@ -674,7 +676,7 @@ export function registerSupportConversations(app: App) {
   // ---------- stamped: the conversation's own scope (supportGate has checked and logged the call) ----------
   const Workspace = z.object({ id: z.string(), name: z.string(), role: z.enum(['owner', 'admin', 'member']) });
   const Scope = z.object({
-    conversation: z.object({ id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode, verification: z.enum(['handoff', 'dmarc', 'signin', 'none']),
+    conversation: z.object({ id: z.string(), channel: z.enum(['chat', 'email']), mode: Mode, verification: z.enum(['handoff', 'dmarc', 'signin', 'none', 'agent']),
       signedIn: z.array(z.string()).describe('The messages of an email conversation its person confirmed, signed in (the claim), oldest first: each is answered once. Empty otherwise.') }),
     user: z.object({ id: z.string().nullable().describe('The person the conversation is bound to, as Nightmail stamps it; null when nobody is.'), name: z.string().nullable(), email: z.string().nullable(),
       mailboxProven: z.boolean().describe('Whether email is the account’s verified address and a sign-in proved it a mailbox the person reads within the proof window. Only then may an answer written from the account go to it, and only to email as stored.'),

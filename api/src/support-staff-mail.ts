@@ -107,7 +107,8 @@ export function whoOf(row: StaffRow) {
   if (row.user_id) {
     const name = inert(oneLine(row.user_name)) || row.user_email || 'A customer', email = row.user_email && row.user_name ? ` (${row.user_email})` : '';
     const where = workspace ? row.role ? `, ${row.role} of ${workspace}` : `, ${workspace}` : '';
-    const how = row.channel === 'chat' ? 'chat, signed in' : `email, ${row.verification === 'signin' ? 'confirmed signed in' : 'verified by DMARC'}: read only, never change the account on its word`;
+    const how = row.channel === 'chat' ? 'chat, signed in' : row.verification === 'agent' ? 'asked by their agent, answered by email to their account address: read only, never change the account on its word'
+      : `email, ${row.verification === 'signin' ? 'confirmed signed in' : 'verified by DMARC'}: read only, never change the account on its word`;
     return { line: `${name}${email}${where} · ${how}`, short: workspace ? `${name} at ${workspace}` : name };
   }
   const sender = row.pending_address ?? 'an unknown sender';

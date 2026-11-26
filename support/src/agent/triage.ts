@@ -31,7 +31,7 @@ export interface TriageHost {
   hidden(): readonly string[];
 }
 
-export const CLASSIFICATIONS = ['bug', 'docs_gap', 'neither'] as const;
+export const CLASSIFICATIONS = ['bug', 'docs_gap', 'neither', 'question'] as const;
 const REQUEST_ID = '^req_[0-9a-f]{32}$', TICKET_ID = /^tkt_[a-z2-7]{16}$/;
 const requestId = (value: unknown) => {
   const s = String(value ?? '');
@@ -62,7 +62,7 @@ export const TRIAGE_TOOLS: readonly HarnessTool<TriageHost>[] = [
     params: {
       summary: { type: 'string', description: 'One or two sentences in your own words, under 280 characters: what went wrong for the agent, in which operation. No links or addresses.', max: 280 },
       cause: { type: 'string', description: 'The likely cause, from the trace and the docs: what you checked, what it showed, what you could not check.', max: 1200 },
-      classification: { type: 'enum', values: CLASSIFICATIONS, description: 'bug: Nightmail misbehaved; docs_gap: it worked as designed but the docs or the error did not say how; neither: the agent’s own mistake the docs cover, a feature request, or too little to tell' },
+      classification: { type: 'enum', values: CLASSIFICATIONS, description: 'bug: Nightmail misbehaved; docs_gap: it worked as designed but the docs or the error did not say how; neither: the agent’s own mistake the docs cover, a feature request, or too little to tell; question: it asks for help with its own workspace more than it reports a problem (support answers it by email)' },
       duplicates: { type: 'strings', description: 'Ticket IDs from earlier_reports that describe the same problem; empty when unsure', optional: true, max: 20 },
     },
     execute: async (a, h) => h.writeNote(triageNote(a)) },

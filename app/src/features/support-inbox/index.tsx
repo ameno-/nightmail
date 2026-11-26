@@ -468,9 +468,11 @@ function Message({ m, detail, canAct, actions, onEdit }: { m: SupportMessage; de
   const c = detail.conversation, note = m.kind === 'note' && (m.author === 'staff' || m.author === 'agent'), isHeld = held(m)
   // The support platform's own notices (a fixed reply, a pause notice) are a line, like an event.
   if (m.author === 'system') return <li className="sinbox-event"><Info size={14} aria-hidden="true" /><span className="sinbox-event__text">{m.text}</span><time dateTime={m.at} title={when(m.at)}>{shortDateTime(m.at)}</time></li>
-  const author = m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? note ? 'Triage agent' : 'Nightmail AI' : m.staff?.name ?? m.emailFrom ?? 'Staff'
+  // An agent's report that asks something (verification agent, api/src/feedback-triage.ts): its first message is the agent's words, not the person's.
+  const report = m.author === 'customer' && m.kind === 'agent_report'
+  const author = report ? 'Their agent' : m.author === 'customer' ? c.customer?.name ?? m.email?.from.name ?? (c.channel === 'agent_feedback' ? 'Agent’s report' : 'Customer') : m.author === 'agent' ? note ? 'Triage agent' : 'Nightmail AI' : m.staff?.name ?? m.emailFrom ?? 'Staff'
   // A note that came by email (a reply to a staff email) names the address it came from, beside its author.
-  const via = note ? m.emailFrom ? 'Note by email' : 'Internal note' : m.author === 'customer' ? (m.email ? 'Email' : channelLabels[c.channel]) : m.author === 'staff' ? `Reply by ${c.channel === 'email' ? 'email' : 'chat'}` : null
+  const via = note ? m.emailFrom ? 'Note by email' : 'Internal note' : report ? 'Filed by an agent' : m.author === 'customer' ? (m.email ? 'Email' : channelLabels[c.channel]) : m.author === 'staff' ? `Reply by ${c.channel === 'email' ? 'email' : 'chat'}` : null
   const badge = isHeld ? m.draft && (m.draft.outcome === 'sent' || m.draft.outcome === 'edited') ? { text: 'Held, then sent by staff', tone: 'neutral' as Tone } : { text: 'Held, not sent', tone: 'warning' as Tone } : note ? undefined : m.author === 'agent' ? deliveryBadge[m.delivery ?? 'sent'] : m.author === 'staff' ? deliveryBadge[m.delivery ?? ''] : undefined
   return <li className="sinbox-message" data-author={m.author} data-note={note || undefined} data-held={isHeld || undefined} data-pending={m.id.startsWith('pending:') || undefined}>
     <div className="sinbox-message__meta">
@@ -538,7 +540,7 @@ const actionWords: Record<string, string> = { verify_domain: 'The agent re-check
 function eventText(e: SupportEvent, c: SupportDetail['conversation']) {
   const who = e.by ? e.by.name ?? 'Staff' : null, d = e.details as Record<string, string | boolean | null | undefined>
   switch (e.kind) {
-    case 'opened': return c.channel === 'agent_feedback' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
+    case 'opened': return c.channel === 'agent_feedback' || c.verification === 'agent' ? 'Filed by an agent' : `Opened by ${c.channel === 'email' ? 'email' : 'chat'}`
     case 'ticket': return d.by === 'nightmail' ? `Ticket opened: this needs a person${d.severity ? ` · ${d.severity}` : ''}` : `The agent filed a ticket${d.type ? ` · ${label(String(d.type))}` : ''}${d.severity ? ` · ${d.severity}` : ''}`
     case 'priority': return `Priority ${d.from ?? '—'} → ${d.to ?? '—'}`
     case 'paused': return d.by === 'ticket' ? 'Handed to you: the agent stopped for the ticket' : d.reply ? `${who ?? 'Staff'} replied and took over from the agent` : `${who ?? 'Staff'} paused the agent`
@@ -665,6 +667,7 @@ function verifiedRow(c: SupportDetail['conversation'], hasUser: boolean): ReactN
   if (c.verification === 'none') return <StatusBadge status={c.mode === 'pending_signin' ? 'Waiting for sign-in' : 'Not verified'} tone="warning" />
   if (c.verification === 'handoff') return c.mode === 'non_member' ? 'Signed in (chat) · no workspace' : 'Signed in (chat)'
   if (c.verification === 'signin') return 'Signed in to claim · read only'
+  if (c.verification === 'agent') return 'Asked by their agent · answered by email · read only'
   if (c.verification === 'dmarc') {
     const dkim = c.evidence.dkimAligned === false ? ', DKIM unaligned' : ''
     return hasUser ? `Email (DMARC${dkim}) · read only` : `Email (DMARC${dkim}) · no account`

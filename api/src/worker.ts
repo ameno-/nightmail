@@ -320,6 +320,7 @@ export class SupportPlatform extends WorkerEntrypoint<Env> {
   async feedbackRequest(conversationId: string, requestId: string) { return (await this.platform()).feedbackRequest(conversationId, requestId); }
   async feedbackRelated(conversationId: string) { return (await this.platform()).feedbackRelated(conversationId); }
   async feedbackTriage(conversationId: string, note: Parameters<SupportPlatformApi['feedbackTriage']>[1]) { return (await this.platform()).feedbackTriage(conversationId, note); }
+  async agentAnswersDue(limit: number) { return (await this.platform()).agentAnswersDue(limit); }
   // A plain fetch to the entrypoint answers nothing: the methods above are the whole surface.
   override async fetch() { return new Response(null, { status: 404 }); }
 }
