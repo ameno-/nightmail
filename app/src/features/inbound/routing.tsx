@@ -16,14 +16,15 @@ import { outcomes } from './concepts'
 import '../settings/settings.css'
 import './inbound.css'
 type Kind = 'inbox' | 'webhook' | 'forward'
-/** `waiting`: why a forward can't be chosen yet (its recipient hasn't confirmed, or stopped forwards). */
-type Destination = { id: string; name: string; detail: string; kind: Kind; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook; waiting?: string }
+/** `waiting`: a forward its recipient hasn't agreed to yet (it can be chosen: forwarding starts once they do), or one
+ *  they declined or stopped (it can't). */
+type Destination = { id: string; name: string; detail: string; kind: Kind; paused: boolean; routeOnly: boolean; href: string; webhook?: InboundWebhook; waiting?: string; declined?: boolean }
 function destinationsOf(addresses: InboundAddress[], webhooks: InboundWebhook[], forwards: ForwardEndpoint[]): Destination[] {
   return [
     ...addresses.map(a => ({ id: a.id, name: a.displayName || a.address, detail: a.address, kind: 'inbox' as const, paused: false, routeOnly: false, href: `/receiving/addresses/${a.id}` })),
     ...webhooks.map(h => ({ id: h.id, name: h.name || h.description || h.url, detail: h.url, kind: 'webhook' as const, paused: h.paused, routeOnly: !h.eventTypes.length, href: `/receiving/webhooks/${h.id}`, webhook: h })),
     ...forwards.map(f => ({ id: f.id, name: f.name, detail: f.target, kind: 'forward' as const, paused: f.status === 'paused', routeOnly: false, href: '/receiving?tab=endpoints',
-      waiting: f.status === 'ready' || f.status === 'paused' ? undefined : endpointStatusLabel[f.status] })),
+      waiting: f.status === 'ready' || f.status === 'paused' ? undefined : endpointStatusLabel[f.status], declined: f.status === 'declined' })),
   ]
 }
 
@@ -107,7 +108,7 @@ function RouteDialog({ draft, version, destinations, owners, onClose, addressSea
     const items = destinations.filter(d => d.kind === kind)
     return <fieldset className="routing-choices" disabled={save.isPending}>
       <legend className="ui-field__label">{label}</legend>
-      {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} disabled={!!d.waiting && !selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)}
+      {items.length ? <div className="settings-choices">{items.map(d => <Checkbox key={d.id} checked={selected.includes(d.id)} disabled={!!d.declined && !selected.includes(d.id)} onCheckedChange={on => toggle(d.id, on)}
         label={<span className="settings-cell-stack"><span>{d.kind === 'inbox' && d.name === d.detail ? <PrivateAddress value={d.name} /> : d.name}{d.paused ? ' (paused)' : d.waiting ? ` (${d.waiting.toLowerCase()})` : ''}</span>{d.detail !== d.name && <span className="ui-field__hint">{d.kind === 'webhook' ? d.detail : <PrivateAddress value={d.detail} />}</span>}</span>} />)}</div> : <p className="muted">{empty}</p>}
       {/* Slack and Discord are a rule's to post, never a route's: the way there sits beside New webhook. */}
       {kind === 'webhook' && <div className="cluster"><Button size="sm" onClick={() => setCreating('webhook')}>New webhook</Button><Link className="ui-button ui-button--ghost ui-button--sm" to="/receiving/rules/new">Slack or Discord</Link></div>}
@@ -148,9 +149,10 @@ function RouteDialog({ draft, version, destinations, owners, onClose, addressSea
     <EndpointDialog open={!!creating} onOpenChange={open => { if (!open) setCreating(null) }} types={[creating ?? 'webhook']} taken={destinations.map(d => d.webhook?.key ?? '').filter(Boolean)} onCreated={async endpoint => {
       setCreating(null); setCreated(endpoint)
       if (endpoint.type === 'forward') {
-        // A forward takes mail once its recipient confirms; one on a domain this workspace verified is ready at once.
+        // Ticked at once: it forwards mail received from the moment its recipient agrees (at once on a domain this
+        // workspace verified).
         await refreshForwards()
-        if (endpoint.status === 'ready') tick(endpoint.id)
+        tick(endpoint.id)
         return
       }
       const hook = (await refreshWebhooks()).find(h => h.key === endpoint.name)

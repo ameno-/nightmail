@@ -14,7 +14,9 @@ import { useSingleFlight } from '../../lib/single-flight'
 
 type EndpointType = 'slack' | 'discord' | 'webhook' | 'forward'
 type EndpointStatus = 'ready' | 'pending' | 'expired' | 'declined' | 'paused'
-export type Endpoint = { id: string; name: string; type: EndpointType; status: EndpointStatus; call: string; target: string; policy: { perMinute: number; retryOnTimeout: boolean; idempotent: boolean }; expiresAt: string | null; nextStep: string; createdAt: string }
+export type Endpoint = { id: string; name: string; type: EndpointType; status: EndpointStatus; call: string; target: string; policy: { perMinute: number; retryOnTimeout: boolean; idempotent: boolean }; expiresAt: string | null; requestFrom?: string | null; nextStep: string; createdAt: string;
+  /** Only in createEndpoint's answer: whether a forward's recipient was emailed, and the address made to ask them. */
+  confirmation?: 'emailed' | 'skipped'; createdSender?: { id: string; address: string } }
 const typeLabel: Record<EndpointType, string> = { slack: 'Slack', discord: 'Discord', webhook: 'Webhook', forward: 'Forward' }
 const statusTone: Record<EndpointStatus, Tone> = { ready: 'success', pending: 'warning', expired: 'warning', declined: 'danger', paused: 'neutral' }
 const statusLabel: Record<EndpointStatus, string> = { ready: 'Ready', pending: 'Awaiting recipient', expired: 'Link expired', declined: 'Declined', paused: 'Paused' }
@@ -57,7 +59,6 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   const [name, setName] = useState('')
   const [target, setTarget] = useState('')
   const [from, setFrom] = useState('')
-  const [preverify, setPreverify] = useState(false)
   const [enabled, setEnabled] = useState(true)
   const [error, setError] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
@@ -65,7 +66,7 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   const [tried, setTried] = useState(false)
   useEffect(() => {
     if (!open) return
-    setType(editing?.type ?? types[0]!); setName(editing?.name ?? ''); setTarget(''); setError(null); setPreverify(false); setTried(false); setEnabled(editing ? editing.status !== 'paused' : true)
+    setType(editing?.type ?? types[0]!); setName(editing?.name ?? ''); setTarget(''); setError(null); setTried(false); setEnabled(editing ? editing.status !== 'paused' : true)
   }, [open, editing]) // eslint-disable-line react-hooks/exhaustive-deps
   // Errors name the field and the fix, as soon as there's something to judge (or on Create).
   const value = target.trim()
@@ -95,8 +96,10 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
     try {
       if (editing) onSaved?.(await request<Endpoint>(`/v1/endpoints/${encodeURIComponent(editing.name)}`, { method: 'PATCH', body: changes }))
       else {
+        // The API decides whether the recipient is asked (auto: not on a domain this workspace verified) and, with no address
+        // that can ask, makes one (createSender): the answer says which, and who asked.
         const sendFrom = sender ?? from
-        const body = { type, name: finalName, ...(type === 'forward' ? { address: value, ...(sendFrom ? { from: sendFrom } : {}), ...(preverify ? { preverify } : {}) } : { url: value }) }
+        const body = { type, name: finalName, ...(type === 'forward' ? { address: value, preverify: 'auto', ...(sendFrom ? { from: sendFrom } : { createSender: true }) } : { url: value }) }
         onCreated?.(await request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) }))
       }
     }
@@ -115,10 +118,8 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
   // A stored URL is never shown: the field is Replace URL, empty keeps it. A webhook's new URL drops the custom headers
   // set on it over the API, so that is said as soon as one is typed, before Save.
   const dropsHeaders = !!editing && editing.type === 'webhook' && type === 'webhook' && !!value
-  // A new forward emails its recipient to confirm first, unless it's on a domain this workspace verified: Create says so.
-  const confirms = !editing && type === 'forward' && !preverify
   return <Dialog open={open} onOpenChange={next => { if (!busy) onOpenChange(next) }} title={editing ? `Edit ${editing.name}` : 'New destination'}
-    footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form={formId} loading={busy}>{editing ? 'Save' : confirms ? 'Email them to confirm' : 'Create'}</Button></>}>
+    footer={<><Button disabled={busy} onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="primary" type="submit" form={formId} loading={busy}>{editing ? 'Save' : 'Create'}</Button></>}>
     <form id={formId} className="stack" onSubmit={submit} noValidate>
       {typeOptions.length > 1 || editing ? <Field label="Type">
         <Select value={type} disabled={typeOptions.length === 1} onValueChange={v => { setType(v as EndpointType); setTarget(''); setTried(false); setError(null) }} options={typeOptions.map(value => ({ value, label: typeLabel[value] }))} />
@@ -134,16 +135,15 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
         <Input value={name} onChange={e => { setName(e.target.value.toLowerCase().replace(/[\s_]+/g, '-')); if (serverError('name')) setError(null) }} placeholder={editing ? editing.name : suggested || (type === 'forward' ? 'team' : type === 'webhook' ? 'crm' : type === 'discord' ? 'alerts' : 'support')} autoComplete="off" aria-invalid={!!(nameError || serverError('name')) || undefined} />
       </Field>
       {dropsHeaders && <Alert tone="warning">A new URL drops the custom headers set on this webhook over the API.</Alert>}
-      {!editing && type === 'forward' && <>
-        <Field label="Forward from">
-          <div className="stack">
-            {(boxes.hasMore || Boolean(boxSearch)) && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={boxSearch} onChange={event => setBoxSearch(event.target.value)} />}
-            <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest receiving address' }, ...boxes.items.map(a => ({ value: a.id, label: a.address }))]} />
-            {boxes.hasMore && <Button variant="ghost" size="sm" loading={boxes.loadingMore} onClick={boxes.loadMore}>Load more addresses</Button>}
-          </div>
-        </Field>
-        <Checkbox checked={preverify} onCheckedChange={setPreverify} label="Skip the email: it’s on a domain you verified" />
-      </>}
+      {/* Who asks the recipient: one of the workspace's addresses (with none, the API makes one). On a domain this
+          workspace verified nobody is asked, and the answer says so. */}
+      {!editing && type === 'forward' && (boxes.items.length > 0 || Boolean(boxSearch)) && <Field label="Confirmation from">
+        <div className="stack">
+          {(boxes.hasMore || Boolean(boxSearch)) && <SearchField aria-label="Search addresses" placeholder="Search addresses" value={boxSearch} onChange={event => setBoxSearch(event.target.value)} />}
+          <Select mask value={from} onValueChange={setFrom} options={[{ value: '', label: 'Oldest address' }, ...boxes.items.map(a => ({ value: a.id, label: a.address }))]} />
+          {boxes.hasMore && <Button variant="ghost" size="sm" loading={boxes.loadingMore} onClick={boxes.loadMore}>Load more addresses</Button>}
+        </div>
+      </Field>}
       {editing && <Checkbox checked={enabled} onCheckedChange={setEnabled} label="Enabled" />}
       {(generalError || serverError('type') || serverError('paused')) && <Alert tone="danger">{generalError || serverError('type') || serverError('paused')}</Alert>}
       <ForwardSenderOffer error={error} onCreated={box => { setFrom(box.id); return send(box.id) }} />
@@ -155,8 +155,9 @@ export function EndpointDialog({ open, onOpenChange, onCreated, onSaved, editing
 export function CreatedEndpointDialog({ created, onClose, writeRule = true }: { created: (Endpoint & { secret?: string }) | null; onClose: () => void; writeRule?: boolean }) {
   const call = created ? `${created.call}${created.type === 'slack' ? '({ text: `New mail from ${email.from.address}` })' : created.type === 'discord' ? '({ content: `New mail from ${email.from.address}` })' : created.type === 'webhook' ? '({ subject: email.subject })' : '()'}` : ''
   return <Dialog sensitive={Boolean(created?.secret)} open={!!created} onOpenChange={next => { if (!next) onClose() }} title={created?.status === 'pending' ? 'Confirmation sent' : 'Destination created'}
-    footer={<><Button onClick={onClose}>Done</Button>{writeRule && created?.status !== 'pending' && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rules/new" onClick={onClose}>New rule</Link>}</>}>
+    footer={<><Button onClick={onClose}>Done</Button>{writeRule && <Link className="ui-button ui-button--primary ui-button--md" to="/receiving/rules/new" onClick={onClose}>New rule</Link>}</>}>
     {created && <div className="stack">
+      {created.type === 'forward' && <ForwardAsked endpoint={created} />}
       <Field label="Call it from a rule"><div className="settings-copy-cell"><code>{call}</code><CopyButton value={call} label="Copy call" /></div></Field>
       {created.secret && <SecretField label="Signing secret" value={created.secret} copyLabel="Copy secret" />}
     </div>}
@@ -204,7 +205,17 @@ export function ForwardSenderOffer({ error, onCreated }: { error: unknown; onCre
     {failed !== null && <p className="ui-field__error" role="alert">{errorText(failed)}</p>}
   </Alert>
 }
-/** A new forward waits for its recipient: what Save is waiting for, said once wherever a forward is made. */
-export function AwaitingConfirm({ address }: { address: string }) {
-  return <Alert tone="info">We emailed <PrivateAddress value={address} /> to confirm. Save once they agree.</Alert>
+/** A new forward waits for its recipient: said once wherever a forward is made. Nothing else waits for them: mail
+ *  received from the moment they agree is forwarded. */
+export function AwaitingConfirm({ address, from }: { address: string; from?: string | null }) {
+  return <Alert tone="info">We emailed <PrivateAddress value={address} />{from ? <> from <PrivateAddress value={from} /></> : null} to confirm. Forwarding starts once they agree.</Alert>
+}
+/** What creating a forward did: asked its recipient (from which address, and whether that address is new), or nothing
+ *  to ask (on a domain this workspace verified). */
+function ForwardAsked({ endpoint }: { endpoint: Endpoint }) {
+  if (endpoint.status !== 'pending') return <p className="muted">It’s on a domain you verified, so nobody had to confirm.</p>
+  return <>
+    <AwaitingConfirm address={endpoint.target} from={endpoint.requestFrom} />
+    {endpoint.createdSender && <p className="muted"><PrivateAddress value={endpoint.createdSender.address} /> is a new address, made to ask them.</p>}
+  </>
 }

@@ -4100,7 +4100,7 @@ export type RoutingConfigFile = {
          */
         match: string;
         /**
-         * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+         * Up to 10 destinations (inboxes, webhooks and forwards, a forward waiting for its recipient included), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
          */
         to: 'drop' | Array<string | string>;
         /**
@@ -4154,7 +4154,7 @@ export type CreateMailRoute = {
      */
     match: string;
     /**
-     * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+     * Up to 10 destinations (inboxes, webhooks and forwards, a forward waiting for its recipient included), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
      */
     to: 'drop' | Array<string | string>;
     /**
@@ -4178,7 +4178,7 @@ export type UpdateMailRoute = {
      */
     match?: string;
     /**
-     * Up to 10 destinations (inboxes, webhooks and confirmed forwards), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
+     * Up to 10 destinations (inboxes, webhooks and forwards, a forward waiting for its recipient included), [] to keep mail stored without an inbox (readable by ID), or 'drop' to discard it. A route for an inbox's own address replaces its default delivery, so list the inbox to keep it.
      */
     to?: 'drop' | Array<string | string>;
     /**
@@ -4356,6 +4356,10 @@ export type Endpoint = {
      */
     expiresAt: string | null;
     /**
+     * A forward: the address that emailed its recipient to confirm. null when none was asked (preverified) and for other types.
+     */
+    requestFrom: string | null;
+    /**
      * What to do next, for people and agents.
      */
     nextStep: string;
@@ -4382,6 +4386,17 @@ export type CreatedEndpoint = Endpoint & {
      * Webhook signing secret, shown once.
      */
     secret?: string;
+    /**
+     * A forward: emailed, its recipient was asked to confirm (requestFrom names the address that asked); skipped, preverified and ready at once.
+     */
+    confirmation?: 'emailed' | 'skipped';
+    /**
+     * A forward made with createSender: the address created to send the confirmation request.
+     */
+    createdSender?: {
+        id: string;
+        address: string;
+    };
 };
 
 export type CreateEndpoint = {
@@ -4438,9 +4453,13 @@ export type CreateEndpoint = {
      */
     from?: string;
     /**
-     * Skip the emailed confirmation. Only for addresses on a domain this workspace has verified.
+     * Skip the emailed confirmation. true: only for an address on a domain this workspace has verified, refused anywhere else. auto: skipped where that applies, and the recipient emailed everywhere else; confirmation in the answer says which happened.
      */
-    preverify?: boolean;
+    preverify?: boolean | 'auto';
+    /**
+     * With no from and no permanent address that can send the confirmation request, create the one FORWARD_SENDER_REQUIRED would suggest (forward@ at a host that receives mail now; never one that turns receiving on) and send it from there, in the same request. createdSender names it. Refused as before when none can be offered.
+     */
+    createSender?: boolean;
 };
 
 export type UpdateEndpoint = {
@@ -5318,6 +5337,15 @@ export type CreatedInboundAddress = InboundAddress & {
             priority: number;
         }>;
     };
+    /**
+     * The forward flow.forward made, as getEndpoint returns it.
+     */
+    forward?: Endpoint & {
+        /**
+         * emailed: its recipient was asked to confirm (requestFrom names who asked); skipped: preverified, ready at once.
+         */
+        confirmation: 'emailed' | 'skipped';
+    };
 };
 
 export type CreateInboundAddress = {
@@ -5388,6 +5416,23 @@ export type CreateInboundAddressFlow = {
         url: string;
     }>;
     /**
+     * A new forward, made after the address: its recipient is asked by the new address. deliver and split may name it at once (forward:<name>; <name> in split params): mail received from the moment they allow it is forwarded, never mail received before. The answer’s forward says whether they were emailed.
+     */
+    forward?: {
+        /**
+         * Endpoint name, unique in the workspace across every type.
+         */
+        name: string;
+        /**
+         * Recipient. They confirm with an emailed link, sent from the new address when it can send it (else as createEndpoint picks one), unless preverify applies.
+         */
+        address: string;
+        /**
+         * As createEndpoint takes it: auto skips the confirmation only for an address on a domain this workspace has verified.
+         */
+        preverify?: boolean | 'auto';
+    };
+    /**
      * Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it.
      */
     deliver?: 'drop' | Array<string | string> | null;
@@ -5449,6 +5494,15 @@ export type InboundAddressFlow = {
      */
     version: number;
     /**
+     * The forward flow.forward made, as getEndpoint returns it.
+     */
+    forward?: Endpoint & {
+        /**
+         * emailed: its recipient was asked to confirm (requestFrom names who asked); skipped: preverified, ready at once.
+         */
+        confirmation: 'emailed' | 'skipped';
+    };
+    /**
      * The route for the address's own address, as getRoute returns it; null when there is none.
      */
     route: MailRoute | null;
@@ -5473,6 +5527,23 @@ export type SetInboundAddressFlow = {
          */
         url: string;
     }>;
+    /**
+     * A new forward: its recipient is asked by this address when it can send the request (else as createEndpoint picks one). deliver and split may name it at once: mail received from the moment they allow it is forwarded, never mail received before. The answer’s forward says whether they were emailed.
+     */
+    forward?: {
+        /**
+         * Endpoint name, unique in the workspace across every type.
+         */
+        name: string;
+        /**
+         * Recipient. They confirm with an emailed link, sent from the new address when it can send it (else as createEndpoint picks one), unless preverify applies.
+         */
+        address: string;
+        /**
+         * As createEndpoint takes it: auto skips the confirmation only for an address on a domain this workspace has verified.
+         */
+        preverify?: boolean | 'auto';
+    };
     /**
      * Where the address's mail goes: the destinations of the route for its own address, as createRoute takes them (inbox, webhook and forward IDs or keys, [] to keep it without an inbox, or 'drop'). Creates the route when there is none; null deletes it.
      */

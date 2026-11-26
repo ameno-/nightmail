@@ -8,14 +8,14 @@ import { sql, and, desc, eq, lt } from 'drizzle-orm';
 import { ApiError, digest, errors, id, isoTime, json, lasting, nextCursor, randomSecret, readCursor, receivingAdmin, response, security, WEBHOOK_CHANGE, webhookUrlHint, WebhookUrlHint, wrapModuleLoad, type App, type Ctx, type ClaimedWebhook, type DbExecutor, type MailboxAccess, type Runtime } from './core.js';
 import { claimSends, hostTakesAddresses } from './states.js';
 import { assertBuiltinRecipients, assertBuiltinStillSends } from './builtin-domain.js';
-import { endpoints, mailAttachments, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
+import { endpoints, mailAttachments, mailboxDomains, mailboxes, mailboxWebhookDeliveries, mailMessages, retainedMail, type EndpointRecord } from './db/mailbox.js';
 import { ownReceiving, resumeNeedsUrl } from './rituals.js';
 import { recordAudit } from './audit.js';
 import { approvalField, approvalTie, approvalTies, tiedNextStep, type Tie } from './approval-ties.js';
 import { encrypt, decrypt, encryptWebhookHeaders, postWebhook, webhookHeaderViews, WebhookHeaders, WebhookHeaderViews, webhookSecret, webhookUrl } from './operations.js';
-import { inboundEventTypes, webhookSecretBinding } from './mailbox-events.js';
+import { inboundEventTypes, recordEvents, webhookSecretBinding } from './mailbox-events.js';
 import { InboundAddressId } from './inbound-threads.js';
-import { htmlToPlain, lockMailboxLane } from './mailbox-store.js';
+import { createMailbox, htmlToPlain, lockMailboxLane } from './mailbox-store.js';
 import { mailAttachmentBytes, mailCopyReservation, safeForwardHtml, sendFromMailbox } from './mailbox-send.js';
 import { withMemory } from './isolate-memory.js';
 import { AttachmentContentId, AttachmentContentType, blockedExtension, mailAddress } from './outbound-content.js';
@@ -27,6 +27,7 @@ import { endpointPolicy, DEFAULT_POLICY, type EndpointPolicy } from './ritual-re
 import { endpointCall, endpointPayloads, type EndpointType } from './ritual-schema.js';
 import { legacyWebhookFormat, loopHeader, productName, webhookFormat } from './brand.js';
 import { linkOrigin, servesWorkspace } from './link-domains.js';
+import { log } from './log.js';
 
 // ── The model ─────────────────────────────────────────────────────────────────────────────
 type HeaderList = z.infer<typeof WebhookHeaders>;
@@ -62,13 +63,13 @@ export function renderChat(type: string, body: unknown) {
 export type EndpointRow = {
   id: string; key: string | null; type: EndpointType; url: string | null; name: string | null; description: string; event_types: string[]; mailbox_ids: string[] | null;
   verified: boolean; expires_at: string | Date | null; declined_at: string | Date | null; created_at: string | Date; paused: boolean; reconfirm: boolean;
-  encrypted_target: string | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null;
+  encrypted_target: string | null; per_minute: number | null; retry_on_timeout: boolean | null; idempotent: boolean | null; request_from: string | null;
 };
 export const endpointColumns = (h = sql`h`) => sql`${h}.id,${h}.key,${h}.type,${h}.url,${h}.name,${h}.description,${h}.event_types,${h}.mailbox_ids,${h}.verified,${h}.expires_at,${h}.declined_at,
-  ${h}.created_at,${h}.paused,${h}.reconfirm,${h}.encrypted_target,${h}.per_minute,${h}.retry_on_timeout,${h}.idempotent`;
-const rowOf = (r: EndpointRecord): EndpointRow => ({ id: r.id, key: r.key, type: r.type, url: r.url, name: r.name, description: r.description, event_types: r.eventTypes, mailbox_ids: r.mailboxIds,
+  ${h}.created_at,${h}.paused,${h}.reconfirm,${h}.encrypted_target,${h}.per_minute,${h}.retry_on_timeout,${h}.idempotent,${h}.request_from`;
+export const endpointRowOf = (r: EndpointRecord): EndpointRow => ({ id: r.id, key: r.key, type: r.type, url: r.url, name: r.name, description: r.description, event_types: r.eventTypes, mailbox_ids: r.mailboxIds,
   verified: r.verified, expires_at: r.expiresAt, declined_at: r.declinedAt, created_at: r.createdAt, paused: r.paused, reconfirm: r.reconfirm, encrypted_target: r.encryptedTarget,
-  per_minute: r.perMinute, retry_on_timeout: r.retryOnTimeout, idempotent: r.idempotent });
+  per_minute: r.perMinute, retry_on_timeout: r.retryOnTimeout, idempotent: r.idempotent, request_from: r.requestFrom });
 /** Named endpoints (any type), by name. */
 export async function endpointRows(db: DbExecutor, w: string, q: { name?: string; cursor?: string; type?: string; limit?: number } = {}) {
   return (await db.execute<EndpointRow>(sql`SELECT ${endpointColumns()} FROM mailbox_webhooks h WHERE h.workspace_id=${w} AND h.key IS NOT NULL
@@ -110,6 +111,7 @@ export const Endpoint = z.object({
   target: z.string().describe('Where it delivers. Slack, Discord and webhook URLs are write-only; only the last four characters are shown.'),
   policy: Policy,
   expiresAt: z.string().nullable().describe('When a pending forward confirmation link expires.'),
+  requestFrom: z.string().nullable().describe('A forward: the address that emailed its recipient to confirm. null when none was asked (preverified) and for other types.'),
   nextStep: z.string().describe('What to do next, for people and agents.'),
   createdAt: z.string(),
 }).openapi('Endpoint');
@@ -124,7 +126,8 @@ const CreateEndpoint = z.discriminatedUnion('type', [
   z.object({
     type: z.literal('forward'), name: Name, address: z.email().max(254).toLowerCase().describe('Recipient. They confirm with an emailed link unless preverify applies.'),
     from: z.string().max(254).optional().describe('Receiving address ID (mbx_…) or address that sends the confirmation request. Mail a route forwards for an address with no permanent inbox of its own is forwarded from it too. Defaults to the oldest permanent receiving address.'),
-    preverify: z.boolean().default(false).describe('Skip the emailed confirmation. Only for addresses on a domain this workspace has verified.'),
+    preverify: z.union([z.boolean(), z.literal('auto')]).default(false).describe('Skip the emailed confirmation. true: only for an address on a domain this workspace has verified, refused anywhere else. auto: skipped where that applies, and the recipient emailed everywhere else; confirmation in the answer says which happened.'),
+    createSender: z.boolean().default(false).describe('With no from and no permanent address that can send the confirmation request, create the one FORWARD_SENDER_REQUIRED would suggest (forward@ at a host that receives mail now; never one that turns receiving on) and send it from there, in the same request. createdSender names it. Refused as before when none can be offered.'),
   }).strict(),
 ]).openapi('CreateEndpoint');
 const UpdateEndpoint = Policy.partial().extend({
@@ -143,12 +146,12 @@ export async function endpointView(runtime: Runtime, w: string, r: EndpointRow):
   const payload = endpointPayloads[r.type].signature(name).replace(/^endpoints\.[^(]+/, call);
   const nextStep = {
     ready: r.type === 'forward' ? `Call it from a rule: ${payload}. Or forward a route's mail to it: add forward:${name} to the route's to.` : `Call it from a rule: ${payload}.`,
-    pending: `Waiting for ${target} to open the confirmation link (expires ${iso(r.expires_at)}). Only the recipient can confirm. Resend with sendEndpointVerification if it was lost.`,
+    pending: `Waiting for ${target} to open the confirmation link (expires ${iso(r.expires_at)}). Only the recipient can confirm. A route or rule may name it meanwhile: mail received from the moment they choose Allow is forwarded, never mail received before. Resend with sendEndpointVerification if it was lost.`,
     expired: `The confirmation link expired. Send a new one with sendEndpointVerification.`,
     declined: `${target} declined or stopped forwards. A new request is possible 30 days after ${iso(r.declined_at)}.`,
     paused: needsUrl(r) ? `Deliveries were held when the approval that created or changed this endpoint was removed. Resume by sending its URL again: updateEndpoint { "url": "…", "paused": false }.` : `Deliveries are held. Resume with updateEndpoint { "paused": false }.`,
   }[status];
-  return { id: r.id, name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, nextStep, createdAt: iso(r.created_at)! };
+  return { id: r.id, name, type: r.type, status, call, target, policy, expiresAt: status === 'pending' || status === 'expired' ? iso(r.expires_at) : null, requestFrom: r.type === 'forward' ? r.request_from : null, nextStep, createdAt: iso(r.created_at)! };
 }
 const missingEndpoint = (name: string) => new ApiError(404, 'NOT_FOUND', `No endpoint named ${name}. List them with listEndpoints.`);
 
@@ -208,10 +211,18 @@ const defaultJunk = (format: StoredFormat) => format === 'inbound' ? 'include' a
  */
 async function lockEndpoint(tx: DbExecutor, c: Ctx, w: string, where: { id: string } | { name: string }, hold = true) {
   await lockMailboxLane(tx, w, 'address');
-  const [found] = await tx.select({ id: endpoints.id }).from(endpoints).where(and(eq(endpoints.workspaceId, w), 'id' in where ? eq(endpoints.id, where.id) : eq(endpoints.key, where.name)));
+  const [found] = await tx.select({ id: endpoints.id, type: endpoints.type }).from(endpoints).where(and(eq(endpoints.workspaceId, w), 'id' in where ? eq(endpoints.id, where.id) : eq(endpoints.key, where.name)));
   if (!found) return null;
   if (hold) await ownReceiving(tx, c, 'endpoint', found.id);
-  const [row] = await tx.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, found.id))).for('update');
+  // A short wait for the row (a forward's send holds it only from its last check to its commit), so a pause, rename,
+  // resend or delete never queues behind a long one: past it the request is refused as busy (retryable), then the
+  // transaction's own lock wait applies again.
+  const { rows: [wait] } = await tx.execute<{ before: string }>(sql`SELECT current_setting('lock_timeout') AS before, set_config('lock_timeout','1s',true)`);
+  const [row] = await tx.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, found.id))).for('update').catch((e: unknown) => {
+    if (lockTimedOut(e)) throw new ApiError(409, 'ENDPOINT_BUSY', `${found.type === 'forward' ? 'This forward' : 'This endpoint'} is busy: a message to it is being sent or it is being changed. Try again in a moment.`, undefined, true);
+    throw e;
+  });
+  await tx.execute(sql`SELECT set_config('lock_timeout',${wait!.before},true)`);
   return row ?? null;
 }
 
@@ -220,13 +231,13 @@ export type NewEndpoint =
   | { type: 'webhook'; key: string | null; name: string | null; url: string; description: string; eventTypes: string[]; addressIds: string[] | null; paused: boolean;
       format: StoredFormat; junk?: 'skip' | 'include'; include?: ('message' | 'raw')[]; timeoutSeconds?: number; retryAttempts?: number; headers?: HeaderList }
   | { type: 'slack' | 'discord'; key: string; url: string }
-  | { type: 'forward'; key: string; address: string; from?: string; preverify: boolean };
+  | { type: 'forward'; key: string; address: string; from?: string; preverify: boolean | 'auto'; createSender?: boolean };
 /** Creates any endpoint. Returns the row and, for a webhook, its signing secret (shown once). */
 export async function createEndpointRecord(tx: DbExecutor, c: Ctx, w: string, spec: NewEndpoint, nameField = 'name') {
   await lockMailboxLane(tx, w, 'address');
   if (spec.key) await assertEndpointName(tx, w, spec.key, '', nameField);
   const endpointId = newEndpointId(spec.type);
-  let secret: string | undefined;
+  let secret: string | undefined, createdSender: { id: string; address: string } | null = null;
   if (spec.type === 'webhook') {
     const junk = spec.junk ?? defaultJunk(spec.format), eventTypes = [...new Set(spec.eventTypes)], binding = webhookSecretBinding(w, endpointId), url = webhookUrl(c.env, spec.url);
     checkScope(spec.addressIds, eventTypes, spec.format);
@@ -243,16 +254,18 @@ export async function createEndpointRecord(tx: DbExecutor, c: Ctx, w: string, sp
     await assertCapacity(tx, w, 'other');
     const forward = spec.type === 'forward', value = forward ? spec.address : pinnedUrl(spec.type, spec.url);
     if (forward) await checkExternal(tx, w, value);
-    const preverified = forward && spec.preverify;
-    if (preverified && !await ownVerifiedDomain(c.env, tx, w, value))
-      throw new ApiError(422, 'PREVERIFY_NOT_ALLOWED', `preverify works only for addresses on a domain this workspace has verified. Omit it to email ${value} a confirmation link.`, 'preverify');
+    // auto: skipped exactly where preverify true is allowed, emailed everywhere else.
+    const own = forward && spec.preverify !== false && await ownVerifiedDomain(c.env, tx, w, value);
+    if (forward && spec.preverify === true && !own)
+      throw new ApiError(422, 'PREVERIFY_NOT_ALLOWED', `preverify works only for addresses on a domain this workspace has verified. Omit it (or send auto) to email ${value} a confirmation link.`, 'preverify');
+    const preverified = forward && own;
     await tx.execute(sql`INSERT INTO mailbox_webhooks(id,workspace_id,type,key,encrypted_target,event_types,verified,expires_at,preverified_by)
       VALUES(${endpointId},${w},${spec.type},${spec.key},${await encrypt(c.env, value, targetBinding(w, endpointId))},'[]',${!forward || preverified},${forward && !preverified ? sql`now()+interval '24 hours'` : null},${preverified ? c.get('actor').keyId : null})`);
     await ownReceiving(tx, c, 'endpoint', endpointId);
-    if (forward && !preverified) await requestConfirmation(c, tx, w, endpointId, value, spec.from);
+    if (forward && !preverified) createdSender = await requestConfirmation(c, tx, w, endpointId, value, spec.from, spec.createSender);
   }
   const [row] = await tx.select().from(endpoints).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, endpointId)));
-  return { row: row!, secret };
+  return { row: row!, secret, createdSender };
 }
 export type EndpointChange = {
   key?: string | null; type?: EndpointType; url?: string; headers?: HeaderList; paused?: boolean;
@@ -303,7 +316,7 @@ export async function changeEndpointRecord(tx: DbExecutor, c: Ctx, row: Endpoint
     if (q.url !== undefined) set.encryptedTarget = await encrypt(c.env, pinnedUrl(type, q.url), targetBinding(w, row.id));
   }
   if (q.perMinute !== undefined || q.retryOnTimeout !== undefined || q.idempotent !== undefined) {
-    const next: EndpointPolicy = { ...endpointPolicy(row.type, rowOf(row)), ...Object.fromEntries(Object.entries({ perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent }).filter(([, v]) => v !== undefined)) };
+    const next: EndpointPolicy = { ...endpointPolicy(row.type, endpointRowOf(row)), ...Object.fromEntries(Object.entries({ perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent }).filter(([, v]) => v !== undefined)) };
     Object.assign(set, { perMinute: next.perMinute, retryOnTimeout: next.retryOnTimeout, idempotent: next.idempotent });
   }
   const [updated] = await tx.update(endpoints).set(set).where(and(eq(endpoints.workspaceId, w), eq(endpoints.id, row.id))).returning();
@@ -344,6 +357,8 @@ async function cannotAsk(runtime: Runtime, tx: DbExecutor, w: string, from: stri
   catch (error) { if (error instanceof ApiError && (error.code === 'OWN_DOMAIN_VERIFIED' || error.code === 'BUILTIN_DOMAIN_RECIPIENT')) return error.code; throw error; }
 }
 type CannotAsk = NonNullable<Awaited<ReturnType<typeof cannotAsk>>>;
+/** Whether `from` can send `to` the confirmation request (the built-in domain's limits); see cannotAsk. */
+export const canAsk = async (runtime: Runtime, tx: DbExecutor, w: string, from: string, to: string) => !await cannotAsk(runtime, tx, w, from, to);
 /**
  * An address the confirmation request to `to` could come from when no address of the workspace can send it: forward@ (or
  * forward-2@…, the first free) at a host that receives mail now, takes an address as it is, and may send to `to`: one of
@@ -384,7 +399,7 @@ const permanentSenders = (tx: DbExecutor, w: string, limit: number) => tx.select
  * to do first (error.details[0].reason: domain_not_receiving with the domain and its ID, builtin_members_only, or
  * no_receiving_domain).
  */
-async function senderBox(runtime: Runtime, tx: DbExecutor, w: string, to: string, from?: string) {
+async function senderBox(runtime: Runtime, tx: DbExecutor, w: string, to: string, from?: string, create?: (address: string) => Promise<typeof mailboxes.$inferSelect>) {
   const refused = new Set<CannotAsk>();
   let box: typeof mailboxes.$inferSelect | undefined, none = false;
   if (from) {
@@ -396,6 +411,8 @@ async function senderBox(runtime: Runtime, tx: DbExecutor, w: string, to: string
     none = !boxes.length;
   }
   const suggested = await suggestedSender(runtime, tx, w, to);
+  // createSender: the suggested address, made here, sends it (from is the caller's own choice and is never replaced).
+  if (!from && create && suggested.address) return create(suggested.address);
   for (const why of suggested.refused) refused.add(why);
   const own = !suggested.address && runtime.config.multiTenant && !refused.has('BUILTIN_DOMAIN_RECIPIENT') ? await ownSendingDomain(tx, w) : undefined;
   const reason = suggested.address ? null : own ? 'domain_not_receiving' : refused.has('BUILTIN_DOMAIN_RECIPIENT') ? 'builtin_members_only' : 'no_receiving_domain';
@@ -419,8 +436,10 @@ const forwardBase = (origin: string) => origin.replace(/\/$/, '') + '/v1/forward
  * Emails the recipient a single-use, 24-hour confirmation link. The message is sealed: the
  * workspace's sent-mail views show it with the link withheld, because the link alone confirms.
  */
-async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId: string, address: string, from?: string) {
-  const box = await senderBox(c.env, tx, w, address, from), origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
+async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId: string, address: string, from?: string, createSender = false) {
+  let made: { id: string; address: string } | null = null;
+  const box = await senderBox(c.env, tx, w, address, from, createSender ? async sender => { const box = await createSenderAddress(c, tx, w, sender); made = { id: box.id, address: box.address }; return box; } : undefined);
+  const origin = await linkOrigin(c.env, tx, w, box.address, 'forward');
   const addressHash = await digest(address);
   const declined = (await tx.execute<{ until: string }>(sql`SELECT (declined_at+interval '30 days')::text AS until FROM mail_forward_declines WHERE workspace_id=${w} AND address_hash=${addressHash} AND declined_at>now()-interval '30 days'`)).rows[0];
   if (declined) throw new ApiError(409, 'FORWARD_DECLINED', `${address} declined forwarding from this workspace. You can ask again after ${new Date(declined.until).toISOString()}.`, 'address');
@@ -436,6 +455,21 @@ async function requestConfirmation(c: Ctx, tx: DbExecutor, w: string, endpointId
     text: `${box.address} wants to forward the email it receives to ${address}.\n\nTo allow it, open this link within 24 hours and choose Allow:\n${forwardBase(origin)}/confirm/${token}\n\nIf you don't recognize this request, ignore this email or choose Decline. Nothing is forwarded until you allow it, and declining stops this sender from asking again for 30 days. Every forwarded message includes a link to stop.`,
     inReplyTo: null, references: [], headers: [], attachments: [], autoSubmitted: 'auto-generated', sealed: true,
   });
+  return made;
+}
+/**
+ * The address createSender makes to send a confirmation request from, as createInboundAddress makes one at a host that
+ * receives mail now (suggestedSender only offers such hosts, so nothing is turned on): in the caller's transaction,
+ * which holds the address lane, audited, with its address.created event. It starts empty.
+ */
+async function createSenderAddress(c: Ctx, tx: DbExecutor, w: string, address: string) {
+  const host = address.split('@')[1]!;
+  const [domain] = await tx.select({ id: mailboxDomains.id }).from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, w), sql`coalesce(${mailboxDomains.receivingHost},${mailboxDomains.name})=${host} AND ${mailboxDomains.status}='active'`)).limit(1);
+  if (!domain) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `${host} doesn’t receive mail, so ${address} can’t be made to send the confirmation request.`, 'createSender');
+  const box = await createMailbox(tx, { workspaceId: w }, { domainId: domain.id, domainName: host, address, origin: 'api' });
+  await recordAudit(tx, c, { action: 'address.create', workspaceId: w, target: { type: 'address', id: box.id }, after: { address: box.address, key: null, publicAddress: null, aliases: 0, rules: 0, for: 'forward confirmation' } });
+  await recordEvents(tx, w, [{ type: 'address.created', mailboxId: box.id, data: { origin: 'api', address: box.address } }]);
+  return box;
 }
 
 /**
@@ -465,14 +499,18 @@ export function registerEndpoints(app: App) {
   });
   app.openapi(createRoute({
     ...meta, method: 'post', path: base, operationId: 'createEndpoint', summary: 'Create an endpoint',
-    description: 'Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.',
-    request: { body: json(CreateEndpoint) }, responses: { 201: response(Endpoint.extend({ secret: z.string().optional().describe('Webhook signing secret, shown once.') }).openapi('CreatedEndpoint')), ...errors },
+    description: 'Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once (auto: wherever that applies, else emailed). A rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>, also while it waits: the recipient gets each message received from the moment they allow it, whole (text, HTML and attachments), and none received before.',
+    request: { body: json(CreateEndpoint) }, responses: { 201: response(Endpoint.extend({
+      secret: z.string().optional().describe('Webhook signing secret, shown once.'),
+      confirmation: z.enum(['emailed', 'skipped']).optional().describe('A forward: emailed, its recipient was asked to confirm (requestFrom names the address that asked); skipped, preverified and ready at once.'),
+      createdSender: z.object({ id: z.string(), address: z.string() }).optional().describe('A forward made with createSender: the address created to send the confirmation request.'),
+    }).openapi('CreatedEndpoint')), ...errors },
   }), async c => {
     const q = c.req.valid('json'), w = receivingAdmin(c, manage).workspaceId;
     const spec: NewEndpoint = q.type === 'webhook'
       ? { type: 'webhook', key: q.name, name: q.name, url: q.url, description: '', eventTypes: [], addressIds: null, paused: false, format: legacyWebhookFormat, headers: q.headers, timeoutSeconds: q.timeoutSeconds, retryAttempts: q.retryAttempts }
-      : q.type === 'forward' ? { type: 'forward', key: q.name, address: q.address, from: q.from, preverify: q.preverify } : { type: q.type, key: q.name, url: q.url };
-    const { row, secret } = await c.env.db.transaction(async tx => {
+      : q.type === 'forward' ? { type: 'forward', key: q.name, address: q.address, from: q.from, preverify: q.preverify, createSender: q.createSender } : { type: q.type, key: q.name, url: q.url };
+    const { row, secret, createdSender } = await c.env.db.transaction(async tx => {
       const created = await createEndpointRecord(tx, c, w, spec);
       // Slack and Discord URLs are credentials: only a forward's address is named.
       await recordAudit(tx, c, { action: 'endpoint.create', workspaceId: w, target: { type: 'endpoint', id: created.row.id }, after: { name: q.name, type: q.type,
@@ -480,9 +518,9 @@ export function registerEndpoints(app: App) {
       return created;
     });
     c.header('Cache-Control', 'no-store');
-    const created = await endpointView(c.env, w, rowOf(row));
-    if (created.status === 'pending') c.get('actor').wakeJobs = 1;
-    return c.json({ ...created, ...(secret ? { secret } : {}) }, 201);
+    const created = await endpointView(c.env, w, endpointRowOf(row));
+    if (created.status === 'pending' || createdSender) c.get('actor').wakeJobs = 1;
+    return c.json({ ...created, ...(secret ? { secret } : {}), ...(q.type === 'forward' ? { confirmation: row.verified ? 'skipped' as const : 'emailed' as const } : {}), ...(createdSender ? { createdSender } : {}) }, 201);
   });
   app.openapi(createRoute({ ...meta, method: 'patch', path: `${base}/{name}`, operationId: 'updateEndpoint', summary: 'Edit an endpoint',
     description: 'Edit an endpoint: its name, type, URL, pause state, rate or retry policy. Send only what changes. URLs and headers are write-only: an omitted url keeps the current one, and none is ever returned. A forward’s address is fixed (its recipient confirmed it); create a new forward instead.',
@@ -498,7 +536,7 @@ export function registerEndpoints(app: App) {
         after: { name: next.key, type: next.type, paused: q.paused, perMinute: q.perMinute, retryOnTimeout: q.retryOnTimeout, idempotent: q.idempotent, timeoutSeconds: q.timeoutSeconds, retryAttempts: q.retryAttempts, headerNames: q.headers?.map(h => h.name) } });
       return next;
     });
-    return c.json(await endpointView(c.env, w, rowOf(updated)), 200);
+    return c.json(await endpointView(c.env, w, endpointRowOf(updated)), 200);
   });
   app.openapi(createRoute({ ...meta, method: 'delete', path: `${base}/{name}`, operationId: 'deleteEndpoint', summary: 'Delete an endpoint', description: 'Delete an endpoint no rule or route uses.', request: { params: NameParam }, responses: { 200: response(z.object({ name: Name, deleted: z.literal(true) }).openapi('DeletedEndpoint')), ...errors } }), async c => {
     const w = receivingAdmin(c, manage).workspaceId, name = c.req.valid('param').name;
@@ -722,7 +760,7 @@ export function registerInboundWebhooks(app: App, deps: Access) {
 // Public, no login: the emailed link is the proof. GET only shows the request (mail scanners
 // follow links); a same-origin POST from the page records the choice.
 const escapeHtml = (value: string) => value.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[ch]!);
-function page(c: Ctx, title: string, body: string, status: 200 | 403 | 404 | 410 = 200) {
+function page(c: Ctx, title: string, body: string, status: 200 | 403 | 404 | 410 | 503 = 200) {
   c.header('Cache-Control', 'no-store');
   c.header('Referrer-Policy', 'no-referrer');
   c.header('X-Robots-Tag', 'noindex');
@@ -750,15 +788,37 @@ async function decline(tx: DbExecutor, runtime: Runtime, row: Pending) {
   const hash = await digest(await decrypt(runtime, row.encrypted_target, targetBinding(row.workspace_id, row.id)));
   await tx.execute(sql`INSERT INTO mail_forward_declines(workspace_id,address_hash) VALUES(${row.workspace_id},${hash}) ON CONFLICT(workspace_id,address_hash) DO UPDATE SET declined_at=now()`);
 }
-/** Records the recipient's choice. Single use: the token is cleared by whichever choice comes first. */
+/**
+ * How long a recipient's Stop or Decline waits for the forward's row, twice. A send holds the row only from its last check
+ * to its commit, and an edit for one short write, so it is free within milliseconds in every real case: not getting it
+ * is a fault. Then nothing is recorded, the page says so and offers the same button again, and FORWARD_CHOICE_BUSY is logged.
+ */
+const STOP_WAIT = '1s';
+const BUSY = Symbol('busy');
+const lockTimedOut = (e: unknown) => { for (let x = e as { code?: string; cause?: unknown } | undefined, i = 0; x && i < 5; x = x.cause as typeof x, i++) if (x.code === '55P03') return true; return false; };
+/** A recipient's choice on the forward's row: in its own transaction, waiting up to STOP_WAIT for the row, and once more. */
+async function onTheRow<T>(runtime: Runtime, work: (tx: DbExecutor) => Promise<T>): Promise<T | typeof BUSY> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await runtime.db.transaction(async tx => { await tx.execute(sql`SELECT set_config('lock_timeout',${STOP_WAIT},true)`); return work(tx); });
+    } catch (e) { if (!lockTimedOut(e) || attempt === 2) { if (lockTimedOut(e)) return BUSY; throw e; } }
+  }
+}
+/** Records the recipient's choice. Single use: the token is cleared by whichever choice comes first. A Decline that
+ *  couldn't have the row answers FORWARD_BUSY (retryable): nothing changed, and the link still works. */
 export async function answerForward(runtime: Runtime, token: string, choice: 'allow' | 'decline') {
-  return runtime.db.transaction(async tx => {
+  const choose = async (tx: DbExecutor) => {
     const row = (await tx.execute<Pending>(sql`SELECT workspace_id,id,encrypted_target,request_from FROM mailbox_webhooks WHERE ${await pendingWhere(token)} FOR UPDATE`)).rows[0];
     if (!row) throw new ApiError(410, 'CONFIRMATION_UNAVAILABLE', 'This link was already used or has expired.');
-    if (choice === 'allow') await tx.execute(sql`UPDATE mailbox_webhooks SET verified=true,proof_hash=NULL,confirmed_at=now() WHERE workspace_id=${row.workspace_id} AND id=${row.id}`);
+    // The moment they chose Allow (the clock, not this transaction's start): mail received from then on is forwarded.
+    if (choice === 'allow') await tx.execute(sql`UPDATE mailbox_webhooks SET verified=true,proof_hash=NULL,confirmed_at=clock_timestamp() WHERE workspace_id=${row.workspace_id} AND id=${row.id}`);
     else await decline(tx, runtime, row);
     return { address: await decrypt(runtime, row.encrypted_target, targetBinding(row.workspace_id, row.id)), from: row.request_from };
-  });
+  };
+  if (choice === 'allow') return runtime.db.transaction(choose);
+  const done = await onTheRow(runtime, choose);
+  if (done === BUSY) throw new ApiError(503, 'FORWARD_BUSY', 'The choice couldn’t be recorded just now, so nothing changed. Try again.', undefined, true);
+  return done;
 }
 function registerForwardPages(app: App) {
   const confirm = '/v1/forwarding/confirm/:token', stop = '/v1/forwarding/stop/:token';
@@ -782,6 +842,10 @@ function registerForwardPages(app: App) {
         : page(c, 'Request declined', `<p>Nothing will be forwarded to ${escapeHtml(done.address)}. This sender cannot ask again for 30 days.</p>`);
     } catch (e) {
       if (e instanceof ApiError && e.status === 410) return page(c, 'This link has expired', '<p>It was already used, or more than 24 hours have passed.</p>', 410);
+      if (e instanceof ApiError && e.code === 'FORWARD_BUSY') {
+        log('error', { code: 'FORWARD_CHOICE_BUSY', choice, workspaceId: pending?.workspace_id });
+        return page(c, 'Not declined yet', '<p>Your choice couldn’t be recorded just now, so nothing has changed. Press Decline again in a moment.</p><form method="post"><button name="choice" value="decline">Decline</button></form>', 503);
+      }
       throw e;
     }
   });
@@ -801,7 +865,10 @@ function registerForwardPages(app: App) {
     if (!sameOrigin(c)) return page(c, 'Open the link from a forwarded message', '<p>Stop from the page the link opens.</p>', 403);
     const row = await stopRow(c);
     if (!row) return page(c, 'Link not recognized', '<p>This stop link is not valid.</p>', 404);
-    await c.env.db.transaction(tx => decline(tx, c.env, row));
+    if (await onTheRow(c.env, tx => decline(tx, c.env, row)) === BUSY) {
+      log('error', { code: 'FORWARD_CHOICE_BUSY', choice: 'stop', workspaceId: row.workspace_id, endpointId: row.id });
+      return page(c, 'Not stopped yet', '<p>These forwards couldn’t be stopped just now, so nothing has changed yet. Press Stop forwarding again in a moment.</p><form method="post"><button name="choice" value="decline">Stop forwarding</button></form>', 503);
+    }
     return page(c, 'Forwarding stopped', '<p>No more messages will be forwarded to you from this sender.</p>');
   });
 }
@@ -899,10 +966,15 @@ async function forwardSender(tx: DbExecutor, w: string, recipient: string, reque
  */
 async function sendForward(runtime: Runtime, w: string, endpointId: string, address: string, requestFrom: string | null, messageId: string, recipient: string, grants: string[]) {
   // Whether it may be forwarded is decided once at ingest (forwardEligibility); only whether it is still kept changes.
-  // A message stored without the verdict (sandbox mail, an IMAP append) is never forwarded.
+  // A message stored without the verdict (sandbox mail, an IMAP append) is never forwarded, nor one received before its
+  // recipient allowed forwarding, whenever its delivery runs: they agreed to mail from then on.
   const received = async (db: DbExecutor) => {
     const [m] = await db.select().from(mailMessages).where(and(eq(mailMessages.workspaceId, w), eq(mailMessages.id, messageId), eq(mailMessages.direction, 'inbound'), retainedMail()));
     if (!m || m.verdicts.forwardEligible !== true) throw forwardBlocked();
+    // From the moment they allowed it (made preverified: from its creation), read with the endpoint, so a later Allow counts.
+    // Received is when SES took it (received_at), so mail taken before the Allow and stored after it is never forwarded either.
+    const early = (await db.execute<{ early: boolean }>(sql`SELECT m.received_at < coalesce(h.confirmed_at,h.created_at) AS early FROM mail_messages m JOIN mailbox_webhooks h ON h.workspace_id=m.workspace_id AND h.id=${endpointId} WHERE m.workspace_id=${w} AND m.id=${messageId}`)).rows[0]?.early;
+    if (early !== false) throw new ApiError(422, 'FORWARD_BEFORE_ALLOW', 'Received before its recipient allowed forwarding: only mail received from then on is forwarded.');
     return m;
   };
   const first = await received(runtime.db);
@@ -944,6 +1016,13 @@ async function sendForward(runtime: Runtime, w: string, endpointId: string, addr
       attachments: files,
     });
     await tx.execute(sql`UPDATE mail_forward_once SET email_id=${sent.message.sendingEmailId} WHERE workspace_id=${w} AND message_id=${m.id} AND endpoint=${endpointId}`);
+    // Last, once the email is queued: still allowed, under a lock a Stop or Decline (decline) waits for. One that came at
+    // any moment before (the attachments, the screening, the queueing) refuses this message, and the queued email goes
+    // with this transaction; one that comes now waits only for the commit. The lock is held for that long only. The lock
+    // first, then the check in a statement of its own: a locking statement that waited keeps the snapshot it started with.
+    await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} FOR SHARE`);
+    if (!(await tx.execute(sql`SELECT FROM mailbox_webhooks WHERE workspace_id=${w} AND id=${endpointId} AND verified AND declined_at IS NULL`)).rowCount)
+      throw new ApiError(422, 'CONNECTOR_UNAVAILABLE', 'Only confirmed endpoints receive routed, non-junk mail.');
   });
 }
 export { DEFAULT_POLICY };

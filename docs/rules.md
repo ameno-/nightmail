@@ -36,7 +36,7 @@ A recipe is a sentence with blanks. Filling them in writes the rule's script, an
 | Group | Recipe (`id`) | Fields | Writes |
 |---|---|---|---|
 | Tell your team | Post to Slack (`slack`), Post to Discord (`discord`) | `channel`: a Slack or Discord endpoint | `if (ctx.junk) return`, then a post with the sender and subject |
-| Pass it on | Forward (`forward`), Send to your app (`webhook`) | `to`: a confirmed forward; `app`: a webhook endpoint | `if (ctx.junk) return`, then the endpoint call |
+| Pass it on | Forward (`forward`), Send to your app (`webhook`) | `to`: a forward (one still waiting for its recipient forwards mail from the moment they allow it); `app`: a webhook endpoint | `if (ctx.junk) return`, then the endpoint call |
 | Keep out junk | Junk newsletters (`junk-newsletters`), Block senders (`block-senders`), Always let VIPs in (`allow-senders`), Junk failed DMARC (`junk-failed-dmarc`) | `senders`: addresses and `@domains`, up to 100 | `junk`, `block` or `allow` plus the `vip` label |
 | Sort with AI | Label by meaning (`label-by-meaning`), Alert by meaning (`alert-by-meaning`) | `meaning`, like `a refund request`; `label`, or `channel`: a Slack or Discord endpoint | an AI decision, `Does this email look like a refund request?`, acted on at 0.7 |
 
@@ -190,7 +190,7 @@ Every endpoint is called the same way, by name; its type decides the payload, an
 | `webhook` | `endpoints.crm({ … })` or `endpoints.crm()` | Any record: it arrives as the signed request's JSON body, with `Idempotency-Key`. Without one, the webhook gets the `message.received` event. |
 | `forward` | `endpoints.team()` | None: it forwards this message whole (text, HTML and attachments) from the receiving address. |
 
-Hyphenated names use quotes: `endpoints["support-hook"]({ … })`. A script can never contain a URL or credential; saving fails if it does. An endpoint must exist (and a forward must be confirmed) before a rule that calls it can be saved. Each endpoint can be called at most three times per recipient of a message.
+Hyphenated names use quotes: `endpoints["support-hook"]({ … })`. A script can never contain a URL or credential; saving fails if it does. An endpoint must exist (and a forward must not be declined) before a rule that calls it can be saved; a forward still waiting for its recipient forwards mail received from the moment they allow it. Each endpoint can be called at most three times per recipient of a message.
 
 ### AI decisions
 
@@ -357,7 +357,7 @@ Both `decisions(…)` calls are answered by the same single AI request.
 ```mermaid
 stateDiagram-v2
   [*] --> pending: createEndpoint (forward)<br/>emails a single-use link
-  [*] --> ready: preverify, own verified domain
+  [*] --> ready: preverify (true or auto), own verified domain
   pending --> ready: recipient opens link, chooses Allow
   pending --> declined: chooses Decline
   pending --> expired: 24 hours pass
@@ -369,6 +369,7 @@ stateDiagram-v2
 ![The page a forward recipient sees: who asks, where mail would go, Allow or Decline](images/rules/forward-confirm.png)
 
 - **The link alone confirms.** No Nightmail account is needed: team aliases and external addresses work. The token is a random 256-bit value, stored only as a hash, valid once for 24 hours.
+- **Only mail from the moment they allow it.** A rule or route may name a forward while it waits; nothing reaches the recipient until they choose Allow, and then only mail received from that moment: mail received before is never forwarded, whenever its delivery runs. Declining, or the stop link later, stops it at once. With `preverify: "auto"`, an address on a domain the workspace verified is ready at once and any other is emailed (`confirmation` in the answer says which); `createSender` makes the address that asks when the workspace has none that can (an address at a host that receives mail now; never one that turns receiving on).
 - **The workspace cannot confirm for the recipient.** The confirmation email is sealed: the copy in the workspace's sent mail, thread view and email content API shows the link as withheld.
 - **Scanners cannot confirm.** Opening the link only shows the request; a same-origin form POST records the choice.
 - **Abuse limits.** 20 requests per workspace per day, 3 per address per workspace per day and 5 per address per day across all workspaces. Declining, or the stop link in any forwarded message, blocks that workspace from asking the address again for 30 days.

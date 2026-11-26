@@ -266,7 +266,7 @@ type EndpointType = OverviewEndpoint['type']
 const NEW = '+new'
 const endpointTypes: Partial<Record<FieldType, EndpointType[]>> = { slack: ['slack'], discord: ['discord'], chat: ['slack', 'discord'], forward: ['forward'], webhook: ['webhook'] }
 // A new forward's option says what happens next: the recipient confirms by email first (unless it's on a domain this
-// workspace verified), and the form says so again, with Save waiting, once the email is out.
+// workspace verified); the rule is saved at once and forwards mail received from the moment they agree.
 const newOption: Partial<Record<FieldType, string>> = { slack: 'New Slack channel', discord: 'New Discord channel', chat: 'New channel', forward: 'Someone new, who confirms by email', webhook: 'New webhook' }
 const newTarget: Partial<Record<FieldType, { label: string; placeholder: string; empty: string }>> = {
   slack: { label: 'Slack incoming webhook URL', placeholder: 'https://hooks.slack.com/services/…', empty: 'Paste the Slack webhook URL.' },
@@ -340,8 +340,8 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
     return value ? '' : `Fill in ${f.label.toLowerCase()}.`
   }
   const targetsError = (error instanceof ApiError ? error.fields.addresses : undefined) || (tried && !targets.length ? 'Choose at least one address.' : '')
-  // A forward that its recipient hasn't confirmed can't be saved yet: the API refuses it until they agree.
-  const waiting = recipe.fields.map(f => f.type === 'forward' ? endpoints.find(e => e.name === values[f.name] && e.type === 'forward') : undefined).find(e => e && e.status !== 'ready')
+  // A forward its recipient hasn't agreed to yet: the rule saves, and forwards mail received from the moment they do.
+  const waiting = recipe.fields.map(f => f.type === 'forward' ? endpoints.find(e => e.name === values[f.name] && e.type === 'forward') : undefined).find(e => e && (e.status === 'pending' || e.status === 'expired'))
   const general = error && !(error instanceof ApiError && (Object.keys(error.fields).some(k => k.startsWith('params.') || k === 'addresses'))) ? errorText(error) : ''
 
   /** Creates the endpoint a field's "new" option describes, once: a retry after a failed save reuses it. */
@@ -352,11 +352,10 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
     const post = (body: Record<string, unknown>) => request<Endpoint & { secret?: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt, body) })
     let created: Endpoint & { secret?: string }
     if (type === 'forward') {
-      // On a domain this workspace verified, no confirmation email is needed; anywhere else the recipient agrees first.
+      // The API decides: on a domain this workspace verified nobody is asked; anywhere else the recipient agrees first,
+      // asked by the address the rule runs on (with none that can, one the API makes).
       const sender = forwardFrom ?? targets[0]
-      const body = { type, name, address: url, ...(sender ? { from: sender } : {}) }
-      try { created = await post({ ...body, preverify: true }) }
-      catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
+      created = await post({ type, name, address: url, preverify: 'auto', ...(sender ? { from: sender } : { createSender: true }) })
     } else created = await post({ type, name, url })
     setMade(list => [...list, { name: created.name, type: created.type, status: created.status, target: created.target }])
     setValues(v => ({ ...v, [f.name]: created.name })); setUrls(u => ({ ...u, [f.name]: '' }))
@@ -366,19 +365,19 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
     setBusy(true); setError(null)
     try {
       const params: Record<string, string | string[]> = {}
-      let webhook: (Endpoint & { secret?: string }) | null = null
+      let webhook: (Endpoint & { secret?: string }) | null = null, asked: string | null = waiting?.target ?? null
       for (const f of recipe.fields) {
         const value = (values[f.name] ?? '').trim()
         if (endpointTypes[f.type] && value === NEW) {
           const created = await createEndpoint(f)
           if (created.secret) webhook = created
-          if (created.status === 'pending') { await refresh(); return }
+          if (created.status === 'pending') asked = created.target
           params[f.name] = created.name
         } else params[f.name] = f.type === 'senders' ? splitSenders(value) : value
       }
       await request('/v1/rules/recipes', { method: 'POST', body: { recipe: recipe.id, params, addresses: targets } })
       await refresh()
-      toast(`${recipe.name} is on`, 'success')
+      toast(asked ? `${recipe.name} is on. Forwarding starts once ${asked} agrees.` : `${recipe.name} is on`, 'success')
       if (webhook) setSecret(webhook); else navigate(LIST)
     } catch (e) {
       // A target gone since the list was read: read it again, which drops it (above); the message lists the valid ones.
@@ -393,7 +392,7 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
       if (endpointTypes[f.type]) return !value || (value === NEW && (!(urls[f.name] ?? '').trim() || !!targetCheck(f.type, urls[f.name]!.trim()).error))
       return f.type === 'senders' ? !splitSenders(value).length : !value
     })
-    if (invalid || !targets.length || waiting) return
+    if (invalid || !targets.length) return
     void save()
   }
   const remaining = targetsList.filter(t => !targets.includes(t.value))
@@ -416,7 +415,7 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
         const err = fieldError(f), id = `recipe-${f.name}`
         if (endpointTypes[f.type]) {
           const list = choices(f), value = values[f.name] ?? NEW
-          const opts: SelectOption[] = [...list.map(e => ({ value: e.name, text: e.name, disabled: e.type === 'forward' && e.status !== 'ready' && e.name !== value,
+          const opts: SelectOption[] = [...list.map(e => ({ value: e.name, text: e.name, disabled: e.type === 'forward' && e.status === 'declined' && e.name !== value,
             label: <>{e.name}{f.type === 'chat' ? <span className="muted"> · {e.type === 'slack' ? 'Slack' : 'Discord'}</span> : e.type === 'forward' ? <span className="muted"> · <PrivateAddress value={e.target} /></span> : null}</> })),
           { value: NEW, label: newOption[f.type]! }]
           const add = newTarget[f.type]!, url = urls[f.name] ?? ''
@@ -442,7 +441,7 @@ function RecipeEditor({ recipe, overview, addresses, preset, header, back, addre
       <ForwardSenderOffer error={error} onCreated={box => { setForwardFrom(box.id); setError(null); refetchAddresses(); return save() }} />
       <div className="recipe-form__actions">
         <Link className="ui-button ui-button--ghost ui-button--md" to={back}>Cancel</Link>
-        <Button variant="primary" type="submit" loading={busy} disabled={!!waiting}>Save</Button>
+        <Button variant="primary" type="submit" loading={busy}>Save</Button>
       </div>
     </form>
     <CreatedEndpointDialog created={secret} writeRule={false} onClose={() => { setSecret(null); navigate(LIST) }} />

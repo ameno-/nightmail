@@ -3137,7 +3137,7 @@ export const listRoutes = <ThrowOnError extends boolean = false>(options?: Optio
 /**
  * Route a recipient
  *
- * Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk", "forward:team"] } keeps the Support inbox, adds a webhook and forwards each message whole to a confirmed forward endpoint. Mail is routed by the new version as soon as this returns. Test first with testRouting.
+ * Example: { "match": "support@acme.com", "to": ["inbox:support", "webhook:helpdesk", "forward:team"] } keeps the Support inbox, adds a webhook and forwards each message whole to a forward endpoint once its recipient allows it. Mail is routed by the new version as soon as this returns. Test first with testRouting.
  */
 export const createRoute = <ThrowOnError extends boolean = false>(options: Options<CreateRouteData, ThrowOnError>): RequestResult<CreateRouteResponses, CreateRouteErrors, ThrowOnError> => (options.client ?? client).post<CreateRouteResponses, CreateRouteErrors, ThrowOnError>({
     security: [
@@ -3450,7 +3450,7 @@ export const listEndpoints = <ThrowOnError extends boolean = false>(options?: Op
 /**
  * Create an endpoint
  *
- * Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once. Once ready, a rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>; either way the recipient gets each message whole: text, HTML and attachments.
+ * Create a named Slack, Discord, webhook or forward endpoint. Slack and Discord URLs are credentials: stored encrypted, pinned to the provider host and never returned. A webhook endpoint is a route-only inbound webhook; its signing secret is returned once. A forward emails its recipient a single-use confirmation link (24 hours); it stays pending until they choose Allow. With preverify, an address on a domain this workspace has verified is ready at once (auto: wherever that applies, else emailed). A rule calls it as endpoints.<name>() and a route forwards to it as forward:<name>, also while it waits: the recipient gets each message received from the moment they allow it, whole (text, HTML and attachments), and none received before.
  */
 export const createEndpoint = <ThrowOnError extends boolean = false>(options: Options<CreateEndpointData, ThrowOnError>): RequestResult<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError> => (options.client ?? client).post<CreateEndpointResponses, CreateEndpointErrors, ThrowOnError>({
     security: [
@@ -5001,7 +5001,7 @@ export const listInboundAddresses = <ThrowOnError extends boolean = false>(optio
 /**
  * Create a receivable address
  *
- * Admin only. Mail arrives once the domain is verified and its receiving MX record is active. Hosted, an address on one of your own domains (or a subdomain of one), verified or still being verified, where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving names the MX record to publish, the host’s status and whether the domain is verified yet; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
+ * Admin only. Mail arrives once the domain is verified and its receiving MX record is active. Hosted, an address on one of your own domains (or a subdomain of one), verified or still being verified, where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer’s receiving names the MX record to publish, the host’s status and whether the domain is verified yet; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. A refused request creates nothing, and receiving stays as it was. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.
  *
  * @deprecated
  */

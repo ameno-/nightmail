@@ -30,8 +30,9 @@ import { Flow, FlowFork, FlowItem, FlowStage, isSplit, splitOf } from './flow'
 import { FlowPanel } from './panel'
 import { receivingDomains, useOverview, type Overview, type OverviewRule, type RouteEntry, type Target } from './overview'
 import { Match, TargetIcon } from './parts'
-import { AwaitingConfirm, ForwardSenderOffer, discordUrl, forwardSenderNeeded, slackUrl, targetProblem, urlHint } from './ritual-connections'
+import { ForwardSenderOffer, discordUrl, forwardSenderNeeded, slackUrl, targetProblem, urlHint, type Endpoint } from './ritual-connections'
 import { catchAllNote, outcomes } from './concepts'
+import { understandAddress } from './address-input'
 import { RuleLine } from './recipes'
 
 const EMAIL = /^[^\s@<>,;]+@[^\s@<>,;]+\.[^\s@<>,;]+$/
@@ -75,25 +76,45 @@ function TurnOnReceiving({ host, domainId }: { host: string; domainId: string })
   </Alert>
 }
 type CreatedReceiving = { domainId: string; host: string; turnedOn: boolean; status?: string; verified?: boolean; dns: { type: 'MX'; name: string; value: string; priority: number }[] }
-/**
- * After an address is created on a host that doesn't route mail here yet: the MX record that makes it receive, what that
- * record takes over (as the address step warned), Copy, and the domain's page, which shows the record until it is live.
- * The host's status is read again every 15 seconds until it receives; while its domain is still being verified, a line
- * says mail waits for that too.
- */
-function ReceivingSetupNote({ setup }: { setup: CreatedReceiving }) {
-  const record = setup.dns[0]
-  const hosts = useReceivingHosts(setup.domainId, true, 15_000)
-  const domain = useApiQuery(['nightmail', 'domain', setup.domainId], (api, signal) => api.domains.get(setup.domainId, signal), { interval: current => current && (current.status === 'verified' || current.sending === 'verified') ? false : 15_000, enabled: setup.verified === false })
-  const host = hosts.data?.find(item => item.name === setup.host)
-  const verified = setup.verified !== false || domain.data?.status === 'verified' || domain.data?.sending === 'verified'
+/** Where creating an address left its host: the MX record, and whether it receives yet (read again every 15 seconds). */
+function useReceivingSetup(setup: CreatedReceiving | null) {
+  const hosts = useReceivingHosts(setup?.domainId ?? '', !!setup, 15_000)
+  const domain = useApiQuery(['nightmail', 'domain', setup?.domainId ?? ''], (api, signal) => api.domains.get(setup!.domainId, signal), { interval: current => current && (current.status === 'verified' || current.sending === 'verified') ? false : 15_000, enabled: !!setup && setup.verified === false })
+  const host = setup ? hosts.data?.find(item => item.name === setup.host) : undefined
+  const verified = !setup || setup.verified !== false || domain.data?.status === 'verified' || domain.data?.sending === 'verified'
   const receiving = host?.status === 'active' && verified
-  const status = host ? hostStatus[host.status] : null
-  return <Alert tone={receiving ? 'success' : isSubdomainName(setup.host) ? 'info' : 'warning'} title={receiving ? `${setup.host} receives mail` : setup.turnedOn ? `Receiving is on for ${setup.host}` : `${setup.host} doesn’t receive mail yet`}>
-    {record && !receiving && <>Publish this MX record at your DNS provider: <code>{record.name}</code> MX {record.priority} <code>{record.value}</code>. Mail arrives once it’s live. {rootMxWarning(setup.host)}</>}
+  const status = receiving ? { label: 'Receiving', tone: 'success' as const } : !verified && host?.status === 'active' ? { label: 'Waiting for verification', tone: 'warning' as const } : host ? hostStatus[host.status] : { label: 'Waiting for MX', tone: 'warning' as const }
+  return { record: setup?.dns[0], receiving, verified, status }
+}
+/** The MX record to publish, what it takes over (as the address step warned), Copy, and the domain's records, which show it until it is live. */
+function MxRecord({ setup, state }: { setup: CreatedReceiving; state: ReturnType<typeof useReceivingSetup> }) {
+  const { record, verified, status } = state
+  return <>
+    {record && <>Mail arrives once this MX record is live: <code>{record.name}</code> MX {record.priority} <code>{record.value}</code>. {rootMxWarning(setup.host)}</>}
     {!verified && <> Its domain is still being verified, so mail waits for that too.</>}
-    {record && !receiving && <div className="cluster builder-receiving-actions"><CopyAction value={record.value} label="Copy the MX value" size="sm" text="Copy value" /><Link className="ui-button ui-button--secondary ui-button--sm" to={`/domains/${setup.domainId}`}>Its domain’s records</Link></div>}
-    <span className="builder-receiving-status"><StatusDot tone={receiving ? 'success' : status?.tone ?? 'warning'}>{receiving ? 'Receiving' : !verified && host?.status === 'active' ? 'Waiting for verification' : status?.label ?? 'Waiting for MX'}</StatusDot></span>
+    {record && <div className="cluster builder-receiving-actions"><CopyAction value={record.value} label="Copy the MX value" size="sm" text="Copy value" /><Link className="ui-button ui-button--secondary ui-button--sm" to={`/domains/${setup.domainId}`}>Its domain’s records</Link></div>}
+    <span className="builder-receiving-status"><StatusDot tone={status.tone}>{status.label}</StatusDot></span>
+  </>
+}
+/** After an address is created on a host that doesn't route mail here yet (and the rest of its Save then failed): its MX record. */
+function ReceivingSetupNote({ setup }: { setup: CreatedReceiving }) {
+  const state = useReceivingSetup(setup)
+  return <Alert tone={state.receiving ? 'success' : isSubdomainName(setup.host) ? 'info' : 'warning'} title={state.receiving ? `${setup.host} receives mail` : setup.turnedOn ? `Receiving is on for ${setup.host}` : `${setup.host} doesn’t receive mail yet`}>
+    {!state.receiving && <MxRecord setup={setup} state={state} />}
+  </Alert>
+}
+/**
+ * Done: one note for what the Save made and what happens next. The new address is made; a recipient asked to confirm is
+ * forwarded its mail once they allow it; and, only where creating the address turned receiving on, the MX record until
+ * its host receives. Nothing when nothing waits.
+ */
+function DoneNote({ made, waiting, setup }: { made: string | null; waiting: { address: string; from: string | null } | null; setup: CreatedReceiving | null }) {
+  const state = useReceivingSetup(setup)
+  if (!waiting && !setup) return null
+  const mx = !!setup && !state.receiving
+  return <Alert tone={mx && !isSubdomainName(setup.host) ? 'warning' : mx || waiting ? 'info' : 'success'} title={made ? <><PrivateAddress value={made} /> is made</> : undefined}>
+    {waiting && <>We emailed <PrivateAddress value={waiting.address} />{waiting.from && waiting.from !== made ? <> from <PrivateAddress value={waiting.from} /></> : null} to confirm; its mail is forwarded once they allow it.{mx ? ' ' : ''}</>}
+    {mx ? <MxRecord setup={setup} state={state} /> : !waiting && <>It receives mail.</>}
   </Alert>
 }
 const lifetimes = [{ value: '', label: 'Always' }, { value: '3600', label: '1 hour' }, { value: '86400', label: '1 day' }, { value: '604800', label: '7 days' }, { value: '2592000', label: '30 days' }]
@@ -116,7 +137,7 @@ type Plan = { split: boolean; condition: Condition; value: string; then: Slot; o
 type Base = { rule: OverviewRule | null; plan: Plan; also: Target[] }
 type Resolved = { param: string; route: string[] | 'drop' | null; chat: boolean }
 type NewEndpoint = { type: 'slack' | 'discord' | 'webhook'; name: string; url: string }
-type Change = { endpoints?: NewEndpoint[]; rule?: string; split?: { recipe: string; params: Record<string, string> } | null; deliver?: string[] | 'drop' | null }
+type Change = { endpoints?: NewEndpoint[]; forward?: { name: string; address: string; preverify: 'auto' }; rule?: string; split?: { recipe: string; params: Record<string, string> } | null; deliver?: string[] | 'drop' | null }
 const newLabel: Record<NewType, string> = { inbox: 'New inbox', slack: 'New Slack channel', discord: 'New Discord channel', webhook: 'New webhook', forward: 'Forward to someone new' }
 const newField: Record<NewType, { label: string; placeholder: string }> = {
   inbox: { label: 'Its address', placeholder: 'refunds@' },
@@ -199,7 +220,7 @@ function DestinationPicker({ id, value, onChange, target, onTarget, own, boxes, 
   const options: SelectOption[] = [
     { value: 'own', label: <>Its inbox</>, text: 'Its inbox' },
     ...boxes.filter(b => b.address !== own && b.kind !== 'inbox').map(b => ({ ...addressOption(`inbox:${b.id}`, b.address, b.displayName ?? undefined), label: <>{b.displayName ? `${b.displayName} inbox` : <><PrivateAddress value={b.address} /> inbox</>}</> })),
-    ...named.map(e => ({ value: `endpoint:${e.name}`, text: e.name, disabled: e.type === 'forward' && e.status !== 'ready', label: <span className="builder-option"><TargetIcon type={e.type} />{e.name}<span className="muted"> · {typeWord[e.type]}</span></span> })),
+    ...named.map(e => ({ value: `endpoint:${e.name}`, text: e.name, disabled: e.type === 'forward' && e.status === 'declined', label: <span className="builder-option"><TargetIcon type={e.type} />{e.name}<span className="muted"> · {typeWord[e.type]}{e.type === 'forward' && (e.status === 'pending' || e.status === 'expired') ? ', awaiting' : ''}</span></span> })),
     ...(routeOnly ? overview.endpoints.filter(e => e.source === 'inbound_webhook').map(e => ({ value: `hook:${e.id}`, text: e.name, label: <span className="builder-option"><TargetIcon type="webhook" />{e.name}<span className="muted"> · Webhook</span></span> })) : []),
     { value: 'store', label: outcomes.store },
     { value: 'drop', label: outcomes.drop },
@@ -249,12 +270,18 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [form, setForm] = useState({ address: initial, displayName: '', lifetime: '', publicAddress: '' })
   const [errors, setErrors] = useState<Record<string, string>>({})
   const [codes, setCodes] = useState<Record<string, string>>({})
-  // The address a Save refusal suggested instead ("Use reply.example.com for receiving instead"), one press away.
+  // The address a Save refusal suggested instead ("Use reply.example.com for receiving instead"), or the other hosts a
+  // name alone could go at, one press away.
   const [refused, setRefused] = useState<string[]>([])
+  // What Next changed in what was typed (a guess, shown before it goes on), and an outside address typed here, which
+  // the next step offers to forward to.
+  const [note, setNote] = useState<string | null>(null)
+  const [forwardTo, setForwardTo] = useState<string | null>(null)
   const [pulse, setPulse] = useState(0)
   const [problem, setProblem] = useState<unknown>(null)
   const [busy, setBusy] = useState(false)
-  const [waiting, setWaiting] = useState<string | null>(null)
+  // A new forward whose recipient was emailed to confirm (and by which address): said after Save, nothing waits for it.
+  const [waiting, setWaiting] = useState<{ address: string; from: string | null } | null>(null)
   const [conflict, setConflict] = useState(false)
   // The address made to send a forward's confirmation from, when the workspace had none (ForwardSenderOffer).
   const [forwardFrom, setForwardFrom] = useState<InboundAddress | null>(null)
@@ -285,7 +312,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const [opened, setOpened] = useState<{ entry: RouteEntry; overview: Overview } | null>(null)
   const [plan, setPlan] = useState<Plan | null>(null)
   // Opening starts afresh. Before the effects below, so the flow they capture from cached data isn't cleared after.
-  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setCodes({}); setRefused([]); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); setForwardFrom(null); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (open) { setEditing(!!address); setStep(address ? 'flow' : 'address'); setSaved(address ?? null); setForm({ address: initial, displayName: '', lifetime: '', publicAddress: '' }); setErrors({}); setCodes({}); setRefused([]); setReceivingSetup(null); setMoveHost(null); setProblem(null); setPlan(null); setWaiting(null); setNote(null); setForwardTo(null); setConflict(false); setOpened(null); setReplace(false); setBoxSearch(''); setForwardFrom(null); made.current.clear() } }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (open && editing && !opened && entry && overview.data && !boxes.isPending && !resolvedBoxes.pending) setOpened({ entry, overview: overview.data }) }, [open, editing, opened, entry, overview.data, boxes.isPending, resolvedBoxes.pending])
   // A rule given by key changes that rule only (its fork and its sides), on an address with any number of rules:
   // the address's route and its other rules stay.
@@ -320,8 +347,7 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         {forwardFrom && forwardFrom.id !== saved?.id && <> <PrivateAddress value={forwardFrom.address} /> is made too, to send the request.</>}
         {asked.map(to => <span key={to}> We emailed <PrivateAddress value={to} /> to confirm forwarding.</span>)}
         {ready.map(to => <span key={to}> Forwarding to <PrivateAddress value={to} /> is set up, not connected to an address yet.</span>)}
-        {saved && wanted.map(to => <span key={to}> Forwarding to <PrivateAddress value={to} /> wasn’t set up.</span>)}
-        {!saved && asked.length > 0 && <> Save once they agree to make <PrivateAddress value={name} />.</>}</>,
+        {saved && wanted.map(to => <span key={to}> Forwarding to <PrivateAddress value={to} /> wasn’t set up.</span>)}</>,
     }
   }
   // Leaving asks first: closing, Cancel, or a link out of the builder. With something typed, to discard it; once a Save
@@ -349,12 +375,20 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   const mailFromDomainId = addressCode === 'mail_from' ? owner?.id : codes.address === 'receiving_host_reserved' && /MAIL FROM/.test(errors.address ?? '') ? domainOf(typedHost)?.id : undefined
   // The name typed without its domain: offered back with the first host, one press away.
   // A rejected address that one of the workspace's hosts would fix (a name alone, or another domain): one button per host.
-  const fixLocal = codes.address === 'missing_domain' ? typed : codes.address === 'not_your_domain' ? typed.split('@')[0]! : ''
+  const fixLocal = codes.address === 'not_your_domain' ? typed.split('@')[0]! : ''
   const fixes = fixLocal ? hosts.slice(0, 4).map(host => `${fixLocal}@${host}`) : refused.length ? refused : hostIssue?.suggestions ?? []
   async function next(event: FormEvent) {
     event.preventDefault()
     if (boxes.isPending || checkingAddress) return
-    const value = form.address.trim().toLowerCase(), sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
+    const read = understandAddress(form.address, hosts, [...new Set([...hosts, ...roots])])
+    // A guess (a domain added, spaces made dots, an address taken from a pasted name) is shown in the field first, with
+    // what changed: Next again goes on with it. Capitals and stray spaces just go.
+    if (!read.error && read.note && read.address !== form.address.trim()) {
+      setForm({ ...form, address: read.address, displayName: form.displayName || read.displayName || '' })
+      setNote(read.note); setRefused(read.fixes ?? []); setErrors({}); setCodes({})
+      return
+    }
+    const value = read.address, sender = form.publicAddress.trim().toLowerCase(), found: Record<string, string> = {}
     // Next pressed before the domain's record arrived reads it now: the check never waits for Save to refuse.
     const issue = owner ? ownerRecord.data ? hostIssue : hostIssueOf(value, owner, (await api.domains.get(owner.id).catch(() => null))?.mailFromDomain, hosts) : null
     // Said exactly: an empty field, a name without its domain (the common slip), or something else that isn't an address.
@@ -362,11 +396,15 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     // Each rejection has a code for analytics (never the value): empty, missing_domain, invalid, not_your_domain, exists.
     const code: Record<string, string> = {}
     if (!value) { found.address = `Enter an address, such as ${example}.`; code.address = 'empty' }
-    else if (LOCAL.test(value)) { found.address = hosts.length > 1 ? `Add the domain, such as ${value}@${hosts[0]}.` : hosts[0] ? `Add the domain: ${value}@${hosts[0]}.` : `Add the domain, such as ${value}@example.com.`; code.address = 'missing_domain' }
+    else if (read.error) { found.address = read.error; code.address = read.code!; setRefused(read.fixes ?? []) }
+    else if (LOCAL.test(value)) { found.address = `Add the domain, such as ${value}@example.com.`; code.address = 'missing_domain' }
     else if (!EMAIL.test(value)) { found.address = `${value} isn’t a full email address: use a name, @ and a domain, such as ${example}.`; code.address = 'invalid' }
     // A * makes a catch-all or wildcard (a route), never an address with a * in its name.
     else if (value.split('@')[0]!.includes('*')) { found.address = value.startsWith('*@') ? catchAllNote : 'An address with * is a wildcard.'; code.address = 'invalid' }
-    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) { found.address = onDomains([...new Set([...hosts, ...roots])], value.split('@')[1]); code.address = 'not_your_domain' }
+    // Someone else's address (their own mailbox, most likely): an address here comes first, and the next step forwards to it.
+    else if ((hosts.length || roots.length) && !hosts.includes(value.split('@')[1]!) && !turnsOn(value.split('@')[1]!)) {
+      found.address = hosts[0] ? `${value.split('@')[1]} isn’t one of your domains. Make an address here; the next step can forward to ${value}.` : onDomains(roots, value.split('@')[1]); code.address = 'not_your_domain'; setForwardTo(value)
+    }
     else if (issue) { found.address = issue.message; code.address = issue.code }
     else if (allBoxes.some(b => b.address === value || b.aliases.includes(value))) { found.address = `${value} already exists.`; code.address = 'exists' }
     else if (boxes.hasMore) {
@@ -383,8 +421,12 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     else if (sender && EMAIL.test(value) && (sender.split('@')[0] !== value.split('@')[0] || !value.split('@')[1]!.endsWith(`.${sender.split('@')[1]}`))) found.publicAddress = `Use ${value.split('@')[0]}@ on a parent domain of ${value.split('@')[1]}.`
     // Pressed again on the same refusal: back to the field, and the message flashes, so the press isn't silent.
     if (found.address && found.address === addressError) { setPulse(p => p + 1); document.getElementById('builder-address-input')?.focus() }
-    setErrors(found); setCodes(code)
-    if (!Object.keys(found).length) setStep('flow')
+    setErrors(found); setCodes(code); setNote(null)
+    if (Object.keys(found).length) return
+    if (value !== form.address) setForm({ ...form, address: value })
+    // An outside address typed first: the flow starts as a forward to it (until something else is chosen).
+    if (forwardTo && !plan && forwardTo !== value) setPlan({ ...blank, then: 'new:forward', targets: { then: forwardTo } })
+    setStep('flow')
   }
 
   const scope = useRequestScope()
@@ -405,8 +447,10 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   }
 
   /** Makes the new destinations a draft names (each once: a retry reuses what an earlier try made) and says how a rule
-   *  and a route name each slot. New names are chosen for both slots before either is made, so they never collide. */
-  async function realize(sides: Side[], ownKey: string | null | undefined, from: string | undefined, endpoints: NewEndpoint[]): Promise<Record<Side, Resolved> | 'waiting'> {
+   *  and a route name each slot. New names are chosen for both slots before either is made, so they never collide.
+   *  `forwards`: a new forward is left to the new address's own request (createInboundAddress's flow.forward), which makes
+   *  it after the address so its recipient is asked by it; without it, the forward is made here, asked by `from`. */
+  async function realize(sides: Side[], ownKey: string | null | undefined, from: string | undefined, endpoints: NewEndpoint[], forwards?: { name: string; address: string }[]): Promise<Record<Side, Resolved>> {
     const o = overview.data!, taken = new Set([...o.endpoints.map(e => e.name), ...[...made.current.values()].map(m => m.name)])
     const names: Partial<Record<Side, string>> = {}
     const asRule = draft.split || ruleMode
@@ -437,6 +481,11 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         out[side] = { param: names[side]!, route: type === 'webhook' ? [`webhook:${names[side]}`] : null, chat: type !== 'webhook' }
         continue
       }
+      if (type === 'forward' && forwards && !made.current.has(cache)) {
+        forwards.push({ name: names[side]!, address: value })
+        out[side] = { param: names[side]!, route: [`forward:${names[side]}`], chat: false }
+        continue
+      }
       let thing = made.current.get(cache)
       if (!thing && type === 'inbox') {
         const address = value.toLowerCase(), body = { address, key: freeName(address.split('@')[0]!, new Set([...ownKeys(), ...(ownKey ? [ownKey] : [])])) }
@@ -444,20 +493,14 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         thing = { id: box.id, name: box.address, key: box.key }
         made.current.set(cache, thing)
       } else if (!thing) {
-        // A forward is made first: its recipient confirms by email before a route or rule can use it.
-        const post = (body: Record<string, unknown>) => request<{ id: string; name: string; status: string }>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body), scope })
+        // The API decides whether its recipient is asked (not on a domain this workspace verified) and who asks; the route
+        // or rule names it at once, and it forwards mail received from the moment they agree.
         const sender = forwardFrom?.id ?? from
-        const body = { type, name: names[side]!, address: value, ...(sender ? { from: sender } : {}) }
-        let created: { id: string; name: string; status: string }
-        try { created = await post({ ...body, preverify: true }) } catch (e) { if (!(e instanceof ApiError && e.code === 'PREVERIFY_NOT_ALLOWED')) throw e; created = await post(body) }
+        const body = { type, name: names[side]!, address: value, preverify: 'auto', ...(sender ? { from: sender } : { createSender: true }) }
+        const created = await request<Endpoint>('/v1/endpoints', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt(cache), body), scope })
         thing = { id: created.id, name: created.name, status: created.status }
         made.current.set(cache, thing)
-        if (created.status !== 'ready') { setWaiting(value); return 'waiting' }
-      } else if (type === 'forward') {
-        // Made by an earlier try and waiting for its recipient: saved once they confirm.
-        const now = await request<{ status: string }>(`/v1/endpoints/${encodeURIComponent(thing.name)}`, { scope })
-        thing.status = now.status
-        if (now.status !== 'ready') { setWaiting(value); return 'waiting' }
+        if (created.status !== 'ready') setWaiting({ address: value, from: created.requestFrom ?? null })
       }
       out[side] = type === 'inbox' ? { param: `inbox:${thing.key ?? ''}`, route: [thing.id], chat: false } : { param: thing.name, route: [thing.id], chat: false }
     }
@@ -498,52 +541,48 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
         const create = async (flow: Record<string, unknown>) => {
           const body = { address: value, displayName: form.displayName.trim() || null, ...(ownKey ? { key: ownKey } : {}), ...(sender ? { publicAddress: sender } : {}), ...(form.lifetime ? { ttlSeconds: Number(form.lifetime) } : {}), ...(Object.keys(flow).length ? { flow } : {}) }
           at.stage = 'address'
-          const { receiving: setup, ...self } = await request<InboundAddress & { receiving?: CreatedReceiving }>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
+          const { receiving: setup, forward, ...self } = await request<InboundAddress & { receiving?: CreatedReceiving; forward?: Endpoint }>('/v1/inbound/addresses', { method: 'POST', body, idempotencyKey: idempotencyFor(attempt('address'), body), scope })
           at.stage = 'destinations'
           setSaved(self); setReceivingSetup(setup ?? null)
           await refresh()
           onSaved?.(self)
-          return self
+          return { ...self, forward }
         }
-        const endpoints: NewEndpoint[] = []
-        const flowOf = (r: Record<Side, Resolved>) => { const rule = plannedRule(r); return { ...(endpoints.length ? { endpoints } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) } }
-        // Its new destinations first, then the address and its flow in one call, so a refusal makes nothing. A new forward
-        // asks its recipient from an address the workspace has. With none that can, the refusal names where one could (a
-        // host that receives now, or a domain of its own where receiving isn't on yet): when this address is there, it is
-        // made first and asks, and the flow follows once the forward takes mail. Anywhere else the refusal shows, before
-        // anything is made. An address made by an earlier Save asks for any new forward.
-        let self = saved, r: Record<Side, Resolved> | 'waiting'
-        try { r = await realize(sides, ownKey, self?.id, endpoints) }
-        catch (error) {
-          const need = forwardSenderNeeded(error), host = value.split('@')[1]!
-          if (self || !need || !(need.suggested?.split('@')[1] === host || (need.reason === 'domain_not_receiving' && !!need.domainId && domainOf(host)?.id === need.domainId))) throw error
-          endpoints.length = 0
-          self = await create({})
-          r = await realize(sides, ownKey, self.id, endpoints)
-        }
-        if (r === 'waiting') return
-        if (self) {
-          const flow = flowOf(r)
+        const endpoints: NewEndpoint[] = [], forwards: { name: string; address: string }[] = []
+        const flowOf = (r: Record<Side, Resolved>) => { const rule = plannedRule(r); return { ...(endpoints.length ? { endpoints } : {}), ...(forwards.length ? { forward: { ...forwards[0]!, preverify: 'auto' } } : {}), ...(rule ? { split: rule, deliver: [] } : r.then.route !== null ? { deliver: r.then.route } : {}) } }
+        if (saved || sides.filter(side => draft[side] === 'new:forward').length > 1) {
+          // The address exists (an earlier Save made it, then failed), or two new forwards, which one request can't make:
+          // the address first, then each forward, asked by it, then its flow.
+          const self = saved ?? await create({})
+          const flow = flowOf(await realize(sides, ownKey, self.expiresAt ? undefined : self.id, endpoints))
           if (Object.keys(flow).length) await request(`/v1/inbound/addresses/${encodeURIComponent(self.id)}/flow`, { method: 'PATCH', body: flow, scope })
           await refresh()
-        } else await create(flowOf(r))
+        } else {
+          // A new address and its flow in one call: its new endpoints, and a new forward made after the address and asked
+          // by it, named by the route or rule at once (it forwards mail received from the moment its recipient agrees).
+          const self = await create(flowOf(await realize(sides, ownKey, undefined, endpoints, forwards)))
+          if (self.forward?.status === 'pending') setWaiting({ address: self.forward.target, from: self.forward.requestFrom ?? null })
+        }
         setEditing(true)
       } else {
         if (!base || !opened || !saved) return
         const ownKey = needsOwn ? await keyed(saved) : saved.key
-        const endpoints: NewEndpoint[] = []
-        const r = await realize(sides, ownKey, saved.id, endpoints)
-        if (r === 'waiting') return
+        // One new forward goes in the flow change: made after nothing else fails, asked by this address when it can.
+        const endpoints: NewEndpoint[] = [], forwards: { name: string; address: string }[] = []
+        const r = await realize(sides, ownKey, saved.id, endpoints, sides.filter(side => draft[side] === 'new:forward').length === 1 ? forwards : undefined)
         const rule = plannedRule(r)
-        const change: Change = endpoints.length ? { endpoints } : {}
+        const change: Change = { ...(endpoints.length ? { endpoints } : {}), ...(forwards.length ? { forward: { ...forwards[0]!, preverify: 'auto' } } : {}) }
         if (!rule && base.rule) { change.rule = base.rule.key; change.split = null }
         else if (rule && (!base.rule || !sameRule(rule, base.rule))) { if (base.rule) change.rule = base.rule.key; change.split = rule }
         // A rule decides where mail goes, so the route sends nowhere else; a route that already sent beside the rule (Also)
         // is kept, and one rule changed by key never touches the route.
         const deliver = ruleMode ? undefined : rule ? (base.rule ? undefined : []) : r.then.route
         if (deliver !== undefined && !sameDeliver(deliver, opened.entry.route?.to ?? null, saved.id)) change.deliver = deliver
-        if (Object.keys(change).length === (endpoints.length ? 1 : 0)) delete change.endpoints
-        if (Object.keys(change).length) await write(change, opened.overview.version, false)
+        if (Object.keys(change).length === (endpoints.length ? 1 : 0) + (forwards.length ? 1 : 0)) { delete change.endpoints; delete change.forward }
+        if (Object.keys(change).length) {
+          const result = await write(change, opened.overview.version, false)
+          if (result?.forward?.status === 'pending') setWaiting({ address: result.forward.target, from: result.forward.requestFrom ?? null })
+        }
         await refresh()
         onSaved?.(saved)
       }
@@ -572,15 +611,15 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   }
   /** setInboundAddressFlow with the version the builder read. When that version is stale only because something else in
    *  the workspace changed, it is sent once more with the new one; when this address's flow changed, Conflict says so. */
-  async function write(change: Change, version: number | undefined, retried: boolean): Promise<void> {
+  async function write(change: Change, version: number | undefined, retried: boolean): Promise<{ forward?: Endpoint } | undefined> {
     try {
-      await request(`/v1/inbound/addresses/${encodeURIComponent(saved!.id)}/flow`, { method: 'PATCH', body: change, ifMatch: version, scope })
+      return await request<{ forward?: Endpoint }>(`/v1/inbound/addresses/${encodeURIComponent(saved!.id)}/flow`, { method: 'PATCH', body: change, ifMatch: version, scope })
     } catch (error) {
       if (retried || !(error instanceof ApiError && error.code === 'VERSION_CONFLICT')) throw error
       const fresh = (await overview.refetch()).data
       const now = fresh?.routes.data.find(r => r.address?.id === saved!.id)
       if (!fresh || !now || !sameFlow(opened!.entry, now, opened!.overview, fresh)) throw error
-      await write(change, fresh.version, true)
+      return write(change, fresh.version, true)
     }
   }
   const startOver = async () => {
@@ -603,12 +642,12 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
   </div>
   let body: ReactNode
   if (step === 'address') body = <form id="builder-address" className="stack" onSubmit={e => void next(e)} noValidate>
-    <Field label="Address" htmlFor="builder-address-input" error={addressError} errorCode={addressCode} pulse={pulse}>
-      <Input id="builder-address-input" type="email" value={form.address} onChange={e => { setForm({ ...form, address: e.target.value }); setErrors(({ address: _, ...rest }) => rest); setCodes(({ address: _, ...rest }) => rest); setRefused([]) }} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
+    <Field label="Address" htmlFor="builder-address-input" error={addressError} errorCode={addressCode} pulse={pulse} hint={!addressError && note ? note : undefined}>
+      <Input id="builder-address-input" type="email" value={form.address} onChange={e => { setForm({ ...form, address: e.target.value }); setErrors(({ address: _, ...rest }) => rest); setCodes(({ address: _, ...rest }) => rest); setRefused([]); setNote(null) }} placeholder={`name@${hosts[0] ?? 'example.com'}`} autoFocus autoComplete="off" />
     </Field>
     {!addressError && EMAIL.test(typed) && turnsOn(typed.split('@')[1]!) && domainOf(typed.split('@')[1]!) && <TurnOnReceiving host={typed.split('@')[1]!} domainId={domainOf(typed.split('@')[1]!)!.id} />}
     {onPattern && pattern && <div className="cluster"><Button size="sm" onClick={() => { onOpenChange(false); onPattern(pattern) }}>{pattern.startsWith('*@') ? 'Edit the catch-all' : 'Set up the wildcard'}</Button></div>}
-    {(fixes.length > 0 || mailFromDomainId) && <div className="cluster">{fixes.map(fix => <Button key={fix} size="sm" onClick={() => { setForm({ ...form, address: fix }); setErrors({}); setCodes({}); setRefused([]) }}>Use {fix}</Button>)}
+    {(fixes.length > 0 || mailFromDomainId) && <div className="cluster builder-fixes">{fixes.map(fix => <Button key={fix} size="sm" onClick={() => { setForm({ ...form, address: fix }); setErrors({}); setCodes({}); setRefused([]) }}>Use {fix}</Button>)}
       {mailFromDomainId && <Link className="ui-button ui-button--ghost ui-button--sm" to={`/domains/${mailFromDomainId}`} onClick={leaveTo(`/domains/${mailFromDomainId}`)}>Change the MAIL FROM subdomain</Link>}</div>}
     {existing && <div className="cluster"><Link className="ui-button ui-button--secondary ui-button--sm" to={`/receiving/addresses/${existing.id}?tab=flow`} onClick={() => onOpenChange(false)}>Open it</Link></div>}
     <Field label="Display name" htmlFor="builder-address-name"><Input id="builder-address-name" value={form.displayName} onChange={e => setForm({ ...form, displayName: e.target.value })} placeholder="Name" /></Field>
@@ -655,17 +694,19 @@ export function AddressBuilder({ open, onOpenChange, domains, initial = '', addr
     {replacing && <Alert tone="warning">Its mail also goes to {base!.also.map((t, i) => <span key={`${t.type}:${t.id}`}>{i > 0 && (i === base!.also.length - 1 ? ' and ' : ', ')}{targetWord(t, saved?.id)}</span>)}. Saving stops that.</Alert>}
     {conflict && <><Alert tone="warning">Its flow changed since you opened it. Nothing was saved.</Alert><div className="cluster"><Button size="sm" onClick={() => void startOver()}>Show the saved flow</Button></div></>}
     <div ref={outcome} className="stack builder-outcome">
-      {/* Made by a Save whose forward then waited or was refused: said here, with the MX record when it turned receiving on. */}
+      {/* An address an earlier Save made when the rest then failed: said here, with the MX record when it turned receiving on. */}
       {!editing && saved && <Alert tone="success"><PrivateAddress value={saved.address} /> is made. Its mail stays in its inbox until it has a destination.</Alert>}
       {!editing && saved && receivingSetup && <ReceivingSetupNote setup={receivingSetup} />}
-      {waiting && <AwaitingConfirm address={waiting} />}
       {problem !== null && !forwardSenderNeeded(problem) && <Alert tone="danger">{errorText(problem)}</Alert>}
       <ForwardSenderOffer error={problem} onCreated={box => { setForwardFrom(box); setProblem(null); return save({ preventDefault() {} } as FormEvent) }} />
     </div>
   </form>
-  else body = receivingSetup ? <div className="stack"><ReceivingSetupNote setup={receivingSetup} />{entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div> : null}</div>
-    : entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div>
-    : <div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div>
+  else {
+    // Done: the flow as saved, under what still waits outside it (an MX record to publish, a recipient asked to confirm).
+    const panel = entry && overview.data ? <div className="addr-flow"><FlowPanel entry={entry} overview={overview.data} onEdit={() => { if (builderFits(entry, overview.data!)) { setPlan(null); setStep('flow') } else close(() => navigate(stepsPath!)) }} mailLink={false} /></div>
+      : receivingSetup ? null : <div className="flow-skeleton" aria-hidden="true"><span /><span /><span /></div>
+    body = <div className="stack"><DoneNote made={!address && saved ? saved.address : null} waiting={waiting} setup={receivingSetup} />{panel}</div>
+  }
   return <>
     <Dialog size="lg" open={open} onOpenChange={next => { if (!next) close() }} title={title} analytics="address-builder" footer={footer} className="builder">{body}</Dialog>
     {/* Yes adds the host with consent (addReceivingHost, confirm) and creates the address again; No leaves both as they are. */}

@@ -16,7 +16,7 @@ import { CLAIM_UNROUTED_INLINE, claimUnroutedBatch, checkRuleCapacity, checkTemp
 import { currentVersion, detachDestination, registerRouting, RoutingKey } from './routing.js';
 import { applyFlow, CreateFlow, registerAddressFlow, releaseAddress } from './address-flow.js';
 import { registerRituals } from './rituals.js';
-import { Ok, registerInboundWebhooks } from './endpoints.js';
+import { Endpoint, endpointRowOf, endpointView, Ok, registerInboundWebhooks } from './endpoints.js';
 import { AttachmentContentId, AttachmentContentType, AttachmentDisposition, AttachmentFilename, MAX_ATTACHMENT_BASE64 } from './outbound-content.js';
 import { SEND_LIMITS } from './send-limits.js';
 import { CustomHeaders, splitThreadingHeaders } from './custom-headers.js';
@@ -28,7 +28,7 @@ import { registerInboundOverview } from './inbound-overview.js';
 import { AddressState, assertInboundRecipients, createInboundThreadRoute, InboundAddressId, inboundReplyTarget, queueInboundThreadMessage, registerInboundThreadReads, replyToInboundThreadRoute, visibleThreadAddresses } from './inbound-threads.js';
 import { legacyAddressOperations, productName } from './brand.js';
 import { followMxJob, receivingIssueSchema } from './operations.js';
-import { addHost, enableHosted, listHosts, receiveForAddress, removeHost, updateHost } from './receiving-hosts.js';
+import { addHost, enableHosted, listHosts, planReceiving, receiveInTransaction, removeHost, updateHost } from './receiving-hosts.js';
 
 const security: Record<string, string[]>[] = [{ bearerAuth: [] }, { dashboardSession: [] }, { secureDashboardSession: [] }];
 const loadMailboxSesv2 = lazyModule(() => import('@aws-sdk/client-sesv2'));
@@ -139,6 +139,8 @@ const CreatedInboundAddressSchema = InboundAddressSchema.extend({
     verified: z.boolean().describe('Whether the domain is verified. Until it is (its DNS records: getDomain), mail waits even with the MX record live.'),
     dns: z.array(z.object({ type: z.literal('MX'), name: z.string(), value: z.string(), priority: z.number() })).describe('The MX record to publish at the host, if it isn\u2019t already: mail arrives once it is.') })
     .optional().describe('Present while the host doesn\u2019t route mail here yet: hosted, an address on one of your own domains, verified or still being verified, turns receiving on at its host if it was off.'),
+  forward: Endpoint.extend({ confirmation: z.enum(['emailed', 'skipped']).describe('emailed: its recipient was asked to confirm (requestFrom names who asked); skipped: preverified, ready at once.') })
+    .optional().describe('The forward flow.forward made, as getEndpoint returns it.'),
 }).openapi('CreatedInboundAddress');
 const InboundEventSchema = z.object({ id: z.string(), cursor: z.string(), type: z.enum(inboundEventTypes), createdAt: z.string(), threadId: z.string().nullable(), messageId: z.string().nullable(), data: SuppressionEventData,
   addressId: z.string().nullable().describe('Receiving address ID at the time of the event; null for workspace events.'),
@@ -492,7 +494,7 @@ function registerAddresses(app: App) {
       return new Response(body, { status: 200, headers: { 'content-type': 'application/json; charset=UTF-8' } });
     }, { route: 'inbound.listAddresses', workspaceId: value.workspaceId }) as never;
   });
-  app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. Mail arrives once the domain is verified and its receiving MX record is active. Hosted, an address on one of your own domains (or a subdomain of one), verified or still being verified, where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer\u2019s receiving names the MX record to publish, the host\u2019s status and whether the domain is verified yet; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(CreatedInboundAddressSchema), ...errors } }), async c => {
+  app.openapi(createRoute({ ...meta, method: 'post', path: collection, ...addressAlias('createInboundAddress'), summary: 'Create a receivable address', description: 'Admin only. Mail arrives once the domain is verified and its receiving MX record is active. Hosted, an address on one of your own domains (or a subdomain of one), verified or still being verified, where nothing receives yet turns receiving on at its host, as addReceivingHost does, and the answer\u2019s receiving names the MX record to publish, the host\u2019s status and whether the domain is verified yet; a host whose mail another provider receives today is refused with RECEIVING_HOST_IN_USE and the call that moves it. A refused request creates nothing, and receiving stays as it was. Permanent addresses claim earlier unrouted mail (kept 30 days) for their address or rules; temporary addresses start empty. Expiry stops new delivery and sending without deleting history.', request: { body: json(MailboxInput) }, responses: { 201: response(CreatedInboundAddressSchema), ...errors } }), async c => {
     const value = admin(c); const input = c.req.valid('json'); const scope = scopeOf(value);
     if ([input.address, ...input.aliases].some(address => address.split('@')[0]!.includes('*'))) throw new ApiError(422, 'INVALID_ADDRESS', 'A * makes a catch-all or wildcard, which is a route: create it with createRoute.', 'address');
     if (input.flow) receivingAdmin(c, 'change routes and rules');
@@ -500,19 +502,21 @@ function registerAddresses(app: App) {
     // Hosted, the workspace's live claim is enough, verified or not: routing waits for proven ownership and the MX observation
     // (mailbox-receipts.ts), so an address made the minute its domain was added receives once both are there.
     // A domain may receive on several hosts: the address goes to the row of its own host. A removed host takes no new addresses.
-    const receivingRow = async () => (await c.env.db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? hostTakesAddresses(value.workspaceId, sql`mailbox_domains`) : undefined)).orderBy(sql`${mailboxDomains.status} IN ('disabled','disabling')`).limit(1))[0];
-    let domain = await receivingRow(), turnedOn = false;
-    // Hosted: on the workspace's own verified domain, an address where nothing receives yet turns receiving on there
-    // (receiving-hosts.ts receiveForAddress), and the answer says which MX record to publish.
-    if (!domain && c.env.config.multiTenant) { await receiveForAddress(c, value.workspaceId, host, input.address, admits(() => lasting(c, RECEIVING_HOST_CHANGE))); domain = await receivingRow(); turnedOn = true; }
-    if (!domain) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} doesn’t receive mail yet. Turn it on with POST /v1/inbound/domains/{id}/hosts, then create the address.` : `Enable receiving for ${host}'s domain first: POST /v1/inbound/domains/{id}/enable, then create the address.`, 'address');
-    if (['disabled', 'disabling'].includes(domain.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} no longer receives mail: its receiving host was removed. Add it back with POST /v1/inbound/domains/${domain.domainId}/hosts and {"name":"${host}"}, then create the address.` : `Verify ${host}'s domain in this workspace before creating addresses on it.`, 'address');
+    const receivingRow = async (db: DbExecutor = c.env.db) => (await db.select().from(mailboxDomains).where(and(eq(mailboxDomains.workspaceId, value.workspaceId), eq(c.env.config.multiTenant?mailboxDomains.receivingHost:mailboxDomains.name,host), c.env.config.multiTenant ? hostTakesAddresses(value.workspaceId, sql`mailbox_domains`) : undefined)).orderBy(sql`${mailboxDomains.status} IN ('disabled','disabling')`).limit(1))[0];
+    const found = await receivingRow();
+    // Hosted: on the workspace's own domain, an address where nothing receives yet turns receiving on there, and the answer
+    // says which MX record to publish. Checked here (receiving-hosts.ts planReceiving); written in the transaction below
+    // that creates the address and its flow, so any refusal in it leaves receiving as it was.
+    const turnOn = !found && c.env.config.multiTenant ? await planReceiving(c, value.workspaceId, host, input.address, admits(() => lasting(c, RECEIVING_HOST_CHANGE))) : undefined, turnedOn = !!turnOn;
+    if (!found && !turnOn) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} doesn’t receive mail yet. Turn it on with POST /v1/inbound/domains/{id}/hosts, then create the address.` : `Enable receiving for ${host}'s domain first: POST /v1/inbound/domains/{id}/enable, then create the address.`, 'address');
+    if (found && ['disabled', 'disabling'].includes(found.status)) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', c.env.config.multiTenant ? `${host} no longer receives mail: its receiving host was removed. Add it back with POST /v1/inbound/domains/${found.domainId}/hosts and {"name":"${host}"}, then create the address.` : `Verify ${host}'s domain in this workspace before creating addresses on it.`, 'address');
     const publicAddress = input.publicAddress;
     if (publicAddress) {
       if (input.ttlSeconds !== undefined) throw new ApiError(422, 'TEMPORARY_MAILBOX_ROUTING', 'Temporary mailboxes cannot have a public sender address.', 'publicAddress');
       const [local, publicHost] = publicAddress.split('@') as [string, string];
       if (local !== input.address.split('@')[0] || !host.endsWith(`.${publicHost}`)) throw new ApiError(422, 'PUBLIC_ADDRESS_MISMATCH', 'Use the same local part on a parent domain of the receiving address.', 'publicAddress');
-      if (!c.env.config.multiTenant) {
+      if (!c.env.config.multiTenant && found) {
+      const domain = found;
       c.env = await withRegionSettings(c.env, value.workspaceId);
       const { GetEmailIdentityCommand } = await loadMailboxSesv2();
       const identity = await (await getSes(c.env, domain.region)).send(new GetEmailIdentityCommand({ EmailIdentity: publicHost })).catch((error: unknown) => {
@@ -525,8 +529,11 @@ function registerAddresses(app: App) {
       }
     }
     // A failure inside this transaction rolled all of it back: its Idempotency-Key is released for a retry.
-    const { row, runnable, claimQueued } = await c.env.db.transaction(async tx => { try {
+    const { row, runnable, claimQueued, forward, domain } = await c.env.db.transaction(async tx => { try {
       await lockMailboxLane(tx,scope.workspaceId, 'address');
+      if (turnOn) await receiveInTransaction(tx, c, value.workspaceId, turnOn);
+      const domain = turnOn ? await receivingRow(tx) : found;
+      if (!domain) throw new ApiError(409, 'MAILBOX_DOMAIN_NOT_ENABLED', `${host} doesn’t receive mail yet. Turn it on with POST /v1/inbound/domains/{id}/hosts, then create the address.`, 'address');
       if (publicAddress && c.env.config.multiTenant) {
         const host=publicAddress.split('@')[1]!;
         if (!(await tx.execute(sql`SELECT 1 FROM domain_claims dc JOIN provider_connections pc ON pc.id=dc.connection_id AND pc.workspace_id=dc.workspace_id
@@ -537,17 +544,20 @@ function registerAddresses(app: App) {
         const [claimed] = await tx.insert(mailboxAddresses).values({ ...scope, address: publicAddress, mailboxId: created.id, kind: 'public' }).onConflictDoNothing().returning({ address: mailboxAddresses.address });
         if (!claimed) throw new ApiError(409, 'ADDRESS_TAKEN', `${publicAddress} already belongs to a mailbox.`, 'publicAddress');
       }
-      if (input.flow) await applyFlow(tx, c, scope.workspaceId, created, input.flow, await currentVersion(tx, scope.workspaceId));
+      const flowed = input.flow ? await applyFlow(tx, c, scope.workspaceId, created, input.flow, await currentVersion(tx, scope.workspaceId)) : undefined;
       const { queued: claimQueued } = await claimUnrouted(tx, scope, created, [created.address, ...input.aliases], created.rules);
       // Temporary addresses are agent working state, created at a high rate: only permanent ones are audited.
       if (input.ttlSeconds === undefined) await recordAudit(tx, c, { action: 'address.create', workspaceId: scope.workspaceId, target: { type: 'address', id: created.id }, after: { address: created.address, key: input.key ?? null, publicAddress: publicAddress ?? null, aliases: input.aliases.length, rules: created.rules.length } });
-      return { row: created, runnable: await recordEvents(tx, scope.workspaceId, [{ type: 'address.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]), claimQueued };
+      return { row: created, runnable: await recordEvents(tx, scope.workspaceId, [{ type: 'address.created', mailboxId: created.id, data: { origin: 'api', address: created.address } }]), claimQueued, forward: flowed?.forward, domain };
     } catch (e) { rolledBack(c); throw e; } });
     if (runnable) try { await c.env.wake?.(runnable,'webhook'); } catch { /* durable */ }
     if (claimQueued) try { await c.env.wake?.(1); } catch { /* durable */ }
     // Until its host routes mail here, the answer says which MX record to publish (and whether this call turned receiving on).
     const receiving = domain.status === 'active' ? undefined : { domainId: domain.domainId, host, turnedOn, status: domain.status, verified: c.env.config.multiTenant ? await domainVerified(c, domain.domainId) : true, dns: [expectedMx(host, domain.region)] };
-    return c.json({ ...(await mailboxViews(c.env, [row]))[0]!, ...(receiving ? { receiving } : {}) }, 201);
+    // A forward that emailed its recipient queued that email: the job runner takes it now.
+    if (forward && !forward.verified) c.get('actor').wakeJobs = 1;
+    const forwardView = forward ? { ...await endpointView(c.env, scope.workspaceId, endpointRowOf(forward)), confirmation: forward.verified ? 'skipped' as const : 'emailed' as const } : undefined;
+    return c.json({ ...(await mailboxViews(c.env, [row]))[0]!, ...(receiving ? { receiving } : {}), ...(forwardView ? { forward: forwardView } : {}) }, 201);
   });
   app.openapi(createRoute({ ...meta, method: 'get', path: detail, ...addressAlias('getInboundAddress'), summary: 'Read a receivable address', request: { params }, responses: { 200: response(InboundAddressSchema), ...errors } }), async c => {
     const { mailbox } = await mailboxFor(c, c.req.valid('param').addressId);
