@@ -95,7 +95,7 @@ const Glass = z.object({
     today: AiPeriod.describe('Since UTC midnight.'), week: AiPeriod.describe('The last 7 days.'), month: AiPeriod.describe('The last 30 days.'),
     daily: z.array(z.number()).describe('US dollars each UTC day, the last 30, oldest first; the last is today.'),
     answered: int.describe('Conversations the answering agent spent on in the last 30 days that got an answer from the AI that reached the customer.'),
-    answeredCostUsd: z.number().describe('What the answering agent spent on those conversations in the last 30 days, US dollars: the average per answer is this over answered. Not the triage agent\u2019s spend, nor conversations the AI never answered.'),
+    answeredCostUsd: z.number().describe('What the answering agent spent on those conversations in the last 30 days, US dollars: the average per conversation is this over answered. Not the triage agent\u2019s spend, nor conversations the AI never answered.'),
     top: z.array(z.object({ id: z.string(), channel: z.string().nullable(), workspace: z.object({ id: z.string(), name: z.string() }).nullable(), costUsd: z.number(), turns: int }))
       .describe('The conversations that cost the most in the last 30 days, most first (at most 3).'),
   }).describe('What the support AI\u2019s model calls cost (src/support-ai-cost.ts): the answering agent\u2019s and the feedback triage agent\u2019s.'),

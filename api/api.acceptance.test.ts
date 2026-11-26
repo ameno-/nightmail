@@ -11670,7 +11670,7 @@ describe('Hosted MCP OAuth and tools', () => {
           assert.equal(after.line, SUPPORT_AI.dailyLineUsd);
           assert.ok(after.top.length <= 3 && after.top.every((c, i, all) => i === 0 || all[i - 1]!.costUsd >= c.costUsd), JSON.stringify(after.top));
           assert.deepEqual(after.top.find(c => c.id === id), { id, channel: 'email', workspace: null, costUsd: 5, turns: 3 });
-          // The average per answer: what the conversations the AI answered cost, over how many. The stranger's counts once an
+          // The average per conversation: what the conversations the AI answered cost, over how many. The stranger's counts once an
           // answer of the AI reached it, and the triage agent's reading never does.
           assert.ok(after.answered === before.answered && near(after.answeredCostUsd, before.answeredCostUsd), 'Not answered yet, so not in the average.');
           ok(reply(await platform.mirrorMessages(id, [{ id: 'msg_aianswerreachedz', author: 'agent', kind: 'reply', text: 'Here is the answer.', delivery: 'sent' }])));

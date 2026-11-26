@@ -122,7 +122,7 @@ function board(g: Glass): GlassBoardFill {
       today: { hint: counts(ai.today), value: dollars(ai.today.costUsd), tone: ai.today.costUsd >= ai.line ? 'danger' : ai.today.costUsd >= ai.line / 2 ? 'warning' : undefined },
       week: { hint: counts(ai.week), value: dollars(ai.week.costUsd) },
       month: { hint: counts(ai.month), spark: ai.daily, value: dollars(ai.month.costUsd) },
-      // What the answered conversations cost, over how many: not the triage agent's spend, nor unanswered conversations'.
+      // Average per conversation: what the answered conversations cost, over how many; not the triage agent's spend, nor unanswered conversations'.
       answered: { hint: `30 days · ${number(ai.answered)} answered`, value: ai.answered ? dollars(ai.answeredCostUsd / ai.answered) : '—' },
       ...Object.fromEntries([0, 1, 2].map(i => { const c = ai.top[i]; return [`top:${i}`, c ? { label: <Link className="glass-ws" to={`/support/${c.id}`}>{c.workspace?.name ?? channels[c.channel ?? ''] ?? 'Conversation'}</Link>,
         hint: c.workspace ? `${channels[c.channel ?? ''] ?? 'Conversation'} · ${plural(c.turns, 'turn')}` : plural(c.turns, 'turn'), value: dollars(c.costUsd) } : empty(i === 0, 'No AI cost in 30 days')] })),

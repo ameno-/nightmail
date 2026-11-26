@@ -306,7 +306,7 @@ export const glassGroups: GlassGroupDef[] = [
   // What the support AI costs (api/src/support-ai-cost.ts): its own group under the tiles, not inside Support's tile, the
   // board's full width so every figure reads whole (operator.css .glass-ai).
   { key: 'ai', title: 'Support AI cost', to: ['/support', 'Support'], className: 'glass-ai', rows: [{ key: 'today', label: 'Today (UTC)' }, { key: 'week', label: '7 days' }, { key: 'month', label: '30 days', spark: true },
-    { key: 'answered', label: 'Average per answer' }, ...slots('top', 3)] },
+    { key: 'answered', label: 'Average per conversation' }, { key: 'top', note: 'Most expensive · 30 days' }, ...slots('top', 3)] },
   { key: 'sending', title: 'Sending & receiving', to: ['/operator?view=health', 'Health'], rows: [{ key: 'transactional', label: 'Transactional', spark: true }, { key: 'marketing', label: 'Marketing', spark: true },
     { key: 'received', label: 'Received · 24 h', spark: true }, { key: 'queued', label: 'Queued' }, { key: 'ramp', label: 'On the ramp' }, ...slots('campaign', 2, { meter: true })] },
   { key: 'standing', title: 'Standing', to: ['/operator', 'Queue'], rows: [{ key: 'grades', cells: GRADE_SLOTS }, { key: 'steps', cells: STEP_SLOTS }, { key: 'paused', label: 'Paused senders' },
